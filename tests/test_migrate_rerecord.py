@@ -40,7 +40,6 @@ from tests.test_chunked_steps import (
     failed_at_batch_two,
     project_with_authors,
     record,
-    refused_at_load,
     slugged,
     step_file,
 )
@@ -114,7 +113,9 @@ def test_a_finished_step_edited_is_refused_and_rerecord_changes_only_its_checksu
     applied = sha384(up_file)
     before = every_column(db, 1, 1)
     # The edit would create a table if anything ran it.
-    up_file.write_bytes(up_file.read_bytes() + b'CREATE TABLE "marker" ("id" integer);\n')
+    up_file.write_bytes(
+        up_file.read_bytes() + b'CREATE TABLE "marker" ("id" integer);\n'
+    )
     edited = sha384(up_file)
     tables = db.tables()
 
@@ -183,7 +184,9 @@ def test_an_unfinished_transactional_ddl_step_edited_is_accepted(
 ):
     applied_author(project, pkg, db)
     up_file = sql_step(
-        project, "fix", 'CREATE TABLE "fixed" ("id" integer);\nSELECT * FROM "missing";\n'
+        project,
+        "fix",
+        'CREATE TABLE "fixed" ("id" integer);\nSELECT * FROM "missing";\n',
     )
     assert run("migrate", "up", "--url", db.url) == 1
     recorded = checksum_of(db, 2, 1)
@@ -288,7 +291,9 @@ def edited_chunked(project, pkg, db, body: str | None = None) -> tuple[Any, str,
     probe = failed_at_batch_two(project, pkg, db)
     recorded = checksum_of(db, 2, 2)
     step = step_file(project)
-    step.write_text(body if body is not None else step.read_text() + "# edited\n")
+    step.write_text(
+        body.format(pkg=pkg) if body is not None else step.read_text() + "# edited\n"
+    )
     probe.reset()
     return probe, recorded, sha384(step)
 
@@ -401,7 +406,9 @@ def test_a_flag_on_a_step_it_does_not_apply_to_is_refused(project, pkg, db, caps
     up_file.write_bytes(up_file.read_bytes() + b"\n")
     applied = checksum_of(db, 1, 1)
 
-    code, _, err = cli("rerecord", "0001:01", "--restart", "--url", db.url, capsys=capsys)
+    code, _, err = cli(
+        "rerecord", "0001:01", "--restart", "--url", db.url, capsys=capsys
+    )
 
     assert code == 1
     assert err == (
@@ -412,23 +419,34 @@ def test_a_flag_on_a_step_it_does_not_apply_to_is_refused(project, pkg, db, caps
     assert checksum_of(db, 1, 1) == applied
 
 
-def test_a_chunked_order_key_through_a_relation_is_refused_at_load(
-    project, pkg, db, capsys
-):
-    err = refused_at_load(
-        project,
-        pkg,
-        db,
-        capsys,
-        "models.Author.select().order_by(lambda author: author.tags.label)"
-        ".order_by(lambda author: author.id)",
-    )
+def test_a_chunked_order_key_through_a_relation_is_refused_at_load():
+    # Refused when the step is checked, before anything runs, rather than as
+    # a KeyError when a resumed run decodes its cursor (#532 review).
+    from types import SimpleNamespace
 
-    assert (
-        "0002_add_slug/02_backfill_author.py: @chunked orders author by tags.label, a "
-        "column of a related model; the cursor holds the last row's own order keys, "
-        "so order by a column of the model, including its primary key: "
-        ".order_by(lambda author: author.id). Nothing was applied." in err
+    from ferro.migrations.steps import Chunked, StepRefused, chunked_query
+    from tests.test_position_paging_traversal import PosTravTransaction
+
+    shape = Chunked(
+        lambda models: (
+            models.PosTravTransaction.select()
+            .order_by(lambda txn: txn.account.label)
+            .order_by(lambda txn: txn.id)
+        ),
+        100,
+    )
+    models = SimpleNamespace(PosTravTransaction=PosTravTransaction)
+    path = Path("migrations/0002_backfill/02_backfill_txn.py")
+
+    with pytest.raises(StepRefused) as refused:
+        chunked_query(shape, models, path)  # type: ignore[arg-type]
+
+    assert str(refused.value) == (
+        "ferro migrate: 0002_backfill/02_backfill_txn.py: @chunked orders "
+        "postravtransaction by account.label, a column of a related model; the "
+        "cursor holds the last row's own order keys, so order by a column of the "
+        "model, including its primary key: "
+        ".order_by(lambda postravtransaction: postravtransaction.id)"
     )
 
 
@@ -534,4 +552,3 @@ def test_rerecord_refuses_an_unknown_mode():
                 mode="again",  # type: ignore[arg-type]
             )
         )
-

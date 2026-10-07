@@ -259,7 +259,11 @@ def test_2500_rows_run_in_three_batches_each_committing_its_cursor(project, pkg,
     final = record(db)
     assert final["finished_at"] is not None and final["failed_at"] is None
     assert final["rows_done"] == 2500
-    assert final["resume_cursor"] == {"keys": [2500], "order_by": ["author.id"], "rows_done": 2500}
+    assert final["resume_cursor"] == {
+        "keys": [2500],
+        "order_by": ["author.id"],
+        "rows_done": 2500,
+    }
     assert slugged(db) == 2500
     assert db.rows("SELECT slug FROM author WHERE id = 7") == [("author-7",)]
     assert sorted(probe.writes["up"]) == list(range(1, 2501))
@@ -304,7 +308,11 @@ def test_a_failed_batch_rolls_back_alone_and_up_resumes_at_the_cursor(project, p
     assert failed["finished_at"] is None and failed["failed_at"] is not None
     assert failed["error"] == "RuntimeError: batch 2 gave up"
     assert failed["rows_done"] == 1000
-    assert failed["resume_cursor"] == {"keys": [1000], "order_by": ["author.id"], "rows_done": 1000}
+    assert failed["resume_cursor"] == {
+        "keys": [1000],
+        "order_by": ["author.id"],
+        "rows_done": 1000,
+    }
     first_run = list(probe.writes["up"])
     assert first_run == list(range(1, 2001))
 
@@ -365,9 +373,17 @@ def test_a_chunked_down_reverts_in_batches_and_an_interrupted_one_blocks_up(
 
     assert seen["slugged"] == 1500, "the down's batch 1 committed"
     assert seen["record"]["reverting"] is True
-    assert seen["record"]["revert_cursor"] == {"keys": [1000], "order_by": ["author.id"], "rows_done": 1000}
+    assert seen["record"]["revert_cursor"] == {
+        "keys": [1000],
+        "order_by": ["author.id"],
+        "rows_done": 1000,
+    }
     assert seen["record"]["finished_at"] is not None
-    assert seen["record"]["resume_cursor"] == {"keys": [2500], "order_by": ["author.id"], "rows_done": 2500}
+    assert seen["record"]["resume_cursor"] == {
+        "keys": [2500],
+        "order_by": ["author.id"],
+        "rows_done": 2500,
+    }
     # Killed inside batch 2: it rolled back, the record stands reverting.
     assert slugged(db) == 1500
     assert record(db)["reverting"] is True
@@ -408,7 +424,11 @@ def test_a_chunked_down_that_fails_after_a_batch_stays_reverting_with_the_error(
     assert "RuntimeError: batch 2 gave up" in report.refusal
     reverting = record(db)
     assert reverting["reverting"] is True
-    assert reverting["revert_cursor"] == {"keys": [1000], "order_by": ["author.id"], "rows_done": 1000}
+    assert reverting["revert_cursor"] == {
+        "keys": [1000],
+        "order_by": ["author.id"],
+        "rows_done": 1000,
+    }
     assert reverting["error"] == "RuntimeError: batch 2 gave up"
     assert slugged(db) == 1500
     capsys.readouterr()

@@ -517,7 +517,9 @@ def baseline(
 def rerecord(
     target: Annotated[
         str,
-        Parameter(help="The step whose edit to accept: <migration>:<step>, as 0007:01."),
+        Parameter(
+            help="The step whose edit to accept: <migration>:<step>, as 0007:01."
+        ),
     ],
     *,
     continue_: Annotated[

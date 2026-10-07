@@ -112,16 +112,12 @@ async def rerecord(
     """
     del settings  # the database carries its project; kept for API symmetry
     if mode not in _MODES:
-        raise SettingsError(
-            f"rerecord mode {mode!r} is not one of {', '.join(_MODES)}"
-        )
+        raise SettingsError(f"rerecord mode {mode!r} is not one of {', '.join(_MODES)}")
     timeout = runner.parse_lock_timeout(lock_timeout)
     async with runner._connection(database, using, url) as name:
         dialect = runner.connection_dialect(name, database)
         tracking = runner.tracking_schema_for(database, dialect)
-        handle = await _core._acquire_run_lock(
-            name, None, timeout, runner._say_waiting
-        )
+        handle = await _core._acquire_run_lock(name, None, timeout, runner._say_waiting)
         try:
             return await _rerecord(
                 name, database, dialect, tracking, handle, target, mode

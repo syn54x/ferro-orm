@@ -267,7 +267,10 @@ def test_a_failed_step_is_recorded_and_the_next_up_resumes_at_it(
     )
     assert run("migrate", "up", "--url", db.url) == 0
     out = capsys.readouterr().out
-    assert f"re-recorded 0002_fix/01_fix.up.sql (sha384:{failed[5]} → sha384:{sha384(fix)})" in out
+    assert (
+        f"re-recorded 0002_fix/01_fix.up.sql (sha384:{failed[5]} → sha384:{sha384(fix)})"
+        in out
+    )
     assert "0002_fix" in out and "0003_three" in out
     records = db.records()
     assert all(r[9] is not None for r in records) and len(records) == 3
