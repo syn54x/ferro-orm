@@ -34,6 +34,8 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_execute_sql_step, m)?)?;
     m.add_function(wrap_pyfunction!(_tracking_tables_for, m)?)?;
     m.add_function(wrap_pyfunction!(_live_tables, m)?)?;
+    m.add_function(wrap_pyfunction!(_rerecord_plan, m)?)?;
+    m.add_function(wrap_pyfunction!(_rerecord, m)?)?;
     m.add_function(wrap_pyfunction!(_plan_baseline, m)?)?;
     m.add_function(wrap_pyfunction!(_write_baseline_records, m)?)?;
     m.add_function(wrap_pyfunction!(_remove_baseline_records, m)?)?;
@@ -194,19 +196,31 @@ fn parse_dialect(dialect: &str) -> PyResult<Dialect> {
     Ok(parse_dialects(&[dialect.to_string()])?[0])
 }
 
+/// `[[migration, step, ["author.id", ...]], ...]` → the planner's
+/// `OrderKeys`.
+fn parse_order_keys(json: &str) -> PyResult<ferro_migrate::run_plan::OrderKeys> {
+    let entries: Vec<(u16, u8, Vec<String>)> = parse_json(json, "order_keys_json")?;
+    Ok(entries
+        .into_iter()
+        .map(|(migration, step, keys)| ((migration, step), keys))
+        .collect())
+}
+
 /// Plan a run over the migrations directory against the applied records
 /// (`_read_records`'s `records`). `direction_json` is `{"direction": "up"}`
 /// or `{"direction": "down", "target": {...}}`; `live_tables_json` (the
 /// governed schema's tables, from `_live_tables`) turns on the adoption
-/// refusal for a database with no records. Returns the JSON of the
-/// `RunPlan`.
+/// refusal for a database with no records; `order_keys_json`
+/// (`[[migration, step, [key, ...]], ...]`, the order keys each edited
+/// chunked step's file pages over) decides whether its refusal offers
+/// `--continue`. Returns the JSON of the `RunPlan`.
 ///
 /// # Errors
-/// `RunRefused` carrying the refusal's text; `ValueError` for malformed
-/// arguments.
+/// `RunRefused` carrying the refusal's text, kind, migration, step and
+/// reason; `ValueError` for malformed arguments.
 #[pyfunction]
 #[pyo3(name = "_run_plan")]
-#[pyo3(signature = (directory, records_json, dialect, direction_json, allow_ahead, live_tables_json=None))]
+#[pyo3(signature = (directory, records_json, dialect, direction_json, allow_ahead, live_tables_json=None, order_keys_json=None))]
 pub fn _run_plan(
     directory: String,
     records_json: String,
@@ -214,14 +228,27 @@ pub fn _run_plan(
     direction_json: String,
     allow_ahead: bool,
     live_tables_json: Option<String>,
+    order_keys_json: Option<String>,
 ) -> PyResult<String> {
     use ferro_migrate::run_plan::{Direction, StepRecord, check_adoption, plan_run, read_for_run};
     let records: Vec<StepRecord> = parse_json(&records_json, "records_json")?;
     let direction: Direction = parse_json(&direction_json, "direction_json")?;
     let dialect = parse_dialect(&dialect)?;
-    let refuse = |r: ferro_migrate::RunRefusal| crate::run::refused(r.to_string());
+    let order_keys = order_keys_json
+        .as_deref()
+        .map(parse_order_keys)
+        .transpose()?;
+    let refuse = |r: ferro_migrate::RunRefusal| crate::run::refused_by(&r);
     let dir = read_for_run(Path::new(&directory)).map_err(refuse)?;
-    let plan = plan_run(&dir, &records, dialect, direction, allow_ahead).map_err(refuse)?;
+    let plan = plan_run(
+        &dir,
+        &records,
+        dialect,
+        direction,
+        allow_ahead,
+        order_keys.as_ref(),
+    )
+    .map_err(refuse)?;
     if let Some(json) = live_tables_json {
         let live: Vec<String> = parse_json(&json, "live_tables_json")?;
         check_adoption(&dir, &records, &live).map_err(refuse)?;
@@ -231,23 +258,36 @@ pub fn _run_plan(
 
 /// Answer `ferro migrate status` from the directory and the records,
 /// read-only. Returns the JSON of the `RunStatus`; a directory that cannot be
-/// read is reported as its refusal with no migrations.
+/// read is reported as its refusal with no migrations. `order_keys_json` is
+/// `_run_plan`'s.
 ///
 /// # Errors
 /// `ValueError` for malformed arguments.
 #[pyfunction]
 #[pyo3(name = "_run_status")]
+#[pyo3(signature = (directory, records_json, dialect, lock_held, order_keys_json=None))]
 pub fn _run_status(
     directory: String,
     records_json: String,
     dialect: String,
     lock_held: bool,
+    order_keys_json: Option<String>,
 ) -> PyResult<String> {
     use ferro_migrate::run_plan::{RunStatus, StepRecord, read_for_run, run_status};
     let records: Vec<StepRecord> = parse_json(&records_json, "records_json")?;
     let dialect = parse_dialect(&dialect)?;
+    let order_keys = order_keys_json
+        .as_deref()
+        .map(parse_order_keys)
+        .transpose()?;
     match read_for_run(Path::new(&directory)) {
-        Ok(dir) => to_json(&run_status(&dir, &records, dialect, lock_held)),
+        Ok(dir) => to_json(&run_status(
+            &dir,
+            &records,
+            dialect,
+            lock_held,
+            order_keys.as_ref(),
+        )),
         Err(refusal) => to_json(&RunStatus {
             refusal_needs_attention: refusal.needs_attention(),
             refusal: Some(refusal.to_string()),
@@ -508,25 +548,33 @@ pub fn _remove_record(
     })
 }
 
-/// Refuse a cursor that is not `{"keys": [...], "rows_done": rows_done}`:
-/// the record's two copies of the count never disagree.
+/// Refuse a cursor that is not `{"keys": [...], "order_by": ["author.id",
+/// ...], "rows_done": rows_done}`: the record's two copies of the count never
+/// disagree, and the cursor names the order keys it is a position in (what
+/// `rerecord --continue` compares an edited file's against, ADR-0030).
 fn check_cursor_json(cursor_json: &str, rows_done: i64) -> PyResult<()> {
     let bad = |why: &str| {
         PyValueError::new_err(format!(
-            "cursor_json must be {{\"keys\": [...], \"rows_done\": {rows_done}}} ({why}): \
-             {cursor_json}"
+            "cursor_json must be {{\"keys\": [...], \"order_by\": [...], \"rows_done\": \
+             {rows_done}}} ({why}): {cursor_json}"
         ))
     };
     let value: serde_json::Value =
         serde_json::from_str(cursor_json).map_err(|e| bad(&e.to_string()))?;
     let object = value.as_object().ok_or_else(|| bad("not an object"))?;
-    if !object.get("keys").is_some_and(serde_json::Value::is_array) {
+    let Some(keys) = object.get("keys").and_then(serde_json::Value::as_array) else {
         return Err(bad("no keys array"));
+    };
+    let Some(order_by) = object.get("order_by").and_then(serde_json::Value::as_array) else {
+        return Err(bad("no order_by array"));
+    };
+    if order_by.len() != keys.len() || !order_by.iter().all(serde_json::Value::is_string) {
+        return Err(bad("order_by is not one key name per value"));
     }
     if object.get("rows_done").and_then(serde_json::Value::as_i64) != Some(rows_done) {
         return Err(bad("its rows_done differs"));
     }
-    if object.len() != 2 {
+    if object.len() != 3 {
         return Err(bad("unexpected members"));
     }
     Ok(())
@@ -714,6 +762,80 @@ pub fn _live_tables(py: Python<'_>, using: Option<String>) -> PyResult<Bound<'_,
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let engine = crate::state::engine_for_connection(using)?;
         to_json(&crate::run::live_tables(&engine).await?)
+    })
+}
+
+// -- rerecord (#537) ----------------------------------------------------------------
+
+/// Plan `ferro migrate rerecord <target> [--continue|--restart]` over the
+/// directory against the records: `target` as the operator wrote it
+/// (`0007:01`), `mode` `"record"`, `"continue"` or `"restart"`,
+/// `order_keys_json` as `_run_plan`'s. Returns the JSON of the
+/// `RerecordAction` (`{"migration", "step", "migration_name",
+/// "recorded_file", "file", "path", "old_checksum", "new_checksum", "kind",
+/// "data", "finished", "clear_cursor"}`).
+///
+/// # Errors
+/// `RunRefused` (structured) for every refusal `rerecord_plan` makes;
+/// `ValueError` for malformed arguments.
+#[pyfunction]
+#[pyo3(name = "_rerecord_plan")]
+#[pyo3(signature = (directory, records_json, target, mode, dialect, order_keys_json=None))]
+pub fn _rerecord_plan(
+    directory: String,
+    records_json: String,
+    target: String,
+    mode: String,
+    dialect: String,
+    order_keys_json: Option<String>,
+) -> PyResult<String> {
+    use ferro_migrate::run_plan::{
+        OrderKeys, RerecordMode, StepRecord, read_for_run, rerecord_plan,
+    };
+    let records: Vec<StepRecord> = parse_json(&records_json, "records_json")?;
+    let mode: RerecordMode = parse_json(&format!("\"{mode}\""), "mode")?;
+    let dialect = parse_dialect(&dialect)?;
+    let order_keys = match order_keys_json {
+        Some(json) => parse_order_keys(&json)?,
+        None => OrderKeys::new(),
+    };
+    let refuse = |r: ferro_migrate::RunRefusal| crate::run::refused_by(&r);
+    let dir = read_for_run(Path::new(&directory)).map_err(refuse)?;
+    let action =
+        rerecord_plan(&dir, &records, &target, mode, dialect, &order_keys).map_err(refuse)?;
+    to_json(&action)
+}
+
+/// Write one planned re-record (`_rerecord_plan`'s action, with a data
+/// step's `kind` read from its file): the record's file, checksum and kind,
+/// and for `--restart` its cursor and rows cleared, in one statement. Runs
+/// nothing of the step. With `lock`, the run lock behind that handle is
+/// verified first.
+///
+/// # Errors
+/// `RunRefused` when the lock was lost or the record changed since it was
+/// planned; `ValueError` for a malformed action; a database error.
+#[pyfunction]
+#[pyo3(name = "_rerecord")]
+#[pyo3(signature = (using, action_json, tracking_schema=None, lock=None))]
+pub fn _rerecord(
+    py: Python<'_>,
+    using: Option<String>,
+    action_json: String,
+    tracking_schema: Option<String>,
+    lock: Option<u64>,
+) -> PyResult<Bound<'_, PyAny>> {
+    let action: ferro_migrate::run_plan::RerecordAction = parse_json(&action_json, "action_json")?;
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let engine = crate::state::engine_for_connection(using)?;
+        if let Some(handle) = lock {
+            crate::run::registered_lock(handle)?
+                .lock()
+                .await
+                .verify()
+                .await?;
+        }
+        crate::run::rerecord_checksum(&engine, tracking_schema.as_deref(), &action).await
     })
 }
 

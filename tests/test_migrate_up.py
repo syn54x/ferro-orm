@@ -267,7 +267,10 @@ def test_a_failed_step_is_recorded_and_the_next_up_resumes_at_it(
     )
     assert run("migrate", "up", "--url", db.url) == 0
     out = capsys.readouterr().out
-    assert "0002_fix/01_fix.up.sql changed since its unfinished attempt" in out
+    assert (
+        f"re-recorded 0002_fix/01_fix.up.sql (sha384:{failed[5]} → sha384:{sha384(fix)})"
+        in out
+    )
     assert "0002_fix" in out and "0003_three" in out
     records = db.records()
     assert all(r[9] is not None for r in records) and len(records) == 3
@@ -421,7 +424,7 @@ def test_an_applied_file_edited_on_disk_is_refused_naming_rerecord(
         f"  applied   sha384:{applied}  ({short_time(finished_at)})\n"
         f"  on disk   sha384:{sha384(up_file)}\n"
         f"An applied step is never run again. Restore the file, or accept a deliberate "
-        f"edit with\n`ferro migrate rerecord 0001`. Nothing was applied.",
+        f"edit with\n`ferro migrate rerecord 0001:01`. Nothing was applied.",
     )
 
 
