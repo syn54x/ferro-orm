@@ -869,6 +869,92 @@ pub fn render_check_body(check: &ferro_schema_ir::SchemaCheck) -> String {
     format!("{} IN ({})", quote_ident(&check.column), check.values.join(", "))
 }
 
+/// How a foreign key or check is added (ADR-0043).
+///
+/// ```text
+/// Plain     ALTER TABLE "post" ADD CONSTRAINT "ck_post_title_set" CHECK ("title" <> '')
+/// NotValid  ALTER TABLE "post" ADD CONSTRAINT "ck_post_title_set" CHECK ("title" <> '') NOT VALID
+/// ```
+///
+/// `Plain` is every door's statement: the create pass, the reconciliation
+/// pass, the Alembic bridge. `NotValid` is the generator's staged constraint
+/// on an existing Postgres table: installed without a scan, refusing every new
+/// violating write at once, and validated by a later step
+/// ([`render_validate_constraint`]). The two differ by the one trailing token.
+/// SQLite has no unvalidated constraint; its renderings ignore the mode.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ConstraintMode {
+    /// Added and validated by the one statement.
+    #[default]
+    Plain,
+    /// Added `NOT VALID`; validated later.
+    NotValid,
+}
+
+impl ConstraintMode {
+    /// What the mode appends to an `ADD CONSTRAINT`.
+    pub fn suffix(self) -> &'static str {
+        match self {
+            ConstraintMode::Plain => "",
+            ConstraintMode::NotValid => " NOT VALID",
+        }
+    }
+}
+
+/// How an index is built or dropped (ADR-0044).
+///
+/// ```text
+/// Plain       CREATE UNIQUE INDEX IF NOT EXISTS "uq_author_email" ON "author" ("email")
+/// Concurrent  CREATE UNIQUE INDEX CONCURRENTLY "uq_author_email" ON "author" ("email")
+/// ```
+///
+/// `Plain` is every door's statement, idempotent inside a transaction.
+/// `Concurrent` is the generator's index step on an existing Postgres table:
+/// built without blocking writers and outside any transaction, and never
+/// `IF NOT EXISTS`, which would skip over an invalid leftover of a failed
+/// build — the step drops that first ([`render_drop_index_sql`]). The create
+/// renderings differ by the one token after `INDEX`. Postgres only.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum IndexMode {
+    /// In the caller's transaction, `IF NOT EXISTS` / `IF EXISTS`.
+    #[default]
+    Plain,
+    /// `CONCURRENTLY`, outside a transaction.
+    Concurrent,
+}
+
+impl IndexMode {
+    /// The token a `CREATE [UNIQUE] INDEX` carries before the index name.
+    pub fn create_token(self) -> &'static str {
+        match self {
+            IndexMode::Plain => "IF NOT EXISTS",
+            IndexMode::Concurrent => "CONCURRENTLY",
+        }
+    }
+}
+
+/// `DROP INDEX` for one index, by name: index names are schema-scoped on both
+/// dialects. Always `IF EXISTS`; [`IndexMode::Concurrent`] adds
+/// `CONCURRENTLY`, the first statement of every Postgres index step (it clears
+/// an invalid leftover of a failed concurrent build, ADR-0044).
+pub fn render_drop_index_sql(name: &str, mode: IndexMode) -> String {
+    match mode {
+        IndexMode::Plain => format!("DROP INDEX IF EXISTS {}", quote_ident(name)),
+        IndexMode::Concurrent => format!("DROP INDEX CONCURRENTLY IF EXISTS {}", quote_ident(name)),
+    }
+}
+
+/// `ALTER TABLE … DROP CONSTRAINT` for one named constraint of any kind (a
+/// foreign key or a check). Postgres only: SQLite drops a table constraint by
+/// rebuilding the table.
+pub fn render_drop_constraint(table: &str, name: &str) -> String {
+    format!(
+        "ALTER TABLE {} DROP CONSTRAINT {}",
+        quote_ident(table),
+        quote_ident(name),
+    )
+}
+
 /// The outcome of emitting one CHECK constraint for one dialect.
 ///
 /// At most one of `statement` / `inline` is set: a standalone statement the
@@ -905,19 +991,30 @@ pub struct CheckEmission {
 /// only *adds when absent* (it does not swallow an "already exists" error). The
 /// CHECK body from [`render_check_body`] is embedded byte-identically inside the
 /// guard, preserving the cross-emitter parity the Alembic mirror depends on.
-pub fn render_db_check(table: &str, check: &ferro_schema_ir::SchemaCheck, dialect: Dialect) -> CheckEmission {
+///
+/// `mode` is [`ConstraintMode::NotValid`] only for the generator's staged
+/// constraint on an existing Postgres table (ADR-0043): the guarded ADD gains
+/// ` NOT VALID` and nothing else changes. SQLite has no unvalidated
+/// constraint; the mode changes nothing there.
+pub fn render_db_check(
+    table: &str,
+    check: &ferro_schema_ir::SchemaCheck,
+    dialect: Dialect,
+    mode: ConstraintMode,
+) -> CheckEmission {
     match dialect {
         Dialect::Postgres => CheckEmission {
             statement: Some(format!(
                 "DO $$ BEGIN \
                  IF NOT EXISTS (SELECT 1 FROM pg_constraint \
                  WHERE conname = '{conname}' AND conrelid = '\"{table}\"'::regclass) THEN \
-                 ALTER TABLE \"{table}\" ADD CONSTRAINT \"{name}\" CHECK ({body}); \
+                 ALTER TABLE \"{table}\" ADD CONSTRAINT \"{name}\" CHECK ({body}){validity}; \
                  END IF; END $$",
                 conname = check.name.replace('\'', "''"),
                 table = table,
                 name = check.name,
                 body = render_check_body(check),
+                validity = mode.suffix(),
             )),
             inline: None,
             warning: None,
@@ -980,18 +1077,22 @@ fn declared_check_names(model: &ferro_schema_ir::SchemaModel) -> Vec<String> {
 /// existing table or column needs a full table rebuild, which is the
 /// Migrations door (`ferro migrate new`). A column check over a column added
 /// in the same pass never reaches here: it rides that `ADD COLUMN` inline.
+///
+/// `mode` appends ` NOT VALID` to the Postgres ADD ([`ConstraintMode`]); every
+/// door but the generator's staged constraint passes `Plain`.
 pub fn render_check_addition(
     table: &str,
     model: &ferro_schema_ir::SchemaModel,
     name: &str,
     dialect: Dialect,
+    mode: ConstraintMode,
 ) -> Option<CheckEmission> {
     if let Some(check) = model.table_checks.iter().find(|check| check.name == name) {
-        return Some(render_add_table_check(table, check, dialect));
+        return Some(render_add_table_check(table, check, dialect, mode));
     }
     let check = model.checks.iter().find(|check| check.name == name)?;
     Some(match dialect {
-        Dialect::Postgres => render_db_check(table, check, dialect),
+        Dialect::Postgres => render_db_check(table, check, dialect, mode),
         Dialect::Sqlite => CheckEmission {
             statement: None,
             inline: None,
@@ -1011,14 +1112,16 @@ fn render_add_table_check(
     table: &str,
     check: &ferro_schema_ir::SchemaTableCheck,
     dialect: Dialect,
+    mode: ConstraintMode,
 ) -> CheckEmission {
     match dialect {
         Dialect::Postgres => CheckEmission {
             statement: Some(format!(
-                "ALTER TABLE {} ADD CONSTRAINT {} CHECK ({})",
+                "ALTER TABLE {} ADD CONSTRAINT {} CHECK ({}){}",
                 quote_ident(table),
                 quote_ident(&check.name),
                 render_table_check_body(check),
+                mode.suffix(),
             )),
             inline: None,
             warning: None,
@@ -1123,26 +1226,27 @@ pub fn drifted_check_names(
 
 /// Render the DROP+ADD (Postgres) or warn-skip (SQLite) for one declared
 /// CHECK whose live body drifted. `None` when `name` is not on `model`.
+///
+/// `mode` stages the ADD half ([`ConstraintMode`]; ADR-0043 stages the `ADD`
+/// half of a rebuild on an existing Postgres table like any other add).
 pub fn render_check_rebuild(
     table: &str,
     model: &ferro_schema_ir::SchemaModel,
     name: &str,
     dialect: Dialect,
+    mode: ConstraintMode,
 ) -> Option<CheckRebuildEmission> {
     let body = declared_check_body(model, name)?;
     Some(match dialect {
         Dialect::Postgres => CheckRebuildEmission {
             statements: vec![
+                render_drop_constraint(table, name),
                 format!(
-                    "ALTER TABLE {} DROP CONSTRAINT {}",
-                    quote_ident(table),
-                    quote_ident(name),
-                ),
-                format!(
-                    "ALTER TABLE {} ADD CONSTRAINT {} CHECK ({})",
+                    "ALTER TABLE {} ADD CONSTRAINT {} CHECK ({}){}",
                     quote_ident(table),
                     quote_ident(name),
                     body,
+                    mode.suffix(),
                 ),
             ],
             warning: None,
@@ -1218,11 +1322,7 @@ pub fn extra_check_names_warning(table: &str, extra: &[String]) -> Option<String
 pub fn render_check_drop(table: &str, name: &str, dialect: Dialect) -> CheckEmission {
     match dialect {
         Dialect::Postgres => CheckEmission {
-            statement: Some(format!(
-                "ALTER TABLE {} DROP CONSTRAINT {}",
-                quote_ident(table),
-                quote_ident(name),
-            )),
+            statement: Some(render_drop_constraint(table, name)),
             inline: None,
             warning: None,
         },
@@ -3118,6 +3218,7 @@ mod tests {
             &model,
             "ck_transfer_at_most_one_outflow",
             Dialect::Postgres,
+            ConstraintMode::Plain,
         )
         .expect("declared table check must resolve");
         assert_eq!(
@@ -3139,6 +3240,7 @@ mod tests {
             &model,
             "ck_transfer_at_most_one_outflow",
             Dialect::Sqlite,
+            ConstraintMode::Plain,
         )
         .expect("declared table check must resolve");
         assert!(emission.statement.is_none(), "ADR-0014: no SQLite ALTER");
@@ -3157,9 +3259,14 @@ mod tests {
         // without a table rebuild, so the inline fragment has nowhere to go.
         let check = account_role_column_check();
         let model = transfer_model_with_checks(vec![], vec![check]);
-        let emission =
-            render_check_addition("transfer", &model, "ck_transfer_kind", Dialect::Sqlite)
-                .expect("declared column check must resolve");
+        let emission = render_check_addition(
+            "transfer",
+            &model,
+            "ck_transfer_kind",
+            Dialect::Sqlite,
+            ConstraintMode::Plain,
+        )
+        .expect("declared column check must resolve");
         assert!(emission.statement.is_none(), "ADR-0014: no SQLite ALTER");
         assert!(
             emission.inline.is_none(),
@@ -3175,13 +3282,127 @@ mod tests {
     fn render_check_addition_column_check_reuses_the_idempotent_do_block() {
         let check = account_role_column_check();
         let model = transfer_model_with_checks(vec![], vec![check.clone()]);
-        let emission =
-            render_check_addition("transfer", &model, "ck_transfer_kind", Dialect::Postgres)
-                .expect("declared column check must resolve");
+        let emission = render_check_addition(
+            "transfer",
+            &model,
+            "ck_transfer_kind",
+            Dialect::Postgres,
+            ConstraintMode::Plain,
+        )
+        .expect("declared column check must resolve");
         assert_eq!(
             emission.statement,
-            render_db_check("transfer", &check, Dialect::Postgres).statement,
+            render_db_check("transfer", &check, Dialect::Postgres, ConstraintMode::Plain).statement,
             "the column-check ADD is single-sourced with the create path"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Staged constraints (#527; ADR-0043): `NOT VALID` is the one renderer in
+    // a mode, the one token appended to the ADD.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn a_not_valid_table_check_is_the_plain_add_plus_the_one_token() {
+        let model = transfer_model_with_checks(vec![transfer_at_most_one_outflow_check()], vec![]);
+        let name = "ck_transfer_at_most_one_outflow";
+        let add = |mode| {
+            render_check_addition("transfer", &model, name, Dialect::Postgres, mode)
+                .and_then(|emission| emission.statement)
+                .expect("declared")
+        };
+        assert_eq!(
+            add(ConstraintMode::NotValid),
+            format!("{} NOT VALID", add(ConstraintMode::Plain))
+        );
+    }
+
+    #[test]
+    fn a_not_valid_column_check_keeps_its_guard_and_adds_the_token_inside_it() {
+        let check = account_role_column_check();
+        let model = transfer_model_with_checks(vec![], vec![check.clone()]);
+        let add = |mode| {
+            render_check_addition(
+                "transfer",
+                &model,
+                "ck_transfer_kind",
+                Dialect::Postgres,
+                mode,
+            )
+            .and_then(|emission| emission.statement)
+            .expect("declared")
+        };
+        let plain = add(ConstraintMode::Plain);
+        assert_eq!(
+            add(ConstraintMode::NotValid),
+            plain.replace(
+                "CHECK (\"kind\" IN ('in', 'out'));",
+                "CHECK (\"kind\" IN ('in', 'out')) NOT VALID;"
+            )
+        );
+        assert_ne!(add(ConstraintMode::NotValid), plain);
+        assert_eq!(
+            Some(plain),
+            render_db_check("transfer", &check, Dialect::Postgres, ConstraintMode::Plain).statement
+        );
+        // SQLite has no unvalidated constraint: the mode changes nothing.
+        let sqlite = |mode| {
+            render_check_addition(
+                "transfer",
+                &model,
+                "ck_transfer_kind",
+                Dialect::Sqlite,
+                mode,
+            )
+            .and_then(|emission| emission.warning)
+        };
+        assert_eq!(
+            sqlite(ConstraintMode::NotValid),
+            sqlite(ConstraintMode::Plain)
+        );
+    }
+
+    #[test]
+    fn a_not_valid_check_rebuild_drops_then_adds_not_valid() {
+        let model = transfer_model_with_checks(vec![transfer_at_most_one_outflow_check()], vec![]);
+        let rebuild = |mode| {
+            render_check_rebuild(
+                "transfer",
+                &model,
+                "ck_transfer_at_most_one_outflow",
+                Dialect::Postgres,
+                mode,
+            )
+            .expect("declared")
+            .statements
+        };
+        let plain = rebuild(ConstraintMode::Plain);
+        let staged = rebuild(ConstraintMode::NotValid);
+        assert_eq!(staged[0], plain[0]);
+        assert_eq!(staged[1], format!("{} NOT VALID", plain[1]));
+    }
+
+    #[test]
+    fn dropping_a_constraint_is_one_statement_for_every_kind() {
+        assert_eq!(
+            render_drop_constraint("post", "fk_post_author_id_author"),
+            "ALTER TABLE \"post\" DROP CONSTRAINT \"fk_post_author_id_author\""
+        );
+        assert_eq!(
+            render_check_drop("post", "ck_post_x", Dialect::Postgres).statement,
+            Some(render_drop_constraint("post", "ck_post_x"))
+        );
+    }
+
+    #[test]
+    fn a_concurrent_index_drop_differs_from_the_plain_one_by_the_one_token() {
+        assert_eq!(
+            render_drop_index_sql("uq_author_email", IndexMode::Plain),
+            "DROP INDEX IF EXISTS \"uq_author_email\""
+        );
+        assert_eq!(
+            render_drop_index_sql("uq_author_email", IndexMode::Concurrent),
+            "DROP INDEX CONCURRENTLY IF EXISTS \"uq_author_email\""
         );
     }
 
@@ -3189,8 +3410,14 @@ mod tests {
     fn render_check_addition_returns_none_for_an_undeclared_name() {
         let model = transfer_model_with_checks(vec![transfer_at_most_one_outflow_check()], vec![]);
         assert!(
-            render_check_addition("transfer", &model, "ck_transfer_nope", Dialect::Postgres)
-                .is_none()
+            render_check_addition(
+                "transfer",
+                &model,
+                "ck_transfer_nope",
+                Dialect::Postgres,
+                ConstraintMode::Plain
+            )
+            .is_none()
         );
     }
 
@@ -3349,6 +3576,7 @@ mod tests {
             &model,
             "ck_transfer_at_most_one_outflow",
             Dialect::Postgres,
+            ConstraintMode::Plain,
         )
         .expect("declared table check must resolve");
         assert_eq!(
@@ -3373,9 +3601,14 @@ mod tests {
     fn render_check_rebuild_column_check_is_also_a_bare_add() {
         let check = account_role_column_check();
         let model = transfer_model_with_checks(vec![], vec![check]);
-        let emission =
-            render_check_rebuild("transfer", &model, "ck_transfer_kind", Dialect::Postgres)
-                .expect("declared column check must resolve");
+        let emission = render_check_rebuild(
+            "transfer",
+            &model,
+            "ck_transfer_kind",
+            Dialect::Postgres,
+            ConstraintMode::Plain,
+        )
+        .expect("declared column check must resolve");
         assert_eq!(
             emission.statements,
             vec![
@@ -3395,6 +3628,7 @@ mod tests {
             &model,
             "ck_transfer_at_most_one_outflow",
             Dialect::Sqlite,
+            ConstraintMode::Plain,
         )
         .expect("declared table check must resolve");
         assert!(emission.statements.is_empty(), "ADR-0014: no SQLite ALTER");
@@ -3411,8 +3645,14 @@ mod tests {
     fn render_check_rebuild_returns_none_for_an_undeclared_name() {
         let model = transfer_model_with_checks(vec![transfer_at_most_one_outflow_check()], vec![]);
         assert!(
-            render_check_rebuild("transfer", &model, "ck_transfer_nope", Dialect::Postgres)
-                .is_none()
+            render_check_rebuild(
+                "transfer",
+                &model,
+                "ck_transfer_nope",
+                Dialect::Postgres,
+                ConstraintMode::Plain
+            )
+            .is_none()
         );
     }
 
@@ -3951,7 +4191,12 @@ mod tests {
 
     #[test]
     fn render_db_check_postgres_is_idempotent_and_wraps_the_bare_alter() {
-        let e = render_db_check("account", &sample_check(), Dialect::Postgres);
+        let e = render_db_check(
+            "account",
+            &sample_check(),
+            Dialect::Postgres,
+            ConstraintMode::Plain,
+        );
         // The idempotent guard: only ADD CONSTRAINT when pg_constraint lacks it,
         // so a re-run against an already-migrated schema is a no-op (G6, #176).
         assert_eq!(
@@ -3975,13 +4220,23 @@ mod tests {
 
     #[test]
     fn render_db_check_postgres_has_no_inline_fragment() {
-        let e = render_db_check("account", &sample_check(), Dialect::Postgres);
+        let e = render_db_check(
+            "account",
+            &sample_check(),
+            Dialect::Postgres,
+            ConstraintMode::Plain,
+        );
         assert!(e.inline.is_none(), "Postgres keeps the post-create ALTER");
     }
 
     #[test]
     fn render_db_check_sqlite_renders_the_named_inline_column_constraint() {
-        let e = render_db_check("account", &sample_check(), Dialect::Sqlite);
+        let e = render_db_check(
+            "account",
+            &sample_check(),
+            Dialect::Sqlite,
+            ConstraintMode::Plain,
+        );
         assert!(e.statement.is_none(), "SQLite has no ADD CONSTRAINT");
         assert!(e.warning.is_none(), "the constraint is emitted, not elided");
         assert_eq!(

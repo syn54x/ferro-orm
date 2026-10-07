@@ -6,7 +6,7 @@
 //! 63-char truncation guards, and the `(logical_type, format, db_type, enum)`
 //! → storage decision live only in `ferro-ddl-lowering` (AGENTS.md § I-1).
 
-use ferro_ddl_lowering::{Dialect, ResolvedStorage};
+use ferro_ddl_lowering::{ConstraintMode, Dialect, ResolvedStorage};
 use pyo3::prelude::*;
 
 #[pyfunction]
@@ -213,14 +213,19 @@ pub fn _plan_check_addition(
     let names = ferro_ddl_lowering::missing_check_names(&model, &live_names);
     let mut statements = Vec::with_capacity(names.len());
     for name in &names {
-        let emission =
-            ferro_ddl_lowering::render_check_addition(&table, &model, name, Dialect::Postgres)
-                .ok_or_else(|| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!(
-                        "CHECK constraint '{name}' is missing from table '{table}' but has no \
+        let emission = ferro_ddl_lowering::render_check_addition(
+            &table,
+            &model,
+            name,
+            Dialect::Postgres,
+            ConstraintMode::Plain,
+        )
+        .ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "CHECK constraint '{name}' is missing from table '{table}' but has no \
                          declared artifact in the model IR"
-                    ))
-                })?;
+            ))
+        })?;
         if let Some(statement) = emission.statement {
             statements.push(statement);
         }
@@ -250,14 +255,19 @@ pub fn _plan_check_rebuild(
     let names = ferro_ddl_lowering::drifted_check_names(&model, &live);
     let mut statements = Vec::with_capacity(names.len().saturating_mul(2));
     for name in &names {
-        let emission =
-            ferro_ddl_lowering::render_check_rebuild(&table, &model, name, Dialect::Postgres)
-                .ok_or_else(|| {
-                    pyo3::exceptions::PyRuntimeError::new_err(format!(
-                        "CHECK constraint '{name}' drifted on table '{table}' but has no \
+        let emission = ferro_ddl_lowering::render_check_rebuild(
+            &table,
+            &model,
+            name,
+            Dialect::Postgres,
+            ConstraintMode::Plain,
+        )
+        .ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "CHECK constraint '{name}' drifted on table '{table}' but has no \
                          declared artifact in the model IR"
-                    ))
-                })?;
+            ))
+        })?;
         statements.extend(emission.statements);
     }
     Ok(serde_json::json!({ "statements": statements, "names": names }).to_string())

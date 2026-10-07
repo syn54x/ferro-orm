@@ -2287,7 +2287,12 @@ fn render_db_check_postgres_emits_quoted_alter_no_warning() {
         column: "role".to_string(),
         values: vec!["'admin'".to_string(), "'user'".to_string()],
     };
-    let e = ferro_ddl_lowering::render_db_check("account", &check, Dialect::Postgres);
+    let e = ferro_ddl_lowering::render_db_check(
+        "account",
+        &check,
+        Dialect::Postgres,
+        ferro_ddl_lowering::ConstraintMode::Plain,
+    );
     assert_eq!(e.statement.as_deref(), Some(PG_DB_CHECK_ACCOUNT_ROLE));
     assert!(e.warning.is_none());
 }
@@ -2299,7 +2304,12 @@ fn render_db_check_sqlite_renders_inline_without_warning() {
         column: "role".to_string(),
         values: vec!["'admin'".to_string(), "'user'".to_string()],
     };
-    let e = ferro_ddl_lowering::render_db_check("account", &check, Dialect::Sqlite);
+    let e = ferro_ddl_lowering::render_db_check(
+        "account",
+        &check,
+        Dialect::Sqlite,
+        ferro_ddl_lowering::ConstraintMode::Plain,
+    );
     assert!(e.statement.is_none());
     assert!(e.warning.is_none());
     assert_eq!(
@@ -3993,5 +4003,90 @@ fn plan_from_ir_plans_a_primary_key_moving_between_columns() {
             .any(|op| matches!(op, MigrationOp::ChangePrimaryKey { .. })),
         "{:?}",
         plan.operations
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Online shapes on an existing Postgres table (#527; ADR-0043, ADR-0044): the
+// pass's own renderers in a mode, one token apart (AGENTS.md § I-1).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_concurrent_index_differs_from_the_passs_by_exactly_the_concurrently_token() {
+    use ferro_ddl_lowering::IndexMode;
+    for unique in [false, true] {
+        let columns = ["email".to_string()];
+        let plain = crate::emit::render_index_sql(
+            "author",
+            "uq_author_email",
+            &columns,
+            unique,
+            Dialect::Postgres,
+            IndexMode::Plain,
+        );
+        let concurrent = crate::emit::render_index_sql(
+            "author",
+            "uq_author_email",
+            &columns,
+            unique,
+            Dialect::Postgres,
+            IndexMode::Concurrent,
+        );
+        let tokens = |sql: &str| sql.split(' ').map(str::to_string).collect::<Vec<_>>();
+        let (plain_tokens, concurrent_tokens) = (tokens(&plain), tokens(&concurrent));
+        let head = if unique { 3 } else { 2 };
+        assert_eq!(plain_tokens[..head], concurrent_tokens[..head]);
+        assert_eq!(plain_tokens[head..head + 3], ["IF", "NOT", "EXISTS"]);
+        assert_eq!(concurrent_tokens[head], "CONCURRENTLY");
+        assert_eq!(plain_tokens[head + 3..], concurrent_tokens[head + 1..]);
+        assert_eq!(
+            concurrent,
+            format!(
+                "CREATE {}INDEX CONCURRENTLY \"uq_author_email\" ON \"author\" (\"email\")",
+                if unique { "UNIQUE " } else { "" }
+            )
+        );
+    }
+}
+
+#[test]
+fn a_not_valid_foreign_key_is_the_passs_add_plus_the_one_token() {
+    use ferro_ddl_lowering::ConstraintMode;
+    let model = post_model_with_constraints();
+    let fk = &model.foreign_keys[0];
+    let plain = crate::emit::render_add_fk_sql("post", fk, ConstraintMode::Plain);
+    assert_eq!(
+        crate::emit::render_add_fk_sql("post", fk, ConstraintMode::NotValid),
+        format!("{plain} NOT VALID")
+    );
+}
+
+#[test]
+fn the_passs_index_statements_are_byte_unchanged_by_the_modes() {
+    let old_ir = envelope(vec![schema_model(
+        "post",
+        vec![pk_col("id", "int"), col("slug", "text", true)],
+    )]);
+    let new_ir = envelope(vec![post_model_with_constraints()]);
+    let plan = plan_from_ir(
+        &old_ir,
+        &new_ir,
+        Dialect::Postgres,
+        &LiveFacts::declared(),
+        PlanOptions { destructive: true },
+    );
+    let pg = render_flat(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap();
+    assert!(
+        pg.statements.contains(
+            &"CREATE UNIQUE INDEX IF NOT EXISTS \"uq_post_slug\" ON \"post\" (\"slug\")"
+                .to_string()
+        ),
+        "{:?}",
+        pg.statements
+    );
+    assert!(
+        !pg.statements
+            .iter()
+            .any(|sql| sql.contains("CONCURRENTLY") || sql.contains("NOT VALID"))
     );
 }
