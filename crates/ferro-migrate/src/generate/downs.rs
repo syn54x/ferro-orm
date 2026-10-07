@@ -147,7 +147,7 @@ fn rewrites_rows(ops: &[MigrationOp], ir: &IrEnvelope<SchemaIrPayload>, dialect:
 }
 
 /// Whether `op` drops data.
-fn drops_data(op: &MigrationOp) -> bool {
+pub fn drops_data(op: &MigrationOp) -> bool {
     matches!(
         op,
         MigrationOp::DropTable { .. }

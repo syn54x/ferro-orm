@@ -903,6 +903,79 @@ pub fn _render_migration_sql_for_test(
     Ok((statements, warnings))
 }
 
+/// The reverse of the live-origin plan over FFI (ADR-0041): what turns the
+/// database `_plan_from_ir(live_json, declared_json, …, facts_json)` leaves
+/// back into the live one (`ferro_migrate::plan::reverse_live_plan`) — the
+/// Alembic bridge's `downgrade()`. `facts_json` is the facts
+/// `_live_schema_ir` returned beside `live_json`.
+///
+/// The result has `_plan_from_ir`'s shape: `{"operations": [{"kind": …,
+/// <fields>}], "warnings": [], "always_warnings": []}`, plus `before`: the
+/// live envelope under the forward plan's renames, the side the reverse's
+/// steps turn the database into (what `_plan_step_verdicts` reads them
+/// against). A step nothing undoes
+/// is the forward op carrying `"irreversible": {"reason": …}`; a check or
+/// policy put back from the catalog is a `RestoreCheck` / `RestoreRowPolicy`;
+/// a foreign key the forward plan added comes off as `DropForeignKey`. With
+/// `render`, each op also carries its `statements` and `warnings`.
+///
+/// # Errors
+/// `ValueError` when a JSON argument is malformed, an envelope is not a
+/// `schema` IR, the dialect is unknown, a live table has no facts entry, or a
+/// step cannot render.
+#[pyfunction]
+#[pyo3(name = "_plan_reverse_from_ir")]
+#[pyo3(signature = (live_json, declared_json, dialect, options_json, facts_json, render=true))]
+pub fn _plan_reverse_from_ir(
+    live_json: String,
+    declared_json: String,
+    dialect: String,
+    options_json: String,
+    facts_json: String,
+    render: bool,
+) -> PyResult<String> {
+    use ferro_migrate::plan::{render_reverse_plan, reverse_live_plan};
+    let backend = parse_dialect(&dialect)?;
+    let live = parse_schema_envelope(&live_json, "live_json")?;
+    let declared = parse_schema_envelope(&declared_json, "declared_json")?;
+    let options: PlanOptions = serde_json::from_str(&options_json).map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!("invalid options_json: {e}"))
+    })?;
+    let facts: LiveFacts = serde_json::from_str(&facts_json).map_err(|e| {
+        pyo3::exceptions::PyValueError::new_err(format!("invalid facts_json: {e}"))
+    })?;
+    validate_schema_ir(&declared).map_err(emission_error)?;
+    let forward = plan_from_ir(&live, &declared, backend, &facts, options).map_err(plan_error)?;
+    let reverse =
+        reverse_live_plan(&forward, &live, &facts, &declared, backend).map_err(plan_error)?;
+    let operations: Vec<serde_json::Value> = if render {
+        render_reverse_plan(&reverse, &declared, backend)
+            .map_err(emission_error)?
+            .into_iter()
+            .map(|rendered| {
+                let mut op = rendered.op.to_json();
+                if let Some(fields) = op.as_object_mut() {
+                    fields.insert("statements".into(), rendered.statements.into());
+                    fields.insert("warnings".into(), rendered.warnings.into());
+                }
+                op
+            })
+            .collect()
+    } else {
+        reverse.operations.iter().map(|op| op.to_json()).collect()
+    };
+    let before = serde_json::to_value(&reverse.before).map_err(|e| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!("could not serialize the plan: {e}"))
+    })?;
+    let out = serde_json::json!({
+        "operations": operations,
+        "warnings": Vec::<String>::new(),
+        "always_warnings": Vec::<String>::new(),
+        "before": before,
+    });
+    Ok(out.to_string())
+}
+
 fn parse_schema_envelope(json: &str, what: &str) -> PyResult<IrEnvelope<SchemaIrPayload>> {
     let envelope: IrEnvelope<SchemaIrPayload> = serde_json::from_str(json)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("invalid {what}: {e}")))?;
@@ -971,6 +1044,12 @@ pub fn _plan_from_ir(
                 if let Some(fields) = op.as_object_mut() {
                     fields.insert("statements".into(), rendered.statements.into());
                     fields.insert("warnings".into(), rendered.warnings.into());
+                    if matches!(rendered.op, MigrationOp::AddTable { .. }) {
+                        fields.insert(
+                            "row_security_statements".into(),
+                            rendered.row_security_statements.into(),
+                        );
+                    }
                 }
                 Ok(op)
             })
