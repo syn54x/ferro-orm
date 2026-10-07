@@ -1735,8 +1735,8 @@ mod tests {
 // them again ([`remove_baseline_records`]) while no run has applied anything
 // above them (ADR-0031).
 
-use ferro_migrate::directory::{MigrationsDir, StepDialect, StepKind};
-use ferro_migrate::run_plan::{RunRefusal, exec_mode};
+use ferro_migrate::directory::{MigrationsDir, StepKind};
+use ferro_migrate::run_plan::{RunRefusal, exec_mode, file_name, step_file};
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload};
 
 /// What `ferro migrate baseline` records: one finished record per step of
@@ -1834,31 +1834,11 @@ pub fn plan_baseline(
     {
         let snapshot_checksum = encode_checksum(&migration.snapshot.checksum);
         for step in &migration.steps {
-            // The file this dialect runs: its rendering, else the portable
-            // file (the run planner's choice; `up` refuses a record that
-            // names any other file as an edited applied step).
-            let file = step
-                .files
-                .get(&StepDialect::from(dialect))
-                .or_else(|| step.files.get(&StepDialect::Portable))
-                .ok_or_else(|| {
-                    let missing = RunRefusal::MissingRendering {
-                        migration: migration.number,
-                        step: step.ordinal,
-                        step_name: format!("{:02}_{}", step.ordinal, step.name),
-                        dialect: match dialect {
-                            Dialect::Postgres => "postgres",
-                            Dialect::Sqlite => "sqlite",
-                        },
-                        rendered_for: step.files.keys().filter_map(|d| d.suffix()).collect(),
-                    };
-                    format!("ferro migrate baseline: {missing} {NOTHING}")
-                })?;
-            let name = file
-                .up
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
+            // The file this dialect runs, by the run planner's own rule: the
+            // file `up` checks every applied record against.
+            let file = step_file(migration, step, dialect)
+                .map_err(|missing| format!("ferro migrate baseline: {missing} {NOTHING}"))?;
+            let name = file_name(&file.up);
             let shown = format!("{}/{name}", migration.dir_name());
             let kind = if step.kind == StepKind::Data {
                 plan.data_steps.push(shown);
@@ -2282,6 +2262,35 @@ mod baseline_tests {
             refusal,
             format!("ferro migrate baseline: {missing} Nothing was recorded.")
         );
+    }
+
+    #[test]
+    fn a_baseline_record_names_the_file_up_would_run() {
+        // A step offering both this dialect's rendering and a portable file:
+        // the record names whichever one the run planner picks.
+        let mut step = ddl(1, "CREATE TABLE a (id int);\n");
+        step.files.insert(
+            StepDialect::Portable,
+            file("01_schema.up.sql", "CREATE TABLE a (id int);\n"),
+        );
+        step.files.remove(&StepDialect::Postgres);
+        let migrations = dir(vec![("create_author", vec![step], &["author"])]);
+        for dialect in [Dialect::Sqlite, Dialect::Postgres] {
+            let planned = plan_run(&migrations, &[], dialect, Direction::Up, false)
+                .expect("up plans")
+                .steps
+                .remove(0)
+                .record;
+            let baseline = plan_baseline(&migrations, &[], dialect, None, NOW, "v")
+                .expect("plan")
+                .records
+                .remove(0);
+            assert_eq!(
+                (&baseline.file, &baseline.checksum, baseline.kind),
+                (&planned.file, &planned.checksum, planned.kind),
+                "{dialect:?}"
+            );
+        }
     }
 
     #[test]
