@@ -693,15 +693,20 @@ fn dialect_name(dialect: Dialect) -> &'static str {
     }
 }
 
-fn file_name(path: &Path) -> String {
+/// A step file's name, as a record stores it (`01_schema.up.sqlite.sql`).
+pub fn file_name(path: &Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_default()
 }
 
 /// The file of `step` this database executes: its dialect's rendering, else
-/// the portable file.
-fn step_file<'a>(
+/// the portable file. Every record names this file: what `up` runs and
+/// checks applied records against, and what `baseline` records.
+///
+/// # Errors
+/// [`RunRefusal::MissingRendering`] when the step has neither.
+pub fn step_file<'a>(
     migration: &Migration,
     step: &'a Step,
     dialect: Dialect,

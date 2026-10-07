@@ -271,6 +271,9 @@ def test_ferro_migrations_publishes_the_calls_and_their_exceptions():
         "drift",
         "DriftReport",
         "render_op",
+        "baseline",
+        "remove_baseline",
+        "BaselineReport",
     } <= set(migrations.__all__)
     for name in migrations.__all__:
         assert getattr(migrations, name) is not None
