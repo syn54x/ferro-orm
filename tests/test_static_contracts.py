@@ -312,4 +312,4 @@ def test_up_and_require_applied_take_no_target():
     ]
     for call in (up, require_applied):
         with pytest.raises(TypeError, match="target"):
-            call(target="0002")  # ty: ignore[unknown-argument]
+            _ = call(target="0002")  # ty: ignore[unknown-argument]
