@@ -5148,6 +5148,129 @@ mod enum_renames {
     }
 
     #[test]
+    fn live_labels_follow_the_renames_so_the_pass_plans_only_the_renames() {
+        // The reconciliation pass's shape: the live type's labels read before
+        // the renames run, under the old type name and the old spellings.
+        let live_facts = || {
+            let mut facts = LiveFacts::live(Default::default(), Default::default());
+            for table in ["enmorder", "enmrefund"] {
+                facts.tables.insert(table.to_string(), Default::default());
+            }
+            facts.enum_labels.insert(
+                "orderstatus".to_string(),
+                vec!["paid".to_string(), "canceled".to_string()],
+            );
+            facts
+        };
+        let label = |type_name: &str| MigrationOp::RenameEnumLabel {
+            type_name: type_name.to_string(),
+            old: "canceled".to_string(),
+            new: "cancelled".to_string(),
+            columns: columns(),
+        };
+        let both_renamed = both(status(
+            "orderstate",
+            &["paid", "cancelled"],
+            &[("cancelled", "canceled")],
+        ));
+        for (target, expected) in [
+            (relabelled(), vec![label("orderstatus")]),
+            (
+                both_renamed,
+                vec![
+                    MigrationOp::RenameEnumType {
+                        old: "orderstatus".to_string(),
+                        new: "orderstate".to_string(),
+                    },
+                    label("orderstate"),
+                ],
+            ),
+        ] {
+            // A live IR reads each column of the type as the native enum it is.
+            let mut live = parent();
+            for model in &mut live.payload.models {
+                for col in &mut model.columns {
+                    col.postgres_native_enum = col.enum_type_name.is_some();
+                }
+            }
+            let plan = plan_from_ir(
+                &live,
+                &target,
+                Dialect::Postgres,
+                &live_facts(),
+                PlanOptions { destructive: true },
+            )
+            .expect("plan");
+            // No `ADD VALUE 'cancelled'` the rename already made, and no
+            // warning that `canceled` is a label the model no longer declares.
+            assert_eq!(plan.operations, expected);
+            assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
+            assert!(
+                plan.always_warnings.is_empty(),
+                "{:?}",
+                plan.always_warnings
+            );
+        }
+    }
+
+    #[test]
+    fn the_reverse_of_a_live_enum_rename_undoes_each_rename_once() {
+        use crate::plan::{ReverseOp, reverse_live_plan};
+        let mut facts = LiveFacts::live(Default::default(), Default::default());
+        for table in ["enmorder", "enmrefund"] {
+            facts.tables.insert(table.to_string(), Default::default());
+        }
+        facts.enum_labels.insert(
+            "orderstatus".to_string(),
+            vec!["paid".to_string(), "canceled".to_string()],
+        );
+        let mut live = parent();
+        for model in &mut live.payload.models {
+            for col in &mut model.columns {
+                col.postgres_native_enum = col.enum_type_name.is_some();
+            }
+        }
+        let back = |type_name: &str| MigrationOp::RenameEnumLabel {
+            type_name: type_name.to_string(),
+            old: "cancelled".to_string(),
+            new: "canceled".to_string(),
+            columns: columns(),
+        };
+        let type_renamed = both(status(
+            "orderstate",
+            &["paid", "cancelled"],
+            &[("cancelled", "canceled")],
+        ));
+        for (declared, expected) in [
+            (relabelled(), vec![back("orderstatus")]),
+            (
+                type_renamed,
+                // The label back under the new type name, then the type.
+                vec![
+                    back("orderstate"),
+                    MigrationOp::RenameEnumType {
+                        old: "orderstate".to_string(),
+                        new: "orderstatus".to_string(),
+                    },
+                ],
+            ),
+        ] {
+            let forward = plan_from_ir(
+                &live,
+                &declared,
+                Dialect::Postgres,
+                &facts,
+                PlanOptions { destructive: true },
+            )
+            .expect("plan");
+            let reverse = reverse_live_plan(&forward, &live, &facts, &declared, Dialect::Postgres)
+                .expect("reverse");
+            let expected: Vec<ReverseOp> = expected.into_iter().map(ReverseOp::Planned).collect();
+            assert_eq!(reverse.operations, expected);
+        }
+    }
+
+    #[test]
     fn an_added_label_beside_a_renamed_one_is_still_added() {
         let edited = both(status(
             "orderstatus",

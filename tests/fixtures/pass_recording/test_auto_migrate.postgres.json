@@ -44,12 +44,9 @@
     "statements": [
       "'pd3order': DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace WHERE t.typname = 'pd3status' AND n.nspname = current_schema()) THEN CREATE TYPE \"pd3status\" AS ENUM ('paid', 'canceled'); END IF; END $$",
       "'pd3order': CREATE TABLE IF NOT EXISTS \"pd3order\" ( \"id\" serial PRIMARY KEY NOT NULL, \"status\" pd3status NOT NULL )",
-      "'': ALTER TYPE \"pd3status\" RENAME VALUE 'canceled' TO 'cancelled'",
-      "'pd3status': ALTER TYPE \"pd3status\" ADD VALUE IF NOT EXISTS 'cancelled'"
+      "'': ALTER TYPE \"pd3status\" RENAME VALUE 'canceled' TO 'cancelled'"
     ],
-    "warnings": [
-      "Enum type 'pd3status' has label(s) 'canceled' that the model no longer declares. Label addition is append-only: ferro never removes enum labels (existing rows may still hold them). Remove or rename labels with a reviewed Alembic migration."
-    ]
+    "warnings": []
   },
   "tests/test_auto_migrate.py::test_a_label_rename_on_sqlite_warns_only_while_the_database_holds_the_old_label[sqlite-db_check-a-row]": {
     "statements": [
@@ -80,6 +77,14 @@
   "tests/test_auto_migrate.py::test_a_label_rename_on_sqlite_warns_only_while_the_database_holds_the_old_label[sqlite-plain-no-row]": {
     "statements": [
       "'pd3order': CREATE TABLE IF NOT EXISTS \"pd3order\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"status\" varchar(8) NOT NULL )"
+    ],
+    "warnings": []
+  },
+  "tests/test_auto_migrate.py::test_a_live_label_rename_on_postgres_is_only_the_rename[postgres]": {
+    "statements": [
+      "'pd3order': DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace WHERE t.typname = 'pd3status' AND n.nspname = current_schema()) THEN CREATE TYPE \"pd3status\" AS ENUM ('paid', 'canceled'); END IF; END $$",
+      "'pd3order': CREATE TABLE IF NOT EXISTS \"pd3order\" ( \"id\" serial PRIMARY KEY NOT NULL, \"status\" pd3status NOT NULL )",
+      "'': ALTER TYPE \"pd3status\" RENAME VALUE 'canceled' TO 'cancelled'"
     ],
     "warnings": []
   },

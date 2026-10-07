@@ -26,13 +26,14 @@
 
 use super::columns::{self, PlanContext, PlanDirection};
 use super::staging::StagedConstraint;
-use super::{GenerateError, GeneratedStep, Rendering, enums, rebuild, step_text};
+use super::{GenerateError, GeneratedStep, Rendering, enums, find_model, rebuild, step_text};
 use crate::directory::{Headers, StepDialect, StepKind};
 use crate::order::order_by_dependencies;
 use crate::plan::enum_declaration;
 use crate::{Dialect, MigrationOp, MigrationPlan, render_plan};
 use ferro_ddl_lowering::{
-    ResolvedStorage, quote_ident, quote_label, render_drop_constraint, render_validate_constraint,
+    ResolvedStorage, positioned_missing_enum_labels, quote_ident, quote_label,
+    render_drop_constraint, render_pg_enum_add_value_at, render_validate_constraint,
     resolve_column_storage,
 };
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
@@ -115,13 +116,6 @@ pub struct Demand {
     pub reason: Reason,
     /// How the table's backfill runs.
     pub driver: Driver,
-}
-
-fn find_model<'a>(ir: &'a IrEnvelope<SchemaIrPayload>, table: &str) -> Option<&'a SchemaModel> {
-    ir.payload
-        .models
-        .iter()
-        .find(|model| model.table_name == table)
 }
 
 fn driver_of(model: &SchemaModel) -> Driver {
@@ -912,8 +906,78 @@ fn label_contract(
     }
     up.extend(rendered(rest(forward), relaxed_target, target)?);
     let backward = super::plan(target, relaxed_target, Dialect::Postgres)?.operations;
-    let down = rendered(rest(backward), target, relaxed_target)?;
+    let (restored, backward): (Vec<_>, Vec<_>) = rest(backward)
+        .into_iter()
+        .partition(|op| matches!(op, MigrationOp::AddEnumLabel { .. }));
+    let mut down = restored_labels(&restored, relaxed_target, target)?;
+    down.extend(rendered(backward, target, relaxed_target)?);
     Ok((up, down))
+}
+
+/// The down's label additions, `restored` (the planner's `AddEnumLabel` ops
+/// run back), each where `parent` declares it: `ADD VALUE … AFTER` the label
+/// before it (or `BEFORE` the first one left), never appended, so the type's
+/// order — its comparisons and `ORDER BY` — is the parent's again
+/// (ADR-0033). The position is [`positioned_missing_enum_labels`]'s, over
+/// the parent's labels and the labels `target` leaves the type.
+///
+/// # Errors
+/// [`GenerateError::Render`] naming the type when either side declares no
+/// native enum of that name: the down could not place the labels it restores.
+fn restored_labels(
+    restored: &[MigrationOp],
+    parent: &IrEnvelope<SchemaIrPayload>,
+    target: &IrEnvelope<SchemaIrPayload>,
+) -> Result<Vec<String>, GenerateError> {
+    let mut types: Vec<&str> = Vec::new();
+    for op in restored {
+        if let MigrationOp::AddEnumLabel { type_name, .. } = op
+            && !types.contains(&type_name.as_str())
+        {
+            types.push(type_name);
+        }
+    }
+    let mut out = Vec::new();
+    for type_name in types {
+        let wanted = |label: &str| {
+            restored.iter().any(|op| {
+                matches!(op, MigrationOp::AddEnumLabel { type_name: t, label: l }
+                    if t == type_name && l == label)
+            })
+        };
+        let labels_of = |ir, side: &str| {
+            pg_enum_labels(ir, type_name).ok_or_else(|| {
+                GenerateError::Render(format!(
+                    "the contract's down restores labels of enum type '{type_name}', which \
+                     the {side} does not declare as a native Postgres enum: it cannot place them"
+                ))
+            })
+        };
+        let declared = labels_of(parent, "parent")?;
+        let present = labels_of(target, "target")?;
+        out.extend(
+            positioned_missing_enum_labels(&declared, &present)
+                .into_iter()
+                .filter(|(label, _)| wanted(label))
+                .map(|(label, at)| render_pg_enum_add_value_at(type_name, &label, at.as_ref())),
+        );
+    }
+    Ok(out)
+}
+
+/// The labels `ir` declares for the native enum type `type_name`.
+fn pg_enum_labels(ir: &IrEnvelope<SchemaIrPayload>, type_name: &str) -> Option<Vec<String>> {
+    ir.payload
+        .models
+        .iter()
+        .flat_map(|model| &model.columns)
+        .find_map(|col| match resolve_column_storage(col, Dialect::Postgres) {
+            Ok(ResolvedStorage::PgEnum {
+                type_name: name,
+                labels,
+            }) if name == type_name => Some(labels),
+            _ => None,
+        })
 }
 
 #[cfg(test)]
@@ -936,6 +1000,20 @@ mod tests {
             .iter()
             .map(|(t, c)| (t.to_string(), c.to_string()))
             .collect()
+    }
+
+    #[test]
+    fn a_restored_label_of_a_type_neither_side_declares_is_an_error_naming_it() {
+        let restored = [MigrationOp::AddEnumLabel {
+            type_name: "status".into(),
+            label: "gone".into(),
+        }];
+        let empty = ir(vec![]);
+        let err = restored_labels(&restored, &empty, &empty).expect_err("refused");
+        assert!(
+            matches!(&err, GenerateError::Render(message) if message.contains("'status'")),
+            "{err:?}"
+        );
     }
 
     #[test]

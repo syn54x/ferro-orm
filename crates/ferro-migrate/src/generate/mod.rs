@@ -46,9 +46,18 @@ use crate::{
 };
 use columns::{Needs, Phase, PlanContext, PlanDirection, Refusal, StepAssignment};
 use ferro_ddl_lowering::extra_check_names_warning;
-use ferro_schema_ir::{IrEnvelope, SchemaIrPayload};
+use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
+
+/// The model of `ir` whose table is `table`: the generator's one lookup by
+/// table name over a whole envelope.
+fn find_model<'a>(ir: &'a IrEnvelope<SchemaIrPayload>, table: &str) -> Option<&'a SchemaModel> {
+    ir.payload
+        .models
+        .iter()
+        .find(|model| model.table_name == table)
+}
 
 /// One dialect's up and down file of a generated step, as written to disk.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
@@ -2829,7 +2838,20 @@ mod tests {
         assert_eq!(pg.up, format!("-- ferro: data-dependent\n{expected}"));
         assert_eq!(
             pg.down,
-            "ALTER TYPE \"status\" ADD VALUE IF NOT EXISTS 'gone';\n"
+            // Back where the parent declares it, never appended (ADR-0033).
+            "ALTER TYPE \"status\" ADD VALUE IF NOT EXISTS 'gone' AFTER 'draft';\n"
+        );
+        // A first label goes back before the first one left, and the next
+        // removed one after it.
+        let firsts = edit(
+            with_status(&["draft", "gone", "live"], false),
+            with_status(&["live"], false),
+            &BOTH,
+        );
+        assert_eq!(
+            step(&firsts, "02_contract", Dialect::Postgres).down,
+            "ALTER TYPE \"status\" ADD VALUE IF NOT EXISTS 'draft' BEFORE 'live';\n\n\
+             ALTER TYPE \"status\" ADD VALUE IF NOT EXISTS 'gone' AFTER 'draft';\n"
         );
         // SQLite stores the label as text in a column as wide as the longest
         // label, which stays: nothing beyond the backfill.
