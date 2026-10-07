@@ -28,6 +28,9 @@ use ferro_schema_ir::{IrEnvelope, SchemaColumn, SchemaIrPayload, SchemaModel};
 /// The phase step an op lands in, in the order a migration's steps run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Phase {
+    /// Label additions to enum types that already exist (ADR-0011, I-12):
+    /// first in the migration, so every later step may write the new label.
+    Labels,
     /// The one atomic DDL step of a migration that needs no data step.
     Schema,
     /// Columns added nullable ahead of a backfill (ticket #534).
@@ -48,6 +51,7 @@ impl Phase {
     /// The step's name after `NN_`.
     pub fn step_name(self) -> &'static str {
         match self {
+            Phase::Labels => "labels",
             Phase::Schema => "schema",
             Phase::Expand => "expand",
             Phase::Backfill => "backfill",
@@ -262,7 +266,9 @@ pub fn constraint_mode(dialect: Dialect, direction: PlanDirection) -> Constraint
 /// Which step `op` lands in and what it needs, for the file and dialect
 /// `ctx` describes.
 pub fn assign(op: &MigrationOp, ctx: &PlanContext<'_>) -> StepAssignment {
-    let phase = if is_index_step(op, ctx) {
+    let phase = if matches!(op, MigrationOp::AddEnumLabel { .. }) {
+        Phase::Labels
+    } else if is_index_step(op, ctx) {
         Phase::Index
     } else {
         Phase::Schema
@@ -297,9 +303,10 @@ fn needs(op: &MigrationOp, ctx: &PlanContext<'_>) -> Needs {
         | MigrationOp::RenameIndex { .. }
         | MigrationOp::RenamePolicy { .. } => Needs::Native,
         MigrationOp::RenameConstraint { .. } => native_or_rebuild,
-        // A label added to a type that already exists cannot be reversed by
-        // a down (Postgres drops no enum label).
-        MigrationOp::AddEnumLabel { .. } => refused(529),
+        // Its own `labels` step ([`assign`]); a down has nothing to reverse.
+        MigrationOp::AddEnumLabel { .. } => Needs::Native,
+        // A declared label rename and an inferred type rename (ADR-0032).
+        MigrationOp::RenameEnumLabel { .. } | MigrationOp::RenameEnumType { .. } => Needs::Native,
         MigrationOp::ChangePrimaryKey { .. } => primary_key,
         MigrationOp::AddColumn { column, .. } => {
             let Some(col) = ctx.column_after(column) else {
@@ -330,7 +337,8 @@ fn needs(op: &MigrationOp, ctx: &PlanContext<'_>) -> Needs {
             } else if rebuild {
                 Needs::Rebuild
             } else if old.is_some_and(native_enum) || new.is_some_and(native_enum) {
-                refused(529)
+                // To, from or between native enum types: the swap-type recipe.
+                refused(536)
             } else {
                 Needs::Native
             }
@@ -724,7 +732,7 @@ mod tests {
                 Dialect::Postgres,
                 PlanDirection::Up
             ),
-            Needs::Refused(Refusal::Ticket(529))
+            Needs::Refused(Refusal::Ticket(536))
         );
         // The primary key's type.
         let id_op = MigrationOp::AlterColumnType {
@@ -982,17 +990,58 @@ mod tests {
     }
 
     #[test]
-    fn labels_row_security_and_live_only_ops_are_refused_naming_their_owner() {
+    fn enum_label_and_type_ops_have_their_steps_and_are_native_everywhere() {
+        let a = author(vec![]);
+        let (before, after) = (ir(vec![a.clone()]), ir(vec![a]));
+        let label = MigrationOp::AddEnumLabel {
+            type_name: "status".into(),
+            label: "x".into(),
+        };
+        let renames = [
+            MigrationOp::RenameEnumLabel {
+                type_name: "status".into(),
+                old: "x".into(),
+                new: "y".into(),
+                columns: vec![("author".into(), "status".into())],
+            },
+            MigrationOp::RenameEnumType {
+                old: "status".into(),
+                new: "state".into(),
+            },
+        ];
+        for dialect in DIALECTS {
+            for direction in DIRECTIONS {
+                let ctx = PlanContext::of(&label, &before, &after, dialect, direction);
+                assert_eq!(
+                    assign(&label, &ctx),
+                    StepAssignment {
+                        phase: Phase::Labels,
+                        needs: Needs::Native,
+                    }
+                );
+                for op in &renames {
+                    let ctx = PlanContext::of(op, &before, &after, dialect, direction);
+                    assert_eq!(
+                        assign(op, &ctx),
+                        StepAssignment {
+                            phase: Phase::Schema,
+                            needs: Needs::Native,
+                        },
+                        "{op:?}"
+                    );
+                }
+            }
+        }
+        // The labels step runs first of every phase step.
+        assert!(Phase::Labels < Phase::Schema);
+        assert_eq!(Phase::Labels.step_name(), "labels");
+    }
+
+    #[test]
+    fn row_security_and_live_only_ops_are_refused_naming_their_owner() {
         let a = author(vec![]);
         let table = || "author".to_string();
         let cases = [
-            (
-                MigrationOp::AddEnumLabel {
-                    type_name: "status".into(),
-                    label: "x".into(),
-                },
-                Refusal::Ticket(529),
-            ),
             (
                 MigrationOp::AddRowPolicy {
                     table: table(),

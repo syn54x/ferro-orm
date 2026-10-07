@@ -47,6 +47,8 @@ pub fn is_rename(op: &MigrationOp) -> bool {
             | MigrationOp::RenameIndex { .. }
             | MigrationOp::RenameConstraint { .. }
             | MigrationOp::RenamePolicy { .. }
+            | MigrationOp::RenameEnumLabel { .. }
+            | MigrationOp::RenameEnumType { .. }
     )
 }
 

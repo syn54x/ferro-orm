@@ -22,12 +22,15 @@
 //! cannot express ([`rebuild`]), in the same step as its Postgres twin. On a
 //! table that already exists ([`staging`]) every index change is its own
 //! index step, after the others, and on Postgres every foreign key and check
-//! is added `NOT VALID` and validated by a last `validate` step.
+//! is added `NOT VALID` and validated by a last `validate` step. A label added
+//! to an enum type is a first `labels` step whose down reverses nothing, and a
+//! label or type rename is a rename of the `schema` step ([`enums`]).
 //! [`columns::assign`] decides each op's step; every other change is refused
 //! naming the ticket that generates it.
 
 pub mod columns;
 pub mod downs;
+pub mod enums;
 pub mod rebuild;
 pub mod renames;
 pub mod staging;
@@ -217,7 +220,9 @@ fn op_subject(op: &MigrationOp) -> String {
     match op {
         MigrationOp::AddEnumLabel { type_name, .. }
         | MigrationOp::CreateEnumType { type_name, .. }
-        | MigrationOp::DropEnumType { type_name } => type_name.clone(),
+        | MigrationOp::DropEnumType { type_name }
+        | MigrationOp::RenameEnumLabel { type_name, .. }
+        | MigrationOp::RenameEnumType { new: type_name, .. } => type_name.clone(),
         other => other.table().unwrap_or_default().to_string(),
     }
 }
@@ -337,10 +342,15 @@ fn plan(
 }
 
 /// Every warning `plan` raises that planning `standing → standing` does not
-/// and that none of its ops answers: the reports this change caused, not the
-/// ones the models always raise. A leftover CHECK's report is answered by the
-/// plan's drop of it.
-fn change_warnings(plan: &MigrationPlan, standing: &MigrationPlan) -> Vec<String> {
+/// and that nothing answers: the reports this change caused, not the ones the
+/// models always raise. A leftover CHECK's report is answered by the plan's
+/// drop of it; `answered` names the rest (a down's report of a label the up
+/// added, which the `labels` step's down already says stays).
+fn change_warnings(
+    plan: &MigrationPlan,
+    standing: &MigrationPlan,
+    answered_elsewhere: &[String],
+) -> Vec<String> {
     let mut dropped_checks: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     for op in &plan.operations {
         if let MigrationOp::DropCheck { table, name } = op {
@@ -350,6 +360,7 @@ fn change_warnings(plan: &MigrationPlan, standing: &MigrationPlan) -> Vec<String
     let answered: BTreeSet<String> = dropped_checks
         .iter()
         .filter_map(|(table, names)| extra_check_names_warning(table, names))
+        .chain(answered_elsewhere.iter().cloned())
         .collect();
     let already: BTreeSet<&String> = standing
         .warnings
@@ -374,11 +385,12 @@ fn refuse_unsupported(
     after: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
     direction: PlanDirection,
+    answered: &[String],
 ) -> Result<(), GenerateError> {
     for op in &plan.operations {
         phase_of(op, before, after, dialect, direction)?;
     }
-    if let Some(warning) = change_warnings(plan, standing).into_iter().next() {
+    if let Some(warning) = change_warnings(plan, standing, answered).into_iter().next() {
         return Err(GenerateError::Unplanned {
             dialect: dialect.into(),
             warning,
@@ -456,6 +468,9 @@ fn summarize(
     let mut types_added = BTreeSet::new();
     let mut types_dropped = BTreeSet::new();
     let mut changed = BTreeSet::new();
+    let mut types_renamed = BTreeSet::new();
+    let mut labels_added = BTreeSet::new();
+    let mut labels_renamed = BTreeSet::new();
     for op in ups.iter().flatten() {
         match op {
             MigrationOp::AddTable { table } => {
@@ -470,6 +485,20 @@ fn summarize(
             MigrationOp::DropEnumType { type_name } => {
                 types_dropped.insert(type_name.clone());
             }
+            MigrationOp::RenameEnumType { old, new } => {
+                types_renamed.insert(format!("{old} → {new}"));
+            }
+            MigrationOp::AddEnumLabel { type_name, label } => {
+                labels_added.insert(format!("{type_name}.{label}"));
+            }
+            MigrationOp::RenameEnumLabel {
+                type_name,
+                old,
+                new,
+                ..
+            } => {
+                labels_renamed.insert(format!("{type_name}.{old} → {new}"));
+            }
             other => {
                 if let Some(table) = other.table() {
                     changed.insert(model_of(target, table));
@@ -483,6 +512,9 @@ fn summarize(
         ("dropped models", dropped),
         ("new enum types", types_added),
         ("dropped enum types", types_dropped),
+        ("renamed enum types", types_renamed),
+        ("new enum labels", labels_added),
+        ("renamed enum labels", labels_renamed),
     ]
     .into_iter()
     .filter(|(_, names)| !names.is_empty())
@@ -539,6 +571,7 @@ pub fn generate(
             target,
             dialect,
             PlanDirection::Up,
+            &[],
         )?;
         refuse_unsupported(
             &plan(target, before, dialect),
@@ -547,6 +580,7 @@ pub fn generate(
             before,
             dialect,
             PlanDirection::Down,
+            &enums::answered_by_labels_step(&change.operations),
         )?;
         for line in renames::suggestions(&change.operations, before, target) {
             if !suggestions.contains(&line) {
@@ -618,10 +652,12 @@ pub fn generate(
                     step_ops.push(op.clone());
                 }
             }
-            renderings.insert(
-                StepDialect::from(dialect),
-                downs::render_down(&step_ops, parent_ir, &shape, dialect, phase, &hints)?,
-            );
+            let rendering = if phase == Phase::Labels {
+                enums::render_labels_step(&step_ops, before, &shape, dialect)?
+            } else {
+                downs::render_down(&step_ops, parent_ir, &shape, dialect, phase, &hints)?
+            };
+            renderings.insert(StepDialect::from(dialect), rendering);
         }
         steps.push(GeneratedStep {
             ordinal: 0,
@@ -777,6 +813,7 @@ mod tests {
             enum_values: None,
             enum_type_name: None,
             postgres_native_enum: false,
+            enum_renamed_labels: Default::default(),
         }
     }
 
@@ -1948,21 +1985,346 @@ mod tests {
         }
     }
 
-    #[test]
-    fn an_enum_label_change_is_refused_naming_its_ticket() {
-        let parent = snapshot_of(&ir(vec![author()]), None);
-        let mut added = author();
-        added.columns[2] = status(&["draft", "live", "archived"]);
-        let err = generate(Some(&parent), &ir(vec![added]), &BOTH).expect_err("refused");
-        assert_eq!(
-            err.to_string(),
-            "not generated yet: AddEnumLabel on status (ticket #529)"
-        );
+    /// `author` with its `status` column declaring `labels`, renamed from
+    /// the `(new, old)` pairs of `hints`, under `type_name`.
+    fn relabelled(type_name: &str, labels: &[&str], hints: &[(&str, &str)]) -> SchemaModel {
+        let mut model = author();
+        model.columns[2] = SchemaColumn {
+            enum_type_name: Some(type_name.into()),
+            enum_renamed_labels: (!hints.is_empty()).then(|| {
+                ferro_schema_ir::SchemaRenamedLabels {
+                    enum_class: "Status".into(),
+                    labels: hints
+                        .iter()
+                        .map(|(new, old)| (new.to_string(), old.to_string()))
+                        .collect(),
+                }
+            }),
+            ..status(labels)
+        };
+        model
+    }
 
-        let mut removed = author();
-        removed.columns[2] = status(&["draft"]);
-        let err = generate(Some(&parent), &ir(vec![removed]), &BOTH).expect_err("refused");
-        assert!(err.to_string().starts_with("not generated yet:"), "{err}");
+    #[test]
+    fn an_added_label_is_its_own_first_step_with_nothing_to_reverse() {
+        let added = relabelled("status", &["draft", "live", "gone"], &[]);
+        let migration = edit(vec![author()], vec![added.clone()], &BOTH);
+        assert_eq!(step_names(&migration), ["01_labels"]);
+        assert_eq!(migration.summary, "new enum labels: status.gone");
+        let pg = step(&migration, "01_labels", Dialect::Postgres);
+        // The pass's statement, through the one renderer (I-1 item 11).
+        let up = pass(&ir(vec![author()]), &ir(vec![added]), Dialect::Postgres);
+        assert_eq!(up, ["ALTER TYPE \"status\" ADD VALUE IF NOT EXISTS 'gone'"]);
+        assert_eq!(pg.up, file(&up, ""));
+        assert_eq!(pg.headers, Headers::default());
+        assert_eq!(
+            pg.down,
+            "-- ferro: nothing-to-reverse Postgres cannot drop an enum label; 'gone' stays\n"
+        );
+        assert_eq!(
+            pg.down_headers.nothing_to_reverse.as_deref(),
+            Some("Postgres cannot drop an enum label; 'gone' stays")
+        );
+        let sqlite = step(&migration, "01_labels", Dialect::Sqlite);
+        assert_eq!(sqlite.up, NOT_APPLICABLE);
+        assert_eq!(sqlite.down, NOT_APPLICABLE);
+    }
+
+    #[test]
+    fn a_label_longer_than_every_other_widens_the_sqlite_column_in_the_schema_step() {
+        // SQLite stores an enum as varchar(<longest label>): a longer label
+        // is that column's type change, a rebuild after the labels step.
+        let added = relabelled("status", &["draft", "live", "archived"], &[]);
+        let migration = edit(vec![author()], vec![added], &BOTH);
+        assert_eq!(step_names(&migration), ["01_labels", "02_schema"]);
+        assert_eq!(
+            step(&migration, "02_schema", Dialect::Postgres).up,
+            NOT_APPLICABLE
+        );
+        let sqlite = step(&migration, "02_schema", Dialect::Sqlite);
+        assert!(sqlite.up.contains("\"status\" varchar(8)"), "{}", sqlite.up);
+        assert!(
+            sqlite.down.contains("\"status\" varchar(5)"),
+            "{}",
+            sqlite.down
+        );
+    }
+
+    #[test]
+    fn an_added_label_and_a_new_column_of_its_type_are_labels_then_schema() {
+        let mut after = relabelled("status", &["draft", "live", "gone", "past"], &[]);
+        after.columns.push(SchemaColumn {
+            nullable: true,
+            name: "previous".into(),
+            ..after.columns[2].clone()
+        });
+        let migration = edit(vec![author()], vec![after.clone()], &BOTH);
+        assert_eq!(step_names(&migration), ["01_labels", "02_schema"]);
+        let labels = step(&migration, "01_labels", Dialect::Postgres);
+        assert_eq!(
+            labels.up,
+            "ALTER TYPE \"status\" ADD VALUE IF NOT EXISTS 'gone';\n\n\
+             ALTER TYPE \"status\" ADD VALUE IF NOT EXISTS 'past';\n"
+        );
+        assert!(
+            labels.down.ends_with("'gone' and 'past' stay\n"),
+            "{}",
+            labels.down
+        );
+        // The column's statements are the pass's, after its label additions.
+        let schema = step(&migration, "02_schema", Dialect::Postgres);
+        let pass_up = pass(&ir(vec![author()]), &ir(vec![after]), Dialect::Postgres);
+        assert_eq!(schema.up, file(&pass_up[2..], ""));
+        assert!(
+            schema
+                .up
+                .ends_with("ALTER TABLE \"author\" ADD COLUMN \"previous\" status;\n"),
+            "{}",
+            schema.up
+        );
+        assert_eq!(
+            schema.down,
+            "ALTER TABLE \"author\" DROP COLUMN \"previous\";\n"
+        );
+        assert!(
+            step(&migration, "02_schema", Dialect::Sqlite)
+                .up
+                .contains("ADD COLUMN \"previous\"")
+        );
+    }
+
+    #[test]
+    fn a_renamed_label_is_rename_value_on_postgres_and_an_update_on_sqlite_both_ways() {
+        let after = relabelled("status", &["draft", "open"], &[("open", "live")]);
+        let migration = edit(vec![author()], vec![after.clone()], &BOTH);
+        assert_eq!(step_names(&migration), ["01_schema"]);
+        assert_eq!(migration.summary, "renamed enum labels: status.live → open");
+        let pg = step(&migration, "01_schema", Dialect::Postgres);
+        assert_eq!(
+            pg.up,
+            "ALTER TYPE \"status\" RENAME VALUE 'live' TO 'open';\n"
+        );
+        assert_eq!(
+            pg.down,
+            "ALTER TYPE \"status\" RENAME VALUE 'open' TO 'live';\n"
+        );
+        let sqlite = step(&migration, "01_schema", Dialect::Sqlite);
+        assert_eq!(
+            sqlite.up,
+            "-- ferro: data-dependent\n\n\
+             UPDATE \"author\" SET \"status\" = 'open' WHERE \"status\" = 'live';\n"
+        );
+        assert_eq!(
+            sqlite.down,
+            "-- ferro: data-dependent\n\n\
+             UPDATE \"author\" SET \"status\" = 'live' WHERE \"status\" = 'open';\n"
+        );
+        // After its migration the hint is inert: no schema change.
+        let parent = snapshot_of(&ir(vec![after.clone()]), None);
+        assert_eq!(generate(Some(&parent), &ir(vec![after]), &BOTH), Ok(None));
+
+        // A longer spelling widens SQLite's column: the table is rebuilt at
+        // the new width, its rows relabelled as the rebuild copies them, and
+        // back the same way on the down.
+        let wider = relabelled("status", &["draft", "published"], &[("published", "live")]);
+        let migration = edit(vec![author()], vec![wider], &[Dialect::Sqlite]);
+        let sqlite = step(&migration, "01_schema", Dialect::Sqlite);
+        assert!(!sqlite.up.contains("UPDATE"), "{}", sqlite.up);
+        assert!(sqlite.headers.data_dependent && sqlite.headers.foreign_keys_off);
+        assert!(sqlite.up.contains("\"status\" varchar(9)"), "{}", sqlite.up);
+        assert!(
+            sqlite.up.contains(
+                "SELECT \"id\", \"name\", CASE \"status\" WHEN 'live' THEN 'published' \
+                 ELSE \"status\" END FROM \"author\""
+            ),
+            "{}",
+            sqlite.up
+        );
+        assert!(
+            sqlite
+                .down
+                .contains("CASE \"status\" WHEN 'published' THEN 'live' ELSE \"status\" END"),
+            "{}",
+            sqlite.down
+        );
+        assert!(
+            sqlite.down.contains("\"status\" varchar(5)"),
+            "{}",
+            sqlite.down
+        );
+    }
+
+    /// `relabelled`, its `status` stored as text, with a `db_check` when
+    /// `checked`.
+    fn text_stored(labels: &[&str], hints: &[(&str, &str)], checked: bool) -> SchemaModel {
+        let mut model = relabelled("status", labels, hints);
+        model.columns[2].db_type = Some("text".into());
+        model.columns[2].db_type_explicit = Some(true);
+        if checked {
+            model.checks.push(ferro_schema_ir::SchemaCheck {
+                name: "ck_author_status".into(),
+                column: "status".into(),
+                values: labels.iter().map(|l| format!("'{l}'")).collect(),
+            });
+        }
+        model
+    }
+
+    #[test]
+    fn a_renamed_label_on_a_text_stored_enum_updates_its_rows_on_both_dialects() {
+        let update = |from: &str, to: &str| {
+            format!("UPDATE \"author\" SET \"status\" = '{to}' WHERE \"status\" = '{from}'")
+        };
+        let before = text_stored(&["draft", "live"], &[], false);
+        let after = text_stored(&["draft", "open"], &[("open", "live")], false);
+        let migration = edit(vec![before], vec![after.clone()], &BOTH);
+        assert_eq!(step_names(&migration), ["01_schema"]);
+        for dialect in BOTH {
+            let r = step(&migration, "01_schema", dialect);
+            assert_eq!(
+                r.up,
+                format!("-- ferro: data-dependent\n\n{};\n", update("live", "open")),
+                "{dialect:?}"
+            );
+            assert_eq!(
+                r.down,
+                format!("-- ferro: data-dependent\n\n{};\n", update("open", "live")),
+                "{dialect:?}"
+            );
+        }
+        let parent = snapshot_of(&ir(vec![after.clone()]), None);
+        assert_eq!(generate(Some(&parent), &ir(vec![after]), &BOTH), Ok(None));
+    }
+
+    #[test]
+    fn a_checked_text_stored_enum_relabels_between_its_check_s_drop_and_add() {
+        let before = text_stored(&["draft", "live"], &[], true);
+        let after = text_stored(&["draft", "open"], &[("open", "live")], true);
+        let migration = edit(vec![before], vec![after.clone()], &BOTH);
+        assert_eq!(step_names(&migration), ["01_schema"]);
+        // Postgres: the old check allows only the old label, so it goes
+        // first, and the new one is added (validated) over the new labels.
+        let pg = step(&migration, "01_schema", Dialect::Postgres);
+        assert_eq!(
+            pg.up,
+            "-- ferro: data-dependent\n\n\
+             ALTER TABLE \"author\" DROP CONSTRAINT \"ck_author_status\";\n\n\
+             UPDATE \"author\" SET \"status\" = 'open' WHERE \"status\" = 'live';\n\n\
+             ALTER TABLE \"author\" ADD CONSTRAINT \"ck_author_status\" \
+             CHECK (\"status\" IN ('draft', 'open'));\n"
+        );
+        assert_eq!(
+            pg.down,
+            "-- ferro: data-dependent\n\n\
+             ALTER TABLE \"author\" DROP CONSTRAINT \"ck_author_status\";\n\n\
+             UPDATE \"author\" SET \"status\" = 'live' WHERE \"status\" = 'open';\n\n\
+             ALTER TABLE \"author\" ADD CONSTRAINT \"ck_author_status\" \
+             CHECK (\"status\" IN ('draft', 'live'));\n"
+        );
+        // SQLite: the check lives in CREATE TABLE, so the table is rebuilt
+        // and its rows relabelled as they are copied under the new check.
+        let sqlite = step(&migration, "01_schema", Dialect::Sqlite);
+        assert!(!sqlite.up.contains("UPDATE"), "{}", sqlite.up);
+        assert!(
+            sqlite
+                .up
+                .contains("CASE \"status\" WHEN 'live' THEN 'open' ELSE \"status\" END"),
+            "{}",
+            sqlite.up
+        );
+        assert!(
+            sqlite
+                .down
+                .contains("CASE \"status\" WHEN 'open' THEN 'live' ELSE \"status\" END"),
+            "{}",
+            sqlite.down
+        );
+        let parent = snapshot_of(&ir(vec![after.clone()]), None);
+        assert_eq!(generate(Some(&parent), &ir(vec![after]), &BOTH), Ok(None));
+    }
+
+    #[test]
+    fn a_label_renamed_from_one_still_declared_is_refused_naming_it() {
+        let still = relabelled(
+            "status",
+            &["draft", "live", "published"],
+            &[("published", "live")],
+        );
+        assert_eq!(
+            refusal(vec![author()], vec![still], &BOTH),
+            "rename hint refused: enum Status (type \"status\") declares \
+             __ferro_renamed_labels__ {\"published\": \"live\"}, but Status still declares the \
+             label \"live\": a label cannot be renamed from one the enum keeps; delete the hint \
+             or the old member"
+        );
+    }
+
+    #[test]
+    fn a_type_every_column_of_which_moved_is_renamed_on_postgres_and_nothing_on_sqlite() {
+        let after = relabelled("authorstatus", &["draft", "live"], &[]);
+        let migration = edit(vec![author()], vec![after], &BOTH);
+        assert_eq!(step_names(&migration), ["01_schema"]);
+        assert_eq!(
+            migration.summary,
+            "renamed enum types: status → authorstatus"
+        );
+        let pg = step(&migration, "01_schema", Dialect::Postgres);
+        assert_eq!(pg.up, "ALTER TYPE \"status\" RENAME TO \"authorstatus\";\n");
+        assert_eq!(
+            pg.down,
+            "ALTER TYPE \"authorstatus\" RENAME TO \"status\";\n"
+        );
+        let sqlite = step(&migration, "01_schema", Dialect::Sqlite);
+        assert_eq!(sqlite.up, NOT_APPLICABLE);
+        assert_eq!(sqlite.down, NOT_APPLICABLE);
+    }
+
+    #[test]
+    fn a_new_table_reusing_a_type_neither_creates_nor_drops_it() {
+        let editor = model("Editor", vec![pk(), status(&["draft", "live"])]);
+        let migration = edit(vec![author()], vec![author(), editor], &[Dialect::Postgres]);
+        let pg = rendering(&migration, StepDialect::Postgres);
+        assert!(
+            pg.up.starts_with("CREATE TABLE IF NOT EXISTS \"editor\""),
+            "{}",
+            pg.up
+        );
+        assert!(!pg.up.contains("TYPE"), "{}", pg.up);
+        assert_eq!(pg.down, "DROP TABLE \"editor\";\n");
+        // A new type is created first and dropped last (B1).
+        let mut fresh = author();
+        fresh.columns[2].enum_type_name = Some("authorstatus".into());
+        let created = generate(None, &ir(vec![fresh]), &[Dialect::Postgres])
+            .expect("ok")
+            .expect("a change");
+        let pg = rendering(&created, StepDialect::Postgres);
+        assert!(pg.up.starts_with("DO $$ BEGIN IF NOT EXISTS"), "{}", pg.up);
+        assert!(pg.up.contains("CREATE TYPE \"authorstatus\""), "{}", pg.up);
+        assert!(
+            pg.down.ends_with("DROP TYPE \"authorstatus\";\n"),
+            "{}",
+            pg.down
+        );
+    }
+
+    #[test]
+    fn a_removed_label_or_a_partial_type_move_is_refused() {
+        let removed = relabelled("status", &["draft"], &[]);
+        let err = refusal(vec![author()], vec![removed], &BOTH);
+        assert!(err.starts_with("not generated yet:"), "{err}");
+        // One of two columns of the type moving to a new type is a type
+        // change, the swap-type recipe's (ticket #536), never a rename.
+        let mut before = author();
+        before.columns.push(SchemaColumn {
+            name: "previous".into(),
+            ..before.columns[2].clone()
+        });
+        let mut after = before.clone();
+        after.columns[3].enum_type_name = Some("authorstatus".into());
+        assert_eq!(
+            refusal(vec![before], vec![after], &[Dialect::Postgres]),
+            "not generated yet: AlterColumnType on author (ticket #536)"
+        );
     }
 
     #[test]

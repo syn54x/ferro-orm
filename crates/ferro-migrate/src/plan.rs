@@ -19,14 +19,15 @@ use crate::{
 };
 use ferro_ddl_lowering::{
     EnumTypeProvenance, LiveRowPolicy, LiveRowSecurity, ResolvedStorage, drifted_check_names,
-    enum_type_provenance, excess_row_security_flag_statements, extra_check_names,
-    extra_check_names_warning, extra_enum_labels, extra_enum_labels_warning, fk_action_from_str,
-    fk_action_sql, fk_name, is_ferro_fk_name, is_ferro_row_policy_name, missing_check_names,
-    missing_enum_labels, missing_row_security_flag_statements, normalize_check_definition,
-    normalize_row_policy_expr, plan_row_security_reconcile, render_check_body,
-    render_disable_row_security, render_enable_row_security, render_force_row_security,
-    render_no_force_row_security, render_table_check_body, resolve_column_storage,
-    row_policy_clauses, row_policy_command_token, schema_columns_storage_drift,
+    enum_label_strings, enum_type_provenance, excess_row_security_flag_statements,
+    extra_check_names, extra_check_names_warning, extra_enum_labels, extra_enum_labels_warning,
+    fk_action_from_str, fk_action_sql, fk_name, is_ferro_fk_name, is_ferro_row_policy_name,
+    missing_check_names, missing_enum_labels, missing_row_security_flag_statements,
+    normalize_check_definition, normalize_row_policy_expr, plan_row_security_reconcile,
+    quote_label, render_check_body, render_disable_row_security, render_enable_row_security,
+    render_force_row_security, render_no_force_row_security, render_table_check_body,
+    resolve_column_storage, row_policy_clauses, row_policy_command_token,
+    schema_columns_storage_drift,
 };
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
 use std::borrow::Cow;
@@ -279,6 +280,7 @@ pub fn plan_from_ir(
     let mut operations = rename_ops(old, &renamed, dialect);
     fact_renames(&mut operations, facts, old, &hints, dialect);
     let facts = renamed_facts(facts, &operations, new, dialect);
+    let renamed = renamed_snapshot(old, &storage_hints(&hints, dialect));
     let mut plan = plan_named(&renamed, new, dialect, &facts, options);
     operations.append(&mut plan.operations);
     plan.operations = operations;
@@ -806,34 +808,88 @@ fn row_security_flag_op(table: &str, statement: &str) -> Option<MigrationOp> {
     .map(|(_, op)| op)
 }
 
-/// Every native enum type the models declare (Postgres storage), with the
-/// labels of its first declaring column and every `(table, column)` that
-/// declares it, in model order.
+/// Every enum the models declare, with the labels of its first declaring
+/// column, every `(table, column)` that declares it, in model order, and its
+/// label rename hints (the first declaring column that carries any).
+/// [`declared_enum_types`] keeps the native Postgres types only (the types
+/// that exist as database objects); [`declared_enum_labels`] every enum, how
+/// ever it is stored (a `db_type="text"` column keeps its labels in its rows).
 struct DeclaredEnumTypes {
     labels: BTreeMap<String, Vec<String>>,
     declaring: BTreeMap<String, Vec<(String, String)>>,
+    renamed_labels: BTreeMap<String, ferro_schema_ir::SchemaRenamedLabels>,
 }
 
-fn declared_enum_types(models: &[SchemaModel]) -> DeclaredEnumTypes {
+/// The native enum type `col` is stored as, when it is one.
+fn enum_type_of(col: &ferro_schema_ir::SchemaColumn) -> Option<(String, Vec<String>)> {
+    match resolve_column_storage(col, Dialect::Postgres) {
+        Ok(ResolvedStorage::PgEnum { type_name, labels }) => Some((type_name, labels)),
+        _ => None,
+    }
+}
+
+/// The enum `col` declares, how ever it is stored: the type name and labels
+/// it would have as a native type (`resolve_column_storage` with the storage
+/// override set aside, so the name and label spelling have one source).
+fn enum_declaration(col: &ferro_schema_ir::SchemaColumn) -> Option<(String, Vec<String>)> {
+    if col.db_type_explicit != Some(true) {
+        return enum_type_of(col);
+    }
+    let declared = ferro_schema_ir::SchemaColumn {
+        db_type: None,
+        db_type_explicit: None,
+        ..col.clone()
+    };
+    enum_type_of(&declared)
+}
+
+/// Whether a label rename rewrites `col`'s rows on `dialect`, rather than
+/// renaming the label of a native type: the label is text in the rows (every
+/// enum on SQLite, a `db_type="text"` enum on Postgres). Decided by the
+/// column's storage (`resolve_column_storage`), the one decider.
+pub(crate) fn relabels_rows(col: &ferro_schema_ir::SchemaColumn, dialect: Dialect) -> bool {
+    !matches!(
+        resolve_column_storage(col, dialect),
+        Ok(ResolvedStorage::PgEnum { .. })
+    )
+}
+
+/// How one column declares an enum: its type name and labels, or `None`.
+type EnumOf = fn(&ferro_schema_ir::SchemaColumn) -> Option<(String, Vec<String>)>;
+
+fn collect_enums(models: &[SchemaModel], of: EnumOf) -> DeclaredEnumTypes {
     let mut declared = DeclaredEnumTypes {
         labels: BTreeMap::new(),
         declaring: BTreeMap::new(),
+        renamed_labels: BTreeMap::new(),
     };
     for model in models {
         for col in &model.columns {
-            if let Ok(ResolvedStorage::PgEnum { type_name, labels }) =
-                resolve_column_storage(col, Dialect::Postgres)
-            {
+            if let Some((type_name, labels)) = of(col) {
                 declared
                     .declaring
                     .entry(type_name.clone())
                     .or_default()
                     .push((model.table_name.clone(), col.name.clone()));
+                if let Some(hints) = &col.enum_renamed_labels {
+                    declared
+                        .renamed_labels
+                        .entry(type_name.clone())
+                        .or_insert_with(|| hints.clone());
+                }
                 declared.labels.entry(type_name).or_insert(labels);
             }
         }
     }
     declared
+}
+
+fn declared_enum_types(models: &[SchemaModel]) -> DeclaredEnumTypes {
+    collect_enums(models, enum_type_of)
+}
+
+fn declared_enum_labels(models: &[SchemaModel]) -> DeclaredEnumTypes {
+    collect_enums(models, enum_declaration)
 }
 
 /// Label addition (ADR-0011): for every declared type that already exists,
@@ -1177,6 +1233,26 @@ pub enum Hint {
         /// Its name in the new one.
         new: String,
     },
+    /// No declaration: every column of the old snapshot's enum type `old`
+    /// now declares the type `new`, which the old snapshot lacks, and `old`
+    /// is declared nowhere any more. An enum type's rename takes no hint; it
+    /// is read off the columns that moved to it (ADR-0032).
+    EnumType {
+        /// The type's name in the old snapshot.
+        old: String,
+        /// Its name in the new one.
+        new: String,
+    },
+    /// `__ferro_renamed_labels__ = {new: old}` on the enum class: label `old`
+    /// of the type is now `new`.
+    Label {
+        /// The type as the new snapshot names it.
+        type_name: String,
+        /// The label in the old snapshot.
+        old: String,
+        /// The label in the new one.
+        new: String,
+    },
 }
 
 /// A declared rename hint `ferro migrate new` refuses (ADR-0032). Every hint
@@ -1201,6 +1277,29 @@ pub enum HintError {
         /// The name they all claim.
         old: String,
         /// Every claimant, in declaration order: columns, or tables.
+        claimants: Vec<String>,
+    },
+    /// A label rename hint whose old label the enum still declares: a label
+    /// cannot be renamed from one the enum keeps.
+    LabelStillDeclared {
+        /// The enum class declaring the hint.
+        enum_class: String,
+        /// Its type name.
+        type_name: String,
+        /// The hinted label.
+        new: String,
+        /// The label the hint claims it was.
+        old: String,
+    },
+    /// Two labels of one enum declare the same old label.
+    AmbiguousLabel {
+        /// The enum class declaring the hints.
+        enum_class: String,
+        /// Its type name.
+        type_name: String,
+        /// The label they all claim.
+        old: String,
+        /// Every claimant, in label order.
         claimants: Vec<String>,
     },
 }
@@ -1265,6 +1364,33 @@ impl std::fmt::Display for HintError {
                     and_list(&tables)
                 )
             }
+            HintError::LabelStillDeclared {
+                enum_class,
+                type_name,
+                new,
+                old,
+            } => write!(
+                f,
+                "enum {enum_class} (type \"{type_name}\") declares __ferro_renamed_labels__ \
+                 {{\"{new}\": \"{old}\"}}, but {enum_class} still declares the label \"{old}\": a \
+                 label cannot be renamed from one the enum keeps; delete the hint or the old \
+                 member"
+            ),
+            HintError::AmbiguousLabel {
+                enum_class,
+                type_name,
+                old,
+                claimants,
+            } => {
+                let labels: Vec<String> = claimants.iter().map(|l| format!("\"{l}\"")).collect();
+                write!(
+                    f,
+                    "enum {enum_class} (type \"{type_name}\") declares labels {} all renamed \
+                     from \"{old}\": one label becomes one label; keep the hint on the label \
+                     \"{old}\" became",
+                    and_list(&labels)
+                )
+            }
         }
     }
 }
@@ -1325,6 +1451,37 @@ pub fn live_hints(old: &SchemaIrPayload, new: &SchemaIrPayload) -> Result<Vec<Hi
             claimants,
         });
     }
+    // Label hints are checked over every enum, how ever it is stored; type
+    // renames only over the native types, the ones that exist as objects.
+    let new_labels = declared_enum_labels(&new.models);
+    let new_types = declared_enum_types(&new.models);
+    for (type_name, renamed) in &new_labels.renamed_labels {
+        let labels = new_labels
+            .labels
+            .get(type_name)
+            .cloned()
+            .unwrap_or_default();
+        let mut label_claims: Vec<(String, Vec<String>)> = Vec::new();
+        for (label, previous) in &renamed.labels {
+            if labels.contains(previous) {
+                return Err(HintError::LabelStillDeclared {
+                    enum_class: renamed.enum_class.clone(),
+                    type_name: type_name.clone(),
+                    new: label.clone(),
+                    old: previous.clone(),
+                });
+            }
+            claim(&mut label_claims, previous, label);
+        }
+        if let Some((previous, claimants)) = label_claims.into_iter().find(|(_, c)| c.len() > 1) {
+            return Err(HintError::AmbiguousLabel {
+                enum_class: renamed.enum_class.clone(),
+                type_name: type_name.clone(),
+                old: previous,
+                claimants,
+            });
+        }
+    }
 
     let old_tables = index_models(&old.models);
     let mut tables = Vec::new();
@@ -1357,7 +1514,90 @@ pub fn live_hints(old: &SchemaIrPayload, new: &SchemaIrPayload) -> Result<Vec<Hi
         }
     }
     tables.extend(columns);
+
+    // Enum types and labels are matched against `old` as the table and
+    // column renames leave it: a column is the same column under its new name.
+    let renamed_old: Vec<SchemaModel> = {
+        let renames = Renames { hints: &tables };
+        old.models
+            .iter()
+            .map(|model| renamed_model(model, &renames))
+            .collect()
+    };
+    let old_types = declared_enum_types(&renamed_old);
+    let old_labels = declared_enum_labels(&renamed_old);
+    let types = enum_type_renames(&old_types, &new_types, &new.models);
+    let mut labels = Vec::new();
+    for (type_name, renamed) in &new_labels.renamed_labels {
+        let old_name = types
+            .iter()
+            .find_map(|hint| match hint {
+                Hint::EnumType { old, new } if new == type_name => Some(old.as_str()),
+                _ => None,
+            })
+            .unwrap_or(type_name);
+        let Some(held) = old_labels.labels.get(old_name) else {
+            continue;
+        };
+        for (label, previous) in &renamed.labels {
+            if held.contains(previous) && !held.contains(label) {
+                labels.push(Hint::Label {
+                    type_name: type_name.clone(),
+                    old: previous.clone(),
+                    new: label.clone(),
+                });
+            }
+        }
+    }
+    tables.extend(types);
+    tables.extend(labels);
     Ok(tables)
+}
+
+/// The enum type renames the columns imply (ADR-0032): a type `A` the old
+/// snapshot declares and the new one does not, every column of which now
+/// declares one and the same type `B` that the old snapshot lacks and no
+/// other vanished type moved to. Anything less — a column of `A` dropped,
+/// split across two types, or moved to a type that already exists — is no
+/// rename: the plain column type change is planned instead.
+fn enum_type_renames(
+    old_types: &DeclaredEnumTypes,
+    new_types: &DeclaredEnumTypes,
+    new_models: &[SchemaModel],
+) -> Vec<Hint> {
+    let new_type_of = |table: &str, column: &str| {
+        new_models
+            .iter()
+            .find(|model| model.table_name == table)?
+            .columns
+            .iter()
+            .find(|col| col.name == column)
+            .and_then(enum_type_of)
+            .map(|(type_name, _)| type_name)
+    };
+    let mut candidates: Vec<(String, String)> = Vec::new();
+    for (old, columns) in &old_types.declaring {
+        if new_types.labels.contains_key(old) {
+            continue;
+        }
+        let moved: BTreeSet<Option<String>> = columns
+            .iter()
+            .map(|(table, column)| new_type_of(table, column))
+            .collect();
+        if let [Some(new)] = moved.into_iter().collect::<Vec<_>>().as_slice()
+            && !old_types.labels.contains_key(new)
+        {
+            candidates.push((old.clone(), new.clone()));
+        }
+    }
+    candidates
+        .iter()
+        .filter(|(_, new)| candidates.iter().filter(|(_, n)| n == new).count() == 1)
+        .map(|(old, new)| Hint::EnumType {
+            old: old.clone(),
+            new: new.clone(),
+        })
+        .collect()
 }
 
 fn claim(claims: &mut Vec<(String, Vec<String>)>, previous: &str, claimant: &str) {
@@ -1365,6 +1605,19 @@ fn claim(claims: &mut Vec<(String, Vec<String>)>, previous: &str, claimant: &str
         Some((_, claimants)) => claimants.push(claimant.to_string()),
         None => claims.push((previous.to_string(), vec![claimant.to_string()])),
     }
+}
+
+/// The `hints` whose renames leave a column's storage on `dialect` as the
+/// rest of a plan should see it. On SQLite an enum column is text as wide as
+/// its longest label, so a label rename is an `UPDATE` of its rows that can
+/// also widen or narrow the column: the label hints are left out, and the
+/// plan still meets the width change as the column's type change.
+pub(crate) fn storage_hints(hints: &[Hint], dialect: Dialect) -> Vec<Hint> {
+    hints
+        .iter()
+        .filter(|hint| dialect != Dialect::Sqlite || !matches!(hint, Hint::Label { .. }))
+        .cloned()
+        .collect()
 }
 
 /// `hints` run the other way: what turns the new snapshot back into the old
@@ -1388,6 +1641,27 @@ pub fn reverse_hints(hints: &[Hint]) -> Vec<Hint> {
             },
             Hint::Column { table, old, new } => Hint::Column {
                 table: old_table(table),
+                old: new.clone(),
+                new: old.clone(),
+            },
+            Hint::EnumType { old, new } => Hint::EnumType {
+                old: new.clone(),
+                new: old.clone(),
+            },
+            // A label hint applies after its type's rename: backwards, after
+            // the type is renamed back.
+            Hint::Label {
+                type_name,
+                old,
+                new,
+            } => Hint::Label {
+                type_name: hints
+                    .iter()
+                    .find_map(|hint| match hint {
+                        Hint::EnumType { old, new } if new == type_name => Some(old.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| type_name.clone()),
                 old: new.clone(),
                 new: old.clone(),
             },
@@ -1424,6 +1698,53 @@ impl Renames<'_> {
                 _ => None,
             })
             .unwrap_or(column)
+    }
+
+    /// `col` of the old snapshot with its enum type renamed (a native type:
+    /// the only kind that exists as an object), then its labels, how ever
+    /// they are stored (a label hint names the type as its type rename leaves
+    /// it). Each label keeps its position, so the label order is unchanged.
+    /// Returns the `(old, new)` labels renamed.
+    fn enum_column(&self, col: &mut ferro_schema_ir::SchemaColumn) -> Vec<(String, String)> {
+        let mut renamed = Vec::new();
+        let Some((mut type_name, _)) = enum_declaration(col) else {
+            return renamed;
+        };
+        if enum_type_of(col).is_some() {
+            for hint in self.hints {
+                match hint {
+                    Hint::EnumType { old, new } if *old == type_name => {
+                        col.enum_type_name = Some(new.clone());
+                        type_name = new.clone();
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let Some(values) = col.enum_values.as_mut() else {
+            return renamed;
+        };
+        for hint in self.hints {
+            let Hint::Label {
+                type_name: t,
+                old,
+                new,
+            } = hint
+            else {
+                continue;
+            };
+            if *t != type_name {
+                continue;
+            }
+            for value in values.iter_mut() {
+                if enum_label_strings(std::slice::from_ref(value)).first() == Some(old) {
+                    *value = serde_json::Value::String(new.clone());
+                    renamed.push((old.clone(), new.clone()));
+                }
+            }
+        }
+        renamed
     }
 }
 
@@ -1502,8 +1823,13 @@ fn renamed_model(model: &SchemaModel, renames: &Renames<'_>) -> SchemaModel {
     if model.model_name == t_old {
         out.model_name = t_new.clone();
     }
+    let mut relabelled: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
     for column in &mut out.columns {
         column.name = col(&column.name);
+        let renamed = renames.enum_column(column);
+        if !renamed.is_empty() {
+            relabelled.insert(column.name.clone(), renamed);
+        }
     }
     for fk in &mut out.foreign_keys {
         let (c_old, to_old) = (fk.column.clone(), fk.to_table.clone());
@@ -1549,6 +1875,15 @@ fn renamed_model(model: &SchemaModel, renames: &Renames<'_>) -> SchemaModel {
     }
     for check in &mut out.checks {
         let c_new = col(&check.column);
+        // A `db_check` over a relabelled column names the labels it allows.
+        for (old, new) in relabelled.get(&c_new).into_iter().flatten() {
+            let (old, new) = (quote_label(old), quote_label(new));
+            for value in &mut check.values {
+                if *value == old {
+                    *value = new.clone();
+                }
+            }
+        }
         check.name = rederived(
             &check.name,
             db_check_constraint_name(t_old, &check.column),
@@ -1703,7 +2038,60 @@ pub(crate) fn rename_ops(
             }
         }
     }
+    out.extend(enum_rename_ops(old, renamed, dialect));
     out
+}
+
+/// The enum renames that turn `old` into `renamed`, after every table's unit
+/// (a SQLite label `UPDATE` names its tables and columns as those renames
+/// leave them): each type rename (Postgres only — SQLite has no enum types),
+/// then each label rename, over every column of its type.
+fn enum_rename_ops(
+    old: &IrEnvelope<SchemaIrPayload>,
+    renamed: &IrEnvelope<SchemaIrPayload>,
+    dialect: Dialect,
+) -> Vec<MigrationOp> {
+    let declaring = declared_enum_labels(&renamed.payload.models).declaring;
+    let mut types = Vec::new();
+    let mut labels = Vec::new();
+    let columns = old
+        .payload
+        .models
+        .iter()
+        .zip(&renamed.payload.models)
+        .flat_map(|(o, r)| o.columns.iter().zip(&r.columns));
+    for (a, b) in columns {
+        let (Some((type_a, labels_a)), Some((type_b, labels_b))) =
+            (enum_declaration(a), enum_declaration(b))
+        else {
+            continue;
+        };
+        if type_a != type_b && dialect == Dialect::Postgres && enum_type_of(a).is_some() {
+            let op = MigrationOp::RenameEnumType {
+                old: type_a,
+                new: type_b.clone(),
+            };
+            if !types.contains(&op) {
+                types.push(op);
+            }
+        }
+        for (label_a, label_b) in labels_a.into_iter().zip(labels_b) {
+            if label_a == label_b {
+                continue;
+            }
+            let op = MigrationOp::RenameEnumLabel {
+                type_name: type_b.clone(),
+                old: label_a,
+                new: label_b,
+                columns: declaring.get(&type_b).cloned().unwrap_or_default(),
+            };
+            if !labels.contains(&op) {
+                labels.push(op);
+            }
+        }
+    }
+    types.extend(labels);
+    types
 }
 
 pub(crate) fn index_models(models: &[SchemaModel]) -> BTreeMap<String, &SchemaModel> {
@@ -1778,7 +2166,17 @@ fn diff_model_columns(
         let Some(old_col) = old_cols.get(name) else {
             continue;
         };
-        if schema_columns_storage_drift(old_col, new_col, dialect) {
+        // A column declared with one native enum type on both sides that moved
+        // to another is a type change too: the storage decision reads a live
+        // native-enum column as already at any enum target, and only a
+        // declared `old` names its type. A move of every column of a type is
+        // its rename, applied before this diff runs (ADR-0032).
+        let moved_enum = dialect == Dialect::Postgres
+            && matches!(
+                (enum_type_of(old_col), enum_type_of(new_col)),
+                (Some((a, _)), Some((b, _))) if a != b
+            );
+        if moved_enum || schema_columns_storage_drift(old_col, new_col, dialect) {
             ops.push(MigrationOp::AlterColumnType {
                 table: table.to_string(),
                 column: (*name).to_string(),

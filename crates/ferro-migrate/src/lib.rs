@@ -96,6 +96,30 @@ pub enum MigrationOp {
         /// Enum type name.
         type_name: String,
     },
+    /// A live label rename hint (`__ferro_renamed_labels__`, ADR-0032) —
+    /// `ALTER TYPE … RENAME VALUE` on Postgres; on SQLite, where labels are
+    /// text in the rows, an `UPDATE` of every column of the type. Planned only
+    /// from declared hints, never inferred.
+    RenameEnumLabel {
+        /// Enum type name, as any type rename of the same plan leaves it.
+        type_name: String,
+        /// The label's old spelling.
+        old: String,
+        /// Its new spelling.
+        new: String,
+        /// Every `(table, column)` of the type whose rows hold the label, by
+        /// the names the plan's table and column renames leave them.
+        columns: Vec<(String, String)>,
+    },
+    /// An enum type every one of whose columns now declares one and the same
+    /// new type (ADR-0032: inferred from the columns, no hint) — `ALTER TYPE
+    /// … RENAME TO`. Postgres only: SQLite has no enum types.
+    RenameEnumType {
+        /// The type's old name.
+        old: String,
+        /// Its new name.
+        new: String,
+    },
     /// A model exists in the new IR but not the old.
     AddTable {
         /// Table to create.
@@ -345,7 +369,9 @@ impl MigrationOp {
         match self {
             MigrationOp::AddEnumLabel { .. }
             | MigrationOp::CreateEnumType { .. }
-            | MigrationOp::DropEnumType { .. } => None,
+            | MigrationOp::DropEnumType { .. }
+            | MigrationOp::RenameEnumLabel { .. }
+            | MigrationOp::RenameEnumType { .. } => None,
             MigrationOp::RenameTable { new, .. } => Some(new),
             MigrationOp::RenameColumn { table, .. }
             | MigrationOp::RenameIndex { table, .. }
