@@ -433,7 +433,7 @@ def _marker(
     if verdict is None:
         return None
     subject = op.get("table") or op.get("type_name") or ""
-    if verdict.get("needs") == "backfill":
+    if verdict.get("demands_values"):
         return (
             f"data-dependent (fails while {subject} has rows; ferro migrations "
             f"generate the backfill: `ferro migrate new`)"
@@ -477,7 +477,7 @@ def translate(
             out.append(FerroIrreversibleOp(irreversible["reason"]))
             continue
         verdict = op.get("verdict") or {}
-        if not op["statements"] and verdict.get("needs") != "backfill":
+        if not op["statements"] and not verdict.get("demands_values"):
             # The pass runs nothing for it on this dialect (row security of
             # a new SQLite table is its create's warning).
             continue
