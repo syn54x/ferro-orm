@@ -1,0 +1,1 @@
+blocked: SQLite table-rename step refused by src/run.rs rebuild guard; drift every-variant test needs old/new sample keys
