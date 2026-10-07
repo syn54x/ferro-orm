@@ -384,7 +384,7 @@ pub fn render_down(
             other => other,
         })
         .collect();
-    let inverse: Vec<MigrationOp> = super::plan(&planned_after, before, dialect)
+    let inverse: Vec<MigrationOp> = super::plan(&planned_after, before, dialect)?
         .operations
         .into_iter()
         .filter(|op| subject(op).is_some_and(|s| subjects.contains(&s)))
@@ -482,6 +482,7 @@ mod tests {
             &LiveFacts::declared(),
             PlanOptions { destructive: true },
         )
+        .expect("plan")
         .operations
     }
 

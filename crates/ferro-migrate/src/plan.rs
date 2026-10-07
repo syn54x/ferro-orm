@@ -75,15 +75,31 @@ pub struct LiveTableFacts {
     pub row_security: LiveRowSecurity,
 }
 
-/// The facts a live database holds beside its IR, keyed by table.
+/// What the `old` side of a plan is: the caller says, the planner never
+/// infers it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OldSide {
+    /// A live database, read through its facts (the reconciliation pass,
+    /// `drift`, `baseline`): every table of `old` has an entry in
+    /// [`LiveFacts::tables`], and a missing one is a [`PlanError`].
+    #[default]
+    Live,
+    /// A declared snapshot (the generator): every artifact on it is ferro's
+    /// own declaration, read from `old` itself; no fact is read.
+    Snapshot,
+}
+
+/// The facts a live database holds beside its IR, keyed by table — or, for
+/// [`LiveFacts::declared`], the marker that `old` is a declared snapshot.
 ///
-/// A table absent from [`tables`](Self::tables) reads as the `old` snapshot
-/// declares it: every declared CHECK present with its canonical body and
-/// valid, every FK and index valid, its row security exactly as declared.
-/// A type absent from [`enum_labels`](Self::enum_labels) reads its labels
-/// from the `old` snapshot's columns. So [`LiveFacts::declared`] — nothing
-/// recorded — is the side-table for planning one declared snapshot against
-/// another.
+/// On the live side ([`LiveFacts::live`], and every facts value read from
+/// JSON) each table of `old` has its entry in [`tables`](Self::tables); a
+/// type absent from [`enum_labels`](Self::enum_labels) reads its labels from
+/// `old`'s columns. On the snapshot side ([`LiveFacts::declared`]) every
+/// table reads as `old` declares it: every declared CHECK present with its
+/// canonical body and valid, every FK and index valid, its row security
+/// exactly as declared, and the parent snapshot is the proof of what ferro
+/// installed (ADR-0033).
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LiveFacts {
     /// Live facts per table name.
@@ -92,13 +108,81 @@ pub struct LiveFacts {
     /// Every live native enum type's labels in enum sort order (Postgres).
     #[serde(default)]
     pub enum_labels: BTreeMap<String, Vec<String>>,
+    /// Which side `old` is. Never on the wire: facts read from JSON are a
+    /// live database's.
+    #[serde(skip)]
+    side: OldSide,
 }
 
+/// Why [`plan_from_ir`] plans nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PlanError {
+    /// The live side's facts carry no entry for a table its schema holds.
+    MissingLiveFacts {
+        /// The table.
+        table: String,
+    },
+}
+
+impl std::fmt::Display for PlanError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PlanError::MissingLiveFacts { table } => write!(
+                f,
+                "the live facts carry no entry for table '{table}', which the live schema \
+                 holds: read the schema and its facts together, from one introspection \
+                 (`_live_schema_ir`), or plan two declared snapshots without facts"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PlanError {}
+
 impl LiveFacts {
-    /// The all-valid, nothing-foreign, bodies-equal-to-canonical side-table:
-    /// every table and type reads as the `old` snapshot declares it.
+    /// The snapshot side: `old` is a declared snapshot and every table and
+    /// type reads as it declares them (the generator).
     pub fn declared() -> Self {
-        Self::default()
+        Self {
+            side: OldSide::Snapshot,
+            ..Self::default()
+        }
+    }
+
+    /// The live side: a live database's facts for every table of its schema.
+    pub fn live(
+        tables: BTreeMap<String, LiveTableFacts>,
+        enum_labels: BTreeMap<String, Vec<String>>,
+    ) -> Self {
+        Self {
+            tables,
+            enum_labels,
+            side: OldSide::Live,
+        }
+    }
+
+    /// Which side `old` is.
+    pub fn side(&self) -> OldSide {
+        self.side
+    }
+
+    /// Every table of `old` has its facts on the live side; the snapshot side
+    /// reads none.
+    fn cover(&self, old: &IrEnvelope<SchemaIrPayload>) -> Result<(), PlanError> {
+        if self.side == OldSide::Snapshot {
+            return Ok(());
+        }
+        match old
+            .payload
+            .models
+            .iter()
+            .find(|model| !self.tables.contains_key(&model.table_name))
+        {
+            Some(model) => Err(PlanError::MissingLiveFacts {
+                table: model.table_name.clone(),
+            }),
+            None => Ok(()),
+        }
     }
 }
 
@@ -223,8 +307,11 @@ fn declared_row_security(model: &SchemaModel) -> LiveRowSecurity {
 
 /// Decide every change that turns `old` into `new`, for the whole modelset.
 ///
-/// `facts` carries what the live database holds beside its IR; pass
-/// [`LiveFacts::declared`] when `old` is a declared snapshot. `options`
+/// `facts` says which side `old` is: [`LiveFacts::live`] (or facts read from
+/// JSON) carries what the live database holds beside its IR, one entry per
+/// table of `old`; [`LiveFacts::declared`] says `old` is a declared snapshot.
+/// The side is the caller's word, never inferred from what the facts lack.
+/// `options`
 /// gates the ops that remove something (ADR-0013's ladder): without
 /// `destructive`, drops are left out and their leftover warnings stand.
 ///
@@ -258,20 +345,32 @@ fn declared_row_security(model: &SchemaModel) -> LiveRowSecurity {
 /// ([`HintError`]) applies no rename and stands in
 /// [`MigrationPlan::always_warnings`] naming both sides; the generator
 /// refuses it before writing anything.
+///
+/// # Errors
+/// [`PlanError::MissingLiveFacts`] when, on the live side, a table of `old`
+/// has no entry in `facts`.
 pub fn plan_from_ir(
     old: &IrEnvelope<SchemaIrPayload>,
     new: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
     facts: &LiveFacts,
     options: PlanOptions,
-) -> MigrationPlan {
+) -> Result<MigrationPlan, PlanError> {
+    facts.cover(old)?;
+    // The snapshot side reads no fact, whatever the value carries.
+    let declared = LiveFacts::declared();
+    let facts = if facts.side == OldSide::Snapshot {
+        &declared
+    } else {
+        facts
+    };
     let hints = match live_hints(&old.payload, &new.payload) {
         Ok(hints) => hints,
         Err(refusal) => {
-            let mut plan = plan_named(old, new, dialect, facts, options);
+            let mut plan = plan_named(old, new, dialect, facts, options)?;
             plan.always_warnings
                 .push(format!("rename hint refused: {refusal}"));
-            return plan;
+            return Ok(plan);
         }
     };
     if hints.is_empty() {
@@ -282,10 +381,10 @@ pub fn plan_from_ir(
     fact_renames(&mut operations, facts, old, &hints, dialect);
     let facts = renamed_facts(facts, &operations, new, dialect);
     let renamed = renamed_snapshot(old, &storage_hints(&hints, dialect));
-    let mut plan = plan_named(&renamed, new, dialect, &facts, options);
+    let mut plan = plan_named(&renamed, new, dialect, &facts, options)?;
     operations.append(&mut plan.operations);
     plan.operations = operations;
-    plan
+    Ok(plan)
 }
 
 /// The renames of the names only a live database's [`LiveFacts`] carry — a
@@ -517,7 +616,7 @@ fn plan_named(
     dialect: Dialect,
     facts: &LiveFacts,
     options: PlanOptions,
-) -> MigrationPlan {
+) -> Result<MigrationPlan, PlanError> {
     let old_models = index_models(&old.payload.models);
     let new_models = index_models(&new.payload.models);
     let mut plan = MigrationPlan::default();
@@ -545,17 +644,21 @@ fn plan_named(
     }
 
     for (old_model, new_model) in order_existing_tables(&old_models, &new_models) {
-        // A table with no live facts is read from the `old` snapshot: the
-        // planner is diffing two declared snapshots (the generator), never a
-        // live database (the pass reads facts for every live table).
-        let (old_view, table_facts, side) = match facts.tables.get(&new_model.table_name) {
-            Some(live) => (Cow::Borrowed(old_model), Cow::Borrowed(live), OldSide::Live),
-            None => (
+        let (old_view, table_facts) = match facts.side {
+            OldSide::Snapshot => (
                 declared_live_view(old_model, dialect),
                 Cow::Owned(declared_table_facts(old_model)),
-                OldSide::Snapshot,
             ),
+            OldSide::Live => {
+                let live = facts.tables.get(&new_model.table_name).ok_or_else(|| {
+                    PlanError::MissingLiveFacts {
+                        table: new_model.table_name.clone(),
+                    }
+                })?;
+                (Cow::Borrowed(old_model), Cow::Borrowed(live))
+            }
         };
+        let side = facts.side;
         plan_existing_table(
             &old_view,
             new_model,
@@ -578,7 +681,7 @@ fn plan_named(
         }
     }
 
-    plan
+    Ok(plan)
 }
 
 /// Tables present in both snapshots, sorted by model name and then so each
@@ -604,17 +707,6 @@ fn order_existing_tables<'a>(
                 .collect()
         },
     )
-}
-
-/// What the `old` side of an existing table is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum OldSide {
-    /// A live database, read through its facts (the reconciliation pass,
-    /// `drift`).
-    Live,
-    /// A declared snapshot (the generator): every artifact on it is ferro's
-    /// own declaration.
-    Snapshot,
 }
 
 fn plan_existing_table(

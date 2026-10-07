@@ -437,6 +437,46 @@ def _new_capturing_all(name: str) -> tuple[int, str, str]:
     return code, out.getvalue(), err.getvalue()
 
 
+# -- the old side is the caller's word -------------------------------------------------
+
+
+def test_the_planner_takes_the_old_side_from_the_caller_never_from_missing_facts(
+    project, pkg
+):
+    """Over FFI, no ``facts_json`` means two declared snapshots: the parent is
+    the proof ferro set the flags, so a dropped policy-less declaration is
+    torn down. Any ``facts_json`` is a live database's, which must cover each
+    of its tables; with the table's facts the pass's posture stands."""
+    write_config(project, pkg, '["postgres"]')
+    write_models(project, pkg, models())
+    new("create")
+    parent = snapshot(project, 1)
+    bare = json.loads(json.dumps(parent))
+    bare["payload"]["models"][0]["row_security"] = {"force": True, "policies": []}
+    gone = json.loads(json.dumps(parent))
+    gone["payload"]["models"][0]["row_security"] = None
+
+    def kinds(facts_json: str | None) -> list[str]:
+        plan = _core._plan_from_ir(
+            json.dumps(bare),
+            json.dumps(gone),
+            "postgres",
+            '{"destructive": true}',
+            facts_json=facts_json,
+        )
+        return [op["kind"] for op in json.loads(plan)["operations"]]
+
+    assert kinds(None) == ["NoForceRowSecurity", "DisableRowSecurity"]
+    live = {
+        "tables": {
+            TABLE: {"row_security": {"enabled": True, "forced": True, "policies": []}}
+        }
+    }
+    assert kinds(json.dumps(live)) == []
+    with pytest.raises(ValueError, match=f"no entry for table '{TABLE}'"):
+        kinds("{}")
+
+
 # -- SQLite-only projects ---------------------------------------------------------------
 
 

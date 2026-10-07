@@ -177,6 +177,10 @@ fn emission_error(err: ferro_migrate::EmissionError) -> PyErr {
     pyo3::exceptions::PyValueError::new_err(err.message)
 }
 
+fn plan_error(err: ferro_migrate::PlanError) -> PyErr {
+    pyo3::exceptions::PyValueError::new_err(err.to_string())
+}
+
 /// Prefix of the debug line auto-migrate logs (on the `ferro` logger) before
 /// it executes each statement — the create pass's, every statement of a
 /// table's reconciliation plan including its column drops, and each enum type
@@ -656,7 +660,8 @@ async fn run_passes(engine: Arc<EngineHandle>, opts: MigrateOptions) -> PyResult
         .collect();
     existing.sort();
     let (live, facts) = live_schema_ir(&engine, Some(&existing)).await?;
-    let plan = plan_from_ir(&live, &modelset, backend, &facts, opts.plan_options());
+    let plan =
+        plan_from_ir(&live, &modelset, backend, &facts, opts.plan_options()).map_err(plan_error)?;
     let rendered = render_plan(&plan, &live, &modelset, backend).map_err(emission_error)?;
 
     if backend == Dialect::Postgres {
@@ -884,7 +889,8 @@ pub fn _render_migration_sql_for_test(
         return Ok((Vec::new(), Vec::new()));
     }
     let (live, facts) = live_tables_to_schema_ir(vec![table], Default::default(), backend);
-    let plan = plan_from_ir(&live, &declared, backend, &facts, opts.plan_options());
+    let plan =
+        plan_from_ir(&live, &declared, backend, &facts, opts.plan_options()).map_err(plan_error)?;
     let rendered = render_plan(&plan, &live, &declared, backend).map_err(emission_error)?;
 
     let mut statements = Vec::new();
@@ -912,16 +918,18 @@ fn parse_schema_envelope(json: &str, what: &str) -> PyResult<IrEnvelope<SchemaIr
 /// The one planner over FFI: every change that turns the `old_ir_json`
 /// snapshot into `new_ir_json` on `dialect`, as JSON.
 ///
-/// `options_json` is `{"destructive": bool}`. `facts_json` is the live
-/// side-table `_live_schema_ir` returns beside a live envelope; omitted, the
-/// old snapshot is read as declared (`LiveFacts::declared`). The result is
+/// `options_json` is `{"destructive": bool}`. `facts_json` says which side
+/// `old_ir_json` is: given (even `"{}"`), a live database whose side-table
+/// `_live_schema_ir` returned beside it, with an entry for every table;
+/// omitted, a declared snapshot (`LiveFacts::declared`). The result is
 /// `{"operations": [{"kind": …, <op fields>}], "warnings": […],
 /// "always_warnings": […]}`; with `render`, each op also carries the
 /// `statements` and `warnings` it renders to.
 ///
 /// # Errors
 /// `ValueError` when a JSON argument is malformed, an envelope is not a
-/// `schema` IR, the dialect is unknown, or an op cannot render.
+/// `schema` IR, the dialect is unknown, a live table of `old_ir_json` has no
+/// entry in `facts_json`, or an op cannot render.
 #[pyfunction]
 #[pyo3(name = "_plan_from_ir")]
 #[pyo3(signature = (old_ir_json, new_ir_json, dialect, options_json, render=false, facts_json=None))]
@@ -948,7 +956,7 @@ pub fn _plan_from_ir(
     validate_schema_ir(&old).map_err(emission_error)?;
     validate_schema_ir(&new).map_err(emission_error)?;
 
-    let plan = plan_from_ir(&old, &new, backend, &facts, options);
+    let plan = plan_from_ir(&old, &new, backend, &facts, options).map_err(plan_error)?;
     let to_value = |value: serde_json::Result<serde_json::Value>| {
         value.map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("could not serialize the plan: {e}"))

@@ -89,7 +89,8 @@ mod tests {
                     Dialect::Postgres,
                     &LiveFacts::declared(),
                     PlanOptions { destructive: true },
-                );
+                )
+                .expect("plan");
                 let disables = down.operations.contains(&MigrationOp::DisableRowSecurity {
                     table: "order".into(),
                 });

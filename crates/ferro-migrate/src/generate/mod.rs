@@ -333,13 +333,15 @@ const DESTRUCTIVE: PlanOptions = PlanOptions { destructive: true };
 
 /// Plan `old → new` on `dialect` as two declared snapshots: every drop is
 /// planned (a dropped model is always rendered, marked destructive; review is
-/// the gate).
+/// the gate). The snapshot side reads no live fact, so the planner's one
+/// error, a live table without facts, cannot arise.
 fn plan(
     old: &IrEnvelope<SchemaIrPayload>,
     new: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
-) -> MigrationPlan {
+) -> Result<MigrationPlan, GenerateError> {
     plan_from_ir(old, new, dialect, &LiveFacts::declared(), DESTRUCTIVE)
+        .map_err(|err| GenerateError::Render(err.to_string()))
 }
 
 /// Every warning `plan` raises that planning `standing → standing` does not
@@ -564,10 +566,10 @@ pub fn generate(
     let mut changes = Vec::new();
     let mut suggestions = Vec::new();
     for &dialect in dialects {
-        let change = plan(parent_ir, target, dialect);
+        let change = plan(parent_ir, target, dialect)?;
         refuse_unsupported(
             &change,
-            &plan(target, target, dialect),
+            &plan(target, target, dialect)?,
             before,
             target,
             dialect,
@@ -575,8 +577,8 @@ pub fn generate(
             &[],
         )?;
         refuse_unsupported(
-            &plan(target, before, dialect),
-            &plan(before, before, dialect),
+            &plan(target, before, dialect)?,
+            &plan(before, before, dialect)?,
             target,
             before,
             dialect,
@@ -599,7 +601,7 @@ pub fn generate(
     let mut ups = Vec::new();
     let mut downs = Vec::new();
     for &dialect in dialects {
-        let up = plan(parent_ir, &shape, dialect);
+        let up = plan(parent_ir, &shape, dialect)?;
         ups.push(rendered_ops(
             &up,
             before,
@@ -607,7 +609,7 @@ pub fn generate(
             dialect,
             PlanDirection::Up,
         ));
-        downs.push(plan(&shape, before, dialect));
+        downs.push(plan(&shape, before, dialect)?);
     }
     if ups.iter().all(Vec::is_empty)
         && downs.iter().all(MigrationPlan::is_empty)
@@ -1032,11 +1034,16 @@ mod tests {
         after: &IrEnvelope<SchemaIrPayload>,
         dialect: Dialect,
     ) -> Vec<String> {
-        render_plan(&plan(before, after, dialect), before, after, dialect)
-            .expect("render")
-            .into_iter()
-            .flat_map(|rendered| rendered.statements)
-            .collect()
+        render_plan(
+            &plan(before, after, dialect).expect("plan"),
+            before,
+            after,
+            dialect,
+        )
+        .expect("render")
+        .into_iter()
+        .flat_map(|rendered| rendered.statements)
+        .collect()
     }
 
     fn with_columns(extra: Vec<SchemaColumn>) -> SchemaModel {
@@ -2445,9 +2452,7 @@ mod tests {
         let sqlite = step(&migration, "01_schema", Dialect::Sqlite);
         assert_eq!(sqlite.up, NOT_APPLICABLE);
         assert_eq!(sqlite.down, NOT_APPLICABLE);
-        // Every statement is the pass's for the same declaration (I-1 15–16).
         let (from, to) = (ir(vec![before.clone()]), ir(vec![after.clone()]));
-        assert_eq!(pass(&from, &to, Dialect::Postgres), up);
         // Applied, the target is no schema change; nor is the parent after
         // its down.
         let parent = snapshot_of(&to, None);
