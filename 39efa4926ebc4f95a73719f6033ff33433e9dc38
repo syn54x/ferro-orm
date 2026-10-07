@@ -1,0 +1,1 @@
+verified 2026-10-07: cargo test (325 passed); CARGO_PROFILE_RELEASE_STRIP=none uv run maturin develop; uv run pytest chunked/data_steps/migrate_status --db-backends=sqlite,postgres (61 passed, 0 skipped)
