@@ -222,6 +222,59 @@ def test_a_text_comparison_check_is_not_rebuilt_on_every_connect(project, pkg, d
     assert migrate_updates_statements(db.url, "ckn_named") == []
 
 
+PRICED = """
+from decimal import Decimal
+
+from ferro import Check
+
+
+class Ckn_Priced(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    price: Decimal
+    __ferro_checks__ = (Check("priced", lambda priced: priced.price > 10),)
+"""
+
+
+def test_a_cast_ferro_did_not_write_is_rebuilt(project, pkg, db):
+    """Declared ``price > 10`` prints as ``CHECK ((price > (10)::numeric))``:
+    that literal coercion is display, so a connect changes nothing. A hand
+    edit to ``price::integer > 10`` prints as ``CHECK (((price)::integer >
+    10))``: that cast is predicate, so ``migrate_updates`` rebuilds the
+    declared body."""
+    if db.backend != "postgres":
+        pytest.skip("SQLite cannot alter a check in place (ADR-0014)")
+    write_models(project, pkg, PRICED)
+    sys.path.insert(0, str(project))
+    importlib.import_module(f"{pkg}.models")
+    asyncio.run(ferro.connect(db.url, auto_migrate=True))
+
+    def constraintdef() -> str:
+        rows = db.rows(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+            "WHERE conname = 'ck_ckn_priced_priced' "
+            f"AND connamespace = '{db.schema}'::regnamespace"
+        )
+        assert len(rows) == 1, rows
+        return rows[0][0]
+
+    assert constraintdef() == "CHECK ((price > (10)::numeric))"
+    assert migrate_updates_statements(db.url, "ckn_priced") == []
+
+    db.execute('ALTER TABLE "ckn_priced" DROP CONSTRAINT "ck_ckn_priced_priced"')
+    db.execute(
+        'ALTER TABLE "ckn_priced" ADD CONSTRAINT "ck_ckn_priced_priced" '
+        'CHECK ("price"::integer > 10)'
+    )
+    assert constraintdef() == "CHECK (((price)::integer > 10))"
+
+    assert migrate_updates_statements(db.url, "ckn_priced") == [
+        'ALTER TABLE "ckn_priced" DROP CONSTRAINT "ck_ckn_priced_priced"',
+        'ALTER TABLE "ckn_priced" ADD CONSTRAINT "ck_ckn_priced_priced" '
+        'CHECK ("price" > 10)',
+    ]
+    assert constraintdef() == "CHECK ((price > (10)::numeric))"
+
+
 def test_a_column_dropped_by_hand_is_one_line_and_exit_4(project, pkg, db, capsys):
     applied(project, pkg, db, capsys)
     db.execute('ALTER TABLE "team" DROP COLUMN "name"')

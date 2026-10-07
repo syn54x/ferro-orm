@@ -2677,19 +2677,26 @@ fn unwrap_outer_parens(mut tokens: Vec<CheckToken>) -> Vec<CheckToken> {
     }
 }
 
-/// Fold every `::type` cast Postgres paints onto a check body.
+/// Fold the `::type` casts Postgres paints onto a check body for display.
 ///
-/// The rule: a cast is display, not predicate. Postgres resolves a
-/// comparison through the operator's input type and prints the coercion it
-/// inserted — a `varchar` column against a string literal comes back as
-/// `(name)::text <> ''::text`, an `IN` list over `varchar` as
-/// `(status)::text = ANY ((ARRAY['a'::character varying])::text[])`. So the
-/// whole type name goes (multi-word spellings, a schema qualifier, `(n)`
-/// modifiers, `[]` array suffixes), and when the cast operand is a lone
-/// operand that Postgres parenthesized only to attach the cast — one
-/// identifier or literal, or an `ARRAY[…]` constructor — those display
-/// parentheses go with it. A parenthesized expression (`(a + b)::int`) keeps
-/// its grouping: that is precedence, not display.
+/// Ferro never writes a cast (`CheckExpr` has no cast node; literals render
+/// bare), so a cast in the catalog is either a coercion Postgres inserted
+/// while resolving an operator, or a hand edit. Only the first kind folds:
+///
+/// - any cast on a **literal** (`''::text`, `'a'::character varying`,
+///   `(10)::numeric`): Postgres types an untyped literal against the column
+///   it is compared with;
+/// - a **text-family** cast (`text`, `character varying`, `varchar`,
+///   `bpchar`, `character`, and their `[]` arrays) on an **identifier** or an
+///   `ARRAY[…]` constructor: a `varchar` compared to a literal comes back as
+///   `(name)::text <> ''::text`, an `IN` list over `varchar` as
+///   `(status)::text = ANY ((ARRAY['a'::character varying])::text[])`.
+///
+/// A folded cast takes its type name (multi-word spellings, a schema
+/// qualifier, `(n)`, `[]`) and the display parentheses around its lone
+/// operand with it. Every other cast — `(price)::integer`, or any cast on a
+/// parenthesized expression such as `((price + 1))::integer` — is part of
+/// the predicate and stays verbatim, so a hand edit to it is drift.
 fn strip_type_casts(tokens: Vec<CheckToken>) -> Vec<CheckToken> {
     let mut out: Vec<CheckToken> = Vec::with_capacity(tokens.len());
     let mut i = 0usize;
@@ -2698,8 +2705,24 @@ fn strip_type_casts(tokens: Vec<CheckToken>) -> Vec<CheckToken> {
             && i + 1 < tokens.len()
             && tokens[i + 1] == CheckToken::Punct(':')
         {
-            unwrap_lone_cast_operand(&mut out);
-            i = skip_cast_type_name(&tokens, i + 2);
+            let type_end = skip_cast_type_name(&tokens, i + 2);
+            let (operand, parens) = cast_operand(&out);
+            let display = match operand {
+                CastOperand::Literal => true,
+                CastOperand::Identifier | CastOperand::Array => {
+                    is_text_family_cast(&tokens[i + 2..type_end])
+                }
+                CastOperand::Expression => false,
+            };
+            if display {
+                if let Some((open, close)) = parens {
+                    out.remove(close);
+                    out.remove(open);
+                }
+            } else {
+                out.extend(tokens[i..type_end].iter().cloned());
+            }
+            i = type_end;
             continue;
         }
         out.push(tokens[i].clone());
@@ -2708,11 +2731,67 @@ fn strip_type_casts(tokens: Vec<CheckToken>) -> Vec<CheckToken> {
     out
 }
 
-/// Drop the display parentheses around a cast operand already emitted to
-/// `out`, when they enclose one identifier / literal or one `ARRAY[…]`.
-fn unwrap_lone_cast_operand(out: &mut Vec<CheckToken>) {
-    if out.last() != Some(&CheckToken::Punct(')')) {
-        return;
+/// What a cast applies to (see [`strip_type_casts`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CastOperand {
+    /// A string or numeric literal.
+    Literal,
+    /// One column reference.
+    Identifier,
+    /// An `ARRAY[…]` constructor.
+    Array,
+    /// Anything else: a parenthesized expression, a function call, ….
+    Expression,
+}
+
+/// `10`, `1.5`, `-1` as tokens (the tokenizer emits digits as punctuation).
+fn is_numeric_literal(tokens: &[CheckToken]) -> bool {
+    let digits = match tokens {
+        [CheckToken::Punct('-'), rest @ ..] => rest,
+        all => all,
+    };
+    digits
+        .iter()
+        .any(|t| matches!(t, CheckToken::Punct(ch) if ch.is_ascii_digit()))
+        && digits
+            .iter()
+            .all(|t| matches!(t, CheckToken::Punct(ch) if ch.is_ascii_digit() || *ch == '.'))
+}
+
+/// Whether a cast's type name (the tokens after `::`) is in the text family
+/// Postgres coerces string comparisons through.
+fn is_text_family_cast(type_tokens: &[CheckToken]) -> bool {
+    let words: Vec<String> = type_tokens
+        .iter()
+        .filter_map(|t| match t {
+            CheckToken::Word(w) => Some(w.to_ascii_lowercase()),
+            _ => None,
+        })
+        .collect();
+    let name = match words.as_slice() {
+        [schema, name, ..] if schema == "pg_catalog" => name.as_str(),
+        [name, ..] => name.as_str(),
+        [] => return false,
+    };
+    // `character` / `char` alone is bpchar; `character varying` is varchar.
+    matches!(name, "text" | "varchar" | "bpchar" | "character" | "char")
+}
+
+/// Classify the operand that ends `out`, with the positions of the display
+/// parentheses around it when Postgres printed it as `(operand)::type`.
+fn cast_operand(out: &[CheckToken]) -> (CastOperand, Option<(usize, usize)>) {
+    let Some(last) = out.last() else {
+        return (CastOperand::Expression, None);
+    };
+    if *last != CheckToken::Punct(')') {
+        let bare = match last {
+            CheckToken::String(_) => CastOperand::Literal,
+            CheckToken::Punct(ch) if ch.is_ascii_digit() => CastOperand::Literal,
+            CheckToken::Word(_) => CastOperand::Identifier,
+            CheckToken::Punct(']') => CastOperand::Array,
+            CheckToken::Punct(_) => CastOperand::Expression,
+        };
+        return (bare, None);
     }
     let close = out.len() - 1;
     let mut depth = 0i32;
@@ -2731,19 +2810,32 @@ fn unwrap_lone_cast_operand(out: &mut Vec<CheckToken>) {
         }
     }
     let Some(open) = open else {
-        return;
+        return (CastOperand::Expression, None);
     };
-    let inner = &out[open + 1..close];
-    let lone_operand = matches!(inner, [CheckToken::Word(_) | CheckToken::String(_)]);
-    let array_constructor = matches!(
-        inner,
-        [CheckToken::Word(w), CheckToken::Punct('['), .., CheckToken::Punct(']')]
-            if w.eq_ignore_ascii_case("array")
-    );
-    if lone_operand || array_constructor {
-        out.remove(close);
-        out.remove(open);
+    // A function call `f(x)::t` casts the call, not a parenthesized operand
+    // (`AND (x)::t` / `NOT (x)::t` are operators, not calls).
+    let called = open > 0
+        && matches!(&out[open - 1], CheckToken::Word(w)
+            if !matches!(
+                w.to_ascii_lowercase().as_str(),
+                "and" | "or" | "not" | "in" | "any" | "all" | "like" | "is"
+            ));
+    if called {
+        return (CastOperand::Expression, None);
     }
+    let inner = &out[open + 1..close];
+    let operand = match inner {
+        [CheckToken::String(_)] => CastOperand::Literal,
+        [CheckToken::Word(_)] => CastOperand::Identifier,
+        [CheckToken::Word(w), CheckToken::Punct('['), .., CheckToken::Punct(']')]
+            if w.eq_ignore_ascii_case("array") =>
+        {
+            CastOperand::Array
+        }
+        _ if is_numeric_literal(inner) => CastOperand::Literal,
+        _ => CastOperand::Expression,
+    };
+    (operand, Some((open, close)))
 }
 
 /// The index just past a cast's type name starting at `start` (right after
@@ -6796,6 +6888,54 @@ mod tests {
         text_cast_pin(
             &rendered,
             "CHECK ((((name)::text <> ''::text) AND (t = 'q'::text)))",
+        );
+    }
+
+    #[test]
+    fn a_literal_coerced_to_its_column_type_normalizes_equal_to_catalog() {
+        // `price` is numeric, `c` is char(3).
+        let rendered = render_check_expr(&cmp_literal(
+            "price",
+            ferro_schema_ir::CheckCmpOp::Gt,
+            "10",
+        ));
+        text_cast_pin(&rendered, "CHECK ((price > (10)::numeric))");
+        let bpchar = render_check_expr(&cmp_literal(
+            "c",
+            ferro_schema_ir::CheckCmpOp::Ne,
+            "''",
+        ));
+        text_cast_pin(&bpchar, "CHECK ((c <> ''::bpchar))");
+    }
+
+    #[test]
+    fn a_cast_ferro_did_not_write_is_drift() {
+        // Declared `price > 10`; hand-edited to `price::integer > 10`. Real
+        // catalog text: a non-text cast on a column is predicate, not display.
+        let model = transfer_model_with_checks(
+            vec![ferro_schema_ir::SchemaTableCheck {
+                name: "ck_transfer_priced".to_string(),
+                predicate: cmp_literal("price", ferro_schema_ir::CheckCmpOp::Gt, "10"),
+            }],
+            vec![],
+        );
+        let live = [(
+            "ck_transfer_priced".to_string(),
+            "CHECK (((price)::integer > 10))".to_string(),
+        )];
+        assert_eq!(
+            drifted_check_names(&model, &live),
+            vec!["ck_transfer_priced".to_string()]
+        );
+        // A cast on a compound operand keeps its cast and its grouping; the
+        // literal coercion inside it still folds.
+        assert_eq!(
+            normalize_check_definition("CHECK ((((price + (1)::numeric))::integer > 0))"),
+            "((price +1)):: integer >0"
+        );
+        assert_ne!(
+            normalize_check_definition("CHECK ((((price + (1)::numeric))::integer > 0))"),
+            normalize_check_definition("(\"price\" + 1) > 0"),
         );
     }
 
