@@ -1,0 +1,1 @@
+verified 2026-10-07: cargo test (326 passed); CARGO_PROFILE_RELEASE_STRIP=none uv run maturin develop; uv run --no-sync pytest chunked/data_steps/migrate_status/transactions/session --db-backends=sqlite,postgres (112 passed, 1 skipped: the SQLite-only BEGIN IMMEDIATE pin on postgres)
