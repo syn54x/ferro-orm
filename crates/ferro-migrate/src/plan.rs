@@ -3167,6 +3167,7 @@ mod reverse_tests {
             unique: false,
             index: false,
             default: None,
+            default_factory: None,
             format: None,
             enum_values: None,
             enum_type_name: None,
