@@ -27,7 +27,7 @@ For ETL pipelines and bulk workloads:
 When you're ready to ship:
 
 1. **[Connections & Databases](../guide/connections.md)** — connection URLs and pool configuration
-2. **[Migrations](../guide/migrations.md)** — the Alembic workflow for evolving schemas
+2. **[Schema Management](../guide/schema/overview.md)** — migrations for evolving a production schema, and [deploying them](../guide/schema/deploying.md)
 3. **[How-To: Multiple Databases](../howto/multiple-databases.md)** — working with more than one database
 4. **[How-To: Testing](../howto/testing.md)** — a test suite you can trust before deploying
 

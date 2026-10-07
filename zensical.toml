@@ -28,7 +28,15 @@ nav = [
     { "Transactions" = "guide/transactions.md" },
     { "Raw SQL" = "guide/raw-sql.md" },
     { "Connections & Databases" = "guide/connections.md" },
-    { "Schema Migrations" = "guide/migrations.md" },
+    { "Schema Management" = [
+      { "Overview" = "guide/schema/overview.md" },
+      { "Auto-migrate" = "guide/schema/auto-migrate.md" },
+      { "Migrations" = "guide/schema/migrations.md" },
+      { "Data Steps and Backfills" = "guide/schema/data-steps.md" },
+      { "Deploying Migrations" = "guide/schema/deploying.md" },
+      { "Testing Migrations" = "guide/schema/testing.md" },
+      { "Alembic" = "guide/schema/alembic.md" },
+    ] },
     { "Using with Postgres RLS" = "guide/row-level-security.md" },
   ] },
   { "How-To" = [
@@ -38,6 +46,7 @@ nav = [
     { "Timestamps" = "howto/timestamps.md" },
     { "Soft Deletes" = "howto/soft-deletes.md" },
     { "Multiple Databases" = "howto/multiple-databases.md" },
+    { "Adopting Migrations on an Existing Database" = "howto/adopting-migrations.md" },
     { "Migrating from SQLAlchemy" = "howto/migrate-from-sqlalchemy.md" },
   ] },
   { "Concepts" = [
@@ -47,6 +56,10 @@ nav = [
     { "Typed Query Predicates" = "concepts/query-typing.md" },
     { "Database Backends" = "concepts/backends.md" },
     { "Performance" = "concepts/performance.md" },
+  ] },
+  { "Reference" = [
+    { "CLI" = "reference/cli.md" },
+    { "Configuration" = "reference/configuration.md" },
   ] },
   { "API Reference" = [
     { "Model" = "api/model.md" },

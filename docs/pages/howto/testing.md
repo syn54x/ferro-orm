@@ -164,6 +164,12 @@ async def pg_db():
 
 Schema names passed through `ferro_search_path` must contain only ASCII letters, digits, and underscores; anything else is rejected at connect time.
 
+## Tests in a Project with Migrations
+
+The fixtures above stay as they are when a project adopts [migrations](../guide/schema/migrations.md). A fresh test database has never run a migration, so `auto_migrate=True` is not refused on it ([one door per database](../guide/schema/overview.md#one-door-per-database)), and it builds the schema the models declare.
+
+That schema is the head of your migrations only while the models and the migrations agree, so run `ferro migrate check` in CI beside the tests. And `auto_migrate=True` never runs a migration's own SQL, its backfill or its down: test those with the migration test harness, on a database it stands at a named migration. See [Testing migrations](../guide/schema/testing.md).
+
 ## See Also
 
 - [Transactions guide](../guide/transactions.md) — semantics of `transaction()` and connection affinity

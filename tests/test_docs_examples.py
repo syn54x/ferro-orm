@@ -60,14 +60,20 @@ def test_docs_examples(example: CodeExample, eval_example: EvalExample) -> None:
 
 @pytest.mark.parametrize(
     "script",
-    sorted(DOCS_EXAMPLES.glob("*.py")),
+    sorted(
+        path for path in DOCS_EXAMPLES.glob("*.py") if not path.name.startswith("_")
+    ),
     ids=lambda p: p.name,
 )
 def test_docs_example_scripts(script: Path) -> None:
     """Every docs example script must run end to end.
 
     Each script runs in a subprocess so model registries and engine state
-    never leak between examples (or into other tests).
+    never leak between examples (or into other tests). A module whose name
+    starts with ``_`` is a helper the examples import (the migrations
+    examples' ``_migrations_project``), not an example. The migrations
+    examples build their project in a temporary directory and drive
+    ``ferro migrate`` against SQLite there.
     """
     result = subprocess.run(
         [sys.executable, str(script)],

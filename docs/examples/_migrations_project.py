@@ -139,7 +139,3 @@ def project(script: str, *, configured: bool = True) -> Iterator[Project]:
         return
     with tempfile.TemporaryDirectory() as tmp:
         yield Project(Path(tmp) / "app", path, configured=configured)
-
-
-if __name__ == "__main__":
-    print(__doc__.splitlines()[0])
