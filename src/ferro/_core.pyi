@@ -40,7 +40,9 @@ async def connect(
     ddl_lock_timeout_s: float = 5.0,
 ) -> None: ...
 async def create_tables(
-    using: Optional[str] = None, tracking_schemas: list[str] = ...
+    using: Optional[str] = None,
+    tracking_schemas: list[str] = ...,
+    ddl_lock_timeout_s: float = 5.0,
 ) -> None: ...
 async def migrate(
     using: Optional[str] = None,

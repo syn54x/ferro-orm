@@ -4,6 +4,8 @@
 //! emitted from the Python-compiled SchemaIR modelset via `ferro_migrate`.
 
 use crate::backend::EngineHandle;
+use crate::ddl_exec::{DdlError, DdlExecutor, StatementError};
+use crate::migrate::{log_lock_timeout_statement, pass_attempt_warning, pass_lock_timeout_error};
 use crate::state::{Dialect, MODEL_REGISTRY, engine_for_connection};
 use pyo3::prelude::*;
 use std::sync::Arc;
@@ -18,11 +20,19 @@ use std::sync::Arc;
 /// exactly the model, so re-diffing it would only replay the create pass's own
 /// backend-limitation warnings.
 ///
+/// On Postgres every statement runs under `ddl` (ADR-0044): a new table's
+/// `REFERENCES "parent"` takes a lock on a parent that already exists, and
+/// waiting behind an open write on it would queue every query on the parent
+/// behind the `CREATE TABLE`. A table that times out is rolled back and
+/// created again from the top; an enum type statement re-runs alone.
+///
 /// # Errors
-/// Returns a `PyErr` if the SQL execution fails.
+/// Returns a `PyErr` if the SQL execution fails; `OperationalError` naming
+/// `ddl_lock_timeout` after the last attempt.
 pub async fn internal_create_tables(
     engine: Arc<EngineHandle>,
     reconciliation_follows: bool,
+    ddl: &DdlExecutor,
 ) -> PyResult<std::collections::HashSet<String>> {
     // The runtime CREATE TABLE path is emitted from the Python-compiled SchemaIR
     // via the shared `ferro_migrate` emitter (issue #153). The modelset must have
@@ -119,16 +129,34 @@ pub async fn internal_create_tables(
                 .or_insert((model.table_name.as_str(), guard));
         }
     }
+    let of = ddl.max_attempts;
     for (table, guard) in type_guards.values() {
-        crate::migrate::log_reconcile_statement(table, guard);
-        engine
-            .execute_sql_unprepared(guard)
-            .await
-            .map_err(|e| create_step_error(table, "enum type", guard, e))?;
+        let (table, guard) = (*table, *guard);
+        ddl.unwrapped(
+            &engine,
+            |sql| log_lock_timeout_statement(table, sql),
+            |attempt| crate::emit_user_warning_always(&pass_attempt_warning(table, &attempt, of)),
+            |mut conn| async move {
+                crate::migrate::log_reconcile_statement(table, guard);
+                let result = conn
+                    .execute_sql_unprepared(guard)
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| StatementError::at(guard, error));
+                (conn, result)
+            },
+        )
+        .await
+        .map_err(|err| match err {
+            DdlError::LockTimeout(timeout) => pass_lock_timeout_error(table, &timeout),
+            DdlError::Failed(failure) => {
+                create_step_error(table, "enum type", guard, failure.error)
+            }
+        })?;
     }
 
     for (model, emission) in &to_create {
-        create_one_table(&engine, model, emission, dialect).await?;
+        create_one_table(&engine, model, emission, dialect, ddl).await?;
 
         for warning in &emission.warnings {
             crate::emit_user_warning(warning);
@@ -146,8 +174,9 @@ pub async fn internal_create_tables(
 /// by [`internal_create_tables`].
 ///
 /// On Postgres this is a single transaction, mirroring the reconciliation
-/// pass's per-table transaction (FF-G G3): a table ends fully created or not
-/// created at all. That is not a nicety for row security, it is the whole
+/// pass's per-table transaction (FF-G G3), under the DDL lock timeout
+/// (`SET LOCAL lock_timeout` first; a timeout rolls the table back and
+/// creates it again): a table ends fully created or not created at all. That is not a nicety for row security, it is the whole
 /// contract. `ENABLE`/`FORCE ROW LEVEL SECURITY` land before the policies, so a
 /// `CREATE POLICY` that fails halfway would otherwise leave a live table with
 /// row security forced on and **zero** policies — default-deny for every role
@@ -164,6 +193,7 @@ async fn create_one_table(
     model: &ferro_schema_ir::SchemaModel,
     emission: &ferro_migrate::CreateTableEmission,
     dialect: Dialect,
+    ddl: &DdlExecutor,
 ) -> PyResult<()> {
     let table = model.table_name.as_str();
     if dialect != Dialect::Postgres {
@@ -182,49 +212,51 @@ async fn create_one_table(
         return Ok(());
     }
 
-    let mut conn = engine.begin_transaction_connection().await.map_err(|e| {
-        crate::errors::map_db_error(
-            &format!("Auto-migrate failed to open a transaction to create table '{table}'"),
-            e,
+    // The executor owns the transaction: BEGIN, `SET LOCAL lock_timeout`,
+    // the table, COMMIT; on a failure ROLLBACK, and a connection whose
+    // ROLLBACK failed is discarded rather than returned to the pool (#416).
+    let of = ddl.max_attempts;
+    let result = ddl
+        .transactional(
+            engine,
+            |sql| log_lock_timeout_statement(table, sql),
+            |attempt| crate::emit_user_warning_always(&pass_attempt_warning(table, &attempt, of)),
+            |mut conn| async move {
+                let mut result = Ok(());
+                let statements =
+                    std::iter::once(&emission.create_sql).chain(&emission.post_create_sqls);
+                for sql in statements {
+                    crate::migrate::log_reconcile_statement(table, sql);
+                    if let Err(error) = conn.execute_sql(sql).await {
+                        result = Err(StatementError::at(sql, error));
+                        break;
+                    }
+                }
+                (conn, result)
+            },
         )
-    })?;
-    let table_result: PyResult<()> = async {
-        crate::migrate::log_reconcile_statement(table, &emission.create_sql);
-        conn.execute_sql(&emission.create_sql)
-            .await
-            .map_err(|e| create_step_error(table, "table", &emission.create_sql, e))?;
-        for post_sql in &emission.post_create_sqls {
-            crate::migrate::log_reconcile_statement(table, post_sql);
-            conn.execute_sql(post_sql)
-                .await
-                .map_err(|e| create_step_error(table, "artifact", post_sql, e))?;
+        .await;
+    result.map_err(|err| match err {
+        DdlError::LockTimeout(timeout) => pass_lock_timeout_error(table, &timeout),
+        DdlError::Failed(StatementError {
+            statement: Some(sql),
+            error,
+        }) => {
+            let step = if sql == emission.create_sql {
+                "table"
+            } else {
+                "artifact"
+            };
+            create_step_error(table, step, &sql, error)
         }
-        Ok(())
-    }
-    .await;
-
-    match table_result {
-        Ok(()) => conn.commit().await.map_err(|e| {
-            crate::errors::map_db_error(
-                &format!("Auto-migrate failed to commit the creation of table '{table}'"),
-                e,
-            )
-        }),
-        Err(err) => {
-            // A connection whose ROLLBACK failed may be stuck
-            // idle-in-transaction, and sqlx only pings on release — handing it
-            // back to the pool would serve that state to the next checkout.
-            // Same disposal `begin_transaction_with_settings` performs (#416).
-            if let Err(rollback_err) = conn.rollback().await {
-                crate::log_debug(format!(
-                    "⚠️ Ferro Engine: rollback after failed creation of '{table}' also failed: \
-                     {rollback_err} — discarding the connection"
-                ));
-                let _ = conn.detach_and_close().await;
-            }
-            Err(err)
-        }
-    }
+        DdlError::Failed(StatementError {
+            statement: None,
+            error,
+        }) => crate::errors::map_db_error(
+            &format!("Auto-migrate failed to create table '{table}'"),
+            error,
+        ),
+    })
 }
 
 /// One create-step failure, naming the table and the exact statement — the
@@ -279,18 +311,23 @@ pub fn register_model_schema(
 /// Returns an awaitable object (Python coroutine). Like `connect()`'s
 /// auto-migrate flags it runs under the run lock and refuses a database
 /// governed by ferro migrations (ADR-0038); `tracking_schemas` are the
-/// project's configured `tracking_schema`s.
+/// project's configured `tracking_schema`s, and `ddl_lock_timeout_s` its
+/// `ddl_lock_timeout` in seconds, which every `CREATE` waits for locks under
+/// on Postgres (ADR-0044; `0` disables).
 ///
 /// # Errors
 /// Returns a `PyErr` if the engine is not initialized, the database is
 /// governed by ferro migrations, or SQL execution fails.
 #[pyfunction]
-#[pyo3(signature = (using=None, tracking_schemas=Vec::new()))]
+#[pyo3(signature = (using=None, tracking_schemas=Vec::new(), ddl_lock_timeout_s=5.0))]
 pub fn create_tables(
     py: Python<'_>,
     using: Option<String>,
     tracking_schemas: Vec<String>,
+    ddl_lock_timeout_s: f64,
 ) -> PyResult<Bound<'_, PyAny>> {
+    let opts = crate::migrate::MigrateOptions::laddered(false, false)
+        .with_ddl_lock_timeout_seconds(ddl_lock_timeout_s)?;
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let engine = engine_for_connection(using)?;
         // `create_tables()` is the create pass on its own (no `updates`):
@@ -298,7 +335,7 @@ pub fn create_tables(
         // on one is reported. It shares the lock-then-guard path.
         crate::migrate::internal_migrate(
             engine,
-            crate::migrate::MigrateOptions::laddered(false, false),
+            opts,
             &tracking_schemas,
             crate::migrate::AutoMigrateDoor::CreateTables,
         )

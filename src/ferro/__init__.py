@@ -46,7 +46,12 @@ from .query import Relation, Row, Rows, now
 from .raw import Transaction, execute, fetch_all, fetch_one
 from .rowsecurity import RowPolicy, RowSecurity
 from .session import Session, current_session, engines
-from .settings import DatabaseSettings, FerroSettings, parse_ddl_lock_timeout
+from .settings import (
+    DatabaseSettings,
+    FerroSettings,
+    SettingsError,
+    parse_ddl_lock_timeout,
+)
 
 # Set up the Ferro logger
 _logger = logging.getLogger("ferro")
@@ -419,9 +424,13 @@ def _auto_migrate_settings() -> dict[str, Any]:
     """What the auto-migrate passes read from ``FerroSettings()``, as the
     Rust entry points' keyword arguments: every configured
     ``tracking_schema`` for the guard (ADR-0038), and the
-    ``ddl_lock_timeout`` the reconciliation pass waits for table locks
-    under (ADR-0044). No config file is not an error: the guard still reads
-    the catalog, and the timeout is its default."""
+    ``ddl_lock_timeout`` the create and reconciliation passes wait for table
+    locks under (ADR-0044). No config file is not an error: the guard still
+    reads the catalog, and the timeout is its default.
+
+    Raises:
+        SettingsError: the configured databases set different
+            ``ddl_lock_timeout`` values."""
     settings = FerroSettings()
     return {
         "tracking_schemas": sorted(
@@ -436,28 +445,28 @@ def _auto_migrate_settings() -> dict[str, Any]:
 
 
 def _ddl_lock_timeout_seconds(settings: FerroSettings) -> float:
-    """The ``ddl_lock_timeout`` an auto-migrate pass runs under: the one
-    database's, else the one value every database claiming a registered
-    model agrees on, else the default. A connection does not say which
-    configured database it is, so databases that disagree leave the
-    default."""
-    default = DatabaseSettings.model_fields["ddl_lock_timeout"].default
+    """The ``ddl_lock_timeout`` an auto-migrate pass runs under: the value
+    every configured database sets, or the default with no config.
+
+    ``connect()`` names no database (ADR-0036), so databases that set
+    different values leave no single answer: that is refused, naming each
+    database's value and the fix, never settled by a silent default."""
     databases = settings.databases
     if not databases:
+        default = DatabaseSettings.model_fields["ddl_lock_timeout"].default
         return parse_ddl_lock_timeout(default).total_seconds()
-    from .registry import REGISTRY
-    from .settings import _owners
-
-    claiming = {
-        owner.name: owner
-        for model in REGISTRY.models().values()
-        if isinstance(model, type)
-        for owner in _owners(databases, model)
-    } or databases
-    values = {database.ddl_lock_timeout_seconds for database in claiming.values()}
+    values = {database.ddl_lock_timeout_seconds for database in databases.values()}
     if len(values) == 1:
         return values.pop()
-    return parse_ddl_lock_timeout(default).total_seconds()
+    each = ", ".join(
+        f'`{name}` = "{database.ddl_lock_timeout}"'
+        for name, database in sorted(databases.items())
+    )
+    raise SettingsError(
+        f"{settings.config_path} sets different ddl_lock_timeout values ({each}), "
+        f"and an auto-migrate pass does not name a database to take one from; set "
+        f"the same ddl_lock_timeout on every database, or configure one database"
+    )
 
 
 async def create_tables(using=None):
@@ -480,7 +489,7 @@ async def create_tables(using=None):
     """
     _ensure_rust_registration_synced()
     return await _core_create_tables(
-        using=using, tracking_schemas=_auto_migrate_settings()["tracking_schemas"]
+        using=using, **_auto_migrate_settings()
     )
 
 

@@ -236,8 +236,9 @@ fn whole_ms(timeout: Duration) -> u128 {
 }
 
 /// The table a DDL statement names, for the attempt line: the target of
-/// `ALTER TABLE`, `DROP TABLE`, `LOCK`, `TRUNCATE`, and the `ON` table of
-/// `CREATE INDEX`, triggers and policies. `None` for anything else.
+/// `ALTER TABLE`, `DROP TABLE`, `LOCK`, `TRUNCATE`, the first `REFERENCES`
+/// table of `CREATE TABLE`, and the `ON` table of `CREATE INDEX`, triggers
+/// and policies. `None` for anything else.
 pub fn lock_target(statement: &str) -> Option<String> {
     let words = words(statement);
     let at = |i: usize| words.get(i).map(String::as_str).unwrap_or("");
@@ -262,6 +263,11 @@ pub fn lock_target(statement: &str) -> Option<String> {
     }
     if is(0, "LOCK") || is(0, "TRUNCATE") {
         return name_from(if is(1, "TABLE") { 2 } else { 1 });
+    }
+    // A new table locks nothing that exists but the tables it references.
+    if is(0, "CREATE") && is(1, "TABLE") {
+        let references = (2..words.len()).find(|&i| is(i, "REFERENCES"))?;
+        return name_from(references + 1);
     }
     if is(0, "COMMENT") && is(1, "ON") && is(2, "TABLE") {
         return name_from(3);
@@ -845,8 +851,9 @@ mod tests {
             ("ALTER TYPE \"status\" ADD VALUE IF NOT EXISTS 'x'", None),
             (
                 "CREATE TABLE \"post\" (\"a\" INT REFERENCES \"author\" ON DELETE CASCADE)",
-                None,
+                Some("author"),
             ),
+            ("CREATE TABLE \"post\" (\"a\" INT)", None),
             ("DROP INDEX CONCURRENTLY IF EXISTS \"idx_a\"", None),
             ("INSERT INTO \"author\" VALUES (1)", None),
             ("", None),

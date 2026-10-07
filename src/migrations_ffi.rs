@@ -442,7 +442,8 @@ pub fn _write_record(
 /// # Errors
 /// `RunRefused` when the lock was lost or the file changed since it was
 /// planned; `ValueError` for a negative or non-finite timeout; a database
-/// error writing a record.
+/// error writing a record; the first exception `on_attempt` raised, once
+/// the step has settled its record.
 #[pyfunction]
 #[pyo3(name = "_execute_sql_step")]
 #[pyo3(signature = (using, planned_step_json, sql, record_json, tracking_schema=None, lock=None, direction_json=None, ddl_lock_timeout_s=5.0, on_attempt=None))]
@@ -475,6 +476,10 @@ pub fn _execute_sql_step(
                 .verify()
                 .await?;
         }
+        // A callback that raises is the caller's bug: its first error is
+        // raised once the step has settled its record (stopping mid-step
+        // would leave the record started with nothing running).
+        let mut callback_error: Option<PyErr> = None;
         let outcome = crate::run::execute_sql_step(
             &engine,
             tracking_schema.as_deref(),
@@ -484,17 +489,18 @@ pub fn _execute_sql_step(
             direction,
             &ddl,
             |attempt| {
-                if let Some(callback) = &on_attempt {
+                if let Some(callback) = &on_attempt
+                    && callback_error.is_none()
+                {
                     let text = attempt.describe(ddl.max_attempts);
-                    Python::attach(|py| {
-                        if let Err(err) = callback.call1(py, (text,)) {
-                            err.print(py);
-                        }
-                    });
+                    callback_error = Python::attach(|py| callback.call1(py, (text,)).err());
                 }
             },
         )
         .await?;
+        if let Some(err) = callback_error {
+            return Err(err);
+        }
         to_json(&outcome)
     })
 }

@@ -126,9 +126,9 @@ pub struct MigrateOptions {
     pub updates: bool,
     /// Drop live columns that no longer exist on the model. Implies `updates`.
     pub destructive: bool,
-    /// How long each reconciliation statement waits for a table lock on
-    /// Postgres before its table's plan is retried (ADR-0044); `None`
-    /// waits without limit.
+    /// How long each statement of the create and reconciliation passes
+    /// waits for a table lock on Postgres before its unit is retried
+    /// (ADR-0044); `None` waits without limit.
     pub ddl_lock_timeout: Option<Duration>,
 }
 
@@ -199,7 +199,7 @@ pub(crate) fn log_reconcile_statement(table_lower: &str, sql: &str) {
 /// pass's DDL (AGENTS.md § I-1) reads exactly what it did before.
 const LOCK_TIMEOUT_LOG_PREFIX: &str = "Ferro Engine: auto-migrate lock timeout on";
 
-fn log_lock_timeout_statement(subject: &str, sql: &str) {
+pub(crate) fn log_lock_timeout_statement(subject: &str, sql: &str) {
     crate::log_debug(format!("{LOCK_TIMEOUT_LOG_PREFIX} '{subject}': {sql}"));
 }
 
@@ -244,16 +244,23 @@ impl DdlFailure for PassFailure {
     }
 }
 
-/// The warning the pass raises for each attempt that timed out waiting for
-/// a lock: `reconciling 'author': waiting for a lock on "author" (attempt 1
-/// of 10, retry in 1s)`.
-fn pass_attempt_warning(subject: &str, attempt: &crate::ddl_exec::Attempt, of: u8) -> String {
-    format!("reconciling '{subject}': {}", attempt.describe(of))
+/// The warning the create and reconciliation passes raise for each attempt
+/// that timed out waiting for a lock: `migrating 'author': waiting for a lock
+/// on "author" (attempt 1 of 10, retry in 1s)`.
+pub(crate) fn pass_attempt_warning(
+    subject: &str,
+    attempt: &crate::ddl_exec::Attempt,
+    of: u8,
+) -> String {
+    format!("migrating '{subject}': {}", attempt.describe(of))
 }
 
-/// The error for a reconciliation unit that timed out on every attempt:
-/// `OperationalError` naming `ddl_lock_timeout`.
-fn pass_lock_timeout_error(subject: &str, timeout: &crate::ddl_exec::DdlLockTimeout) -> PyErr {
+/// The error for a create or reconciliation unit that timed out on every
+/// attempt: `OperationalError` naming `ddl_lock_timeout`.
+pub(crate) fn pass_lock_timeout_error(
+    subject: &str,
+    timeout: &crate::ddl_exec::DdlLockTimeout,
+) -> PyErr {
     crate::ddl_exec::lock_timeout_error(&format!(
         "Auto-migrate DDL failed for '{subject}': {timeout}"
     ))
@@ -617,7 +624,9 @@ pub async fn internal_migrate(
 /// safely — rendering runs before anything executes, so such a plan executes
 /// nothing.
 async fn run_passes(engine: Arc<EngineHandle>, opts: MigrateOptions) -> PyResult<()> {
-    let tables_before_create = internal_create_tables(engine.clone(), opts.updates).await?;
+    // One lock-timeout policy for every DDL statement of both passes (ADR-0044).
+    let ddl = DdlExecutor::new(opts.ddl_lock_timeout);
+    let tables_before_create = internal_create_tables(engine.clone(), opts.updates, &ddl).await?;
     if !opts.updates {
         return Ok(());
     }
@@ -680,7 +689,6 @@ async fn run_passes(engine: Arc<EngineHandle>, opts: MigrateOptions) -> PyResult
         }
     }
 
-    let ddl = DdlExecutor::new(opts.ddl_lock_timeout);
     let mut warnings = plan.warnings.clone();
     let mut ddl_ran = false;
     let mut index = 0;

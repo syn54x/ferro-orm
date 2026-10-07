@@ -88,17 +88,22 @@ def _postgres_only(db) -> None:
 
 
 class Holder:
-    """Another session holding ``ACCESS EXCLUSIVE`` on a table, as a long
-    query would hold a lock a DDL statement needs. Without ``seconds`` it
-    holds until the ``with`` block ends, or ``SAFETY_HOLD`` seconds, so a
-    statement that never gives up fails the test instead of hanging it."""
+    """Another session holding ``ACCESS EXCLUSIVE`` on a table (or, with
+    ``sql``, whatever lock that statement takes, such as an uncommitted
+    write), as a long query would hold a lock a DDL statement needs.
+    Without ``seconds`` it holds until the ``with`` block ends, or
+    ``SAFETY_HOLD`` seconds, so a statement that never gives up fails the
+    test instead of hanging it."""
 
     SAFETY_HOLD = 30.0
 
-    def __init__(self, db, table: str, seconds: float | None = None):
+    def __init__(
+        self, db, table: str, seconds: float | None = None, sql: str | None = None
+    ):
         self.db = db
         self.table = table
         self.seconds = seconds
+        self.sql = sql or f'LOCK TABLE "{table}" IN ACCESS EXCLUSIVE MODE'
         self.locked = threading.Event()
         self.release = threading.Event()
         self.thread = threading.Thread(target=self._hold, daemon=True)
@@ -109,7 +114,7 @@ class Holder:
         conn = psycopg.connect(self.db.base)
         try:
             conn.execute(f'SET search_path TO "{self.db.schema}"')
-            conn.execute(f'LOCK TABLE "{self.table}" IN ACCESS EXCLUSIVE MODE')
+            conn.execute(self.sql)
             self.locked.set()
             self.release.wait(self.seconds or self.SAFETY_HOLD)
             conn.commit()
@@ -403,7 +408,7 @@ async def test_the_pass_retries_behind_a_held_lock_and_warns_each_attempt(
 
     waiting = [str(w.message) for w in caught if "waiting for a lock" in str(w.message)]
     assert waiting == [
-        "ferro auto-migrate: reconciling 'author': waiting for a lock on \"author\" "
+        "ferro auto-migrate: migrating 'author': waiting for a lock on \"author\" "
         "(attempt 1 of 10, retry in 1s)"
     ]
     assert "slug" in {
@@ -431,3 +436,172 @@ async def test_the_pass_fails_loudly_naming_ddl_lock_timeout(
     assert "after 10 attempts" in str(exc.value)
     assert "ddl_lock_timeout" in str(exc.value)
     assert exc.value.sqlstate == "55P03"
+
+
+async def test_a_failed_no_transaction_step_resets_the_timeout_on_its_connection(
+    project, pkg, db
+):
+    _postgres_only(db)
+    from ferro.raw import fetch_all
+
+    settings, database = await _project(project, pkg, db, 'ddl_lock_timeout = "1s"\n')
+    sql_step(
+        project,
+        "broken",
+        '-- ferro: no-transaction\nSELECT 1;\nINSERT INTO "missing" VALUES (1);\n',
+    )
+    # One pooled connection: the step's, read back after it failed.
+    await ferro.connect(db.url, name="one", pool=ferro.PoolConfig(max_connections=1))
+
+    report = await runner.up(settings, database, using="one")
+
+    assert report.refusal is not None and '"missing"' in report.refusal
+    rows = await fetch_all("SELECT current_setting('lock_timeout') AS v", using="one")
+    assert rows == [{"v": "0"}]
+
+
+async def test_a_progress_callback_that_raises_is_raised_after_the_step_settles(
+    project, pkg, db
+):
+    _postgres_only(db)
+    settings, database = await _project(project, pkg, db, 'ddl_lock_timeout = "1s"\n')
+    sql_step(project, "add_slug", ADD_SLUG)
+
+    def progress(line: str) -> None:
+        if "waiting for a lock" in line:
+            raise RuntimeError("the progress sink broke")
+
+    with Holder(db, "author", seconds=1.5), pytest.raises(RuntimeError, match="sink"):
+        await runner.up(settings, database, url=db.url, progress=progress)
+
+    [(finished, failed, error, _)] = _record(db, 3)
+    assert finished is not None and failed is None and error is None
+
+
+# -- the create pass ----------------------------------------------------------------------
+
+
+def _live_parent(db) -> None:
+    db.execute('CREATE TABLE "parent" ("id" integer PRIMARY KEY, "name" text NOT NULL)')
+
+
+PARENT_AND_CHILD = """
+class Parent(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    name: str
+    children: Relation[list["Child"]] = BackRef()
+
+
+class Child(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    parent: Annotated[Parent, ForeignKey(related_name="children")]
+"""
+
+
+def _declare_parent_and_child(project, pkg) -> None:
+    """``Parent`` (live already) and a new ``Child`` referencing it, imported
+    from a module so the forward references resolve."""
+    import importlib
+    import sys
+
+    write_models(project, pkg, PARENT_AND_CHILD)
+    sys.path.insert(0, str(project))
+    importlib.import_module(f"{pkg}.models")
+
+
+OPEN_WRITE = 'INSERT INTO "parent" ("id", "name") VALUES (1, \'held\')'
+
+
+async def test_a_new_table_referencing_a_written_parent_retries_then_is_created(
+    project, pkg, db, ferro_log
+):
+    _postgres_only(db)
+    configure(project, pkg, db.backend, 'ddl_lock_timeout = "1s"\n')
+    _live_parent(db)
+    _declare_parent_and_child(project, pkg)
+
+    # An open write on `parent` conflicts with the lock `REFERENCES "parent"`
+    # takes: the CREATE TABLE gives up instead of queueing every query on it.
+    with (
+        Holder(db, "parent", seconds=1.5, sql=OPEN_WRITE),
+        pytest.warns(UserWarning) as caught,
+    ):
+        await ferro.connect(db.url, auto_migrate=True)
+
+    waiting = [str(w.message) for w in caught if "waiting for a lock" in str(w.message)]
+    assert waiting == [
+        "ferro auto-migrate: migrating 'child': waiting for a lock on \"parent\" "
+        "(attempt 1 of 10, retry in 1s)"
+    ]
+    assert "child" in db.tables()
+    set_lines = [
+        m for m in ferro_log if m.startswith("Ferro Engine: auto-migrate lock")
+    ]
+    assert set_lines[0] == (
+        "Ferro Engine: auto-migrate lock timeout on 'child': "
+        "SET LOCAL lock_timeout = '1000ms'"
+    )
+
+
+async def test_zero_creates_the_new_table_once_the_write_commits_without_a_set(
+    project, pkg, db, ferro_log
+):
+    _postgres_only(db)
+    configure(project, pkg, db.backend, 'ddl_lock_timeout = "0"\n')
+    _live_parent(db)
+    _declare_parent_and_child(project, pkg)
+
+    with Holder(db, "parent", seconds=1.5, sql=OPEN_WRITE):
+        await ferro.connect(db.url, auto_migrate=True)
+
+    assert "child" in db.tables()
+    assert not [m for m in ferro_log if "lock_timeout" in m]
+
+
+# -- which database's timeout ------------------------------------------------------------
+
+
+def _two_databases(project, pkg, a: str, b: str) -> None:
+    (project / "ferro.toml").write_text(
+        f'[databases.a]\nmodels = ["{pkg}.a"]\ndialects = ["sqlite", "postgres"]\n'
+        f'ddl_lock_timeout = "{a}"\n\n'
+        f'[databases.b]\nmodels = ["{pkg}.b"]\ndialects = ["sqlite", "postgres"]\n'
+        f'ddl_lock_timeout = "{b}"\n'
+    )
+
+
+async def test_databases_that_disagree_on_the_timeout_are_refused_naming_each(
+    project, pkg, db
+):
+    from ferro.settings import SettingsError
+
+    _two_databases(project, pkg, "0", "30s")
+    _declare_author()
+
+    with pytest.raises(SettingsError) as refused:
+        await ferro.connect(db.url, migrate_updates=True)
+
+    message = str(refused.value)
+    assert '`a` = "0"' in message and '`b` = "30s"' in message
+    assert (
+        "set the same ddl_lock_timeout on every database, or configure one database"
+    ) in message
+    assert "author" not in db.tables()
+
+
+async def test_databases_that_agree_on_the_timeout_run_under_it(
+    project, pkg, db, ferro_log
+):
+    _two_databases(project, pkg, "2s", "2s")
+    _live_author(db)
+    _declare_author()
+
+    await ferro.connect(db.url, migrate_updates=True)
+
+    if db.backend == "postgres":
+        assert (
+            "Ferro Engine: auto-migrate lock timeout on 'author': "
+            "SET LOCAL lock_timeout = '2000ms'"
+        ) in ferro_log
+    else:
+        assert not [m for m in ferro_log if "lock_timeout" in m]
