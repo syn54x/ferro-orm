@@ -286,7 +286,7 @@ def test_a_column_the_migration_drops_is_dropped_by_a_contract_after_the_step(
     assert plan_against(db, snapshot(project, 2), snapshot(project, 1)) == []
 
 
-def test_a_sql_step_follows_the_data_step_whether_or_not_the_models_changed(
+def test_a_sql_step_precedes_the_data_step_whether_or_not_the_models_changed(
     project, pkg, db
 ):
     configure(project, pkg, db.backend)
@@ -294,7 +294,7 @@ def test_a_sql_step_follows_the_data_step_whether_or_not_the_models_changed(
     new("create_author")
     backend = db.backend
 
-    # The models drop `name`: the data step, the contract, then the SQL step.
+    # The models drop `name`: the SQL step, the data step, then the contract.
     write_models(project, pkg, WITH_SLUG.replace("    name: str\n", ""))
     new("slugs", "--data-step", "Author", "--sql-step", "audit")
     assert sorted(
@@ -302,19 +302,22 @@ def test_a_sql_step_follows_the_data_step_whether_or_not_the_models_changed(
     ) == [
         f"01_schema.down.{backend}.sql",
         f"01_schema.up.{backend}.sql",
-        "02_backfill_author.py",
-        f"03_contract.down.{backend}.sql",
-        f"03_contract.up.{backend}.sql",
-        "04_audit.down.sql",
-        "04_audit.up.sql",
+        "02_audit.down.sql",
+        "02_audit.up.sql",
+        "03_backfill_author.py",
+        f"04_contract.down.{backend}.sql",
+        f"04_contract.up.{backend}.sql",
         "ir.json",
     ]
+    assert (migrations(project) / "0002_slugs" / "02_audit.up.sql").read_text() == (
+        "-- write this step\n"
+    )
 
-    # The models change nothing: the data step, then the SQL step.
+    # The models change nothing: the SQL step, then the data step.
     new("again", "--data-step", "Author", "--sql-step", "audit")
     assert sorted(
         path.name for path in (migrations(project) / "0003_again").iterdir()
-    ) == ["01_backfill_author.py", "02_audit.down.sql", "02_audit.up.sql", "ir.json"]
+    ) == ["01_audit.down.sql", "01_audit.up.sql", "02_backfill_author.py", "ir.json"]
 
 
 def test_a_nested_transaction_in_a_step_is_a_savepoint(project, pkg, db):

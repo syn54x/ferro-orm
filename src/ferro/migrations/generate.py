@@ -41,6 +41,7 @@ from .scaffold import data_step as scaffold_data_step
 from .steps import StepRefused, scan_todos, unwritten
 from .layout import (
     SNAPSHOT_FILE,
+    SQL_STEP_PLACEHOLDER,
     GeneratedMigration,
     GeneratedStep,
     MigrationsDirectoryError,
@@ -229,14 +230,19 @@ def prepare(
         target = declared_modelset(database)
         try:
             # The generator decides the guard (ADR-0037), refusing a
-            # --no-backfill it cannot honour, and places a --data-step before
-            # the contract that drops what the step may read (ADR-0025).
+            # --no-backfill it cannot honour, and places the hand steps: a
+            # --data-step before the contract that drops what the step may
+            # read (ADR-0025), a --sql-step right before it.
             raw = _generate_migration(
                 parent,
                 json.dumps(target),
                 list(database.dialects),
                 options_json=json.dumps(
-                    {"no_backfill": list(no_backfill), "data_step": data_step}
+                    {
+                        "no_backfill": list(no_backfill),
+                        "data_step": data_step,
+                        "sql_step": sql_step,
+                    }
                 ),
             )
         except ValueError as err:
@@ -249,11 +255,13 @@ def prepare(
             raise MigrationsDirectoryError(
                 "a hand-written step needs a migration to follow; there is none"
             )
-        # No schema change: a full copy of the parent's snapshot, and the
-        # data step is the migration's first step.
+        # No schema change: a full copy of the parent's snapshot, and the hand
+        # steps alone, the SQL step first.
         migration = GeneratedMigration(
             number=number, name=name, steps=(), snapshot_json=_store_snapshot(parent)
         )
+        if sql_step is not None:
+            migration = migration.with_sql_step(sql_step)
         if data_step is not None:
             model = _snapshot_model(migration.snapshot_json, data_step)
             migration = migration.with_data_step(
@@ -267,8 +275,6 @@ def prepare(
             generated,
             directory / TEMPLATES_DIR,
         )
-    if sql_step is not None:
-        migration = migration.with_sql_step(sql_step)
     return migration
 
 
@@ -298,6 +304,21 @@ def _with_data_steps(
     steps: list[GeneratedStep] = []
     notes: list[str] = []
     for step in migration.steps:
+        if step.kind == "portable_sql":
+            # A --sql-step the generator placed: its placeholder files.
+            stem = f"{step.ordinal:02d}_{step.name}"
+            steps.append(
+                GeneratedStep(
+                    step.ordinal,
+                    step.name,
+                    "portable_sql",
+                    {
+                        f"{stem}.up.sql": SQL_STEP_PLACEHOLDER,
+                        f"{stem}.down.sql": SQL_STEP_PLACEHOLDER,
+                    },
+                )
+            )
+            continue
         hand = by_ordinal[step.ordinal].get("hand_model")
         if hand is not None:
             text = scaffold_data_step(hand, template_dir=template_dir)

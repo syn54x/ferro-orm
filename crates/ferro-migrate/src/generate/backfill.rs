@@ -39,8 +39,7 @@
 use super::columns::{self, Phase, PlanContext, PlanDirection};
 use super::staging::StagedConstraint;
 use super::{
-    GenerateError, GeneratedStep, Rendering, downs, enums, find_model, rebuild, staging,
-    step_text,
+    GenerateError, GeneratedStep, Rendering, downs, enums, find_model, rebuild, staging, step_text,
 };
 use crate::directory::{Headers, StepDialect, StepKind};
 use crate::order::order_by_dependencies;

@@ -658,6 +658,11 @@ pub struct GenerateOptions {
     /// placed after every generated data step and before the contract.
     #[serde(default)]
     pub data_step: Option<String>,
+    /// `--sql-step <name>`: a portable SQL step a person writes, placed right
+    /// before the `--data-step` (which it usually prepares), or last when
+    /// there is none.
+    #[serde(default)]
+    pub sql_step: Option<String>,
 }
 
 impl GenerateOptions {
@@ -710,6 +715,20 @@ pub fn generate_with(
         .as_deref()
         .map(|model| backfill::hand_data_step(target, model))
         .transpose()?;
+    let sql = options.sql_step.as_ref().map(|name| GeneratedStep {
+        ordinal: 0,
+        name: name.clone(),
+        kind: StepKind::PortableSql,
+        renderings: BTreeMap::new(),
+        data: None,
+        hand_model: None,
+    });
+    // A hand SQL step goes right before a hand data step, or last.
+    let (sql_first, sql_last) = if hand.is_some() {
+        (sql, None)
+    } else {
+        (None, sql)
+    };
     let empty = empty_modelset(target);
     let parent_ir = parent.map(|snapshot| &snapshot.ir).unwrap_or(&empty);
     // Declared renames (ADR-0032): the planner puts them first; every other
@@ -894,11 +913,13 @@ pub fn generate_with(
         if !staged.is_empty() {
             steps.push(staging::validate_step(&staged, dialects));
         }
+        steps.extend(sql_first);
         steps.extend(hand);
     } else {
         // The contract validates what the expand staged (ADR-0043): no
         // separate validate step.
         steps.extend(backfill::add_constraint_step(&demands, dialects));
+        steps.extend(sql_first);
         steps.extend(hand);
         steps.push(backfill::contract_step(
             &demands,
@@ -910,6 +931,7 @@ pub fn generate_with(
             dialects,
         )?);
     }
+    steps.extend(sql_last);
     for (ordinal, step) in (1u8..).zip(&mut steps) {
         step.ordinal = ordinal;
     }
@@ -2885,6 +2907,45 @@ mod tests {
         );
         assert!(migration.steps[1].data.is_some());
         assert_eq!(migration.steps[3].hand_model.as_deref(), Some("Author"));
+        // A hand SQL step goes right before the hand data step; with none, it
+        // is last.
+        let both = GenerateOptions {
+            sql_step: Some("audit".into()),
+            ..options.clone()
+        };
+        let migration = generate_with(Some(&parent), &ir(vec![slug_for_name()]), &BOTH, &both)
+            .expect("ok")
+            .expect("a change");
+        assert_eq!(
+            step_names(&migration),
+            [
+                "01_expand",
+                "02_backfill_author",
+                "03_add_constraint",
+                "04_audit",
+                "05_backfill_author",
+                "06_contract"
+            ]
+        );
+        assert_eq!(migration.steps[3].kind, StepKind::PortableSql);
+        assert!(migration.steps[3].renderings.is_empty());
+        let sql_only = GenerateOptions {
+            sql_step: Some("audit".into()),
+            ..GenerateOptions::default()
+        };
+        let migration = generate_with(Some(&parent), &ir(vec![slug_for_name()]), &BOTH, &sql_only)
+            .expect("ok")
+            .expect("a change");
+        assert_eq!(
+            step_names(&migration),
+            [
+                "01_expand",
+                "02_backfill_author",
+                "03_add_constraint",
+                "04_contract",
+                "05_audit"
+            ]
+        );
     }
 
     #[test]
