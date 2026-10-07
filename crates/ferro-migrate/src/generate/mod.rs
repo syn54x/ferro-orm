@@ -33,6 +33,7 @@ pub mod downs;
 pub mod enums;
 pub mod rebuild;
 pub mod renames;
+pub mod row_security;
 pub mod staging;
 
 use crate::directory::{DirectoryError, Headers, MigrationsDir, StepDialect, StepKind};
@@ -332,20 +333,25 @@ const DESTRUCTIVE: PlanOptions = PlanOptions { destructive: true };
 
 /// Plan `old → new` on `dialect` as two declared snapshots: every drop is
 /// planned (a dropped model is always rendered, marked destructive; review is
-/// the gate).
+/// the gate), and row security `old` declares and `new` does not is torn
+/// down ([`row_security::with_teardown`]).
 fn plan(
     old: &IrEnvelope<SchemaIrPayload>,
     new: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
 ) -> MigrationPlan {
-    plan_from_ir(old, new, dialect, &LiveFacts::declared(), DESTRUCTIVE)
+    let mut plan = plan_from_ir(old, new, dialect, &LiveFacts::declared(), DESTRUCTIVE);
+    plan.operations = row_security::with_teardown(plan.operations, old, new, dialect);
+    plan
 }
 
 /// Every warning `plan` raises that planning `standing → standing` does not
 /// and that nothing answers: the reports this change caused, not the ones the
 /// models always raise. A leftover CHECK's report is answered by the plan's
-/// drop of it; `answered` names the rest (a down's report of a label the up
-/// added, which the `labels` step's down already says stays).
+/// drop of it, a row-security teardown's by the teardown itself
+/// ([`row_security::answered_warnings`]); `answered` names the rest (a down's
+/// report of a label the up added, which the `labels` step's down already
+/// says stays).
 fn change_warnings(
     plan: &MigrationPlan,
     standing: &MigrationPlan,
@@ -360,6 +366,7 @@ fn change_warnings(
     let answered: BTreeSet<String> = dropped_checks
         .iter()
         .filter_map(|(table, names)| extra_check_names_warning(table, names))
+        .chain(row_security::answered_warnings(&plan.operations))
         .chain(answered_elsewhere.iter().cloned())
         .collect();
     let already: BTreeSet<&String> = standing
@@ -1031,7 +1038,8 @@ mod tests {
         after: &IrEnvelope<SchemaIrPayload>,
         dialect: Dialect,
     ) -> Vec<String> {
-        render_plan(&plan(before, after, dialect), before, after, dialect)
+        let pass = plan_from_ir(before, after, dialect, &LiveFacts::declared(), DESTRUCTIVE);
+        render_plan(&pass, before, after, dialect)
             .expect("render")
             .into_iter()
             .flat_map(|rendered| rendered.statements)
@@ -2368,6 +2376,294 @@ mod tests {
         // dialect: the SQLite row-security warning is standing, not a change.
         let parent = snapshot_of(&ir(vec![guarded.clone()]), None);
         assert_eq!(generate(Some(&parent), &ir(vec![guarded]), &BOTH), Ok(None));
+    }
+
+    /// A tenant policy on `order`, reading `setting`.
+    pub(super) fn tenant_policy(setting: &str) -> SchemaRowPolicy {
+        SchemaRowPolicy {
+            name: "rls_order_tenant_id".into(),
+            command: RowPolicyCommand::All,
+            restrictive: false,
+            expr: RowPolicyExpr::Setting {
+                column: "tenant_id".into(),
+                setting: setting.into(),
+            },
+        }
+    }
+
+    /// `order` with `policies` under a row-security declaration, or none.
+    pub(super) fn order(declared: Option<(bool, Vec<SchemaRowPolicy>)>) -> SchemaModel {
+        SchemaModel {
+            row_security: declared.map(|(force, policies)| SchemaRowSecurity { force, policies }),
+            ..model(
+                "Order",
+                vec![pk(), column("tenant_id", "uuid"), column("owner", "string")],
+            )
+        }
+    }
+
+    fn owner_policy() -> SchemaRowPolicy {
+        SchemaRowPolicy {
+            name: "rls_order_owner".into(),
+            command: RowPolicyCommand::Select,
+            restrictive: true,
+            expr: RowPolicyExpr::Setting {
+                column: "owner".into(),
+                setting: "app.owner".into(),
+            },
+        }
+    }
+
+    fn enable() -> String {
+        ferro_ddl_lowering::render_enable_row_security("order")
+    }
+    fn force() -> String {
+        ferro_ddl_lowering::render_force_row_security("order")
+    }
+    fn no_force() -> String {
+        ferro_ddl_lowering::render_no_force_row_security("order")
+    }
+    fn disable() -> String {
+        ferro_ddl_lowering::render_disable_row_security("order")
+    }
+    fn create_policy(model: &SchemaModel, policy: &SchemaRowPolicy) -> String {
+        ferro_ddl_lowering::render_create_row_policy(model, policy).expect("policy")
+    }
+    fn drop_policy(name: &str) -> String {
+        ferro_ddl_lowering::render_drop_row_policy("order", name)
+    }
+
+    /// The one schema step of `before → after` on both dialects: the Postgres
+    /// up and down equal `up` and `down`, the up is the pass's own statements
+    /// for the same change, and SQLite has nothing to do either way.
+    fn assert_row_security_step(
+        before: SchemaModel,
+        after: SchemaModel,
+        up: &[String],
+        down: &[String],
+    ) {
+        let migration = edit(vec![before.clone()], vec![after.clone()], &BOTH);
+        assert_eq!(step_names(&migration), ["01_schema"]);
+        let pg = step(&migration, "01_schema", Dialect::Postgres);
+        assert_eq!(pg.up, file(up, ""));
+        assert_eq!(pg.down, file(down, ""));
+        assert_eq!(pg.headers, Headers::default());
+        assert_eq!(pg.down_headers, Headers::default());
+        let sqlite = step(&migration, "01_schema", Dialect::Sqlite);
+        assert_eq!(sqlite.up, NOT_APPLICABLE);
+        assert_eq!(sqlite.down, NOT_APPLICABLE);
+        // Every statement is the pass's for the same declaration (I-1 15–16).
+        let (from, to) = (ir(vec![before.clone()]), ir(vec![after.clone()]));
+        let mut pass_up = pass(&from, &to, Dialect::Postgres);
+        pass_up.extend(teardown_pass_cannot_witness(&before, &after));
+        assert_eq!(pass_up, up);
+        assert_eq!(
+            row_security::render(&plan(&from, &to, Dialect::Postgres).operations, &from, &to)
+                .expect("render"),
+            up
+        );
+        // Applied, the target is no schema change; nor is the parent after
+        // its down.
+        let parent = snapshot_of(&to, None);
+        assert_eq!(generate(Some(&parent), &to, &BOTH), Ok(None));
+        // A SQLite-only project has no step to write at all.
+        assert_eq!(
+            generate(Some(&snapshot_of(&from, None)), &to, &[Dialect::Sqlite]),
+            Ok(None)
+        );
+    }
+
+    /// The flag teardown a file removing a policy-less declaration owes and the
+    /// pass, which reads ownership off ferro-named policies, does not plan.
+    fn teardown_pass_cannot_witness(before: &SchemaModel, after: &SchemaModel) -> Vec<String> {
+        match (&before.row_security, &after.row_security) {
+            (Some(declared), None) if declared.policies.is_empty() => {
+                let mut out = Vec::new();
+                if declared.force {
+                    out.push(no_force());
+                }
+                out.push(disable());
+                out
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    #[test]
+    fn e1_row_security_added_to_a_table_enables_forces_creates_and_its_down_tears_it_down() {
+        let after = order(Some((true, vec![tenant_policy("app.tenant")])));
+        let up = [
+            enable(),
+            force(),
+            create_policy(&after, &tenant_policy("app.tenant")),
+        ];
+        assert!(up[2].contains(
+            "USING (\"tenant_id\" = NULLIF(current_setting('app.tenant', true), '')::uuid)"
+        ));
+        assert_row_security_step(
+            order(None),
+            after,
+            &up,
+            &[drop_policy("rls_order_tenant_id"), no_force(), disable()],
+        );
+        // Without FORCE there is no FORCE to clear.
+        let unforced = order(Some((false, vec![tenant_policy("app.tenant")])));
+        assert_row_security_step(
+            order(None),
+            unforced.clone(),
+            &[
+                enable(),
+                create_policy(&unforced, &tenant_policy("app.tenant")),
+            ],
+            &[drop_policy("rls_order_tenant_id"), disable()],
+        );
+    }
+
+    #[test]
+    fn e2_a_changed_policy_body_is_dropped_and_recreated_and_its_down_restores_the_old_body() {
+        let before = order(Some((true, vec![tenant_policy("app.tenant")])));
+        let after = order(Some((true, vec![tenant_policy("app.tenant_id")])));
+        assert_row_security_step(
+            before.clone(),
+            after.clone(),
+            &[
+                drop_policy("rls_order_tenant_id"),
+                create_policy(&after, &tenant_policy("app.tenant_id")),
+            ],
+            &[
+                drop_policy("rls_order_tenant_id"),
+                create_policy(&before, &tenant_policy("app.tenant")),
+            ],
+        );
+    }
+
+    #[test]
+    fn e3_row_security_removed_is_dropped_and_torn_down_and_its_down_recreates_it() {
+        let before = order(Some((true, vec![tenant_policy("app.tenant")])));
+        assert_row_security_step(
+            before.clone(),
+            order(None),
+            &[drop_policy("rls_order_tenant_id"), no_force(), disable()],
+            &[
+                enable(),
+                force(),
+                create_policy(&before, &tenant_policy("app.tenant")),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_second_policy_on_a_table_with_row_security_is_its_create_policy_alone() {
+        let before = order(Some((true, vec![tenant_policy("app.tenant")])));
+        let after = order(Some((
+            true,
+            vec![tenant_policy("app.tenant"), owner_policy()],
+        )));
+        assert_row_security_step(
+            before,
+            after.clone(),
+            &[create_policy(&after, &owner_policy())],
+            &[drop_policy("rls_order_owner")],
+        );
+    }
+
+    #[test]
+    fn a_declaration_with_no_policy_is_still_torn_down_by_the_migration_that_introduced_it() {
+        // No ferro-named policy witnesses the flags, which the pass would
+        // leave alone; the parent snapshot shows the migration set them.
+        let bare = order(Some((true, Vec::new())));
+        assert_row_security_step(
+            order(None),
+            bare.clone(),
+            &[enable(), force()],
+            &[no_force(), disable()],
+        );
+        assert_row_security_step(
+            bare,
+            order(None),
+            &[no_force(), disable()],
+            &[enable(), force()],
+        );
+    }
+
+    #[test]
+    fn an_edited_raw_policy_body_is_refused_not_written() {
+        // The planner reads a raw body that differs as unverifiable (ADR-0019)
+        // and plans no op for it: `new` refuses rather than write a migration
+        // that leaves the old body standing.
+        let raw = |body: &str| SchemaRowPolicy {
+            name: "rls_order_raw".into(),
+            command: RowPolicyCommand::Select,
+            restrictive: false,
+            expr: RowPolicyExpr::Raw {
+                using: Some(body.into()),
+                with_check: None,
+            },
+        };
+        let before = order(Some((true, vec![raw("owner = 'a'")])));
+        let after = order(Some((true, vec![raw("owner = 'b'")])));
+        let err = refusal(vec![before], vec![after], &BOTH);
+        assert!(err.starts_with("not generated yet:"), "{err}");
+        assert!(err.contains("'rls_order_raw'"), "{err}");
+    }
+
+    #[test]
+    fn row_security_lands_after_the_tables_column_changes_and_its_down_before_their_reverse() {
+        let mut after = order(Some((true, vec![tenant_policy("app.tenant")])));
+        after.columns.push(optional("note", "string"));
+        let migration = edit(vec![order(None)], vec![after.clone()], &[Dialect::Postgres]);
+        let pg = step(&migration, "01_schema", Dialect::Postgres);
+        assert_eq!(
+            pg.up,
+            file(
+                &[
+                    "ALTER TABLE \"order\" ADD COLUMN \"note\" varchar".to_string(),
+                    enable(),
+                    force(),
+                    create_policy(&after, &tenant_policy("app.tenant")),
+                ],
+                ""
+            )
+        );
+        // Its down tears the row security down before dropping the column.
+        assert_eq!(
+            pg.down,
+            file(
+                &[
+                    drop_policy("rls_order_tenant_id"),
+                    no_force(),
+                    disable(),
+                    "ALTER TABLE \"order\" DROP COLUMN \"note\"".to_string(),
+                ],
+                ""
+            )
+        );
+    }
+
+    #[test]
+    fn b1_a_new_table_with_row_security_creates_it_after_the_table_and_drops_only_the_table() {
+        let after = order(Some((true, vec![tenant_policy("app.tenant")])));
+        let migration = edit(vec![], vec![after.clone()], &BOTH);
+        let pg = step(&migration, "01_schema", Dialect::Postgres);
+        let create = create_pass(&after, Dialect::Postgres);
+        assert_eq!(pg.up, file(&create, ""));
+        let table_at = create
+            .iter()
+            .position(|s| s.starts_with("CREATE TABLE"))
+            .expect("table");
+        assert_eq!(
+            create[table_at + 1..],
+            [
+                enable(),
+                force(),
+                create_policy(&after, &tenant_policy("app.tenant"))
+            ]
+        );
+        assert_eq!(pg.up.matches("CREATE POLICY").count(), 1, "{}", pg.up);
+        assert_eq!(pg.down, "DROP TABLE \"order\";\n");
+        let sqlite = step(&migration, "01_schema", Dialect::Sqlite);
+        assert!(!sqlite.up.contains("POLICY"), "{}", sqlite.up);
+        assert_eq!(sqlite.down, "DROP TABLE \"order\";\n");
     }
 
     #[test]
