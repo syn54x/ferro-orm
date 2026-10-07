@@ -33,7 +33,9 @@ use super::rebuild;
 use super::renames;
 use super::{DESTRUCTIVE, GenerateError, refuse_unrendered, step_text};
 use crate::directory::Headers;
-use crate::plan::{Hint, rename_ops, renamed_snapshot, renamed_table, reverse_hints};
+use crate::plan::{
+    Hint, rename_ops, renamed_snapshot, renamed_table, reverse_hints, storage_hints,
+};
 use crate::render::render_plan_in;
 use crate::{Dialect, LiveFacts, MigrationOp, MigrationPlan, RenderedOp, plan_from_ir};
 use ferro_ddl_lowering::ConstraintMode;
@@ -323,6 +325,10 @@ pub fn render_down(
     let renamed_before = renamed_snapshot(before, hints);
     let reverse = reverse_hints(hints);
     let renamed_after = renamed_snapshot(after, &reverse);
+    // The side the down is planned from: on SQLite with its labels as the
+    // step leaves them, so a column the label renames widened is narrowed back
+    // ([`storage_hints`]).
+    let planned_after = renamed_snapshot(after, &storage_hints(&reverse, dialect));
     let (up_structural, up_rest): (Vec<MigrationOp>, Vec<MigrationOp>) =
         step_ops.iter().cloned().partition(renames::is_structural);
     let (down_structural, down_derived): (Vec<MigrationOp>, Vec<MigrationOp>) =
@@ -341,7 +347,7 @@ pub fn render_down(
         })
         .collect();
     let inverse: Vec<MigrationOp> = plan_from_ir(
-        &renamed_after,
+        &planned_after,
         before,
         dialect,
         &LiveFacts::declared(),
@@ -351,7 +357,7 @@ pub fn render_down(
     .into_iter()
     .filter(|op| subject(op).is_some_and(|s| subjects.contains(&s)))
     .filter(|op| {
-        let ctx = PlanContext::of(op, &renamed_after, before, dialect, PlanDirection::Down);
+        let ctx = PlanContext::of(op, &planned_after, before, dialect, PlanDirection::Down);
         !columns::carried_by_its_column_drop(op, &ctx) && columns::assign(op, &ctx).phase == phase
     })
     .collect();

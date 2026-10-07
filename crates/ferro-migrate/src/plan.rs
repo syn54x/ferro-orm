@@ -280,6 +280,7 @@ pub fn plan_from_ir(
     let mut operations = rename_ops(old, &renamed, dialect);
     fact_renames(&mut operations, facts, old, &hints, dialect);
     let facts = renamed_facts(facts, &operations, new, dialect);
+    let renamed = renamed_snapshot(old, &storage_hints(&hints, dialect));
     let mut plan = plan_named(&renamed, new, dialect, &facts, options);
     operations.append(&mut plan.operations);
     plan.operations = operations;
@@ -1547,6 +1548,19 @@ fn claim(claims: &mut Vec<(String, Vec<String>)>, previous: &str, claimant: &str
         Some((_, claimants)) => claimants.push(claimant.to_string()),
         None => claims.push((previous.to_string(), vec![claimant.to_string()])),
     }
+}
+
+/// The `hints` whose renames leave a column's storage on `dialect` as the
+/// rest of a plan should see it. On SQLite an enum column is text as wide as
+/// its longest label, so a label rename is an `UPDATE` of its rows that can
+/// also widen or narrow the column: the label hints are left out, and the
+/// plan still meets the width change as the column's type change.
+pub(crate) fn storage_hints(hints: &[Hint], dialect: Dialect) -> Vec<Hint> {
+    hints
+        .iter()
+        .filter(|hint| dialect != Dialect::Sqlite || !matches!(hint, Hint::Label { .. }))
+        .cloned()
+        .collect()
 }
 
 /// `hints` run the other way: what turns the new snapshot back into the old

@@ -108,7 +108,34 @@ def _column_ir_from_spec(spec: ColumnSpec) -> dict[str, Any]:
         column_ir["db_type_explicit"] = True
     if spec.enum_type_name:
         column_ir["enum_type_name"] = spec.enum_type_name
+    renamed_labels = declared_renamed_labels(spec.enum_class)
+    # Absent, not empty, when undeclared: every existing envelope stays
+    # byte-identical (ADR-0032).
+    if renamed_labels:
+        column_ir["enum_renamed_labels"] = renamed_labels
     return column_ir
+
+
+def declared_renamed_labels(enum_cls: type[Any] | None) -> dict[str, str]:
+    """``enum_cls``'s label rename hints (ADR-0032), new label → old label.
+
+    ``__ferro_renamed_labels__ = {"cancelled": "canceled"}`` on a ``StrEnum``
+    says the label ``cancelled`` was called ``canceled`` before. Sorted by new
+    label so the compiled envelope is deterministic. A declaration that is not
+    a mapping of label strings fails here, at class definition.
+    """
+    declared = getattr(enum_cls, "__ferro_renamed_labels__", None)
+    if declared is None:
+        return {}
+    if not isinstance(declared, Mapping) or not all(
+        isinstance(new, str) and isinstance(old, str) for new, old in declared.items()
+    ):
+        name = getattr(enum_cls, "__name__", repr(enum_cls))
+        raise TypeError(
+            f"{name}.__ferro_renamed_labels__ must map each new label to the label it "
+            f'was before, as strings (e.g. {{"cancelled": "canceled"}}); got {declared!r}'
+        )
+    return {new: declared[new] for new in sorted(declared)}
 
 
 # Artifact names come from the single-source builders in ferro-ddl-lowering

@@ -4652,16 +4652,25 @@ mod enum_renames {
                 new: "cancelled".to_string(),
             }]
         );
+        // On SQLite the column is text as wide as its longest label: the
+        // longer spelling widens every column of the type too.
+        let widened = || {
+            columns().into_iter().map(|(table, column)| MigrationOp::AlterColumnType { table, column })
+        };
         for dialect in [Dialect::Postgres, Dialect::Sqlite] {
             let plan = plan(&parent(), &relabelled(), dialect);
+            let mut expected = vec![MigrationOp::RenameEnumLabel {
+                type_name: "orderstatus".to_string(),
+                old: "canceled".to_string(),
+                new: "cancelled".to_string(),
+                columns: columns(),
+            }];
+            if dialect == Dialect::Sqlite {
+                expected.extend(widened());
+            }
             assert_eq!(
                 plan.operations,
-                vec![MigrationOp::RenameEnumLabel {
-                    type_name: "orderstatus".to_string(),
-                    old: "canceled".to_string(),
-                    new: "cancelled".to_string(),
-                    columns: columns(),
-                }],
+                expected,
                 "{dialect:?}"
             );
             assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
@@ -4863,9 +4872,15 @@ mod enum_renames {
             plan(&parent(), &both_renamed, Dialect::Postgres).operations,
             vec![expected_type, expected_label.clone()]
         );
+        let mut sqlite = vec![expected_label];
+        sqlite.extend(
+            columns()
+                .into_iter()
+                .map(|(table, column)| MigrationOp::AlterColumnType { table, column }),
+        );
         assert_eq!(
             plan(&parent(), &both_renamed, Dialect::Sqlite).operations,
-            vec![expected_label]
+            sqlite
         );
     }
 

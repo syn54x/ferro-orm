@@ -132,6 +132,12 @@ _RENDERERS: dict[str, Callable[[dict[str, Any]], str]] = {
     ),
     "CreateEnumType": lambda op: f"{op['type_name']} enum type is missing",
     "DropEnumType": lambda op: f"{op['type_name']} enum type is extra",
+    "RenameEnumLabel": lambda op: (
+        f"{op['type_name']} enum label {op['old']} is named {op['new']} in the snapshot"
+    ),
+    "RenameEnumType": lambda op: (
+        f"{op['old']} enum type is named {op['new']} in the snapshot"
+    ),
     "AddTable": lambda op: f"{op['table']} table is missing",
     "DropTable": lambda op: f"{op['table']} table is extra",
     "RenameTable": lambda op: f"{op['old']} table is named {op['new']} in the snapshot",

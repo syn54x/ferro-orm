@@ -2090,36 +2090,50 @@ mod tests {
 
     #[test]
     fn a_renamed_label_is_rename_value_on_postgres_and_an_update_on_sqlite_both_ways() {
-        let after = relabelled("status", &["draft", "published"], &[("published", "live")]);
+        let after = relabelled("status", &["draft", "open"], &[("open", "live")]);
         let migration = edit(vec![author()], vec![after.clone()], &BOTH);
         assert_eq!(step_names(&migration), ["01_schema"]);
-        assert_eq!(
-            migration.summary,
-            "renamed enum labels: status.live → published"
-        );
+        assert_eq!(migration.summary, "renamed enum labels: status.live → open");
         let pg = step(&migration, "01_schema", Dialect::Postgres);
-        assert_eq!(
-            pg.up,
-            "ALTER TYPE \"status\" RENAME VALUE 'live' TO 'published';\n"
-        );
-        assert_eq!(
-            pg.down,
-            "ALTER TYPE \"status\" RENAME VALUE 'published' TO 'live';\n"
-        );
+        assert_eq!(pg.up, "ALTER TYPE \"status\" RENAME VALUE 'live' TO 'open';\n");
+        assert_eq!(pg.down, "ALTER TYPE \"status\" RENAME VALUE 'open' TO 'live';\n");
         let sqlite = step(&migration, "01_schema", Dialect::Sqlite);
         assert_eq!(
             sqlite.up,
             "-- ferro: data-dependent\n\n\
-             UPDATE \"author\" SET \"status\" = 'published' WHERE \"status\" = 'live';\n"
+             UPDATE \"author\" SET \"status\" = 'open' WHERE \"status\" = 'live';\n"
         );
         assert_eq!(
             sqlite.down,
             "-- ferro: data-dependent\n\n\
-             UPDATE \"author\" SET \"status\" = 'live' WHERE \"status\" = 'published';\n"
+             UPDATE \"author\" SET \"status\" = 'live' WHERE \"status\" = 'open';\n"
         );
         // After its migration the hint is inert: no schema change.
         let parent = snapshot_of(&ir(vec![after.clone()]), None);
         assert_eq!(generate(Some(&parent), &ir(vec![after]), &BOTH), Ok(None));
+
+        // A longer spelling widens SQLite's column: the rows are relabelled,
+        // then the table is rebuilt at the new width, and back on the down.
+        let wider = relabelled("status", &["draft", "published"], &[("published", "live")]);
+        let migration = edit(vec![author()], vec![wider], &[Dialect::Sqlite]);
+        let sqlite = step(&migration, "01_schema", Dialect::Sqlite);
+        assert!(
+            sqlite.up.starts_with(
+                "-- ferro: foreign-keys-off\n-- ferro: data-dependent\n\n\
+                 UPDATE \"author\" SET \"status\" = 'published' WHERE \"status\" = 'live';\n"
+            ),
+            "{}",
+            sqlite.up
+        );
+        assert!(sqlite.up.contains("\"status\" varchar(9)"), "{}", sqlite.up);
+        assert!(
+            sqlite
+                .down
+                .contains("UPDATE \"author\" SET \"status\" = 'live' WHERE \"status\" = 'published'"),
+            "{}",
+            sqlite.down
+        );
+        assert!(sqlite.down.contains("\"status\" varchar(5)"), "{}", sqlite.down);
     }
 
     #[test]
