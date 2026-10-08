@@ -23,7 +23,7 @@ functions. Today Ferro emits DDL through:
   `crates/ferro-migrate`): `connect(auto_migrate=True)` and its
   `migrate_updates` / `migrate_destructive` rungs. It reads the live database
   (`src/live_ir.rs`, `_core._live_schema_ir`), plans with the one planner
-  (`ferro_migrate::plan_from_ir`) and runs `ferro_migrate::render_plan`; its
+  (`ferro_migrate::plan_from_ir`) and runs its `Plan::render`; its
   create pass is `ferro_migrate::render_create_table`. What it executed is its
   `PassReport` (`ferro.migrate()` / `ferro.create_tables()` return it, built
   from what the DDL executor ran, ADR-0049), pinned against the planner by
@@ -31,7 +31,7 @@ functions. Today Ferro emits DDL through:
 - The **migrations door** (`src/ferro/migrations/` +
   `crates/ferro-migrate/src/generate/`): `ferro migrate new`. It plans between
   two schema snapshots with the same planner and renders through the same
-  `render_plan`, once per dialect, into step files. It decides which step an
+  `Plan::render`, once per dialect, into step files. It decides which step an
   op lands in and which headers a file carries, never a statement. Its
   online shapes are the pass's renderings in another mode: `NOT VALID` then a
   validate step (`ConstraintMode`, ADR-0043), `CONCURRENTLY` (`IndexMode`,
@@ -78,7 +78,7 @@ For a single model, every emitter must agree on:
 11. **Every change to an existing database: the Alembic bridge translates the
     one planner's ops.** What changes and the statement that changes it are
     decided once, by the one planner (`ferro_migrate::plan_from_ir`) and its
-    renderer (`ferro_migrate::render_plan`), over function families in
+    renderer (`ferro_migrate::Plan::render`), over function families in
     `ferro_ddl_lowering`. The reconciliation pass runs them directly; the
     migrations door writes them into step files; the bridge's one comparator
     (`dispatch_for("schema")` in `src/ferro/migrations/alembic.py`) reads the
@@ -195,7 +195,7 @@ Phantom diffs are the canonical symptom that this invariant has been broken.
 ### How this invariant is enforced
 
 - One planner, one renderer: every door plans with
-  `ferro_migrate::plan_from_ir` and renders with `render_plan`; every
+  `ferro_migrate::plan_from_ir` and renders with `Plan::render`; every
   decision lives in one `ferro_ddl_lowering` function, consumed over FFI by
   the Python side.
 - `src/ferro/migrations/alembic.py` constructs `MetaData` with an explicit
@@ -214,8 +214,8 @@ Phantom diffs are the canonical symptom that this invariant has been broken.
 
 If you add a new emitter (e.g. `ferro schema dump`):
 
-1. Plan with `ferro_migrate::plan_from_ir` and render with `render_plan`; read
-   the constants in `_FERRO_NAMING_CONVENTION` and the `composite_*_name`
+1. Plan with `ferro_migrate::plan_from_ir` and render with `Plan::render`;
+   read the constants in `_FERRO_NAMING_CONVENTION` and the `composite_*_name`
    helpers — these are the source of truth. Never a second renderer.
 2. Add a pin to `tests/test_cross_emitter_parity.py` that compares your
    emitter's output with `_core._plan_from_ir(..., render=True)` for every
@@ -232,7 +232,7 @@ If you add a new schema feature (e.g. partial indexes, exclusion constraints):
 1. Pick the canonical name format and document it in this file under the
    numbered list above.
 2. Decide it in one `ferro_ddl_lowering` function, plan it as a
-   `MigrationOp` and render it in `render_plan`, so every door gets it in the
+   `MigrationOp` and render it in `Plan::render`, so every door gets it in the
    same PR; give the bridge's `translate.py` its op (Alembic's own, or the
    pass's statement).
 3. Add a casebook case (`tests/_casebook.py`) so pins (a)–(g) cover it, and a

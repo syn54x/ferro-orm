@@ -85,8 +85,8 @@ token × dialect plus `ck_<table>_<col>` parity).
 ## The seven pins
 
 `ferro migrate new` plans with the same planner as the pass
-(`ferro_migrate::plan_from_ir`) and renders through the same `render_plan`; it
-only decides which step an op lands in. Some of what it writes is an *online
+(`ferro_migrate::plan_from_ir`) and renders through the same `Plan::render`;
+it only decides which step an op lands in. Some of what it writes is an *online
 shape* the pass, inside its one transaction, never needs. Each is pinned to
 the pass's rendering in `tests/test_cross_emitter_parity.py`, over every
 casebook change in `tests/_casebook.py` (cases A–F, built from the generator
@@ -119,8 +119,8 @@ the entry.
 
 1. Pick the name format and add it to the table in `AGENTS.md` § I-1.
 2. Decide it in one `ferro_ddl_lowering` function and plan and render it
-   through `plan_from_ir` / `render_plan`, so every door gets it in the same
-   PR:
+   through `plan_from_ir` / `Plan::render`, so every door gets it in the
+   same PR:
    - Python: extend `_FERRO_NAMING_CONVENTION` with the appropriate
      SQLAlchemy convention key (`ix`, `uq`, `fk`, `pk`, `ck`), and give the
      bridge's `translate.py` the op (Alembic's own, or the pass's statement).
@@ -132,9 +132,9 @@ the entry.
 
 ## Recipe: adding a new emitter
 
-1. Plan with `plan_from_ir` and render with `render_plan`; read the canonical
-   names in `_FERRO_NAMING_CONVENTION` and the `composite_*_name` helpers —
-   those are the source of truth. Never a second renderer.
+1. Plan with `plan_from_ir` and render with `Plan::render`; read the
+   canonical names in `_FERRO_NAMING_CONVENTION` and the `composite_*_name`
+   helpers — those are the source of truth. Never a second renderer.
 2. Run all existing parity tests against your emitter.
 3. Add a pin to `tests/test_cross_emitter_parity.py` that compares your
    emitter's output with `_core._plan_from_ir(..., render=True)` for every

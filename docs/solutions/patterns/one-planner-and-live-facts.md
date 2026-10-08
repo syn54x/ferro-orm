@@ -16,14 +16,16 @@ captured: 2026-10-06
 ## The shape
 
 Every migration door asks one question: what turns snapshot `old` into
-snapshot `new`? `ferro_migrate::plan_from_ir(old, new, dialect, &facts,
-options)` answers it for the whole modelset; `render_plan` turns each op into
-the exact statements. The reconciliation pass is now just:
+snapshot `new`? `ferro_migrate::plan_from_ir(&old, &new, dialect, options)`
+answers it for the whole modelset as a `Plan`, each op with its `OpVerdict`;
+`Plan::render` turns every op into the exact statements (`Plan::render_ops`
+renders a chosen few). The reconciliation pass is now just:
 
 ```text
-live_schema_ir(engine, tables)  ->  (live IR, LiveFacts)
-plan_from_ir(live, declared, …) ->  MigrationPlan
-render_plan(plan, live, declared, dialect) -> Vec<RenderedOp>
+live_schema_ir(engine, tables)              ->  (live IR, LiveFacts)
+Side::live(ir, facts)?, Side::declared(ir)  ->  two Sides
+plan_from_ir(&live, &declared, dialect, options) -> Plan
+plan.render()?                              ->  Vec<RenderedOp>
 execute (type ops autocommit; each table's ops in one Postgres transaction)
 ```
 
