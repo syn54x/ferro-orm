@@ -2,7 +2,7 @@ import asyncio
 import os
 import sys
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -16,6 +16,7 @@ from tests.db_backends import (
     get_postgres_url,
     has_pytest_postgresql,
     parse_backend_option,
+    postgres_test_role_name,
 )
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -106,9 +107,27 @@ def _create_postgres_schema(base_url: str, schema_name: str) -> None:
         conn.execute(f'CREATE SCHEMA "{schema_name}"')
 
 
-def _drop_postgres_schema(base_url: str, schema_name: str) -> None:
+def _drop_postgres_schema(
+    base_url: str, schema_name: str, roles: Iterable[str] = ()
+) -> None:
+    """Drop the test's schema, then every role the test was handed
+    (:func:`pg_role`): a role is server-global, so it goes with the schema
+    it is named after rather than with whatever the test's body reached."""
     with _connect_postgres_admin(base_url) as conn:
         conn.execute(f'DROP SCHEMA IF EXISTS "{schema_name}" CASCADE')
+        for role in roles:
+            exists = conn.execute(
+                "SELECT 1 FROM pg_roles WHERE rolname = %s", (role,)
+            ).fetchone()
+            if exists is None:
+                continue
+            conn.execute(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                "WHERE usename = %s AND pid <> pg_backend_pid()",
+                (role,),
+            )
+            conn.execute(f'DROP OWNED BY "{role}"')
+            conn.execute(f'DROP ROLE "{role}"')
 
 
 def _pytest_postgresql_base_url(request: pytest.FixtureRequest) -> str:
@@ -161,6 +180,7 @@ def db_url(request: pytest.FixtureRequest, tmp_path: Path):
     _create_postgres_schema(base_url, schema_name)
     request.node._ferro_db_schema = schema_name
     request.node._ferro_postgres_base_url = base_url
+    request.node._ferro_pg_roles = []
 
     try:
         yield build_postgres_test_url(base_url, schema_name)
@@ -168,7 +188,37 @@ def db_url(request: pytest.FixtureRequest, tmp_path: Path):
         from ferro import reset_engine
 
         reset_engine()
-        _drop_postgres_schema(base_url, schema_name)
+        _drop_postgres_schema(base_url, schema_name, request.node._ferro_pg_roles)
+
+
+@pytest.fixture(scope="function")
+def pg_role(request: pytest.FixtureRequest, db_url: str | None) -> Callable[..., str]:
+    """Name a role for this Postgres test: ``pg_role("tenant")`` is
+    ``<schema>_tenant`` (:func:`postgres_test_role_name`).
+
+    ``schema=`` names it after another schema the test made for itself (a
+    second tenant), which must carry the test's schema name as its prefix.
+    The test creates the role itself (its attributes are the test's
+    business); ``db_url`` drops it — owned objects and grants first — right
+    after the test's schema, whether the test's own teardown ran or not.
+    """
+    schema_name = getattr(request.node, "_ferro_db_schema", None)
+
+    def name(label: str, *, schema: str | None = None) -> str:
+        if schema_name is None:
+            raise RuntimeError("pg_role names roles for Postgres tests only")
+        owner = schema or schema_name
+        if not owner.startswith(schema_name):
+            raise ValueError(
+                f"pg_role(schema={owner!r}): name roles after this test's own "
+                f"schemas, which start with {schema_name!r}"
+            )
+        role = postgres_test_role_name(owner, label)
+        if role not in request.node._ferro_pg_roles:
+            request.node._ferro_pg_roles.append(role)
+        return role
+
+    return name
 
 
 @pytest.fixture(scope="function")

@@ -17,6 +17,7 @@ drift happens in production, and reads the report back.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import importlib
 import json
 import re
@@ -30,6 +31,7 @@ import ferro
 from ferro import _core
 from ferro.migrations import DriftReport, MigrationRefused, render_op
 from tests._pass_harness import auto_migrate
+from tests.db_backends import postgres_server_lock
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     AUTHOR,
     pkg,
@@ -350,44 +352,49 @@ def test_alembic_version_an_extension_and_the_tracking_tables_are_not_drift(
     applied(project, pkg, db, capsys)
     db.execute('CREATE TABLE "alembic_version" ("version_num" varchar(32) NOT NULL)')
     db.execute("INSERT INTO alembic_version VALUES ('abc123')")
-    extension = False
-    if db.backend == "postgres":
-        found = db.rows(
-            "SELECT n.nspname FROM pg_extension e "
-            "JOIN pg_namespace n ON n.oid = e.extnamespace "
-            "WHERE e.extname = 'pg_stat_statements'"
-        )
-        if found:
-            pytest.skip(
-                f"pg_stat_statements is already installed in schema {found[0][0]}; "
-                "it can be installed once per database, so this test cannot place "
-                "it in its own schema"
+    with contextlib.ExitStack() as held:
+        extension = False
+        if db.backend == "postgres":
+            # The extension is one per database, not per schema: the
+            # server lock keeps a concurrent run of the suite from
+            # installing, reading or dropping it meanwhile.
+            held.enter_context(postgres_server_lock(db.base, "pg_stat_statements"))
+            found = db.rows(
+                "SELECT n.nspname FROM pg_extension e "
+                "JOIN pg_namespace n ON n.oid = e.extnamespace "
+                "WHERE e.extname = 'pg_stat_statements'"
             )
-        available = db.rows(
-            "SELECT 1 FROM pg_available_extensions WHERE name = 'pg_stat_statements'"
-        )
-        if not available:
-            pytest.skip("this Postgres server does not ship pg_stat_statements")
-        db.execute(f'CREATE EXTENSION pg_stat_statements SCHEMA "{db.schema}"')
-        extension = True
-    try:
-        tables = db.tables()
-        assert {"alembic_version", "_ferro_migrations"} <= tables
-        if extension:
-            assert "pg_stat_statements" in {
-                row[0]
-                for row in db.rows(
-                    "SELECT table_name FROM information_schema.views "
-                    f"WHERE table_schema = '{db.schema}'"
+            if found:
+                pytest.skip(
+                    f"pg_stat_statements is already installed in schema {found[0][0]}; "
+                    "it can be installed once per database, so this test cannot place "
+                    "it in its own schema"
                 )
-            }
+            available = db.rows(
+                "SELECT 1 FROM pg_available_extensions WHERE name = 'pg_stat_statements'"
+            )
+            if not available:
+                pytest.skip("this Postgres server does not ship pg_stat_statements")
+            db.execute(f'CREATE EXTENSION pg_stat_statements SCHEMA "{db.schema}"')
+            extension = True
+        try:
+            tables = db.tables()
+            assert {"alembic_version", "_ferro_migrations"} <= tables
+            if extension:
+                assert "pg_stat_statements" in {
+                    row[0]
+                    for row in db.rows(
+                        "SELECT table_name FROM information_schema.views "
+                        f"WHERE table_schema = '{db.schema}'"
+                    )
+                }
 
-        assert drift_cli(db, capsys) == (0, f"no drift against {HEAD}\n", "")
-        assert drift_api(db).clean
-        assert db.rows("SELECT version_num FROM alembic_version") == [("abc123",)]
-    finally:
-        if extension:
-            db.execute("DROP EXTENSION pg_stat_statements")
+            assert drift_cli(db, capsys) == (0, f"no drift against {HEAD}\n", "")
+            assert drift_api(db).clean
+            assert db.rows("SELECT version_num FROM alembic_version") == [("abc123",)]
+        finally:
+            if extension:
+                db.execute("DROP EXTENSION pg_stat_statements")
 
 
 def test_a_foreign_index_is_not_reported_and_a_ferro_named_extra_one_is(

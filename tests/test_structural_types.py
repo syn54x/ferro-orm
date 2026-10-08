@@ -489,7 +489,8 @@ async def test_jsonb_declared_fields_roundtrip(db_url):
 
             rows = await fetch_all(
                 "SELECT column_name, data_type FROM information_schema.columns "
-                "WHERE table_name = 'jsonbdoc' AND column_name IN "
+                "WHERE table_schema = current_schema() AND table_name = 'jsonbdoc' "
+                "AND column_name IN "
                 "('payload', 'entries', 'plain') ORDER BY column_name"
             )
             types = {r["column_name"]: r["data_type"] for r in rows}

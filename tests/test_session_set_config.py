@@ -11,7 +11,6 @@ semantics.
 """
 
 import asyncio
-import uuid
 from typing import Annotated
 
 import pytest
@@ -369,8 +368,8 @@ class ReapplyFailureRow(Model):
 
 
 @pytest.fixture
-def reapply_failure_role() -> str:
-    return f"ferro_reapply_fail_{uuid.uuid4().hex[:12]}"
+def reapply_failure_role(pg_role) -> str:
+    return pg_role("reapply_fail")
 
 
 async def _revoke_set_config(role: str) -> None:

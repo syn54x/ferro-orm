@@ -439,9 +439,9 @@ async def _pg_policies(table: str) -> list[dict]:
 
 
 @pytest.fixture
-def tenant_role():
-    """A cluster-unique NOSUPERUSER role name, dropped after the test."""
-    return f"ferro_rls_{uuid.uuid4().hex[:12]}"
+def tenant_role(pg_role):
+    """A NOSUPERUSER role name of the test's own, dropped with its schema."""
+    return pg_role("rls")
 
 
 async def _grant(role: str, table: str) -> None:

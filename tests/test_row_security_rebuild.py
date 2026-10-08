@@ -598,11 +598,11 @@ async def test_command_drift_rebuilds_against_a_live_table(db_url):
 @pytest.mark.backend_matrix
 @pytest.mark.postgres_only
 @pytest.mark.asyncio
-async def test_a_rebuilt_policy_filters_by_the_new_setting(db_url):
+async def test_a_rebuilt_policy_filters_by_the_new_setting(db_url, pg_role):
     """The rebuild is not just catalog text — the new key is what scopes rows."""
     from ferro import transaction
 
-    role = f"ferro_rls_{uuid.uuid4().hex[:12]}"
+    role = pg_role("rls")
     LedgerRow = _define_ledger_row()
     report = await auto_migrate(db_url)
     assert schema_steps(report) == [
@@ -661,7 +661,9 @@ async def test_a_rebuilt_policy_filters_by_the_new_setting(db_url):
 @pytest.mark.backend_matrix
 @pytest.mark.postgres_only
 @pytest.mark.asyncio
-async def test_a_policy_narrowed_to_a_role_is_rebuilt_back_to_public(db_url):
+async def test_a_policy_narrowed_to_a_role_is_rebuilt_back_to_public(
+    db_url, pg_role
+):
     """``ALTER POLICY … TO admin_role`` is drift no expression comparison can
     see — and on a RESTRICTIVE policy it makes the table fail **open**, because
     a restrictive policy that does not apply to a role stops restricting it.
@@ -669,7 +671,7 @@ async def test_a_policy_narrowed_to_a_role_is_rebuilt_back_to_public(db_url):
     Ferro's ``CREATE POLICY`` never writes a ``TO`` clause, so PUBLIC is the
     declared value and anything else is someone else's ALTER.
     """
-    role = f"ferro_rls_{uuid.uuid4().hex[:12]}"
+    role = pg_role("rls")
     _define_ledger_row(restrictive=True)
     report = await auto_migrate(db_url)
     assert schema_steps(report) == [
