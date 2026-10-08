@@ -2848,3 +2848,139 @@ async def test_a_live_label_rename_on_postgres_is_only_the_rename(db_url, clean_
     async with ferro.engines.session():
         rows = await fetch_all('SELECT "status" FROM "pd3order"')
     assert [r["status"] for r in rows] == ["cancelled"]
+
+
+# ---------------------------------------------------------------------------
+# A name held by something that is not a table
+# ---------------------------------------------------------------------------
+#
+# A view named like a model's table:
+#
+#     CREATE VIEW "heldcard" AS SELECT 1 AS "id", 'x' AS "label";
+#
+# `CREATE TABLE IF NOT EXISTS "heldcard"` would skip in silence, and the
+# connect would return as if `HeldCard` had its table. The create pass refuses
+# instead, before any DDL:
+#
+#     MigrationRefused: Table creation is refused: a declared table's name is
+#     held by something that is not a table, ...
+#       "heldcard" is a view: rename or drop the view, or declare a different
+#       __ferro_table__ on app.models.HeldCard.
+#     Nothing was created.
+#
+# The model is named by its full identity (module and qualified name), so the
+# line points at the one class to edit.
+
+HELD_REFUSAL = (
+    "Table creation is refused: a declared table's name is held by something "
+    "that is not a table, so CREATE TABLE would skip it and leave the model "
+    "without one.\n"
+    '  "heldcard" is a view: rename or drop the view, or declare a different '
+    f"__ferro_table__ on {__name__}._define_held_models.<locals>.HeldCard.\n"
+    "Nothing was created."
+)
+
+HELD_VIEW = 'CREATE VIEW "heldcard" AS SELECT 1 AS "id", \'x\' AS "label"'
+
+
+def _define_held_models() -> None:
+    class HeldCard(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        label: str
+
+    class HeldDeck(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: Annotated[str, FerroField(index=True)]
+
+
+async def _held_relations(db_url: str, db_backend: str) -> dict[str, str]:
+    """Every ``held*`` table or view in the schema, with its catalog kind."""
+    await ferro.connect(db_url)
+    async with ferro.engines.session():
+        if db_backend == "sqlite":
+            rows = await fetch_all(
+                "SELECT name, type AS kind FROM sqlite_master "
+                "WHERE name LIKE 'held%' AND type IN ('table', 'view')"
+            )
+        else:
+            rows = await fetch_all(
+                "SELECT table_name::text AS name, table_type::text AS kind "
+                "FROM information_schema.tables "
+                "WHERE table_schema = current_schema() AND table_name LIKE 'held%'"
+            )
+    ferro.reset_engine()
+    return {row["name"]: row["kind"].lower() for row in rows}
+
+
+async def _seed_held(db_url: str, sql: str) -> None:
+    await ferro.connect(db_url)
+    async with ferro.engines.session():
+        await execute(sql)
+    ferro.reset_engine()
+
+
+@pytest.mark.asyncio
+@pytest.mark.backend_matrix
+@pytest.mark.parametrize(
+    "flags",
+    [{"auto_migrate": True}, {"migrate_updates": True}],
+    ids=lambda flags: next(iter(flags)),
+)
+async def test_a_view_named_like_a_model_refuses_connect_and_creates_nothing(
+    db_url, db_backend, clean_registry, flags
+):
+    from ferro.migrations import MigrationRefused
+
+    await _seed_held(db_url, HELD_VIEW)
+    _define_held_models()
+
+    with pytest.raises(MigrationRefused) as raised:
+        await ferro.connect(db_url, **flags)
+
+    assert str(raised.value) == HELD_REFUSAL
+    # Nothing was created: not the model the view stands in for, not the
+    # model beside it.
+    ferro.reset_engine()
+    assert await _held_relations(db_url, db_backend) == {"heldcard": "view"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.backend_matrix
+async def test_create_tables_refuses_a_view_named_like_a_model(
+    db_url, db_backend, clean_registry
+):
+    from ferro.migrations import MigrationRefused
+
+    await _seed_held(db_url, HELD_VIEW)
+    _define_held_models()
+
+    await ferro.connect(db_url)
+    with pytest.raises(MigrationRefused) as raised:
+        await ferro.create_tables()
+
+    assert str(raised.value) == HELD_REFUSAL
+    ferro.reset_engine()
+    assert await _held_relations(db_url, db_backend) == {"heldcard": "view"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.backend_matrix
+async def test_a_base_table_named_like_a_model_is_left_to_reconcile_as_before(
+    db_url, db_backend, clean_registry
+):
+    """The refusal is about what holds the name, never about its being
+    live: a base table of the model's name is the reconciliation pass's, and
+    the model beside it is created."""
+    await _seed_held(
+        db_url, 'CREATE TABLE "heldcard" ("id" integer PRIMARY KEY, "label" text)'
+    )
+    _define_held_models()
+
+    await ferro.connect(db_url, auto_migrate=True)
+    ferro.reset_engine()
+
+    table = "table" if db_backend == "sqlite" else "base table"
+    assert await _held_relations(db_url, db_backend) == {
+        "heldcard": table,
+        "helddeck": table,
+    }

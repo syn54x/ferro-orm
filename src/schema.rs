@@ -65,6 +65,39 @@ pub async fn internal_create_tables(
 
     let dialect = engine.backend();
 
+    // A declared table whose name a view (or, on SQLite, a virtual table or
+    // its shadow table; on Postgres any other relation) holds is never
+    // created: `CREATE TABLE IF NOT EXISTS` would skip it in silence and the
+    // pass would return as if the model had its table. Refused before any
+    // DDL, naming every such table at once.
+    let declared: Vec<&str> = modelset
+        .payload
+        .models
+        .iter()
+        .map(|model| model.table_name.as_str())
+        .collect();
+    let holders = crate::introspect::live_non_table_holders(&engine, &declared).await?;
+    if !holders.is_empty() {
+        let model_refs: Vec<&ferro_schema_ir::SchemaModel> =
+            modelset.payload.models.iter().collect();
+        let held: Vec<(&str, &str, crate::introspect::NonTableHolder)> =
+            ferro_migrate::order_models_for_create(&model_refs)
+                .into_iter()
+                .filter_map(|model| {
+                    holders.get(&model.table_name).map(|holder| {
+                        (
+                            model.model_name.as_str(),
+                            model.table_name.as_str(),
+                            *holder,
+                        )
+                    })
+                })
+                .collect();
+        return Err(crate::run::refused(
+            crate::migrate::table_name_held_refusal(&held),
+        ));
+    }
+
     // ADR-0010: the create pass owns only missing tables. An existing table —
     // whatever its shape — belongs to the reconciliation pass; firing even
     // `IF NOT EXISTS` index DDL at it can reference columns only the
