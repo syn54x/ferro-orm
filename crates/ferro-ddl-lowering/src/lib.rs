@@ -3817,6 +3817,8 @@ pub enum InPlaceChange {
     AddForeignKey,
     /// Change a foreign key's action or target.
     RebuildForeignKey,
+    /// Drop a foreign key from a column the table keeps.
+    DropForeignKey,
     /// Add a check constraint.
     AddCheck,
     /// Change a check constraint's body.

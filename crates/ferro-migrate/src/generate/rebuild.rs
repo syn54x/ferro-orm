@@ -60,6 +60,7 @@ fn column<'a>(model: Option<&'a SchemaModel>, name: &str) -> Option<&'a SchemaCo
 /// | Op | Up | Down |
 /// | :-- | :-- | :-- |
 /// | add/drop a table, an enum type or label, an index | native | native |
+/// | redefine an index (drop + create) | native | native |
 /// | rename a table, a column, an index (drop + create), a policy | native | native |
 /// | rename a constraint (a `ck_` / `fk_` name a rename drags) | rebuild | rebuild |
 /// | add an optional column, or a required one with a literal default | native | native |
@@ -69,7 +70,7 @@ fn column<'a>(model: Option<&'a SchemaModel>, name: &str) -> Option<&'a SchemaCo
 /// | drop a foreign-key column | rebuild | rebuild |
 /// | change a column's type or nullability | rebuild | rebuild |
 /// | add, change or drop a check (but a dropped column's own) | rebuild | rebuild |
-/// | add or retarget a foreign key | rebuild | rebuild |
+/// | add, retarget or drop a foreign key (on a kept column) | rebuild | rebuild |
 /// | change the primary key | rebuild | rebuild |
 /// | validate a constraint, rebuild an invalid index, row security | native (nothing on SQLite) | native |
 ///
@@ -93,6 +94,7 @@ pub fn needs_rebuild(op: &MigrationOp, direction: PlanDirection, ctx: &PlanConte
         | MigrationOp::RenameEnumType { .. }
         | MigrationOp::AddIndex { .. }
         | MigrationOp::DropIndex { .. }
+        | MigrationOp::RedefineIndex { .. }
         | MigrationOp::RebuildIndex { .. }
         | MigrationOp::ValidateConstraint { .. }
         | MigrationOp::AddRowPolicy { .. }
@@ -127,6 +129,7 @@ pub fn needs_rebuild(op: &MigrationOp, direction: PlanDirection, ctx: &PlanConte
         | MigrationOp::AddCheck { .. }
         | MigrationOp::RebuildCheck { .. }
         | MigrationOp::AddForeignKey { .. }
+        | MigrationOp::DropForeignKey { .. }
         | MigrationOp::RebuildForeignKey { .. } => true,
         MigrationOp::DropCheck { .. } => !goes_with_a_dropped_column(op, ctx),
     }

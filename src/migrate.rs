@@ -252,6 +252,52 @@ pub(crate) fn pass_lock_timeout_error(
     ))
 }
 
+/// The unique index `op` builds, as `(name, declared columns)`: an added,
+/// redefined (ADR-0051) or rebuilt unique, whose build duplicates refuse.
+fn unique_build_of(
+    op: &MigrationOp,
+    declared: &IrEnvelope<SchemaIrPayload>,
+) -> Option<(String, Vec<String>)> {
+    match op {
+        MigrationOp::AddIndex {
+            table,
+            name,
+            unique: true,
+            ..
+        }
+        | MigrationOp::RedefineIndex { table, name }
+        | MigrationOp::RebuildIndex {
+            table,
+            name,
+            unique: true,
+            ..
+        } => match ferro_migrate::declared_index(declared, table, name) {
+            Some((columns, true)) => Some((name.clone(), columns)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The error for `sql` of `op` on `table` failing with `e`: a unique build
+/// refused by duplicates is counted and names the fix; anything else is the
+/// statement's own failure.
+async fn map_op_statement_error(
+    engine: &EngineHandle,
+    table: &str,
+    op: &MigrationOp,
+    declared: &IrEnvelope<SchemaIrPayload>,
+    sql: &str,
+    e: sqlx::Error,
+) -> PyErr {
+    match unique_build_of(op, declared) {
+        Some((index, columns)) if crate::errors::is_unique_violation(&e) => {
+            crate::errors::pass_unique_build_failure(engine, table, &index, &columns, e).await
+        }
+        _ => map_statement_error(table, sql, e),
+    }
+}
+
 fn map_statement_error(table_lower: &str, sql: &str, e: sqlx::Error) -> PyErr {
     crate::errors::map_db_error(
         &format!(
@@ -352,6 +398,7 @@ async fn execute_table_ops(
     engine: &EngineHandle,
     table: &str,
     ops: &[&RenderedOp],
+    declared: &IrEnvelope<SchemaIrPayload>,
     backend: Dialect,
     ddl: &DdlExecutor,
 ) -> PyResult<(usize, usize)> {
@@ -365,7 +412,7 @@ async fn execute_table_ops(
     }
 
     if backend == Dialect::Sqlite {
-        execute_sqlite_table_ops(engine, table, ops).await?;
+        execute_sqlite_table_ops(engine, table, ops, declared).await?;
         return Ok((statements - drops, drops));
     }
 
@@ -401,7 +448,9 @@ async fn execute_table_ops(
                     },
                     _,
                 )) => map_drop_column_error(table, column, error),
-                Some((_, sql)) => map_statement_error(table, sql, error),
+                Some((op, sql)) => {
+                    map_op_statement_error(engine, table, &op.op, declared, sql, error).await
+                }
                 None => crate::errors::map_db_error(
                     &format!("Auto-migrate failed to apply DDL to table '{table}'"),
                     error,
@@ -419,6 +468,7 @@ async fn execute_sqlite_table_ops(
     engine: &EngineHandle,
     table: &str,
     ops: &[&RenderedOp],
+    declared: &IrEnvelope<SchemaIrPayload>,
 ) -> PyResult<Executed> {
     let mut executed = Executed::default();
     for op in ops {
@@ -429,10 +479,12 @@ async fn execute_sqlite_table_ops(
             continue;
         }
         for sql in &op.statements {
-            executed
+            if let Err(e) = executed
                 .send_on(engine, Door::Pass(table), Role::Schema, sql)
                 .await
-                .map_err(|e| map_statement_error(table, sql, e))?;
+            {
+                return Err(map_op_statement_error(engine, table, &op.op, declared, sql, e).await);
+            }
         }
     }
     Ok(executed)
@@ -798,7 +850,7 @@ async fn run_passes(engine: Arc<EngineHandle>, opts: MigrateOptions) -> PyResult
             .take_while(|op| op.op.table() == Some(table))
             .count();
         let (statements, dropped) =
-            execute_table_ops(&engine, table, &group, backend, &ddl).await?;
+            execute_table_ops(&engine, table, &group, &modelset, backend, &ddl).await?;
         if statements + dropped > 0 {
             ddl_ran = true;
             crate::log_debug(format!(

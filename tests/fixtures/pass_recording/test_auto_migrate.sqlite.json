@@ -21,6 +21,15 @@
     ],
     "warnings": []
   },
+  "tests/test_auto_migrate.py::test_a_foreign_key_removed_from_a_kept_column_is_dropped_only_when_destructive[sqlite]": {
+    "statements": [
+      "'dfkteam': CREATE TABLE IF NOT EXISTS \"dfkteam\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT )",
+      "'dfkmember': CREATE TABLE IF NOT EXISTS \"dfkmember\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"team_id\" integer, CONSTRAINT \"fk_dfkmember_team_id_dfkteam\" FOREIGN KEY (\"team_id\") REFERENCES \"dfkteam\" (\"id\") ON DELETE CASCADE )"
+    ],
+    "warnings": [
+      "Foreign key 'fk_dfkmember_team_id_dfkteam' on 'dfkmember.team_id' is no longer declared, and SQLite cannot drop a table constraint in place, so it stays and keeps enforcing its reference. Generate a reviewed migration with `ferro migrate new` to rebuild the table without it."
+    ]
+  },
   "tests/test_auto_migrate.py::test_a_hinted_table_whose_new_name_is_also_live_is_inert[sqlite]": {
     "statements": [
       "'trnwriter': CREATE TABLE IF NOT EXISTS \"trnwriter\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"name\" varchar NOT NULL )",
@@ -118,6 +127,14 @@
     "warnings": [
       "table \"trnauthor\" declares __ferro_renamed_from__ = \"trnwriter\", and the database holds \"trnwriter\" and no \"trnauthor\": \"trnauthor\" was not created, nor \"trnappendix\" and \"trnbook\", which reference it. The rename runs under connect(..., migrate_updates=True) or in a migration from ferro migrate new."
     ]
+  },
+  "tests/test_auto_migrate.py::test_a_unique_redefinition_over_duplicates_fails_counted_naming_the_fix[sqlite]": {
+    "statements": [
+      "'redefdupe': CREATE TABLE IF NOT EXISTS \"redefdupe\" ( \"code\" varchar NOT NULL, \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT )",
+      "'redefdupe': DROP INDEX IF EXISTS \"uq_redefdupe_code\"",
+      "'redefdupe': CREATE UNIQUE INDEX IF NOT EXISTS \"uq_redefdupe_code\" ON \"redefdupe\" (\"code\")"
+    ],
+    "warnings": []
   },
   "tests/test_auto_migrate.py::test_added_indexed_and_unique_columns_get_their_indexes[sqlite]": {
     "statements": [
@@ -256,6 +273,24 @@
       "'vfauthor': CREATE TABLE IF NOT EXISTS \"vfauthor\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"name\" varchar NOT NULL )",
       "'vfpost': CREATE TABLE IF NOT EXISTS \"vfpost\" ( \"author_id\" integer, \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"slug\" varchar, \"title\" varchar, CONSTRAINT \"fk_vfpost_author_id_vfauthor\" FOREIGN KEY (\"author_id\") REFERENCES \"vfauthor\" (\"id\") ON DELETE CASCADE, CONSTRAINT \"ck_vfpost_title_set\" CHECK (\"title\" IS NOT NULL) )",
       "'vfpost': CREATE UNIQUE INDEX IF NOT EXISTS \"uq_vfpost_slug\" ON \"vfpost\" (\"slug\")"
+    ],
+    "warnings": []
+  },
+  "tests/test_auto_migrate.py::test_migrate_updates_redefines_a_ferro_named_index_written_another_way[sqlite]": {
+    "statements": [
+      "'redeflive': CREATE TABLE IF NOT EXISTS \"redeflive\" ( \"code\" varchar NOT NULL, \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"label\" varchar NOT NULL )",
+      "'redeflive': CREATE INDEX IF NOT EXISTS \"idx_redeflive_code\" ON \"redeflive\" (\"code\")",
+      "'redeflive': DROP INDEX IF EXISTS \"idx_redeflive_code\"",
+      "'redeflive': CREATE INDEX IF NOT EXISTS \"idx_redeflive_code\" ON \"redeflive\" (\"code\")"
+    ],
+    "warnings": []
+  },
+  "tests/test_auto_migrate.py::test_migrate_updates_redefines_an_index_whose_cut_name_now_covers_more_columns[sqlite]": {
+    "statements": [
+      "'subscriptioninvoiceline': CREATE TABLE IF NOT EXISTS \"subscriptioninvoiceline\" ( \"billing_period_end\" integer NOT NULL, \"billing_period_start\" integer NOT NULL, \"customer_id\" integer NOT NULL, \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT )",
+      "'subscriptioninvoiceline': CREATE INDEX IF NOT EXISTS \"idx_subscriptioninvoiceline_billing_period_start_billing_pe_idx\" ON \"subscriptioninvoiceline\" (\"billing_period_start\", \"billing_period_end\")",
+      "'subscriptioninvoiceline': DROP INDEX IF EXISTS \"idx_subscriptioninvoiceline_billing_period_start_billing_pe_idx\"",
+      "'subscriptioninvoiceline': CREATE INDEX IF NOT EXISTS \"idx_subscriptioninvoiceline_billing_period_start_billing_pe_idx\" ON \"subscriptioninvoiceline\" (\"billing_period_start\", \"billing_period_end\", \"customer_id\")"
     ],
     "warnings": []
   },

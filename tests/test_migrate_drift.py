@@ -730,3 +730,80 @@ def test_against_a_connection_that_is_not_open_is_refused(project, pkg, db, caps
                 snapshot_of(project, HEAD), migration=HEAD, using="nowhere"
             )
         )
+
+
+# -- a redefined index and a removed foreign key (ADR-0051) ------------------------
+
+
+def test_a_ferro_named_index_over_other_columns_is_drift(project, pkg, db, capsys):
+    """``idx_team_size`` rebuilt by hand over ``name``: the name is the
+    snapshot's, its definition is not."""
+    applied(project, pkg, db, capsys)
+    db.execute('DROP INDEX "idx_team_size"')
+    db.execute('CREATE INDEX "idx_team_size" ON "team" ("name")')
+
+    report = drift_api(db)
+    assert report.lines == ["idx_team_size index is on (name), snapshot says (size)"]
+    assert report.operations[0]["kind"] == "RedefineIndex"
+
+
+def test_a_ferro_named_index_made_unique_is_drift(project, pkg, db, capsys):
+    applied(project, pkg, db, capsys)
+    db.execute('DROP INDEX "idx_team_size"')
+    db.execute('CREATE UNIQUE INDEX "idx_team_size" ON "team" ("size")')
+
+    assert drift_api(db).lines == [
+        "idx_team_size index is unique, snapshot says not unique"
+    ]
+
+
+def add_foreign_key_by_hand(db, table: str, column: str, to_table: str) -> str:
+    """Put a ferro-named foreign key on ``table.column`` the way an older
+    build or a hand edit would; returns its name. SQLite adds a table
+    constraint only by rebuilding the table, so it is rebuilt by hand (its
+    indexes go with the old table and are put back)."""
+    name = f"fk_{table}_{column}_{to_table}"
+    clause = (
+        f'CONSTRAINT "{name}" FOREIGN KEY ("{column}") '
+        f'REFERENCES "{to_table}" ("id") ON DELETE CASCADE'
+    )
+    if db.backend != "sqlite":
+        db.execute(f'ALTER TABLE "{table}" ADD {clause}')
+        return name
+    (create,) = db.rows(
+        f"SELECT sql FROM sqlite_master WHERE type = 'table' AND name = '{table}'"
+    )[0]
+    indexes = [
+        sql
+        for (sql,) in db.rows(
+            f"SELECT sql FROM sqlite_master WHERE type = 'index' "
+            f"AND tbl_name = '{table}' AND sql IS NOT NULL"
+        )
+    ]
+    rebuilt = create.rstrip().removesuffix(")") + f", {clause})"
+    rebuilt = rebuilt.replace(f'"{table}"', f'"{table}_by_hand"', 1)
+    db.execute(rebuilt)
+    db.execute(f'INSERT INTO "{table}_by_hand" SELECT * FROM "{table}"')
+    db.execute(f'DROP TABLE "{table}"')
+    db.execute(f'ALTER TABLE "{table}_by_hand" RENAME TO "{table}"')
+    for sql in indexes:
+        db.execute(sql)
+    return name
+
+
+def test_a_foreign_key_the_snapshot_no_longer_declares_is_drift(
+    project, pkg, db, capsys
+):
+    """A ferro-named foreign key on ``team.size``, a column the snapshot
+    keeps without one: was invisible to every door (ADR-0051)."""
+    applied(project, pkg, db, capsys)
+    name = add_foreign_key_by_hand(db, "team", "size", "author")
+
+    report = drift_api(db)
+    assert report.lines == [f"{name} foreign key is extra"]
+    assert report.operations[0] == {
+        "kind": "DropForeignKey",
+        "table": "team",
+        "column": "size",
+        "name": name,
+    }

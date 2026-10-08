@@ -44,6 +44,25 @@ pub use run_plan::{
 };
 pub use snapshot::{Snapshot, SnapshotError};
 
+/// The columns and uniqueness of the standalone index `name` that `ir`
+/// declares on `table` (an `indexes` entry, a `uniques` entry or a column
+/// flag), as every door builds it; `None` when it declares none.
+pub fn declared_index(
+    ir: &ferro_schema_ir::IrEnvelope<ferro_schema_ir::SchemaIrPayload>,
+    table: &str,
+    name: &str,
+) -> Option<(Vec<String>, bool)> {
+    let model = ir
+        .payload
+        .models
+        .iter()
+        .find(|model| model.table_name == table)?;
+    emit::standalone_indexes(model)
+        .into_iter()
+        .find(|(index, _, _)| index == name)
+        .map(|(_, columns, unique)| (columns, unique))
+}
+
 /// Executable SQL plus the reports for one rendered op.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EmissionResult {
@@ -260,6 +279,19 @@ pub enum MigrationOp {
         /// Index name.
         name: String,
     },
+    /// A ferro-owned index that keeps its name and changes its columns or its
+    /// uniqueness (ADR-0051): two declarations can build one name (a name cut
+    /// to 63 characters, or an underscore join), and a live database can hold
+    /// a ferro-named index another way. `DROP INDEX`, then the declared
+    /// `CREATE [UNIQUE] INDEX`, read from the plan's target. Planned under
+    /// `migrate_updates`: nothing a row holds is discarded; a unique
+    /// redefinition fails on duplicate values.
+    RedefineIndex {
+        /// Owning table.
+        table: String,
+        /// Index name.
+        name: String,
+    },
     /// A declared FK whose column exists live but has no FK constraint at all.
     /// (FKs on newly added columns ride the `AddColumn` emission instead.)
     AddForeignKey {
@@ -267,6 +299,19 @@ pub enum MigrationOp {
         table: String,
         /// Local FK column.
         column: String,
+    },
+    /// A live ferro-owned FK on a column both sides keep that the model no
+    /// longer declares (ADR-0051) — `ALTER TABLE … DROP CONSTRAINT` on
+    /// Postgres; a table rebuild on SQLite. Planned only under
+    /// `migrate_destructive` (ADR-0013's ladder), though no row is lost; the
+    /// generator always writes it. An FK on a dropped column goes with it.
+    DropForeignKey {
+        /// Owning table.
+        table: String,
+        /// Local FK column.
+        column: String,
+        /// Live constraint name (`fk_<table>_<col>_<to_table>`).
+        name: String,
     },
     /// A declared CHECK constraint — table check or column check — with no live
     /// constraint of that name (#343). Looked up by `name` in the declared
@@ -406,7 +451,9 @@ impl MigrationOp {
             | MigrationOp::ChangePrimaryKey { table, .. }
             | MigrationOp::AddIndex { table, .. }
             | MigrationOp::DropIndex { table, .. }
+            | MigrationOp::RedefineIndex { table, .. }
             | MigrationOp::AddForeignKey { table, .. }
+            | MigrationOp::DropForeignKey { table, .. }
             | MigrationOp::AddCheck { table, .. }
             | MigrationOp::RebuildCheck { table, .. }
             | MigrationOp::DropCheck { table, .. }
