@@ -74,6 +74,11 @@ For a single model, every emitter must agree on:
    `_ddl_table_check_constraint_name` (Python) and
    `table_check_constraint_name` (Rust).
 9. **Default values** — server-side defaults must serialize identically.
+   One exception (ADR-0034): on SQLite the reconciliation pass adds a
+   required column with a literal default as `NOT NULL DEFAULT <literal>`
+   and keeps that default, since only a rebuild could drop it; a migration
+   rebuilds the table without it (`KEPT_DEFAULTS` in
+   `tests/test_cross_emitter_parity.py`).
 10. **Nullability** — must agree.
 11. **Every change to an existing database: the Alembic bridge translates the
     one planner's ops.** What changes and the statement that changes it are
