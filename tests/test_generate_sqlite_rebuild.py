@@ -133,6 +133,16 @@ def checked_copy(table: str, column: str, target: str, storage: str) -> list[str
     ]
 
 
+def carried_sequence(table: str) -> list[str]:
+    """What a rebuild of an ``AUTOINCREMENT`` table runs before dropping the
+    old one: the new table takes its high-water mark, so no id is reused."""
+    return [
+        f"DELETE FROM sqlite_sequence WHERE name = '_ferro_new_{table}'",
+        "INSERT INTO sqlite_sequence (name, seq) SELECT "
+        f"'_ferro_new_{table}', seq FROM sqlite_sequence WHERE name = '{table}'",
+    ]
+
+
 def rebuild_of(
     project: Path, number: int, table: str, copy: str, checks: list[str] | None = None
 ) -> list[str]:
@@ -148,6 +158,7 @@ def rebuild_of(
         ),
         f'INSERT INTO "_ferro_new_{table}" {copy} FROM "{table}"',
         *(checks or []),
+        *(carried_sequence(table) if "AUTOINCREMENT" in create else []),
         f'DROP TABLE "{table}"',
         f'ALTER TABLE "_ferro_new_{table}" RENAME TO "{table}"',
         *indexes,
@@ -249,6 +260,42 @@ def test_a6_a_type_change_rebuilds_copying_with_a_cast_and_round_trips(
     ]
     assert clean(db, project, number - 1, number)
     assert "_ferro_new_author" not in db.tables()
+
+
+@sqlite_only
+def test_a_rebuild_never_hands_out_a_deleted_rows_id_again(project, pkg, db):
+    """``INTEGER PRIMARY KEY AUTOINCREMENT`` never reuses an id: the rebuild
+    carries the old table's ``sqlite_sequence`` mark to the new one, up and
+    down, so the row deleted from the end keeps its id retired."""
+    start(project, pkg, db, AGE_INT)
+    db.execute(
+        "INSERT INTO author (name, status) VALUES ('a', 'draft'), ('b', 'draft'), "
+        "('c', 'draft')"
+    )
+    db.execute("DELETE FROM author WHERE id = 3")
+    number = generate(project, pkg, AGE_TEXT, "author_age_text")
+    up = statements(step_file(project, number, "up", db.backend))
+    drop = up.index('DROP TABLE "author"')
+    assert up[drop - 2 : drop] == carried_sequence("author"), up
+
+    assert run("migrate", "up", "--url", db.url) == 0
+    assert db.rows("SELECT seq FROM sqlite_sequence WHERE name = 'author'") == [(3,)]
+    db.execute("INSERT INTO author (name, status) VALUES ('d', 'draft')")
+    assert db.rows("SELECT id, name FROM author ORDER BY id") == [
+        (1, "a"),
+        (2, "b"),
+        (4, "d"),
+    ]
+
+    db.execute("DELETE FROM author WHERE id = 4")
+    assert run("migrate", "down", "--yes", "--url", db.url) == 0
+    db.execute("INSERT INTO author (name, status) VALUES ('e', 'draft')")
+    assert db.rows("SELECT id, name FROM author ORDER BY id") == [
+        (1, "a"),
+        (2, "b"),
+        (5, "e"),
+    ]
+    assert db.rows("SELECT name, seq FROM sqlite_sequence") == [("author", 5)]
 
 
 # -- A7b and A4: nullability ----------------------------------------------------------

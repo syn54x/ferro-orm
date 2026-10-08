@@ -1322,9 +1322,12 @@ mod tests {
             "INSERT INTO \"_ferro_new_author\" (\"id\", \"name\", \"status\") \
              SELECT \"id\", \"name\", \"status\" FROM \"author\""
                 .to_string(),
+        ];
+        down.extend(carried_sequence());
+        down.extend([
             "DROP TABLE \"author\"".to_string(),
             "ALTER TABLE \"_ferro_new_author\" RENAME TO \"author\"".to_string(),
-        ];
+        ]);
         down.extend(create_pass_indexes(&before));
         assert_eq!(
             sqlite.down,
@@ -1768,6 +1771,16 @@ mod tests {
     }
 
     /// The check a rebuild runs on a retyped column of `author`.
+    /// The `author` rebuild's carry of its `AUTOINCREMENT` sequence.
+    fn carried_sequence() -> [String; 2] {
+        [
+            "DELETE FROM sqlite_sequence WHERE name = '_ferro_new_author'".to_string(),
+            "INSERT INTO sqlite_sequence (name, seq) SELECT '_ferro_new_author', seq \
+             FROM sqlite_sequence WHERE name = 'author'"
+                .to_string(),
+        ]
+    }
+
     fn guarded(column: &str, target: &str, class: &str) -> Vec<String> {
         vec![
             format!(
@@ -1801,6 +1814,7 @@ mod tests {
                 .to_string(),
         ];
         up.extend(guarded("age", "varchar", "'text'"));
+        up.extend(carried_sequence());
         up.extend([
             "DROP TABLE \"author\"".to_string(),
             "ALTER TABLE \"_ferro_new_author\" RENAME TO \"author\"".to_string(),
@@ -1821,6 +1835,7 @@ mod tests {
                 .to_string(),
         ];
         down.extend(guarded("age", "integer", "'integer'"));
+        down.extend(carried_sequence());
         down.extend([
             "DROP TABLE \"author\"".to_string(),
             "ALTER TABLE \"_ferro_new_author\" RENAME TO \"author\"".to_string(),
