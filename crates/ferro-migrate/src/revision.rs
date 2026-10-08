@@ -73,6 +73,11 @@ pub struct RevisionOp {
     /// Postgres lets no later statement of the same transaction use. The
     /// generator's `labels` step is the same fact on the other door.
     pub autocommit: bool,
+    /// The foreign key Alembic's `create_foreign_key` writes with the op, read
+    /// from the side the revision leads to: an `AddForeignKey`'s, or the one
+    /// riding a column added with no statement of the pass's (a column that
+    /// demands values of existing rows, written as Alembic's plain op).
+    pub foreign_key: Option<RevisionForeignKey>,
     /// For a `RedefineIndex`, the definition its create builds, read from the
     /// side the revision leads to: `(columns, unique)`.
     pub index: Option<(Vec<String>, bool)>,
@@ -81,6 +86,33 @@ pub struct RevisionOp {
     /// Nothing this revision writes undoes it: `raise RuntimeError(<reason>)`
     /// in place of the op.
     pub irreversible: Option<String>,
+}
+
+/// A foreign key as `op.create_foreign_key` takes it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct RevisionForeignKey {
+    /// The constraint's name (`fk_<table>_<col>_<to_table>`).
+    pub name: Option<String>,
+    /// The local column.
+    pub column: String,
+    /// The referenced table.
+    pub to_table: String,
+    /// The referenced column.
+    pub to_column: String,
+    /// The `ON DELETE` action, when set.
+    pub on_delete: Option<String>,
+}
+
+impl From<&ferro_schema_ir::SchemaForeignKey> for RevisionForeignKey {
+    fn from(fk: &ferro_schema_ir::SchemaForeignKey) -> Self {
+        Self {
+            name: fk.name.clone(),
+            column: fk.column.clone(),
+            to_table: fk.to_table.clone(),
+            to_column: fk.to_column.clone(),
+            on_delete: fk.on_delete.clone(),
+        }
+    }
 }
 
 /// What the comment above a revision op says.
@@ -215,12 +247,13 @@ impl serde::Serialize for RevisionOp {
             kind: &'static str,
             comment: &'a str,
         }
-        let mut out = serializer.serialize_struct("RevisionOp", 8)?;
+        let mut out = serializer.serialize_struct("RevisionOp", 9)?;
         out.serialize_field("op", &self.op)?;
         out.serialize_field("statements", &self.statements)?;
         out.serialize_field("row_security_statements", &self.row_security_statements)?;
         out.serialize_field("twin", &self.twin)?;
         out.serialize_field("autocommit", &self.autocommit)?;
+        out.serialize_field("foreign_key", &self.foreign_key)?;
         out.serialize_field(
             "index",
             &self.index.as_ref().map(|(columns, unique)| Index {
@@ -449,9 +482,34 @@ fn written(
     up: bool,
 ) -> Result<RevisionOp, RevisionRefusal> {
     let target = plan.target.ir();
+    let demanding = rendered.is_none();
     let (statements, row_security_statements) = match rendered {
         Some(rendered) => (rendered.statements, rendered.row_security_statements),
         None => (Vec::new(), Vec::new()),
+    };
+    let foreign_key = match &planned.op {
+        MigrationOp::AddForeignKey { table, column } => Some(
+            plan.target
+                .model(table)
+                .and_then(|model| model.foreign_keys.iter().find(|fk| &fk.column == column))
+                .map(RevisionForeignKey::from)
+                .ok_or_else(|| {
+                    RevisionRefusal::Render(EmissionError {
+                        message: format!(
+                            "the plan adds a foreign key on {table}.{column} the target does \
+                             not declare; this is a ferro bug, please file an issue"
+                        ),
+                    })
+                })?,
+        ),
+        // The pass writes a rider into its own statement; a demanding add
+        // has none, so the rider is Alembic's op beside the plain add.
+        MigrationOp::AddColumn { table, column } if demanding => plan
+            .target
+            .model(table)
+            .and_then(|model| crate::emit::column_riders(model, column).foreign_key)
+            .map(RevisionForeignKey::from),
+        _ => None,
     };
     let twin = has_twin(&planned.op, &statements, target, plan.dialect());
     let index = match &planned.op {
@@ -490,6 +548,7 @@ fn written(
         row_security_statements,
         twin,
         autocommit: commits_alone(&planned.op),
+        foreign_key,
         index,
         marker,
         irreversible: None,

@@ -651,6 +651,50 @@ fn a_removed_foreign_key_is_alembics_drop_constraint_both_ways() {
     assert!(revision.upgrade[0].twin);
     assert_eq!(kinds(&revision.downgrade), ["AddForeignKey"]);
     assert!(revision.downgrade[0].twin);
+    // The key put back is the live one, as `create_foreign_key` takes it.
+    assert_eq!(revision.downgrade[0].foreign_key, Some(team_key()));
+}
+
+fn team_key() -> RevisionForeignKey {
+    RevisionForeignKey {
+        name: Some("fk_card_owner_id_team".into()),
+        column: "owner_id".into(),
+        to_table: "team".into(),
+        to_column: "id".into(),
+        on_delete: None,
+    }
+}
+
+#[test]
+fn a_demanding_column_carries_its_foreign_key_rider() {
+    // A required `owner_id` with its foreign key, added to a table with
+    // rows: the pass has no statement, so the revision writes Alembic's
+    // plain add and, beside it, the key that rides the column.
+    let team = table("team", vec![id()]);
+    let mut required = linked_card(true);
+    required.columns[1].nullable = false;
+    let revision = plan_revision(
+        &live(vec![team.clone(), card(vec![id()])]),
+        &envelope(vec![team, required]),
+        Dialect::Postgres,
+    )
+    .expect("a revision");
+    let [add] = revision.upgrade.as_slice() else {
+        panic!("{:?}", revision.upgrade);
+    };
+    assert_eq!(kind_name(&add.op), "AddColumn");
+    assert!(add.statements.is_empty() && add.twin);
+    assert!(matches!(add.marker, Some(Marker::DataDependent(_))));
+    assert_eq!(add.foreign_key, Some(team_key()));
+
+    // A nullable one is the pass's own statement, its key inside it.
+    let revision = plan_revision(
+        &live(vec![table("team", vec![id()]), card(vec![id()])]),
+        &envelope(vec![table("team", vec![id()]), linked_card(true)]),
+        Dialect::Postgres,
+    )
+    .expect("a revision");
+    assert!(revision.upgrade.iter().all(|op| op.foreign_key.is_none()));
 }
 
 // -- the wire shape ---------------------------------------------------------------------
@@ -669,6 +713,7 @@ fn a_revision_op_serialises_its_marker_with_its_comment() {
             "row_security_statements": [],
             "twin": true,
             "autocommit": false,
+            "foreign_key": null,
             "index": null,
             "marker": {
                 "kind": "data_dependent",

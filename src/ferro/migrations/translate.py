@@ -205,16 +205,6 @@ class _Target:
     def model_column(self, table: str, name: str) -> dict[str, Any]:
         return next(c for c in self.models[table]["columns"] if c["name"] == name)
 
-    def foreign_key(self, table: str, column: str) -> dict[str, Any] | None:
-        return next(
-            (
-                fk
-                for fk in self.models[table].get("foreign_keys") or []
-                if fk["column"] == column
-            ),
-            None,
-        )
-
 
 def _not_creating_types(column: sa.Column, dialect: str) -> sa.Column:
     """``column`` (copied) whose native enum type the table op does not
@@ -283,25 +273,20 @@ def _executed(
     ]
 
 
-def _foreign_key(
-    target: _Target, table: str, column: str
-) -> list[ops.MigrateOperation]:
-    """``op.create_foreign_key`` for the foreign key the target declares on
-    ``table.column``."""
-    fk = target.foreign_key(table, column)
+def _foreign_key(written: dict[str, Any]) -> list[ops.MigrateOperation]:
+    """``op.create_foreign_key`` for the foreign key the core carries on the
+    revision op ``written`` (none: nothing)."""
+    fk = written["foreign_key"]
     if fk is None:
-        raise RuntimeError(
-            f"ferro: the plan adds a foreign key on {table}.{column} the target does "
-            "not declare; this is a ferro bug, please file an issue"
-        )
+        return []
     return [
         ops.CreateForeignKeyOp(
-            fk.get("name"),
-            table,
+            fk["name"],
+            written["op"]["table"],
             fk["to_table"],
-            [column],
-            [fk.get("to_column") or "id"],
-            ondelete=fk.get("on_delete"),
+            [fk["column"]],
+            [fk["to_column"]],
+            ondelete=fk["on_delete"],
         )
     ]
 
@@ -329,13 +314,9 @@ def _twin(written: dict[str, Any], target: _Target) -> list[ops.MigrateOperation
         added: list[ops.MigrateOperation] = [
             ops.AddColumnOp(table, target.column(table, column))
         ]
-        if not statements:
-            # The pass has no statement for it (a column that demands values
-            # of existing rows): the plain op, with its foreign key.
-            if target.foreign_key(table, column) is not None:
-                added += _foreign_key(target, table, column)
-            return added
-        return added + _executed(written, statements[1:])
+        # A rider the pass writes is among its statements; a demanding add
+        # has none, and its foreign key comes with the op.
+        return added + _foreign_key(written) + _executed(written, statements[1:])
     if kind == "DropColumn":
         return [ops.DropColumnOp(op["table"], op["column"])]
     if kind == "AlterColumnNullability":
@@ -382,7 +363,7 @@ def _twin(written: dict[str, Any], target: _Target) -> list[ops.MigrateOperation
             ),
         ]
     if kind == "AddForeignKey":
-        return _foreign_key(target, op["table"], op["column"])
+        return _foreign_key(written)
     if kind == "DropForeignKey":
         return [ops.DropConstraintOp(op["name"], op["table"], type_="foreignkey")]
     raise RuntimeError(

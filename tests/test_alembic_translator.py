@@ -1327,6 +1327,7 @@ def _written(op: dict, **fields) -> dict:
         "row_security_statements": [],
         "twin": False,
         "autocommit": False,
+        "foreign_key": None,
         "index": None,
         "marker": None,
         "irreversible": None,
@@ -1358,6 +1359,13 @@ def test_the_translator_writes_each_revision_op_the_way_the_core_says():
                 {"kind": "AddColumn", "table": "card", "column": "flavor"},
                 twin=True,
                 marker={"kind": "data_dependent", "comment": marker},
+                foreign_key={
+                    "name": "fk_card_flavor_team",
+                    "column": "flavor",
+                    "to_table": "team",
+                    "to_column": "id",
+                    "on_delete": "CASCADE",
+                },
             ),
             _written(
                 {"kind": "AddCheck", "table": "card", "name": "ck_card_a"},
@@ -1396,13 +1404,23 @@ def test_the_translator_writes_each_revision_op_the_way_the_core_says():
     assert isinstance(warning, FerroWarningOp)
     assert warning.warning == "enum type status holds x, which no model declares"
     assert isinstance(marked, FerroMarkedOp) and marked.marker == marker
-    [added] = marked.wrapped
+    added, rider = marked.wrapped
     assert isinstance(added, ops.AddColumnOp)
     assert (added.table_name, added.column.name, added.column.nullable) == (
         "card",
         "flavor",
         False,
     )
+    # The foreign key the core carries beside the plain add.
+    assert isinstance(rider, ops.CreateForeignKeyOp)
+    assert (
+        rider.constraint_name,
+        rider.source_table,
+        rider.referent_table,
+        rider.local_cols,
+        rider.remote_cols,
+        rider.kw.get("ondelete"),
+    ) == ("fk_card_flavor_team", "card", "team", ["flavor"], ["id"], "CASCADE")
     assert isinstance(executed, FerroExecuteOp)
     assert (executed.statement, executed.autocommit) == (check, False)
     assert isinstance(autocommitted, FerroExecuteOp)

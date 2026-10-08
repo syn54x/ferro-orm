@@ -39,7 +39,9 @@ pub use plan::{
     PlannedOp, Refusal, Rider, RowRisk, Side, live_hints, plan_down, plan_from_ir,
 };
 pub use render::{RenderedOp, validate_schema_ir};
-pub use revision::{Marker, Revision, RevisionOp, RevisionRefusal, plan_revision};
+pub use revision::{
+    Marker, Revision, RevisionForeignKey, RevisionOp, RevisionRefusal, plan_revision,
+};
 pub use run_plan::{
     Direction, ExecMode, HeldDirectory, Origin, PlannedStep, RebuildExpectation, RecordKind,
     RunPlan, RunRefusal, RunStatus, StepRecord, Target, plan_run,
