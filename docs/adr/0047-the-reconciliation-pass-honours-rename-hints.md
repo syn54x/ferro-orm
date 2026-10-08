@@ -37,6 +37,10 @@ ADR-0032 defines a hint as live when the *previous snapshot* holds the old name 
 - **ADR-0010**: the create pass "brings missing tables into existence", except a table a live rename hint says already exists under its old name, and the tables that depend on it.
 - **ADR-0011**: label addition stays append-only, and removal stays reviewed-migration territory. A **hinted** label rename on Postgres is the one other change the pass makes to a live enum type. The ownership argument is restated. The rename runs only on the developer's explicit hint and only while the old label is live and the new one absent, so misattributing a type by derivation cannot rename anything the developer did not name.
 
+## Amended by the runtime deepening (2026-10-07, #511 tier A)
+
+Every door decides which live tables it reads with one rule. A live read planned against a declared modelset (the pass against the models, `drift` and `baseline` against a snapshot, the bridge against the models) reads every declared table that is live, plus the old table of each live table rename hint, minus the tables the caller excludes (the pass excludes the tables its create pass just built), plus the tables the caller adds (the bridge adds the tables a revision drops). A live table is a base table: never a view, and never SQLite's own `sqlite_*` tables. The same rule decides whether a hint is live and whether a database with no records already holds a model's table (the adoption refusal), so a view named like a model gets the same answer on every door. One Rust function decides that table list, and the pass calls it directly. Over FFI it is `_live_schema_ir(using, declared_json, extra_tables_json=None)`, so a caller no longer passes a table list that repeats its declared modelset.
+
 ## Considered options
 
 - **Ignore hints in the pass and leave renames to migrations.** Rejected: the pass would create or drop where the other doors rename, and on a table rename the create pass would build an empty twin that the next migration's drift check then reports.
