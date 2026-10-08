@@ -43,11 +43,16 @@ from ferro import (
 from ferro._core import (
     _live_row_security_for_test,
     _normalize_row_policy_expr,
-    _plan_row_security_reconcile,
     _render_migration_sql_for_test,
 )
 from ferro.ir.compiler import compile_registry_schema_ir
 from ferro.raw import execute, fetch_all
+from tests.test_row_security_reconcile import (
+    ops_of,
+    plan_live_ledgerrow,
+    statements_of,
+    warnings_of,
+)
 
 LEDGER_A = uuid.UUID("11111111-1111-4111-8111-111111111111")
 LEDGER_B = uuid.UUID("22222222-2222-4222-8222-222222222222")
@@ -193,14 +198,6 @@ def _render(live_row_security: dict) -> tuple[list[str], list[str]]:
         "",
         "",
         json.dumps(live_row_security),
-    )
-
-
-def _model_ir() -> dict:
-    return next(
-        model
-        for model in compile_registry_schema_ir()["payload"]["models"]
-        if model["table_name"] == "ledgerrow"
     )
 
 
@@ -387,14 +384,12 @@ def test_a_user_owned_policy_is_never_rebuilt():
 def test_row_policy_rebuild_statement_parity_pin():
     _define_ledger_row(setting=OTHER_SETTING)
     live = _live()
-    plan = json.loads(
-        _plan_row_security_reconcile(json.dumps(_model_ir()), json.dumps(live))
-    )
-    assert plan["drifted"] == [POLICY_NAME]
-    assert plan["statements"] == [DROP_POLICY_SQL, _create_policy_sql(OTHER_SETTING)]
+    plan = plan_live_ledgerrow(live)
+    assert ops_of(plan) == [("RebuildRowPolicy", POLICY_NAME)]
+    assert statements_of(plan) == [DROP_POLICY_SQL, _create_policy_sql(OTHER_SETTING)]
 
     runtime, _ = _render(live)
-    assert plan["statements"] == runtime
+    assert statements_of(plan) == runtime
 
 
 # ---------------------------------------------------------------------------
@@ -446,12 +441,9 @@ async def test_a_rebuilt_policy_does_not_re_drift_on_the_next_connect(db_url):
     await connect(db_url, migrate_updates=True)
     async with engines.session():
         live = await _live_row_security_for_test("ledgerrow")
-        plan = json.loads(
-            _plan_row_security_reconcile(json.dumps(_model_ir()), json.dumps(live))
-        )
-        assert plan["statements"] == []
-        assert plan["drifted"] == []
-        assert plan["warnings"] == []
+        plan = plan_live_ledgerrow(live)
+        assert plan["operations"] == []
+        assert warnings_of(plan) == []
 
     reset_engine()
     await connect(db_url, migrate_updates=True)
@@ -544,12 +536,8 @@ async def test_a_policy_narrowed_to_a_role_is_rebuilt_back_to_public(db_url):
             assert narrowed["policies"][0]["roles"] == [role]
             # The body did not change at all — only the audience did.
             assert narrowed["policies"][0]["using"] == live["policies"][0]["using"]
-            plan = json.loads(
-                _plan_row_security_reconcile(
-                    json.dumps(_model_ir()), json.dumps(narrowed)
-                )
-            )
-            assert plan["drifted"] == [POLICY_NAME]
+            plan = plan_live_ledgerrow(narrowed)
+            assert ops_of(plan) == [("RebuildRowPolicy", POLICY_NAME)]
 
         reset_engine()
         await connect(db_url, migrate_updates=True)

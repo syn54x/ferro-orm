@@ -553,18 +553,6 @@ def _render_table_check_body(predicate_json: str) -> str:
     """The shared table-check CHECK body, byte-identical to the Rust emitters."""
     ...
 
-def _plan_enum_label_addition(
-    type_name: str, declared: list[str], live: list[str]
-) -> str:
-    """The label-addition decision (ADR-0011) for one enum type.
-
-    Returns JSON: ``{"statements": [...], "extra_labels": [...]}`` — the
-    Rust-rendered ``ADD VALUE IF NOT EXISTS`` statements for model-declared
-    labels the live type is missing, and the live labels the model no longer
-    declares (warn-never-act).
-    """
-    ...
-
 def _plan_step_verdicts(
     before_json: str,
     after_json: str,
@@ -613,35 +601,6 @@ def _rls_shorthand_cast(column_ir_json: str) -> str:
     """
     ...
 
-def _plan_row_security(model_ir_json: str, dialect: str = "postgres") -> str:
-    """The row-security create decision (PRD #406) for one model.
-
-    Returns JSON: ``{"statements": [...], "names": [...], "warning": str|None}``
-    — the Rust-rendered ``ENABLE``/``FORCE ROW LEVEL SECURITY`` and
-    ``CREATE POLICY`` statements a freshly created table needs, in execution
-    order, plus the policy names. Byte-identical to what the create pass
-    executes (I-1). On ``"sqlite"`` there are no statements and one warning.
-    """
-    ...
-
-def _plan_row_security_reconcile(
-    model_ir_json: str,
-    live_json: str,
-    dialect: str = "postgres",
-    destructive: bool = False,
-) -> str:
-    """The row-security reconciliation decision (#413) for one live table.
-
-    ``live_json`` is the LiveRowSecurity shape (``enabled``, ``forced``,
-    ``policies``). Returns JSON:
-    ``{"statements": [...], "missing": [...], "drifted": [...],
-    "unverifiable": [...], "extra": [...], "foreign": [...],
-    "warnings": [...]}`` — the Rust-rendered flag, ``CREATE POLICY``, rebuild
-    and (under ``destructive``) orphan-drop statements in execution order.
-    Byte-identical to what the reconciliation pass executes (I-1).
-    """
-    ...
-
 def _normalize_row_policy_expr(expr: str) -> str:
     """One row-policy expression through ferro's canonical normalizer (#413).
 
@@ -655,7 +614,7 @@ def _row_policy_command_from_catalog_code(code: str) -> str | None:
 
     ``None`` for a code ferro does not recognize. The Alembic autogenerate
     comparator's own ``pg_policy`` introspection uses this to build the
-    ``LiveRowPolicy`` payload ``_plan_row_security_reconcile`` expects —
+    ``LiveRowPolicy`` payload the planner's live facts carry —
     the same decode ``src/introspect.rs``'s ``live_table_row_security`` uses
     (AGENTS.md § I-1).
     """

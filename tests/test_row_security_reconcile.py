@@ -17,6 +17,7 @@ enforces. The enforcement assertion runs as a created ``NOSUPERUSER`` role: the
 matrix connects as a superuser, and superusers bypass RLS unconditionally.
 """
 
+import copy
 import json
 import uuid
 from typing import ClassVar
@@ -36,7 +37,7 @@ from ferro import (
 from ferro._core import (
     _live_row_security_for_test,
     _normalize_row_policy_expr,
-    _plan_row_security_reconcile,
+    _plan_from_ir,
     _render_migration_sql_for_test,
 )
 from ferro.ir.compiler import compile_registry_schema_ir
@@ -185,12 +186,44 @@ CATALOG_SHORTHAND = (
 )
 
 
-def _model_ir() -> dict:
-    return next(
-        model
-        for model in compile_registry_schema_ir()["payload"]["models"]
-        if model["table_name"] == "ledgerrow"
+def plan_live_ledgerrow(live_row_security: dict, *, destructive: bool = False) -> dict:
+    """The one planner's rendered plan (``_plan_from_ir``) for the registry's
+    declaration over a live ``ledgerrow`` that already holds its columns, its
+    row security as the catalog reads it: what the reconciliation pass
+    executes and the migrations door writes (AGENTS.md § I-1)."""
+    declared = compile_registry_schema_ir()
+    live = copy.deepcopy(declared)
+    for model in live["payload"]["models"]:
+        model.pop("row_security", None)
+    facts = {"tables": {m["table_name"]: {} for m in live["payload"]["models"]}}
+    facts["tables"]["ledgerrow"]["row_security"] = live_row_security
+    return json.loads(
+        _plan_from_ir(
+            json.dumps(live),
+            json.dumps(declared),
+            "postgres",
+            json.dumps({"destructive": destructive}),
+            True,
+            json.dumps(facts),
+        )
     )
+
+
+def ops_of(plan: dict) -> list[tuple[str, str | None]]:
+    """Each planned op as ``(kind, policy name)``."""
+    return [(op["kind"], op.get("name")) for op in plan["operations"]]
+
+
+def statements_of(plan: dict) -> list[str]:
+    return [sql for op in plan["operations"] for sql in op["statements"]]
+
+
+def warnings_of(plan: dict) -> list[str]:
+    return [
+        *plan["warnings"],
+        *(w for op in plan["operations"] for w in op["warnings"]),
+        *plan["always_warnings"],
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -300,38 +333,29 @@ def test_policy_ddl_lands_after_the_tables_own_column_and_data_steps():
 
 
 def test_row_security_reconcile_statement_parity_pin():
-    """The FFI the Alembic operation (#414) consumes renders the same bytes the
-    reconciliation pass executes — one decision, two migration doors."""
+    """The one planner renders the same bytes the reconciliation pass
+    executes — one decision, every migration door."""
     _define_ledger_row()
     live = {"enabled": False, "forced": False, "policies": []}
-    plan = json.loads(
-        _plan_row_security_reconcile(json.dumps(_model_ir()), json.dumps(live))
-    )
-    assert plan["missing"] == [POLICY_NAME]
-    assert plan["drifted"] == []
-    assert plan["statements"] == [ENABLE_SQL, FORCE_SQL, CREATE_POLICY_SQL]
+    plan = plan_live_ledgerrow(live)
+    assert ops_of(plan) == [
+        ("EnableRowSecurity", None),
+        ("ForceRowSecurity", None),
+        ("AddRowPolicy", POLICY_NAME),
+    ]
+    assert statements_of(plan) == [ENABLE_SQL, FORCE_SQL, CREATE_POLICY_SQL]
 
     runtime, _ = _render(live)
-    assert plan["statements"] == runtime
+    assert statements_of(plan) == runtime
 
 
-def test_the_reconcile_seam_reports_an_unchanged_declaration_as_empty():
+def test_the_planner_plans_nothing_for_an_unchanged_declaration():
     _define_ledger_row()
-    plan = json.loads(
-        _plan_row_security_reconcile(
-            json.dumps(_model_ir()),
-            json.dumps({"enabled": True, "forced": True, "policies": [_live_policy()]}),
-        )
+    plan = plan_live_ledgerrow(
+        {"enabled": True, "forced": True, "policies": [_live_policy()]}
     )
-    assert plan == {
-        "statements": [],
-        "missing": [],
-        "drifted": [],
-        "unverifiable": [],
-        "extra": [],
-        "foreign": [],
-        "warnings": [],
-    }
+    assert plan["operations"] == []
+    assert warnings_of(plan) == []
 
 
 # ---------------------------------------------------------------------------
@@ -427,12 +451,9 @@ async def test_a_second_reconcile_of_the_same_declaration_emits_nothing(db_url):
         assert _normalize_row_policy_expr(catalog_using) == _normalize_row_policy_expr(
             SHORTHAND_EXPR
         )
-        plan = json.loads(
-            _plan_row_security_reconcile(json.dumps(_model_ir()), json.dumps(live))
-        )
-        assert plan["statements"] == []
-        assert plan["drifted"] == []
-        assert plan["warnings"] == []
+        plan = plan_live_ledgerrow(live)
+        assert plan["operations"] == []
+        assert warnings_of(plan) == []
 
     reset_engine()
     await connect(db_url, migrate_updates=True)

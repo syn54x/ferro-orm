@@ -31,9 +31,15 @@ from ferro import (
     engines,
     reset_engine,
 )
-from ferro._core import _plan_row_security_reconcile, _render_migration_sql_for_test
+from ferro._core import _render_migration_sql_for_test
 from ferro.ir.compiler import compile_registry_schema_ir
 from ferro.raw import execute, fetch_all
+from tests.test_row_security_reconcile import (
+    ops_of,
+    plan_live_ledgerrow,
+    statements_of,
+    warnings_of,
+)
 
 LEDGER_A = uuid.UUID("11111111-1111-4111-8111-111111111111")
 LEDGER_B = uuid.UUID("22222222-2222-4222-8222-222222222222")
@@ -153,14 +159,6 @@ def _render(
     )
 
 
-def _model_ir() -> dict:
-    return next(
-        model
-        for model in compile_registry_schema_ir()["payload"]["models"]
-        if model["table_name"] == "ledgerrow"
-    )
-
-
 # ---------------------------------------------------------------------------
 # Render level
 # ---------------------------------------------------------------------------
@@ -211,31 +209,25 @@ def test_a_foreign_policy_is_reported_and_never_touched():
 
 def test_orphans_and_foreign_policies_are_told_apart():
     _define_ledger_row()
-    plan = json.loads(
-        _plan_row_security_reconcile(
-            json.dumps(_model_ir()),
-            json.dumps(
-                _live(_declared_live_policy(), _orphan_policy(), _foreign_policy())
-            ),
-            "postgres",
-            True,
-        )
+    plan = plan_live_ledgerrow(
+        _live(_declared_live_policy(), _orphan_policy(), _foreign_policy()),
+        destructive=True,
     )
-    assert plan["extra"] == [ORPHAN_NAME]
-    assert plan["foreign"] == [FOREIGN_NAME]
-    assert plan["statements"] == [f'DROP POLICY "{ORPHAN_NAME}" ON "ledgerrow"']
+    # The orphan is dropped; the foreign policy is never an op, only reported.
+    assert ops_of(plan) == [("DropRowPolicy", ORPHAN_NAME)]
+    assert statements_of(plan) == [f'DROP POLICY "{ORPHAN_NAME}" ON "ledgerrow"']
+    foreign = [w for w in warnings_of(plan) if FOREIGN_NAME in w]
+    assert len(foreign) == 1
+    assert "does not own" in foreign[0]
+    assert ORPHAN_NAME not in foreign[0]
 
 
 def test_row_policy_drop_statement_parity_pin():
     _define_ledger_row()
     live = _live(_declared_live_policy(), _orphan_policy())
-    plan = json.loads(
-        _plan_row_security_reconcile(
-            json.dumps(_model_ir()), json.dumps(live), "postgres", True
-        )
-    )
+    plan = plan_live_ledgerrow(live, destructive=True)
     runtime, _ = _render(live, destructive=True)
-    assert plan["statements"] == runtime
+    assert statements_of(plan) == runtime
 
 
 # ---------------------------------------------------------------------------
