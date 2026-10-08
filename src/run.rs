@@ -30,7 +30,7 @@ use crate::ddl_exec::{
     Attempt, DdlError, DdlExecutor, Door, Executed, Failed, Role, Unit, pool_connection,
 };
 use crate::state::TransactionConnection;
-use ferro_ddl_lowering::Dialect;
+use ferro_ddl_lowering::{Dialect, quote_ident};
 use ferro_migrate::run_plan::{
     Direction, ExecMode, HeldDirectory, OrderKeys, Origin, PlannedStep, RebuildExpectation,
     RecordKind, RerecordAction, RerecordMode, RunPlan, RunStatus, StepRecord, TRACKING_FORMAT,
@@ -237,10 +237,6 @@ pub(crate) fn show_duration(duration: Duration) -> String {
 }
 
 // -- names -------------------------------------------------------------------------
-
-fn quote_ident(name: &str) -> String {
-    format!("\"{}\"", name.replace('"', "\"\""))
-}
 
 /// Where the tracking tables live: `tracking_schema` when set (Postgres
 /// only), else the connection's current schema, unqualified.

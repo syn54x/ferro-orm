@@ -18,7 +18,7 @@ use crate::backend::{EngineBindValue, EngineHandle};
 use crate::ddl_exec::{DdlError, DdlExecutor, Door, Executed, Failed, Role, Unit};
 use crate::introspect::{
     LiveCheck, LiveColumn, LiveForeignKey, LiveIndex, connected_role_bypasses_row_security,
-    live_table_checks, live_table_columns, quote_ident, sqlite_indexes_covering_column,
+    live_table_checks, live_table_columns, sqlite_indexes_covering_column,
 };
 use crate::live_ir::{
     LiveTable, live_schema_ir, live_table_renames, live_tables_to_schema_ir, tables_to_read,
@@ -29,7 +29,7 @@ use crate::run::{
 use crate::schema::internal_create_tables;
 use crate::state::{MODEL_REGISTRY, engine_for_connection};
 use ferro_ddl_lowering::{
-    Dialect, LiveRowSecurity, ddl_lock_retry_warning, row_security_migrator_warning,
+    Dialect, LiveRowSecurity, ddl_lock_retry_warning, quote_ident, row_security_migrator_warning,
     run_lock_wait_warning,
 };
 use ferro_migrate::{
