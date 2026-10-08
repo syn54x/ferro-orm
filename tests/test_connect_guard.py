@@ -16,7 +16,6 @@ catalog's format tables; a plain ``connect(url)`` reads neither.
 from __future__ import annotations
 
 import asyncio
-import logging
 import warnings
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -28,6 +27,7 @@ import ferro
 from ferro import Model, _core
 from ferro.base import FerroField
 from ferro.migrations import MigrationRefused
+from tests._pass_harness import auto_migrate, schema_steps
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     AUTHOR,
     pkg,
@@ -109,7 +109,7 @@ async def test_a_tracked_database_refuses_auto_migrate_through_the_config(
 
 @pytest.mark.parametrize("door", ["create_tables", "migrate"])
 async def test_the_manual_passes_refuse_a_tracked_database_too(
-    project, pkg, db, door, executed
+    project, pkg, db, door
 ):
     """``ferro.create_tables()`` and ``ferro.migrate()`` are the passes'
     public doors: they share the lock and the guard."""
@@ -121,21 +121,22 @@ async def test_the_manual_passes_refuse_a_tracked_database_too(
         await getattr(ferro, door)()
 
     assert str(raised.value) == guard_text(governed(db), governed(db))
-    assert executed == []
+    # Refused before any DDL: the error's report lists nothing.
+    assert raised.value.report == ferro.PassReport()
     assert "guardfresh" not in db.tables()
 
 
-async def test_create_tables_still_creates_on_an_untracked_database(
-    project, pkg, db, executed
-):
+async def test_create_tables_still_creates_on_an_untracked_database(project, pkg, db):
     configure(project, pkg, db.backend)
     await ferro.connect(db.url)
     declare_fresh_model()
 
-    await ferro.create_tables()
+    report = await ferro.create_tables()
 
     assert "guardfresh" in db.tables()
-    assert len(executed) == 1 and '"guardfresh"' in executed[0]
+    steps = schema_steps(report)
+    assert len(steps) == 1 and steps[0][0] == "guardfresh", steps
+    assert steps[0][1].startswith('CREATE TABLE IF NOT EXISTS "guardfresh"')
     assert await lock_held() is False
 
 
@@ -255,37 +256,7 @@ async def test_an_untracked_database_still_auto_migrates_beside_a_config(
 # -- the run lock ------------------------------------------------------------------
 
 
-class _ExecutedStatements(logging.Handler):
-    """The statements auto-migrate logs before executing each one, on the
-    ``ferro`` logger (the line ``tests/fixtures/pass_recording`` records)."""
-
-    PREFIX = "Ferro Engine: auto-migrate executing on "
-
-    def __init__(self) -> None:
-        super().__init__(level=logging.DEBUG)
-        self.lines: list[str] = []
-
-    def emit(self, record: logging.LogRecord) -> None:
-        message = record.getMessage()
-        if message.startswith(self.PREFIX):
-            self.lines.append(message[len(self.PREFIX) :])
-
-
-@pytest.fixture
-def executed():
-    logger = logging.getLogger("ferro")
-    handler = _ExecutedStatements()
-    level = logger.level
-    logger.addHandler(handler)
-    logger.setLevel(logging.DEBUG)
-    yield handler.lines
-    logger.removeHandler(handler)
-    logger.setLevel(level)
-
-
-async def test_two_concurrent_auto_migrates_serialize_on_the_run_lock(
-    project, db, executed
-):
+async def test_two_concurrent_auto_migrates_serialize_on_the_run_lock(project, db):
     """Two processes booting with ``migrate_updates=True``: the second's
     pass waits, then sees the first's DDL and executes nothing."""
     if db.backend != "postgres":
@@ -294,14 +265,18 @@ async def test_two_concurrent_auto_migrates_serialize_on_the_run_lock(
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        await asyncio.gather(
-            ferro.connect(db.url, name="boot_a", migrate_updates=True),
-            ferro.connect(db.url, name="boot_b", migrate_updates=True),
+        reports = await asyncio.gather(
+            auto_migrate(db.url, name="boot_a", updates=True),
+            auto_migrate(db.url, name="boot_b", updates=True),
         )
 
-    assert executed == [
-        "'guardfresh': CREATE TABLE IF NOT EXISTS \"guardfresh\" "
-        '( "id" serial PRIMARY KEY NOT NULL, "label" varchar NOT NULL )'
+    # Between them the two passes created the table once.
+    assert [step for report in reports for step in schema_steps(report)] == [
+        (
+            "guardfresh",
+            'CREATE TABLE IF NOT EXISTS "guardfresh" '
+            '( "id" serial PRIMARY KEY NOT NULL, "label" varchar NOT NULL )',
+        )
     ]
     assert "guardfresh" in db.tables()
 
@@ -334,9 +309,13 @@ async def test_the_waiting_warning_names_the_call_that_waits(project, db):
             pending = asyncio.create_task(ferro.create_tables())
             await asyncio.sleep(0.5)
             assert not pending.done()
-        await asyncio.wait_for(pending, 10)
+        report = await asyncio.wait_for(pending, 10)
 
     assert "guardfresh" in db.tables()
+    # The wait is in the report too, typed.
+    assert [(w.kind, w.subject.scope) for w in report.warnings] == [
+        ("RunLockWait", "modelset")
+    ]
     assert [str(w.message) for w in caught if "is waiting" in str(w.message)] == [
         "ferro auto-migrate: create_tables() is waiting: another ferro migration "
         "run or auto-migrate pass holds the run lock on this database. It goes on "

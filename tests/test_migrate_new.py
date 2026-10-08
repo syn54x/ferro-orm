@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
 import shutil
 import sys
 import textwrap
@@ -454,21 +453,6 @@ def test_a_name_unusable_in_a_file_name_is_refused(project, pkg, capsys):
 # -- parity with auto-migrate (AGENTS.md § I-1) -----------------------------------------
 
 
-class _CreatePassStatements(logging.Handler):
-    """Collect every statement auto-migrate logs before executing it."""
-
-    prefix = "Ferro Engine: auto-migrate executing on '"
-
-    def __init__(self) -> None:
-        super().__init__(level=logging.DEBUG)
-        self.statements: list[str] = []
-
-    def emit(self, record: logging.LogRecord) -> None:
-        message = record.getMessage()
-        if message.startswith(self.prefix):
-            self.statements.append(message.split("': ", 1)[1])
-
-
 @pytest.mark.asyncio
 @pytest.mark.backend_matrix
 async def test_the_up_file_is_what_auto_migrate_executes(
@@ -488,21 +472,13 @@ async def test_the_up_file_is_what_auto_migrate_executes(
         assert run("migrate", "new", "library") == 0
     migration = project / "migrations/0001_library"
 
-    logger = logging.getLogger("ferro")
-    handler = _CreatePassStatements()
-    previous = logger.level
-    logger.addHandler(handler)
-    logger.setLevel(logging.DEBUG)
-    try:
-        await ferro.connect(db_url, auto_migrate=True)
-    finally:
-        logger.removeHandler(handler)
-        logger.setLevel(previous)
+    await ferro.connect(db_url)
+    report = await ferro.create_tables()
 
     generated = statements(migration / f"01_schema.up.{db_backend}.sql")
     # The same statements, byte for byte, in the same sequence: every enum
     # type first (by name), then the tables, parents first.
-    assert generated == handler.statements
+    assert generated == [s.sql for s in report.statements if s.role == "schema"]
     if db_backend == "postgres":
         assert [sql.split('"')[1] for sql in generated if "CREATE TYPE" in sql] == [
             "kind",

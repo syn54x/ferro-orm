@@ -17,9 +17,8 @@
 use crate::backend::{EngineBindValue, EngineHandle};
 use crate::ddl_exec::{DdlError, DdlExecutor, Door, Executed, Failed, Role, Unit};
 use crate::introspect::{
-    LiveCheck, LiveColumn, LiveForeignKey, LiveIndex, column_holds_label,
-    connected_role_bypasses_row_security, live_table_checks, live_table_columns, quote_ident,
-    sqlite_indexes_covering_column,
+    LiveCheck, LiveColumn, LiveForeignKey, LiveIndex, connected_role_bypasses_row_security,
+    live_table_checks, live_table_columns, quote_ident, sqlite_indexes_covering_column,
 };
 use crate::live_ir::{
     LiveTable, live_schema_ir, live_table_renames, live_tables_to_schema_ir, tables_to_read,
@@ -29,9 +28,12 @@ use crate::run::{
 };
 use crate::schema::internal_create_tables;
 use crate::state::{MODEL_REGISTRY, engine_for_connection};
-use ferro_ddl_lowering::{Dialect, LiveRowSecurity, row_security_migrator_warning};
+use ferro_ddl_lowering::{
+    Dialect, LiveRowSecurity, ddl_lock_retry_warning, row_security_migrator_warning,
+    run_lock_wait_warning,
+};
 use ferro_migrate::{
-    LiveFacts, MigrationOp, PlanOptions, RenderedOp, Report, ReportKind, plan_from_ir,
+    LiveFacts, MigrationOp, PlanOptions, RenderedOp, Report, ReportKind, Subject, plan_from_ir,
     validate_schema_ir,
 };
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload};
@@ -185,40 +187,101 @@ fn plan_error(err: ferro_migrate::PlanError) -> PyErr {
     pyo3::exceptions::PyValueError::new_err(err.to_string())
 }
 
-/// Prefix of the debug line auto-migrate logs (on the `ferro` logger) before
-/// it executes each statement — the create pass's, every statement of a
-/// table's reconciliation plan including its column drops, and each enum type
-/// statement (logged against its type name) — so a run's exact DDL is
-/// observable without a database-side statement log.
-const RECONCILE_STATEMENT_LOG_PREFIX: &str = "Ferro Engine: auto-migrate executing on";
-
-pub(crate) fn log_reconcile_statement(table_lower: &str, sql: &str) {
-    crate::log_debug(format!(
-        "{RECONCILE_STATEMENT_LOG_PREFIX} '{table_lower}': {sql}"
-    ));
+/// What one auto-migrate pass did (ADR-0049): every statement it sent to the
+/// database, in execution order across the create pass, the type statements
+/// and the reconciliation, and every warning it raised, in the order raised.
+/// `ferro.migrate()` and `ferro.create_tables()` return it as
+/// `ferro.PassReport`; `connect()` builds it and logs from it.
+///
+/// It is filled from what the DDL executor ran ([`Executed`]), never rebuilt
+/// from the plan, so it cannot describe a statement that did not execute. A
+/// pass that fails partway carries it on its error ([`with_pass_report`]):
+/// what committed before the failure, the failing statement left out.
+#[derive(Debug, Default)]
+pub struct PassReport {
+    /// Every statement sent, with its subject and role.
+    pub executed: Executed,
+    /// Every warning raised.
+    pub warnings: Vec<Report>,
 }
 
-/// Prefix of the debug line logged before each statement the DDL lock
-/// timeout (ADR-0044) adds around a reconciliation unit on Postgres —
-/// `SET LOCAL lock_timeout = '5000ms'`, or `SET` / `RESET lock_timeout`
-/// around an enum type's statements. A line of its own, not
-/// [`RECONCILE_STATEMENT_LOG_PREFIX`]'s: it is the session's lock policy,
-/// not a statement of the pass, so every recording and parity check of the
-/// pass's DDL (AGENTS.md § I-1) reads exactly what it did before.
-const LOCK_TIMEOUT_LOG_PREFIX: &str = "Ferro Engine: auto-migrate lock timeout on";
+impl PassReport {
+    /// Raise `report` as a Python warning ([`emit_report`]) and list it.
+    pub(crate) fn warn(&mut self, report: Report) {
+        emit_report(&report);
+        self.warnings.push(report);
+    }
 
-pub(crate) fn log_lock_timeout_statement(subject: &str, sql: &str) {
-    crate::log_debug(format!("{LOCK_TIMEOUT_LOG_PREFIX} '{subject}': {sql}"));
+    /// List what a unit run under the executor sent: all of it, or what it
+    /// committed before it failed. The failure is handed back.
+    pub(crate) fn unit(
+        &mut self,
+        result: Result<Executed, DdlError<Failed>>,
+    ) -> Result<(), DdlError<Failed>> {
+        match result {
+            Ok(executed) => {
+                self.executed.statements.extend(executed.statements);
+                Ok(())
+            }
+            Err(mut err) => {
+                self.executed
+                    .statements
+                    .extend(err.take_committed().statements);
+                Err(err)
+            }
+        }
+    }
+
+    /// The wire form: `{"statements": [{"subject", "sql", "role"}],
+    /// "warnings": [{"kind", "subject", "text", "recurs", "blocks"}]}`.
+    ///
+    /// # Errors
+    /// `RuntimeError` if it cannot be serialized.
+    pub fn to_json(&self) -> PyResult<String> {
+        serde_json::to_string(&serde_json::json!({
+            "statements": self.executed.statements,
+            "warnings": self.warnings,
+        }))
+        .map_err(|e| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "could not serialize the pass report: {e}"
+            ))
+        })
+    }
+
+    /// One debug line summing the pass up, for `connect()`, which returns
+    /// nothing: every statement already logged its own line as it ran.
+    pub(crate) fn log_summary(&self) {
+        let ran = |role| {
+            self.executed
+                .statements
+                .iter()
+                .filter(|statement| statement.role == role)
+                .count()
+        };
+        crate::log_debug(format!(
+            "ferro auto-migrate: {} schema statement(s), {} warning(s)",
+            ran(Role::Schema),
+            self.warnings.len()
+        ));
+    }
 }
 
-/// Prefix of the debug line logged before each row probe a SQLite label
-/// rename hint costs (`render_label_held_probe`). A line of its own: the
-/// probe reads rows and changes nothing, so the pass's DDL recordings read
-/// exactly what they did before, while the probe's cost stays observable.
-const LABEL_PROBE_LOG_PREFIX: &str = "Ferro Engine: auto-migrate reading rows of";
+/// The attribute a failed pass's error carries its report on, as JSON; the
+/// Python door reads it into the error's `.report`.
+pub const PASS_REPORT_ATTR: &str = "_ferro_pass_report";
 
-fn log_label_probe(table: &str, sql: &str) {
-    crate::log_debug(format!("{LABEL_PROBE_LOG_PREFIX} '{table}': {sql}"));
+/// `err`, carrying `report` (what committed before the failure) for the
+/// Python door to expose as `.report`.
+pub(crate) fn with_pass_report(err: PyErr, report: &PassReport) -> PyErr {
+    let json = match report.to_json() {
+        Ok(json) => json,
+        Err(serialize) => return serialize,
+    };
+    Python::attach(|py| match err.value(py).setattr(PASS_REPORT_ATTR, json) {
+        Ok(()) => err,
+        Err(attach) => attach,
+    })
 }
 
 /// Map a column-drop execution failure to a `PyErr` with a consistent,
@@ -236,9 +299,9 @@ fn map_drop_column_error(table_lower: &str, col_name: &str, e: sqlx::Error) -> P
 
 /// The warning the create and reconciliation passes raise for each attempt
 /// that timed out waiting for a lock: `migrating 'author': waiting for a lock
-/// on "author" (attempt 1 of 10, retry in 1s)`.
-pub(crate) fn pass_attempt_warning(subject: &str, attempt: &crate::ddl_exec::Attempt) -> String {
-    format!("migrating '{subject}': {}", attempt.describe())
+/// on "author" (attempt 1 of 10, retry in 1s)` ([`ReportKind::DdlLockRetry`]).
+pub(crate) fn pass_attempt_warning(subject: Subject, attempt: &crate::ddl_exec::Attempt) -> Report {
+    ddl_lock_retry_warning(subject, &attempt.describe())
 }
 
 /// The error for a create or reconciliation unit that timed out on every
@@ -377,11 +440,16 @@ fn type_statement_error(op: &MigrationOp, e: sqlx::Error) -> PyErr {
     crate::errors::map_db_error(&context, e)
 }
 
+/// The enum type an op without a table changes: the subject its statements
+/// are reported under. A type rename is reported under its new name.
 fn type_name_of(op: &MigrationOp) -> &str {
     match op {
         MigrationOp::AddEnumLabel { type_name, .. }
         | MigrationOp::CreateEnumType { type_name, .. }
-        | MigrationOp::DropEnumType { type_name } => type_name,
+        | MigrationOp::DropEnumType { type_name }
+        | MigrationOp::RenameEnumLabel { type_name, .. }
+        | MigrationOp::RemoveEnumLabel { type_name, .. } => type_name,
+        MigrationOp::RenameEnumType { new, .. } => new,
         _ => "",
     }
 }
@@ -393,7 +461,8 @@ fn type_name_of(op: &MigrationOp) -> &str {
 /// A mid-plan failure leaves the table exactly as it was, so a failed run is
 /// safely re-runnable. SQLite runs statement at a time, with each column
 /// drop going through its index-dependency path, and sets no timeout.
-/// Returns how many statements ran and how many columns were dropped.
+/// What ran (or committed before a failure) goes into `report`. Returns how
+/// many statements ran and how many columns were dropped.
 async fn execute_table_ops(
     engine: &EngineHandle,
     table: &str,
@@ -401,6 +470,7 @@ async fn execute_table_ops(
     declared: &IrEnvelope<SchemaIrPayload>,
     backend: Dialect,
     ddl: &DdlExecutor,
+    report: &mut PassReport,
 ) -> PyResult<(usize, usize)> {
     let statements: usize = ops.iter().map(|op| op.statements.len()).sum();
     let drops = ops
@@ -412,7 +482,7 @@ async fn execute_table_ops(
     }
 
     if backend == Dialect::Sqlite {
-        execute_sqlite_table_ops(engine, table, ops, declared).await?;
+        execute_sqlite_table_ops(engine, table, ops, declared, &mut report.executed).await?;
         return Ok((statements - drops, drops));
     }
 
@@ -432,14 +502,14 @@ async fn execute_table_ops(
             Unit::Transactional,
             Door::Pass(table),
             &sqls,
-            |attempt| crate::emit_user_warning_always(&pass_attempt_warning(table, &attempt)),
+            |attempt| report.warn(pass_attempt_warning(Subject::table(table), &attempt)),
             None,
         )
         .await;
-    match result {
-        Ok(_) => Ok((statements - drops, drops)),
+    match report.unit(result) {
+        Ok(()) => Ok((statements - drops, drops)),
         Err(DdlError::LockTimeout(timeout)) => Err(pass_lock_timeout_error(table, &timeout)),
-        Err(DdlError::Failed(Failed { index, error })) => {
+        Err(DdlError::Failed(Failed { index, error, .. })) => {
             Err(match index.and_then(|index| ops_statements.get(index)) {
                 Some((
                     RenderedOp {
@@ -463,18 +533,20 @@ async fn execute_table_ops(
 /// One table's rendered ops on SQLite, outside the executor on purpose:
 /// statement at a time (SQLite sets no lock timeout and retries nothing),
 /// each column drop through its index-dependency path, which reads the
-/// catalog between statements ([`execute_sqlite_drop_column`]).
+/// catalog between statements ([`execute_sqlite_drop_column`]). Each
+/// statement is recorded in `executed` as it commits, so a failure leaves
+/// the ones ahead of it there.
 async fn execute_sqlite_table_ops(
     engine: &EngineHandle,
     table: &str,
     ops: &[&RenderedOp],
     declared: &IrEnvelope<SchemaIrPayload>,
-) -> PyResult<Executed> {
-    let mut executed = Executed::default();
+    executed: &mut Executed,
+) -> PyResult<()> {
     for op in ops {
         if let MigrationOp::DropColumn { column, .. } = &op.op {
             for sql in &op.statements {
-                execute_sqlite_drop_column(engine, &mut executed, table, column, sql).await?;
+                execute_sqlite_drop_column(engine, executed, table, column, sql).await?;
             }
             continue;
         }
@@ -487,7 +559,7 @@ async fn execute_sqlite_table_ops(
             }
         }
     }
-    Ok(executed)
+    Ok(())
 }
 
 /// How long an auto-migrate pass waits for the run lock. The wait has no
@@ -511,23 +583,13 @@ pub enum AutoMigrateDoor {
 }
 
 impl AutoMigrateDoor {
-    fn call(self) -> &'static str {
+    pub(crate) fn call(self) -> &'static str {
         match self {
             AutoMigrateDoor::Connect => "connect(auto_migrate=…)",
             AutoMigrateDoor::CreateTables => "create_tables()",
             AutoMigrateDoor::Migrate => "migrate()",
         }
     }
-}
-
-/// The warning an auto-migrate pass raises the moment it finds the run lock
-/// held, so a caller that is waiting says why.
-pub fn auto_migrate_waiting_text(door: AutoMigrateDoor) -> String {
-    format!(
-        "{} is waiting: another ferro migration run or auto-migrate pass holds the run lock \
-         on this database. It goes on once that one finishes.",
-        door.call()
-    )
 }
 
 /// The refusal for an auto-migrate flag on a database ferro migrations
@@ -663,7 +725,9 @@ pub async fn guard_tracked_schema(
 /// together serialize here, and the second sees the first's DDL. The lock
 /// is released on every exit path.
 ///
-/// `door` names the public call for the waiting warning.
+/// `door` names the public call for the waiting warning
+/// ([`run_lock_wait_warning`]). What the passes execute and warn goes into
+/// `report`, failure or not.
 ///
 /// # Errors
 /// The guard's refusal; the pooler refusal behind a transaction-mode
@@ -673,18 +737,38 @@ pub async fn internal_migrate(
     opts: MigrateOptions,
     tracking_schemas: &[String],
     door: AutoMigrateDoor,
+    report: &mut PassReport,
 ) -> PyResult<()> {
     let lock = RunLock::acquire(&engine, None, AUTO_MIGRATE_LOCK_WAIT, |_| {
-        crate::emit_user_warning_always(&auto_migrate_waiting_text(door));
+        report.warn(run_lock_wait_warning(door.call()));
     })
     .await?;
     let outcome = async {
         guard_tracked_schema(&engine, tracking_schemas).await?;
-        run_passes(engine.clone(), opts).await
+        run_passes(engine.clone(), opts, report).await
     }
     .await;
     let released = lock.release().await;
     outcome.and(released)
+}
+
+/// [`internal_migrate`] as a Python door returns it: the report's wire form,
+/// or the pass's error carrying what committed before it
+/// ([`with_pass_report`]).
+///
+/// # Errors
+/// The pass's error, with its report attached.
+pub async fn run_pass_for_python(
+    engine: Arc<EngineHandle>,
+    opts: MigrateOptions,
+    tracking_schemas: &[String],
+    door: AutoMigrateDoor,
+) -> PyResult<String> {
+    let mut report = PassReport::default();
+    match internal_migrate(engine, opts, tracking_schemas, door, &mut report).await {
+        Ok(()) => report.to_json(),
+        Err(err) => Err(with_pass_report(err, &report)),
+    }
 }
 
 /// The create pass, then (per `MigrateOptions`) the reconciliation of
@@ -705,10 +789,14 @@ pub async fn internal_migrate(
 /// refresh fails, or if the plan contains a change that cannot be applied
 /// safely — rendering runs before anything executes, so such a plan executes
 /// nothing.
-async fn run_passes(engine: Arc<EngineHandle>, opts: MigrateOptions) -> PyResult<()> {
+async fn run_passes(
+    engine: Arc<EngineHandle>,
+    opts: MigrateOptions,
+    report: &mut PassReport,
+) -> PyResult<()> {
     // One lock-timeout policy for every DDL statement of both passes (ADR-0044).
     let ddl = DdlExecutor::new(opts.ddl_lock_timeout);
-    let created = internal_create_tables(engine.clone(), opts.updates, &ddl).await?;
+    let created = internal_create_tables(engine.clone(), opts.updates, &ddl, report).await?;
     let tables_before_create = &created.existing;
     let modelset = {
         let guard = crate::state::SCHEMA_IR_MODELSET.read().map_err(|_| {
@@ -786,13 +874,13 @@ async fn run_passes(engine: Arc<EngineHandle>, opts: MigrateOptions) -> PyResult
             .collect();
         if !forced_tables.is_empty()
             && !connected_role_bypasses_row_security(&engine).await?
-            && let Some(report) = row_security_migrator_warning(&forced_tables)
+            && let Some(warning) = row_security_migrator_warning(&forced_tables)
         {
             // Emitted HERE, not queued with the rest: it warns that the data
             // steps below may see zero rows, and a warning that arrives after
             // those steps have already run silently succeeded is no warning at
             // all (#413 gate).
-            emit_report(&report);
+            report.warn(warning);
         }
     }
 
@@ -819,18 +907,22 @@ async fn run_passes(engine: Arc<EngineHandle>, opts: MigrateOptions) -> PyResult
             // `SET lock_timeout` / `RESET lock_timeout` (ADR-0044).
             if !current.statements.is_empty() {
                 let subject = type_name_of(&current.op);
-                ddl.run(
-                    &engine,
-                    Unit::Unwrapped,
-                    Door::Pass(subject),
-                    &current.statements,
-                    |attempt| {
-                        crate::emit_user_warning_always(&pass_attempt_warning(subject, &attempt))
-                    },
-                    None,
-                )
-                .await
-                .map_err(|err| match err {
+                let result = ddl
+                    .run(
+                        &engine,
+                        Unit::Unwrapped,
+                        Door::Pass(subject),
+                        &current.statements,
+                        |attempt| {
+                            report.warn(pass_attempt_warning(
+                                Subject::enum_type(subject),
+                                &attempt,
+                            ))
+                        },
+                        None,
+                    )
+                    .await;
+                report.unit(result).map_err(|err| match err {
                     DdlError::LockTimeout(timeout) => pass_lock_timeout_error(subject, &timeout),
                     DdlError::Failed(failure) => type_statement_error(&current.op, failure.error),
                 })?;
@@ -850,7 +942,7 @@ async fn run_passes(engine: Arc<EngineHandle>, opts: MigrateOptions) -> PyResult
             .take_while(|op| op.op.table() == Some(table))
             .count();
         let (statements, dropped) =
-            execute_table_ops(&engine, table, &group, &modelset, backend, &ddl).await?;
+            execute_table_ops(&engine, table, &group, &modelset, backend, &ddl, report).await?;
         if statements + dropped > 0 {
             ddl_ran = true;
             crate::log_debug(format!(
@@ -873,8 +965,8 @@ async fn run_passes(engine: Arc<EngineHandle>, opts: MigrateOptions) -> PyResult
         })?;
     }
 
-    for report in reports {
-        emit_report(report);
+    for warning in reports {
+        report.warn(warning.clone());
     }
     // After the renames ran, so each table and column is read by its
     // declared name. A refused hint renames nothing and is the planner's to
@@ -883,16 +975,18 @@ async fn run_passes(engine: Arc<EngineHandle>, opts: MigrateOptions) -> PyResult
     let hint_refused = plan
         .reports
         .iter()
-        .any(|report| matches!(report.kind, ReportKind::HintRefused(_)));
+        .any(|warning| matches!(warning.kind, ReportKind::HintRefused(_)));
     if !hint_refused {
-        for report in stranded_label_warnings(&engine, &modelset, &reconciled).await? {
-            emit_report(&report);
+        for warning in
+            stranded_label_warnings(&engine, &modelset, &reconciled, &mut report.executed).await?
+        {
+            report.warn(warning);
         }
     }
     // Row-security notes describe whether THIS connect left rows fenced, so
     // the warning registry must never quiet them down after the first boot.
-    for report in recurring {
-        emit_report(report);
+    for warning in recurring {
+        report.warn(warning.clone());
     }
 
     Ok(())
@@ -915,8 +1009,8 @@ pub(crate) fn emit_report(report: &Report) {
 /// (ADR-0032) while the database still holds its old label. A column with a
 /// `db_check` answers from the check alone, since it bounds every row: it
 /// lists the old label (live) or does not (inert), and no row is read. Only
-/// a column with no check is probed ([`column_holds_label`], logged with
-/// [`LABEL_PROBE_LOG_PREFIX`]). Called under `migrate_updates` only: the
+/// a column with no check is probed (`render_label_held_probe`, recorded in
+/// `executed` as [`Role::Probe`]). Called under `migrate_updates` only: the
 /// probe reads the whole column once nothing matches, which a plain connect
 /// must never pay for a hint that may stay (ADR-0047, ADR-0011, ADR-0032).
 /// The pass changes the schema, never rows (ADR-0014), so a live hint is one
@@ -931,6 +1025,7 @@ async fn stranded_label_warnings(
     engine: &EngineHandle,
     modelset: &IrEnvelope<SchemaIrPayload>,
     existing: &HashSet<String>,
+    executed: &mut Executed,
 ) -> PyResult<Vec<Report>> {
     use ferro_ddl_lowering::{
         check_lists_label, db_check_constraint_name, stranded_label_rename_warning,
@@ -964,11 +1059,21 @@ async fn stranded_label_warnings(
                 let held = match check {
                     Some(check) => check_lists_label(&check.definition, old),
                     None => {
-                        log_label_probe(
-                            table,
-                            &ferro_ddl_lowering::render_label_held_probe(table, &col.name, old),
-                        );
-                        column_holds_label(engine, table, &col.name, old).await?
+                        let probe =
+                            ferro_ddl_lowering::render_label_held_probe(table, &col.name, old);
+                        !executed
+                            .probe_on(engine, Door::Pass(table), &probe)
+                            .await
+                            .map_err(|e| {
+                                crate::errors::map_db_error(
+                                    &format!(
+                                        "Auto-migrate failed reading rows of '{table}' for a \
+                                         label rename hint"
+                                    ),
+                                    e,
+                                )
+                            })?
+                            .is_empty()
                     }
                 };
                 if held {
@@ -1002,7 +1107,12 @@ fn is_create_pass_add(op: &MigrationOp, after_renames: &BTreeSet<String>) -> boo
 /// configured `tracking_schema`s.
 ///
 /// # Errors
-/// Returns a `PyErr` if the engine is not initialized or the migration fails.
+/// Returns the pass's report as JSON ([`PassReport::to_json`]), which
+/// `ferro.migrate` reads into a `PassReport`.
+///
+/// # Errors
+/// Returns a `PyErr` if the engine is not initialized or the migration
+/// fails; a failure of the pass carries its report ([`with_pass_report`]).
 #[pyfunction]
 #[pyo3(signature = (using=None, updates=true, destructive=false, tracking_schemas=Vec::new(), ddl_lock_timeout_s=5.0))]
 pub fn migrate(
@@ -1017,7 +1127,7 @@ pub fn migrate(
         .with_ddl_lock_timeout_seconds(ddl_lock_timeout_s)?;
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let engine = engine_for_connection(using)?;
-        internal_migrate(engine, opts, &tracking_schemas, AutoMigrateDoor::Migrate).await
+        run_pass_for_python(engine, opts, &tracking_schemas, AutoMigrateDoor::Migrate).await
     })
 }
 

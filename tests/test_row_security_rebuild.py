@@ -53,6 +53,7 @@ from tests.test_row_security_reconcile import (
     statements_of,
     warnings_of,
 )
+from tests._pass_harness import auto_migrate, schema_steps, warning_texts
 
 LEDGER_A = uuid.UUID("11111111-1111-4111-8111-111111111111")
 LEDGER_B = uuid.UUID("22222222-2222-4222-8222-222222222222")
@@ -268,6 +269,7 @@ def test_parentheses_that_change_grouping_are_not_erased():
 def test_an_unchanged_shorthand_policy_is_not_rebuilt():
     _define_ledger_row()
     statements, warnings = _render(_live())
+    assert (statements, warnings) == ([], [])
     assert statements == []
     assert warnings == []
 
@@ -275,6 +277,13 @@ def test_an_unchanged_shorthand_policy_is_not_rebuilt():
 def test_a_drifted_shorthand_body_is_dropped_and_recreated():
     _define_ledger_row(setting=OTHER_SETTING)
     statements, warnings = _render(_live())
+    assert (statements, warnings) == (
+        [
+            'DROP POLICY "rls_ledgerrow_ledger_id" ON "ledgerrow"',
+            "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.tenant_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.tenant_id', true), '')::uuid)",
+        ],
+        [],
+    )
     assert statements == [DROP_POLICY_SQL, _create_policy_sql(OTHER_SETTING)]
     assert warnings == []
 
@@ -282,12 +291,26 @@ def test_a_drifted_shorthand_body_is_dropped_and_recreated():
 def test_command_drift_rebuilds():
     _define_ledger_row(command="select")
     statements, _ = _render(_live())
+    assert (statements, _) == (
+        [
+            'DROP POLICY "rls_ledgerrow_ledger_id" ON "ledgerrow"',
+            'CREATE POLICY "rls_ledgerrow_ledger_id" ON "ledgerrow" FOR SELECT USING ("ledger_id" = NULLIF(current_setting(\'pinch.ledger_id\', true), \'\')::uuid)',
+        ],
+        [],
+    )
     assert statements == [DROP_POLICY_SQL, _create_policy_sql(command="SELECT")]
 
 
 def test_restrictive_drift_rebuilds():
     _define_ledger_row(restrictive=True)
     statements, _ = _render(_live())
+    assert (statements, _) == (
+        [
+            'DROP POLICY "rls_ledgerrow_ledger_id" ON "ledgerrow"',
+            "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" AS RESTRICTIVE FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)",
+        ],
+        [],
+    )
     assert statements == [DROP_POLICY_SQL, _create_policy_sql(restrictive=True)]
 
 
@@ -296,6 +319,13 @@ def test_a_clause_the_declaration_no_longer_asks_for_is_drift():
     is drift ferro decides exactly — no body comparison needed."""
     _define_ledger_row(command="select")
     statements, _ = _render(_live(command="select", with_check=CATALOG_SHORTHAND))
+    assert (statements, _) == (
+        [
+            'DROP POLICY "rls_ledgerrow_ledger_id" ON "ledgerrow"',
+            'CREATE POLICY "rls_ledgerrow_ledger_id" ON "ledgerrow" FOR SELECT USING ("ledger_id" = NULLIF(current_setting(\'pinch.ledger_id\', true), \'\')::uuid)',
+        ],
+        [],
+    )
     assert statements == [DROP_POLICY_SQL, _create_policy_sql(command="SELECT")]
 
 
@@ -306,6 +336,7 @@ def test_a_second_pass_over_the_rebuilt_policy_plans_nothing():
     statements, _ = _render(
         _live(using=CATALOG_SHORTHAND_OTHER, with_check=CATALOG_SHORTHAND_OTHER)
     )
+    assert (statements, _) == ([], [])
     assert statements == []
 
 
@@ -316,6 +347,12 @@ def test_a_raw_body_difference_is_reported_and_never_rebuilt():
     _define_raw_ledger_row('"id" BETWEEN 1 AND 5')
     statements, warnings = _render(
         _live(command="select", using="((id >= 1) AND (id <= 5))", with_check=None)
+    )
+    assert (statements, warnings) == (
+        [],
+        [
+            "Row policy 'rls_ledgerrow_ledger_id' on table 'ledgerrow' is declared with a raw using=/with_check= expression whose live definition no longer matches the declaration as ferro reads it.\n  declared: USING (\"id\" BETWEEN 1 AND 5)\n  live:     USING (((id >= 1) AND (id <= 5)))\nPostgres stores its own rewriting of raw SQL, so ferro cannot tell an edited expression from a re-spelled one and does NOT rebuild it. If you changed the declaration, apply it with a reviewed migration (or drop the policy and reconnect, and ferro will create it from the declaration).",
+        ],
     )
     assert statements == []
     assert len(warnings) == 1
@@ -341,6 +378,7 @@ def test_an_unchanged_raw_body_is_silent():
             with_check=None,
         )
     )
+    assert (statements, warnings) == ([], [])
     assert statements == []
     assert warnings == []
 
@@ -350,6 +388,13 @@ def test_command_drift_on_a_raw_policy_still_rebuilds():
     ferro's to report rather than rewrite."""
     _define_raw_ledger_row('"id" > 0')
     statements, _ = _render(_live(command="all", using="(id > 0)", with_check=None))
+    assert (statements, _) == (
+        [
+            'DROP POLICY "rls_ledgerrow_ledger_id" ON "ledgerrow"',
+            'CREATE POLICY "rls_ledgerrow_ledger_id" ON "ledgerrow" FOR SELECT USING ("id" > 0)',
+        ],
+        [],
+    )
     assert statements == [
         DROP_POLICY_SQL,
         f'CREATE POLICY "{POLICY_NAME}" ON "ledgerrow" FOR SELECT USING ("id" > 0)',
@@ -372,6 +417,15 @@ def test_a_user_owned_policy_is_never_rebuilt():
         }
     )
     statements, warnings = _render(live)
+    assert (statements, warnings) == (
+        [
+            'DROP POLICY "rls_ledgerrow_ledger_id" ON "ledgerrow"',
+            "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.tenant_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.tenant_id', true), '')::uuid)",
+        ],
+        [
+            "Table 'ledgerrow' carries row policy/policies 'handwritten_admin' that ferro does not own (their names do not start with 'rls_'). They still filter rows and compose with the declared policies. Ferro never alters or drops them.",
+        ],
+    )
     assert not any("handwritten_admin" in sql for sql in statements)
     assert any("handwritten_admin" in w for w in warnings)
 
@@ -389,6 +443,13 @@ def test_row_policy_rebuild_statement_parity_pin():
     assert statements_of(plan) == [DROP_POLICY_SQL, _create_policy_sql(OTHER_SETTING)]
 
     runtime, _ = _render(live)
+    assert (runtime, _) == (
+        [
+            'DROP POLICY "rls_ledgerrow_ledger_id" ON "ledgerrow"',
+            "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.tenant_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.tenant_id', true), '')::uuid)",
+        ],
+        [],
+    )
     assert statements_of(plan) == runtime
 
 
@@ -410,13 +471,34 @@ async def _pg_policies(table: str) -> list[dict]:
 @pytest.mark.asyncio
 async def test_migrate_updates_rebuilds_a_drifted_policy(db_url):
     LedgerRow = _define_ledger_row()
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "ledgerrow",
+            'CREATE TABLE IF NOT EXISTS "ledgerrow" ( "id" serial PRIMARY KEY NOT NULL, "label" varchar NOT NULL, "ledger_id" uuid NOT NULL )',
+        ),
+        ("ledgerrow", 'ALTER TABLE "ledgerrow" ENABLE ROW LEVEL SECURITY'),
+        ("ledgerrow", 'ALTER TABLE "ledgerrow" FORCE ROW LEVEL SECURITY'),
+        (
+            "ledgerrow",
+            "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)",
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         await LedgerRow.create(ledger_id=LEDGER_A, label="a1")
     _rewind_registry()
 
     _define_ledger_row(setting=OTHER_SETTING)
-    await connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == [
+        ("ledgerrow", 'DROP POLICY "rls_ledgerrow_ledger_id" ON "ledgerrow"'),
+        (
+            "ledgerrow",
+            "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.tenant_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.tenant_id', true), '')::uuid)",
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         policies = await _pg_policies("ledgerrow")
         assert [policy["policyname"] for policy in policies] == [POLICY_NAME]
@@ -434,11 +516,32 @@ async def test_a_rebuilt_policy_does_not_re_drift_on_the_next_connect(db_url):
     """The failure mode this whole comparison exists to prevent: rebuild, then
     reconcile again and see nothing."""
     _define_ledger_row()
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "ledgerrow",
+            'CREATE TABLE IF NOT EXISTS "ledgerrow" ( "id" serial PRIMARY KEY NOT NULL, "label" varchar NOT NULL, "ledger_id" uuid NOT NULL )',
+        ),
+        ("ledgerrow", 'ALTER TABLE "ledgerrow" ENABLE ROW LEVEL SECURITY'),
+        ("ledgerrow", 'ALTER TABLE "ledgerrow" FORCE ROW LEVEL SECURITY'),
+        (
+            "ledgerrow",
+            "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)",
+        ),
+    ]
+    assert warning_texts(report) == []
     _rewind_registry()
 
     _define_ledger_row(setting=OTHER_SETTING)
-    await connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == [
+        ("ledgerrow", 'DROP POLICY "rls_ledgerrow_ledger_id" ON "ledgerrow"'),
+        (
+            "ledgerrow",
+            "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.tenant_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.tenant_id', true), '')::uuid)",
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         live = await _live_row_security_for_test("ledgerrow")
         plan = plan_live_ledgerrow(live)
@@ -446,7 +549,9 @@ async def test_a_rebuilt_policy_does_not_re_drift_on_the_next_connect(db_url):
         assert warnings_of(plan) == []
 
     reset_engine()
-    await connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == []
+    assert warning_texts(report) == []
     async with engines.session():
         live_again = await _live_row_security_for_test("ledgerrow")
         assert live_again == live
@@ -457,11 +562,32 @@ async def test_a_rebuilt_policy_does_not_re_drift_on_the_next_connect(db_url):
 @pytest.mark.asyncio
 async def test_command_drift_rebuilds_against_a_live_table(db_url):
     _define_ledger_row()
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "ledgerrow",
+            'CREATE TABLE IF NOT EXISTS "ledgerrow" ( "id" serial PRIMARY KEY NOT NULL, "label" varchar NOT NULL, "ledger_id" uuid NOT NULL )',
+        ),
+        ("ledgerrow", 'ALTER TABLE "ledgerrow" ENABLE ROW LEVEL SECURITY'),
+        ("ledgerrow", 'ALTER TABLE "ledgerrow" FORCE ROW LEVEL SECURITY'),
+        (
+            "ledgerrow",
+            "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)",
+        ),
+    ]
+    assert warning_texts(report) == []
     _rewind_registry()
 
     _define_ledger_row(command="select", restrictive=True)
-    await connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == [
+        ("ledgerrow", 'DROP POLICY "rls_ledgerrow_ledger_id" ON "ledgerrow"'),
+        (
+            "ledgerrow",
+            'CREATE POLICY "rls_ledgerrow_ledger_id" ON "ledgerrow" AS RESTRICTIVE FOR SELECT USING ("ledger_id" = NULLIF(current_setting(\'pinch.ledger_id\', true), \'\')::uuid)',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         policies = await _pg_policies("ledgerrow")
         assert policies[0]["cmd"] == "SELECT"
@@ -478,14 +604,35 @@ async def test_a_rebuilt_policy_filters_by_the_new_setting(db_url):
 
     role = f"ferro_rls_{uuid.uuid4().hex[:12]}"
     LedgerRow = _define_ledger_row()
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "ledgerrow",
+            'CREATE TABLE IF NOT EXISTS "ledgerrow" ( "id" serial PRIMARY KEY NOT NULL, "label" varchar NOT NULL, "ledger_id" uuid NOT NULL )',
+        ),
+        ("ledgerrow", 'ALTER TABLE "ledgerrow" ENABLE ROW LEVEL SECURITY'),
+        ("ledgerrow", 'ALTER TABLE "ledgerrow" FORCE ROW LEVEL SECURITY'),
+        (
+            "ledgerrow",
+            "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)",
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         await LedgerRow.create(ledger_id=LEDGER_A, label="a1")
         await LedgerRow.create(ledger_id=LEDGER_B, label="b1")
     _rewind_registry()
 
     LedgerRow = _define_ledger_row(setting=OTHER_SETTING)
-    await connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == [
+        ("ledgerrow", 'DROP POLICY "rls_ledgerrow_ledger_id" ON "ledgerrow"'),
+        (
+            "ledgerrow",
+            "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.tenant_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.tenant_id', true), '')::uuid)",
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         schema = (await fetch_all("SELECT current_schema() AS s"))[0]["s"]
         try:
@@ -524,7 +671,20 @@ async def test_a_policy_narrowed_to_a_role_is_rebuilt_back_to_public(db_url):
     """
     role = f"ferro_rls_{uuid.uuid4().hex[:12]}"
     _define_ledger_row(restrictive=True)
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "ledgerrow",
+            'CREATE TABLE IF NOT EXISTS "ledgerrow" ( "id" serial PRIMARY KEY NOT NULL, "label" varchar NOT NULL, "ledger_id" uuid NOT NULL )',
+        ),
+        ("ledgerrow", 'ALTER TABLE "ledgerrow" ENABLE ROW LEVEL SECURITY'),
+        ("ledgerrow", 'ALTER TABLE "ledgerrow" FORCE ROW LEVEL SECURITY'),
+        (
+            "ledgerrow",
+            "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" AS RESTRICTIVE FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)",
+        ),
+    ]
+    assert warning_texts(report) == []
     try:
         async with engines.session():
             await execute(f'CREATE ROLE "{role}" NOSUPERUSER')
@@ -540,7 +700,15 @@ async def test_a_policy_narrowed_to_a_role_is_rebuilt_back_to_public(db_url):
             assert ops_of(plan) == [("RebuildRowPolicy", POLICY_NAME)]
 
         reset_engine()
-        await connect(db_url, migrate_updates=True)
+        report = await auto_migrate(db_url, updates=True)
+        assert schema_steps(report) == [
+            ("ledgerrow", 'DROP POLICY "rls_ledgerrow_ledger_id" ON "ledgerrow"'),
+            (
+                "ledgerrow",
+                "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" AS RESTRICTIVE FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)",
+            ),
+        ]
+        assert warning_texts(report) == []
         async with engines.session():
             restored = await _live_row_security_for_test("ledgerrow")
             assert restored["policies"][0]["roles"] == ["public"]
@@ -562,7 +730,20 @@ async def test_a_metadata_rebuild_reports_the_raw_body_it_replaced(db_url, recwa
     rebuild carries the declared body — overwriting a live body ferro had just
     said it could not verify. Declaration-is-truth stands; silence does not."""
     _define_raw_ledger_row('"id" BETWEEN 1 AND 5')
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "ledgerrow",
+            'CREATE TABLE IF NOT EXISTS "ledgerrow" ( "id" serial PRIMARY KEY NOT NULL, "label" varchar NOT NULL, "ledger_id" uuid NOT NULL )',
+        ),
+        ("ledgerrow", 'ALTER TABLE "ledgerrow" ENABLE ROW LEVEL SECURITY'),
+        ("ledgerrow", 'ALTER TABLE "ledgerrow" FORCE ROW LEVEL SECURITY'),
+        (
+            "ledgerrow",
+            'CREATE POLICY "rls_ledgerrow_ledger_id" ON "ledgerrow" FOR SELECT USING ("id" BETWEEN 1 AND 5)',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         live = await _live_row_security_for_test("ledgerrow")
         # Postgres stored BETWEEN as two comparisons — the stated limit.
@@ -580,7 +761,17 @@ async def test_a_metadata_rebuild_reports_the_raw_body_it_replaced(db_url, recwa
         )
 
     recwarn.clear()
-    await connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == [
+        ("ledgerrow", 'DROP POLICY "rls_ledgerrow_ledger_id" ON "ledgerrow"'),
+        (
+            "ledgerrow",
+            'CREATE POLICY "rls_ledgerrow_ledger_id" ON "ledgerrow" FOR ALL USING ("id" BETWEEN 1 AND 9)',
+        ),
+    ]
+    assert warning_texts(report) == [
+        "Row policy 'rls_ledgerrow_ledger_id' on table 'ledgerrow' was rebuilt because its metadata (command, permissive/restrictive, clauses or roles) no longer matched the declaration, and the rebuild REPLACED its live raw body with the declared one.\n  declared: USING (\"id\" BETWEEN 1 AND 9)\n  live was:  USING (((id >= 1) AND (id <= 5)))\nFerro cannot tell an edited raw expression from Postgres's own re-spelling of it, so if the live body held a change that is not in your model, it is gone. Re-apply it in the declaration.",
+    ]
     replaced = [w for w in recwarn if "REPLACED its live raw body" in str(w.message)]
     assert len(replaced) == 1, [str(w.message) for w in recwarn]
     message = str(replaced[0].message)
