@@ -478,14 +478,39 @@ enum LockState {
     },
     /// An OS file lock on `<database>.ferro-migrate.lock`, held while the file is open.
     SqliteFile { file: Option<std::fs::File> },
-    /// An in-memory database: one process, an in-process lock.
-    Memory { name: String },
+    /// An in-memory database: one process, an in-process lock, named in
+    /// [`MEMORY_LOCKS`] while `Some`.
+    Memory { name: Option<String> },
 }
 
 /// The run lock (ADR-0029, ADR-0038). Released by [`RunLock::release`], and
-/// by the database or the operating system when the process dies.
+/// whenever its holder is dropped without reaching it (a cancelled run, a
+/// panic, a process that dies): the lock dies with its holder.
+///
+/// Dropped without `release()`, each kind lets go on its own: the Postgres
+/// lock's detached connection closes its socket, so the server ends the
+/// session and its session advisory lock; the SQLite sidecar file closes, and
+/// the operating system drops the file lock with the descriptor; the
+/// in-process lock is removed from [`MEMORY_LOCKS`] by [`Drop`], since
+/// nothing outside the process would.
 pub struct RunLock {
     state: LockState,
+}
+
+impl Drop for RunLock {
+    fn drop(&mut self) {
+        if let LockState::Memory { name } = &mut self.state
+            && let Some(name) = name.take()
+        {
+            // A poisoned registry still holds a sound set: a panic cannot
+            // leave a `HashSet::remove` or `insert` half done. Drop cannot
+            // report, so it frees the name either way.
+            MEMORY_LOCKS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&name);
+        }
+    }
 }
 
 static MEMORY_LOCKS: Lazy<std::sync::Mutex<HashSet<String>>> =
@@ -679,7 +704,7 @@ impl RunLock {
                         tokio::time::sleep(LOCK_POLL).await;
                     }
                     Ok(RunLock {
-                        state: LockState::Memory { name },
+                        state: LockState::Memory { name: Some(name) },
                     })
                 }
             },
@@ -755,10 +780,12 @@ impl RunLock {
                 }
             }
             LockState::Memory { name } => {
-                MEMORY_LOCKS
-                    .lock()
-                    .map_err(|_| refused(POISONED_MEMORY_LOCKS))?
-                    .remove(name);
+                if let Some(name) = name.take() {
+                    MEMORY_LOCKS
+                        .lock()
+                        .map_err(|_| refused(POISONED_MEMORY_LOCKS))?
+                        .remove(&name);
+                }
             }
         }
         Ok(())
@@ -2618,6 +2645,54 @@ mod tests {
                 assert!(text.contains("run lock registry is unusable"), "{text}");
             }
         });
+    }
+
+    /// An in-memory engine whose run lock is named `name` in [`MEMORY_LOCKS`].
+    async fn memory_engine(name: &str) -> EngineHandle {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&format!("sqlite:file:{name}?mode=memory&cache=shared"))
+            .await
+            .expect("an in-memory SQLite pool");
+        EngineHandle::new_sqlite(pool)
+    }
+
+    async fn held(engine: &EngineHandle) -> bool {
+        RunLock::is_held(engine, None)
+            .await
+            .expect("the lock probe answers")
+    }
+
+    #[tokio::test]
+    async fn a_dropped_in_process_lock_is_released_with_its_holder() {
+        let engine = memory_engine("f19_dropped_lock").await;
+        let lock = RunLock::acquire(&engine, None, Duration::ZERO, |_| {})
+            .await
+            .expect("the first run takes the lock");
+        assert!(held(&engine).await);
+        // A cancelled run drops its lock without reaching `release()`.
+        drop(lock);
+        assert!(!held(&engine).await);
+        let next = RunLock::acquire(&engine, None, Duration::ZERO, |_| {})
+            .await
+            .expect("the next run takes the lock at once");
+        assert!(next.release().await.is_ok());
+        assert!(!held(&engine).await);
+    }
+
+    #[tokio::test]
+    async fn a_released_in_process_lock_does_not_free_the_next_holder_when_dropped() {
+        let engine = memory_engine("f19_released_lock").await;
+        let first = RunLock::acquire(&engine, None, Duration::ZERO, |_| {})
+            .await
+            .expect("the first run takes the lock");
+        assert!(first.release().await.is_ok());
+        let second = RunLock::acquire(&engine, None, Duration::ZERO, |_| {})
+            .await
+            .expect("the second run takes the lock");
+        assert!(held(&engine).await);
+        drop(second);
+        assert!(!held(&engine).await);
     }
 
     #[test]
