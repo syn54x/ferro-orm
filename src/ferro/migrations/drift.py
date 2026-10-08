@@ -378,7 +378,13 @@ async def against(
             facts_json,
         )
     )
-    operations = _describe(plan["operations"], json.loads(live_json), snapshot, dialect)
+    # Drift reports what the planner would change, not how each change runs:
+    # the ops without their verdicts.
+    planned = [
+        {key: value for key, value in op.items() if key != "verdict"}
+        for op in plan["operations"]
+    ]
+    operations = _describe(planned, json.loads(live_json), snapshot, dialect)
     return DriftReport(
         against=migration,
         lines=[render_op(op) for op in operations],

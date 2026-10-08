@@ -94,6 +94,8 @@ A down is planned with destructive changes on: a column, table or index the up a
 
 The scope is the artifact, not the table or the type: a column, an index, a named constraint, a policy, a row-security flag, an enum type, one enum label, a table. An added column's scope includes the index, check and foreign key that ride its statement, so the down's drop of the column takes them with it.
 
+As built (2026-10-08, #600): a foreign key's key is its column, not its name. The name follows the target (`fk_<table>_<column>_<to_table>`), so an up that retargets `fk_card_owner_id_team` to `fk_card_owner_id_org` would leave the down's rebuild out of scope if keys were names. A table's primary key is its own key.
+
 Scoping is what keeps the warn-only categories one-way. The forward plan is asymmetric on purpose, and an unscoped reverse would undo things the up never did:
 
 | The up (live → declared) | The planner backwards, before scoping | The down |

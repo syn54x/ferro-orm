@@ -34,8 +34,8 @@ pub use generate::{
 };
 pub use order::order_by_dependencies;
 pub use plan::{
-    Hint, HintError, LiveCheckFact, LiveFacts, LiveTableFacts, OldSide, PlanError, live_hints,
-    plan_from_ir,
+    Execution, Hint, HintError, LiveCheckFact, LiveFacts, LiveTableFacts, OpVerdict, PlanError,
+    PlannedOp, Refusal, Rider, RowRisk, Side, live_hints, plan_down, plan_from_ir,
 };
 pub use render::{RenderedOp, validate_schema_ir};
 pub use run_plan::{
@@ -134,13 +134,13 @@ pub enum MigrationOp {
         /// the names the plan's table and column renames leave them.
         columns: Vec<(String, String)>,
     },
-    /// A label the old snapshot's enum declares and the new one drops, with
-    /// no hint renaming it (#536). Planned only between two declared
-    /// snapshots (the generator): against a live database a dropped label is
-    /// ADR-0011's warn-never-act. Rows may hold the label, so the generator
-    /// answers it with a backfill and, on Postgres, the swap-type contract
-    /// (`generate::enums::render_swap_type`); the pass renders it as the
-    /// warning only.
+    /// A label the old side's enum declares and the new one drops, with no
+    /// hint renaming it (#536). Planned only from a declared old side: from a
+    /// live database a dropped label is ADR-0011's warn-never-act. Rows may
+    /// hold the label, so the generator answers it with a backfill and, on
+    /// Postgres, the swap-type contract (`generate::enums::render_swap_type`);
+    /// toward a live database (a down planned back to it) it is
+    /// irreversible: labels are append-only there.
     RemoveEnumLabel {
         /// Enum type name.
         type_name: String,
@@ -504,14 +504,16 @@ pub struct LiveIndexValidity {
 
 /// The whole modelset's ordered operations plus the reports planning raised,
 /// holding the sides they were decided between: the planned-before side
-/// (the old snapshot as the plan's renames leave it, which every op but the
+/// (the old side as the plan's renames leave it, which every op but the
 /// renames names its tables and columns by), the target and the dialect. An
 /// op is name-only, so it means something only against those sides; the plan
-/// renders itself ([`Plan::render`]) and no caller supplies them again.
+/// renders itself ([`Plan::render`]), reading every table, column and body
+/// from them, and no caller supplies them again.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Plan {
-    /// Operations to apply, in execution order (see [`plan_from_ir`]).
-    pub operations: Vec<MigrationOp>,
+    /// Operations to apply, in execution order (see [`plan_from_ir`]), each
+    /// with its verdict, computed once between the plan's sides.
+    pub operations: Vec<PlannedOp>,
     /// What planning reports beside its ops (a refused rename hint, leftover
     /// CHECKs, extra enum labels, a user-owned FK that drifts, every
     /// row-security report), in the order planning raised them. A report
@@ -520,10 +522,10 @@ pub struct Plan {
     /// fenced the way the model says is still not fenced on the next run.
     /// Reports an op raises while rendering travel on its [`RenderedOp`].
     pub reports: Vec<Report>,
-    /// The old snapshot as the plan's renames leave it.
-    before: ferro_schema_ir::IrEnvelope<ferro_schema_ir::SchemaIrPayload>,
-    /// The snapshot the plan leads to.
-    target: ferro_schema_ir::IrEnvelope<ferro_schema_ir::SchemaIrPayload>,
+    /// The old side as the plan's renames leave it.
+    pub(crate) before: Side,
+    /// The side the plan leads to.
+    pub(crate) target: Side,
     /// The dialect it was planned for.
     dialect: Dialect,
 }
@@ -621,18 +623,24 @@ pub struct PlanOptions {
 }
 
 impl Plan {
-    /// A plan with no op and no report yet, between `before` (already the
-    /// planned-before side) and `target` on `dialect`.
-    pub(crate) fn between(
-        before: &ferro_schema_ir::IrEnvelope<ferro_schema_ir::SchemaIrPayload>,
-        target: &ferro_schema_ir::IrEnvelope<ferro_schema_ir::SchemaIrPayload>,
+    /// The plan `draft` decides between `before` (already the planned-before
+    /// side) and `target` on `dialect`, each op with its verdict.
+    pub(crate) fn decided(
+        before: Side,
+        target: Side,
         dialect: Dialect,
+        draft: plan::Draft,
     ) -> Self {
+        let operations = draft
+            .operations
+            .into_iter()
+            .map(|op| PlannedOp::of(op, &before, &target, dialect))
+            .collect();
         Self {
-            operations: Vec::new(),
-            reports: Vec::new(),
-            before: before.clone(),
-            target: target.clone(),
+            operations,
+            reports: draft.reports,
+            before,
+            target,
             dialect,
         }
     }
@@ -641,23 +649,39 @@ impl Plan {
     /// test's hand-built op list, for what reads only the ops.
     #[cfg(test)]
     pub(crate) fn unplaced(operations: Vec<MigrationOp>) -> Self {
-        let empty = ferro_schema_ir::IrEnvelope {
+        let empty = Side::declared(ferro_schema_ir::IrEnvelope {
             ir_kind: "schema".into(),
             ir_version: 1,
             payload: ferro_schema_ir::SchemaIrPayload {
                 dialect_agnostic: true,
                 models: Vec::new(),
             },
-        };
-        Self {
-            operations,
-            ..Self::between(&empty, &empty, Dialect::Postgres)
-        }
+        });
+        Self::decided(
+            empty.clone(),
+            empty,
+            Dialect::Postgres,
+            plan::Draft {
+                operations,
+                reports: Vec::new(),
+            },
+        )
     }
 
     /// Returns `true` when there are no operations to run.
     pub fn is_empty(&self) -> bool {
         self.operations.is_empty()
+    }
+
+    /// The ops, in execution order, without their verdicts.
+    pub fn ops(&self) -> impl Iterator<Item = &MigrationOp> {
+        self.operations.iter().map(|planned| &planned.op)
+    }
+
+    /// The ops as a list: what a test compares.
+    #[cfg(test)]
+    pub(crate) fn op_list(&self) -> Vec<MigrationOp> {
+        self.ops().cloned().collect()
     }
 
     /// The dialect the plan was decided for.
@@ -706,7 +730,7 @@ impl Plan {
             .map(|&index| {
                 self.operations
                     .get(index)
-                    .cloned()
+                    .map(|planned| planned.op.clone())
                     .ok_or_else(|| EmissionError {
                         message: format!(
                             "op {index} is past the plan's {} ops",

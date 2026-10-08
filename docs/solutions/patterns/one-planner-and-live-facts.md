@@ -28,17 +28,20 @@ execute (type ops autocommit; each table's ops in one Postgres transaction)
 ```
 
 `LiveFacts` carries what the IR cannot say: CHECK bodies and row policies as
-the catalog prints them, validity flags, live enum labels. A table absent from
-`LiveFacts.tables` reads as the `old` snapshot declares it, so
-`LiveFacts::declared()` is the side-table for snapshot-vs-snapshot planning.
+the catalog prints them, validity flags, live enum labels. A plan's two sides
+are adapters (ADR-0050): `Side::live(ir, facts)` (refused when it is built if
+a table lacks its facts) and `Side::declared(ir)`, whose facts are read off
+the declaration. Either may be the target: `plan_down` plans toward a live
+side, whose checks and policies render as the catalog printed them.
 
 ## Gotchas
 
 - **A new deciding rule goes in `ferro_ddl_lowering`, never in `plan.rs`.**
   The planner only decides *where* a verdict lands. Row security is translated
-  from `plan_row_security_reconcile`'s result into ops; a pin
-  (`row_security_ops_render_byte_identical_to_the_reconcile_decision`) holds
-  the rendered ops byte-equal to that function's statements.
+  from `plan_row_security_reconcile`'s names and flags into ops (it returns
+  no SQL; only the plan's renderer writes statements); a pin
+  (`row_security_ops_are_the_reconcile_decisions_names_and_flags`) holds the
+  ops equal to that decision.
 - **Declared vs declared needs the declared side's live view.** The
   storage-drift decision reads `postgres_native_enum` on its live side; a
   declared old snapshot does not set it, so the planner sets it from

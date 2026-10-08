@@ -512,7 +512,7 @@ def test_enum_type_provenance_parity_pin():
 # ``ferro migrate new`` writes a casebook change into step files; the
 # reconciliation pass plans the same before/after modelset with
 # ``_core._plan_from_ir(parent, target, dialect, ..., render=True)`` (two
-# declared snapshots: ``LiveFacts::declared()``). The generator writes some
+# declared snapshots: ``Side::declared``). The generator writes some
 # statements in an online shape the pass, inside its one transaction, never
 # needs — ``NOT VALID`` then ``VALIDATE`` (ADR-0043), ``CONCURRENTLY``
 # (ADR-0044), the ``_ferro_notnull_*`` staging (#534) — and on SQLite a

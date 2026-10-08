@@ -42,7 +42,7 @@ fn render_plan(
     dialect: Dialect,
 ) -> Result<Vec<RenderedOp>, EmissionError> {
     crate::render::render_ops(
-        &plan.operations,
+        &plan.op_list(),
         old_ir,
         new_ir,
         dialect,
@@ -303,33 +303,37 @@ fn plan_from_ir_detects_add_drop_and_alter_ops() {
     )]);
     let new_ir = envelope(vec![schema_model(
         "doc",
-        vec![col("name", "varchar(120)", true), col("status", "text", false)],
+        vec![
+            col("name", "varchar(120)", true),
+            col("status", "text", false),
+        ],
     )]);
 
     let plan = plan_from_ir(
-        &old_ir,
-        &new_ir,
+        &Side::declared(old_ir.clone()),
+        &Side::declared(new_ir.clone()),
         Dialect::Sqlite,
-        &LiveFacts::declared(),
         destructive(),
-    )
-    .expect("plan");
-    assert!(plan.operations.contains(&MigrationOp::AddColumn {
+    );
+    assert!(plan.op_list().contains(&MigrationOp::AddColumn {
         table: "doc".to_string(),
         column: "status".to_string(),
     }));
-    assert!(plan.operations.contains(&MigrationOp::DropColumn {
+    assert!(plan.op_list().contains(&MigrationOp::DropColumn {
         table: "doc".to_string(),
         column: "legacy".to_string(),
     }));
-    assert!(plan.operations.contains(&MigrationOp::AlterColumnType {
+    assert!(plan.op_list().contains(&MigrationOp::AlterColumnType {
         table: "doc".to_string(),
         column: "name".to_string(),
     }));
-    assert!(plan.operations.contains(&MigrationOp::AlterColumnNullability {
-        table: "doc".to_string(),
-        column: "name".to_string(),
-    }));
+    assert!(
+        plan.op_list()
+            .contains(&MigrationOp::AlterColumnNullability {
+                table: "doc".to_string(),
+                column: "name".to_string(),
+            })
+    );
 }
 
 /// A live SQLite `DATETIME` column (introspected token `timestamp`) against a
@@ -347,20 +351,18 @@ fn plan_from_ir_same_storage_datetime_is_not_a_type_change_on_sqlite() {
     let new_ir = envelope(vec![schema_model("author", vec![declared])]);
 
     let plan = plan_from_ir(
-        &old_ir,
-        &new_ir,
+        &Side::declared(old_ir.clone()),
+        &Side::declared(new_ir.clone()),
         Dialect::Sqlite,
-        &LiveFacts::declared(),
         destructive(),
-    )
-    .expect("plan");
+    );
     assert!(
-        !plan.operations.contains(&MigrationOp::AlterColumnType {
+        !plan.op_list().contains(&MigrationOp::AlterColumnType {
             table: "author".to_string(),
             column: "seen".to_string(),
         }),
         "same-storage column planned a type change: {:?}",
-        plan.operations
+        plan.op_list()
     );
 }
 
@@ -369,17 +371,15 @@ fn plan_from_ir_add_and_drop_table() {
     let old_ir = envelope(vec![schema_model("legacy", vec![col("id", "int", false)])]);
     let new_ir = envelope(vec![schema_model("fresh", vec![col("id", "int", false)])]);
     let plan = plan_from_ir(
-        &old_ir,
-        &new_ir,
+        &Side::declared(old_ir.clone()),
+        &Side::declared(new_ir.clone()),
         Dialect::Sqlite,
-        &LiveFacts::declared(),
         destructive(),
-    )
-    .expect("plan");
-    assert!(plan.operations.contains(&MigrationOp::AddTable {
+    );
+    assert!(plan.op_list().contains(&MigrationOp::AddTable {
         table: "fresh".to_string(),
     }));
-    assert!(plan.operations.contains(&MigrationOp::DropTable {
+    assert!(plan.op_list().contains(&MigrationOp::DropTable {
         table: "legacy".to_string(),
     }));
 }
@@ -391,13 +391,10 @@ fn render_plan_renders_drop_column_postgres() {
         vec![pk_col("id", "int"), col("legacy", "text", true)],
     )]);
     let new_ir = envelope(vec![schema_model("doc", vec![pk_col("id", "int")])]);
-    let plan = Plan {
-        operations: vec![MigrationOp::DropColumn {
-            table: "doc".to_string(),
-            column: "legacy".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::DropColumn {
+        table: "doc".to_string(),
+        column: "legacy".to_string(),
+    }]);
     let rendered = render_plan(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap();
     assert_eq!(
         rendered[0].statements,
@@ -412,13 +409,10 @@ fn render_plan_renders_drop_column_sqlite() {
         vec![pk_col("id", "int"), col("legacy", "text", true)],
     )]);
     let new_ir = envelope(vec![schema_model("doc", vec![pk_col("id", "int")])]);
-    let plan = Plan {
-        operations: vec![MigrationOp::DropColumn {
-            table: "doc".to_string(),
-            column: "legacy".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::DropColumn {
+        table: "doc".to_string(),
+        column: "legacy".to_string(),
+    }]);
     let rendered = render_plan(&plan, &old_ir, &new_ir, Dialect::Sqlite).unwrap();
     assert_eq!(
         rendered[0].statements,
@@ -428,12 +422,9 @@ fn render_plan_renders_drop_column_sqlite() {
 
 #[test]
 fn emit_sql_with_ir_drop_table_postgres() {
-    let plan = Plan {
-        operations: vec![MigrationOp::DropTable {
-            table: "doc".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::DropTable {
+        table: "doc".to_string(),
+    }]);
     let result = render_flat(
         &plan,
         &empty_envelope(),
@@ -447,12 +438,9 @@ fn emit_sql_with_ir_drop_table_postgres() {
 
 #[test]
 fn emit_sql_with_ir_drop_table_sqlite() {
-    let plan = Plan {
-        operations: vec![MigrationOp::DropTable {
-            table: "doc".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::DropTable {
+        table: "doc".to_string(),
+    }]);
     let result = render_flat(&plan, &empty_envelope(), &empty_envelope(), Dialect::Sqlite).unwrap();
     assert_eq!(result.statements, vec!["DROP TABLE \"doc\"".to_string()]);
 }
@@ -467,12 +455,9 @@ fn emit_sql_with_ir_add_table_postgres() {
         ],
     );
     let new_ir = envelope(vec![model]);
-    let plan = Plan {
-        operations: vec![MigrationOp::AddTable {
-            table: "user".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::AddTable {
+        table: "user".to_string(),
+    }]);
     let result = render_flat(&plan, &empty_envelope(), &new_ir, Dialect::Postgres).unwrap();
     assert!(result.statements[0].contains("CREATE TABLE"));
     assert!(result.statements[0].contains("\"user\""));
@@ -483,12 +468,9 @@ fn emit_sql_with_ir_add_table_postgres() {
 fn emit_sql_with_ir_add_table_sqlite() {
     let model = schema_model("user", vec![col("id", "int", false)]);
     let new_ir = envelope(vec![model]);
-    let plan = Plan {
-        operations: vec![MigrationOp::AddTable {
-            table: "user".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::AddTable {
+        table: "user".to_string(),
+    }]);
     let result = render_flat(&plan, &empty_envelope(), &new_ir, Dialect::Sqlite).unwrap();
     assert!(result.statements[0].starts_with("CREATE TABLE"));
 }
@@ -507,12 +489,9 @@ fn emit_sql_with_ir_add_table_single_unique_is_standalone_named_index() {
         ..schema_model("user", vec![])
     };
     let new_ir = envelope(vec![model]);
-    let plan = Plan {
-        operations: vec![MigrationOp::AddTable {
-            table: "user".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::AddTable {
+        table: "user".to_string(),
+    }]);
     for dialect in [Dialect::Sqlite, Dialect::Postgres] {
         let result = render_flat(&plan, &empty_envelope(), &new_ir, dialect).unwrap();
         assert_eq!(
@@ -538,13 +517,10 @@ fn emit_sql_with_ir_add_column_nullable_postgres() {
     let model = schema_model("user", vec![col("email", "text", true)]);
     let old_ir = envelope(vec![schema_model("user", vec![col("id", "int", false)])]);
     let new_ir = envelope(vec![model]);
-    let plan = Plan {
-        operations: vec![MigrationOp::AddColumn {
-            table: "user".to_string(),
-            column: "email".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::AddColumn {
+        table: "user".to_string(),
+        column: "email".to_string(),
+    }]);
     let result = render_flat(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap();
     assert_eq!(result.statements.len(), 1);
     assert!(result.statements[0].contains("ADD COLUMN"));
@@ -557,13 +533,10 @@ fn emit_sql_with_ir_add_column_nullable_sqlite() {
     let model = schema_model("user", vec![col("email", "text", true)]);
     let old_ir = envelope(vec![schema_model("user", vec![col("id", "int", false)])]);
     let new_ir = envelope(vec![model]);
-    let plan = Plan {
-        operations: vec![MigrationOp::AddColumn {
-            table: "user".to_string(),
-            column: "email".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::AddColumn {
+        table: "user".to_string(),
+        column: "email".to_string(),
+    }]);
     let result = render_flat(&plan, &old_ir, &new_ir, Dialect::Sqlite).unwrap();
     assert!(result.statements[0].contains("ADD COLUMN"));
 }
@@ -579,13 +552,10 @@ fn emit_sql_with_ir_add_column_not_null_with_default_postgres() {
     );
     let old_ir = envelope(vec![schema_model("user", vec![])]);
     let new_ir = envelope(vec![model]);
-    let plan = Plan {
-        operations: vec![MigrationOp::AddColumn {
-            table: "user".to_string(),
-            column: "score".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::AddColumn {
+        table: "user".to_string(),
+        column: "score".to_string(),
+    }]);
     let result = render_flat(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap();
     assert_eq!(result.statements.len(), 2);
     assert!(result.statements[0].contains("NOT NULL"));
@@ -603,13 +573,10 @@ fn emit_sql_with_ir_add_column_unique_is_standalone_named_index() {
     );
     let old_ir = envelope(vec![schema_model("user", vec![])]);
     let new_ir = envelope(vec![model]);
-    let plan = Plan {
-        operations: vec![MigrationOp::AddColumn {
-            table: "user".to_string(),
-            column: "email".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::AddColumn {
+        table: "user".to_string(),
+        column: "email".to_string(),
+    }]);
     for dialect in [Dialect::Sqlite, Dialect::Postgres] {
         let result = render_flat(&plan, &old_ir, &new_ir, dialect).unwrap();
         assert_eq!(
@@ -644,13 +611,10 @@ fn emit_sql_with_ir_add_column_indexed() {
     );
     let old_ir = envelope(vec![schema_model("user", vec![])]);
     let new_ir = envelope(vec![model]);
-    let plan = Plan {
-        operations: vec![MigrationOp::AddColumn {
-            table: "user".to_string(),
-            column: "email".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::AddColumn {
+        table: "user".to_string(),
+        column: "email".to_string(),
+    }]);
     for dialect in [Dialect::Sqlite, Dialect::Postgres] {
         let result = render_flat(&plan, &old_ir, &new_ir, dialect).unwrap();
         assert_eq!(result.statements.len(), 2);
@@ -676,13 +640,10 @@ fn emit_sql_with_ir_add_column_fk_postgres() {
     };
     let old_ir = envelope(vec![parent.clone(), schema_model("user", vec![])]);
     let new_ir = envelope(vec![parent, child]);
-    let plan = Plan {
-        operations: vec![MigrationOp::AddColumn {
-            table: "user".to_string(),
-            column: "team_id".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::AddColumn {
+        table: "user".to_string(),
+        column: "team_id".to_string(),
+    }]);
     let result = render_flat(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap();
     // FF-B B4: the added FK carries its IR name via ADD CONSTRAINT.
     assert!(
@@ -711,13 +672,10 @@ fn emit_sql_with_ir_add_column_nullable_fk_sqlite_references_inline() {
     };
     let old_ir = envelope(vec![parent.clone(), schema_model("user", vec![])]);
     let new_ir = envelope(vec![parent, child]);
-    let plan = Plan {
-        operations: vec![MigrationOp::AddColumn {
-            table: "user".to_string(),
-            column: "team_id".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::AddColumn {
+        table: "user".to_string(),
+        column: "team_id".to_string(),
+    }]);
     let result = render_flat(&plan, &old_ir, &new_ir, Dialect::Sqlite).unwrap();
     // A nullable add has no DEFAULT (its default is NULL): the one shape
     // SQLite's ADD COLUMN accepts a REFERENCES clause for (#514). A missing
@@ -753,13 +711,10 @@ fn emit_sql_with_ir_add_column_not_null_fk_with_default_sqlite_warns_naming_migr
     };
     let old_ir = envelope(vec![parent.clone(), schema_model("user", vec![])]);
     let new_ir = envelope(vec![parent, child]);
-    let plan = Plan {
-        operations: vec![MigrationOp::AddColumn {
-            table: "user".to_string(),
-            column: "team_id".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::AddColumn {
+        table: "user".to_string(),
+        column: "team_id".to_string(),
+    }]);
 
     let lite = render_flat(&plan, &old_ir, &new_ir, Dialect::Sqlite).unwrap();
     assert_eq!(
@@ -811,13 +766,10 @@ fn emit_sql_with_ir_alter_column_type_postgres() {
         "user",
         vec![col("name", "varchar(120)", true)],
     )]);
-    let plan = Plan {
-        operations: vec![MigrationOp::AlterColumnType {
-            table: "user".to_string(),
-            column: "name".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::AlterColumnType {
+        table: "user".to_string(),
+        column: "name".to_string(),
+    }]);
     let result = render_flat(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap();
     assert_eq!(result.statements.len(), 1);
     assert!(result.statements[0].contains("ALTER COLUMN"));
@@ -828,20 +780,19 @@ fn emit_sql_with_ir_alter_column_type_postgres() {
 #[test]
 fn emit_sql_with_ir_alter_column_type_sqlite_warns_only() {
     let old_ir = envelope(vec![schema_model("user", vec![col("name", "text", true)])]);
-    let new_ir = envelope(vec![schema_model(
-        "user",
-        vec![col("name", "int", true)],
-    )]);
-    let plan = Plan {
-        operations: vec![MigrationOp::AlterColumnType {
-            table: "user".to_string(),
-            column: "name".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let new_ir = envelope(vec![schema_model("user", vec![col("name", "int", true)])]);
+    let plan = Plan::unplaced(vec![MigrationOp::AlterColumnType {
+        table: "user".to_string(),
+        column: "name".to_string(),
+    }]);
     let result = render_flat(&plan, &old_ir, &new_ir, Dialect::Sqlite).unwrap();
     assert!(result.statements.is_empty());
-    assert!(result.reports.iter().any(|w| w.text.contains("cannot change column types")));
+    assert!(
+        result
+            .reports
+            .iter()
+            .any(|w| w.text.contains("cannot change column types"))
+    );
 }
 
 #[test]
@@ -915,10 +866,7 @@ fn sqlite_warn_skips_name_migrations_not_alembic() {
         ),
     ];
     for (op, old_ir, new_ir) in cases {
-        let plan = Plan {
-            operations: vec![op.clone()],
-            ..Plan::unplaced(Vec::new())
-        };
+        let plan = Plan::unplaced(vec![op.clone()]);
         let result = render_flat(&plan, old_ir, new_ir, Dialect::Sqlite).unwrap();
         assert!(
             result.statements.is_empty(),
@@ -961,10 +909,7 @@ fn primary_key_refusals_name_migrations_not_alembic() {
             &without,
         ),
     ] {
-        let plan = Plan {
-            operations: vec![op.clone()],
-            ..Plan::unplaced(Vec::new())
-        };
+        let plan = Plan::unplaced(vec![op.clone()]);
         for dialect in [Dialect::Sqlite, Dialect::Postgres] {
             let err = render_flat(&plan, old_ir, new_ir, dialect).unwrap_err();
             assert!(
@@ -993,23 +938,17 @@ fn render_create_table_sqlite_fails_loudly_when_a_column_check_has_no_column() {
 fn emit_sql_with_ir_alter_column_nullability_postgres() {
     let old_ir = envelope(vec![schema_model("user", vec![col("name", "text", true)])]);
     let new_ir = envelope(vec![schema_model("user", vec![col("name", "text", false)])]);
-    let plan = Plan {
-        operations: vec![MigrationOp::AlterColumnNullability {
-            table: "user".to_string(),
-            column: "name".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::AlterColumnNullability {
+        table: "user".to_string(),
+        column: "name".to_string(),
+    }]);
     let result = render_flat(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap();
     assert!(result.statements[0].contains("SET NOT NULL"));
 
-    let plan_drop = Plan {
-        operations: vec![MigrationOp::AlterColumnNullability {
-            table: "user".to_string(),
-            column: "name".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan_drop = Plan::unplaced(vec![MigrationOp::AlterColumnNullability {
+        table: "user".to_string(),
+        column: "name".to_string(),
+    }]);
     let result_drop = render_flat(&plan_drop, &new_ir, &old_ir, Dialect::Postgres).unwrap();
     assert!(result_drop.statements[0].contains("DROP NOT NULL"));
 }
@@ -1018,19 +957,18 @@ fn emit_sql_with_ir_alter_column_nullability_postgres() {
 fn emit_sql_with_ir_alter_column_nullability_sqlite_warns_only() {
     let old_ir = envelope(vec![schema_model("user", vec![col("name", "text", true)])]);
     let new_ir = envelope(vec![schema_model("user", vec![col("name", "text", false)])]);
-    let plan = Plan {
-        operations: vec![MigrationOp::AlterColumnNullability {
-            table: "user".to_string(),
-            column: "name".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::AlterColumnNullability {
+        table: "user".to_string(),
+        column: "name".to_string(),
+    }]);
     let result = render_flat(&plan, &old_ir, &new_ir, Dialect::Sqlite).unwrap();
     assert!(result.statements.is_empty());
-    assert!(result
-        .reports
-        .iter()
-        .any(|w| w.text.contains("cannot change column nullability")));
+    assert!(
+        result
+            .reports
+            .iter()
+            .any(|w| w.text.contains("cannot change column nullability"))
+    );
 }
 
 #[test]
@@ -1038,13 +976,10 @@ fn emit_sql_with_ir_unsafe_not_null_add_errors() {
     let model = schema_model("user", vec![col("score", "int", false)]);
     let old_ir = envelope(vec![schema_model("user", vec![])]);
     let new_ir = envelope(vec![model]);
-    let plan = Plan {
-        operations: vec![MigrationOp::AddColumn {
-            table: "user".to_string(),
-            column: "score".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::AddColumn {
+        table: "user".to_string(),
+        column: "score".to_string(),
+    }]);
     let err = render_flat(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap_err();
     assert!(err.message.contains("NOT NULL"));
     assert!(err.message.contains("no literal default"));
@@ -1052,27 +987,24 @@ fn emit_sql_with_ir_unsafe_not_null_add_errors() {
 
 #[test]
 fn emit_sql_with_ir_drop_primary_key_column_errors() {
-    let old_ir = envelope(vec![schema_model("user", vec![pk_col("id", "int"), col("legacy", "text", true)])]);
+    let old_ir = envelope(vec![schema_model(
+        "user",
+        vec![pk_col("id", "int"), col("legacy", "text", true)],
+    )]);
     let new_ir = envelope(vec![schema_model("user", vec![pk_col("id", "int")])]);
-    let plan = Plan {
-        operations: vec![MigrationOp::DropColumn {
-            table: "user".to_string(),
-            column: "id".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::DropColumn {
+        table: "user".to_string(),
+        column: "id".to_string(),
+    }]);
     let err = render_flat(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap_err();
     assert!(err.message.contains("primary key"));
 }
 
 #[test]
 fn emit_sql_with_ir_add_table_missing_model_errors() {
-    let plan = Plan {
-        operations: vec![MigrationOp::AddTable {
-            table: "missing".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::AddTable {
+        table: "missing".to_string(),
+    }]);
     let err = render_flat(
         &plan,
         &empty_envelope(),
@@ -1092,13 +1024,10 @@ fn emit_sql_with_ir_alter_column_type_unknown_db_type_errors() {
     };
     let old_ir = envelope(vec![schema_model("user", vec![col("name", "text", true)])]);
     let new_ir = envelope(vec![schema_model("user", vec![bad_col])]);
-    let plan = Plan {
-        operations: vec![MigrationOp::AlterColumnType {
-            table: "user".to_string(),
-            column: "name".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::AlterColumnType {
+        table: "user".to_string(),
+        column: "name".to_string(),
+    }]);
     let err = render_flat(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap_err();
     assert!(err.message.contains("Cannot alter type"));
     assert!(err.message.contains("unknown"));
@@ -1152,17 +1081,14 @@ fn emit_sql_multi_op_ordering() {
     };
     let old_ir = empty_envelope();
     let new_ir = envelope(vec![parent, child]);
-    let plan = Plan {
-        operations: vec![
-            MigrationOp::AddTable {
-                table: "team".to_string(),
-            },
-            MigrationOp::AddTable {
-                table: "user".to_string(),
-            },
-        ],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![
+        MigrationOp::AddTable {
+            table: "team".to_string(),
+        },
+        MigrationOp::AddTable {
+            table: "user".to_string(),
+        },
+    ]);
     let result = render_flat(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap();
     let create_positions: Vec<(usize, &String)> = result
         .statements
@@ -1201,38 +1127,48 @@ fn emit_sql_multi_op_ordering() {
 
 #[test]
 fn plan_from_ir_adds_missing_index() {
-    let old = envelope(vec![schema_model("doc", vec![col("a", "text", true), col("b", "text", true)])]);
+    let old = envelope(vec![schema_model(
+        "doc",
+        vec![col("a", "text", true), col("b", "text", true)],
+    )]);
     let mut nm = schema_model("doc", vec![col("a", "text", true), col("b", "text", true)]);
-    nm.indexes = vec![SchemaIndex { name: "idx_doc_a_b".into(), columns: vec!["a".into(), "b".into()], unique: false }];
+    nm.indexes = vec![SchemaIndex {
+        name: "idx_doc_a_b".into(),
+        columns: vec!["a".into(), "b".into()],
+        unique: false,
+    }];
     let new = envelope(vec![nm]);
     let plan = plan_from_ir(
-        &old,
-        &new,
+        &Side::declared(old.clone()),
+        &Side::declared(new.clone()),
         Dialect::Sqlite,
-        &LiveFacts::declared(),
         destructive(),
-    )
-    .expect("plan");
-    assert!(plan.operations.contains(&MigrationOp::AddIndex {
-        table: "doc".into(), name: "idx_doc_a_b".into(), columns: vec!["a".into(), "b".into()], unique: false
+    );
+    assert!(plan.op_list().contains(&MigrationOp::AddIndex {
+        table: "doc".into(),
+        name: "idx_doc_a_b".into(),
+        columns: vec!["a".into(), "b".into()],
+        unique: false
     }));
 }
 
 #[test]
 fn plan_from_ir_drops_orphaned_index() {
     let mut om = schema_model("doc", vec![col("a", "text", true)]);
-    om.indexes = vec![SchemaIndex { name: "idx_doc_a".into(), columns: vec!["a".into()], unique: false }];
+    om.indexes = vec![SchemaIndex {
+        name: "idx_doc_a".into(),
+        columns: vec!["a".into()],
+        unique: false,
+    }];
     let old = envelope(vec![om]);
     let new = envelope(vec![schema_model("doc", vec![col("a", "text", true)])]); // no index
     let plan = plan_from_ir(
-        &old,
-        &new,
+        &Side::declared(old.clone()),
+        &Side::declared(new.clone()),
         Dialect::Sqlite,
-        &LiveFacts::declared(),
         destructive(),
-    )
-    .expect("plan");
-    assert!(plan.operations.contains(&MigrationOp::DropIndex {
+    );
+    assert!(plan.op_list().contains(&MigrationOp::DropIndex {
         table: "doc".into(),
         name: "idx_doc_a".into()
     }));
@@ -1240,15 +1176,12 @@ fn plan_from_ir_drops_orphaned_index() {
 
 #[test]
 fn emit_add_index_matches_create_path() {
-    let plan = Plan {
-        operations: vec![MigrationOp::AddIndex {
-            table: "doc".into(),
-            name: "idx_doc_a_b".into(),
-            columns: vec!["a".into(), "b".into()],
-            unique: false,
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::AddIndex {
+        table: "doc".into(),
+        name: "idx_doc_a_b".into(),
+        columns: vec!["a".into(), "b".into()],
+        unique: false,
+    }]);
     let r = render_flat(&plan, &empty_envelope(), &empty_envelope(), Dialect::Sqlite).unwrap();
     assert_eq!(
         r.statements,
@@ -1258,13 +1191,10 @@ fn emit_add_index_matches_create_path() {
 
 #[test]
 fn emit_drop_index_renders_drop() {
-    let plan = Plan {
-        operations: vec![MigrationOp::DropIndex {
-            table: "doc".into(),
-            name: "idx_doc_a".into(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::DropIndex {
+        table: "doc".into(),
+        name: "idx_doc_a".into(),
+    }]);
     let r = render_flat(
         &plan,
         &empty_envelope(),
@@ -1292,13 +1222,11 @@ fn emit_sql_no_comment_placeholders_on_full_plan() {
         ],
     )]);
     let plan = plan_from_ir(
-        &old_ir,
-        &new_ir,
+        &Side::declared(old_ir.clone()),
+        &Side::declared(new_ir.clone()),
         Dialect::Sqlite,
-        &LiveFacts::declared(),
         destructive(),
-    )
-    .expect("plan");
+    );
     for dialect in [Dialect::Sqlite, Dialect::Postgres] {
         let result = render_flat(&plan, &old_ir, &new_ir, dialect).unwrap();
         assert_no_comment_placeholders(&result.statements);
@@ -1321,22 +1249,20 @@ fn plan_from_ir_composite_all_new_columns_emits_add_index() {
     }];
     let new = envelope(vec![nm]);
     let plan = plan_from_ir(
-        &old,
-        &new,
+        &Side::declared(old.clone()),
+        &Side::declared(new.clone()),
         Dialect::Sqlite,
-        &LiveFacts::declared(),
         destructive(),
-    )
-    .expect("plan");
+    );
     assert!(
-        plan.operations.contains(&MigrationOp::AddIndex {
+        plan.op_list().contains(&MigrationOp::AddIndex {
             table: "doc".to_string(),
             name: "idx_doc_a_b".to_string(),
             columns: vec!["a".to_string(), "b".to_string()],
             unique: false,
         }),
         "composite index over all-new columns must appear in plan; got: {:?}",
-        plan.operations
+        plan.op_list()
     );
 }
 
@@ -1351,13 +1277,10 @@ fn emit_alter_type_refuses_timestamp_to_timestamptz_on_postgres() {
         "event",
         vec![ir_col("occurred_at", "datetime", None, false, false, false)],
     )]);
-    let plan = Plan {
-        operations: vec![MigrationOp::AlterColumnType {
-            table: "event".to_string(),
-            column: "occurred_at".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::AlterColumnType {
+        table: "event".to_string(),
+        column: "occurred_at".to_string(),
+    }]);
     let result = render_flat(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap();
     assert!(
         result.statements.is_empty(),
@@ -1374,13 +1297,10 @@ fn emit_alter_type_refuses_timestamp_to_timestamptz_on_postgres() {
 fn emit_alter_type_still_alters_int_to_bigint_on_postgres() {
     let old_ir = envelope(vec![schema_model("m", vec![col("n", "int", false)])]);
     let new_ir = envelope(vec![schema_model("m", vec![col("n", "bigint", false)])]);
-    let plan = Plan {
-        operations: vec![MigrationOp::AlterColumnType {
-            table: "m".to_string(),
-            column: "n".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::AlterColumnType {
+        table: "m".to_string(),
+        column: "n".to_string(),
+    }]);
     let result = render_flat(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap();
     assert_eq!(result.statements.len(), 1);
     assert!(result.statements[0].contains("ALTER COLUMN"));
@@ -1550,12 +1470,9 @@ fn emit_add_table_dedupes_create_type_across_columns() {
         vec![pk_col("id", "int"), status("state_a"), status("state_b")],
     );
     let new_ir = envelope(vec![model]);
-    let plan = Plan {
-        operations: vec![MigrationOp::AddTable {
-            table: "ticket".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::AddTable {
+        table: "ticket".to_string(),
+    }]);
     let result = render_flat(&plan, &empty_envelope(), &new_ir, Dialect::Postgres).unwrap();
     let create_types: Vec<&String> = result
         .statements
@@ -1580,13 +1497,10 @@ fn emit_add_column_enum_postgres_creates_type_then_column() {
     }
     let old_ir = envelope(vec![schema_model("ticket", vec![pk_col("id", "int")])]);
     let new_ir = envelope(vec![model]);
-    let plan = Plan {
-        operations: vec![MigrationOp::AddColumn {
-            table: "ticket".to_string(),
-            column: "status".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::AddColumn {
+        table: "ticket".to_string(),
+        column: "status".to_string(),
+    }]);
     let result = render_flat(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap();
     assert_eq!(result.statements[0], PG_CREATE_TYPE_STATUS);
     assert!(
@@ -1628,19 +1542,16 @@ fn emit_alter_refuses_varchar_to_enum_and_varchar_to_time() {
         vec![pk_col("id", "int"), live_enum_col, live_time_col],
     )]);
     let new_ir = envelope(vec![model]);
-    let plan = Plan {
-        operations: vec![
-            MigrationOp::AlterColumnType {
-                table: "ticket".to_string(),
-                column: "status".to_string(),
-            },
-            MigrationOp::AlterColumnType {
-                table: "ticket".to_string(),
-                column: "wake_time".to_string(),
-            },
-        ],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![
+        MigrationOp::AlterColumnType {
+            table: "ticket".to_string(),
+            column: "status".to_string(),
+        },
+        MigrationOp::AlterColumnType {
+            table: "ticket".to_string(),
+            column: "wake_time".to_string(),
+        },
+    ]);
     let result = render_flat(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap();
     assert!(result.statements.is_empty(), "{:?}", result.statements);
     assert_eq!(result.reports.len(), 2, "{:?}", result.reports);
@@ -1665,13 +1576,10 @@ fn emit_alter_native_enum_live_is_noop() {
     };
     let old_ir = envelope(vec![schema_model("ticket", vec![live])]);
     let new_ir = envelope(vec![schema_model("ticket", vec![model_col])]);
-    let plan = Plan {
-        operations: vec![MigrationOp::AlterColumnType {
-            table: "ticket".to_string(),
-            column: "status".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::AlterColumnType {
+        table: "ticket".to_string(),
+        column: "status".to_string(),
+    }]);
     let result = render_flat(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap();
     assert!(result.statements.is_empty());
     assert!(result.reports.is_empty());
@@ -1721,22 +1629,20 @@ fn plan_from_ir_single_column_new_index_is_skipped() {
     }];
     let new = envelope(vec![nm]);
     let plan = plan_from_ir(
-        &old,
-        &new,
+        &Side::declared(old.clone()),
+        &Side::declared(new.clone()),
         Dialect::Sqlite,
-        &LiveFacts::declared(),
         destructive(),
-    )
-    .expect("plan");
+    );
     assert!(
-        !plan.operations.contains(&MigrationOp::AddIndex {
+        !plan.op_list().contains(&MigrationOp::AddIndex {
             table: "doc".to_string(),
             name: "idx_doc_c".to_string(),
             columns: vec!["c".to_string()],
             unique: false,
         }),
         "single-column index on a new column must NOT appear in plan (emit_add_column handles it); got: {:?}",
-        plan.operations
+        plan.op_list()
     );
 }
 
@@ -1925,16 +1831,14 @@ fn plan_live_table(
     table_facts: LiveTableFacts,
     options: PlanOptions,
 ) -> Plan {
-    let mut facts = LiveFacts::live(Default::default(), Default::default());
+    let mut facts = LiveFacts::default();
     facts.tables.insert(old.table_name.clone(), table_facts);
     plan_from_ir(
-        &envelope(vec![old]),
-        &envelope(vec![new]),
+        &Side::live(envelope(vec![old]).clone(), facts.clone()).expect("live side"),
+        &Side::declared(envelope(vec![new]).clone()),
         Dialect::Postgres,
-        &facts,
         options,
     )
-    .expect("plan")
 }
 
 /// Live CHECK facts, every one validated.
@@ -1963,7 +1867,7 @@ fn a_declared_table_check_absent_live_is_added() {
         updates_only(),
     );
     assert_eq!(
-        plan.operations,
+        plan.op_list(),
         vec![MigrationOp::AddCheck {
             table: "transfer".to_string(),
             name: "ck_transfer_at_most_one_outflow".to_string(),
@@ -1981,9 +1885,9 @@ fn a_declared_table_check_the_live_table_already_has_is_not_added() {
         updates_only(),
     );
     assert!(
-        plan.operations.is_empty(),
+        plan.op_list().is_empty(),
         "a reconciled table replans to nothing — no phantom add: {:?}",
-        plan.operations
+        plan.op_list()
     );
 }
 
@@ -2006,7 +1910,7 @@ fn a_column_check_rides_its_new_column_and_stands_alone_on_an_existing_one() {
         updates_only(),
     );
     assert_eq!(
-        added.operations,
+        added.op_list(),
         vec![MigrationOp::AddColumn {
             table: "account".to_string(),
             column: "role".to_string(),
@@ -2024,7 +1928,7 @@ fn a_column_check_rides_its_new_column_and_stands_alone_on_an_existing_one() {
         updates_only(),
     );
     assert_eq!(
-        existing.operations,
+        existing.op_list(),
         vec![MigrationOp::AddCheck {
             table: "account".to_string(),
             name: "ck_account_role".to_string(),
@@ -2038,13 +1942,10 @@ fn emit_sql_with_ir_add_check_table_check_alters_on_postgres_and_warns_on_sqlite
     let new_ir = envelope(vec![transfer_model_with_table_checks(vec![
         transfer_outflow_table_check(),
     ])]);
-    let plan = Plan {
-        operations: vec![MigrationOp::AddCheck {
-            table: "transfer".to_string(),
-            name: "ck_transfer_at_most_one_outflow".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::AddCheck {
+        table: "transfer".to_string(),
+        name: "ck_transfer_at_most_one_outflow".to_string(),
+    }]);
 
     let pg = render_flat(&plan, &live_transfer_ir(), &new_ir, Dialect::Postgres).unwrap();
     assert_eq!(
@@ -2079,13 +1980,10 @@ fn emit_sql_with_ir_add_check_column_check_reuses_the_db_check_do_block() {
         vec![ir_col("role", "string", None, true, false, false)],
     )]);
     let new_ir = envelope(vec![model]);
-    let plan = Plan {
-        operations: vec![MigrationOp::AddCheck {
-            table: "account".to_string(),
-            name: "ck_account_role".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::AddCheck {
+        table: "account".to_string(),
+        name: "ck_account_role".to_string(),
+    }]);
 
     let pg = render_flat(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap();
     assert_eq!(pg.statements, vec![PG_DB_CHECK_ACCOUNT_ROLE]);
@@ -2106,19 +2004,16 @@ fn emit_sql_with_ir_orders_add_column_before_the_check_that_references_it() {
             col("outflow_activity_id", "int", true),
         ],
     )]);
-    let plan = Plan {
-        operations: vec![
-            MigrationOp::AddColumn {
-                table: "transfer".to_string(),
-                column: "outflow_transaction_id".to_string(),
-            },
-            MigrationOp::AddCheck {
-                table: "transfer".to_string(),
-                name: "ck_transfer_at_most_one_outflow".to_string(),
-            },
-        ],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![
+        MigrationOp::AddColumn {
+            table: "transfer".to_string(),
+            column: "outflow_transaction_id".to_string(),
+        },
+        MigrationOp::AddCheck {
+            table: "transfer".to_string(),
+            name: "ck_transfer_at_most_one_outflow".to_string(),
+        },
+    ]);
 
     let pg = render_flat(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap();
     assert_eq!(pg.statements.len(), 2, "{:?}", pg.statements);
@@ -2129,13 +2024,10 @@ fn emit_sql_with_ir_orders_add_column_before_the_check_that_references_it() {
 #[test]
 fn emit_sql_with_ir_add_check_fails_loudly_for_an_undeclared_name() {
     let new_ir = envelope(vec![transfer_model_with_table_checks(vec![])]);
-    let plan = Plan {
-        operations: vec![MigrationOp::AddCheck {
-            table: "transfer".to_string(),
-            name: "ck_transfer_nope".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::AddCheck {
+        table: "transfer".to_string(),
+        name: "ck_transfer_nope".to_string(),
+    }]);
     let err = render_flat(&plan, &live_transfer_ir(), &new_ir, Dialect::Postgres).unwrap_err();
     assert!(err.message.contains("ck_transfer_nope"), "{}", err.message);
 }
@@ -2157,7 +2049,7 @@ fn a_declared_check_whose_live_body_drifted_is_rebuilt() {
         updates_only(),
     );
     assert_eq!(
-        plan.operations,
+        plan.op_list(),
         vec![MigrationOp::RebuildCheck {
             table: "transfer".to_string(),
             name: "ck_transfer_at_most_one_outflow".to_string(),
@@ -2175,9 +2067,9 @@ fn catalog_wrapping_alone_is_not_check_drift() {
         updates_only(),
     );
     assert!(
-        plan.operations.is_empty(),
+        plan.op_list().is_empty(),
         "catalog parens are not drift: {:?}",
-        plan.operations
+        plan.op_list()
     );
 }
 
@@ -2186,13 +2078,10 @@ fn emit_sql_with_ir_rebuild_check_drops_then_bare_adds_on_postgres() {
     let new_ir = envelope(vec![transfer_model_with_table_checks(vec![
         transfer_outflow_table_check(),
     ])]);
-    let plan = Plan {
-        operations: vec![MigrationOp::RebuildCheck {
-            table: "transfer".to_string(),
-            name: "ck_transfer_at_most_one_outflow".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::RebuildCheck {
+        table: "transfer".to_string(),
+        name: "ck_transfer_at_most_one_outflow".to_string(),
+    }]);
 
     let pg = render_flat(&plan, &live_transfer_ir(), &new_ir, Dialect::Postgres).unwrap();
     assert_eq!(
@@ -2220,13 +2109,10 @@ fn emit_sql_with_ir_rebuild_check_drops_then_bare_adds_on_postgres() {
 #[test]
 fn emit_sql_with_ir_rebuild_check_fails_loudly_for_an_undeclared_name() {
     let new_ir = envelope(vec![transfer_model_with_table_checks(vec![])]);
-    let plan = Plan {
-        operations: vec![MigrationOp::RebuildCheck {
-            table: "transfer".to_string(),
-            name: "ck_transfer_nope".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::RebuildCheck {
+        table: "transfer".to_string(),
+        name: "ck_transfer_nope".to_string(),
+    }]);
     let err = render_flat(&plan, &live_transfer_ir(), &new_ir, Dialect::Postgres).unwrap_err();
     assert!(err.message.contains("ck_transfer_nope"), "{}", err.message);
 }
@@ -2250,7 +2136,7 @@ fn live_ferro_owned_checks_the_model_does_not_declare_drop_in_live_order() {
         destructive(),
     );
     assert_eq!(
-        plan.operations,
+        plan.op_list(),
         vec![
             MigrationOp::DropCheck {
                 table: "transfer".to_string(),
@@ -2273,19 +2159,16 @@ fn no_check_drops_when_every_live_name_is_declared() {
         live_checks(&[("ck_transfer_at_most_one_outflow", CATALOG_OUTFLOW_CHECK)]),
         destructive(),
     );
-    assert!(plan.operations.is_empty(), "{:?}", plan.operations);
+    assert!(plan.op_list().is_empty(), "{:?}", plan.op_list());
 }
 
 #[test]
 fn emit_sql_with_ir_drop_check_drops_on_postgres_and_warns_on_sqlite() {
     let new_ir = envelope(vec![transfer_model_with_table_checks(vec![])]);
-    let plan = Plan {
-        operations: vec![MigrationOp::DropCheck {
-            table: "transfer".to_string(),
-            name: "ck_transfer_orphan".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::DropCheck {
+        table: "transfer".to_string(),
+        name: "ck_transfer_orphan".to_string(),
+    }]);
 
     let pg = render_flat(&plan, &live_transfer_ir(), &new_ir, Dialect::Postgres).unwrap();
     assert_eq!(
@@ -2319,13 +2202,10 @@ fn emit_sql_with_ir_drop_check_fails_loudly_for_a_still_declared_name() {
     let new_ir = envelope(vec![transfer_model_with_table_checks(vec![
         transfer_outflow_table_check(),
     ])]);
-    let plan = Plan {
-        operations: vec![MigrationOp::DropCheck {
-            table: "transfer".to_string(),
-            name: "ck_transfer_at_most_one_outflow".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::DropCheck {
+        table: "transfer".to_string(),
+        name: "ck_transfer_at_most_one_outflow".to_string(),
+    }]);
     let err = render_flat(&plan, &live_transfer_ir(), &new_ir, Dialect::Postgres).unwrap_err();
     assert!(
         err.message.contains("ck_transfer_at_most_one_outflow"),
@@ -2403,13 +2283,10 @@ fn emit_sql_with_ir_add_column_db_check_postgres_quoted_and_sqlite_inline() {
     let old_ir = envelope(vec![schema_model("account", vec![])]);
     let new_ir = envelope(vec![model]);
 
-    let plan = Plan {
-        operations: vec![MigrationOp::AddColumn {
-            table: "account".to_string(),
-            column: "role".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::AddColumn {
+        table: "account".to_string(),
+        column: "role".to_string(),
+    }]);
 
     let pg = render_flat(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap();
     assert!(
@@ -2525,15 +2402,13 @@ fn plan_from_ir_rebuilds_fk_on_delete_drift() {
     )]);
 
     let plan = plan_from_ir(
-        &old_ir,
-        &new_ir,
+        &Side::declared(old_ir.clone()),
+        &Side::declared(new_ir.clone()),
         Dialect::Postgres,
-        &LiveFacts::declared(),
         destructive(),
-    )
-    .expect("plan");
+    );
     assert_eq!(
-        plan.operations,
+        plan.op_list(),
         vec![MigrationOp::RebuildForeignKey {
             table: "account".to_string(),
             column: "connection_id".to_string(),
@@ -2568,17 +2443,15 @@ fn plan_from_ir_fk_noop_when_definition_matches() {
     )]);
 
     let plan = plan_from_ir(
-        &old_ir,
-        &new_ir,
+        &Side::declared(old_ir.clone()),
+        &Side::declared(new_ir.clone()),
         Dialect::Postgres,
-        &LiveFacts::declared(),
         destructive(),
-    )
-    .expect("plan");
+    );
     assert!(
-        plan.operations.is_empty(),
+        plan.op_list().is_empty(),
         "unexpected ops: {:?}",
-        plan.operations
+        plan.op_list()
     );
     assert!(plan.reports.is_empty());
 }
@@ -2601,15 +2474,13 @@ fn plan_from_ir_adds_fk_missing_on_existing_column() {
     )]);
 
     let plan = plan_from_ir(
-        &old_ir,
-        &new_ir,
+        &Side::declared(old_ir.clone()),
+        &Side::declared(new_ir.clone()),
         Dialect::Postgres,
-        &LiveFacts::declared(),
         destructive(),
-    )
-    .expect("plan");
+    );
     assert_eq!(
-        plan.operations,
+        plan.op_list(),
         vec![MigrationOp::AddForeignKey {
             table: "account".to_string(),
             column: "connection_id".to_string(),
@@ -2640,15 +2511,13 @@ fn plan_from_ir_fk_on_new_column_rides_add_column() {
     )]);
 
     let plan = plan_from_ir(
-        &old_ir,
-        &new_ir,
+        &Side::declared(old_ir.clone()),
+        &Side::declared(new_ir.clone()),
         Dialect::Postgres,
-        &LiveFacts::declared(),
         destructive(),
-    )
-    .expect("plan");
+    );
     assert_eq!(
-        plan.operations,
+        plan.op_list(),
         vec![MigrationOp::AddColumn {
             table: "account".to_string(),
             column: "connection_id".to_string(),
@@ -2680,17 +2549,15 @@ fn plan_from_ir_warns_on_user_owned_fk_drift() {
     )]);
 
     let plan = plan_from_ir(
-        &old_ir,
-        &new_ir,
+        &Side::declared(old_ir.clone()),
+        &Side::declared(new_ir.clone()),
         Dialect::Postgres,
-        &LiveFacts::declared(),
         destructive(),
-    )
-    .expect("plan");
+    );
     assert!(
-        plan.operations.is_empty(),
+        plan.op_list().is_empty(),
         "unexpected ops: {:?}",
-        plan.operations
+        plan.op_list()
     );
     assert_eq!(plan.reports.len(), 1);
     assert!(
@@ -2722,15 +2589,13 @@ fn plan_from_ir_unnamed_live_fk_drift_rebuilds_with_canonical_name() {
     )]);
 
     let plan = plan_from_ir(
-        &old_ir,
-        &new_ir,
+        &Side::declared(old_ir.clone()),
+        &Side::declared(new_ir.clone()),
         Dialect::Sqlite,
-        &LiveFacts::declared(),
         destructive(),
-    )
-    .expect("plan");
+    );
     assert_eq!(
-        plan.operations,
+        plan.op_list(),
         vec![MigrationOp::RebuildForeignKey {
             table: "account".to_string(),
             column: "connection_id".to_string(),
@@ -2751,14 +2616,11 @@ fn emit_sql_with_ir_rebuild_fk_postgres_drops_then_adds() {
             Some("fk_account_connection_id_connection"),
         )],
     )]);
-    let plan = Plan {
-        operations: vec![MigrationOp::RebuildForeignKey {
-            table: "account".to_string(),
-            column: "connection_id".to_string(),
-            old_name: "fk_account_connection_id_connection".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::RebuildForeignKey {
+        table: "account".to_string(),
+        column: "connection_id".to_string(),
+        old_name: "fk_account_connection_id_connection".to_string(),
+    }]);
 
     let result = render_flat(&plan, &empty_envelope(), &new_ir, Dialect::Postgres).unwrap();
     assert_eq!(
@@ -2792,14 +2654,11 @@ fn emit_sql_with_ir_rebuild_fk_sqlite_warns_and_skips() {
             Some("fk_account_connection_id_connection"),
         )],
     )]);
-    let plan = Plan {
-        operations: vec![MigrationOp::RebuildForeignKey {
-            table: "account".to_string(),
-            column: "connection_id".to_string(),
-            old_name: "fk_account_connection_id_connection".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::RebuildForeignKey {
+        table: "account".to_string(),
+        column: "connection_id".to_string(),
+        old_name: "fk_account_connection_id_connection".to_string(),
+    }]);
 
     let result = render_flat(&plan, &old_ir, &new_ir, Dialect::Sqlite).unwrap();
     assert!(
@@ -2832,13 +2691,10 @@ fn emit_sql_with_ir_add_fk_postgres_and_sqlite() {
             Some("fk_account_connection_id_connection"),
         )],
     )]);
-    let plan = Plan {
-        operations: vec![MigrationOp::AddForeignKey {
-            table: "account".to_string(),
-            column: "connection_id".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::AddForeignKey {
+        table: "account".to_string(),
+        column: "connection_id".to_string(),
+    }]);
 
     let pg = render_flat(&plan, &empty_envelope(), &new_ir, Dialect::Postgres).unwrap();
     assert_eq!(
@@ -2912,14 +2768,12 @@ fn a_snapshot_down_disables_row_security_exactly_when_its_migration_introduced_i
     for before in &sides {
         for after in &sides {
             let down = plan_from_ir(
-                &snapshot(after),
-                &snapshot(before),
+                &Side::declared(snapshot(after).clone()),
+                &Side::declared(snapshot(before).clone()),
                 Dialect::Postgres,
-                &LiveFacts::declared(),
                 destructive(),
-            )
-            .expect("plan");
-            let disables = down.operations.contains(&MigrationOp::DisableRowSecurity {
+            );
+            let disables = down.op_list().contains(&MigrationOp::DisableRowSecurity {
                 table: "ledgerrow".into(),
             });
             let introduced = matches!(
@@ -2987,12 +2841,9 @@ fn create_pass_skips_row_security_on_sqlite_with_one_warning() {
 fn add_table_pass_carries_row_security_through_emit_sql_with_ir() {
     let model = ledgerrow_model_with_row_security(true);
     let new_ir = envelope(vec![model]);
-    let plan = Plan {
-        operations: vec![MigrationOp::AddTable {
-            table: "ledgerrow".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::AddTable {
+        table: "ledgerrow".to_string(),
+    }]);
     let emitted = render_flat(&plan, &empty_envelope(), &new_ir, Dialect::Postgres).unwrap();
     assert!(
         emitted
@@ -3116,7 +2967,7 @@ fn a_declared_fk_and_check_that_exist_not_valid_are_validated() {
         vec![],
     );
     assert_eq!(
-        plan.operations,
+        plan.op_list(),
         vec![
             MigrationOp::ValidateConstraint {
                 table: "post".to_string(),
@@ -3138,14 +2989,14 @@ fn validated_absent_or_undeclared_constraints_are_never_validated() {
         vec![],
     );
     assert!(
-        validated.operations.is_empty(),
+        validated.op_list().is_empty(),
         "a validated constraint replans to nothing: {:?}",
-        validated.operations
+        validated.op_list()
     );
 
     let absent = live_post(vec![], None, vec![]);
     assert_eq!(
-        absent.operations,
+        absent.op_list(),
         vec![MigrationOp::AddCheck {
             table: "post".to_string(),
             name: "ck_post_title_set".to_string(),
@@ -3171,9 +3022,9 @@ fn validated_absent_or_undeclared_constraints_are_never_validated() {
     };
     let plan = plan_live_table(undeclared.clone(), undeclared, facts, updates_only());
     assert!(
-        plan.operations.is_empty(),
+        plan.op_list().is_empty(),
         "a NOT VALID constraint the model does not declare is never touched: {:?}",
-        plan.operations
+        plan.op_list()
     );
 }
 
@@ -3188,7 +3039,7 @@ fn a_declared_index_that_exists_invalid_is_rebuilt() {
         ],
     );
     assert_eq!(
-        plan.operations,
+        plan.op_list(),
         vec![
             MigrationOp::RebuildIndex {
                 table: "post".to_string(),
@@ -3216,37 +3067,34 @@ fn valid_absent_or_undeclared_indexes_are_never_rebuilt() {
             index_validity("uq_post_slug", true),
         ],
     );
-    assert!(valid.operations.is_empty(), "{:?}", valid.operations);
+    assert!(valid.op_list().is_empty(), "{:?}", valid.op_list());
     let absent = live_post(vec![], Some(true), vec![]);
-    assert!(absent.operations.is_empty(), "{:?}", absent.operations);
+    assert!(absent.op_list().is_empty(), "{:?}", absent.op_list());
     let undeclared = live_post(
         vec![],
         Some(true),
         vec![index_validity("idx_post_legacy", false)],
     );
     assert!(
-        undeclared.operations.is_empty(),
+        undeclared.op_list().is_empty(),
         "an invalid index the model does not declare is leftover handling, not a rebuild: {:?}",
-        undeclared.operations
+        undeclared.op_list()
     );
 }
 
 #[test]
 fn emit_validate_constraint_renders_the_one_validate_statement_on_postgres() {
     let new_ir = envelope(vec![post_model_with_constraints()]);
-    let plan = Plan {
-        operations: vec![
-            MigrationOp::ValidateConstraint {
-                table: "post".to_string(),
-                name: "fk_post_author_id_author".to_string(),
-            },
-            MigrationOp::ValidateConstraint {
-                table: "post".to_string(),
-                name: "ck_post_title_set".to_string(),
-            },
-        ],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![
+        MigrationOp::ValidateConstraint {
+            table: "post".to_string(),
+            name: "fk_post_author_id_author".to_string(),
+        },
+        MigrationOp::ValidateConstraint {
+            table: "post".to_string(),
+            name: "ck_post_title_set".to_string(),
+        },
+    ]);
     let pg = render_flat(&plan, &new_ir, &new_ir, Dialect::Postgres).unwrap();
     assert_eq!(
         pg.statements,
@@ -3268,37 +3116,28 @@ fn emit_validate_constraint_fails_loudly_on_sqlite() {
     // so the planner never plans the op there; an op that reaches emission
     // anyway is a planner bug, never a silent no-op.
     let new_ir = envelope(vec![post_model_with_constraints()]);
-    let plan = Plan {
-        operations: vec![MigrationOp::ValidateConstraint {
-            table: "post".to_string(),
-            name: "ck_post_title_set".to_string(),
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![MigrationOp::ValidateConstraint {
+        table: "post".to_string(),
+        name: "ck_post_title_set".to_string(),
+    }]);
     let err = render_flat(&plan, &new_ir, &new_ir, Dialect::Sqlite).unwrap_err();
     assert!(err.message.contains("ck_post_title_set"), "{}", err.message);
 }
 
 #[test]
 fn emit_rebuild_index_drops_then_runs_the_add_index_create_statement() {
-    let add = Plan {
-        operations: vec![MigrationOp::AddIndex {
-            table: "post".into(),
-            name: "uq_post_slug".into(),
-            columns: vec!["slug".into()],
-            unique: true,
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
-    let rebuild = Plan {
-        operations: vec![MigrationOp::RebuildIndex {
-            table: "post".into(),
-            name: "uq_post_slug".into(),
-            columns: vec!["slug".into()],
-            unique: true,
-        }],
-        ..Plan::unplaced(Vec::new())
-    };
+    let add = Plan::unplaced(vec![MigrationOp::AddIndex {
+        table: "post".into(),
+        name: "uq_post_slug".into(),
+        columns: vec!["slug".into()],
+        unique: true,
+    }]);
+    let rebuild = Plan::unplaced(vec![MigrationOp::RebuildIndex {
+        table: "post".into(),
+        name: "uq_post_slug".into(),
+        columns: vec!["slug".into()],
+        unique: true,
+    }]);
     let created = render_flat(
         &add,
         &empty_envelope(),
@@ -3353,7 +3192,7 @@ fn a_not_valid_check_whose_body_drifted_is_a_rebuild_and_an_unchanged_one_is_not
         updates_only(),
     );
     assert_eq!(
-        drifted.operations,
+        drifted.op_list(),
         vec![MigrationOp::RebuildCheck {
             table: "post".to_string(),
             name: "ck_post_title_set".to_string(),
@@ -3367,7 +3206,7 @@ fn a_not_valid_check_whose_body_drifted_is_a_rebuild_and_an_unchanged_one_is_not
         updates_only(),
     );
     assert_eq!(
-        unchanged.operations,
+        unchanged.op_list(),
         vec![MigrationOp::ValidateConstraint {
             table: "post".to_string(),
             name: "ck_post_title_set".to_string(),
@@ -3379,21 +3218,18 @@ fn a_not_valid_check_whose_body_drifted_is_a_rebuild_and_an_unchanged_one_is_not
 #[test]
 fn render_plan_renders_the_validate_and_rebuild_index_ops() {
     let new_ir = envelope(vec![post_model_with_constraints()]);
-    let plan = Plan {
-        operations: vec![
-            MigrationOp::ValidateConstraint {
-                table: "post".into(),
-                name: "ck_post_title_set".into(),
-            },
-            MigrationOp::RebuildIndex {
-                table: "post".into(),
-                name: "uq_post_slug".into(),
-                columns: vec!["slug".into()],
-                unique: true,
-            },
-        ],
-        ..Plan::unplaced(Vec::new())
-    };
+    let plan = Plan::unplaced(vec![
+        MigrationOp::ValidateConstraint {
+            table: "post".into(),
+            name: "ck_post_title_set".into(),
+        },
+        MigrationOp::RebuildIndex {
+            table: "post".into(),
+            name: "uq_post_slug".into(),
+            columns: vec!["slug".into()],
+            unique: true,
+        },
+    ]);
     let rendered = render_plan(&plan, &new_ir, &new_ir, Dialect::Postgres).unwrap();
     assert_eq!(
         rendered[0].statements,
@@ -3448,15 +3284,13 @@ fn parent_child_models(labels: &[&str]) -> Vec<SchemaModel> {
 fn whole_modelset_add_creates_types_first_then_parents_before_children() {
     let new = envelope(parent_child_models(&["draft", "archived"]));
     let plan = plan_from_ir(
-        &empty_envelope(),
-        &new,
+        &Side::declared(empty_envelope().clone()),
+        &Side::declared(new.clone()),
         Dialect::Postgres,
-        &LiveFacts::declared(),
         destructive(),
-    )
-    .expect("plan");
+    );
     assert_eq!(
-        plan.operations,
+        plan.op_list(),
         vec![
             MigrationOp::CreateEnumType {
                 type_name: "status".into(),
@@ -3484,15 +3318,13 @@ fn whole_modelset_add_creates_types_first_then_parents_before_children() {
     assert!(statements[1].starts_with("CREATE TABLE IF NOT EXISTS \"parent\""));
 
     let sqlite = plan_from_ir(
-        &empty_envelope(),
-        &new,
+        &Side::declared(empty_envelope().clone()),
+        &Side::declared(new.clone()),
         Dialect::Sqlite,
-        &LiveFacts::declared(),
         destructive(),
-    )
-    .expect("plan");
+    );
     assert_eq!(
-        sqlite.operations,
+        sqlite.op_list(),
         vec![
             MigrationOp::AddTable {
                 table: "parent".into()
@@ -3509,15 +3341,13 @@ fn whole_modelset_add_creates_types_first_then_parents_before_children() {
 fn whole_modelset_drop_removes_children_before_parents_then_their_types() {
     let old = envelope(parent_child_models(&["draft", "archived"]));
     let plan = plan_from_ir(
-        &old,
-        &empty_envelope(),
+        &Side::declared(old.clone()),
+        &Side::declared(empty_envelope().clone()),
         Dialect::Postgres,
-        &LiveFacts::declared(),
         destructive(),
-    )
-    .expect("plan");
+    );
     assert_eq!(
-        plan.operations,
+        plan.op_list(),
         vec![
             MigrationOp::DropTable {
                 table: "child".into()
@@ -3531,14 +3361,12 @@ fn whole_modelset_drop_removes_children_before_parents_then_their_types() {
         ]
     );
     let kept = plan_from_ir(
-        &old,
-        &empty_envelope(),
+        &Side::declared(old.clone()),
+        &Side::declared(empty_envelope().clone()),
         Dialect::Postgres,
-        &LiveFacts::declared(),
         updates_only(),
-    )
-    .expect("plan");
-    assert!(kept.operations.is_empty(), "{:?}", kept.operations);
+    );
+    assert!(kept.op_list().is_empty(), "{:?}", kept.op_list());
 }
 
 #[test]
@@ -3548,15 +3376,13 @@ fn label_addition_precedes_every_table_op_including_the_tables_using_the_type() 
     models[0].columns.push(col("note", "text", true));
     let new = envelope(models);
     let plan = plan_from_ir(
-        &old,
-        &new,
+        &Side::declared(old.clone()),
+        &Side::declared(new.clone()),
         Dialect::Postgres,
-        &LiveFacts::declared(),
         destructive(),
-    )
-    .expect("plan");
+    );
     assert_eq!(
-        plan.operations,
+        plan.op_list(),
         vec![
             MigrationOp::AddEnumLabel {
                 type_name: "status".into(),
@@ -3590,12 +3416,16 @@ fn a_label_dropped_between_two_snapshots_is_a_removal_on_both_dialects() {
         columns: vec![("child".into(), "status".into())],
     };
     for dialect in [Dialect::Postgres, Dialect::Sqlite] {
-        let plan =
-            plan_from_ir(&old, &new, dialect, &LiveFacts::declared(), destructive()).expect("plan");
+        let plan = plan_from_ir(
+            &Side::declared(old.clone()),
+            &Side::declared(new.clone()),
+            dialect,
+            destructive(),
+        );
         assert!(
-            plan.operations.contains(&removal),
+            plan.op_list().contains(&removal),
             "{dialect:?} {:?}",
-            plan.operations
+            plan.op_list()
         );
         assert!(plan.reports.is_empty(), "{dialect:?} {:?}", plan.reports);
         let rendered = render_plan(&plan, &old, &new, dialect).expect("render");
@@ -3625,20 +3455,18 @@ fn a_label_dropped_between_two_snapshots_is_a_removal_on_both_dialects() {
     });
     for dialect in [Dialect::Postgres, Dialect::Sqlite] {
         let plan = plan_from_ir(
-            &old,
-            &envelope(renamed.clone()),
+            &Side::declared(old.clone()),
+            &Side::declared(envelope(renamed.clone()).clone()),
             dialect,
-            &LiveFacts::declared(),
             destructive(),
-        )
-        .expect("plan");
+        );
         assert!(
             !plan
-                .operations
+                .op_list()
                 .iter()
                 .any(|op| matches!(op, MigrationOp::RemoveEnumLabel { .. })),
             "{dialect:?} {:?}",
-            plan.operations
+            plan.op_list()
         );
     }
 }
@@ -3649,22 +3477,26 @@ fn a_label_dropped_between_two_snapshots_is_a_removal_on_both_dialects() {
 fn a_label_dropped_against_a_live_database_only_warns() {
     let models = envelope(parent_child_models(&["draft", "live"]));
     let mut live = envelope(parent_child_models(&["draft", "canceled", "live"]));
-    let mut facts = LiveFacts::live(Default::default(), Default::default());
+    let mut facts = LiveFacts::default();
     for model in &mut live.payload.models {
         facts.tables.entry(model.table_name.clone()).or_default();
         for col in &mut model.columns {
             col.postgres_native_enum = col.enum_values.is_some();
         }
     }
-    let plan =
-        plan_from_ir(&live, &models, Dialect::Postgres, &facts, destructive()).expect("plan");
+    let plan = plan_from_ir(
+        &Side::live(live.clone(), facts.clone()).expect("live side"),
+        &Side::declared(models.clone()),
+        Dialect::Postgres,
+        destructive(),
+    );
     assert!(
         !plan
-            .operations
+            .op_list()
             .iter()
             .any(|op| matches!(op, MigrationOp::RemoveEnumLabel { .. })),
         "{:?}",
-        plan.operations
+        plan.op_list()
     );
     assert_eq!(plan.reports.len(), 1, "{:?}", plan.reports);
     assert!(plan.reports[0].text.contains("'canceled'"));
@@ -3673,7 +3505,7 @@ fn a_label_dropped_against_a_live_database_only_warns() {
 #[test]
 fn live_labels_come_from_the_facts_and_extras_only_warn() {
     let models = envelope(parent_child_models(&["draft", "archived"]));
-    let mut facts = LiveFacts::live(Default::default(), Default::default());
+    let mut facts = LiveFacts::default();
     facts
         .enum_labels
         .insert("status".into(), vec!["draft".into(), "legacy".into()]);
@@ -3686,10 +3518,14 @@ fn live_labels_come_from_the_facts_and_extras_only_warn() {
             col.postgres_native_enum = col.enum_values.is_some();
         }
     }
-    let plan =
-        plan_from_ir(&live, &models, Dialect::Postgres, &facts, destructive()).expect("plan");
+    let plan = plan_from_ir(
+        &Side::live(live.clone(), facts.clone()).expect("live side"),
+        &Side::declared(models.clone()),
+        Dialect::Postgres,
+        destructive(),
+    );
     assert_eq!(
-        plan.operations,
+        plan.op_list(),
         vec![MigrationOp::AddEnumLabel {
             type_name: "status".into(),
             label: "archived".into(),
@@ -3740,13 +3576,11 @@ fn new_tables_create_every_enum_type_first_by_name_then_the_tables() {
     let new_ir = envelope(vec![post.clone(), author.clone()]);
     let old_ir = empty_envelope();
     let plan = plan_from_ir(
-        &old_ir,
-        &new_ir,
+        &Side::declared(old_ir.clone()),
+        &Side::declared(new_ir.clone()),
         Dialect::Postgres,
-        &LiveFacts::declared(),
         PlanOptions::default(),
-    )
-    .expect("plan");
+    );
     let statements = render_flat(&plan, &old_ir, &new_ir, Dialect::Postgres)
         .expect("render")
         .statements;
@@ -3802,17 +3636,15 @@ fn identical_snapshots_with_a_unique_column_plan_nothing() {
     for dialect in [Dialect::Postgres, Dialect::Sqlite] {
         for destructive in [false, true] {
             let plan = plan_from_ir(
-                &snapshot,
-                &snapshot,
+                &Side::declared(snapshot.clone()),
+                &Side::declared(snapshot.clone()),
                 dialect,
-                &LiveFacts::declared(),
                 PlanOptions { destructive },
-            )
-            .expect("plan");
+            );
             assert!(
-                plan.operations.is_empty(),
+                plan.op_list().is_empty(),
                 "{dialect:?} destructive={destructive}: {:?}",
-                plan.operations
+                plan.op_list()
             );
         }
     }
@@ -3832,15 +3664,15 @@ fn identical_snapshots_with_checks_policies_and_types_plan_nothing() {
     });
     let both = envelope(vec![model]);
     for dialect in [Dialect::Postgres, Dialect::Sqlite] {
-        let plan = plan_from_ir(&both, &both, dialect, &LiveFacts::declared(), destructive())
-            .expect("plan");
-        assert!(plan.is_empty(), "{dialect:?}: {:?}", plan.operations);
-        assert!(plan.reports.is_empty(), "{dialect:?}: {:?}", plan.reports);
-        assert!(
-            plan.reports.is_empty(),
-            "{dialect:?}: {:?}",
-            plan.reports
+        let plan = plan_from_ir(
+            &Side::declared(both.clone()),
+            &Side::declared(both.clone()),
+            dialect,
+            destructive(),
         );
+        assert!(plan.is_empty(), "{dialect:?}: {:?}", plan.op_list());
+        assert!(plan.reports.is_empty(), "{dialect:?}: {:?}", plan.reports);
+        assert!(plan.reports.is_empty(), "{dialect:?}: {:?}", plan.reports);
     }
 }
 
@@ -3876,7 +3708,7 @@ fn a_text_comparison_check_as_postgres_prints_it_is_not_a_rebuild() {
     };
     let declared = envelope(vec![model]);
     let facts_with = |definition: &str| {
-        let mut facts = LiveFacts::live(Default::default(), Default::default());
+        let mut facts = LiveFacts::default();
         facts.tables.insert(
             "cknamed".into(),
             LiveTableFacts {
@@ -3890,25 +3722,29 @@ fn a_text_comparison_check_as_postgres_prints_it_is_not_a_rebuild() {
     };
 
     let clean = plan_from_ir(
-        &declared,
-        &declared,
+        &Side::live(
+            declared.clone(),
+            facts_with("CHECK (((name)::text <> ''::text))").clone(),
+        )
+        .expect("live side"),
+        &Side::declared(declared.clone()),
         Dialect::Postgres,
-        &facts_with("CHECK (((name)::text <> ''::text))"),
         updates_only(),
-    )
-    .expect("plan");
-    assert!(clean.operations.is_empty(), "{:?}", clean.operations);
+    );
+    assert!(clean.op_list().is_empty(), "{:?}", clean.op_list());
 
     let drifted = plan_from_ir(
-        &declared,
-        &declared,
+        &Side::live(
+            declared.clone(),
+            facts_with("CHECK (((name)::text <> 'x'::text))").clone(),
+        )
+        .expect("live side"),
+        &Side::declared(declared.clone()),
         Dialect::Postgres,
-        &facts_with("CHECK (((name)::text <> 'x'::text))"),
         updates_only(),
-    )
-    .expect("plan");
+    );
     assert_eq!(
-        drifted.operations,
+        drifted.op_list(),
         vec![MigrationOp::RebuildCheck {
             table: "cknamed".into(),
             name: "ck_cknamed_named".into(),
@@ -3939,7 +3775,7 @@ fn ledgerrow_with_leftovers() -> (IrEnvelope<SchemaIrPayload>, LiveFacts) {
     let mut live_model = ledgerrow_model_with_row_security(true);
     live_model.row_security = None;
     live_model.columns.push(col("legacy", "text", true));
-    let mut facts = LiveFacts::live(Default::default(), Default::default());
+    let mut facts = LiveFacts::default();
     facts.tables.insert(
         "ledgerrow".into(),
         LiveTableFacts {
@@ -3967,9 +3803,13 @@ fn updates_only_plans_no_drop_and_keeps_every_leftover_warning() {
     let (live, facts) = ledgerrow_with_leftovers();
     let declared = envelope(vec![ledgerrow_model_with_row_security(true)]);
 
-    let kept =
-        plan_from_ir(&live, &declared, Dialect::Postgres, &facts, updates_only()).expect("plan");
-    assert!(kept.operations.is_empty(), "{:?}", kept.operations);
+    let kept = plan_from_ir(
+        &Side::live(live.clone(), facts.clone()).expect("live side"),
+        &Side::declared(declared.clone()),
+        Dialect::Postgres,
+        updates_only(),
+    );
+    assert!(kept.op_list().is_empty(), "{:?}", kept.op_list());
     let kinds: Vec<&ReportKind> = kept.reports.iter().map(|report| &report.kind).collect();
     assert!(
         kinds.contains(&&ReportKind::LeftoverChecks {
@@ -3984,10 +3824,14 @@ fn updates_only_plans_no_drop_and_keeps_every_leftover_warning() {
         "{kinds:?}"
     );
 
-    let dropped =
-        plan_from_ir(&live, &declared, Dialect::Postgres, &facts, destructive()).expect("plan");
+    let dropped = plan_from_ir(
+        &Side::live(live.clone(), facts.clone()).expect("live side"),
+        &Side::declared(declared.clone()),
+        Dialect::Postgres,
+        destructive(),
+    );
     assert_eq!(
-        dropped.operations,
+        dropped.op_list(),
         vec![
             MigrationOp::DropCheck {
                 table: "ledgerrow".into(),
@@ -4031,7 +3875,7 @@ fn foreign_and_unverifiable_policies_plan_no_op_and_warn_as_the_pass_does() {
             live_policy("rls_ledgerrow_raw", "(ledger_id IS NULL)"),
         ],
     };
-    let mut facts = LiveFacts::live(Default::default(), Default::default());
+    let mut facts = LiveFacts::default();
     facts.tables.insert(
         "ledgerrow".into(),
         LiveTableFacts {
@@ -4041,14 +3885,12 @@ fn foreign_and_unverifiable_policies_plan_no_op_and_warn_as_the_pass_does() {
     );
     let declared = envelope(vec![declared_model.clone()]);
     let plan = plan_from_ir(
-        &envelope(vec![live_model]),
-        &declared,
+        &Side::live(envelope(vec![live_model]).clone(), facts.clone()).expect("live side"),
+        &Side::declared(declared.clone()),
         Dialect::Postgres,
-        &facts,
         destructive(),
-    )
-    .expect("plan");
-    assert!(plan.operations.is_empty(), "{:?}", plan.operations);
+    );
+    assert!(plan.op_list().is_empty(), "{:?}", plan.op_list());
     let reconcile = ferro_ddl_lowering::plan_row_security_reconcile(
         &declared_model,
         &live_rs,
@@ -4065,7 +3907,7 @@ fn foreign_and_unverifiable_policies_plan_no_op_and_warn_as_the_pass_does() {
 }
 
 #[test]
-fn row_security_ops_render_byte_identical_to_the_reconcile_decision() {
+fn row_security_ops_are_the_reconcile_decisions_names_and_flags() {
     // Every category at once: missing ENABLE, a missing policy, a drifted
     // shorthand policy, an orphan, and (destructive) the FORCE teardown.
     let mut declared_model = ledgerrow_model_with_row_security(false);
@@ -4094,7 +3936,7 @@ fn row_security_ops_render_byte_identical_to_the_reconcile_decision() {
     live_model.row_security = None;
     let live = envelope(vec![live_model]);
     let declared = envelope(vec![declared_model.clone()]);
-    let mut facts = LiveFacts::live(Default::default(), Default::default());
+    let mut facts = LiveFacts::default();
     facts.tables.insert(
         "ledgerrow".into(),
         LiveTableFacts {
@@ -4103,10 +3945,12 @@ fn row_security_ops_render_byte_identical_to_the_reconcile_decision() {
         },
     );
     for options in [updates_only(), destructive()] {
-        let plan =
-            plan_from_ir(&live, &declared, Dialect::Postgres, &facts, options).expect("plan");
-        let rendered = render_plan(&plan, &live, &declared, Dialect::Postgres).unwrap();
-        let statements: Vec<String> = rendered.into_iter().flat_map(|op| op.statements).collect();
+        let plan = plan_from_ir(
+            &Side::live(live.clone(), facts.clone()).expect("live side"),
+            &Side::declared(declared.clone()),
+            Dialect::Postgres,
+            options,
+        );
         let reconcile = ferro_ddl_lowering::plan_row_security_reconcile(
             &declared_model,
             &live_rs,
@@ -4114,9 +3958,81 @@ fn row_security_ops_render_byte_identical_to_the_reconcile_decision() {
             options.destructive,
         )
         .unwrap();
-        assert!(!reconcile.statements.is_empty());
-        assert_eq!(statements, reconcile.statements, "{options:?}");
+        let table = || "ledgerrow".to_string();
+        let flag = |flag: &ferro_ddl_lowering::RowSecurityFlag| match flag {
+            ferro_ddl_lowering::RowSecurityFlag::Enable => {
+                MigrationOp::EnableRowSecurity { table: table() }
+            }
+            ferro_ddl_lowering::RowSecurityFlag::Force => {
+                MigrationOp::ForceRowSecurity { table: table() }
+            }
+            ferro_ddl_lowering::RowSecurityFlag::NoForce => {
+                MigrationOp::NoForceRowSecurity { table: table() }
+            }
+            ferro_ddl_lowering::RowSecurityFlag::Disable => {
+                MigrationOp::DisableRowSecurity { table: table() }
+            }
+        };
+        // The decision's names and flags, one op each, in its order.
+        let expected: Vec<MigrationOp> = reconcile
+            .missing_flags
+            .iter()
+            .map(flag)
+            .chain(
+                reconcile
+                    .missing
+                    .iter()
+                    .map(|name| MigrationOp::AddRowPolicy {
+                        table: table(),
+                        name: name.clone(),
+                    }),
+            )
+            .chain(
+                reconcile
+                    .drifted
+                    .iter()
+                    .map(|name| MigrationOp::RebuildRowPolicy {
+                        table: table(),
+                        name: name.clone(),
+                    }),
+            )
+            .chain(
+                reconcile
+                    .extra
+                    .iter()
+                    .filter(|_| options.destructive)
+                    .map(|name| MigrationOp::DropRowPolicy {
+                        table: table(),
+                        name: name.clone(),
+                    }),
+            )
+            .chain(reconcile.excess_flags.iter().map(flag))
+            .collect();
+        assert!(!expected.is_empty());
+        assert_eq!(plan.op_list(), expected, "{options:?}");
         assert_eq!(plan.reports, reconcile.reports, "{options:?}");
+        // Only the plan's renderer writes the statements.
+        let rendered = render_plan(&plan, &live, &declared, Dialect::Postgres).unwrap();
+        let statements: Vec<String> = rendered.into_iter().flat_map(|op| op.statements).collect();
+        let mut wanted = vec![
+            "ALTER TABLE \"ledgerrow\" ENABLE ROW LEVEL SECURITY".to_string(),
+            ferro_ddl_lowering::render_create_row_policy(
+                &declared_model,
+                &declared_model.row_security.as_ref().unwrap().policies[1],
+            )
+            .unwrap(),
+            "DROP POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\"".to_string(),
+            ferro_ddl_lowering::render_create_row_policy(
+                &declared_model,
+                &declared_model.row_security.as_ref().unwrap().policies[0],
+            )
+            .unwrap(),
+        ];
+        if options.destructive {
+            wanted.push("DROP POLICY \"rls_ledgerrow_gone\" ON \"ledgerrow\"".to_string());
+            wanted.push("ALTER TABLE \"ledgerrow\" NO FORCE ROW LEVEL SECURITY".to_string());
+        }
+        assert_eq!(statements, wanted, "{options:?}");
     }
 }
 
@@ -4141,13 +4057,11 @@ fn render_plan_renders_one_entry_per_op_with_its_own_statements_and_warnings() {
         )
     }]);
     let plan = plan_from_ir(
-        &old,
-        &new,
+        &Side::declared(old.clone()),
+        &Side::declared(new.clone()),
         Dialect::Sqlite,
-        &LiveFacts::declared(),
         destructive(),
-    )
-    .expect("plan");
+    );
     let rendered = render_plan(&plan, &old, &new, Dialect::Sqlite).unwrap();
     assert_eq!(rendered.len(), 1);
     assert_eq!(
@@ -4208,7 +4122,7 @@ fn growing_table(table: &str, targets: &[&str]) -> (SchemaModel, SchemaModel) {
 
 fn tables_in_plan_order(plan: &Plan) -> Vec<String> {
     let mut tables: Vec<String> = Vec::new();
-    for op in &plan.operations {
+    for op in &plan.op_list() {
         if let Some(table) = op.table()
             && tables.last().map(String::as_str) != Some(table)
         {
@@ -4230,13 +4144,11 @@ fn existing_tables_follow_the_tables_their_foreign_keys_reference() {
     let old = envelope(pairs.iter().map(|(before, _)| before.clone()).collect());
     let new = envelope(pairs.iter().map(|(_, after)| after.clone()).collect());
     let plan = plan_from_ir(
-        &old,
-        &new,
+        &Side::declared(old.clone()),
+        &Side::declared(new.clone()),
         Dialect::Postgres,
-        &LiveFacts::declared(),
         destructive(),
-    )
-    .expect("plan");
+    );
     assert_eq!(
         tables_in_plan_order(&plan),
         vec!["grandparent", "parent", "child"]
@@ -4255,13 +4167,11 @@ fn a_self_reference_does_not_constrain_existing_table_order() {
     let old = envelope(pairs.iter().map(|(before, _)| before.clone()).collect());
     let new = envelope(pairs.iter().map(|(_, after)| after.clone()).collect());
     let plan = plan_from_ir(
-        &old,
-        &new,
+        &Side::declared(old.clone()),
+        &Side::declared(new.clone()),
         Dialect::Sqlite,
-        &LiveFacts::declared(),
         destructive(),
-    )
-    .expect("plan");
+    );
     assert_eq!(
         tables_in_plan_order(&plan),
         vec!["external_child", "znode", "areferrer"],
@@ -4278,13 +4188,11 @@ fn a_foreign_key_cycle_keeps_every_table_in_name_order() {
     let old = envelope(pairs.iter().map(|(before, _)| before.clone()).collect());
     let new = envelope(pairs.iter().map(|(_, after)| after.clone()).collect());
     let plan = plan_from_ir(
-        &old,
-        &new,
+        &Side::declared(old.clone()),
+        &Side::declared(new.clone()),
         Dialect::Sqlite,
-        &LiveFacts::declared(),
         destructive(),
-    )
-    .expect("plan");
+    );
     assert_eq!(tables_in_plan_order(&plan), vec!["alpha", "beta"]);
 }
 
@@ -4311,14 +4219,12 @@ fn plan_from_ir_plans_a_primary_key_moving_between_columns() {
     };
     for dialect in [Dialect::Postgres, Dialect::Sqlite] {
         let plan = plan_from_ir(
-            &keyed_on_id,
-            &keyed_on_slug,
+            &Side::declared(keyed_on_id.clone()),
+            &Side::declared(keyed_on_slug.clone()),
             dialect,
-            &LiveFacts::declared(),
             destructive(),
-        )
-        .expect("plan");
-        assert_eq!(plan.operations.first(), Some(&change), "{dialect:?}");
+        );
+        assert_eq!(plan.op_list().first(), Some(&change), "{dialect:?}");
         // The pass warns and skips: no statement, one warning naming the
         // reviewed-migration door.
         let rendered = render_plan(&plan, &keyed_on_id, &keyed_on_slug, dialect).expect("render");
@@ -4337,18 +4243,12 @@ fn plan_from_ir_plans_a_primary_key_moving_between_columns() {
             }]
         );
         let unchanged = plan_from_ir(
-            &keyed_on_id,
-            &keyed_on_id,
+            &Side::declared(keyed_on_id.clone()),
+            &Side::declared(keyed_on_id.clone()),
             dialect,
-            &LiveFacts::declared(),
             destructive(),
-        )
-        .expect("plan");
-        assert!(
-            unchanged.operations.is_empty(),
-            "{:?}",
-            unchanged.operations
         );
+        assert!(unchanged.op_list().is_empty(), "{:?}", unchanged.op_list());
     }
     // The same key listed in another column order is no change: a live table
     // reports catalog order.
@@ -4359,20 +4259,18 @@ fn plan_from_ir_plans_a_primary_key_moving_between_columns() {
         )])
     };
     let plan = plan_from_ir(
-        &composite(["a", "b"]),
-        &composite(["b", "a"]),
+        &Side::declared(composite(["a", "b"]).clone()),
+        &Side::declared(composite(["b", "a"]).clone()),
         Dialect::Postgres,
-        &LiveFacts::declared(),
         destructive(),
-    )
-    .expect("plan");
+    );
     assert!(
         !plan
-            .operations
+            .op_list()
             .iter()
             .any(|op| matches!(op, MigrationOp::ChangePrimaryKey { .. })),
         "{:?}",
-        plan.operations
+        plan.op_list()
     );
 }
 
@@ -4439,13 +4337,11 @@ fn the_passs_index_statements_are_byte_unchanged_by_the_modes() {
     )]);
     let new_ir = envelope(vec![post_model_with_constraints()]);
     let plan = plan_from_ir(
-        &old_ir,
-        &new_ir,
+        &Side::declared(old_ir.clone()),
+        &Side::declared(new_ir.clone()),
         Dialect::Postgres,
-        &LiveFacts::declared(),
         PlanOptions { destructive: true },
-    )
-    .expect("plan");
+    );
     let pg = render_flat(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap();
     assert!(
         pg.statements.contains(
@@ -4547,14 +4443,12 @@ mod renames {
         dialect: Dialect,
     ) -> Vec<MigrationOp> {
         plan_from_ir(
-            old,
-            new,
+            &Side::declared(old.clone()),
+            &Side::declared(new.clone()),
             dialect,
-            &LiveFacts::declared(),
             PlanOptions { destructive: true },
         )
-        .expect("plan")
-        .operations
+        .op_list()
     }
 
     #[test]
@@ -4565,20 +4459,18 @@ mod renames {
             ..col("display_name", "text", true)
         });
         let plan = plan_from_ir(
-            &parent(),
-            &twice,
+            &Side::declared(parent().clone()),
+            &Side::declared(twice.clone()),
             Dialect::Postgres,
-            &LiveFacts::declared(),
             PlanOptions { destructive: true },
-        )
-        .expect("plan");
+        );
         assert!(
-            !plan.operations.iter().any(|op| matches!(
+            !plan.op_list().iter().any(|op| matches!(
                 op,
                 MigrationOp::RenameTable { .. } | MigrationOp::RenameColumn { .. }
             )),
             "{:?}",
-            plan.operations
+            plan.op_list()
         );
         let report = plan
             .reports
@@ -4660,11 +4552,15 @@ mod renames {
         ];
         for (old, new) in &declared_cases {
             for dialect in [Dialect::Postgres, Dialect::Sqlite] {
-                let plan = plan_from_ir(old, new, dialect, &LiveFacts::declared(), destructive())
-                    .expect("plan");
+                let plan = plan_from_ir(
+                    &Side::declared(old.clone()),
+                    &Side::declared(new.clone()),
+                    dialect,
+                    destructive(),
+                );
                 assert_eq!(plan.dialect(), dialect);
                 assert_eq!(plan.render(), render_plan(&plan, old, new, dialect));
-                let every_other: Vec<usize> = (0..plan.operations.len()).step_by(2).collect();
+                let every_other: Vec<usize> = (0..plan.op_list().len()).step_by(2).collect();
                 let subset = Plan {
                     operations: every_other
                         .iter()
@@ -4682,8 +4578,12 @@ mod renames {
         let (live, facts) = ledgerrow_with_leftovers();
         let declared = envelope(vec![ledgerrow_model_with_row_security(true)]);
         for options in [updates_only(), destructive()] {
-            let plan =
-                plan_from_ir(&live, &declared, Dialect::Postgres, &facts, options).expect("plan");
+            let plan = plan_from_ir(
+                &Side::live(live.clone(), facts.clone()).expect("live side"),
+                &Side::declared(declared.clone()),
+                Dialect::Postgres,
+                options,
+            );
             assert_eq!(
                 plan.render(),
                 render_plan(&plan, &live, &declared, Dialect::Postgres)
@@ -4691,14 +4591,12 @@ mod renames {
         }
         // An index past the plan is an error, never a panic.
         let plan = plan_from_ir(
-            &parent(),
-            &target(),
+            &Side::declared(parent().clone()),
+            &Side::declared(target().clone()),
             Dialect::Postgres,
-            &LiveFacts::declared(),
             destructive(),
-        )
-        .expect("plan");
-        assert!(plan.render_ops(&[plan.operations.len()]).is_err());
+        );
+        assert!(plan.render_ops(&[plan.op_list().len()]).is_err());
     }
 
     #[test]
@@ -4793,7 +4691,7 @@ mod renames {
     fn live_facts_follow_the_renames_so_the_pass_plans_only_the_renames() {
         // The reconciliation pass's shape: facts read from the live database
         // before the renames run, keyed and named the old way.
-        let mut facts = LiveFacts::live(Default::default(), Default::default());
+        let mut facts = LiveFacts::default();
         facts.tables.insert(
             "writer".to_string(),
             crate::plan::LiveTableFacts {
@@ -4814,14 +4712,12 @@ mod renames {
             facts.tables.entry(model.table_name.clone()).or_default();
         }
         let ops = plan_from_ir(
-            &live,
-            &target(),
+            &Side::live(live.clone(), facts.clone()).expect("live side"),
+            &Side::declared(target().clone()),
             Dialect::Postgres,
-            &facts,
             PlanOptions { destructive: true },
         )
-        .expect("plan")
-        .operations;
+        .op_list();
         assert!(
             ops.contains(&MigrationOp::RenameConstraint {
                 table: "author".to_string(),
@@ -4847,7 +4743,7 @@ mod renames {
         // Equal to the declaration under the old names: read as renamed, no
         // rebuild (pinned above). Unequal: kept as read, so the one drift
         // decision rebuilds it now, not on the next run.
-        let mut facts = LiveFacts::live(Default::default(), Default::default());
+        let mut facts = LiveFacts::default();
         facts.tables.insert(
             "writer".to_string(),
             crate::plan::LiveTableFacts {
@@ -4867,14 +4763,12 @@ mod renames {
             facts.tables.entry(model.table_name.clone()).or_default();
         }
         let ops = plan_from_ir(
-            &live,
-            &target(),
+            &Side::live(live.clone(), facts.clone()).expect("live side"),
+            &Side::declared(target().clone()),
             Dialect::Postgres,
-            &facts,
             PlanOptions { destructive: true },
         )
-        .expect("plan")
-        .operations;
+        .op_list();
         let rename = ops
             .iter()
             .position(|op| {
@@ -4939,10 +4833,7 @@ mod renames {
         changed.payload.models[0].columns[1].db_type = Some("varchar(80)".to_string());
         for dialect in [Dialect::Postgres, Dialect::Sqlite] {
             let rendered = render_plan(
-                &Plan {
-                    operations: plan(&parent(), &changed, dialect),
-                    ..Plan::unplaced(Vec::new())
-                },
+                &Plan::unplaced(plan(&parent(), &changed, dialect)),
                 &parent(),
                 &changed,
                 dialect,
@@ -4990,10 +4881,7 @@ mod renames {
     fn the_rename_ops_render_through_the_one_renderer_per_statement() {
         let ops = plan(&parent(), &target(), Dialect::Postgres);
         let rendered = render_plan(
-            &Plan {
-                operations: ops,
-                ..Plan::unplaced(Vec::new())
-            },
+            &Plan::unplaced(ops),
             &parent(),
             &target(),
             Dialect::Postgres,
@@ -5014,14 +4902,11 @@ mod renames {
 
         // SQLite has no index rename: the index is dropped and created under
         // its new name, by the statements every door uses.
-        let index_only = Plan {
-            operations: vec![MigrationOp::RenameIndex {
-                table: "author".to_string(),
-                old: "idx_writer_name".to_string(),
-                new: "idx_author_full_name".to_string(),
-            }],
-            ..Plan::unplaced(Vec::new())
-        };
+        let index_only = Plan::unplaced(vec![MigrationOp::RenameIndex {
+            table: "author".to_string(),
+            old: "idx_writer_name".to_string(),
+            new: "idx_author_full_name".to_string(),
+        }]);
         let sqlite = render_plan(&index_only, &parent(), &target(), Dialect::Sqlite)
             .expect("renders")
             .remove(0)
@@ -5080,13 +4965,11 @@ mod enum_renames {
         dialect: Dialect,
     ) -> Plan {
         plan_from_ir(
-            old,
-            new,
+            &Side::declared(old.clone()),
+            &Side::declared(new.clone()),
             dialect,
-            &LiveFacts::declared(),
             PlanOptions { destructive: true },
         )
-        .expect("plan")
     }
 
     fn columns() -> Vec<(String, String)> {
@@ -5141,7 +5024,7 @@ mod enum_renames {
             if dialect == Dialect::Sqlite {
                 expected.extend(widened());
             }
-            assert_eq!(plan.operations, expected, "{dialect:?}");
+            assert_eq!(plan.op_list(), expected, "{dialect:?}");
             assert!(plan.reports.is_empty(), "{:?}", plan.reports);
             assert!(
                 plan.reports.is_empty(),
@@ -5248,7 +5131,7 @@ mod enum_renames {
         let renamed = both(status("orderstate", &["paid", "canceled"], &[]));
         let pg = plan(&parent(), &renamed, Dialect::Postgres);
         assert_eq!(
-            pg.operations,
+            pg.op_list(),
             vec![MigrationOp::RenameEnumType {
                 old: "orderstatus".to_string(),
                 new: "orderstate".to_string(),
@@ -5265,7 +5148,7 @@ mod enum_renames {
         assert!(plan(&parent(), &renamed, Dialect::Sqlite).is_empty());
         // The way back is the reverse rename.
         assert_eq!(
-            plan(&renamed, &parent(), Dialect::Postgres).operations,
+            plan(&renamed, &parent(), Dialect::Postgres).op_list(),
             vec![MigrationOp::RenameEnumType {
                 old: "orderstate".to_string(),
                 new: "orderstatus".to_string(),
@@ -5279,7 +5162,7 @@ mod enum_renames {
             status("orderstate", &["paid", "canceled"], &[]),
             status("orderstatus", &["paid", "canceled"], &[]),
         ]);
-        let ops = plan(&parent(), &split, Dialect::Postgres).operations;
+        let ops = plan(&parent(), &split, Dialect::Postgres).op_list();
         assert!(!renames_a_type(&ops), "{ops:?}");
         assert_eq!(
             ops,
@@ -5298,13 +5181,13 @@ mod enum_renames {
             status("refundstatus", &["paid", "canceled"], &[]),
             status("refundstatus", &["paid", "canceled"], &[]),
         ]);
-        let ops = plan(&existing, &moved_to_existing, Dialect::Postgres).operations;
+        let ops = plan(&existing, &moved_to_existing, Dialect::Postgres).op_list();
         assert!(!renames_a_type(&ops), "{ops:?}");
         let two_types = orders([
             status("orderstate", &["paid", "canceled"], &[]),
             status("orderphase", &["paid", "canceled"], &[]),
         ]);
-        let ops = plan(&parent(), &two_types, Dialect::Postgres).operations;
+        let ops = plan(&parent(), &two_types, Dialect::Postgres).op_list();
         assert!(!renames_a_type(&ops), "{ops:?}");
         // A column of the vanished type dropped in the same edit: not every
         // column moved.
@@ -5318,7 +5201,7 @@ mod enum_renames {
             ),
             schema_model("enmrefund", vec![pk_col("id", "integer")]),
         ]);
-        let ops = plan(&parent(), &one_dropped, Dialect::Postgres).operations;
+        let ops = plan(&parent(), &one_dropped, Dialect::Postgres).op_list();
         assert!(!renames_a_type(&ops), "{ops:?}");
     }
 
@@ -5340,7 +5223,7 @@ mod enum_renames {
             columns: columns(),
         };
         assert_eq!(
-            plan(&parent(), &both_renamed, Dialect::Postgres).operations,
+            plan(&parent(), &both_renamed, Dialect::Postgres).op_list(),
             vec![expected_type, expected_label.clone()]
         );
         let mut sqlite = vec![expected_label];
@@ -5350,7 +5233,7 @@ mod enum_renames {
                 .map(|(table, column)| MigrationOp::AlterColumnType { table, column }),
         );
         assert_eq!(
-            plan(&parent(), &both_renamed, Dialect::Sqlite).operations,
+            plan(&parent(), &both_renamed, Dialect::Sqlite).op_list(),
             sqlite
         );
     }
@@ -5360,7 +5243,7 @@ mod enum_renames {
         // The reconciliation pass's shape: the live type's labels read before
         // the renames run, under the old type name and the old spellings.
         let live_facts = || {
-            let mut facts = LiveFacts::live(Default::default(), Default::default());
+            let mut facts = LiveFacts::default();
             for table in ["enmorder", "enmrefund"] {
                 facts.tables.insert(table.to_string(), Default::default());
             }
@@ -5402,16 +5285,14 @@ mod enum_renames {
                 }
             }
             let plan = plan_from_ir(
-                &live,
-                &target,
+                &Side::live(live.clone(), live_facts().clone()).expect("live side"),
+                &Side::declared(target.clone()),
                 Dialect::Postgres,
-                &live_facts(),
                 PlanOptions { destructive: true },
-            )
-            .expect("plan");
+            );
             // No `ADD VALUE 'cancelled'` the rename already made, and no
             // warning that `canceled` is a label the model no longer declares.
-            assert_eq!(plan.operations, expected);
+            assert_eq!(plan.op_list(), expected);
             assert!(plan.reports.is_empty(), "{:?}", plan.reports);
             assert!(
                 plan.reports.is_empty(),
@@ -5422,9 +5303,8 @@ mod enum_renames {
     }
 
     #[test]
-    fn the_reverse_of_a_live_enum_rename_undoes_each_rename_once() {
-        use crate::plan::{ReverseOp, reverse_live_plan};
-        let mut facts = LiveFacts::live(Default::default(), Default::default());
+    fn the_down_of_a_live_enum_rename_undoes_each_rename_once() {
+        let mut facts = LiveFacts::default();
         for table in ["enmorder", "enmrefund"] {
             facts.tables.insert(table.to_string(), Default::default());
         }
@@ -5453,28 +5333,27 @@ mod enum_renames {
             (relabelled(), vec![back("orderstatus")]),
             (
                 type_renamed,
-                // The label back under the new type name, then the type.
+                // The type back, then the label under the type's old name:
+                // the planner's own rename order (ADR-0050).
                 vec![
-                    back("orderstate"),
                     MigrationOp::RenameEnumType {
                         old: "orderstate".to_string(),
                         new: "orderstatus".to_string(),
                     },
+                    back("orderstatus"),
                 ],
             ),
         ] {
+            let live = Side::live(live.clone(), facts.clone()).expect("live side");
+            let declared = Side::declared(declared.clone());
             let forward = plan_from_ir(
                 &live,
                 &declared,
                 Dialect::Postgres,
-                &facts,
                 PlanOptions { destructive: true },
-            )
-            .expect("plan");
-            let reverse = reverse_live_plan(&forward, &live, &facts, &declared, Dialect::Postgres)
-                .expect("reverse");
-            let expected: Vec<ReverseOp> = expected.into_iter().map(ReverseOp::Planned).collect();
-            assert_eq!(reverse.operations, expected);
+            );
+            let down = crate::plan_down(&forward.op_list(), &declared, &live, Dialect::Postgres);
+            assert_eq!(down.op_list(), expected);
         }
     }
 
@@ -5486,7 +5365,7 @@ mod enum_renames {
             &[("cancelled", "canceled")],
         ));
         assert_eq!(
-            plan(&parent(), &edited, Dialect::Postgres).operations,
+            plan(&parent(), &edited, Dialect::Postgres).op_list(),
             vec![
                 MigrationOp::RenameEnumLabel {
                     type_name: "orderstatus".to_string(),
@@ -5537,20 +5416,18 @@ fn raw_policy_model(who: &str) -> IrEnvelope<SchemaIrPayload> {
 }
 
 fn ledgerrow_ops(plan: &Plan) -> Vec<MigrationOp> {
-    plan.operations.clone()
+    plan.op_list().clone()
 }
 
 #[test]
 fn the_snapshot_side_tears_down_a_dropped_declaration_and_rebuilds_an_edited_raw_body() {
     let (bare, none) = bare_row_security_pair();
     let plan = plan_from_ir(
-        &bare,
-        &none,
+        &Side::declared(bare.clone()),
+        &Side::declared(none.clone()),
         Dialect::Postgres,
-        &LiveFacts::declared(),
         destructive(),
-    )
-    .expect("plan");
+    );
     assert_eq!(
         ledgerrow_ops(&plan),
         [
@@ -5562,19 +5439,13 @@ fn the_snapshot_side_tears_down_a_dropped_declaration_and_rebuilds_an_edited_raw
             },
         ]
     );
-    assert!(
-        plan.reports.is_empty(),
-        "{:?}",
-        plan.reports
-    );
+    assert!(plan.reports.is_empty(), "{:?}", plan.reports);
     let plan = plan_from_ir(
-        &raw_policy_model("ann"),
-        &raw_policy_model("bob"),
+        &Side::declared(raw_policy_model("ann").clone()),
+        &Side::declared(raw_policy_model("bob").clone()),
         Dialect::Postgres,
-        &LiveFacts::declared(),
         destructive(),
-    )
-    .expect("plan");
+    );
     assert_eq!(
         ledgerrow_ops(&plan),
         [MigrationOp::RebuildRowPolicy {
@@ -5594,8 +5465,8 @@ fn the_live_side_keeps_the_pass_posture_for_the_same_two_shapes() {
     // RLS on with no ferro-named policy: nothing says ferro set it, so the
     // flags stay (ADR-0019) — the pass, unchanged.
     let (_, none) = bare_row_security_pair();
-    let live_bare = LiveFacts::live(
-        std::collections::BTreeMap::from([(
+    let live_bare = LiveFacts {
+        tables: std::collections::BTreeMap::from([(
             "ledgerrow".to_string(),
             crate::plan::LiveTableFacts {
                 row_security: ferro_ddl_lowering::LiveRowSecurity {
@@ -5606,24 +5477,22 @@ fn the_live_side_keeps_the_pass_posture_for_the_same_two_shapes() {
                 ..Default::default()
             },
         )]),
-        std::collections::BTreeMap::new(),
-    );
+        enum_labels: std::collections::BTreeMap::new(),
+    };
     // A live IR carries no row security: it is all facts.
     let live_ir = none.clone();
     let plan = plan_from_ir(
-        &live_ir,
-        &none,
+        &Side::live(live_ir.clone(), live_bare.clone()).expect("live side"),
+        &Side::declared(none.clone()),
         Dialect::Postgres,
-        &live_bare,
         destructive(),
-    )
-    .expect("plan");
+    );
     assert_eq!(ledgerrow_ops(&plan), []);
     // A raw body the catalog prints differently is unverifiable: reported,
     // never rebuilt.
     let new = raw_policy_model("bob");
-    let live_raw = LiveFacts::live(
-        std::collections::BTreeMap::from([(
+    let live_raw = LiveFacts {
+        tables: std::collections::BTreeMap::from([(
             "ledgerrow".to_string(),
             crate::plan::LiveTableFacts {
                 row_security: ferro_ddl_lowering::LiveRowSecurity {
@@ -5645,10 +5514,14 @@ fn the_live_side_keeps_the_pass_posture_for_the_same_two_shapes() {
                 ..Default::default()
             },
         )]),
-        std::collections::BTreeMap::new(),
+        enum_labels: std::collections::BTreeMap::new(),
+    };
+    let plan = plan_from_ir(
+        &Side::live(live_ir.clone(), live_raw.clone()).expect("live side"),
+        &Side::declared(new.clone()),
+        Dialect::Postgres,
+        destructive(),
     );
-    let plan =
-        plan_from_ir(&live_ir, &new, Dialect::Postgres, &live_raw, destructive()).expect("plan");
     assert_eq!(ledgerrow_ops(&plan), []);
     assert!(
         plan.reports.iter().any(|report| matches!(
@@ -5661,38 +5534,23 @@ fn the_live_side_keeps_the_pass_posture_for_the_same_two_shapes() {
 }
 
 #[test]
-fn a_live_side_missing_a_tables_facts_is_an_error_naming_it() {
-    let (bare, none) = bare_row_security_pair();
-    let empty = LiveFacts::live(
-        std::collections::BTreeMap::new(),
-        std::collections::BTreeMap::new(),
-    );
+fn a_live_side_missing_a_tables_facts_is_refused_when_it_is_built() {
+    let (bare, _) = bare_row_security_pair();
+    // The live side is refused at construction, naming the table, never
+    // halfway through a plan (ADR-0050).
     assert_eq!(
-        plan_from_ir(&bare, &none, Dialect::Postgres, &empty, destructive()),
+        Side::live(bare.clone(), LiveFacts::default()),
         Err(crate::PlanError::MissingLiveFacts {
             table: "ledgerrow".to_string()
         })
     );
-    // Facts read from JSON are always a live database's, even `{}`.
+    // Facts read from JSON are a live database's, even `{}`.
     let wire: LiveFacts = serde_json::from_str("{}").expect("facts");
-    assert_eq!(wire.side(), crate::OldSide::Live);
-    assert!(plan_from_ir(&bare, &none, Dialect::Postgres, &wire, destructive()).is_err());
-    // The snapshot side reads no fact, even one a caller put there.
-    let mut declared = LiveFacts::declared();
-    declared.tables.insert(
-        "ledgerrow".to_string(),
-        crate::plan::LiveTableFacts::default(),
-    );
-    assert_eq!(
-        plan_from_ir(&bare, &none, Dialect::Postgres, &declared, destructive()),
-        plan_from_ir(
-            &bare,
-            &none,
-            Dialect::Postgres,
-            &LiveFacts::declared(),
-            destructive()
-        )
-    );
+    assert!(Side::live(bare.clone(), wire).is_err());
+    // An empty live database needs no facts.
+    let live = Side::live(empty_envelope(), LiveFacts::default()).expect("live side");
+    let empty = Side::declared(empty_envelope());
+    assert!(plan_from_ir(&live, &empty, Dialect::Postgres, destructive()).is_empty());
 }
 
 /// What an `ADD COLUMN` also creates is stated once (ADR-0050): the column's
@@ -5805,9 +5663,13 @@ fn a_truncated_index_name_over_other_columns_is_redefined() {
 
     let (old, new) = (envelope(vec![before]), envelope(vec![after]));
     for dialect in [Dialect::Postgres, Dialect::Sqlite] {
-        let plan = plan_from_ir(&old, &new, dialect, &LiveFacts::declared(), updates_only())
-            .expect("plan");
-        assert_eq!(plan.operations, vec![redefine(table, name)]);
+        let plan = plan_from_ir(
+            &Side::declared(old.clone()),
+            &Side::declared(new.clone()),
+            dialect,
+            updates_only(),
+        );
+        assert_eq!(plan.op_list(), vec![redefine(table, name)]);
         let rendered = plan.render().expect("render");
         assert_eq!(
             rendered[0].statements,
@@ -5833,15 +5695,13 @@ fn an_underscore_join_collision_is_redefined() {
     assert_eq!(after.indexes[0].name, before.indexes[0].name);
 
     let plan = plan_from_ir(
-        &envelope(vec![before]),
-        &envelope(vec![after]),
+        &Side::declared(envelope(vec![before]).clone()),
+        &Side::declared(envelope(vec![after]).clone()),
         Dialect::Postgres,
-        &LiveFacts::declared(),
         updates_only(),
-    )
-    .expect("plan");
+    );
     assert_eq!(
-        plan.operations,
+        plan.op_list(),
         vec![redefine("line", "idx_line_order_id_kind")]
     );
     assert_eq!(
@@ -5874,7 +5734,7 @@ fn a_live_ferro_named_index_with_another_definition_is_redefined_without_destruc
     };
     let plan = plan_live_table(live, declared, facts, updates_only());
     assert_eq!(
-        plan.operations,
+        plan.op_list(),
         vec![
             redefine("post", "idx_post_title"),
             redefine("post", "uq_post_slug")
@@ -5900,7 +5760,7 @@ fn an_index_with_the_same_definition_is_not_redefined() {
         LiveTableFacts::default(),
         updates_only(),
     );
-    assert!(plan.operations.is_empty(), "{:?}", plan.operations);
+    assert!(plan.op_list().is_empty(), "{:?}", plan.op_list());
 }
 
 // ---------------------------------------------------------------------------
@@ -5947,10 +5807,10 @@ fn a_foreign_key_removed_from_a_kept_column_is_dropped_only_when_destructive() {
         LiveTableFacts::default(),
         updates_only(),
     );
-    assert!(kept.operations.is_empty(), "{:?}", kept.operations);
+    assert!(kept.op_list().is_empty(), "{:?}", kept.op_list());
 
     let dropped = plan_live_table(live, declared, LiveTableFacts::default(), destructive());
-    assert_eq!(dropped.operations, vec![drop_fk("fk_member_team_id_team")]);
+    assert_eq!(dropped.op_list(), vec![drop_fk("fk_member_team_id_team")]);
     let rendered = dropped.render().expect("render");
     assert_eq!(
         rendered[0].statements,
@@ -5967,9 +5827,9 @@ fn a_user_owned_or_a_still_declared_foreign_key_is_never_dropped() {
         destructive(),
     );
     assert!(
-        user_owned.operations.is_empty(),
+        user_owned.op_list().is_empty(),
         "{:?}",
-        user_owned.operations
+        user_owned.op_list()
     );
 
     let declared = member(Some("fk_member_team_id_team"));
@@ -5979,7 +5839,7 @@ fn a_user_owned_or_a_still_declared_foreign_key_is_never_dropped() {
         LiveTableFacts::default(),
         destructive(),
     );
-    assert!(same.operations.is_empty(), "{:?}", same.operations);
+    assert!(same.op_list().is_empty(), "{:?}", same.op_list());
 }
 
 #[test]
@@ -5992,7 +5852,7 @@ fn a_foreign_key_on_a_dropped_column_goes_with_the_column() {
         destructive(),
     );
     assert_eq!(
-        plan.operations,
+        plan.op_list(),
         vec![MigrationOp::DropColumn {
             table: "member".to_string(),
             column: "team_id".to_string(),
@@ -6010,18 +5870,20 @@ fn a_removed_foreign_key_between_snapshots_and_on_sqlite() {
         envelope(vec![member(None)]),
     );
     for dialect in [Dialect::Postgres, Dialect::Sqlite] {
-        let plan =
-            plan_from_ir(&old, &new, dialect, &LiveFacts::declared(), destructive()).expect("plan");
-        assert_eq!(plan.operations, vec![drop_fk("fk_member_team_id_team")]);
+        let plan = plan_from_ir(
+            &Side::declared(old.clone()),
+            &Side::declared(new.clone()),
+            dialect,
+            destructive(),
+        );
+        assert_eq!(plan.op_list(), vec![drop_fk("fk_member_team_id_team")]);
     }
     let sqlite = plan_from_ir(
-        &old,
-        &new,
+        &Side::declared(old.clone()),
+        &Side::declared(new.clone()),
         Dialect::Sqlite,
-        &LiveFacts::declared(),
         destructive(),
     )
-    .expect("plan")
     .render()
     .expect("render");
     assert!(sqlite[0].statements.is_empty());

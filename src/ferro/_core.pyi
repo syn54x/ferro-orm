@@ -127,14 +127,14 @@ def _plan_reverse_from_ir(
     render: bool = True,
     unrendered: list[int] | None = None,
 ) -> str:
-    """The reverse of the live-origin plan (``_plan_from_ir(live_json,
+    """The down of the live-origin plan (``_plan_from_ir(live_json,
     declared_json, ..., facts_json)``): what turns the database it leaves
-    back into the live one (ADR-0041). Same JSON shape as ``_plan_from_ir``
-    plus ``before`` (the live envelope under the forward plan's renames); a
-    step nothing undoes carries ``irreversible: {"reason": ...}``, a check or
-    policy put back from the catalog is a ``RestoreCheck`` /
-    ``RestoreRowPolicy``, a foreign key the forward plan added comes off as
-    ``DropForeignKey``. With ``render``, the ops at the ``unrendered``
+    back into the live one — ``plan_down``, the planner run from the models
+    back to the database and scoped to the artifacts the upgrade touched
+    (ADR-0050). Same JSON shape as ``_plan_from_ir``; an op the live
+    database cannot express carries the verdict ``{"execution":
+    {"irreversible": <reason>}}``, and a check or policy comes back with the
+    body the catalog printed. With ``render``, the ops at the ``unrendered``
     indexes carry no statement: the ones the bridge writes itself (a
     re-added column that demands values of existing rows)."""
     ...
@@ -156,8 +156,14 @@ def _plan_from_ir(
     ``{"destructive": bool}``. ``facts_json`` is the live side-table
     ``_live_schema_ir`` returns beside a live envelope; omitted, the old
     snapshot reads as declared. Returns JSON
-    ``{"operations": [{"kind": ..., <op fields>}], "reports": [...]}``, ops in
-    execution order. Each report is ``{"kind", "subject", "text", "recurs",
+    ``{"operations": [{"kind": ..., <op fields>, "verdict": {...}}],
+    "reports": [...]}``, ops in execution order. Each op's ``verdict`` is
+    what is true of it between the two sides (ADR-0050): ``execution``
+    (``"native"``, ``"rebuild"``, ``{"refused": <text>}`` or
+    ``{"irreversible": <reason>}``), ``demands_values``, ``drops_data``,
+    ``fails_on_rows`` (``"none"``, ``"always"``, ``"when_validated"``),
+    ``recreates`` and ``goes_with`` (``null``, ``"dropped_column"``,
+    ``"added_column"``). Each report is ``{"kind", "subject", "text", "recurs",
     "blocks"}``:
     ``kind`` is its name (``"PrimaryKeyKept"``) or ``{name: fields}``
     (``{"HintRefused": {...}}``), ``subject`` is ``{"scope": "table",
@@ -657,23 +663,6 @@ def _render_check_body(column: str, values: list[str]) -> str:
 
 def _render_table_check_body(predicate_json: str) -> str:
     """The shared table-check CHECK body, byte-identical to the Rust emitters."""
-    ...
-
-def _plan_step_verdicts(
-    before_json: str,
-    after_json: str,
-    dialect: str,
-    direction: str,
-    operations_json: str,
-) -> str:
-    """What each planner op needs on ``dialect`` in a file turning
-    ``before_json`` into ``after_json`` (``direction`` ``"up"`` / ``"down"``):
-    the generator's step-assignment verdict. Returns a JSON list, one
-    ``{"needs": "native" | "rebuild" | "backfill" | "refused", "refusal":
-    str | None, "primary_key": bool, "drops_data": bool, "demands_values":
-    bool}`` per op; ``demands_values`` marks an op asking existing rows for a
-    value no statement supplies (a backfill going up, a re-added required
-    column going down)."""
     ...
 
 def _tracking_table_names() -> tuple[str, str]:
