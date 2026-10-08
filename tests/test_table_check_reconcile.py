@@ -32,6 +32,7 @@ from ferro.ir.compiler import compile_registry_schema_ir
 from ferro.raw import execute, fetch_all
 from tests._alembic_harness import autogen_upgrade_code as _autogen_upgrade_code
 from tests._alembic_harness import planner_statements as _planner_statements
+from tests._pass_harness import auto_migrate, schema_steps, warning_texts
 
 SIDE_CHECK_NAME = "ck_reconcile_at_most_one_side"
 SIDE_CHECK_BODY = '("left" IS NULL) OR ("right" IS NULL)'
@@ -150,6 +151,12 @@ def _live_check(name: str, definition: str, *, ferro_owned: bool = True) -> dict
 def test_missing_table_check_renders_one_alter_add_constraint_on_postgres():
     _define_reconcile_with_check()
     statements, warnings = _render("reconcile", RECONCILE_LIVE_COLUMNS, [], "postgres")
+    assert (statements, warnings) == (
+        [
+            'ALTER TABLE "reconcile" ADD CONSTRAINT "ck_reconcile_at_most_one_side" CHECK (("left" IS NULL) OR ("right" IS NULL))',
+        ],
+        [],
+    )
     assert statements == [SIDE_CHECK_ADD]
     assert warnings == []
 
@@ -160,6 +167,7 @@ def test_live_table_check_replans_to_nothing():
     live = [_live_check(SIDE_CHECK_NAME, f"CHECK ({SIDE_CHECK_BODY})")]
     for dialect in ("postgres", "sqlite"):
         statements, warnings = _render("reconcile", RECONCILE_LIVE_COLUMNS, live, dialect)
+        assert (statements, warnings) == ([], [])
         assert statements == [], dialect
         assert warnings == [], dialect
 
@@ -172,6 +180,12 @@ def test_user_owned_live_check_is_not_a_counterpart_and_is_never_touched():
         )
     ]
     statements, _ = _render("reconcile", RECONCILE_LIVE_COLUMNS, live, "postgres")
+    assert (statements, _) == (
+        [
+            'ALTER TABLE "reconcile" ADD CONSTRAINT "ck_reconcile_at_most_one_side" CHECK (("left" IS NULL) OR ("right" IS NULL))',
+        ],
+        [],
+    )
     assert statements == [SIDE_CHECK_ADD]
     assert not any("reconcile_left_not_blank" in sql for sql in statements)
 
@@ -180,6 +194,12 @@ def test_sqlite_warns_with_the_constraint_name_and_emits_no_sql():
     """ADR-0014: no ALTER, no table rebuild — a loud skip."""
     _define_reconcile_with_check()
     statements, warnings = _render("reconcile", RECONCILE_LIVE_COLUMNS, [], "sqlite")
+    assert (statements, warnings) == (
+        [],
+        [
+            "Table check 'ck_reconcile_at_most_one_side' is declared on 'reconcile' but missing from the live table, and SQLite cannot add a table constraint to an existing table (it requires a full table rebuild). The invariant is not database-enforced; generate a reviewed migration with `ferro migrate new` to apply it.",
+        ],
+    )
     assert statements == []
     assert len(warnings) == 1
     assert SIDE_CHECK_NAME in warnings[0]
@@ -196,6 +216,12 @@ def test_sqlite_column_check_on_an_existing_column_warns_naming_migrations():
         {"name": "flavor", "declared_type": "text", "is_nullable": False},
     ]
     statements, warnings = _render("cookie", live_columns, [], "sqlite")
+    assert (statements, warnings) == (
+        [],
+        [
+            "Check constraint 'ck_cookie_flavor' on column 'cookie.flavor' is declared but missing from the live table, and SQLite cannot add a constraint to an existing column (it requires a full table rebuild). The invariant is not database-enforced; generate a reviewed migration with `ferro migrate new` to apply it.",
+        ],
+    )
     assert statements == []
     assert len(warnings) == 1
     assert "ck_cookie_flavor" in warnings[0]
@@ -209,6 +235,12 @@ def test_sqlite_column_check_on_a_new_column_rides_its_add_column_inline():
         {"name": "id", "declared_type": "integer", "is_primary_key": True, "is_nullable": False}
     ]
     statements, warnings = _render("cookie", pk_only, [], "sqlite")
+    assert (statements, warnings) == (
+        [
+            'ALTER TABLE "cookie" ADD COLUMN "flavor" text NOT NULL DEFAULT \'sweet\' CONSTRAINT "ck_cookie_flavor" CHECK ("flavor" IN (\'sweet\', \'salty\'))',
+        ],
+        [],
+    )
     assert statements == [
         'ALTER TABLE "cookie" ADD COLUMN "flavor" text NOT NULL DEFAULT \'sweet\''
         " CONSTRAINT \"ck_cookie_flavor\" CHECK (\"flavor\" IN ('sweet', 'salty'))"
@@ -223,6 +255,7 @@ def test_without_migrate_updates_no_check_is_planned():
         statements, warnings = _render(
             "reconcile", RECONCILE_LIVE_COLUMNS, [], dialect, updates=False
         )
+        assert (statements, warnings) == ([], [])
         assert statements == [], dialect
         assert warnings == [], dialect
 
@@ -234,6 +267,12 @@ def test_toggling_db_check_on_an_existing_column_adds_the_column_check():
         {"name": "flavor", "declared_type": "text", "is_nullable": False},
     ]
     statements, _ = _render("cookie", live_columns, [], "postgres")
+    assert (statements, _) == (
+        [
+            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_cookie_flavor' AND conrelid = '\"cookie\"'::regclass) THEN ALTER TABLE \"cookie\" ADD CONSTRAINT \"ck_cookie_flavor\" CHECK (\"flavor\" IN ('sweet', 'salty')); END IF; END $$",
+        ],
+        [],
+    )
     assert len(statements) == 1
     assert "ck_cookie_flavor" in statements[0]
     assert "\"flavor\" IN ('sweet', 'salty')" in statements[0]
@@ -247,6 +286,14 @@ def test_column_check_on_a_new_column_rides_its_add_column_exactly_once():
         {"name": "id", "declared_type": "integer", "is_primary_key": True, "is_nullable": False}
     ]
     statements, _ = _render("cookie", pk_only, [], "postgres")
+    assert (statements, _) == (
+        [
+            'ALTER TABLE "cookie" ADD COLUMN "flavor" text NOT NULL DEFAULT \'sweet\'',
+            'ALTER TABLE "cookie" ALTER COLUMN "flavor" DROP DEFAULT',
+            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_cookie_flavor' AND conrelid = '\"cookie\"'::regclass) THEN ALTER TABLE \"cookie\" ADD CONSTRAINT \"ck_cookie_flavor\" CHECK (\"flavor\" IN ('sweet', 'salty')); END IF; END $$",
+        ],
+        [],
+    )
     assert 'ADD COLUMN "flavor"' in statements[0]
     adds = [sql for sql in statements if "ADD CONSTRAINT" in sql]
     assert len(adds) == 1, statements
@@ -260,6 +307,13 @@ def test_a_new_column_lands_before_the_check_that_references_it():
         column for column in RECONCILE_LIVE_COLUMNS if column["name"] != "right"
     ]
     statements, _ = _render("reconcile", without_right, [], "postgres")
+    assert (statements, _) == (
+        [
+            'ALTER TABLE "reconcile" ADD COLUMN "right" varchar',
+            'ALTER TABLE "reconcile" ADD CONSTRAINT "ck_reconcile_at_most_one_side" CHECK (("left" IS NULL) OR ("right" IS NULL))',
+        ],
+        [],
+    )
     assert len(statements) == 2, statements
     assert 'ADD COLUMN "right"' in statements[0]
     assert statements[1] == SIDE_CHECK_ADD
@@ -279,6 +333,12 @@ def test_check_addition_statement_parity_pin():
     assert statements == [SIDE_CHECK_ADD]
 
     runtime, _ = _render("reconcile", RECONCILE_LIVE_COLUMNS, [], "postgres")
+    assert (runtime, _) == (
+        [
+            'ALTER TABLE "reconcile" ADD CONSTRAINT "ck_reconcile_at_most_one_side" CHECK (("left" IS NULL) OR ("right" IS NULL))',
+        ],
+        [],
+    )
     assert statements == runtime
 
 
@@ -300,13 +360,27 @@ async def _pg_check_names(table: str) -> set[str]:
 @pytest.mark.asyncio
 async def test_migrate_updates_adds_a_missing_table_check(db_url):
     Reconcile = _define_reconcile_without_check()
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "reconcile",
+            'CREATE TABLE IF NOT EXISTS "reconcile" ( "id" serial PRIMARY KEY NOT NULL, "left" varchar, "right" varchar )',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         await Reconcile.create(left="a", right=None)
     _rewind_registry()
 
     Reconcile = _define_reconcile_with_check()
-    await connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == [
+        (
+            "reconcile",
+            'ALTER TABLE "reconcile" ADD CONSTRAINT "ck_reconcile_at_most_one_side" CHECK (("left" IS NULL) OR ("right" IS NULL))',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         assert SIDE_CHECK_NAME in await _pg_check_names("reconcile")
         # The invariant is enforced from here on.
@@ -320,18 +394,34 @@ async def test_migrate_updates_adds_a_missing_table_check(db_url):
 @pytest.mark.asyncio
 async def test_a_second_migrate_updates_boot_is_a_noop(db_url, recwarn):
     Reconcile = _define_reconcile_without_check()
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "reconcile",
+            'CREATE TABLE IF NOT EXISTS "reconcile" ( "id" serial PRIMARY KEY NOT NULL, "left" varchar, "right" varchar )',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         await Reconcile.create(left="a", right=None)
     _rewind_registry()
 
     _define_reconcile_with_check()
-    await connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == [
+        (
+            "reconcile",
+            'ALTER TABLE "reconcile" ADD CONSTRAINT "ck_reconcile_at_most_one_side" CHECK (("left" IS NULL) OR ("right" IS NULL))',
+        ),
+    ]
+    assert warning_texts(report) == []
     _rewind_registry()
     recwarn.clear()
 
     _define_reconcile_with_check()
-    await connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == []
+    assert warning_texts(report) == []
     assert not [w for w in recwarn if "ck_reconcile" in str(w.message)]
     async with engines.session():
         assert await _pg_check_names("reconcile") == {SIDE_CHECK_NAME}
@@ -346,7 +436,14 @@ async def test_rows_violating_the_new_check_fail_the_connect_and_roll_the_table_
     """Fail loudly, and leave the table exactly as it was: the added column of
     the same plan must be gone too (FF-G G3's per-table transaction)."""
     Reconcile = _define_reconcile_without_check()
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "reconcile",
+            'CREATE TABLE IF NOT EXISTS "reconcile" ( "id" serial PRIMARY KEY NOT NULL, "left" varchar, "right" varchar )',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         await Reconcile.create(left="a", right="b")  # violates the new invariant
     _rewind_registry()
@@ -365,9 +462,14 @@ async def test_rows_violating_the_new_check_fail_the_connect_and_roll_the_table_
         right: str | None = None
         memo: str | None = None
 
-    with pytest.raises(CheckViolationError):
-        await connect(db_url, migrate_updates=True)
+    with pytest.raises(CheckViolationError) as raised:
+        await auto_migrate(db_url, updates=True)
 
+    # The ADD COLUMN "memo" and the failing ADD CONSTRAINT ran in one
+    # transaction and rolled back: nothing committed, the ADD is named.
+    assert schema_steps(raised.value.report) == []
+    assert warning_texts(raised.value.report) == []
+    assert SIDE_CHECK_ADD in str(raised.value)
     _rewind_registry()
     await connect(db_url)
     async with engines.session():
@@ -388,14 +490,28 @@ async def test_rows_violating_the_new_check_fail_the_connect_and_roll_the_table_
 @pytest.mark.asyncio
 async def test_toggling_db_check_on_a_live_column_adds_the_column_check(db_url):
     Cookie = _define_cookie(db_check=False)
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "cookie",
+            'CREATE TABLE IF NOT EXISTS "cookie" ( "flavor" text NOT NULL, "id" serial PRIMARY KEY NOT NULL )',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         await Cookie.create(flavor=Flavor.SWEET)
         assert await _pg_check_names("cookie") == set()
     _rewind_registry()
 
     _define_cookie(db_check=True)
-    await connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == [
+        (
+            "cookie",
+            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_cookie_flavor' AND conrelid = '\"cookie\"'::regclass) THEN ALTER TABLE \"cookie\" ADD CONSTRAINT \"ck_cookie_flavor\" CHECK (\"flavor\" IN ('sweet', 'salty')); END IF; END $$",
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         assert "ck_cookie_flavor" in await _pg_check_names("cookie")
         with pytest.raises(CheckViolationError):
@@ -410,7 +526,14 @@ async def test_a_new_column_and_a_check_over_it_land_in_one_run(db_url):
         id: int | None = Field(default=None, primary_key=True)
         left: str | None = None
 
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "split",
+            'CREATE TABLE IF NOT EXISTS "split" ( "id" serial PRIMARY KEY NOT NULL, "left" varchar )',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         await Split.create(left="a")
     _rewind_registry()
@@ -427,7 +550,15 @@ async def test_a_new_column_and_a_check_over_it_land_in_one_run(db_url):
         left: str | None = None
         right: str | None = None
 
-    await connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == [
+        ("split", 'ALTER TABLE "split" ADD COLUMN "right" varchar'),
+        (
+            "split",
+            'ALTER TABLE "split" ADD CONSTRAINT "ck_split_at_most_one_side" CHECK (("left" IS NULL) OR ("right" IS NULL))',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         assert "ck_split_at_most_one_side" in await _pg_check_names("split")
         with pytest.raises(CheckViolationError):
@@ -439,14 +570,25 @@ async def test_a_new_column_and_a_check_over_it_land_in_one_run(db_url):
 @pytest.mark.asyncio
 async def test_sqlite_reconcile_warns_with_the_constraint_name_and_adds_nothing(db_url):
     Reconcile = _define_reconcile_without_check()
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "reconcile",
+            'CREATE TABLE IF NOT EXISTS "reconcile" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "left" varchar, "right" varchar )',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         await Reconcile.create(left="a", right="b")
     _rewind_registry()
 
     Reconcile = _define_reconcile_with_check()
     with pytest.warns(UserWarning, match=SIDE_CHECK_NAME) as record:
-        await connect(db_url, migrate_updates=True)
+        report = await auto_migrate(db_url, updates=True)
+        assert schema_steps(report) == []
+        assert warning_texts(report) == [
+            "Table check 'ck_reconcile_at_most_one_side' is declared on 'reconcile' but missing from the live table, and SQLite cannot add a table constraint to an existing table (it requires a full table rebuild). The invariant is not database-enforced; generate a reviewed migration with `ferro migrate new` to apply it.",
+        ]
     named = [w for w in record if SIDE_CHECK_NAME in str(w.message)]
     assert len(named) == 1, "one warning per missing constraint"
 
@@ -468,7 +610,14 @@ async def test_a_table_created_in_this_run_is_not_reconciled_again(db_url, recwa
     column check now rides the CREATE TABLE inline (#514), so neither pass
     has anything to warn about."""
     Cookie = _define_cookie(db_check=True)
-    await connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == [
+        (
+            "cookie",
+            'CREATE TABLE IF NOT EXISTS "cookie" ( "flavor" text NOT NULL CONSTRAINT "ck_cookie_flavor" CHECK ("flavor" IN (\'sweet\', \'salty\')), "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT )',
+        ),
+    ]
+    assert warning_texts(report) == []
     named = [w for w in recwarn if "ck_cookie_flavor" in str(w.message)]
     assert named == [], [str(w.message) for w in named]
     async with engines.session():
@@ -496,7 +645,14 @@ async def test_autogenerate_proposes_the_same_add_as_the_runtime(
     same body. Autogenerate is not ``migrate_updates``-gated — running it is
     itself the request for a diff."""
     Reconcile = _define_reconcile_without_check()
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "reconcile",
+            'CREATE TABLE IF NOT EXISTS "reconcile" ( "id" serial PRIMARY KEY NOT NULL, "left" varchar, "right" varchar )',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         await Reconcile.create(left="a", right=None)
     _rewind_registry()
@@ -517,13 +673,27 @@ async def test_autogenerate_is_empty_once_the_check_is_reconciled(
     """No phantom diffs (AGENTS.md § I-1): what the reconciliation pass applied,
     autogenerate does not propose again."""
     Reconcile = _define_reconcile_without_check()
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "reconcile",
+            'CREATE TABLE IF NOT EXISTS "reconcile" ( "id" serial PRIMARY KEY NOT NULL, "left" varchar, "right" varchar )',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         await Reconcile.create(left="a", right=None)
     _rewind_registry()
 
     _define_reconcile_with_check()
-    await connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == [
+        (
+            "reconcile",
+            'ALTER TABLE "reconcile" ADD CONSTRAINT "ck_reconcile_at_most_one_side" CHECK (("left" IS NULL) OR ("right" IS NULL))',
+        ),
+    ]
+    assert warning_texts(report) == []
 
     code = _autogen_upgrade_code(postgres_base_url, db_schema_name)
     assert "ADD CONSTRAINT" not in code, code
@@ -544,7 +714,14 @@ async def test_autogenerate_adds_a_column_before_the_check_that_references_it(
     pin).
     """
     Reconcile = _define_reconcile_without_right()
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "reconcile",
+            'CREATE TABLE IF NOT EXISTS "reconcile" ( "id" serial PRIMARY KEY NOT NULL, "left" varchar )',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         await Reconcile.create(left="a")
     _rewind_registry()

@@ -24,7 +24,10 @@ functions. Today Ferro emits DDL through:
   `migrate_updates` / `migrate_destructive` rungs. It reads the live database
   (`src/live_ir.rs`, `_core._live_schema_ir`), plans with the one planner
   (`ferro_migrate::plan_from_ir`) and runs `ferro_migrate::render_plan`; its
-  create pass is `ferro_migrate::render_create_table`.
+  create pass is `ferro_migrate::render_create_table`. What it executed is its
+  `PassReport` (`ferro.migrate()` / `ferro.create_tables()` return it, built
+  from what the DDL executor ran, ADR-0049), pinned against the planner by
+  pin **(g)**.
 - The **migrations door** (`src/ferro/migrations/` +
   `crates/ferro-migrate/src/generate/`): `ferro migrate new`. It plans between
   two schema snapshots with the same planner and renders through the same
@@ -134,11 +137,12 @@ For a single model, every emitter must agree on:
     pass-side parity pin. The item is carried by pins **(e)** and **(f)**
     below.
 
-### The migrations door's six pins
+### The seven pins
 
-`tests/test_cross_emitter_parity.py` pins the migrations door against the
-pass over every casebook change (`tests/_casebook.py`, cases A–F, built
-from the generator tests' own models) on both dialects:
+`tests/test_cross_emitter_parity.py` pins the migrations door, the bridge and
+the pass itself against the one planner over every casebook change
+(`tests/_casebook.py`, cases A–F, built from the generator tests' own models)
+on both dialects:
 
 - **(a)** the statements of the generated DDL steps, headers stripped and the
   online shapes compared by their plain twins (`normalize_online_shape`: a
@@ -160,7 +164,13 @@ from the generator tests' own models) on both dialects:
   database is `ferro migrate new`'s);
 - **(f)** the bridge's revision runs the pass's DDL for every planner op:
   every statement it runs as written is the pass's, and it leaves the same
-  live schema the pass's statements do.
+  live schema the pass's statements do;
+- **(g)** the pass executes what the planner renders: on a database at the
+  case's before side, `ferro.migrate(destructive=True)`'s `PassReport`
+  `schema` statements equal `_core._plan_from_ir(..., render=True)` for the
+  same live read, grouped by table (or enum type) and in order within each,
+  the create pass standing in for each `AddTable`; its warnings equal the
+  plan's reports by kind and subject, never by sentence.
 
 A pin that fails against merged behaviour is listed in `FINDINGS` there,
 `xfail(strict=True)` with its reason, until the fix lands and the strict
@@ -189,8 +199,7 @@ Phantom diffs are the canonical symptom that this invariant has been broken.
   table_lower, col_name)` and the helpers in `composite_index_name` /
   `composite_unique_index_name`.
 - `tests/test_cross_emitter_parity.py` holds the bridge sentinel (autogenerate
-  against an auto-migrated database is empty) and the migrations door's six
-  pins; `tests/test_db_type_cross_emitter_parity.py` pins every type token;
+  against an auto-migrated database is empty) and the seven pins; `tests/test_db_type_cross_emitter_parity.py` pins every type token;
   `tests/test_alembic_autogenerate.py` and `tests/test_schema_constraints.py`
   pin the names (`test_index_name_matches_rust_runtime_*`).
 - `docs/solutions/patterns/cross-emitter-ddl-parity.md` documents the rule and
@@ -221,7 +230,7 @@ If you add a new schema feature (e.g. partial indexes, exclusion constraints):
    `MigrationOp` and render it in `render_plan`, so every door gets it in the
    same PR; give the bridge's `translate.py` its op (Alembic's own, or the
    pass's statement).
-3. Add a casebook case (`tests/_casebook.py`) so pins (a)–(f) cover it, and a
+3. Add a casebook case (`tests/_casebook.py`) so pins (a)–(g) cover it, and a
    parity test that asserts the names match.
 4. Do not edit `CHANGELOG.md` manually — release tooling records entries at
    release time (see I-10).

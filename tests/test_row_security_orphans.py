@@ -27,7 +27,6 @@ from ferro import (
     RowPolicy,
     RowSecurity,
     clear_registry,
-    connect,
     engines,
     reset_engine,
 )
@@ -40,6 +39,7 @@ from tests.test_row_security_reconcile import (
     statements_of,
     warnings_of,
 )
+from tests._pass_harness import auto_migrate, schema_steps, warning_texts
 
 LEDGER_A = uuid.UUID("11111111-1111-4111-8111-111111111111")
 LEDGER_B = uuid.UUID("22222222-2222-4222-8222-222222222222")
@@ -167,6 +167,12 @@ def _render(
 def test_an_orphan_warns_on_updates_and_is_not_dropped():
     _define_ledger_row()
     statements, warnings = _render(_live(_declared_live_policy(), _orphan_policy()))
+    assert (statements, warnings) == (
+        [],
+        [
+            "Table 'ledgerrow' has row policy/policies 'rls_ledgerrow_retired' that the model no longer declares. They are still filtering rows. Ferro leaves them in place unless you pass migrate_destructive=True — dropping a policy removes protection, so it is never automatic.",
+        ],
+    )
     assert statements == []
     assert len(warnings) == 1
     assert ORPHAN_NAME in warnings[0]
@@ -178,6 +184,14 @@ def test_an_orphan_is_dropped_only_under_migrate_destructive():
     _define_ledger_row()
     statements, warnings = _render(
         _live(_declared_live_policy(), _orphan_policy()), destructive=True
+    )
+    assert (statements, warnings) == (
+        [
+            'DROP POLICY "rls_ledgerrow_retired" ON "ledgerrow"',
+        ],
+        [
+            "migrate_destructive tore down row security on table 'ledgerrow': dropped row policy/policies 'rls_ledgerrow_retired'. Rows on this table are no longer filtered by the artifacts ferro owned.",
+        ],
     )
     assert statements == [f'DROP POLICY "{ORPHAN_NAME}" ON "ledgerrow"']
     # The run that removes protection says what it removed.
@@ -191,6 +205,7 @@ def test_a_policy_still_declared_is_never_an_orphan():
     statements, warnings = _render(
         _live(_declared_live_policy(), _orphan_policy()), destructive=True
     )
+    assert (statements, warnings) == ([], [])
     assert statements == []
     assert warnings == []
 
@@ -200,6 +215,12 @@ def test_a_foreign_policy_is_reported_and_never_touched():
     for destructive in (False, True):
         statements, warnings = _render(
             _live(_declared_live_policy(), _foreign_policy()), destructive=destructive
+        )
+        assert (statements, warnings) == (
+            [],
+            [
+                "Table 'ledgerrow' carries row policy/policies 'handwritten_admin' that ferro does not own (their names do not start with 'rls_'). They still filter rows and compose with the declared policies. Ferro never alters or drops them.",
+            ],
         )
         assert statements == [], destructive
         assert len(warnings) == 1, destructive
@@ -227,6 +248,14 @@ def test_row_policy_drop_statement_parity_pin():
     live = _live(_declared_live_policy(), _orphan_policy())
     plan = plan_live_ledgerrow(live, destructive=True)
     runtime, _ = _render(live, destructive=True)
+    assert (runtime, _) == (
+        [
+            'DROP POLICY "rls_ledgerrow_retired" ON "ledgerrow"',
+        ],
+        [
+            "migrate_destructive tore down row security on table 'ledgerrow': dropped row policy/policies 'rls_ledgerrow_retired'. Rows on this table are no longer filtered by the artifacts ferro owned.",
+        ],
+    )
     assert statements_of(plan) == runtime
 
 
@@ -249,14 +278,35 @@ async def _pg_policy_names(table: str) -> list[str]:
 @pytest.mark.asyncio
 async def test_an_orphan_survives_updates_and_drops_on_destructive(db_url, recwarn):
     _define_ledger_row(retired=True)
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "ledgerrow",
+            'CREATE TABLE IF NOT EXISTS "ledgerrow" ( "id" serial PRIMARY KEY NOT NULL, "label" varchar NOT NULL, "ledger_id" uuid NOT NULL )',
+        ),
+        ("ledgerrow", 'ALTER TABLE "ledgerrow" ENABLE ROW LEVEL SECURITY'),
+        ("ledgerrow", 'ALTER TABLE "ledgerrow" FORCE ROW LEVEL SECURITY'),
+        (
+            "ledgerrow",
+            "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)",
+        ),
+        (
+            "ledgerrow",
+            'CREATE POLICY "rls_ledgerrow_retired" ON "ledgerrow" FOR SELECT USING ("label" IS NOT NULL)',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         assert await _pg_policy_names("ledgerrow") == [POLICY_NAME, ORPHAN_NAME]
     _rewind_registry()
 
     _define_ledger_row()
     recwarn.clear()
-    await connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == []
+    assert warning_texts(report) == [
+        "Table 'ledgerrow' has row policy/policies 'rls_ledgerrow_retired' that the model no longer declares. They are still filtering rows. Ferro leaves them in place unless you pass migrate_destructive=True — dropping a policy removes protection, so it is never automatic.",
+    ]
     orphaned = [w for w in recwarn if ORPHAN_NAME in str(w.message)]
     assert len(orphaned) == 1, [str(w.message) for w in recwarn]
     async with engines.session():
@@ -264,7 +314,13 @@ async def test_an_orphan_survives_updates_and_drops_on_destructive(db_url, recwa
 
     reset_engine()
     recwarn.clear()
-    await connect(db_url, migrate_destructive=True)
+    report = await auto_migrate(db_url, destructive=True)
+    assert schema_steps(report) == [
+        ("ledgerrow", 'DROP POLICY "rls_ledgerrow_retired" ON "ledgerrow"'),
+    ]
+    assert warning_texts(report) == [
+        "migrate_destructive tore down row security on table 'ledgerrow': dropped row policy/policies 'rls_ledgerrow_retired'. Rows on this table are no longer filtered by the artifacts ferro owned.",
+    ]
     async with engines.session():
         assert await _pg_policy_names("ledgerrow") == [POLICY_NAME]
     torn_down = [w for w in recwarn if "tore down row security" in str(w.message)]
@@ -276,7 +332,20 @@ async def test_an_orphan_survives_updates_and_drops_on_destructive(db_url, recwa
 @pytest.mark.asyncio
 async def test_a_foreign_policy_survives_migrate_destructive(db_url, recwarn):
     LedgerRow = _define_ledger_row()
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "ledgerrow",
+            'CREATE TABLE IF NOT EXISTS "ledgerrow" ( "id" serial PRIMARY KEY NOT NULL, "label" varchar NOT NULL, "ledger_id" uuid NOT NULL )',
+        ),
+        ("ledgerrow", 'ALTER TABLE "ledgerrow" ENABLE ROW LEVEL SECURITY'),
+        ("ledgerrow", 'ALTER TABLE "ledgerrow" FORCE ROW LEVEL SECURITY'),
+        (
+            "ledgerrow",
+            "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)",
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         await execute(
             f'CREATE POLICY "{FOREIGN_NAME}" ON "ledgerrow" FOR ALL USING (true)'
@@ -285,7 +354,11 @@ async def test_a_foreign_policy_survives_migrate_destructive(db_url, recwarn):
 
     reset_engine()
     recwarn.clear()
-    await connect(db_url, migrate_destructive=True)
+    report = await auto_migrate(db_url, destructive=True)
+    assert schema_steps(report) == []
+    assert warning_texts(report) == [
+        "Table 'ledgerrow' carries row policy/policies 'handwritten_admin' that ferro does not own (their names do not start with 'rls_'). They still filter rows and compose with the declared policies. Ferro never alters or drops them.",
+    ]
     async with engines.session():
         assert await _pg_policy_names("ledgerrow") == [FOREIGN_NAME, POLICY_NAME]
     foreign = [w for w in recwarn if FOREIGN_NAME in str(w.message)]
@@ -319,6 +392,12 @@ def test_hand_managed_row_security_is_never_torn_down():
     live = _live(_foreign_policy())
     for destructive in (False, True):
         statements, warnings = _render(live, destructive=destructive)
+        assert (statements, warnings) == (
+            [],
+            [
+                "Table 'ledgerrow' carries row policy/policies 'handwritten_admin' that ferro does not own (their names do not start with 'rls_'). They still filter rows and compose with the declared policies. Ferro never alters or drops them.",
+            ],
+        )
         assert statements == [], destructive
         # The only thing said is the standing foreign-policy report.
         assert len(warnings) == 1, (destructive, warnings)
@@ -335,10 +414,27 @@ def test_ferro_managed_row_security_still_tears_down_completely():
     live = _live(_declared_live_policy())
 
     statements, warnings = _render(live)
+    assert (statements, warnings) == (
+        [],
+        [
+            "Table 'ledgerrow' has row-level security enabled in the database, but the model no longer declares __ferro_rls__. Ferro never disables row security on migrate_updates — the table keeps filtering rows, and any ferro-owned policy keeps applying. Restore the declaration, or tear it down with migrate_destructive=True.",
+            "Table 'ledgerrow' has row policy/policies 'rls_ledgerrow_ledger_id' that the model no longer declares. They are still filtering rows. Ferro leaves them in place unless you pass migrate_destructive=True — dropping a policy removes protection, so it is never automatic.",
+        ],
+    )
     assert statements == []
     assert any("no longer declares __ferro_rls__" in w for w in warnings)
 
     statements, warnings = _render(live, destructive=True)
+    assert (statements, warnings) == (
+        [
+            'DROP POLICY "rls_ledgerrow_ledger_id" ON "ledgerrow"',
+            'ALTER TABLE "ledgerrow" NO FORCE ROW LEVEL SECURITY',
+            'ALTER TABLE "ledgerrow" DISABLE ROW LEVEL SECURITY',
+        ],
+        [
+            "migrate_destructive tore down row security on table 'ledgerrow': dropped row policy/policies 'rls_ledgerrow_ledger_id'; cleared FORCE ROW LEVEL SECURITY; disabled ROW LEVEL SECURITY. Rows on this table are no longer filtered by the artifacts ferro owned.",
+        ],
+    )
     assert statements == [
         f'DROP POLICY "{POLICY_NAME}" ON "ledgerrow"',
         'ALTER TABLE "ledgerrow" NO FORCE ROW LEVEL SECURITY',
@@ -352,7 +448,14 @@ def test_ferro_managed_row_security_still_tears_down_completely():
 @pytest.mark.asyncio
 async def test_a_hand_managed_rls_table_survives_migrate_destructive(db_url, recwarn):
     LedgerRow = _define_plain_ledger_row()
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "ledgerrow",
+            'CREATE TABLE IF NOT EXISTS "ledgerrow" ( "id" serial PRIMARY KEY NOT NULL, "label" varchar NOT NULL, "ledger_id" uuid NOT NULL )',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         await LedgerRow.create(ledger_id=LEDGER_A, label="a1")
         # Row security nobody asked ferro for.
@@ -364,7 +467,11 @@ async def test_a_hand_managed_rls_table_survives_migrate_destructive(db_url, rec
 
     reset_engine()
     recwarn.clear()
-    await connect(db_url, migrate_destructive=True)
+    report = await auto_migrate(db_url, destructive=True)
+    assert schema_steps(report) == []
+    assert warning_texts(report) == [
+        "Table 'ledgerrow' carries row policy/policies 'handwritten_admin' that ferro does not own (their names do not start with 'rls_'). They still filter rows and compose with the declared policies. Ferro never alters or drops them.",
+    ]
     async with engines.session():
         flags = await fetch_all(
             "SELECT relrowsecurity, relforcerowsecurity FROM pg_class "

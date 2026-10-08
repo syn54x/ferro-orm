@@ -47,3 +47,7 @@ The recorder did two jobs. Each gets an owner when the recorder is retired:
 - The `RECONCILE_STATEMENT_LOG_PREFIX`, `LOCK_TIMEOUT_LOG_PREFIX` and `LABEL_PROBE_LOG_PREFIX` constants go. The debug log becomes one free-text line per statement, free to change.
 - When pin (g) lands, AGENTS.md I-1 lists seven pins and its reconciliation-pass bullet names `PassReport`.
 - The Auto-migrate guide page documents `PassReport`, its roles, its warning kinds and `.report` on failure.
+
+## Amendments
+
+- 2026-10-08: the executor's input is the shape A-0 built, not the one sketched above: `ddl.run(engine, unit, Door::Pass(subject), &[sql], on_attempt, settle)` takes the door (whose subject every statement carries) and the plain SQL, and returns `Executed { statements: [Statement { subject, sql, role }] }`. A failure carries what its unit committed (`Failed::committed`, and the same on a lock timeout): an unwrapped unit's earlier statements, nothing for a transactional one. The SQLite label probe runs through `Executed::probe_on`, recorded as `role = "probe"`. Every statement of a type is reported under the type's name, the create pass's guarded `CREATE TYPE` included.

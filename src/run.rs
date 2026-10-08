@@ -1332,10 +1332,7 @@ async fn run_statements(
         executed
             .send(conn, Door::Run(file), Role::Schema, statement)
             .await
-            .map_err(|error| Failed {
-                index: Some(index),
-                error,
-            })?;
+            .map_err(|error| Failed::at(index, error))?;
     }
     Ok(())
 }

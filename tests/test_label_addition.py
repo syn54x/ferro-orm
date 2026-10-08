@@ -10,6 +10,7 @@ import ferro
 from ferro import Model, connect, engines, reset_engine
 from ferro.raw import execute, fetch_all
 from tests._alembic_harness import autogen_upgrade_code as _autogen_upgrade_code
+from tests._pass_harness import auto_migrate, schema_steps, warning_texts
 
 pytestmark = [pytest.mark.backend_matrix, pytest.mark.postgres_only]
 
@@ -39,7 +40,11 @@ async def test_migrate_updates_appends_missing_label_and_member_round_trips(
         id: int | None = ferro.Field(primary_key=True, default=None)
         provider: Provider
 
-    await connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == [
+        ("provider", "ALTER TYPE \"provider\" ADD VALUE IF NOT EXISTS 'mx'"),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         created = await Feed.create(provider=Provider.MX)
         assert created.provider is Provider.MX
@@ -85,7 +90,11 @@ async def test_extra_live_labels_warn_and_are_never_removed(db_url, clean_regist
         provider: Provider
 
     with pytest.warns(UserWarning, match=r"legacy") as record:
-        await connect(db_url, migrate_updates=True)
+        report = await auto_migrate(db_url, updates=True)
+        assert schema_steps(report) == []
+        assert warning_texts(report) == [
+            "Enum type 'provider' has label(s) 'legacy' that the model no longer declares. Label addition is append-only: ferro never removes enum labels (existing rows may still hold them). Remove or rename labels with a reviewed Alembic migration.",
+        ]
     enum_warnings = [str(w.message) for w in record if "provider" in str(w.message)]
     assert len(enum_warnings) == 1, "warning fires per drifted type, exactly once"
     assert "'legacy'" in enum_warnings[0]
@@ -118,7 +127,9 @@ async def test_plain_auto_migrate_stays_silent_and_inert_with_drift(
         id: int | None = ferro.Field(primary_key=True, default=None)
         provider: Provider
 
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == []
+    assert warning_texts(report) == []
     assert not [w for w in recwarn if "provider" in str(w.message)]
     async with engines.session():
         assert await _live_labels("provider") == ["plaid", "legacy"]
@@ -152,7 +163,13 @@ async def test_shared_type_reconciles_exactly_once(db_url, clean_registry):
         provider: Provider
 
     with pytest.warns(UserWarning) as record:
-        await connect(db_url, migrate_updates=True)
+        report = await auto_migrate(db_url, updates=True)
+        assert schema_steps(report) == [
+            ("provider", "ALTER TYPE \"provider\" ADD VALUE IF NOT EXISTS 'mx'"),
+        ]
+        assert warning_texts(report) == [
+            "Enum type 'provider' has label(s) 'legacy' that the model no longer declares. Label addition is append-only: ferro never removes enum labels (existing rows may still hold them). Remove or rename labels with a reviewed Alembic migration.",
+        ]
     per_type = [w for w in record if "'legacy'" in str(w.message)]
     assert len(per_type) == 1, "one warning per drifted type, not per table"
 
@@ -181,7 +198,20 @@ async def test_new_label_as_default_of_new_column_in_same_run(db_url, clean_regi
         id: int | None = ferro.Field(primary_key=True, default=None)
         state: State = ferro.Field(default=State.CLOSED)
 
-    await connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == [
+        ("state", "ALTER TYPE \"state\" ADD VALUE IF NOT EXISTS 'closed'"),
+        (
+            "ticket",
+            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace WHERE t.typname = 'state' AND n.nspname = current_schema()) THEN CREATE TYPE \"state\" AS ENUM ('open', 'closed'); END IF; END $$",
+        ),
+        (
+            "ticket",
+            'ALTER TABLE "ticket" ADD COLUMN "state" state NOT NULL DEFAULT \'closed\'',
+        ),
+        ("ticket", 'ALTER TABLE "ticket" ALTER COLUMN "state" DROP DEFAULT'),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         rows = await fetch_all('SELECT "state" FROM "ticket"')
         assert [r["state"] for r in rows] == ["closed"], (
@@ -213,7 +243,19 @@ async def test_new_table_defaulting_to_new_label_of_existing_stale_type(
         id: int | None = ferro.Field(primary_key=True, default=None)
         state: State = ferro.Field(default=State.CLOSED)
 
-    await connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == [
+        (
+            "state",
+            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace WHERE t.typname = 'state' AND n.nspname = current_schema()) THEN CREATE TYPE \"state\" AS ENUM ('open', 'closed'); END IF; END $$",
+        ),
+        (
+            "audit",
+            'CREATE TABLE IF NOT EXISTS "audit" ( "id" serial PRIMARY KEY NOT NULL, "state" state NOT NULL )',
+        ),
+        ("state", "ALTER TYPE \"state\" ADD VALUE IF NOT EXISTS 'closed'"),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         assert (await Audit.create()).state is State.CLOSED
         assert await _live_labels("state") == ["open", "closed"]
@@ -241,7 +283,11 @@ async def test_appended_labels_sort_last_regardless_of_declaration_order(
         id: int | None = ferro.Field(primary_key=True, default=None)
         provider: Provider
 
-    await connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == [
+        ("provider", "ALTER TYPE \"provider\" ADD VALUE IF NOT EXISTS 'mx'"),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         # ...but appended last in the database ordering.
         assert await _live_labels("provider") == ["plaid", "mx"]
@@ -271,11 +317,17 @@ async def test_second_boot_is_a_noop(db_url, clean_registry, recwarn):
         id: int | None = ferro.Field(primary_key=True, default=None)
         provider: Provider
 
-    await connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == [
+        ("provider", "ALTER TYPE \"provider\" ADD VALUE IF NOT EXISTS 'mx'"),
+    ]
+    assert warning_texts(report) == []
     reset_engine()
     recwarn.clear()
 
-    await connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == []
+    assert warning_texts(report) == []
     assert not [w for w in recwarn if "provider" in str(w.message)]
     async with engines.session():
         assert await _live_labels("provider") == ["plaid", "mx"]

@@ -19,7 +19,6 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
-import logging
 import re
 import shutil
 import sys
@@ -30,6 +29,7 @@ import pytest
 import ferro
 from ferro import _core
 from ferro.migrations import DriftReport, MigrationRefused, render_op
+from tests._pass_harness import auto_migrate
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     AUTHOR,
     pkg,
@@ -154,35 +154,12 @@ class Ckn_Named(Model):
 """
 
 
-class _ReconcileStatements(logging.Handler):
-    """Collect the DDL the reconciliation pass logs for one table."""
-
-    def __init__(self, table: str):
-        super().__init__(level=logging.DEBUG)
-        self.prefix = f"Ferro Engine: auto-migrate executing on '{table}': "
-        self.statements: list[str] = []
-
-    def emit(self, record: logging.LogRecord) -> None:
-        message = record.getMessage()
-        if message.startswith(self.prefix):
-            self.statements.append(message[len(self.prefix) :])
-
-
 def migrate_updates_statements(url: str, table: str) -> list[str]:
-    """``connect(migrate_updates=True)``; the statements the pass executed
-    for ``table``."""
+    """``connect(migrate_updates=True)``; the schema statements its pass
+    reported for ``table``."""
     ferro.reset_engine()
-    logger = logging.getLogger("ferro")
-    handler = _ReconcileStatements(table)
-    previous_level = logger.level
-    logger.addHandler(handler)
-    logger.setLevel(logging.DEBUG)
-    try:
-        asyncio.run(ferro.connect(url, migrate_updates=True))
-    finally:
-        logger.removeHandler(handler)
-        logger.setLevel(previous_level)
-    return handler.statements
+    report = asyncio.run(auto_migrate(url, updates=True))
+    return [s.sql for s in report.statements if s.role == "schema" and s.subject == table]
 
 
 def test_a_text_comparison_check_is_not_drift_after_up(project, pkg, db, capsys):

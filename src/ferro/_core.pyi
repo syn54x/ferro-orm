@@ -43,14 +43,18 @@ async def create_tables(
     using: Optional[str] = None,
     tracking_schemas: list[str] = ...,
     ddl_lock_timeout_s: float = 5.0,
-) -> None: ...
+) -> str:
+    """The create pass alone. Resolves to the pass's report as JSON (see
+    ``migrate``); a failed pass's error carries it as ``_ferro_pass_report``."""
+    ...
+
 async def migrate(
     using: Optional[str] = None,
     updates: bool = True,
     destructive: bool = False,
     tracking_schemas: list[str] = ...,
     ddl_lock_timeout_s: float = 5.0,
-) -> None:
+) -> str:
     """Run the auto-migrate pass against a connected engine.
 
     Creates missing tables, then (with ``updates``, the default) adds missing
@@ -60,6 +64,12 @@ async def migrate(
     DDL so no cached statement observes the pre-migration schema. On Postgres
     each reconciliation statement waits for a table lock under
     ``ddl_lock_timeout_s`` seconds (``0`` disables; ADR-0044).
+
+    Resolves to the pass's report as JSON, ``{"statements": [{"subject",
+    "sql", "role"}], "warnings": [{"kind", "subject", "text", "recurs",
+    "blocks"}]}``, which ``ferro.migrate`` reads into a ``PassReport``; a
+    failed pass's error carries the same JSON (what committed before the
+    failure) as ``_ferro_pass_report``.
     """
     ...
 

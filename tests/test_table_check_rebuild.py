@@ -34,6 +34,7 @@ from ferro.ir.compiler import compile_registry_schema_ir
 from ferro.raw import execute, fetch_all
 from tests._alembic_harness import autogen_upgrade_code as _autogen_upgrade_code
 from tests._alembic_harness import planner_statements as _planner_statements
+from tests._pass_harness import auto_migrate, schema_steps, warning_texts
 
 SIDE_CHECK_NAME = "ck_rebuild_at_most_one_side"
 SIDE_CHECK_BODY = '("left" IS NULL) OR ("right" IS NULL)'
@@ -166,6 +167,13 @@ def test_drifted_table_check_renders_drop_then_bare_add_on_postgres():
     _define_rebuild(both=True)
     live = [_live_check(SIDE_CHECK_NAME, f"CHECK ({SIDE_CHECK_BODY})")]
     statements, warnings = _render("rebuild", REBUILD_LIVE_COLUMNS, live, "postgres")
+    assert (statements, warnings) == (
+        [
+            'ALTER TABLE "rebuild" DROP CONSTRAINT "ck_rebuild_at_most_one_side"',
+            'ALTER TABLE "rebuild" ADD CONSTRAINT "ck_rebuild_at_most_one_side" CHECK (("left" IS NULL) AND ("right" IS NULL))',
+        ],
+        [],
+    )
     assert statements == [SIDE_CHECK_DROP, SIDE_CHECK_ADD_AND]
     assert warnings == []
     assert not any("DO $$" in sql for sql in statements)
@@ -182,6 +190,7 @@ def test_catalog_wrapping_is_not_drift():
     ]
     for dialect in ("postgres", "sqlite"):
         statements, warnings = _render("rebuild", REBUILD_LIVE_COLUMNS, live, dialect)
+        assert (statements, warnings) == ([], [])
         assert statements == [], dialect
         assert warnings == [], dialect
 
@@ -190,6 +199,7 @@ def test_second_boot_shape_replans_to_nothing():
     _define_rebuild(both=False)
     live = [_live_check(SIDE_CHECK_NAME, f"CHECK ({SIDE_CHECK_BODY})")]
     statements, warnings = _render("rebuild", REBUILD_LIVE_COLUMNS, live, "postgres")
+    assert (statements, warnings) == ([], [])
     assert statements == []
     assert warnings == []
 
@@ -204,6 +214,7 @@ def test_user_owned_live_check_is_never_rebuilt():
         )
     ]
     statements, _ = _render("rebuild", REBUILD_LIVE_COLUMNS, live, "postgres")
+    assert (statements, _) == ([], [])
     assert statements == []
     assert not any(SIDE_CHECK_NAME in sql for sql in statements)
 
@@ -212,6 +223,12 @@ def test_sqlite_warns_with_the_constraint_name_and_emits_no_sql():
     _define_rebuild(both=True)
     live = [_live_check(SIDE_CHECK_NAME, f"CHECK ({SIDE_CHECK_BODY})")]
     statements, warnings = _render("rebuild", REBUILD_LIVE_COLUMNS, live, "sqlite")
+    assert (statements, warnings) == (
+        [],
+        [
+            "CHECK constraint 'ck_rebuild_at_most_one_side' on table 'rebuild' has a declared body that differs from the live constraint, and SQLite cannot alter constraints in place (it requires a full table rebuild). The live body remains; generate a reviewed migration with `ferro migrate new` to apply the declared predicate.",
+        ],
+    )
     assert statements == []
     assert len(warnings) == 1
     assert SIDE_CHECK_NAME in warnings[0]
@@ -225,6 +242,7 @@ def test_without_migrate_updates_no_rebuild_is_planned():
         statements, warnings = _render(
             "rebuild", REBUILD_LIVE_COLUMNS, live, dialect, updates=False
         )
+        assert (statements, warnings) == ([], [])
         assert statements == [], dialect
         assert warnings == [], dialect
 
@@ -242,6 +260,13 @@ def test_column_check_label_change_renders_drop_then_bare_add():
     ]
     live = [_live_check("ck_cookie_flavor", "CHECK (\"flavor\" IN ('sweet', 'salty'))")]
     statements, _ = _render("cookie", live_columns, live, "postgres")
+    assert (statements, _) == (
+        [
+            'ALTER TABLE "cookie" DROP CONSTRAINT "ck_cookie_flavor"',
+            "ALTER TABLE \"cookie\" ADD CONSTRAINT \"ck_cookie_flavor\" CHECK (\"flavor\" IN ('sweet', 'salty', 'umami'))",
+        ],
+        [],
+    )
     assert statements == [
         'ALTER TABLE "cookie" DROP CONSTRAINT "ck_cookie_flavor"',
         'ALTER TABLE "cookie" ADD CONSTRAINT "ck_cookie_flavor" '
@@ -258,6 +283,12 @@ def test_undeclared_live_ck_is_not_a_rebuild():
         _live_check("ck_rebuild_orphan", "CHECK (true)"),
     ]
     statements, _ = _render("rebuild", REBUILD_LIVE_COLUMNS, live, "postgres")
+    assert (statements, _) == (
+        [],
+        [
+            "Table 'rebuild' has CHECK constraint(s) 'ck_rebuild_orphan' that the model no longer declares. Leftover CHECKs keep rejecting rows the model now allows. They stay in place unless you pass migrate_destructive=True (Postgres) or drop them with a reviewed migration (`ferro migrate new`).",
+        ],
+    )
     assert statements == []
     assert not any("ck_rebuild_orphan" in sql for sql in statements)
 
@@ -276,6 +307,13 @@ def test_check_rebuild_statement_parity_pin():
     assert statements == [SIDE_CHECK_DROP, SIDE_CHECK_ADD_AND]
 
     runtime, _ = _render("rebuild", REBUILD_LIVE_COLUMNS, live, "postgres")
+    assert (runtime, _) == (
+        [
+            'ALTER TABLE "rebuild" DROP CONSTRAINT "ck_rebuild_at_most_one_side"',
+            'ALTER TABLE "rebuild" ADD CONSTRAINT "ck_rebuild_at_most_one_side" CHECK (("left" IS NULL) AND ("right" IS NULL))',
+        ],
+        [],
+    )
     assert statements == runtime
 
 
@@ -306,13 +344,31 @@ async def _pg_constraintdef(table: str, name: str) -> str:
 @pytest.mark.asyncio
 async def test_migrate_updates_rebuilds_a_drifted_table_check(db_url):
     Rebuild = _define_rebuild(both=False)
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "rebuild",
+            'CREATE TABLE IF NOT EXISTS "rebuild" ( "id" serial PRIMARY KEY NOT NULL, "left" varchar, "right" varchar, CONSTRAINT "ck_rebuild_at_most_one_side" CHECK (("left" IS NULL) OR ("right" IS NULL)) )',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         await Rebuild.create(left=None, right=None)  # passes both OR and AND
     _rewind_registry()
 
     Rebuild = _define_rebuild(both=True)
-    await connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == [
+        (
+            "rebuild",
+            'ALTER TABLE "rebuild" DROP CONSTRAINT "ck_rebuild_at_most_one_side"',
+        ),
+        (
+            "rebuild",
+            'ALTER TABLE "rebuild" ADD CONSTRAINT "ck_rebuild_at_most_one_side" CHECK (("left" IS NULL) AND ("right" IS NULL))',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         assert SIDE_CHECK_NAME in await _pg_check_names("rebuild")
         definition = await _pg_constraintdef("rebuild", SIDE_CHECK_NAME)
@@ -330,7 +386,14 @@ async def test_catalog_parens_do_not_phantom_rebuild(db_url):
     """Pin real ``pg_get_constraintdef`` for the IS NULL / OR shape: extra
     wrapping parens are not drift, and a second boot is a no-op."""
     _define_rebuild(both=False)
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "rebuild",
+            'CREATE TABLE IF NOT EXISTS "rebuild" ( "id" serial PRIMARY KEY NOT NULL, "left" varchar, "right" varchar, CONSTRAINT "ck_rebuild_at_most_one_side" CHECK (("left" IS NULL) OR ("right" IS NULL)) )',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         catalog = await _pg_constraintdef("rebuild", SIDE_CHECK_NAME)
     predicate = json.dumps(_model_ir("rebuild")["table_checks"][0]["predicate"])
@@ -343,7 +406,9 @@ async def test_catalog_parens_do_not_phantom_rebuild(db_url):
 
     _rewind_registry()
     _define_rebuild(both=False)
-    await connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == []
+    assert warning_texts(report) == []
     async with engines.session():
         assert await _pg_constraintdef("rebuild", SIDE_CHECK_NAME) == catalog
 
@@ -353,18 +418,29 @@ async def test_catalog_parens_do_not_phantom_rebuild(db_url):
 @pytest.mark.asyncio
 async def test_a_second_migrate_updates_boot_is_a_noop(db_url, recwarn):
     Rebuild = _define_rebuild(both=False)
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "rebuild",
+            'CREATE TABLE IF NOT EXISTS "rebuild" ( "id" serial PRIMARY KEY NOT NULL, "left" varchar, "right" varchar, CONSTRAINT "ck_rebuild_at_most_one_side" CHECK (("left" IS NULL) OR ("right" IS NULL)) )',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         await Rebuild.create(left="a", right=None)
     _rewind_registry()
 
     _define_rebuild(both=False)
-    await connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == []
+    assert warning_texts(report) == []
     recwarn.clear()
 
     _rewind_registry()
     _define_rebuild(both=False)
-    await connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == []
+    assert warning_texts(report) == []
     assert not [w for w in recwarn if "ck_rebuild" in str(w.message)]
     async with engines.session():
         assert await _pg_check_names("rebuild") == {SIDE_CHECK_NAME}
@@ -379,15 +455,30 @@ async def test_rows_violating_the_new_body_fail_the_connect_and_keep_the_old_con
     """Fail loudly: DROP + ADD share the per-table transaction, so a failing
     ADD leaves the previous constraint in place."""
     Rebuild = _define_rebuild(both=False)
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "rebuild",
+            'CREATE TABLE IF NOT EXISTS "rebuild" ( "id" serial PRIMARY KEY NOT NULL, "left" varchar, "right" varchar, CONSTRAINT "ck_rebuild_at_most_one_side" CHECK (("left" IS NULL) OR ("right" IS NULL)) )',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         await Rebuild.create(left="a", right=None)  # passes OR, fails AND
     _rewind_registry()
 
     _define_rebuild(both=True)
-    with pytest.raises(CheckViolationError):
-        await connect(db_url, migrate_updates=True)
+    with pytest.raises(CheckViolationError) as raised:
+        await auto_migrate(db_url, updates=True)
 
+    # The DROP CONSTRAINT and the failing ADD CONSTRAINT ran in one
+    # transaction and rolled back: nothing committed, the ADD is named.
+    assert schema_steps(raised.value.report) == []
+    assert warning_texts(raised.value.report) == []
+    assert (
+        f'ALTER TABLE "rebuild" ADD CONSTRAINT "{SIDE_CHECK_NAME}" CHECK '
+        '(("left" IS NULL) AND ("right" IS NULL))' in str(raised.value)
+    )
     _rewind_registry()
     await connect(db_url)
     async with engines.session():
@@ -404,14 +495,33 @@ async def test_rows_violating_the_new_body_fail_the_connect_and_keep_the_old_con
 @pytest.mark.asyncio
 async def test_changing_column_check_labels_rebuilds_the_constraint(db_url):
     Cookie = _define_cookie(Flavor)
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "cookie",
+            'CREATE TABLE IF NOT EXISTS "cookie" ( "flavor" text NOT NULL, "id" serial PRIMARY KEY NOT NULL )',
+        ),
+        (
+            "cookie",
+            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_cookie_flavor' AND conrelid = '\"cookie\"'::regclass) THEN ALTER TABLE \"cookie\" ADD CONSTRAINT \"ck_cookie_flavor\" CHECK (\"flavor\" IN ('sweet', 'salty')); END IF; END $$",
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         await Cookie.create(flavor=Flavor.SWEET)
         assert "ck_cookie_flavor" in await _pg_check_names("cookie")
     _rewind_registry()
 
     Cookie = _define_cookie(FlavorWider)
-    await connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == [
+        ("cookie", 'ALTER TABLE "cookie" DROP CONSTRAINT "ck_cookie_flavor"'),
+        (
+            "cookie",
+            "ALTER TABLE \"cookie\" ADD CONSTRAINT \"ck_cookie_flavor\" CHECK (\"flavor\" IN ('sweet', 'salty', 'umami'))",
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         await Cookie.create(flavor=FlavorWider.UMAMI)
         with pytest.raises(CheckViolationError):
@@ -425,7 +535,14 @@ async def test_sqlite_rebuild_warns_with_the_constraint_name_and_rewrites_nothin
     db_url,
 ):
     Rebuild = _define_rebuild(both=False)
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "rebuild",
+            'CREATE TABLE IF NOT EXISTS "rebuild" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "left" varchar, "right" varchar, CONSTRAINT "ck_rebuild_at_most_one_side" CHECK (("left" IS NULL) OR ("right" IS NULL)) )',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         await Rebuild.create(left="a", right=None)
         before = (
@@ -437,7 +554,11 @@ async def test_sqlite_rebuild_warns_with_the_constraint_name_and_rewrites_nothin
 
     Rebuild = _define_rebuild(both=True)
     with pytest.warns(UserWarning, match=SIDE_CHECK_NAME) as record:
-        await connect(db_url, migrate_updates=True)
+        report = await auto_migrate(db_url, updates=True)
+        assert schema_steps(report) == []
+        assert warning_texts(report) == [
+            "CHECK constraint 'ck_rebuild_at_most_one_side' on table 'rebuild' has a declared body that differs from the live constraint, and SQLite cannot alter constraints in place (it requires a full table rebuild). The live body remains; generate a reviewed migration with `ferro migrate new` to apply the declared predicate.",
+        ]
     named = [w for w in record if SIDE_CHECK_NAME in str(w.message)]
     assert len(named) == 1, "one warning per drifted constraint"
 
@@ -465,7 +586,14 @@ async def test_autogenerate_proposes_the_same_drop_and_add_as_the_runtime(
     db_url, postgres_base_url, db_schema_name
 ):
     Rebuild = _define_rebuild(both=False)
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "rebuild",
+            'CREATE TABLE IF NOT EXISTS "rebuild" ( "id" serial PRIMARY KEY NOT NULL, "left" varchar, "right" varchar, CONSTRAINT "ck_rebuild_at_most_one_side" CHECK (("left" IS NULL) OR ("right" IS NULL)) )',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         await Rebuild.create(left="a", right=None)
     _rewind_registry()
@@ -485,13 +613,22 @@ async def test_autogenerate_is_empty_once_the_body_matches(
     db_url, postgres_base_url, db_schema_name
 ):
     Rebuild = _define_rebuild(both=False)
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "rebuild",
+            'CREATE TABLE IF NOT EXISTS "rebuild" ( "id" serial PRIMARY KEY NOT NULL, "left" varchar, "right" varchar, CONSTRAINT "ck_rebuild_at_most_one_side" CHECK (("left" IS NULL) OR ("right" IS NULL)) )',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         await Rebuild.create(left="a", right=None)
     _rewind_registry()
 
     _define_rebuild(both=False)
-    await connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == []
+    assert warning_texts(report) == []
 
     code = _autogen_upgrade_code(postgres_base_url, db_schema_name)
     assert "DROP CONSTRAINT" not in code, code
@@ -559,7 +696,22 @@ async def test_four_term_chain_is_not_rebuilt_on_every_connect(db_url, recwarn, 
     catalog, left-nested in ferro's rendering. Same predicate, so the second
     ``migrate_updates`` boot keeps the very same constraint (same oid)."""
     _define_sides(op=op)
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    body = {
+        "and": '((("a" IS NOT NULL) AND ("b" IS NOT NULL)) AND ("c" IS NOT NULL)) '
+        'AND ("d" IS NOT NULL)',
+        "or": '((("a" IS NOT NULL) OR ("b" IS NOT NULL)) OR ("c" IS NOT NULL)) '
+        'OR ("d" IS NOT NULL)',
+    }[op]
+    assert schema_steps(report) == [
+        (
+            "sides",
+            'CREATE TABLE IF NOT EXISTS "sides" ( "a" varchar, "b" varchar, '
+            '"c" varchar, "d" varchar, "id" serial PRIMARY KEY NOT NULL, '
+            f'CONSTRAINT "{SIDES_CHECK_NAME}" CHECK ({body}) )',
+        )
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         catalog = await _pg_constraintdef("sides", SIDES_CHECK_NAME)
         first_oid = await _pg_constraint_oid("sides", SIDES_CHECK_NAME)
@@ -573,7 +725,9 @@ async def test_four_term_chain_is_not_rebuilt_on_every_connect(db_url, recwarn, 
 
     _rewind_registry()
     _define_sides(op=op)
-    await connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == []
+    assert warning_texts(report) == []
     assert not [w for w in recwarn if "ck_sides" in str(w.message)]
     async with engines.session():
         assert await _pg_constraint_oid("sides", SIDES_CHECK_NAME) == first_oid, (
@@ -589,7 +743,14 @@ async def test_autogenerate_is_empty_for_a_four_term_chain(
     db_url, postgres_base_url, db_schema_name
 ):
     _define_sides(op="or")
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "sides",
+            'CREATE TABLE IF NOT EXISTS "sides" ( "a" varchar, "b" varchar, "c" varchar, "d" varchar, "id" serial PRIMARY KEY NOT NULL, CONSTRAINT "ck_sides_at_least_one_side" CHECK (((("a" IS NOT NULL) OR ("b" IS NOT NULL)) OR ("c" IS NOT NULL)) OR ("d" IS NOT NULL)) )',
+        ),
+    ]
+    assert warning_texts(report) == []
     _rewind_registry()
 
     _define_sides(op="or")
@@ -606,13 +767,28 @@ async def test_autogenerate_is_empty_for_a_four_term_chain(
 async def test_changing_a_chain_term_still_rebuilds(db_url):
     """Flattening must not hide a real change: OR chain -> AND chain is drift."""
     Sides = _define_sides(op="or")
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "sides",
+            'CREATE TABLE IF NOT EXISTS "sides" ( "a" varchar, "b" varchar, "c" varchar, "d" varchar, "id" serial PRIMARY KEY NOT NULL, CONSTRAINT "ck_sides_at_least_one_side" CHECK (((("a" IS NOT NULL) OR ("b" IS NOT NULL)) OR ("c" IS NOT NULL)) OR ("d" IS NOT NULL)) )',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         await Sides.create(a="x", b="x", c="x", d="x")
     _rewind_registry()
 
     Sides = _define_sides(op="and")
-    await connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == [
+        ("sides", 'ALTER TABLE "sides" DROP CONSTRAINT "ck_sides_at_least_one_side"'),
+        (
+            "sides",
+            'ALTER TABLE "sides" ADD CONSTRAINT "ck_sides_at_least_one_side" CHECK (((("a" IS NOT NULL) AND ("b" IS NOT NULL)) AND ("c" IS NOT NULL)) AND ("d" IS NOT NULL))',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         definition = await _pg_constraintdef("sides", SIDES_CHECK_NAME)
         assert "AND" in definition and "OR" not in definition

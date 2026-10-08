@@ -4,7 +4,9 @@
 //! and engine resets.
 
 use crate::backend::{EngineHandle, PoolSpec, dialect_from_url};
-use crate::migrate::{AutoMigrateDoor, MigrateOptions, internal_migrate};
+use crate::migrate::{
+    AutoMigrateDoor, MigrateOptions, PassReport, internal_migrate, with_pass_report,
+};
 use crate::session_settings::SettingsDelivery;
 use crate::state::{
     CONNECTION_REGISTRY, DEFAULT_CONNECTION_NAME, Dialect, ENGINE, SESSION_REGISTRY,
@@ -288,14 +290,21 @@ pub fn connect(
         // having run first. The passes run under the run lock, behind the
         // guard that refuses a database governed by ferro migrations
         // (ADR-0038), before the connection is registered.
+        // `connect()` returns nothing: it builds the same report
+        // `ferro.migrate()` returns and logs from it (ADR-0049), and a failed
+        // pass's error carries it.
         if auto_migrate || opts.updates {
+            let mut report = PassReport::default();
             internal_migrate(
                 engine_handle.clone(),
                 opts,
                 &tracking_schemas,
                 AutoMigrateDoor::Connect,
+                &mut report,
             )
-            .await?;
+            .await
+            .map_err(|err| with_pass_report(err, &report))?;
+            report.log_summary();
         }
 
         let mut registry = CONNECTION_REGISTRY.write().map_err(|_| {

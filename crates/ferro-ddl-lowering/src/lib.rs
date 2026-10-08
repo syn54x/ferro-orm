@@ -3907,6 +3907,38 @@ pub fn pending_table_rename_warning(old: &str, new: &str, waiting: &[String]) ->
     )
 }
 
+/// [`ReportKind::RunLockWait`]: the auto-migrate pass found the run lock held
+/// and waits for it. `call` is the public call running the pass
+/// (`connect(auto_migrate=…)`, `create_tables()`, `migrate()`). It is said
+/// every time a pass waits, so it recurs.
+pub fn run_lock_wait_warning(call: &str) -> Report {
+    Report::recurring(
+        ReportKind::RunLockWait,
+        Subject::Modelset,
+        format!(
+            "{call} is waiting: another ferro migration run or auto-migrate pass holds the run \
+             lock on this database. It goes on once that one finishes."
+        ),
+    )
+}
+
+/// [`ReportKind::DdlLockRetry`]: one attempt of the pass's unit on `subject`
+/// (a table, or an enum type) timed out waiting for a lock and is retried;
+/// `attempt` is the executor's line for it (`waiting for a lock on "author"
+/// (attempt 1 of 10, retry in 1s)`). Said for every attempt, so it recurs.
+pub fn ddl_lock_retry_warning(subject: Subject, attempt: &str) -> Report {
+    let name = match &subject {
+        Subject::Table { table } | Subject::Column { table, .. } => table.clone(),
+        Subject::EnumType { type_name } => type_name.clone(),
+        Subject::Modelset => String::new(),
+    };
+    Report::recurring(
+        ReportKind::DdlLockRetry,
+        subject,
+        format!("migrating '{name}': {attempt}"),
+    )
+}
+
 /// The report for a refused rename hint, on every door that plans without
 /// refusing outright (the reconciliation pass, `drift`): the hint renames
 /// nothing, on every run until the declaration changes.
@@ -8123,6 +8155,30 @@ mod tests {
         assert_eq!(
             wire["subject"],
             serde_json::json!({"scope": "column", "table": "t", "column": "b"})
+        );
+    }
+
+    #[test]
+    fn the_pass_operational_reports_recur_and_keep_their_sentences() {
+        let waiting = run_lock_wait_warning("migrate()");
+        assert_eq!(waiting.kind, ReportKind::RunLockWait);
+        assert_eq!(waiting.subject, Subject::Modelset);
+        assert!(waiting.recurs && !waiting.blocks());
+        assert_eq!(
+            waiting.text,
+            "migrate() is waiting: another ferro migration run or auto-migrate pass holds the \
+             run lock on this database. It goes on once that one finishes."
+        );
+        let retry = ddl_lock_retry_warning(
+            Subject::enum_type("status"),
+            "waiting for a lock (attempt 1 of 10, retry in 1s)",
+        );
+        assert_eq!(retry.kind, ReportKind::DdlLockRetry);
+        assert_eq!(retry.subject, Subject::enum_type("status"));
+        assert!(retry.recurs && !retry.blocks());
+        assert_eq!(
+            retry.text,
+            "migrating 'status': waiting for a lock (attempt 1 of 10, retry in 1s)"
         );
     }
 }
