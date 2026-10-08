@@ -91,7 +91,9 @@ def created_row_security(
         )
     )
     (add_table,) = [op for op in plan["operations"] if op["kind"] == "AddTable"]
-    return add_table["row_security_statements"], add_table["warnings"]
+    return add_table["row_security_statements"], [
+        report["text"] for report in add_table["reports"]
+    ]
 
 
 def _rewind_registry() -> None:

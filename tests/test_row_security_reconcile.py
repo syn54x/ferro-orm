@@ -219,10 +219,13 @@ def statements_of(plan: dict) -> list[str]:
 
 
 def warnings_of(plan: dict) -> list[str]:
+    """Every report's sentence: the plan's, then each op's rendering's."""
     return [
-        *plan["warnings"],
-        *(w for op in plan["operations"] for w in op["warnings"]),
-        *plan["always_warnings"],
+        report["text"]
+        for report in [
+            *plan["reports"],
+            *(report for op in plan["operations"] for report in op["reports"]),
+        ]
     ]
 
 

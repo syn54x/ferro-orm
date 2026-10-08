@@ -44,9 +44,10 @@ use super::{
 use crate::directory::{Headers, StepDialect, StepKind};
 use crate::order::order_by_dependencies;
 use crate::plan::enum_declaration;
-use crate::{Dialect, MigrationOp, MigrationPlan, render_plan};
+use crate::render::render_ops;
+use crate::{Dialect, MigrationOp};
 use ferro_ddl_lowering::{
-    ResolvedStorage, positioned_missing_enum_labels, quote_ident, quote_label,
+    ConstraintMode, ResolvedStorage, positioned_missing_enum_labels, quote_ident, quote_label,
     render_drop_constraint, render_pg_enum_add_value_at, render_validate_constraint,
     resolve_column_storage,
 };
@@ -833,14 +834,11 @@ fn nullability(
     old: &IrEnvelope<SchemaIrPayload>,
     new: &IrEnvelope<SchemaIrPayload>,
 ) -> Result<Vec<String>, GenerateError> {
-    let plan = MigrationPlan {
-        operations: vec![MigrationOp::AlterColumnNullability {
-            table: demand.table.clone(),
-            column: demand.column.clone(),
-        }],
-        ..MigrationPlan::default()
+    let op = MigrationOp::AlterColumnNullability {
+        table: demand.table.clone(),
+        column: demand.column.clone(),
     };
-    let rendered = render_plan(&plan, old, new, Dialect::Postgres)?;
+    let rendered = render_ops(&[op], old, new, Dialect::Postgres, ConstraintMode::Plain)?;
     super::refuse_unrendered(&rendered, Dialect::Postgres)?;
     Ok(rendered.into_iter().flat_map(|op| op.statements).collect())
 }
@@ -1073,11 +1071,7 @@ fn label_contract(
             .collect()
     };
     let rendered = |ops: Vec<MigrationOp>, old, new| -> Result<Vec<String>, GenerateError> {
-        let plan = MigrationPlan {
-            operations: ops,
-            ..MigrationPlan::default()
-        };
-        let rendered = render_plan(&plan, old, new, Dialect::Postgres)?;
+        let rendered = render_ops(&ops, old, new, Dialect::Postgres, ConstraintMode::Plain)?;
         super::refuse_unrendered(&rendered, Dialect::Postgres)?;
         Ok(rendered.into_iter().flat_map(|op| op.statements).collect())
     };

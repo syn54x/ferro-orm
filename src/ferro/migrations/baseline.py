@@ -73,9 +73,14 @@ class BaselineReport:
     drift: DriftReport | None
     steps: int = 0
     """How many step records were written."""
-    warnings: list[str] = field(default_factory=list)
+    reports: list[dict[str, Any]] = field(default_factory=list)
     """What the drift check reported without counting it as drift (a
     foreign or unverifiable row policy, ...), as ``drift`` reports it."""
+
+    @property
+    def warnings(self) -> list[str]:
+        """Each report's sentence, in order."""
+        return [report["text"] for report in self.reports]
 
     def render(self) -> str:
         """The text ``ferro migrate baseline`` prints on stdout."""
@@ -163,7 +168,7 @@ async def _record(
         drift = await against(plan["snapshot"], migration=plan["target"], using=name)
         if not drift.clean:
             return BaselineReport(
-                recorded=[], data_steps_listed=[], drift=drift, warnings=drift.warnings
+                recorded=[], data_steps_listed=[], drift=drift, reports=drift.reports
             )
         await _core._write_baseline_records(
             name, json.dumps(plan["records"]), tracking, handle
@@ -173,7 +178,7 @@ async def _record(
             data_steps_listed=list(plan["data_steps"]),
             drift=None,
             steps=len(plan["records"]),
-            warnings=drift.warnings,
+            reports=drift.reports,
         )
     finally:
         await _core._release_run_lock(handle)

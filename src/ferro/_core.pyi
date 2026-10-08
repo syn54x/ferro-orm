@@ -129,16 +129,6 @@ def _plan_reverse_from_ir(
     re-added column that demands values of existing rows)."""
     ...
 
-def _render_plan_ops(
-    old_ir_json: str, new_ir_json: str, dialect: str, operations_json: str
-) -> str:
-    """Render the planner ops ``operations_json`` (a plan's ``operations``)
-    as one plan from ``old_ir_json`` to ``new_ir_json`` on ``dialect``, in
-    order, through the same renderer ``_plan_from_ir(..., render=True)``
-    uses. Returns the JSON list of ops, each with ``statements`` and
-    ``warnings`` (an ``AddTable`` also ``row_security_statements``)."""
-    ...
-
 def _plan_from_ir(
     old_ir_json: str,
     new_ir_json: str,
@@ -146,6 +136,7 @@ def _plan_from_ir(
     options_json: str,
     render: bool = False,
     facts_json: str | None = None,
+    unrendered: list[int] | None = None,
 ) -> str:
     """The one planner: every change that turns one SchemaIR snapshot into another.
 
@@ -155,10 +146,20 @@ def _plan_from_ir(
     ``{"destructive": bool}``. ``facts_json`` is the live side-table
     ``_live_schema_ir`` returns beside a live envelope; omitted, the old
     snapshot reads as declared. Returns JSON
-    ``{"operations": [{"kind": ..., <op fields>}], "warnings": [...],
-    "always_warnings": [...]}``, ops in execution order; with ``render`` each op
-    also carries its ``statements`` and ``warnings`` for ``dialect`` — the
-    byte-identical statements the reconciliation pass executes (I-1).
+    ``{"operations": [{"kind": ..., <op fields>}], "reports": [...]}``, ops in
+    execution order. Each report is ``{"kind", "subject", "text", "recurs",
+    "blocks"}``:
+    ``kind`` is its name (``"PrimaryKeyKept"``) or ``{name: fields}``
+    (``{"HintRefused": {...}}``), ``subject`` is ``{"scope": "table",
+    "table": ...}`` (or ``column``, ``enum_type``, ``modelset``), ``text`` the
+    sentence printed, ``recurs`` whether it holds on every run until someone
+    acts, ``blocks`` whether it stands in for a statement its op does not
+    render (the op is left out, so a reviewed file refuses it). With ``render`` each op also carries its ``statements`` and
+    ``reports`` for ``dialect`` — the byte-identical statements the
+    reconciliation pass executes (I-1) — and an ``AddTable`` its
+    ``row_security_statements``; the ops at the ``unrendered`` indexes carry
+    none (the ones a caller writes its own way), and the rest render as that
+    subset alone.
     """
     ...
 

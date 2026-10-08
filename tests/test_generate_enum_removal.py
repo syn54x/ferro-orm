@@ -417,7 +417,7 @@ def test_the_alembic_translator_refuses_a_removal_naming_the_op():
                 "label": "canceled",
                 "columns": [],
                 "statements": [],
-                "warnings": [],
+                "reports": [],
             }
         ],
     }

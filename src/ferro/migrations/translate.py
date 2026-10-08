@@ -456,15 +456,19 @@ def translate(
     ``plan["dialect"]`` its dialect; each op may carry the generator's
     ``verdict`` (``_plan_step_verdicts``) for its marker. An op with
     ``irreversible`` becomes ``raise RuntimeError(<reason>)``. Going up, the
-    planner's ``warnings`` (reports with no op, such as an enum label the
-    model no longer declares) lead the revision as comments; its
-    ``always_warnings`` (a foreign or unverifiable row policy) stay the
+    planner's one-off ``reports`` (no op for them, such as an enum label the
+    model no longer declares) lead the revision as comments, by their text;
+    its recurring ones (a foreign or unverifiable row policy) stay the
     connect-time warnings they are (ADR-0019).
     """
     target = _Target(plan["target"], plan["dialect"])
     out: list[ops.MigrateOperation] = []
     if direction == "up":
-        out.extend(FerroWarningOp(warning) for warning in plan.get("warnings") or [])
+        out.extend(
+            FerroWarningOp(report["text"])
+            for report in plan.get("reports") or []
+            if not report["recurs"]
+        )
     for op in plan["operations"]:
         if op["kind"] in _SNAPSHOT_ONLY:
             raise RuntimeError(

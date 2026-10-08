@@ -561,18 +561,24 @@ pub fn extra_enum_labels(declared: &[String], live: &[String]) -> Vec<String> {
 /// The warn-never-act message for one drifted enum type, or `None` when
 /// nothing is extra. Single-sourced like [`refused_conversion_warning`]:
 /// callers emit it verbatim, never re-derive the wording.
-pub fn extra_enum_labels_warning(type_name: &str, extra: &[String]) -> Option<String> {
+pub fn extra_enum_labels_warning(type_name: &str, extra: &[String]) -> Option<Report> {
     if extra.is_empty() {
         return None;
     }
     let listed: Vec<String> = extra.iter().map(|l| format!("'{l}'")).collect();
-    Some(format!(
-        "Enum type '{}' has label(s) {} that the model no longer declares. \
-         Label addition is append-only: ferro never removes enum labels \
-         (existing rows may still hold them). Remove or rename labels with \
-         a reviewed Alembic migration.",
-        type_name,
-        listed.join(", ")
+    Some(Report::new(
+        ReportKind::ExtraEnumLabels {
+            labels: extra.to_vec(),
+        },
+        Subject::enum_type(type_name),
+        format!(
+            "Enum type '{}' has label(s) {} that the model no longer declares. \
+             Label addition is append-only: ferro never removes enum labels \
+             (existing rows may still hold them). Remove or rename labels with \
+             a reviewed Alembic migration.",
+            type_name,
+            listed.join(", ")
+        ),
     ))
 }
 
@@ -718,15 +724,19 @@ pub fn check_lists_label(definition: &str, label: &str) -> bool {
 /// still hold `old`, which the model now declares as `new`. The pass changes
 /// the schema and never rows (ADR-0014), so the relabel is a generated
 /// migration's. Emitted verbatim; never re-derived.
-pub fn stranded_label_rename_warning(table: &str, column: &str, old: &str, new: &str) -> String {
-    format!(
-        "Column '{table}.{column}' still holds the enum label {old_q}, which the model \
-         now declares as {new_q} (__ferro_renamed_labels__). SQLite keeps enum labels as \
-         text in the rows, and auto-migrate changes the schema, never the rows: they keep \
-         {old_q}, which the model no longer reads or writes. Generate the migration that \
-         relabels them with `ferro migrate new`.",
-        old_q = quote_label(old),
-        new_q = quote_label(new),
+pub fn stranded_label_rename_warning(table: &str, column: &str, old: &str, new: &str) -> Report {
+    Report::recurring(
+        ReportKind::StrandedLabelRename,
+        Subject::column(table, column),
+        format!(
+            "Column '{table}.{column}' still holds the enum label {old_q}, which the model \
+             now declares as {new_q} (__ferro_renamed_labels__). SQLite keeps enum labels as \
+             text in the rows, and auto-migrate changes the schema, never the rows: they keep \
+             {old_q}, which the model no longer reads or writes. Generate the migration that \
+             relabels them with `ferro migrate new`.",
+            old_q = quote_label(old),
+            new_q = quote_label(new),
+        ),
     )
 }
 
@@ -1183,8 +1193,8 @@ pub struct CheckEmission {
     /// the owning column's definition in `CREATE TABLE` or `ALTER TABLE ... ADD
     /// COLUMN` (SQLite `db_check` only).
     pub inline: Option<String>,
-    /// The skip warning when the dialect cannot emit the constraint.
-    pub warning: Option<String>,
+    /// The skip report when the dialect cannot emit the constraint.
+    pub warning: Option<Report>,
 }
 
 /// Single source for db_check emission: wrapper + dialect decision + body.
@@ -1309,12 +1319,16 @@ pub fn render_check_addition(
         Dialect::Sqlite => CheckEmission {
             statement: None,
             inline: None,
-            warning: Some(format!(
-                "Check constraint '{}' on column '{}.{}' is declared but missing from the \
-                 live table, and SQLite cannot add a constraint to an existing column (it \
-                 requires a full table rebuild). The invariant is not database-enforced; \
-                 generate a reviewed migration with `ferro migrate new` to apply it.",
-                check.name, table, check.column
+            warning: Some(sqlite_in_place_report(
+                InPlaceChange::AddCheck,
+                Subject::column(table, &check.column),
+                format!(
+                    "Check constraint '{}' on column '{}.{}' is declared but missing from the \
+                     live table, and SQLite cannot add a constraint to an existing column (it \
+                     requires a full table rebuild). The invariant is not database-enforced; \
+                     generate a reviewed migration with `ferro migrate new` to apply it.",
+                    check.name, table, check.column
+                ),
             )),
         },
     })
@@ -1356,12 +1370,16 @@ fn render_add_table_check(
         Dialect::Sqlite => CheckEmission {
             statement: None,
             inline: None,
-            warning: Some(format!(
-                "Table check '{}' is declared on '{}' but missing from the live table, and \
-                 SQLite cannot add a table constraint to an existing table (it requires a \
-                 full table rebuild). The invariant is not database-enforced; generate a \
-                 reviewed migration with `ferro migrate new` to apply it.",
-                check.name, table
+            warning: Some(sqlite_in_place_report(
+                InPlaceChange::AddCheck,
+                Subject::table(table),
+                format!(
+                    "Table check '{}' is declared on '{}' but missing from the live table, and \
+                     SQLite cannot add a table constraint to an existing table (it requires a \
+                     full table rebuild). The invariant is not database-enforced; generate a \
+                     reviewed migration with `ferro migrate new` to apply it.",
+                    check.name, table
+                ),
             )),
         },
     }
@@ -1378,8 +1396,8 @@ fn render_add_table_check(
 pub struct CheckRebuildEmission {
     /// DROP + ADD on Postgres; empty on SQLite.
     pub statements: Vec<String>,
-    /// The SQLite skip warning (SQLite only).
-    pub warning: Option<String>,
+    /// The SQLite skip report (SQLite only).
+    pub warning: Option<Report>,
 }
 
 /// Canonicalize a CHECK definition so catalog wrapping, identifier quotes,
@@ -1483,12 +1501,16 @@ pub fn render_check_rebuild(
         },
         Dialect::Sqlite => CheckRebuildEmission {
             statements: Vec::new(),
-            warning: Some(format!(
-                "CHECK constraint '{name}' on table '{table}' has a declared body that \
-                 differs from the live constraint, and SQLite cannot alter constraints in \
-                 place (it requires a full table rebuild). The live body remains; \
-                 generate a reviewed migration with `ferro migrate new` to apply the \
-                 declared predicate."
+            warning: Some(sqlite_in_place_report(
+                InPlaceChange::RebuildCheck,
+                Subject::table(table),
+                format!(
+                    "CHECK constraint '{name}' on table '{table}' has a declared body that \
+                     differs from the live constraint, and SQLite cannot alter constraints in \
+                     place (it requires a full table rebuild). The live body remains; \
+                     generate a reviewed migration with `ferro migrate new` to apply the \
+                     declared predicate."
+                ),
             )),
         },
     })
@@ -1529,17 +1551,23 @@ pub fn extra_check_names(
 /// Single-sourced like [`extra_enum_labels_warning`]: callers emit it verbatim,
 /// never re-derive the wording. Names every leftover and points at
 /// `migrate_destructive` / a reviewed migration (`ferro migrate new`).
-pub fn extra_check_names_warning(table: &str, extra: &[String]) -> Option<String> {
+pub fn extra_check_names_warning(table: &str, extra: &[String]) -> Option<Report> {
     if extra.is_empty() {
         return None;
     }
     let listed: Vec<String> = extra.iter().map(|name| format!("'{name}'")).collect();
-    Some(format!(
-        "Table '{table}' has CHECK constraint(s) {} that the model no longer \
-         declares. Leftover CHECKs keep rejecting rows the model now allows. \
-         They stay in place unless you pass migrate_destructive=True (Postgres) \
-         or drop them with a reviewed migration (`ferro migrate new`).",
-        listed.join(", "),
+    Some(Report::new(
+        ReportKind::LeftoverChecks {
+            names: extra.to_vec(),
+        },
+        Subject::table(table),
+        format!(
+            "Table '{table}' has CHECK constraint(s) {} that the model no longer \
+             declares. Leftover CHECKs keep rejecting rows the model now allows. \
+             They stay in place unless you pass migrate_destructive=True (Postgres) \
+             or drop them with a reviewed migration (`ferro migrate new`).",
+            listed.join(", "),
+        ),
     ))
 }
 
@@ -1559,11 +1587,15 @@ pub fn render_check_drop(table: &str, name: &str, dialect: Dialect) -> CheckEmis
         Dialect::Sqlite => CheckEmission {
             statement: None,
             inline: None,
-            warning: Some(format!(
-                "CHECK constraint '{name}' on table '{table}' is no longer declared, \
-                 and SQLite cannot drop a table constraint in place (it requires a \
-                 full table rebuild). The live constraint remains; generate a \
-                 reviewed migration with `ferro migrate new` to drop it."
+            warning: Some(sqlite_in_place_report(
+                InPlaceChange::DropCheck,
+                Subject::table(table),
+                format!(
+                    "CHECK constraint '{name}' on table '{table}' is no longer declared, \
+                     and SQLite cannot drop a table constraint in place (it requires a \
+                     full table rebuild). The live constraint remains; generate a \
+                     reviewed migration with `ferro migrate new` to drop it."
+                ),
             )),
         },
     }
@@ -1846,8 +1878,8 @@ pub fn render_no_force_row_security(table: &str) -> String {
 pub struct RowSecurityEmission {
     /// ENABLE, FORCE (when declared), then one CREATE POLICY per policy.
     pub statements: Vec<String>,
-    /// The SQLite skip warning — one per table, never one per policy.
-    pub warning: Option<String>,
+    /// The SQLite skip report — one per table, never one per policy.
+    pub warning: Option<Report>,
 }
 
 /// Every row-security statement a newly created table needs, in execution
@@ -1885,13 +1917,17 @@ pub fn row_security_statements(
     })
 }
 
-/// The SQLite skip warning — one per table, single-sourced so the create path
+/// The SQLite skip report — one per table, single-sourced so the create path
 /// and the existing-table path say the same thing.
-fn sqlite_row_security_warning(table: &str) -> String {
-    format!(
-        "Table '{table}' declares __ferro_rls__, but row-level security is a \
-         PostgreSQL-only feature: the table is created without its policies and \
-         rows are NOT filtered on SQLite. Run against PostgreSQL for enforcement."
+fn sqlite_row_security_warning(table: &str) -> Report {
+    Report::new(
+        ReportKind::RowSecuritySkipped,
+        Subject::table(table),
+        format!(
+            "Table '{table}' declares __ferro_rls__, but row-level security is a \
+             PostgreSQL-only feature: the table is created without its policies and \
+             rows are NOT filtered on SQLite. Run against PostgreSQL for enforcement."
+        ),
     )
 }
 
@@ -1913,18 +1949,26 @@ fn sqlite_row_security_warning(table: &str) -> String {
 pub fn row_security_existing_table_warning(
     model: &ferro_schema_ir::SchemaModel,
     dialect: Dialect,
-) -> Option<String> {
+) -> Option<Report> {
     model.row_security.as_ref()?;
-    Some(match dialect {
+    let report = match dialect {
         Dialect::Sqlite => sqlite_row_security_warning(&model.table_name),
-        Dialect::Postgres => format!(
-            "Table '{}' declares __ferro_rls__, but the table already exists and the \
-             create pass never alters an existing table (ADR-0010). Its row-security \
-             flags and policies were NOT applied — rows are NOT filtered. Connect with \
-             migrate_updates=True to reconcile them, or apply them with a reviewed \
-             migration.",
-            model.table_name
+        Dialect::Postgres => Report::new(
+            ReportKind::RowSecuritySkipped,
+            Subject::table(&model.table_name),
+            format!(
+                "Table '{}' declares __ferro_rls__, but the table already exists and the \
+                 create pass never alters an existing table (ADR-0010). Its row-security \
+                 flags and policies were NOT applied — rows are NOT filtered. Connect with \
+                 migrate_updates=True to reconcile them, or apply them with a reviewed \
+                 migration.",
+                model.table_name
+            ),
         ),
+    };
+    Some(Report {
+        recurs: true,
+        ..report
     })
 }
 
@@ -2220,33 +2264,45 @@ pub fn extra_row_policy_names(
 /// CHECK rejects rows the model now allows, while a leftover policy may be the
 /// only thing standing between two tenants — so ferro never drops one outside
 /// `migrate_destructive` (ADR-0013's ladder).
-pub fn extra_row_policy_names_warning(table: &str, extra: &[String]) -> Option<String> {
+pub fn extra_row_policy_names_warning(table: &str, extra: &[String]) -> Option<Report> {
     if extra.is_empty() {
         return None;
     }
     let listed: Vec<String> = extra.iter().map(|name| format!("'{name}'")).collect();
-    Some(format!(
-        "Table '{table}' has row policy/policies {} that the model no longer \
-         declares. They are still filtering rows. Ferro leaves them in place \
-         unless you pass migrate_destructive=True — dropping a policy removes \
-         protection, so it is never automatic.",
-        listed.join(", "),
+    Some(Report::recurring(
+        ReportKind::ExtraPolicies {
+            names: extra.to_vec(),
+        },
+        Subject::table(table),
+        format!(
+            "Table '{table}' has row policy/policies {} that the model no longer \
+             declares. They are still filtering rows. Ferro leaves them in place \
+             unless you pass migrate_destructive=True — dropping a policy removes \
+             protection, so it is never automatic.",
+            listed.join(", "),
+        ),
     ))
 }
 
 /// The warning for live policies ferro does not own (their names do not start
 /// with `rls_`). Ferro never alters or drops one — but it never pretends the
 /// table is only what the model declares, either.
-pub fn foreign_row_policy_warning(table: &str, foreign: &[String]) -> Option<String> {
+pub fn foreign_row_policy_warning(table: &str, foreign: &[String]) -> Option<Report> {
     if foreign.is_empty() {
         return None;
     }
     let listed: Vec<String> = foreign.iter().map(|name| format!("'{name}'")).collect();
-    Some(format!(
-        "Table '{table}' carries row policy/policies {} that ferro does not own \
-         (their names do not start with 'rls_'). They still filter rows and \
-         compose with the declared policies. Ferro never alters or drops them.",
-        listed.join(", "),
+    Some(Report::recurring(
+        ReportKind::ForeignPolicies {
+            names: foreign.to_vec(),
+        },
+        Subject::table(table),
+        format!(
+            "Table '{table}' carries row policy/policies {} that ferro does not own \
+             (their names do not start with 'rls_'). They still filter rows and \
+             compose with the declared policies. Ferro never alters or drops them.",
+            listed.join(", "),
+        ),
     ))
 }
 
@@ -2258,16 +2314,22 @@ pub fn unverifiable_row_policy_warning(
     name: &str,
     declared: &str,
     live: &str,
-) -> String {
-    format!(
-        "Row policy '{name}' on table '{table}' is declared with a raw \
-         using=/with_check= expression whose live definition no longer matches \
-         the declaration as ferro reads it.\n  declared: {declared}\n  live:     \
-         {live}\nPostgres stores its own rewriting of raw SQL, so ferro cannot \
-         tell an edited expression from a re-spelled one and does NOT rebuild \
-         it. If you changed the declaration, apply it with a reviewed migration \
-         (or drop the policy and reconnect, and ferro will create it from the \
-         declaration)."
+) -> Report {
+    Report::recurring(
+        ReportKind::UnverifiablePolicy {
+            name: name.to_string(),
+        },
+        Subject::table(table),
+        format!(
+            "Row policy '{name}' on table '{table}' is declared with a raw \
+             using=/with_check= expression whose live definition no longer matches \
+             the declaration as ferro reads it.\n  declared: {declared}\n  live:     \
+             {live}\nPostgres stores its own rewriting of raw SQL, so ferro cannot \
+             tell an edited expression from a re-spelled one and does NOT rebuild \
+             it. If you changed the declaration, apply it with a reviewed migration \
+             (or drop the policy and reconnect, and ferro will create it from the \
+             declaration)."
+        ),
     )
 }
 
@@ -2284,15 +2346,21 @@ pub fn row_policy_body_replaced_warning(
     name: &str,
     declared: &str,
     live: &str,
-) -> String {
-    format!(
-        "Row policy '{name}' on table '{table}' was rebuilt because its \
-         metadata (command, permissive/restrictive, clauses or roles) no longer \
-         matched the declaration, and the rebuild REPLACED its live raw body \
-         with the declared one.\n  declared: {declared}\n  live was:  \
-         {live}\nFerro cannot tell an edited raw expression from Postgres's own \
-         re-spelling of it, so if the live body held a change that is not in \
-         your model, it is gone. Re-apply it in the declaration."
+) -> Report {
+    Report::recurring(
+        ReportKind::PolicyBodyReplaced {
+            name: name.to_string(),
+        },
+        Subject::table(table),
+        format!(
+            "Row policy '{name}' on table '{table}' was rebuilt because its \
+             metadata (command, permissive/restrictive, clauses or roles) no longer \
+             matched the declaration, and the rebuild REPLACED its live raw body \
+             with the declared one.\n  declared: {declared}\n  live was:  \
+             {live}\nFerro cannot tell an edited raw expression from Postgres's own \
+             re-spelling of it, so if the live body held a change that is not in \
+             your model, it is gone. Re-apply it in the declaration."
+        ),
     )
 }
 
@@ -2345,9 +2413,9 @@ pub fn missing_row_security_flag_statements(
 pub fn dropped_row_security_warning(
     model: &ferro_schema_ir::SchemaModel,
     live: &LiveRowSecurity,
-) -> Option<String> {
+) -> Option<Report> {
     let table = &model.table_name;
-    match model.row_security.as_ref() {
+    let text = match model.row_security.as_ref() {
         // Only a table ferro managed can have had its declaration dropped.
         // RLS someone else enabled by hand is theirs, and accusing them of it
         // on every connect is how a warning becomes noise
@@ -2366,7 +2434,12 @@ pub fn dropped_row_security_warning(
              with migrate_destructive=True if that is what you want."
         )),
         _ => None,
-    }
+    }?;
+    Some(Report::recurring(
+        ReportKind::DroppedRowSecurity,
+        Subject::table(table),
+        text,
+    ))
 }
 
 /// The flag statements that undo row security a live table carries but the
@@ -2410,7 +2483,7 @@ pub fn row_security_teardown_warning(
     table: &str,
     dropped_policies: &[String],
     flag_statements: &[String],
-) -> Option<String> {
+) -> Option<Report> {
     if dropped_policies.is_empty() && flag_statements.is_empty() {
         return None;
     }
@@ -2429,11 +2502,17 @@ pub fn row_security_teardown_warning(
             parts.push("disabled ROW LEVEL SECURITY".to_string());
         }
     }
-    Some(format!(
-        "migrate_destructive tore down row security on table '{table}': {}. \
-         Rows on this table are no longer filtered by the artifacts ferro \
-         owned.",
-        parts.join("; "),
+    Some(Report::recurring(
+        ReportKind::RowSecurityTeardown {
+            names: dropped_policies.to_vec(),
+        },
+        Subject::table(table),
+        format!(
+            "migrate_destructive tore down row security on table '{table}': {}. \
+             Rows on this table are no longer filtered by the artifacts ferro \
+             owned.",
+            parts.join("; "),
+        ),
     ))
 }
 
@@ -2444,7 +2523,7 @@ pub fn row_security_teardown_warning(
 /// `FORCE ROW LEVEL SECURITY`. Callers only pass them when the connected role
 /// is neither a superuser nor `BYPASSRLS` — those roles are exempt and get no
 /// warning.
-pub fn row_security_migrator_warning(forced_tables: &[String]) -> Option<String> {
+pub fn row_security_migrator_warning(forced_tables: &[String]) -> Option<Report> {
     if forced_tables.is_empty() {
         return None;
     }
@@ -2452,13 +2531,17 @@ pub fn row_security_migrator_warning(forced_tables: &[String]) -> Option<String>
         .iter()
         .map(|name| format!("'{name}'"))
         .collect();
-    Some(format!(
-        "The connected role is neither a superuser nor BYPASSRLS, and this \
-         migration touches table(s) {} with FORCE ROW LEVEL SECURITY. Row policies \
-         apply to the migrating role too, so a backfill or data step can silently \
-         see and update zero rows. Migrate as a role with BYPASSRLS if this pass \
-         moves data.",
-        listed.join(", "),
+    Some(Report::recurring(
+        ReportKind::RowSecurityUnderMigrator,
+        Subject::Modelset,
+        format!(
+            "The connected role is neither a superuser nor BYPASSRLS, and this \
+             migration touches table(s) {} with FORCE ROW LEVEL SECURITY. Row policies \
+             apply to the migrating role too, so a backfill or data step can silently \
+             see and update zero rows. Migrate as a role with BYPASSRLS if this pass \
+             moves data.",
+            listed.join(", "),
+        ),
     ))
 }
 
@@ -2478,8 +2561,8 @@ pub struct RowSecurityReconcilePlan {
     /// DDL in execution order: flags, additions, rebuilds, then (only under
     /// `destructive`) orphan drops.
     pub statements: Vec<String>,
-    /// Warnings the caller emits verbatim.
-    pub warnings: Vec<String>,
+    /// Reports the caller surfaces, every one recurring.
+    pub reports: Vec<Report>,
 }
 
 /// The row-security reconciliation decision for ONE live table — the single
@@ -2528,7 +2611,7 @@ pub fn plan_row_security_reconcile(
     if !destructive
         && let Some(warning) = dropped_row_security_warning(model, live)
     {
-        plan.warnings.push(warning);
+        plan.reports.push(warning);
     }
 
     plan.foreign = live
@@ -2538,7 +2621,7 @@ pub fn plan_row_security_reconcile(
         .map(|policy| policy.name.clone())
         .collect();
     if let Some(warning) = foreign_row_policy_warning(table, &plan.foreign) {
-        plan.warnings.push(warning);
+        plan.reports.push(warning);
     }
 
     plan.statements
@@ -2578,7 +2661,7 @@ pub fn plan_row_security_reconcile(
                 if matches!(policy.expr, ferro_schema_ir::RowPolicyExpr::Raw { .. }) {
                     let (using, with_check) = row_policy_clauses(model, policy)?;
                     if !row_policy_bodies_match(&using, &with_check, live_policy) {
-                        plan.warnings.push(row_policy_body_replaced_warning(
+                        plan.reports.push(row_policy_body_replaced_warning(
                             table,
                             &policy.name,
                             &describe_clauses(using.as_deref(), with_check.as_deref()),
@@ -2593,7 +2676,7 @@ pub fn plan_row_security_reconcile(
             RowPolicyDrift::Unverifiable => {
                 let (using, with_check) = row_policy_clauses(model, policy)?;
                 plan.unverifiable.push(policy.name.clone());
-                plan.warnings.push(unverifiable_row_policy_warning(
+                plan.reports.push(unverifiable_row_policy_warning(
                     table,
                     &policy.name,
                     &describe_clauses(using.as_deref(), with_check.as_deref()),
@@ -2620,10 +2703,10 @@ pub fn plan_row_security_reconcile(
         let flag_statements = excess_row_security_flag_statements(model, live);
         plan.statements.extend(flag_statements.iter().cloned());
         if let Some(warning) = row_security_teardown_warning(table, &plan.extra, &flag_statements) {
-            plan.warnings.push(warning);
+            plan.reports.push(warning);
         }
     } else if let Some(warning) = extra_row_policy_names_warning(table, &plan.extra) {
-        plan.warnings.push(warning);
+        plan.reports.push(warning);
     }
 
     Ok(plan)
@@ -3336,8 +3419,8 @@ pub fn refused_conversion_warning(
     old_db_type: &str,
     new_target: &str,
     keep_db_type: &str,
-) -> String {
-    match kind {
+) -> Report {
+    let text = match kind {
         RefusedConversion::TimestampTz => {
             timestamp_tz_conversion_warning(table, column, old_db_type, new_target, keep_db_type)
         }
@@ -3358,7 +3441,12 @@ pub fn refused_conversion_warning(
              it intentionally, use a reviewed migration (Alembic) with an explicit \
              USING cast."
         ),
-    }
+    };
+    Report::new(
+        ReportKind::RefusedConversion,
+        Subject::column(table, column),
+        text,
+    )
 }
 
 /// SQLite declared-type string for a canonical type (parity-pinned; matches
@@ -3503,6 +3591,489 @@ pub fn render_json_backfill_default(
         Dialect::Sqlite => format!("'{body}'"),
     })
 }
+
+// ---------------------------------------------------------------------------
+// Plan reports (ADR-0050, ADR-0049): what the planner, the renderer and the
+// reconciliation pass tell their reader that is not a change they make. One
+// vocabulary for every door, so a reader acts on the kind and never on the
+// sentence. Every `*_warning` builder in this crate returns one; the text is
+// the sentence each has always printed.
+// ---------------------------------------------------------------------------
+
+/// One thing a plan, a rendering or a pass tells its reader that is not a
+/// change it makes. `text` is the sentence printed for a person; `kind` and
+/// `subject` are what a program reads. `recurs` says it describes a standing
+/// condition of the live database that holds on every run until someone
+/// acts, so a caller says it every time (the "always" channel).
+///
+/// On the wire it also carries `blocks` ([`Report::blocks`]), so a reader in
+/// another language acts on the one decision and never re-derives it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Report {
+    /// What is reported.
+    pub kind: ReportKind,
+    /// What it is about.
+    pub subject: Subject,
+    /// The sentence, exactly as printed.
+    pub text: String,
+    /// It holds on every run until someone acts, and is said every time.
+    pub recurs: bool,
+}
+
+impl Report {
+    fn new(kind: ReportKind, subject: Subject, text: String) -> Self {
+        Self {
+            kind,
+            subject,
+            text,
+            recurs: false,
+        }
+    }
+
+    fn recurring(kind: ReportKind, subject: Subject, text: String) -> Self {
+        Self {
+            recurs: true,
+            ..Self::new(kind, subject, text)
+        }
+    }
+
+    /// Whether this report stands in for an op that renders no statement: a
+    /// rendering that only reports one of these leaves its change undone, so
+    /// a door that writes a reviewed file refuses it rather than leave it
+    /// out. A planner or pass report never blocks, and neither does the
+    /// row-security skip on a new SQLite table, whose table is created.
+    pub fn blocks(&self) -> bool {
+        matches!(
+            self.kind,
+            ReportKind::RefusedConversion
+                | ReportKind::SqliteInPlace { .. }
+                | ReportKind::PrimaryKeyKept
+        )
+    }
+}
+
+impl serde::Serialize for Report {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut out = serializer.serialize_struct("Report", 5)?;
+        out.serialize_field("kind", &self.kind)?;
+        out.serialize_field("subject", &self.subject)?;
+        out.serialize_field("text", &self.text)?;
+        out.serialize_field("recurs", &self.recurs)?;
+        out.serialize_field("blocks", &self.blocks())?;
+        out.end()
+    }
+}
+
+impl std::fmt::Display for Report {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text)
+    }
+}
+
+/// What a [`Report`] is about.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "scope", rename_all = "snake_case")]
+pub enum Subject {
+    /// The modelset as a whole (two tables claiming one old name, the tables a
+    /// role is forced under).
+    Modelset,
+    /// One table.
+    Table {
+        /// The table.
+        table: String,
+    },
+    /// One column.
+    Column {
+        /// Its table.
+        table: String,
+        /// The column.
+        column: String,
+    },
+    /// One enum type.
+    EnumType {
+        /// The type.
+        type_name: String,
+    },
+}
+
+impl Subject {
+    /// [`Subject::Table`].
+    pub fn table(table: &str) -> Self {
+        Subject::Table {
+            table: table.to_string(),
+        }
+    }
+
+    /// [`Subject::Column`].
+    pub fn column(table: &str, column: &str) -> Self {
+        Subject::Column {
+            table: table.to_string(),
+            column: column.to_string(),
+        }
+    }
+
+    /// [`Subject::EnumType`].
+    pub fn enum_type(type_name: &str) -> Self {
+        Subject::EnumType {
+            type_name: type_name.to_string(),
+        }
+    }
+}
+
+/// The kind of a [`Report`]: the planner's, the renderer's, then the
+/// reconciliation pass's own. Serializes as its name, or `{name: fields}`.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub enum ReportKind {
+    // -- the planner's ----------------------------------------------------
+    /// A declared rename hint that cannot be meant (ADR-0032): nothing is
+    /// renamed.
+    HintRefused(HintError),
+    /// Live ferro-owned checks the model no longer declares (ADR-0013),
+    /// answered by the plan's drop of each.
+    LeftoverChecks {
+        /// The checks, in live order.
+        names: Vec<String>,
+    },
+    /// Live labels of an enum type the model no longer declares (ADR-0011:
+    /// warn, never act).
+    ExtraEnumLabels {
+        /// The labels, in live order.
+        labels: Vec<String>,
+    },
+    /// A foreign key that drifts from the model under a name ferro does not
+    /// own, left untouched.
+    ForeignFkDrift {
+        /// The foreign-key column.
+        column: String,
+        /// The live constraint's name.
+        name: String,
+    },
+    /// Row security the live table carries that the model no longer asks
+    /// for (the declaration, or `force`), left in place (#413).
+    DroppedRowSecurity,
+    /// Live policies ferro does not own; never touched.
+    ForeignPolicies {
+        /// The policies.
+        names: Vec<String>,
+    },
+    /// A raw policy body ferro cannot verify, left as it is (ADR-0019).
+    UnverifiablePolicy {
+        /// The policy.
+        name: String,
+    },
+    /// A raw policy rebuilt for its metadata, whose live body the rebuild
+    /// replaced.
+    PolicyBodyReplaced {
+        /// The policy.
+        name: String,
+    },
+    /// What `migrate_destructive` tore down on a table.
+    RowSecurityTeardown {
+        /// The policies dropped.
+        names: Vec<String>,
+    },
+    /// Live ferro-owned policies the model no longer declares, left in place.
+    ExtraPolicies {
+        /// The policies.
+        names: Vec<String>,
+    },
+    // -- the renderer's ---------------------------------------------------
+    /// A storage conversion that could reinterpret or destroy stored values,
+    /// not executed.
+    RefusedConversion,
+    /// A change SQLite cannot make to an existing table in place: it needs a
+    /// table rebuild, which only a generated migration writes.
+    SqliteInPlace {
+        /// The change.
+        what: InPlaceChange,
+    },
+    /// A table's declared primary key differs from its live one, and no door
+    /// changes a primary key in place.
+    PrimaryKeyKept,
+    /// Row security a table declares and the database does not apply: SQLite
+    /// has none, or the create pass met the table already there.
+    RowSecuritySkipped,
+    // -- the reconciliation pass's ----------------------------------------
+    /// A live table rename hint a pass that does not reconcile leaves
+    /// pending.
+    PendingTableRename,
+    /// A SQLite column whose rows still hold a label the model renamed.
+    StrandedLabelRename,
+    /// The migrating role is itself bound by the `FORCE` policies it
+    /// maintains.
+    RowSecurityUnderMigrator,
+    /// The pass waited for another run's lock.
+    RunLockWait,
+    /// A DDL statement timed out waiting for its lock and is retried.
+    DdlLockRetry,
+}
+
+/// The in-place change a [`ReportKind::SqliteInPlace`] names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+pub enum InPlaceChange {
+    /// Add a foreign key to an existing column, or with an added `NOT NULL`
+    /// column.
+    AddForeignKey,
+    /// Change a foreign key's action or target.
+    RebuildForeignKey,
+    /// Add a check constraint.
+    AddCheck,
+    /// Change a check constraint's body.
+    RebuildCheck,
+    /// Drop a check constraint.
+    DropCheck,
+    /// Rename a table constraint.
+    RenameConstraint,
+    /// Change a column's type.
+    AlterColumnType,
+    /// Change a column's nullability.
+    AlterColumnNullability,
+}
+
+/// [`ReportKind::SqliteInPlace`] on `subject`, with the sentence saying so.
+pub fn sqlite_in_place_report(what: InPlaceChange, subject: Subject, text: String) -> Report {
+    Report::new(ReportKind::SqliteInPlace { what }, subject, text)
+}
+
+/// [`ReportKind::ForeignFkDrift`]: the foreign key on `table.column` drifts
+/// from the model (`live` and `declared` are each its `(referenced table,
+/// ON DELETE action)`), but the live constraint `name` is not ferro-owned, so
+/// it is left untouched — and never silently.
+pub fn foreign_fk_drift_warning(
+    table: &str,
+    column: &str,
+    name: &str,
+    live: (&str, &str),
+    declared: (&str, &str),
+) -> Report {
+    Report::new(
+        ReportKind::ForeignFkDrift {
+            column: column.to_string(),
+            name: name.to_string(),
+        },
+        Subject::column(table, column),
+        format!(
+            "Foreign key on '{}.{}' drifts from the model (live: REFERENCES {} \
+             ON DELETE {}; declared: REFERENCES {} ON DELETE {}), but the live \
+             constraint '{}' is not ferro-owned, so it is left untouched. \
+             Migrate it manually or with Alembic.",
+            table, column, live.0, live.1, declared.0, declared.1, name,
+        ),
+    )
+}
+
+/// [`ReportKind::PrimaryKeyKept`]: `table` declares primary key `declared`
+/// and holds `live`.
+pub fn primary_key_kept_warning(table: &str, declared: &[String], live: &[String]) -> Report {
+    Report::new(
+        ReportKind::PrimaryKeyKept,
+        Subject::table(table),
+        format!(
+            "Table '{}' declares primary key ({}) but its primary key is ({}). A \
+             primary key cannot be changed in place, so the live key remains; \
+             generate a reviewed migration with `ferro migrate new`.",
+            table,
+            declared.join(", "),
+            live.join(", "),
+        ),
+    )
+}
+
+/// The pass's warning for a live table hint on a pass that does not
+/// reconcile (`connect(auto_migrate=True)`, `create_tables()`): table `new` is
+/// neither renamed nor created beside its old self, nor is any new table in
+/// `waiting` that references it, and the two doors that rename it are named.
+/// It holds until a door renames the table, so it recurs.
+pub fn pending_table_rename_warning(old: &str, new: &str, waiting: &[String]) -> Report {
+    let waiting = match waiting {
+        [] => String::new(),
+        tables => {
+            let quoted: Vec<String> = tables.iter().map(|t| format!("\"{t}\"")).collect();
+            format!(", nor {}, which reference it", and_list(&quoted))
+        }
+    };
+    Report::recurring(
+        ReportKind::PendingTableRename,
+        Subject::table(new),
+        format!(
+            "table \"{new}\" declares __ferro_renamed_from__ = \"{old}\", and the database \
+             holds \"{old}\" and no \"{new}\": \"{new}\" was not created{waiting}. The rename \
+             runs under connect(..., migrate_updates=True) or in a migration from ferro \
+             migrate new."
+        ),
+    )
+}
+
+/// The report for a refused rename hint, on every door that plans without
+/// refusing outright (the reconciliation pass, `drift`): the hint renames
+/// nothing, on every run until the declaration changes.
+pub fn hint_refusal_warning(refusal: &HintError) -> Report {
+    let subject = match refusal {
+        HintError::OldStillDeclared {
+            table,
+            field: Some(field),
+            ..
+        } => Subject::column(table, field),
+        HintError::OldStillDeclared {
+            table, field: None, ..
+        }
+        | HintError::Ambiguous {
+            table: Some(table), ..
+        } => Subject::table(table),
+        HintError::Ambiguous { table: None, .. } => Subject::Modelset,
+        HintError::LabelStillDeclared { type_name, .. }
+        | HintError::AmbiguousLabel { type_name, .. } => Subject::enum_type(type_name),
+    };
+    Report::recurring(
+        ReportKind::HintRefused(refusal.clone()),
+        subject,
+        format!("rename hint refused: {refusal}"),
+    )
+}
+
+/// A declared rename hint that cannot be meant (ADR-0032). Every hint is
+/// checked, live or inert: neither shape can be meant.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub enum HintError {
+    /// The hint's old name is still declared: a field (`field`) or a model
+    /// (`field` is `None`) cannot be renamed from one the models keep.
+    OldStillDeclared {
+        /// The table declaring the hint.
+        table: String,
+        /// The hinted column, or `None` for a table hint.
+        field: Option<String>,
+        /// The name the hint claims.
+        old: String,
+    },
+    /// Two declarations claim one old name: within `table` (two columns), or
+    /// across the modelset (`table` is `None`, two tables).
+    Ambiguous {
+        /// The table whose columns claim it, or `None` for tables.
+        table: Option<String>,
+        /// The name they all claim.
+        old: String,
+        /// Every claimant, in declaration order: columns, or tables.
+        claimants: Vec<String>,
+    },
+    /// A label rename hint whose old label the enum still declares: a label
+    /// cannot be renamed from one the enum keeps.
+    LabelStillDeclared {
+        /// The enum class declaring the hint.
+        enum_class: String,
+        /// Its type name.
+        type_name: String,
+        /// The hinted label.
+        new: String,
+        /// The label the hint claims it was.
+        old: String,
+    },
+    /// Two labels of one enum declare the same old label.
+    AmbiguousLabel {
+        /// The enum class declaring the hints.
+        enum_class: String,
+        /// Its type name.
+        type_name: String,
+        /// The label they all claim.
+        old: String,
+        /// Every claimant, in label order.
+        claimants: Vec<String>,
+    },
+}
+
+/// `"a"`, `"a" and "b"`, `"a", "b" and "c"`: the one list joiner, for every
+/// refusal and warning that names several things.
+pub fn and_list(names: &[String]) -> String {
+    match names {
+        [] => String::new(),
+        [only] => only.clone(),
+        [init @ .., last] => format!("{} and {last}", init.join(", ")),
+    }
+}
+
+impl std::fmt::Display for HintError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HintError::OldStillDeclared {
+                table,
+                field: Some(field),
+                old,
+            } => write!(
+                f,
+                "{table}.{field} declares renamed_from=\"{old}\", but {table} still declares \
+                 \"{old}\": a field cannot be renamed from one the model keeps; delete the \
+                 hint or the old field"
+            ),
+            HintError::OldStillDeclared {
+                table,
+                field: None,
+                old,
+            } => write!(
+                f,
+                "table \"{table}\" declares __ferro_renamed_from__ = \"{old}\", but the models \
+                 still declare table \"{old}\": delete the hint or the old model"
+            ),
+            HintError::Ambiguous {
+                table: Some(table),
+                old,
+                claimants,
+            } => {
+                let fields: Vec<String> = claimants
+                    .iter()
+                    .map(|column| format!("{table}.{column}"))
+                    .collect();
+                write!(
+                    f,
+                    "{} all declare renamed_from=\"{old}\": one column becomes one column; \
+                     keep the hint on the field \"{old}\" became",
+                    and_list(&fields)
+                )
+            }
+            HintError::Ambiguous {
+                table: None,
+                old,
+                claimants,
+            } => {
+                let tables: Vec<String> = claimants.iter().map(|t| format!("\"{t}\"")).collect();
+                write!(
+                    f,
+                    "tables {} all declare __ferro_renamed_from__ = \"{old}\": one table becomes \
+                     one table; keep the hint on the model \"{old}\" became",
+                    and_list(&tables)
+                )
+            }
+            HintError::LabelStillDeclared {
+                enum_class,
+                type_name,
+                new,
+                old,
+            } => write!(
+                f,
+                "enum {enum_class} (type \"{type_name}\") declares __ferro_renamed_labels__ \
+                 {{\"{new}\": \"{old}\"}}, but {enum_class} still declares the label \"{old}\": a \
+                 label cannot be renamed from one the enum keeps; delete the hint or the old \
+                 member"
+            ),
+            HintError::AmbiguousLabel {
+                enum_class,
+                type_name,
+                old,
+                claimants,
+            } => {
+                let labels: Vec<String> = claimants.iter().map(|l| format!("\"{l}\"")).collect();
+                write!(
+                    f,
+                    "enum {enum_class} (type \"{type_name}\") declares labels {} all renamed \
+                     from \"{old}\": one label becomes one label; keep the hint on the label \
+                     \"{old}\" became",
+                    and_list(&labels)
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for HintError {}
 
 #[cfg(test)]
 mod tests {
@@ -3694,7 +4265,7 @@ mod tests {
         )
         .expect("declared table check must resolve");
         assert!(emission.statement.is_none(), "ADR-0014: no SQLite ALTER");
-        let warning = emission.warning.expect("SQLite must never skip silently");
+        let warning = emission.warning.expect("SQLite must never skip silently").text;
         assert!(
             warning.contains("ck_transfer_at_most_one_outflow"),
             "{warning}"
@@ -3722,7 +4293,7 @@ mod tests {
             emission.inline.is_none(),
             "no column definition to carry it"
         );
-        let warning = emission.warning.expect("SQLite must never skip silently");
+        let warning = emission.warning.expect("SQLite must never skip silently").text;
         assert!(warning.contains("ck_transfer_kind"), "{warning}");
         assert!(warning.contains("ferro migrate new"), "{warning}");
         assert!(!warning.contains("Alembic"), "{warning}");
@@ -4127,7 +4698,7 @@ mod tests {
         )
         .expect("declared table check must resolve");
         assert!(emission.statements.is_empty(), "ADR-0014: no SQLite ALTER");
-        let warning = emission.warning.expect("SQLite must never skip silently");
+        let warning = emission.warning.expect("SQLite must never skip silently").text;
         assert!(
             warning.contains("ck_transfer_at_most_one_outflow"),
             "{warning}"
@@ -4198,14 +4769,19 @@ mod tests {
                     "ck_transfer_kind".to_string(),
                 ],
             ),
-            Some(
-                "Table 'transfer' has CHECK constraint(s) 'ck_transfer_orphan', \
-                 'ck_transfer_kind' that the model no longer declares. Leftover \
-                 CHECKs keep rejecting rows the model now allows. They stay in \
-                 place unless you pass migrate_destructive=True (Postgres) or \
-                 drop them with a reviewed migration (`ferro migrate new`)."
-                    .to_string()
-            )
+            Some(Report {
+                kind: ReportKind::LeftoverChecks {
+                    names: vec!["ck_transfer_orphan".into(), "ck_transfer_kind".into()],
+                },
+                subject: Subject::table("transfer"),
+                text: "Table 'transfer' has CHECK constraint(s) 'ck_transfer_orphan', \
+                       'ck_transfer_kind' that the model no longer declares. Leftover \
+                       CHECKs keep rejecting rows the model now allows. They stay in \
+                       place unless you pass migrate_destructive=True (Postgres) or \
+                       drop them with a reviewed migration (`ferro migrate new`)."
+                    .to_string(),
+                recurs: false,
+            })
         );
         assert_eq!(extra_check_names_warning("transfer", &[]), None);
     }
@@ -4224,7 +4800,7 @@ mod tests {
     fn render_check_drop_warns_and_skips_on_sqlite() {
         let emission = render_check_drop("transfer", "ck_transfer_orphan", Dialect::Sqlite);
         assert!(emission.statement.is_none(), "ADR-0014: no SQLite ALTER");
-        let warning = emission.warning.expect("SQLite must never skip silently");
+        let warning = emission.warning.expect("SQLite must never skip silently").text;
         assert!(warning.contains("ck_transfer_orphan"), "{warning}");
         assert!(warning.contains("ferro migrate new"), "{warning}");
         assert!(!warning.contains("Alembic"), "{warning}");
@@ -5027,13 +5603,18 @@ mod tests {
     fn extra_enum_labels_warning_is_pinned_and_names_the_exit() {
         assert_eq!(
             extra_enum_labels_warning("provider", &["legacy".to_string()]),
-            Some(
-                "Enum type 'provider' has label(s) 'legacy' that the model no longer \
-                 declares. Label addition is append-only: ferro never removes enum \
-                 labels (existing rows may still hold them). Remove or rename labels \
-                 with a reviewed Alembic migration."
-                    .to_string()
-            )
+            Some(Report {
+                kind: ReportKind::ExtraEnumLabels {
+                    labels: vec!["legacy".into()],
+                },
+                subject: Subject::enum_type("provider"),
+                text: "Enum type 'provider' has label(s) 'legacy' that the model no longer \
+                       declares. Label addition is append-only: ferro never removes enum \
+                       labels (existing rows may still hold them). Remove or rename labels \
+                       with a reviewed Alembic migration."
+                    .to_string(),
+                recurs: false,
+            })
         );
         assert_eq!(extra_enum_labels_warning("provider", &[]), None);
     }
@@ -5122,11 +5703,18 @@ mod tests {
         assert!(check_lists_label("CHECK (\"st\" IN ('it''s'))", "it's"));
         assert_eq!(
             stranded_label_rename_warning("order", "status", "canceled", "cancelled"),
-            "Column 'order.status' still holds the enum label 'canceled', which the \
-             model now declares as 'cancelled' (__ferro_renamed_labels__). SQLite keeps \
-             enum labels as text in the rows, and auto-migrate changes the schema, never \
-             the rows: they keep 'canceled', which the model no longer reads or writes. \
-             Generate the migration that relabels them with `ferro migrate new`."
+            Report {
+                kind: ReportKind::StrandedLabelRename,
+                subject: Subject::column("order", "status"),
+                text: "Column 'order.status' still holds the enum label 'canceled', which the \
+                       model now declares as 'cancelled' (__ferro_renamed_labels__). SQLite \
+                       keeps enum labels as text in the rows, and auto-migrate changes the \
+                       schema, never the rows: they keep 'canceled', which the model no longer \
+                       reads or writes. Generate the migration that relabels them with `ferro \
+                       migrate new`."
+                    .to_string(),
+                recurs: true,
+            }
         );
     }
 
@@ -5360,7 +5948,10 @@ mod tests {
             "timestamptz",
             "timestamp",
         );
-        assert_eq!(via_kind, direct);
+        assert_eq!(via_kind.text, direct);
+        assert_eq!(via_kind.kind, ReportKind::RefusedConversion);
+        assert_eq!(via_kind.subject, Subject::column("event", "occurred_at"));
+        assert!(via_kind.blocks() && !via_kind.recurs);
     }
 
     #[test]
@@ -5372,7 +5963,8 @@ mod tests {
             "varchar",
             "role",
             "varchar",
-        );
+        )
+        .text;
         let col = w.find("account.role").expect("names the column");
         let dbt = w.find("db_type").expect("names db_type");
         let alembic = w.find("Alembic").expect("names Alembic");
@@ -5395,7 +5987,8 @@ mod tests {
             "varchar",
             "time",
             "varchar",
-        );
+        )
+        .text;
         let col = w.find("shift.opens_at").expect("names the column");
         let dbt = w.find("db_type").expect("names db_type");
         let alembic = w.find("Alembic").expect("names Alembic");
@@ -5759,7 +6352,8 @@ mod tests {
         assert!(emission.statements.is_empty());
         let warning = emission
             .warning
-            .expect("SQLite warns, never silently skips");
+            .expect("SQLite warns, never silently skips")
+            .text;
         assert!(warning.contains("ledgerrow"), "{warning}");
         assert!(warning.contains("PostgreSQL-only"), "{warning}");
     }
@@ -5778,20 +6372,22 @@ mod tests {
             )],
         });
         let warning = row_security_existing_table_warning(&model, Dialect::Postgres)
-            .expect("a declaration the create pass cannot apply must never be silent");
+            .expect("a declaration the create pass cannot apply must never be silent")
+            .text;
         assert!(warning.contains("ledgerrow"), "{warning}");
         assert!(warning.contains("NOT filtered"), "{warning}");
         assert!(warning.contains("ADR-0010"), "{warning}");
 
         // SQLite says the PostgreSQL-only thing instead — same sentence the
         // create path emits, single-sourced.
-        let lite = row_security_existing_table_warning(&model, Dialect::Sqlite).unwrap();
+        let lite = row_security_existing_table_warning(&model, Dialect::Sqlite).unwrap().text;
         assert_eq!(
             lite,
             row_security_statements(&model, Dialect::Sqlite)
                 .unwrap()
                 .warning
                 .unwrap()
+                .text
         );
     }
 
@@ -6049,7 +6645,7 @@ mod tests {
                 render_create_row_policy(&model, &shorthand_policy()).unwrap(),
             ]
         );
-        assert!(plan.warnings.is_empty());
+        assert!(plan.reports.is_empty());
     }
 
     #[test]
@@ -6133,9 +6729,9 @@ mod tests {
         let plan = plan_row_security_reconcile(&model, &live, Dialect::Postgres, false).unwrap();
         assert!(plan.statements.is_empty(), "{:?}", plan.statements);
         assert_eq!(plan.unverifiable, vec!["rls_ledgerrow_invitee".to_string()]);
-        assert_eq!(plan.warnings.len(), 1);
-        assert!(plan.warnings[0].contains("rls_ledgerrow_invitee"));
-        assert!(plan.warnings[0].contains("does NOT rebuild"));
+        assert_eq!(plan.reports.len(), 1);
+        assert!(plan.reports[0].text.contains("rls_ledgerrow_invitee"));
+        assert!(plan.reports[0].text.contains("does NOT rebuild"));
     }
 
     #[test]
@@ -6165,9 +6761,9 @@ mod tests {
             plan_row_security_reconcile(&undeclared, &live_on, Dialect::Postgres, false).unwrap();
         assert!(plan.statements.is_empty());
         assert!(
-            plan.warnings
+            plan.reports
                 .iter()
-                .any(|warning| warning.contains("no longer declares __ferro_rls__"))
+                .any(|warning| warning.text.contains("no longer declares __ferro_rls__"))
         );
         assert!(missing_row_security_flag_statements(&undeclared, &live_on).is_empty());
 
@@ -6181,6 +6777,7 @@ mod tests {
         assert!(
             dropped_row_security_warning(&unforced, &live_on)
                 .unwrap()
+                .text
                 .contains("force=False")
         );
     }
@@ -6208,11 +6805,10 @@ mod tests {
         let updates = plan_row_security_reconcile(&model, &live, Dialect::Postgres, false).unwrap();
         assert_eq!(updates.extra, vec!["rls_ledgerrow_gone".to_string()]);
         assert!(updates.statements.is_empty());
-        assert!(
-            updates.warnings.iter().any(|warning| warning
-                .contains("no longer\n         declares")
-                || warning.contains("no longer declares"))
-        );
+        assert!(updates.reports.iter().any(|warning| {
+            warning.text.contains("no longer\n         declares")
+                || warning.text.contains("no longer declares")
+        }));
 
         let destructive =
             plan_row_security_reconcile(&model, &live, Dialect::Postgres, true).unwrap();
@@ -6243,10 +6839,10 @@ mod tests {
         );
         // The run that removes protection says what it removed, and does not
         // also tell the author to run migrate_destructive.
-        assert_eq!(plan.warnings.len(), 1);
-        assert!(plan.warnings[0].contains("tore down row security"));
-        assert!(plan.warnings[0].contains("disabled ROW LEVEL SECURITY"));
-        assert!(!plan.warnings[0].contains("Restore the declaration"));
+        assert_eq!(plan.reports.len(), 1);
+        assert!(plan.reports[0].text.contains("tore down row security"));
+        assert!(plan.reports[0].text.contains("disabled ROW LEVEL SECURITY"));
+        assert!(!plan.reports[0].text.contains("Restore the declaration"));
     }
 
     #[test]
@@ -6292,9 +6888,9 @@ mod tests {
         assert!(plan.extra.is_empty());
         assert!(plan.statements.is_empty(), "{:?}", plan.statements);
         assert!(
-            plan.warnings
+            plan.reports
                 .iter()
-                .any(|warning| warning.contains("handwritten_admin"))
+                .any(|warning| warning.text.contains("handwritten_admin"))
         );
     }
 
@@ -6346,7 +6942,7 @@ mod tests {
     #[test]
     fn the_migrator_warning_names_the_forced_tables() {
         assert!(row_security_migrator_warning(&[]).is_none());
-        let warning = row_security_migrator_warning(&["ledgerrow".to_string()]).unwrap();
+        let warning = row_security_migrator_warning(&["ledgerrow".to_string()]).unwrap().text;
         assert!(warning.contains("'ledgerrow'"));
         assert!(warning.contains("BYPASSRLS"));
     }
@@ -6508,8 +7104,11 @@ mod tests {
             assert!(plan.statements.is_empty(), "{destructive}");
             // The only thing said is the standing report that the table carries
             // policies ferro does not own.
-            assert_eq!(plan.warnings.len(), 1, "{destructive}");
-            assert!(plan.warnings[0].contains("does not own"), "{destructive}");
+            assert_eq!(plan.reports.len(), 1, "{destructive}");
+            assert!(
+                plan.reports[0].text.contains("does not own"),
+                "{destructive}"
+            );
         }
     }
 
@@ -6644,10 +7243,10 @@ mod tests {
         };
         let plan = plan_row_security_reconcile(&model, &live, Dialect::Postgres, false).unwrap();
         assert_eq!(plan.drifted, vec!["rls_ledgerrow_invitee".to_string()]);
-        assert_eq!(plan.warnings.len(), 1);
-        assert!(plan.warnings[0].contains("REPLACED its live raw body"));
-        assert!(plan.warnings[0].contains("BETWEEN 1 AND 5"));
-        assert!(plan.warnings[0].contains("(n >= 1)"));
+        assert_eq!(plan.reports.len(), 1);
+        assert!(plan.reports[0].text.contains("REPLACED its live raw body"));
+        assert!(plan.reports[0].text.contains("BETWEEN 1 AND 5"));
+        assert!(plan.reports[0].text.contains("(n >= 1)"));
     }
 
     #[test]
@@ -6677,7 +7276,7 @@ mod tests {
         };
         let plan = plan_row_security_reconcile(&model, &live, Dialect::Postgres, false).unwrap();
         assert_eq!(plan.drifted, vec!["rls_ledgerrow_invitee".to_string()]);
-        assert!(plan.warnings.is_empty(), "{:?}", plan.warnings);
+        assert!(plan.reports.is_empty(), "{:?}", plan.reports);
     }
 
     // -----------------------------------------------------------------------
@@ -7166,6 +7765,362 @@ mod tests {
             normalize_check_definition("CHECK (((name)::text = ''::text))"),
             normalize_check_definition(&rendered),
             "folding the cast must not fold the operator"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Plan reports (ADR-0050): one pin per builder — its kind, its subject,
+    // whether it recurs, and the sentence it has always printed, byte for
+    // byte. A reader acts on the kind; a person reads the text.
+    // -----------------------------------------------------------------------
+
+    fn report(kind: ReportKind, subject: Subject, recurs: bool, text: &str) -> Report {
+        Report {
+            kind,
+            subject,
+            text: text.to_string(),
+            recurs,
+        }
+    }
+
+    fn names(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
+    #[test]
+    fn a_foreign_fk_drift_report_names_the_column_and_the_constraint() {
+        assert_eq!(
+            foreign_fk_drift_warning(
+                "account",
+                "connection_id",
+                "account_connection_id_fkey",
+                ("connection", "NO ACTION"),
+                ("connection", "CASCADE"),
+            ),
+            report(
+                ReportKind::ForeignFkDrift {
+                    column: "connection_id".into(),
+                    name: "account_connection_id_fkey".into(),
+                },
+                Subject::column("account", "connection_id"),
+                false,
+                "Foreign key on 'account.connection_id' drifts from the model (live: REFERENCES \
+                 connection ON DELETE NO ACTION; declared: REFERENCES connection ON DELETE \
+                 CASCADE), but the live constraint 'account_connection_id_fkey' is not \
+                 ferro-owned, so it is left untouched. Migrate it manually or with Alembic.",
+            )
+        );
+    }
+
+    #[test]
+    fn the_row_security_reports_recur_and_name_their_kind() {
+        let live_on = LiveRowSecurity {
+            enabled: true,
+            forced: true,
+            policies: vec![live_shorthand_policy()],
+        };
+        let mut undeclared = reconcile_model();
+        undeclared.row_security = None;
+        assert_eq!(
+            dropped_row_security_warning(&undeclared, &live_on),
+            Some(report(
+                ReportKind::DroppedRowSecurity,
+                Subject::table("ledgerrow"),
+                true,
+                "Table 'ledgerrow' has row-level security enabled in the database, but the \
+                 model no longer declares __ferro_rls__. Ferro never disables row security on \
+                 migrate_updates — the table keeps filtering rows, and any ferro-owned policy \
+                 keeps applying. Restore the declaration, or tear it down with \
+                 migrate_destructive=True.",
+            ))
+        );
+        assert_eq!(
+            foreign_row_policy_warning("ledgerrow", &names(&["admin_all"])),
+            Some(report(
+                ReportKind::ForeignPolicies {
+                    names: names(&["admin_all"]),
+                },
+                Subject::table("ledgerrow"),
+                true,
+                "Table 'ledgerrow' carries row policy/policies 'admin_all' that ferro does not \
+                 own (their names do not start with 'rls_'). They still filter rows and compose \
+                 with the declared policies. Ferro never alters or drops them.",
+            ))
+        );
+        assert_eq!(
+            extra_row_policy_names_warning("ledgerrow", &names(&["rls_ledgerrow_gone"])),
+            Some(report(
+                ReportKind::ExtraPolicies {
+                    names: names(&["rls_ledgerrow_gone"]),
+                },
+                Subject::table("ledgerrow"),
+                true,
+                "Table 'ledgerrow' has row policy/policies 'rls_ledgerrow_gone' that the model \
+                 no longer declares. They are still filtering rows. Ferro leaves them in place \
+                 unless you pass migrate_destructive=True — dropping a policy removes \
+                 protection, so it is never automatic.",
+            ))
+        );
+        assert_eq!(
+            unverifiable_row_policy_warning(
+                "ledgerrow",
+                "rls_ledgerrow_raw",
+                "USING (a)",
+                "USING (b)"
+            ),
+            report(
+                ReportKind::UnverifiablePolicy {
+                    name: "rls_ledgerrow_raw".into(),
+                },
+                Subject::table("ledgerrow"),
+                true,
+                "Row policy 'rls_ledgerrow_raw' on table 'ledgerrow' is declared with a raw \
+                 using=/with_check= expression whose live definition no longer matches the \
+                 declaration as ferro reads it.\n  declared: USING (a)\n  live:     USING \
+                 (b)\nPostgres stores its own rewriting of raw SQL, so ferro cannot tell an \
+                 edited expression from a re-spelled one and does NOT rebuild it. If you \
+                 changed the declaration, apply it with a reviewed migration (or drop the \
+                 policy and reconnect, and ferro will create it from the declaration).",
+            )
+        );
+        assert_eq!(
+            row_policy_body_replaced_warning(
+                "ledgerrow",
+                "rls_ledgerrow_raw",
+                "USING (a)",
+                "USING (b)"
+            ),
+            report(
+                ReportKind::PolicyBodyReplaced {
+                    name: "rls_ledgerrow_raw".into(),
+                },
+                Subject::table("ledgerrow"),
+                true,
+                "Row policy 'rls_ledgerrow_raw' on table 'ledgerrow' was rebuilt because its \
+                 metadata (command, permissive/restrictive, clauses or roles) no longer matched \
+                 the declaration, and the rebuild REPLACED its live raw body with the declared \
+                 one.\n  declared: USING (a)\n  live was:  USING (b)\nFerro cannot tell an \
+                 edited raw expression from Postgres's own re-spelling of it, so if the live \
+                 body held a change that is not in your model, it is gone. Re-apply it in the \
+                 declaration.",
+            )
+        );
+        assert_eq!(
+            row_security_teardown_warning(
+                "ledgerrow",
+                &names(&["rls_ledgerrow_gone"]),
+                &[render_disable_row_security("ledgerrow")],
+            ),
+            Some(report(
+                ReportKind::RowSecurityTeardown {
+                    names: names(&["rls_ledgerrow_gone"]),
+                },
+                Subject::table("ledgerrow"),
+                true,
+                "migrate_destructive tore down row security on table 'ledgerrow': dropped row \
+                 policy/policies 'rls_ledgerrow_gone'; disabled ROW LEVEL SECURITY. Rows on \
+                 this table are no longer filtered by the artifacts ferro owned.",
+            ))
+        );
+        assert_eq!(
+            row_security_migrator_warning(&names(&["ledgerrow"])),
+            Some(report(
+                ReportKind::RowSecurityUnderMigrator,
+                Subject::Modelset,
+                true,
+                "The connected role is neither a superuser nor BYPASSRLS, and this migration \
+                 touches table(s) 'ledgerrow' with FORCE ROW LEVEL SECURITY. Row policies apply \
+                 to the migrating role too, so a backfill or data step can silently see and \
+                 update zero rows. Migrate as a role with BYPASSRLS if this pass moves data.",
+            ))
+        );
+        // The reconcile decision carries the same reports, every one recurring.
+        let plan =
+            plan_row_security_reconcile(&undeclared, &live_on, Dialect::Postgres, false).unwrap();
+        assert!(plan.reports.iter().all(|report| report.recurs));
+        assert_eq!(
+            plan.reports.first().map(|report| &report.kind),
+            Some(&ReportKind::DroppedRowSecurity)
+        );
+    }
+
+    #[test]
+    fn the_row_security_skip_reports_on_a_new_table_and_recurs_on_an_existing_one() {
+        let mut model = rls_model(vec![col_with_db_type("ledger_id", "uuid", None, None)]);
+        model.row_security = Some(ferro_schema_ir::SchemaRowSecurity {
+            force: false,
+            policies: Vec::new(),
+        });
+        let skipped = "Table 'ledgerrow' declares __ferro_rls__, but row-level security is a \
+                       PostgreSQL-only feature: the table is created without its policies and \
+                       rows are NOT filtered on SQLite. Run against PostgreSQL for enforcement.";
+        let created = row_security_statements(&model, Dialect::Sqlite)
+            .unwrap()
+            .warning;
+        assert_eq!(
+            created,
+            Some(report(
+                ReportKind::RowSecuritySkipped,
+                Subject::table("ledgerrow"),
+                false,
+                skipped,
+            ))
+        );
+        assert!(
+            !created.as_ref().is_some_and(Report::blocks),
+            "the table is created"
+        );
+        assert_eq!(
+            row_security_existing_table_warning(&model, Dialect::Sqlite),
+            Some(report(
+                ReportKind::RowSecuritySkipped,
+                Subject::table("ledgerrow"),
+                true,
+                skipped,
+            ))
+        );
+        assert_eq!(
+            row_security_existing_table_warning(&model, Dialect::Postgres),
+            Some(report(
+                ReportKind::RowSecuritySkipped,
+                Subject::table("ledgerrow"),
+                true,
+                "Table 'ledgerrow' declares __ferro_rls__, but the table already exists and \
+                 the create pass never alters an existing table (ADR-0010). Its row-security \
+                 flags and policies were NOT applied — rows are NOT filtered. Connect with \
+                 migrate_updates=True to reconcile them, or apply them with a reviewed \
+                 migration.",
+            ))
+        );
+    }
+
+    #[test]
+    fn a_sqlite_in_place_report_blocks_and_names_the_change() {
+        let model = transfer_model_with_checks(
+            vec![transfer_at_most_one_outflow_check()],
+            vec![account_role_column_check()],
+        );
+        let add = render_check_addition(
+            "transfer",
+            &model,
+            "ck_transfer_at_most_one_outflow",
+            Dialect::Sqlite,
+            ConstraintMode::Plain,
+        )
+        .unwrap()
+        .warning
+        .unwrap();
+        assert_eq!(
+            add,
+            report(
+                ReportKind::SqliteInPlace {
+                    what: InPlaceChange::AddCheck,
+                },
+                Subject::table("transfer"),
+                false,
+                "Table check 'ck_transfer_at_most_one_outflow' is declared on 'transfer' but \
+                 missing from the live table, and SQLite cannot add a table constraint to an \
+                 existing table (it requires a full table rebuild). The invariant is not \
+                 database-enforced; generate a reviewed migration with `ferro migrate new` to \
+                 apply it.",
+            )
+        );
+        assert!(add.blocks());
+        let rebuild = render_check_rebuild(
+            "transfer",
+            &model,
+            "ck_transfer_kind",
+            Dialect::Sqlite,
+            ConstraintMode::Plain,
+        )
+        .unwrap()
+        .warning
+        .unwrap();
+        assert_eq!(
+            rebuild.kind,
+            ReportKind::SqliteInPlace {
+                what: InPlaceChange::RebuildCheck,
+            }
+        );
+        assert_eq!(
+            rebuild.text,
+            "CHECK constraint 'ck_transfer_kind' on table 'transfer' has a declared body that \
+             differs from the live constraint, and SQLite cannot alter constraints in place (it \
+             requires a full table rebuild). The live body remains; generate a reviewed \
+             migration with `ferro migrate new` to apply the declared predicate."
+        );
+        let drop = render_check_drop("transfer", "ck_transfer_orphan", Dialect::Sqlite)
+            .warning
+            .unwrap();
+        assert_eq!(
+            drop,
+            report(
+                ReportKind::SqliteInPlace {
+                    what: InPlaceChange::DropCheck,
+                },
+                Subject::table("transfer"),
+                false,
+                "CHECK constraint 'ck_transfer_orphan' on table 'transfer' is no longer \
+                 declared, and SQLite cannot drop a table constraint in place (it requires a \
+                 full table rebuild). The live constraint remains; generate a reviewed \
+                 migration with `ferro migrate new` to drop it.",
+            )
+        );
+    }
+
+    #[test]
+    fn a_primary_key_kept_report_blocks_and_a_planner_report_never_does() {
+        let kept = primary_key_kept_warning("doc", &names(&["slug"]), &names(&["id"]));
+        assert_eq!(
+            kept,
+            report(
+                ReportKind::PrimaryKeyKept,
+                Subject::table("doc"),
+                false,
+                "Table 'doc' declares primary key (slug) but its primary key is (id). A primary \
+                 key cannot be changed in place, so the live key remains; generate a reviewed \
+                 migration with `ferro migrate new`.",
+            )
+        );
+        assert!(kept.blocks());
+        let leftover = extra_check_names_warning("transfer", &names(&["ck_transfer_orphan"]));
+        assert!(!leftover.is_some_and(|report| report.blocks()));
+    }
+
+    #[test]
+    fn a_report_serializes_its_kind_as_a_name_or_a_tagged_object() {
+        let leftover = extra_check_names_warning("t", &names(&["ck_t_old"])).unwrap();
+        let wire = serde_json::to_value(&leftover).unwrap();
+        assert_eq!(
+            wire["kind"],
+            serde_json::json!({"LeftoverChecks": {"names": ["ck_t_old"]}})
+        );
+        assert_eq!(
+            wire["subject"],
+            serde_json::json!({"scope": "table", "table": "t"})
+        );
+        assert_eq!(wire["recurs"], serde_json::json!(false));
+        assert_eq!(wire["blocks"], serde_json::json!(false));
+        assert_eq!(wire["text"], serde_json::json!(leftover.text));
+        let kept = serde_json::to_value(primary_key_kept_warning("t", &[], &[])).unwrap();
+        assert_eq!(kept["kind"], serde_json::json!("PrimaryKeyKept"));
+        // `blocks` on the wire is the one `Report::blocks`, never re-derived.
+        assert_eq!(kept["blocks"], serde_json::json!(true));
+        let refused = hint_refusal_warning(&HintError::OldStillDeclared {
+            table: "t".into(),
+            field: Some("b".into()),
+            old: "a".into(),
+        });
+        let wire = serde_json::to_value(&refused).unwrap();
+        assert_eq!(
+            wire["kind"],
+            serde_json::json!({"HintRefused": {"OldStillDeclared": {
+                "table": "t", "field": "b", "old": "a"
+            }}})
+        );
+        assert_eq!(
+            wire["subject"],
+            serde_json::json!({"scope": "column", "table": "t", "column": "b"})
         );
     }
 }
