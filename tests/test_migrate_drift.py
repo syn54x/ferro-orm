@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import json
 import logging
 import re
 import shutil
@@ -659,3 +660,72 @@ def test_render_op_is_published_beside_drift():
     through the package; it is the drift module's own ``render_op``."""
     assert ferro.migrations.drift is not drift_module
     assert ferro.migrations.render_op is drift_module.render_op
+
+
+# -- against one snapshot --------------------------------------------------------------
+
+
+def snapshot_of(project, name: str) -> dict:
+    contents = _core._read_migrations_dir(str(migrations(project)))
+    return next(
+        m["snapshot"]["ir"]
+        for m in json.loads(contents)["migrations"]
+        if Path(m["dir"]).name == name
+    )
+
+
+def test_against_one_snapshot_gives_the_lines_drift_prints(project, pkg, db, capsys):
+    """``drift`` is ``against`` the last applied migration's snapshot: the
+    same lines, the same ops, the same text."""
+    applied(project, pkg, db, capsys)
+    db.execute('ALTER TABLE "team" DROP COLUMN "name"')
+    db.execute('CREATE INDEX "idx_team_name" ON "team" ("size")')
+
+    async def compared() -> DriftReport:
+        await ferro.connect(db.url, name="probe")
+        try:
+            return await drift_module.against(
+                snapshot_of(project, HEAD), migration=HEAD, using="probe"
+            )
+        finally:
+            await _core._disconnect("probe")
+
+    report = asyncio.run(compared())
+    audited = drift_api(db)
+    assert report == audited
+    assert sorted(report.lines) == [
+        "idx_team_name index is extra",
+        "team.name column is missing",
+    ]
+    code, out, _ = drift_cli(db, capsys)
+    assert (code, out) == (4, report.render() + "\n")
+
+
+def test_against_an_earlier_snapshot_reads_only_its_tables(project, pkg, db, capsys):
+    """Against ``0001``'s snapshot the ``team`` table ``0002`` added is not
+    drift: only the snapshot's tables are read (ADR-0031)."""
+    applied(project, pkg, db, capsys)
+
+    async def compared() -> DriftReport:
+        await ferro.connect(db.url, name="probe")
+        try:
+            return await drift_module.against(
+                snapshot_of(project, "0001_create_author"),
+                migration="0001_create_author",
+                using="probe",
+            )
+        finally:
+            await _core._disconnect("probe")
+
+    report = asyncio.run(compared())
+    assert report.clean and report.against == "0001_create_author"
+
+
+def test_against_a_connection_that_is_not_open_is_refused(project, pkg, db, capsys):
+    applied(project, pkg, db, capsys)
+    with pytest.raises(MigrationRefused, match="connection `nowhere` is not open"):
+        asyncio.run(
+            drift_module.against(
+                snapshot_of(project, HEAD), migration=HEAD, using="nowhere"
+            )
+        )

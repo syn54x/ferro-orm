@@ -10,10 +10,16 @@ anything needs attention.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import re
+from pathlib import Path
 
 import pytest
 
+import ferro
+from ferro import _core
+from ferro.migrations.report import StatusReport
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     AUTHOR,
     pkg,
@@ -149,3 +155,129 @@ def test_a_baselined_step_says_so(project, pkg, db, capsys):
 
     assert run("migrate", "status", "--url", db.url) == 0
     assert "0001_create_author  applied (baseline)\n" in capsys.readouterr().out
+
+
+# -- where the database stands -----------------------------------------------------------
+
+
+def stands(db) -> StatusReport:
+    """``ferro.migrations.status()`` on a connection of its own."""
+
+    async def read() -> StatusReport:
+        await ferro.connect(db.url, name="stands")
+        try:
+            return await ferro.migrations.status(using="stands")
+        finally:
+            await _core._disconnect("stands")
+
+    return asyncio.run(read())
+
+
+def test_a_database_at_head_has_its_last_migration_applied_and_nothing_else(
+    project, pkg, db, capsys
+):
+    configure(project, pkg, db.backend)
+    write_models(project, pkg, AUTHOR)
+    new("create_author")
+    sql_step(project, "second", 'CREATE TABLE "second" ("id" integer);\n')
+    assert run("migrate", "up", "--url", db.url) == 0
+
+    report = stands(db)
+
+    assert report.head_applied is not None
+    assert report.head_applied.name == "0002_second"
+    assert report.unfinished is None
+    assert report.pending is False
+
+
+def test_a_database_with_an_unfinished_step_names_it_and_stands_below_it(
+    project, pkg, db, capsys
+):
+    configure(project, pkg, db.backend)
+    write_models(project, pkg, AUTHOR)
+    new("create_author")
+    sql_step(project, "second", 'CREATE TABLE "second" ("id" integer);\n')
+    assert run("migrate", "up", "--url", db.url) == 0
+    # The process was killed inside 0002's step: started, never finished.
+    db.execute(
+        "UPDATE _ferro_migrations SET finished_at = NULL, error = NULL, "
+        "failed_at = NULL WHERE migration = 2"
+    )
+
+    report = stands(db)
+
+    assert report.head_applied is not None
+    assert report.head_applied.name == "0001_create_author"
+    assert report.unfinished is not None
+    assert report.unfinished.name == "0002_second"
+    assert report.unfinished.unfinished_step is not None
+    assert report.unfinished.unfinished_step.state == "interrupted"
+    assert report.pending is True
+
+
+def test_a_database_with_a_pending_migration_stands_at_the_one_before(
+    project, pkg, db, capsys
+):
+    configure(project, pkg, db.backend)
+    write_models(project, pkg, AUTHOR)
+    new("create_author")
+    assert run("migrate", "up", "--url", db.url) == 0
+    sql_step(project, "second", 'CREATE TABLE "second" ("id" integer);\n')
+
+    report = stands(db)
+
+    assert report.head_applied is not None
+    assert report.head_applied.name == "0001_create_author"
+    assert report.unfinished is None
+    assert report.pending is True
+
+
+STEP_STATE = Path(__file__).parents[1] / "crates/ferro-migrate/src/run_plan.rs"
+
+
+def step_state_words() -> list[str]:
+    """Every ``StepState`` variant as the core serializes it (snake_case)."""
+    body = STEP_STATE.read_text().split("pub enum StepState {", 1)[1].split("}", 1)[0]
+    variants = re.findall(r"^    ([A-Z][A-Za-z]+),", body, flags=re.MULTILINE)
+    return [re.sub(r"(?<!^)([A-Z])", r"_\1", v).lower() for v in variants]
+
+
+def one_step(word: str) -> dict:
+    return {
+        "step": 1,
+        "file": "01_schema.up.sql",
+        "state": word,
+        "error": None,
+        "applied_checksum": None,
+        "on_disk_checksum": None,
+        "flags": [],
+    }
+
+
+def test_every_core_step_state_is_read_into_where_the_database_stands():
+    """A ``StepState`` the core adds without a reading here fails, rather
+    than leaving drift, the harness and ``status`` to disagree about it."""
+    words = step_state_words()
+    applied = {"applied", "applied_different_checksum", "applied_baseline"}
+    unfinished = {"running", "failed", "interrupted", "reverting"}
+    assert set(words) == applied | unfinished | {"pending"}
+    for word in words:
+        report = StatusReport.from_core(
+            {
+                "migrations": [
+                    {"number": 1, "name": "0001_a", "steps": [one_step("applied")]},
+                    {"number": 2, "name": "0002_b", "steps": [one_step(word)]},
+                ],
+                "ahead": [],
+                "refusal": None,
+                "refusal_needs_attention": False,
+            },
+            database="default",
+            dialect="sqlite",
+            table="main._ferro_migrations",
+        )
+        head = report.head_applied
+        assert head is not None
+        assert head.name == ("0002_b" if word in applied else "0001_a"), word
+        assert (report.unfinished is not None) == (word in unfinished), word
+        assert report.pending == (word not in applied), word
