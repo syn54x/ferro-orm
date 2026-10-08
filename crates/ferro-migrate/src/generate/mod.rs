@@ -1322,9 +1322,12 @@ mod tests {
             "INSERT INTO \"_ferro_new_author\" (\"id\", \"name\", \"status\") \
              SELECT \"id\", \"name\", \"status\" FROM \"author\""
                 .to_string(),
+        ];
+        down.extend(carried_sequence());
+        down.extend([
             "DROP TABLE \"author\"".to_string(),
             "ALTER TABLE \"_ferro_new_author\" RENAME TO \"author\"".to_string(),
-        ];
+        ]);
         down.extend(create_pass_indexes(&before));
         assert_eq!(
             sqlite.down,
@@ -1767,6 +1770,16 @@ mod tests {
             .post_create_sqls
     }
 
+    /// The `author` rebuild's carry of its `AUTOINCREMENT` sequence.
+    fn carried_sequence() -> [String; 2] {
+        [
+            "DELETE FROM sqlite_sequence WHERE name = '_ferro_new_author'".to_string(),
+            "INSERT INTO sqlite_sequence (name, seq) SELECT '_ferro_new_author', seq \
+             FROM sqlite_sequence WHERE name = 'author'"
+                .to_string(),
+        ]
+    }
+
     /// The check a rebuild runs on a retyped column of `author`.
     fn guarded(column: &str, target: &str, class: &str) -> Vec<String> {
         vec![
@@ -1801,6 +1814,7 @@ mod tests {
                 .to_string(),
         ];
         up.extend(guarded("age", "varchar", "'text'"));
+        up.extend(carried_sequence());
         up.extend([
             "DROP TABLE \"author\"".to_string(),
             "ALTER TABLE \"_ferro_new_author\" RENAME TO \"author\"".to_string(),
@@ -1821,6 +1835,7 @@ mod tests {
                 .to_string(),
         ];
         down.extend(guarded("age", "integer", "'integer'"));
+        down.extend(carried_sequence());
         down.extend([
             "DROP TABLE \"author\"".to_string(),
             "ALTER TABLE \"_ferro_new_author\" RENAME TO \"author\"".to_string(),
@@ -3317,8 +3332,9 @@ mod tests {
         models
     }
 
-    const SWAP: [&str; 4] = [
+    const SWAP: [&str; 5] = [
         "CREATE TYPE \"status_new\" AS ENUM ('draft', 'live')",
+        "ALTER TABLE \"author\" ALTER COLUMN \"status\" DROP DEFAULT",
         "ALTER TABLE \"author\" ALTER COLUMN \"status\" TYPE \"status_new\" USING \
          \"status\"::text::\"status_new\"",
         "DROP TYPE \"status\"",
@@ -3412,16 +3428,21 @@ mod tests {
             [
                 SWAP[0],
                 SWAP[1],
+                SWAP[2],
+                "ALTER TABLE \"editor\" ALTER COLUMN \"status\" DROP DEFAULT",
                 "ALTER TABLE \"editor\" ALTER COLUMN \"status\" TYPE \"status_new\" USING \
                  \"status\"::text::\"status_new\"",
-                SWAP[2],
                 SWAP[3],
+                SWAP[4],
             ]
         );
     }
 
     #[test]
-    fn d2_a_column_default_is_dropped_around_the_swap() {
+    fn d2_a_model_default_is_no_server_default_and_the_swap_sets_none() {
+        // `status: Status = Status.draft` is a Python-side default: ferro
+        // persists no server DEFAULT (ADR-0027), so the swap drops whatever
+        // the column holds and sets nothing after the cast.
         let defaulted = |labels: &[&str]| {
             let mut model = relabelled("status", labels, &[]);
             model.columns[2].default = Some(serde_json::json!("draft"));
@@ -3433,18 +3454,7 @@ mod tests {
             &[Dialect::Postgres],
         );
         let up = statements_of(&step(&migration, "02_contract", Dialect::Postgres).up);
-        let alter = "ALTER TABLE \"author\" ALTER COLUMN \"status\"";
-        assert_eq!(
-            up,
-            [
-                SWAP[0].to_string(),
-                format!("{alter} DROP DEFAULT"),
-                SWAP[1].to_string(),
-                format!("{alter} SET DEFAULT 'draft'"),
-                SWAP[2].to_string(),
-                SWAP[3].to_string(),
-            ]
-        );
+        assert_eq!(up, SWAP);
     }
 
     #[test]
