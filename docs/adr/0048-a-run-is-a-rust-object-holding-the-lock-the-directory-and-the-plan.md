@@ -18,11 +18,11 @@ async with tracked.locked(timeout, on_wait) as run:          # records re-read u
             await run.execute(step, on_attempt)               # 01_expand, 03_contract
 ```
 
-Rust will own the connection name, the dialect, the tracking schema, the run lock, one read of the migrations directory and the plan made from it. `run.execute(step)` runs the bytes that read hashed. Nothing crosses back to be checked: no step JSON, no SQL text, no record, no direction. Execution never goes back to disk. The planned step carries what its execution needs, all from the held read:
+Rust will own the connection name, the dialect, the tracking schema, the run lock, one read of the migrations directory and the plan made from it. `run.execute(step)` is to run the bytes that read hashed. Nothing is to cross back to be checked: no step JSON, no SQL text, no record, no direction. Execution is never to go back to disk. The planned step is to carry what its execution needs, all from the held read:
 
 - the migration's first data step (the backfill a contract's recipe re-runs);
 - the snapshots a data step's historical models are built from;
-- for a SQLite `foreign-keys-off` step, its rebuild expectations. Each table the step rebuilds comes with its starting name and the columns its migration's two adjacent snapshots declare. `plan_run` reads them off the step file's own bytes, lexed once. Those bytes are what runs, and an edited unfinished step may run (ADR-0030). The executor only compares the expectations with the live catalog.
+- for a SQLite `foreign-keys-off` step, its rebuild expectations. Each table the step rebuilds comes with its starting name and the columns its migration's two adjacent snapshots declare. `plan_run` is to read them off the step file's own bytes, lexed once. Those bytes are what runs, and an edited unfinished step may run (ADR-0030). The executor is only to compare the expectations with the live catalog.
 
 There are two types, and a write without the lock cannot be called at all. `TrackedDatabase` reads: records, `status`, a preview plan, whether the lock is held, the held directory. `LockedDatabase` exists only inside `tracked.locked(...)`, re-reads the records once it holds the lock (ADR-0029), and alone carries `plan`, `execute` and the record transitions. `status`, `drift` and `require_applied` open a `TrackedDatabase`. `up`, `down`, `baseline` and `rerecord` lock it. `down` previews, prompts, locks and plans again.
 
