@@ -125,7 +125,7 @@ async def test_a_view_named_like_a_model_does_not_trip_the_adoption_refusal(
     settings, database = settings_and_database()
     db.execute(AUTHOR_VIEW)
 
-    report = await run_report(runner.up(settings, database, url=db.url))
+    report = await run_report(runner.up(settings, database.name, url=db.url))
 
     assert report.refusal is not None
     assert report.refusal.startswith(

@@ -8,6 +8,7 @@ exit 3 naming each problem otherwise. The model sources and helpers are
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -229,12 +230,12 @@ def test_the_python_api_returns_the_report_and_raises_on_request(project, pkg):
 
     _generated(project, pkg)
     settings = FerroSettings()
-    clean = check(settings, settings.database())
+    clean = asyncio.run(check(settings))
     assert clean.ok and clean.head == "0001_create_author" and clean.problems == []
     clean.raise_for_problems()
 
     write_models(project, pkg, LIBRARY)
-    report = check(settings, settings.database())
+    report = asyncio.run(check(settings))
     assert not report.ok
     assert [p.kind for p in report.problems] == ["ungenerated"]
     with pytest.raises(MigrationsCheckError) as raised:

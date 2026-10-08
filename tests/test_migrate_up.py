@@ -378,14 +378,14 @@ async def test_a_foreign_keys_off_step_rebuilds_a_referenced_table_and_restores_
     write_models(project, pkg, LIBRARY)
     new("library")
     settings, database = settings_and_database()
-    assert (await runner.up(settings, database, url=db.url)).refusal is None
+    assert (await runner.up(settings, database.name, url=db.url)).refusal is None
     db.execute("INSERT INTO author (id, name, status) VALUES (1, 'a', 'draft')")
     db.execute(
         "INSERT INTO post (id, title, kind, author_id) VALUES (1, 't', 'note', 1)"
     )
     sql_step(project, "rebuild_author", REBUILD)
 
-    report = await runner.up(settings, database, url=db.url)
+    report = await runner.up(settings, database.name, url=db.url)
 
     assert report.refusal is None
     assert [a.migration for a in report.applied] == ["0002_rebuild_author"]
@@ -405,14 +405,14 @@ async def test_a_foreign_keys_off_step_that_breaks_a_reference_fails_with_the_ro
     write_models(project, pkg, LIBRARY)
     new("library")
     settings, database = settings_and_database()
-    assert (await runner.up(settings, database, url=db.url)).refusal is None
+    assert (await runner.up(settings, database.name, url=db.url)).refusal is None
     db.execute("INSERT INTO author (id, name, status) VALUES (1, 'a', 'draft')")
     db.execute(
         "INSERT INTO post (id, title, kind, author_id) VALUES (1, 't', 'note', 1)"
     )
     sql_step(project, "orphan", '-- ferro: foreign-keys-off\nDELETE FROM "author";\n')
 
-    report = await run_report(runner.up(settings, database, url=db.url))
+    report = await run_report(runner.up(settings, database.name, url=db.url))
 
     assert report.refusal is not None
     assert "foreign_key_check" in report.refusal
@@ -436,7 +436,7 @@ async def test_up_over_tables_auto_migrate_built_names_baseline_and_creates_noth
     await ferro.connect(db.url, auto_migrate=True)
     ferro.reset_engine()
 
-    report = await run_report(runner.up(settings, database, url=db.url))
+    report = await run_report(runner.up(settings, database.name, url=db.url))
 
     assert report.refusal == (
         'This database has no ferro migration records, but table "author" from 0001 '
@@ -548,12 +548,14 @@ def test_a_database_ahead_of_the_directory_is_refused_unless_allowed(
     settings, database = settings_and_database()
 
     _refused_by_up_and_status(db, capsys, expected)
-    report = asyncio.run(runner.status(settings, database, url=db.url))
+    report = asyncio.run(runner.status(settings, database.name, url=db.url))
     assert report.exit_code == 4
     assert [m.state for m in report.migrations] == ["applied", "applied"]
     assert report.ahead == ["0003_third"]
 
-    allowed = asyncio.run(runner.up(settings, database, url=db.url, allow_ahead=True))
+    allowed = asyncio.run(
+        runner.up(settings, database.name, url=db.url, allow_ahead=True)
+    )
     assert allowed.refusal is None and allowed.applied == []
     assert allowed.ahead == ["0003_third"]
 

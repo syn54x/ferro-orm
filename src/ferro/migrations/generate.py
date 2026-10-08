@@ -38,6 +38,7 @@ from . import scaffold
 from .errors import MigrationRefused
 from .scaffold import TEMPLATES_DIR
 from .steps import StepRefused, scan_todos, unwritten
+from .target import Target
 from .layout import (
     SNAPSHOT_FILE,
     GeneratedMigration,
@@ -134,7 +135,6 @@ def _head_snapshot_text(migrations: list[dict[str, Any]]) -> str | None:
 
 
 def new(
-    settings: FerroSettings,
     database: DatabaseSettings,
     name: str,
     *,
@@ -171,7 +171,6 @@ def new(
             generate yet (``not generated yet: <op> on <table> (ticket #N)``).
     """
     migration = prepare(
-        settings,
         database,
         name,
         sql_step=sql_step,
@@ -194,7 +193,6 @@ def write(database: DatabaseSettings, migration: GeneratedMigration) -> Path:
 
 
 def prepare(
-    settings: FerroSettings,
     database: DatabaseSettings,
     name: str,
     *,
@@ -205,7 +203,6 @@ def prepare(
 ) -> GeneratedMigration | None:
     """The migration :func:`new` would write, without writing it; ``None``
     for no schema change. Raises what :func:`new` raises."""
-    del settings  # the database carries its project; kept for API symmetry
     check_name(name, "migration name")
     if sql_step is not None:
         check_name(sql_step, "--sql-step name")
@@ -331,23 +328,31 @@ def _snapshot_model(snapshot_json: str, name: str) -> str:
     return name
 
 
-def check(settings: FerroSettings, database: DatabaseSettings) -> CheckReport:
-    """Check ``database``'s migrations against its models, reading files only.
+async def check(
+    settings: FerroSettings | None = None, database: str | None = None
+) -> CheckReport:
+    """Check, offline, that every model change has a migration and the
+    directory is intact (``ferro migrate check``), reading files only: it
+    takes no connection.
 
     Reports an ungenerated model change (naming the models), a broken
-    snapshot chain (naming both files), a duplicate or missing number, and a
-    DDL step without the rendering a target dialect needs. Raises nothing for
-    a problem: call :meth:`CheckReport.raise_for_problems` to fail on one.
+    snapshot chain (naming both files), a duplicate or missing number, a
+    DDL step without the rendering a target dialect needs, and a data step
+    still holding ``todo(...)``. Raises nothing for a problem: call
+    :meth:`CheckReport.raise_for_problems` to fail on one.
+
+    Raises:
+        MigrationRefused: the configuration names no single database.
     """
-    del settings
-    target = declared_modelset(database)
+    chosen = Target.resolve(settings, database).database
+    declared = declared_modelset(chosen)
     raw = json.loads(
         _check_migrations(
-            str(database.directory), json.dumps(target), list(database.dialects)
+            str(chosen.directory), json.dumps(declared), list(chosen.dialects)
         )
     )
     problems = [Problem(p["kind"], p["message"]) for p in raw["problems"]]
-    problems += _unwritten_steps(database.directory)
+    problems += _unwritten_steps(chosen.directory)
     return CheckReport(ok=not problems, head=raw["head"], problems=problems)
 
 

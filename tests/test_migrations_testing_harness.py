@@ -278,16 +278,19 @@ async def test_apply_through_runs_the_real_directorys_files_and_stops_at_its_tar
     assert f"ran from {step.resolve()}" in str(refused.value)
 
 
+def _default() -> str:
+    name = _core._default_connection_name()
+    assert name is not None
+    return name
+
+
 async def test_runner_up_through_refuses_a_migration_the_directory_lacks_and_a_step(
     connected,
 ):
-    settings = FerroSettings()
-    database = settings.database()
+    database = FerroSettings().database()
 
     with pytest.raises(MigrationRefused) as missing:
-        await runner.up(
-            settings, database, using=_core._default_connection_name(), through="0009"
-        )
+        await runner._up(_default(), database, through="0009")
     report = missing.value.report
 
     assert isinstance(report, runner.RunReport)
@@ -297,12 +300,7 @@ async def test_runner_up_through_refuses_a_migration_the_directory_lacks_and_a_s
     )
     assert report.applied == []
     with pytest.raises(MigrationRefused) as not_a_migration:
-        await runner.up(
-            settings,
-            database,
-            using=_core._default_connection_name(),
-            through="0002:01",
-        )
+        await runner._up(_default(), database, through="0002:01")
     step = not_a_migration.value.report
     assert isinstance(step, runner.RunReport)
     assert step.refusal is not None and "0007:02" in step.refusal
@@ -313,14 +311,11 @@ async def test_runner_up_through_refuses_a_migration_the_directory_lacks_and_a_s
 async def test_runner_up_through_below_the_head_applies_and_reverts_nothing(
     connected,
 ):
-    settings = FerroSettings()
-    database = settings.database()
+    database = FerroSettings().database()
     await harness().apply_through("0003")
     before = connected.records()
 
-    report = await runner.up(
-        settings, database, using=_core._default_connection_name(), through="0001"
-    )
+    report = await runner._up(_default(), database, through="0001")
 
     assert report.applied == [] and report.reverted == []
     assert report.refusal is None

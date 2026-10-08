@@ -213,12 +213,12 @@ def slugged(db) -> int:
 
 async def up(**kwargs: Any) -> runner.RunReport:
     settings = FerroSettings()
-    return await run_report(runner.up(settings, settings.database(), **kwargs))
+    return await run_report(runner.up(settings, **kwargs))
 
 
 async def down(**kwargs: Any) -> runner.RunReport:
     settings = FerroSettings()
-    return await run_report(runner.down(settings, settings.database(), **kwargs))
+    return await run_report(runner.down(settings, **kwargs))
 
 
 async def paused_at(probe: Any, task: asyncio.Task) -> None:
