@@ -19,7 +19,7 @@ migration through the target as applied without running it, and only after
 checking: under the run lock, with no step records yet, the live database
 is planned against the target migration's schema snapshot exactly as
 ``ferro migrate drift`` plans it against the last applied one: both call
-:func:`ferro.migrations.drift.against`, so the lines are the same. Any
+:func:`ferro.migrations._drift.against`, so the lines are the same. Any
 line means nothing is recorded; there is no flag that records past one.
 Live tables the snapshot does not declare (``alembic_version``, a later
 migration's tables) are never drift.
@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from . import runner
-from .drift import DriftReport, against
+from ._drift import DriftReport, against
 from .errors import MigrationRefused
 from .steps import declared_up_kind
 from .target import Target

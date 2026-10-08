@@ -28,8 +28,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from .baseline import BaselineReport, baseline, remove_baseline
-from .drift import DriftReport, drift, render_op
+from ._baseline import BaselineReport, baseline, remove_baseline
+from ._drift import DriftReport, drift, render_op
 from .errors import DatabaseAheadError, MigrationRefused, PendingMigrationsError
 from .generate import check
 from .runner import require_applied, status, up

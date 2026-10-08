@@ -47,7 +47,7 @@ from tests.test_migrate_up import (  # noqa: F401
     sql_step,
 )
 
-drift_module = importlib.import_module("ferro.migrations.drift")
+drift_module = importlib.import_module("ferro.migrations._drift")
 
 pytestmark = [
     pytest.mark.usefixtures("isolated_imports", "clean_registry"),

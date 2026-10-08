@@ -7,17 +7,20 @@ Four promises the pages make, each checked against the implementation:
   the assignment twin's);
 - every refusal the CLI reference quotes is the text ``ferro`` prints, for
   the refusals that need no database;
-- the Migrations API page documents exactly ``ferro.migrations.__all__``;
+- the Migrations API page documents exactly ``ferro.migrations.__all__``, and
+  every identifier an API page documents resolves at runtime;
 - no page says "in-house" or "Alembic territory" (the doors are named
   Auto-migrate, Migrations and Alembic).
 """
 
 from __future__ import annotations
 
+import importlib
 import re
 import subprocess
 import sys
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -193,6 +196,42 @@ def test_the_api_page_documents_every_public_name_of_ferro_migrations() -> None:
         if not target.startswith("ferro.migrations.testing.")
     )
     assert documented == sorted(ferro.migrations.__all__)
+
+
+def _api_targets() -> list[str]:
+    """Every ``::: <identifier>`` on every API reference page."""
+    return [
+        target
+        for page in sorted((DOCS_PAGES / "api").glob("*.md"))
+        for target in re.findall(r"^::: ([\w.]+)$", page.read_text(), re.M)
+    ]
+
+
+def _resolve(identifier: str) -> object:
+    """``identifier`` reached the way a reader's code reaches it: attribute by
+    attribute from ``ferro``, importing a submodule only where the package
+    has no attribute of that name (as ``import ferro.migrations.testing``
+    does)."""
+    first, *rest = identifier.split(".")
+    found: object = importlib.import_module(first)
+    for part in rest:
+        if not hasattr(found, part) and isinstance(found, ModuleType):
+            importlib.import_module(f"{found.__name__}.{part}")
+        found = getattr(found, part)
+    return found
+
+
+@pytest.mark.parametrize("identifier", _api_targets())
+def test_each_api_page_identifier_resolves_at_runtime(identifier: str) -> None:
+    _resolve(identifier)
+
+
+def test_baseline_and_drift_are_the_functions_on_the_package() -> None:
+    from ferro.migrations._baseline import baseline
+    from ferro.migrations._drift import drift
+
+    assert ferro.migrations.baseline is baseline
+    assert ferro.migrations.drift is drift
 
 
 def test_the_api_page_documents_the_test_harness() -> None:
