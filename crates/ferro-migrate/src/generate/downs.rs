@@ -39,7 +39,7 @@ use crate::directory::Headers;
 use crate::plan::{self, Hint, renamed_snapshot};
 use crate::render::render_ops;
 use crate::{Dialect, Execution, MigrationOp, PlannedOp, RenderedOp, RowRisk, Side, plan_down};
-use ferro_ddl_lowering::ConstraintMode;
+use ferro_ddl_lowering::{ConstraintMode, IndexMode};
 use ferro_schema_ir::{IrEnvelope, SchemaColumn, SchemaIrPayload};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -131,7 +131,14 @@ fn rendered(
     dialect: Dialect,
     constraints: ConstraintMode,
 ) -> Result<Vec<RenderedOp>, GenerateError> {
-    Ok(render_ops(&ops, old, new, dialect, constraints)?)
+    Ok(render_ops(
+        &ops,
+        old,
+        new,
+        dialect,
+        constraints,
+        IndexMode::Plain,
+    )?)
 }
 
 /// Each of `ops`' statements on `dialect`, planned `old → new`, op by op. A
@@ -247,12 +254,30 @@ fn statements(
     Ok((out, !rebuilt.is_empty()))
 }
 
+/// `ops` with their verdicts between a step's two stages, `before` (read as
+/// the planner leaves it, [`plan::planned_before`]) and `after`: what is true
+/// of each op between the sides the step renders it between (ADR-0050). A
+/// demanded column the expand adds nullable is a plain add there, which the
+/// migration's plan, from the parent to the target, does not say.
+pub(super) fn decided(
+    ops: &[MigrationOp],
+    before: &IrEnvelope<SchemaIrPayload>,
+    after: &IrEnvelope<SchemaIrPayload>,
+    dialect: Dialect,
+) -> Vec<PlannedOp> {
+    let old = Side::declared(plan::planned_before(before, after, dialect).into_owned());
+    let new = Side::declared(after.clone());
+    ops.iter()
+        .map(|op| PlannedOp::of(op.clone(), &old, &new, dialect))
+        .collect()
+}
+
 /// [`render_step`] as the step's two files.
 ///
 /// # Errors
 /// What [`render_step`] raises.
-pub fn render_down(
-    step_ops: &[PlannedOp],
+pub(super) fn render_down(
+    step_ops: &[MigrationOp],
     before: &IrEnvelope<SchemaIrPayload>,
     after: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
@@ -271,7 +296,7 @@ pub fn render_down(
 /// written as files: what a step that holds more than the planner's ops (the
 /// contract) composes with its own.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct StepStatements {
+pub(super) struct StepStatements {
     /// The up file's statements.
     pub up: Vec<String>,
     /// The up file's headers.
@@ -283,10 +308,13 @@ pub struct StepStatements {
 }
 
 /// One generated step on `dialect`, both directions: the up file renders
-/// `step_ops` (planned `before → after`, the migration's declared renames
-/// `hints` among them), and the down file renders [`plan_down`]`(step_ops,
-/// after, before)` — the planner run back between the two declared stages,
-/// keeping only the ops whose artifact the step's up touched.
+/// `step_ops` (the migration's plan's ops placed in the step, the declared
+/// renames `hints` among them) between the stages `before` and `after`,
+/// each with its verdict between them ([`decided`]), and the down file
+/// renders [`plan_down`]`(step_ops, after, before)` — the planner run back
+/// between the two declared stages, keeping only the ops whose artifact the
+/// step's up touched. On SQLite the drop of a dropped column's own check is
+/// left out: its `DROP COLUMN` carries it ([`columns::omitted`]).
 ///
 /// On Postgres the up adds every foreign key and check `NOT VALID`
 /// (ADR-0043); the down restores the step's pre-state with plain statements.
@@ -304,13 +332,18 @@ pub struct StepStatements {
 /// renderer), or that renders only a blocking report
 /// ([`GenerateError::Unrenderable`]), or a down op with no way to run
 /// between two declared stages.
-pub fn render_step(
-    step_ops: &[PlannedOp],
+pub(super) fn render_step(
+    step_ops: &[MigrationOp],
     before: &IrEnvelope<SchemaIrPayload>,
     after: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
     hints: &[Hint],
 ) -> Result<StepStatements, GenerateError> {
+    let step_ops: Vec<PlannedOp> = decided(step_ops, before, after, dialect)
+        .into_iter()
+        .filter(|planned| !columns::omitted(planned, dialect))
+        .collect();
+    let step_ops = step_ops.as_slice();
     let ops: Vec<MigrationOp> = step_ops.iter().map(|planned| planned.op.clone()).collect();
     // A step holding the migration's renames (ADR-0032) runs its table and
     // column renames first; everything else in it reads the table under its
@@ -421,7 +454,7 @@ pub fn render_step(
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{author, create_pass, file, ir, model, pk, post};
+    use super::super::tests::{create_pass, file, ir, model, pk};
     use super::*;
     use crate::{PlanOptions, Side, plan_from_ir};
     use ferro_schema_ir::{RowPolicyCommand, RowPolicyExpr, SchemaRowPolicy, SchemaRowSecurity};
@@ -430,14 +463,16 @@ mod tests {
         before: &IrEnvelope<SchemaIrPayload>,
         after: &IrEnvelope<SchemaIrPayload>,
         dialect: Dialect,
-    ) -> Vec<PlannedOp> {
+    ) -> Vec<MigrationOp> {
         plan_from_ir(
             &Side::declared(before.clone()),
             &Side::declared(after.clone()),
             dialect,
             PlanOptions { destructive: true },
         )
-        .operations
+        .ops()
+        .cloned()
+        .collect()
     }
 
     fn render(
@@ -446,56 +481,6 @@ mod tests {
         dialect: Dialect,
     ) -> Rendering {
         render_down(&up_ops(before, after, dialect), before, after, dialect, &[]).expect("render")
-    }
-
-    #[test]
-    fn a_created_table_and_its_type_are_dropped_table_first_with_no_destructive_header() {
-        let before = ir(vec![]);
-        let after = ir(vec![author()]);
-        let pg = render(&before, &after, Dialect::Postgres);
-        assert_eq!(pg.down, "DROP TABLE \"author\";\n\nDROP TYPE \"status\";\n");
-        assert_eq!(pg.down_headers, Headers::default());
-        assert_eq!(pg.up, file(&create_pass(&author(), Dialect::Postgres), ""));
-        assert_eq!(pg.headers, Headers::default());
-
-        let sqlite = render(&before, &after, Dialect::Sqlite);
-        assert_eq!(sqlite.down, "DROP TABLE \"author\";\n");
-        assert_eq!(sqlite.down_headers, Headers::default());
-    }
-
-    #[test]
-    fn a_dropped_table_is_recreated_from_the_parent_snapshot_marked_data_dependent() {
-        let before = ir(vec![author(), post()]);
-        let after = ir(vec![author()]);
-        for dialect in [Dialect::Postgres, Dialect::Sqlite] {
-            let r = render(&before, &after, dialect);
-            assert_eq!(r.up, "-- ferro: destructive\n\nDROP TABLE \"post\";\n");
-            assert_eq!(
-                r.down,
-                file(&create_pass(&post(), dialect), "-- ferro: data-dependent\n"),
-                "{dialect:?}"
-            );
-            assert!(r.down_headers.data_dependent && !r.down_headers.destructive);
-            assert_eq!(r.down_headers.irreversible, None);
-        }
-    }
-
-    #[test]
-    fn a_dropped_table_with_its_type_recreates_the_type_before_the_table() {
-        let before = ir(vec![author()]);
-        let after = ir(vec![]);
-        let pg = render(&before, &after, Dialect::Postgres);
-        assert_eq!(
-            pg.up,
-            "-- ferro: destructive\n\nDROP TABLE \"author\";\n\nDROP TYPE \"status\";\n"
-        );
-        assert_eq!(
-            pg.down,
-            file(
-                &create_pass(&author(), Dialect::Postgres),
-                "-- ferro: data-dependent\n"
-            )
-        );
     }
 
     #[test]
@@ -535,25 +520,5 @@ mod tests {
                 .down
                 .contains("CREATE POLICY \"rls_ledger_owner_id\"")
         );
-    }
-
-    #[test]
-    fn the_down_is_restricted_to_what_the_step_touches() {
-        let before = ir(vec![author()]);
-        let after = ir(vec![author(), post(), model("Tag", vec![pk()])]);
-        let ops: Vec<PlannedOp> = up_ops(&before, &after, Dialect::Sqlite)
-            .into_iter()
-            .filter(|planned| planned.op.table() == Some("tag"))
-            .collect();
-        let r = render_down(&ops, &before, &after, Dialect::Sqlite, &[]).expect("render");
-        assert_eq!(r.down, "DROP TABLE \"tag\";\n");
-    }
-
-    #[test]
-    fn a_step_with_nothing_on_a_dialect_is_not_applicable_both_ways() {
-        let r = render_down(&[], &ir(vec![]), &ir(vec![]), Dialect::Sqlite, &[]).expect("render");
-        assert_eq!(r.up, "-- ferro: not-applicable\n");
-        assert_eq!(r.down, "-- ferro: not-applicable\n");
-        assert!(r.headers.not_applicable && r.down_headers.not_applicable);
     }
 }

@@ -36,7 +36,6 @@
 //!                                        04_contract        …; DROP COLUMN "name"
 //! ```
 
-use super::columns;
 use super::staging::StagedConstraint;
 use super::{
     GenerateError, GeneratedStep, Rendering, downs, enums, find_model, rebuild, staging, step_text,
@@ -45,10 +44,10 @@ use crate::directory::{Headers, StepDialect, StepKind};
 use crate::order::order_by_dependencies;
 use crate::plan::enum_declaration;
 use crate::render::render_ops;
-use crate::{Dialect, MigrationOp, PlannedOp};
+use crate::{Dialect, MigrationOp, PlannedOp, Side, plan_down};
 use ferro_ddl_lowering::{
-    ConstraintMode, ResolvedStorage, positioned_missing_enum_labels, quote_ident, quote_label,
-    render_drop_constraint, render_pg_enum_add_value_at, render_validate_constraint,
+    ConstraintMode, IndexMode, ResolvedStorage, positioned_missing_enum_labels, quote_ident,
+    quote_label, render_drop_constraint, render_pg_enum_add_value_at, render_validate_constraint,
     resolve_column_storage,
 };
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
@@ -834,7 +833,14 @@ fn nullability(
         table: demand.table.clone(),
         column: demand.column.clone(),
     };
-    let rendered = render_ops(&[op], old, new, Dialect::Postgres, ConstraintMode::Plain)?;
+    let rendered = render_ops(
+        &[op],
+        old,
+        new,
+        Dialect::Postgres,
+        ConstraintMode::Plain,
+        IndexMode::Plain,
+    )?;
     super::refuse_unrendered(&rendered, Dialect::Postgres)?;
     Ok(rendered.into_iter().flat_map(|op| op.statements).collect())
 }
@@ -858,16 +864,18 @@ fn nullability(
 /// rebuilds it back.
 ///
 /// Every op the phase table (`columns::phase`) withheld (ADR-0025),
-/// `withheld` per dialect in `dialects`' order, drops here, after the data steps, as a migration without one drops it in its
-/// schema step ([`downs::render_step`]): `DROP COLUMN`, `DROP TABLE`, then
+/// `withheld` per dialect in `dialects`' order, drops here, after the data
+/// steps, as a migration without one drops it in its schema step
+/// ([`downs::render_step`]): `DROP COLUMN`, `DROP TABLE`, then
 /// the `DROP TYPE` that follows them, before a removed label's type swap (a
 /// column the swap would otherwise have to convert is gone). On SQLite a drop
 /// from a table the step rebuilds anyway folds into that one rebuild. The
 /// down puts each back as the parent declares it, a `NOT NULL` column under
 /// `data-dependent` (ADR-0033).
 ///
-/// A removed enum label (D2) is the rest of `relaxed_target` → `target`
-/// ([`label_contract`]): on Postgres the swap-type recipe for a native type
+/// A removed enum label (D2) is `relabel`, per dialect: the plan's label
+/// removals and the changes they make to the columns that held the label
+/// ([`label_contract`]). On Postgres the swap-type recipe for a native type
 /// and the pass's own statements for the rest (a text enum's check rebuilt
 /// to the new labels), the down putting each label back; on SQLite a rebuild
 /// only of a table whose shape changes (its check, or a column narrowed to
@@ -876,10 +884,12 @@ fn nullability(
 /// # Errors
 /// A demanded table missing from either side, or a statement that does not
 /// render.
-pub fn contract_step(
+#[allow(clippy::too_many_arguments)]
+pub(super) fn contract_step(
     demands: &[Demand],
     staged: &[StagedConstraint],
-    withheld: &[Vec<PlannedOp>],
+    withheld: &[Vec<MigrationOp>],
+    relabel: &[Vec<MigrationOp>],
     kept_target: &IrEnvelope<SchemaIrPayload>,
     relaxed_target: &IrEnvelope<SchemaIrPayload>,
     target: &IrEnvelope<SchemaIrPayload>,
@@ -892,17 +902,13 @@ pub fn contract_step(
         .collect();
     let demands = demands.as_slice();
     let mut renderings = BTreeMap::new();
-    for (&dialect, held) in dialects.iter().zip(withheld) {
+    for ((&dialect, held), relabel) in dialects.iter().zip(withheld).zip(relabel) {
         // The drops the phase table held back for the contract, rendered
-        // `kept_target` → `relaxed_target` but the SQLite check drop its
-        // `DROP COLUMN` carries.
-        let withheld: Vec<PlannedOp> = held
-            .iter()
-            .filter(|op| !columns::omitted(op, dialect))
-            .cloned()
-            .collect();
-        let drops =
-            |ops: &[PlannedOp]| downs::render_step(ops, kept_target, relaxed_target, dialect, &[]);
+        // `kept_target` → `relaxed_target`.
+        let withheld = held.clone();
+        let drops = |ops: &[MigrationOp]| {
+            downs::render_step(ops, kept_target, relaxed_target, dialect, &[])
+        };
         let rendering = match dialect {
             Dialect::Postgres => {
                 let mut up = Vec::new();
@@ -925,7 +931,7 @@ pub fn contract_step(
                         &staged_not_null_name(&d.table, &d.column),
                     ));
                 }
-                let (labels_up, labels_down) = label_contract(relaxed_target, target)?;
+                let (labels_up, labels_down) = label_contract(relabel, relaxed_target, target)?;
                 let prepared = !up.is_empty() || !labels_up.is_empty();
                 let dropped = drops(&withheld)?;
                 up.extend(dropped.up);
@@ -962,7 +968,7 @@ pub fn contract_step(
                 }
                 // A table a removed label reshapes (its check, or a column
                 // narrowed to the longest label left).
-                for op in super::plan(relaxed_target, target, Dialect::Sqlite).ops() {
+                for op in relabel {
                     if let Some(table) = op.table()
                         && !tables.iter().any(|t| t == table)
                     {
@@ -970,13 +976,12 @@ pub fn contract_step(
                     }
                 }
                 // A drop from a table rebuilt here folds into its rebuild.
-                let (folded, native): (Vec<PlannedOp>, Vec<PlannedOp>) =
-                    withheld.into_iter().partition(|planned| {
-                        planned
-                            .op
-                            .table()
+                let (folded, native): (Vec<MigrationOp>, Vec<MigrationOp>) =
+                    withheld.into_iter().partition(|op| {
+                        op.table()
                             .is_some_and(|table| tables.iter().any(|t| t == table))
                     });
+                let folded = downs::decided(&folded, kept_target, relaxed_target, dialect);
                 let dropped = drops(&native)?;
                 let mut rebuilt_up = Vec::new();
                 let mut rebuilt_down = Vec::new();
@@ -1033,41 +1038,32 @@ pub fn contract_step(
     })
 }
 
-/// The removed labels' half of the Postgres contract, up and down: every op
-/// planning `relaxed_target` → `target` but the nullability the staged
-/// `NOT NULL` owns. A native type's removals are one swap per type
-/// ([`enums::render_swap_type`], over every column the target stores as that
-/// type); anything else (a text enum's check rebuilt to the labels left) is
-/// the pass's statement, added validated. The down is the planner run back:
-/// `ADD VALUE IF NOT EXISTS` for each label of a native type (ADR-0011's
-/// statement) and the check rebuilt over the labels again.
+/// The removed labels' half of the Postgres contract, up and down, from the
+/// plan's own ops `relabel` (its label removals and the changes they make to
+/// the columns that held the label), between `relaxed_target` (every removed
+/// label still declared) and `target`. A native type's removals are one swap
+/// per type ([`enums::render_swap_type`], over every column the target
+/// stores as that type); every other op (a text enum's check rebuilt to the
+/// labels left) is the pass's statement, added validated. The down puts each
+/// removed label of a native type back where the parent declares it
+/// ([`restored_labels`]), and the rest is [`plan_down`] of those ops: the
+/// check rebuilt over the labels again.
 fn label_contract(
+    relabel: &[MigrationOp],
     relaxed_target: &IrEnvelope<SchemaIrPayload>,
     target: &IrEnvelope<SchemaIrPayload>,
 ) -> Result<(Vec<String>, Vec<String>), GenerateError> {
-    let rest = |ops: Vec<MigrationOp>| -> Vec<MigrationOp> {
-        ops.into_iter()
-            .filter(|op| {
-                !matches!(
-                    op,
-                    MigrationOp::AlterColumnNullability { .. }
-                        | MigrationOp::RemoveEnumLabel { .. }
-                )
-            })
-            .collect()
-    };
-    let rendered = |ops: Vec<MigrationOp>, old, new| -> Result<Vec<String>, GenerateError> {
-        let rendered = render_ops(&ops, old, new, Dialect::Postgres, ConstraintMode::Plain)?;
+    let (removals, rest): (Vec<MigrationOp>, Vec<MigrationOp>) = relabel
+        .iter()
+        .cloned()
+        .partition(|op| matches!(op, MigrationOp::RemoveEnumLabel { .. }));
+    let statements = |rendered: Vec<crate::RenderedOp>| -> Result<Vec<String>, GenerateError> {
         super::refuse_unrendered(&rendered, Dialect::Postgres)?;
         Ok(rendered.into_iter().flat_map(|op| op.statements).collect())
     };
-    let forward: Vec<MigrationOp> = super::plan(relaxed_target, target, Dialect::Postgres)
-        .ops()
-        .cloned()
-        .collect();
     let mut up = Vec::new();
     let mut swapped: Vec<&str> = Vec::new();
-    for op in &forward {
+    for op in &removals {
         let MigrationOp::RemoveEnumLabel {
             type_name, columns, ..
         } = op
@@ -1105,21 +1101,42 @@ fn label_contract(
             up.extend(enums::render_swap_type(type_name, &labels_after, &native));
         }
     }
-    up.extend(rendered(rest(forward), relaxed_target, target)?);
-    let backward: Vec<MigrationOp> = super::plan(target, relaxed_target, Dialect::Postgres)
-        .ops()
-        .cloned()
+    up.extend(statements(render_ops(
+        &rest,
+        relaxed_target,
+        target,
+        Dialect::Postgres,
+        ConstraintMode::Plain,
+        IndexMode::Plain,
+    )?)?);
+    // A removed label of a native type comes back in the down; a text
+    // enum's labels live in its rows and its check, which `rest` puts back.
+    let mut restored: Vec<(String, String)> = removals
+        .iter()
+        .filter_map(|op| match op {
+            MigrationOp::RemoveEnumLabel {
+                type_name, label, ..
+            } if pg_enum_labels(target, type_name).is_some() => {
+                Some((type_name.clone(), label.clone()))
+            }
+            _ => None,
+        })
         .collect();
-    let (restored, backward): (Vec<_>, Vec<_>) = rest(backward)
-        .into_iter()
-        .partition(|op| matches!(op, MigrationOp::AddEnumLabel { .. }));
+    restored.sort();
+    restored.dedup();
     let mut down = restored_labels(&restored, relaxed_target, target)?;
-    down.extend(rendered(backward, target, relaxed_target)?);
+    let back = plan_down(
+        &rest,
+        &Side::declared(target.clone()),
+        &Side::declared(relaxed_target.clone()),
+        Dialect::Postgres,
+    );
+    down.extend(statements(back.render()?)?);
     Ok((up, down))
 }
 
-/// The down's label additions, `restored` (the planner's `AddEnumLabel` ops
-/// run back), each where `parent` declares it: `ADD VALUE … AFTER` the label
+/// The down's label additions, `restored` (each removed `(type, label)` of
+/// a native type), each where `parent` declares it: `ADD VALUE … AFTER` the label
 /// before it (or `BEFORE` the first one left), never appended, so the type's
 /// order — its comparisons and `ORDER BY` — is the parent's again
 /// (ADR-0033). The position is [`positioned_missing_enum_labels`]'s, over
@@ -1129,26 +1146,19 @@ fn label_contract(
 /// [`GenerateError::Render`] naming the type when either side declares no
 /// native enum of that name: the down could not place the labels it restores.
 fn restored_labels(
-    restored: &[MigrationOp],
+    restored: &[(String, String)],
     parent: &IrEnvelope<SchemaIrPayload>,
     target: &IrEnvelope<SchemaIrPayload>,
 ) -> Result<Vec<String>, GenerateError> {
     let mut types: Vec<&str> = Vec::new();
-    for op in restored {
-        if let MigrationOp::AddEnumLabel { type_name, .. } = op
-            && !types.contains(&type_name.as_str())
-        {
+    for (type_name, _) in restored {
+        if !types.contains(&type_name.as_str()) {
             types.push(type_name);
         }
     }
     let mut out = Vec::new();
     for type_name in types {
-        let wanted = |label: &str| {
-            restored.iter().any(|op| {
-                matches!(op, MigrationOp::AddEnumLabel { type_name: t, label: l }
-                    if t == type_name && l == label)
-            })
-        };
+        let wanted = |label: &str| restored.iter().any(|(t, l)| t == type_name && l == label);
         let labels_of = |ir, side: &str| {
             pg_enum_labels(ir, type_name).ok_or_else(|| {
                 GenerateError::Render(format!(
@@ -1208,10 +1218,7 @@ mod tests {
 
     #[test]
     fn a_restored_label_of_a_type_neither_side_declares_is_an_error_naming_it() {
-        let restored = [MigrationOp::AddEnumLabel {
-            type_name: "status".into(),
-            label: "gone".into(),
-        }];
+        let restored = [("status".to_string(), "gone".to_string())];
         let empty = ir(vec![]);
         let err = restored_labels(&restored, &empty, &empty).expect_err("refused");
         assert!(

@@ -30,8 +30,9 @@ pub use directory::{
 pub use emit::{CreateTableEmission, order_models_for_create, render_create_table};
 pub use ferro_ddl_lowering::{Dialect, InPlaceChange, Report, ReportKind, Subject};
 pub use generate::{
-    CheckReport, GenerateError, GenerateOptions, GeneratedMigration, check_migrations, generate,
-    generate_with,
+    CheckReport, GenerateError, GenerateOptions, GeneratedMigration, GeneratedStep,
+    NEW_TABLE_PREFIX, Problem, Rendering, STAGED_NOT_NULL_PREFIX, check_migrations, generate,
+    generate_with, new_table_name, staged_not_null_name,
 };
 pub use order::order_by_dependencies;
 pub use plan::{
@@ -718,15 +719,21 @@ impl Plan {
     /// # Errors
     /// What [`Self::render`] raises, and an index past the plan's ops.
     pub fn render_ops(&self, ops: &[usize]) -> Result<Vec<RenderedOp>, EmissionError> {
-        self.render_in(ferro_ddl_lowering::ConstraintMode::Plain, ops)
+        self.render_in(
+            ferro_ddl_lowering::ConstraintMode::Plain,
+            ferro_ddl_lowering::IndexMode::Plain,
+            ops,
+        )
     }
 
     /// [`Self::render_ops`] with every foreign key and check added in
-    /// `constraints` mode: `NOT VALID` is the generator's staged constraint
-    /// on an existing Postgres table (ADR-0043).
+    /// `constraints` mode (`NOT VALID` is the generator's staged constraint
+    /// on an existing Postgres table, ADR-0043) and every index in `indexes`
+    /// mode (`CONCURRENTLY` is the generator's index step, ADR-0044).
     pub(crate) fn render_in(
         &self,
         constraints: ferro_ddl_lowering::ConstraintMode,
+        indexes: ferro_ddl_lowering::IndexMode,
         ops: &[usize],
     ) -> Result<Vec<RenderedOp>, EmissionError> {
         let selected = ops
@@ -749,6 +756,7 @@ impl Plan {
             &self.target,
             self.dialect,
             constraints,
+            indexes,
         )
     }
 }

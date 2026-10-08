@@ -28,23 +28,28 @@
 //! The phase table in [`columns`] reads each op's step off its verdict; an op
 //! no door runs is refused with its recipe.
 
-pub mod backfill;
-pub mod columns;
-pub mod downs;
-pub mod enums;
-pub mod rebuild;
-pub mod renames;
-pub mod staging;
+mod backfill;
+mod columns;
+mod downs;
+pub(crate) mod enums;
+pub(crate) mod rebuild;
+mod renames;
+mod stages;
+mod staging;
+
+pub use backfill::{STAGED_NOT_NULL_PREFIX, staged_not_null_name};
+pub use rebuild::{NEW_TABLE_PREFIX, new_table_name};
 
 use crate::directory::{DirectoryError, Headers, MigrationsDir, StepDialect, StepKind};
 use crate::plan::{HintError, renamed_snapshot};
+use crate::render::render_ops;
 use crate::snapshot::{Snapshot, SnapshotError};
 use crate::{
     AnsweredBy, Dialect, EmissionError, Execution, MigrationOp, Plan, PlanOptions, PlannedOp,
     Refusal, RenderedOp, ReportKind, Side, plan_from_ir,
 };
 use columns::Phase;
-use ferro_ddl_lowering::ConstraintMode;
+use ferro_ddl_lowering::{ConstraintMode, IndexMode};
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -291,18 +296,6 @@ fn phase_of(op: &PlannedOp, data_steps: bool) -> Result<Phase, GenerateError> {
     })
 }
 
-/// The indexes of the ops of `plan` the file renders: every op but a SQLite
-/// check drop the same file's `DROP COLUMN` carries
-/// ([`columns::omitted`]).
-fn rendered_ops(plan: &Plan) -> Vec<usize> {
-    plan.operations
-        .iter()
-        .enumerate()
-        .filter(|(_, op)| !columns::omitted(op, plan.dialect()))
-        .map(|(index, _)| index)
-        .collect()
-}
-
 /// Refuse an op the renderer answered with a report that stands in for its
 /// statement ([`crate::Report::blocks`]: a cast the pass refuses, a change
 /// SQLite cannot make in place): the file would otherwise silently leave it
@@ -322,43 +315,8 @@ fn refuse_unrendered(rendered: &[RenderedOp], dialect: Dialect) -> Result<(), Ge
     Ok(())
 }
 
-/// The phase steps the schema-step ops `ups` (one list per dialect, planned
-/// `before → expanded`) land in, in a migration that has (`data_steps`) or
-/// lacks a data step. Refuses a phase the steps before the data steps must
-/// never see: an index change (its own index step), a demand for values (the
-/// expanded schema relaxes every demanded column), or a drop the data steps
-/// wait for (the expanded schema keeps it until the contract).
-fn step_phases(ups: &[Vec<PlannedOp>], data_steps: bool) -> Result<BTreeSet<Phase>, GenerateError> {
-    let mut phases = BTreeSet::new();
-    for op in ups.iter().flatten() {
-        phases.insert(phase_of(op, data_steps)?);
-    }
-    if phases.contains(&Phase::Index) {
-        return Err(GenerateError::Render(
-            "an index change on an existing table reached a phase step; it is its own index \
-             step"
-                .to_string(),
-        ));
-    }
-    if phases.contains(&Phase::Backfill) {
-        return Err(GenerateError::Render(
-            "a change still asks existing rows for values on the expanded schema; every \
-             demanded column is nullable there"
-                .to_string(),
-        ));
-    }
-    if phases.contains(&Phase::Contract) {
-        return Err(GenerateError::Render(
-            "a drop the data steps wait for reached a step before them; the expanded schema \
-             keeps every table and column the contract drops"
-                .to_string(),
-        ));
-    }
-    Ok(phases)
-}
-
 /// The modelset with no models, in `like`'s IR version: the parent of `0001`.
-pub fn empty_modelset(like: &IrEnvelope<SchemaIrPayload>) -> IrEnvelope<SchemaIrPayload> {
+pub(crate) fn empty_modelset(like: &IrEnvelope<SchemaIrPayload>) -> IrEnvelope<SchemaIrPayload> {
     IrEnvelope {
         ir_kind: like.ir_kind.clone(),
         ir_version: like.ir_version,
@@ -426,30 +384,36 @@ fn step_text(headers: &Headers, statements: &[String]) -> String {
     out
 }
 
-/// The text of every report rendering the ops of `up` at `ops` raises (a
-/// backend limitation a dialect skips, such as row security on SQLite), each
-/// once, into `warnings`; an op the renderer leaves out with a blocking report
-/// is refused. An op on a table SQLite rebuilds is not rendered alone: its
-/// rebuild carries it.
+/// The text of every report rendering `ops` from `before` to `after` on
+/// `dialect` raises (a backend limitation a dialect skips, such as row
+/// security on SQLite), each once, into `warnings`; an op the renderer leaves
+/// out with a blocking report is refused. An op on a table SQLite rebuilds
+/// is not rendered alone: its rebuild carries it.
 fn render_warnings(
-    up: &Plan,
-    ops: &[usize],
+    ops: &[MigrationOp],
+    before: &IrEnvelope<SchemaIrPayload>,
+    after: &IrEnvelope<SchemaIrPayload>,
+    dialect: Dialect,
     warnings: &mut Vec<String>,
 ) -> Result<(), GenerateError> {
-    let dialect = up.dialect();
-    let listed: Vec<PlannedOp> = ops.iter().map(|&i| up.operations[i].clone()).collect();
-    let rebuilt = rebuild::tables_to_rebuild(&listed);
-    let native: Vec<usize> = ops
-        .iter()
-        .copied()
-        .filter(|&i| {
-            !up.operations[i]
-                .op
-                .table()
-                .is_some_and(|table| rebuilt.contains(table))
-        })
+    let decided: Vec<PlannedOp> = downs::decided(ops, before, after, dialect)
+        .into_iter()
+        .filter(|planned| !columns::omitted(planned, dialect))
         .collect();
-    let rendered = up.render_in(ConstraintMode::Plain, &native)?;
+    let rebuilt = rebuild::tables_to_rebuild(&decided);
+    let native: Vec<MigrationOp> = decided
+        .into_iter()
+        .map(|planned| planned.op)
+        .filter(|op| !op.table().is_some_and(|table| rebuilt.contains(table)))
+        .collect();
+    let rendered = render_ops(
+        &native,
+        before,
+        after,
+        dialect,
+        ConstraintMode::Plain,
+        IndexMode::Plain,
+    )?;
     refuse_unrendered(&rendered, dialect)?;
     for report in rendered.into_iter().flat_map(|rendered| rendered.reports) {
         if !warnings.contains(&report.text) {
@@ -592,6 +556,11 @@ pub struct GenerateOptions {
     /// there is none.
     #[serde(default)]
     pub sql_step: Option<String>,
+    /// `--data-only`: the migration is the `--data-step` alone, with no
+    /// schema plan, whatever the models changed; its snapshot is the
+    /// parent's, linked to it (ADR-0037).
+    #[serde(default)]
+    pub data_only: bool,
 }
 
 impl GenerateOptions {
@@ -622,13 +591,19 @@ impl GenerateOptions {
 }
 
 /// [`generate`] with `options`: a `--no-backfill` column's backfill is its
-/// model's guard step.
+/// model's guard step, and the steps a person asks for (`--sql-step`,
+/// `--data-step`) are laid out here whether or not the models changed. A
+/// migration made only of such steps stores the target snapshot; with
+/// `--data-only` the target is the parent (no schema plan). `Ok(None)` only
+/// when the models change nothing and no step is asked for.
 ///
 /// # Errors
-/// What [`generate`] raises, and [`GenerateError::NoBackfill`] for a
+/// What [`generate`] raises, [`GenerateError::NoBackfill`] for a
 /// `--no-backfill` the migration cannot honour (malformed, naming a column
 /// nothing backfills, or only some of a model's columns, or given when the
-/// models change nothing).
+/// models change nothing, or beside `--data-only`), and
+/// [`GenerateError::DataStep`] for a `--data-step` model the snapshot lacks
+/// or a `--data-only` without exactly one `--data-step`.
 pub fn generate_with(
     parent: Option<&Snapshot>,
     target: &IrEnvelope<SchemaIrPayload>,
@@ -639,6 +614,25 @@ pub fn generate_with(
     if dialects.is_empty() {
         return Err(GenerateError::NoDialects);
     }
+    if options.data_only && !skipped.is_empty() {
+        return Err(GenerateError::NoBackfill(
+            "--no-backfill replaces a generated backfill, and --data-only generates none; \
+             drop one of them"
+                .to_string(),
+        ));
+    }
+    if options.data_only && (options.data_step.is_none() || options.sql_step.is_some()) {
+        return Err(GenerateError::DataStep(
+            "--data-only writes one data step and nothing else; name its model with \
+             --data-step <Model> (and drop --sql-step)"
+                .to_string(),
+        ));
+    }
+    let empty = empty_modelset(target);
+    let parent_ir = parent.map(|snapshot| &snapshot.ir).unwrap_or(&empty);
+    // `--data-only` plans nothing: the migration leads from the parent to
+    // the parent.
+    let target = if options.data_only { parent_ir } else { target };
     let hand = options
         .data_step
         .as_deref()
@@ -652,167 +646,64 @@ pub fn generate_with(
         data: None,
         hand_model: None,
     });
-    // A hand SQL step goes right before a hand data step, or last.
-    let (sql_first, sql_last) = if hand.is_some() {
-        (sql, None)
-    } else {
-        (None, sql)
-    };
-    let empty = empty_modelset(target);
-    let parent_ir = parent.map(|snapshot| &snapshot.ir).unwrap_or(&empty);
     // Declared renames (ADR-0032): the planner puts them first; every other
     // op reads its table from `before`, the parent as the renames leave it.
     // A refused hint stops `new` here, before anything is written.
     let hints = renames::live(parent_ir, target)?;
-    let renamed_parent = renamed_snapshot(parent_ir, &hints);
-    let before = &renamed_parent;
+    let before = renamed_snapshot(parent_ir, &hints);
 
-    let mut changes = Vec::new();
+    // One plan per dialect, every op placed in its step by its verdict, and
+    // the schemas between the steps (ADR-0050).
+    let layout = stages::Layout::plan(parent_ir, before, target, dialects, hand.is_some())?;
+    let stages::Stages {
+        before,
+        expanded,
+        kept,
+        loose,
+    } = &layout.stages;
+    if layout.is_empty() && !skipped.is_empty() {
+        backfill::data_steps(&[], target, &skipped)?;
+    }
+    if layout.is_empty() && hand.is_none() && sql.is_none() {
+        return Ok(None);
+    }
+
+    let mut warnings = Vec::new();
+    let mut staged = Vec::new();
     let mut suggestions = Vec::new();
-    for &dialect in dialects {
-        let change = plan(parent_ir, target, dialect);
-        refuse_unsupported(&change)?;
-        refuse_unsupported(&plan(target, before, dialect))?;
-        let ops: Vec<MigrationOp> = change.ops().cloned().collect();
+    for placed in &layout.placed {
+        let dialect = placed.dialect;
+        let early: Vec<MigrationOp> = placed
+            .labels
+            .iter()
+            .chain(&placed.schema)
+            .cloned()
+            .collect();
+        render_warnings(&early, parent_ir, expanded, dialect, &mut warnings)?;
+        for constraint in staging::staged_constraints(&early, before, expanded, dialect)? {
+            if !staged.contains(&constraint) {
+                staged.push(constraint);
+            }
+        }
+        let ops: Vec<MigrationOp> = placed.plan.ops().cloned().collect();
         for line in renames::suggestions(&ops, before, target) {
             if !suggestions.contains(&line) {
                 suggestions.push(line);
             }
         }
-        changes.push(ops);
-    }
-
-    // The index steps come after every other step but the add-constraint,
-    // contract and validate steps, and turn `shape` into the target; every
-    // earlier step turns the parent into `shape` (ADR-0044, ADR-0046).
-    let index_ops = staging::index_ops(before, target);
-    let shape = staging::schema_shape(before, target, &index_ops);
-    // A change that asks existing rows for values (ADR-0040): every step up
-    // to the contract sees each demanded column nullable — `expanded` is the
-    // schema the expand leaves and the backfill fills, `loose_target` the one
-    // the index steps leave — and the contract makes it the target.
-    let mut demand_ops = Vec::new();
-    for &dialect in dialects {
-        demand_ops.extend(plan(parent_ir, &shape, dialect).operations);
-    }
-    let demands = backfill::collect(&demand_ops, before, &shape);
-    // A removed enum label (D2) stays declared until the contract: the
-    // backfill relabels the rows holding it, the contract removes it.
-    let removal_ops: Vec<MigrationOp> = demand_ops
-        .iter()
-        .map(|planned| planned.op.clone())
-        .collect();
-    let removals = backfill::label_removals(&removal_ops);
-    let backfills = !demands.is_empty() || !removals.is_empty();
-    // A migration with a data step after its schema step keeps every table
-    // and column it drops until its contract (ADR-0025), so the data step
-    // reads what the historical model declares: the phase table decides
-    // which ops wait ([`columns::phase`]), and every step before the contract
-    // sees them still there.
-    let data_steps = backfills || hand.is_some();
-    // The ops each dialect holds back for the contract, as the phase table
-    // decides them: the contract renders exactly these, and every step before
-    // it sees exactly what they remove ([`backfill::with_drops_kept`]).
-    let mut withheld: Vec<Vec<PlannedOp>> = Vec::new();
-    for &dialect in dialects {
-        let mut held = Vec::new();
-        if data_steps {
-            for op in plan(parent_ir, &shape, dialect).operations {
-                if phase_of(&op, true)? == Phase::Contract {
-                    held.push(op);
-                }
-            }
-        }
-        withheld.push(held);
-    }
-    let held: Vec<MigrationOp> = withheld
-        .iter()
-        .flatten()
-        .map(|planned| planned.op.clone())
-        .collect();
-    let expanded = backfill::with_drops_kept(
-        &backfill::with_removed_labels(&backfill::relaxed(&shape, &demands), before, &removals),
-        before,
-        &held,
-    );
-    let loose_target =
-        backfill::with_removed_labels(&backfill::relaxed(target, &demands), before, &removals);
-    let kept_target = backfill::with_drops_kept(&loose_target, before, &held);
-    let contracts = backfills || !held.is_empty();
-    let mut up_plans = Vec::new();
-    let mut up_indexes = Vec::new();
-    for &dialect in dialects {
-        let up = plan(parent_ir, &expanded, dialect);
-        up_indexes.push(rendered_ops(&up));
-        up_plans.push(up);
-    }
-    let ups: Vec<Vec<PlannedOp>> = up_plans
-        .iter()
-        .zip(&up_indexes)
-        .map(|(up, indexes)| indexes.iter().map(|&i| up.operations[i].clone()).collect())
-        .collect();
-    // A label the models add is the `labels` step on every dialect, also
-    // where the dialect keeps labels as text and has nothing to run (SQLite:
-    // the step is `not-applicable` both ways): the models changed, so the
-    // migration must store the target snapshot. The planner says so going
-    // back: from the target, the parent drops the label.
-    let mut labels_added = BTreeSet::new();
-    for &dialect in dialects {
-        for op in plan(target, before, dialect).ops() {
-            if let MigrationOp::RemoveEnumLabel {
-                type_name, label, ..
-            } = op
-            {
-                labels_added.insert(format!("{type_name}.{label}"));
-            }
-        }
-    }
-    let adds_labels = !labels_added.is_empty();
-    if ups.iter().all(Vec::is_empty) && index_ops.is_empty() && !contracts && !adds_labels {
-        if !skipped.is_empty() {
-            backfill::data_steps(&demands, target, &skipped)?;
-        }
-        return Ok(None);
-    }
-
-    let mut phases = step_phases(&ups, data_steps)?;
-    if adds_labels {
-        phases.insert(Phase::Labels);
-    }
-    let mut warnings = Vec::new();
-    let mut staged = Vec::new();
-    for ((&dialect, up), (up_plan, indexes)) in dialects
-        .iter()
-        .zip(&ups)
-        .zip(up_plans.iter().zip(&up_indexes))
-    {
-        render_warnings(up_plan, indexes, &mut warnings)?;
-        let up_ops: Vec<MigrationOp> = up.iter().map(|planned| planned.op.clone()).collect();
-        for constraint in staging::staged_constraints(&up_ops, before, &expanded, dialect)? {
-            if !staged.contains(&constraint) {
-                staged.push(constraint);
-            }
-        }
     }
 
     // With a backfill, the schema step is the expand (ADR-0040).
-    let schema_step = if backfills { "expand" } else { "schema" };
+    let schema_step = if layout.backfills { "expand" } else { "schema" };
     let mut steps = Vec::new();
-    let push_phase = |phase: Phase, steps: &mut Vec<GeneratedStep>| {
+    for phase in layout.early_phases() {
         let mut renderings = BTreeMap::new();
-        for (&dialect, up) in dialects.iter().zip(&ups) {
-            let mut step_ops = Vec::new();
-            for op in up {
-                if phase_of(op, data_steps)? == phase {
-                    step_ops.push(op.clone());
-                }
-            }
+        for placed in &layout.placed {
+            let dialect = placed.dialect;
             let rendering = if phase == Phase::Labels {
-                let ops: Vec<MigrationOp> =
-                    step_ops.iter().map(|planned| planned.op.clone()).collect();
-                enums::render_labels_step(&ops, before, &expanded, dialect)?
+                enums::render_labels_step(&placed.labels, before, expanded, dialect)?
             } else {
-                downs::render_down(&step_ops, parent_ir, &expanded, dialect, &hints)?
+                downs::render_down(&placed.schema, parent_ir, expanded, dialect, &hints)?
             };
             renderings.insert(StepDialect::from(dialect), rendering);
         }
@@ -827,19 +718,27 @@ pub fn generate_with(
             data: None,
             hand_model: None,
         });
-        Ok::<(), GenerateError>(())
+    }
+    steps.extend(backfill::data_steps(&layout.demands, target, &skipped)?);
+    for (at, op) in layout.index_ops.iter().enumerate() {
+        let (step_before, step_after) = layout.index_stages(at, target);
+        steps.push(staging::index_step(
+            op,
+            &step_before,
+            &step_after,
+            dialects,
+        )?);
+    }
+    // The steps a person asks for (`--sql-step`, `--data-step`), laid out
+    // whether or not the models changed: the SQL step right before the data
+    // step, or last; a data step after every generated step but the
+    // contract, which drops what it may still read (ADR-0025).
+    let (sql_first, sql_last) = if hand.is_some() {
+        (sql, None)
+    } else {
+        (None, sql)
     };
-    for &phase in phases.iter().filter(|&&phase| phase < Phase::Index) {
-        push_phase(phase, &mut steps)?;
-    }
-    steps.extend(backfill::data_steps(&demands, target, &skipped)?);
-    steps.extend(index_ops.iter().map(|op| staging::index_step(op, dialects)));
-    for &phase in phases.iter().filter(|&&phase| phase > Phase::Index) {
-        push_phase(phase, &mut steps)?;
-    }
-    // A data step a person adds runs after every generated step but the
-    // contract, which drops what it may still read.
-    if !contracts {
+    if !layout.contracts() {
         // A step every configured dialect would render not-applicable is not
         // generated: only Postgres stages a constraint (ADR-0043).
         if !staged.is_empty() {
@@ -850,15 +749,26 @@ pub fn generate_with(
     } else {
         // The contract validates what the expand staged (ADR-0043): no
         // separate validate step.
-        steps.extend(backfill::add_constraint_step(&demands, dialects));
+        steps.extend(backfill::add_constraint_step(&layout.demands, dialects));
         steps.extend(sql_first);
         steps.extend(hand);
+        let held: Vec<Vec<MigrationOp>> = layout
+            .placed
+            .iter()
+            .map(|placed| placed.held.clone())
+            .collect();
+        let relabel: Vec<Vec<MigrationOp>> = layout
+            .placed
+            .iter()
+            .map(|placed| placed.relabel.clone())
+            .collect();
         steps.push(backfill::contract_step(
-            &demands,
+            &layout.demands,
             &staged,
-            &withheld,
-            &kept_target,
-            &loose_target,
+            &held,
+            &relabel,
+            kept,
+            loose,
             target,
             dialects,
         )?);
@@ -869,16 +779,23 @@ pub fn generate_with(
     }
     backfill::name_reverse(&mut steps);
 
+    // The schema snapshot is the declared modelset the migration was
+    // generated from, whether its steps are generated or a person's.
     let bytes = Snapshot::store(target, parent.map(|snapshot| snapshot.checksum))?;
     let snapshot = Snapshot::load(&bytes)?;
     let snapshot_json = String::from_utf8(bytes).map_err(|err| {
         GenerateError::Render(format!("the generated snapshot is not UTF-8: {err}"))
     })?;
+    let changes: Vec<Vec<MigrationOp>> = layout
+        .placed
+        .iter()
+        .map(|placed| placed.plan.ops().cloned().collect())
+        .collect();
     Ok(Some(GeneratedMigration {
         steps,
         snapshot,
         snapshot_json,
-        summary: std::iter::once(summarize(&changes, &labels_added, parent_ir, target))
+        summary: std::iter::once(summarize(&changes, &layout.labels_added, parent_ir, target))
             .chain(suggestions)
             .filter(|line| !line.is_empty())
             .collect::<Vec<_>>()
@@ -1209,6 +1126,59 @@ mod tests {
         edited.columns[1].default = Some(serde_json::json!("anonymous"));
         edited.model_name = "myapp.renamed_module.Author".into();
         assert_eq!(generate(Some(&parent), &ir(vec![edited]), &BOTH), Ok(None));
+    }
+
+    #[test]
+    fn hand_steps_alone_are_laid_out_here_and_store_the_target_snapshot() {
+        // The models change nothing that renders DDL, but they did change:
+        // the migration's snapshot is the target (the glossary's "declared
+        // modelset as it was when a migration was generated").
+        let parent = snapshot_of(&ir(vec![author()]), None);
+        let mut edited = author();
+        edited.columns[1].default = Some(serde_json::json!("anonymous"));
+        let target = ir(vec![edited]);
+        let sql = GenerateOptions {
+            sql_step: Some("audit".into()),
+            ..GenerateOptions::default()
+        };
+        let migration = generate_with(Some(&parent), &target, &BOTH, &sql)
+            .expect("ok")
+            .expect("a migration");
+        assert_eq!(step_names(&migration), ["01_audit"]);
+        assert_eq!(migration.steps[0].kind, StepKind::PortableSql);
+        assert_eq!(migration.snapshot.ir, target);
+        assert_eq!(migration.snapshot.parent_checksum, Some(parent.checksum));
+        assert_eq!(
+            migration.snapshot_json.as_bytes(),
+            Snapshot::store(&target, Some(parent.checksum))
+                .expect("store")
+                .as_slice()
+        );
+        assert_eq!(migration.summary, "");
+        // With a data step too, the SQL step goes right before it.
+        let both = GenerateOptions {
+            data_step: Some("Author".into()),
+            ..sql.clone()
+        };
+        let migration = generate_with(Some(&parent), &target, &BOTH, &both)
+            .expect("ok")
+            .expect("a migration");
+        assert_eq!(step_names(&migration), ["01_audit", "02_backfill_author"]);
+        assert_eq!(migration.steps[1].hand_model.as_deref(), Some("Author"));
+        // `--data-only` is the same path with no schema plan: whatever the
+        // models changed, its snapshot is the parent's, linked to it.
+        let changed = ir(vec![with_columns(vec![column("slug", "string")])]);
+        let data_only = GenerateOptions {
+            data_step: Some("Author".into()),
+            data_only: true,
+            ..GenerateOptions::default()
+        };
+        let migration = generate_with(Some(&parent), &changed, &BOTH, &data_only)
+            .expect("ok")
+            .expect("a migration");
+        assert_eq!(step_names(&migration), ["01_backfill_author"]);
+        assert_eq!(migration.snapshot.ir, parent.ir);
+        assert_eq!(migration.snapshot.parent_checksum, Some(parent.checksum));
     }
 
     /// What the reconciliation pass executes to turn `before` into `after`
@@ -1561,70 +1531,6 @@ mod tests {
             "DROP INDEX IF EXISTS \"idx_author_lookup\";\n\n\
              CREATE INDEX IF NOT EXISTS \"idx_author_lookup\" ON \"author\" (\"name\");\n"
         );
-    }
-
-    /// Until the index steps are built from the planner's ops (ADR-0051),
-    /// the generator's own index diff and the planner name the same
-    /// redefinitions: both causes of a shared name, and a change of
-    /// uniqueness, on both dialects.
-    #[test]
-    fn the_index_steps_redefine_exactly_what_the_planner_redefines() {
-        let with_index = |columns: &[&str], unique: bool| {
-            let mut model = with_columns(vec![
-                optional("order_id", "string"),
-                optional("kind", "string"),
-                optional("order", "string"),
-                optional("id_kind", "string"),
-            ]);
-            let name = ferro_ddl_lowering::composite_index_name("author", columns);
-            model.indexes.push(ferro_schema_ir::SchemaIndex {
-                name,
-                columns: columns.iter().map(|c| c.to_string()).collect(),
-                unique,
-            });
-            model
-        };
-        let cases = [
-            // An underscore join.
-            (
-                with_index(&["order_id", "kind"], false),
-                with_index(&["order", "id_kind"], false),
-            ),
-            // The same columns, made unique.
-            (
-                with_index(&["order_id", "kind"], false),
-                with_index(&["order_id", "kind"], true),
-            ),
-            // An unchanged index is no step and no op.
-            (
-                with_index(&["order_id", "kind"], false),
-                with_index(&["order_id", "kind"], false),
-            ),
-        ];
-        for (before, after) in cases {
-            let (before, after) = (ir(vec![before]), ir(vec![after]));
-            let staged: Vec<String> = staging::index_ops(&before, &after)
-                .iter()
-                .filter_map(|op| match op {
-                    staging::IndexOp::Build {
-                        def,
-                        replaces: Some(_),
-                    } => Some(def.name.clone()),
-                    _ => None,
-                })
-                .collect();
-            for dialect in BOTH {
-                let planned: Vec<String> = plan(&before, &after, dialect)
-                    .op_list()
-                    .into_iter()
-                    .filter_map(|op| match op {
-                        MigrationOp::RedefineIndex { name, .. } => Some(name),
-                        _ => None,
-                    })
-                    .collect();
-                assert_eq!(planned, staged, "{dialect:?}");
-            }
-        }
     }
 
     /// `author` with an optional `email`, unique when `unique`, and the table
@@ -2806,33 +2712,6 @@ mod tests {
     }
 
     #[test]
-    fn f1_a_drop_that_reaches_a_step_before_the_data_steps_is_refused() {
-        // The expanded schema keeps what the contract drops, so no such op
-        // reaches the schema step; if one did, the phase table says where it
-        // belongs and generation stops rather than drop it early.
-        let (before, after) = (ir(vec![author()]), ir(vec![slug_for_name()]));
-        let drop = MigrationOp::DropColumn {
-            table: "author".into(),
-            column: "name".into(),
-        };
-        let ups = vec![vec![PlannedOp::of(
-            drop,
-            &Side::declared(before),
-            &Side::declared(after),
-            Dialect::Postgres,
-        )]];
-        assert_eq!(
-            step_phases(&ups, true).expect_err("refused").to_string(),
-            "a drop the data steps wait for reached a step before them; the expanded schema \
-             keeps every table and column the contract drops"
-        );
-        assert_eq!(
-            step_phases(&ups, false).expect("ok"),
-            BTreeSet::from([Phase::Schema])
-        );
-    }
-
-    #[test]
     fn f1_a_dropped_foreign_key_column_is_one_held_back_op_its_key_going_with_it() {
         let mut keyless = post();
         keyless.columns.retain(|col| col.name != "author_id");
@@ -3624,6 +3503,68 @@ mod tests {
         // SQLite rebuilds the table into the new check.
         let sqlite = step(&migration, "02_contract", Dialect::Sqlite);
         assert!(sqlite.up.contains("\"_ferro_new_author\""), "{}", sqlite.up);
+    }
+
+    #[test]
+    fn d2_a_label_added_beside_a_removed_one_widens_the_check_in_the_expand_first() {
+        // One plan: the check's one rebuild rides the removal into the
+        // contract, and the expand widens it first so the backfill can write
+        // the added label.
+        let migration = edit(
+            vec![text_stored(&["draft", "canceled", "live"], &[], true)],
+            vec![text_stored(&["draft", "live", "cancelled"], &[], true)],
+            &[Dialect::Postgres],
+        );
+        assert_eq!(
+            step_names(&migration),
+            [
+                "01_labels",
+                "02_expand",
+                "03_backfill_author",
+                "04_contract"
+            ]
+        );
+        let expand = step(&migration, "02_expand", Dialect::Postgres);
+        assert!(
+            expand
+                .up
+                .contains("IN ('draft', 'canceled', 'live', 'cancelled')"),
+            "{}",
+            expand.up
+        );
+        assert!(
+            expand.down.contains("IN ('draft', 'canceled', 'live'))"),
+            "{}",
+            expand.down
+        );
+        let contract = step(&migration, "04_contract", Dialect::Postgres);
+        assert!(
+            contract.up.contains("IN ('draft', 'live', 'cancelled'))"),
+            "{}",
+            contract.up
+        );
+        assert!(
+            contract
+                .down
+                .contains("IN ('draft', 'canceled', 'live', 'cancelled'))"),
+            "{}",
+            contract.down
+        );
+    }
+
+    #[test]
+    fn a_native_enum_column_made_plain_text_is_refused_with_the_recipe() {
+        // The one forward plan names the move; no reverse plan is needed to
+        // find it.
+        let mut text = author();
+        text.columns[2].enum_type_name = None;
+        text.columns[2].enum_values = None;
+        assert_eq!(
+            refusal(vec![author()], vec![text], &BOTH),
+            "changing \"author\".\"status\" to or from a native enum type is not generated: \
+             add a column of the new type, copy the values across in a data step (ferro \
+             migrate new --data-step …), then drop the old column"
+        );
     }
 
     #[test]

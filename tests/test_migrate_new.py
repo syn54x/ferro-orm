@@ -268,7 +268,7 @@ def test_a_hand_written_sql_step_is_a_portable_placeholder(project, pkg):
     assert (migration / "01_schema.up.sqlite.sql").exists()
 
     # With no schema change, the hand-written step is the whole migration and
-    # its snapshot is a full copy of the parent's, linked to it.
+    # its snapshot is the declared modelset, linked to the parent.
     assert run("migrate", "new", "touch_up", "--sql-step", "fix_more") == 0
     second = project / "migrations/0002_touch_up"
     assert listing(second) == [
@@ -280,6 +280,36 @@ def test_a_hand_written_sql_step_is_a_portable_placeholder(project, pkg):
     child = json.loads((second / "ir.json").read_text())
     assert child["parent_checksum"] == sha384(migration / "ir.json")
     assert child["payload"] == parent["payload"]
+    assert run("migrate", "check") == 0
+
+
+def test_a_hand_step_after_an_edit_that_renders_no_ddl_stores_the_models(project, pkg):
+    # The glossary's schema snapshot is the declared modelset as it was when
+    # the migration was generated: a hand step after a Python default edit
+    # records the edit, never the parent's copy.
+    write_config(project, pkg)
+    write_models(project, pkg, AUTHOR)
+    assert run("migrate", "new", "create_author") == 0
+    write_models(project, pkg, AUTHOR.replace("Status.DRAFT", "Status.LIVE"))
+
+    assert run("migrate", "new", "touch_up", "--sql-step", "fix_more") == 0
+
+    first = project / "migrations/0001_create_author/ir.json"
+    second = project / "migrations/0002_touch_up"
+    assert listing(second) == [
+        "01_fix_more.down.sql",
+        "01_fix_more.up.sql",
+        "ir.json",
+    ]
+    child = json.loads((second / "ir.json").read_text())
+    assert child["parent_checksum"] == sha384(first)
+    assert child["payload"] != json.loads(first.read_text())["payload"]
+    status = next(
+        col
+        for col in child["payload"]["models"][0]["columns"]
+        if col["name"] == "status"
+    )
+    assert status["default"] == "live"
     assert run("migrate", "check") == 0
 
 
