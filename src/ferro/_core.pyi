@@ -147,6 +147,20 @@ def _plan_revision(
     raises ``ValueError``."""
     ...
 
+async def _plan_drift(using: str | None, declared_json: str) -> dict[str, Any]:
+    """``ferro migrate drift``'s read and plan in one call: the database behind
+    connection ``using`` read for the snapshot ``declared_json`` (the tables
+    the reconciliation pass would read for it, ADR-0031 / ADR-0047) and
+    planned toward it by the one planner, destructive changes on.
+
+    Returns ``{"dialect": "postgres" | "sqlite", "live": <the live schema IR
+    envelope>, "operations": [{"kind": ..., <op fields>}], "reports":
+    [...]}``: ``_plan_from_ir``'s ops without their verdicts (drift says what
+    would change, never how it runs) and its report shape. Raises
+    ``ValueError`` when ``declared_json`` is not a schema envelope, and the
+    connection's error when it is not open."""
+    ...
+
 def _plan_from_ir(
     old_ir_json: str,
     new_ir_json: str,

@@ -560,14 +560,14 @@ def test_raise_for_problems_carries_every_line(project, pkg, db, capsys):
 def test_drift_takes_no_lock_and_creates_nothing(project, pkg, db, capsys, monkeypatch):
     applied(project, pkg, db, capsys)
     held_while_reading: list[bool] = []
-    live_schema_ir = _core._live_schema_ir
+    plan_drift = _core._plan_drift
 
-    async def probing(using, declared_json, extra_tables_json=None):
+    async def probing(using, declared_json):
         tracked = await _core._open_tracked(using, None, "migrations")
         held_while_reading.append(await tracked.lock_held())
-        return await live_schema_ir(using, declared_json, extra_tables_json)
+        return await plan_drift(using, declared_json)
 
-    monkeypatch.setattr(_core, "_live_schema_ir", probing)
+    monkeypatch.setattr(_core, "_plan_drift", probing)
     assert drift_api(db).clean
     assert held_while_reading == [False]
 
@@ -704,6 +704,45 @@ def test_against_an_earlier_snapshot_reads_only_its_tables(project, pkg, db, cap
 
     report = asyncio.run(compared())
     assert report.clean and report.against == "0001_create_author"
+
+
+def test_the_drift_plan_is_the_one_planner_without_its_verdicts(
+    project, pkg, db, capsys
+):
+    """``_core._plan_drift`` is one read and one plan in the core: its ops are
+    ``_plan_from_ir``'s, destructive changes on, each verdict removed, and
+    its live side is the envelope ``_live_schema_ir`` reads."""
+    applied(project, pkg, db, capsys)
+    db.execute('ALTER TABLE "team" DROP COLUMN "name"')
+    db.execute('CREATE INDEX "idx_team_name" ON "team" ("size")')
+    snapshot = json.dumps(snapshot_of(project, HEAD))
+
+    async def planned() -> tuple[dict, str, str]:
+        await ferro.connect(db.url, name="probe")
+        try:
+            drifted = await _core._plan_drift("probe", snapshot)
+            live, facts = await _core._live_schema_ir("probe", snapshot)
+            return drifted, live, facts
+        finally:
+            await _core._disconnect("probe")
+
+    drifted, live, facts = asyncio.run(planned())
+    plan = json.loads(
+        _core._plan_from_ir(
+            live, snapshot, db.backend, json.dumps({"destructive": True}), False, facts
+        )
+    )
+    assert drifted["operations"] == [
+        {key: value for key, value in op.items() if key != "verdict"}
+        for op in plan["operations"]
+    ]
+    assert drifted["reports"] == plan["reports"]
+    assert drifted["live"] == json.loads(live)
+    assert drifted["dialect"] == db.backend
+    assert sorted(op["kind"] for op in drifted["operations"]) == [
+        "AddColumn",
+        "DropIndex",
+    ]
 
 
 def test_against_a_connection_that_is_not_open_is_refused(project, pkg, db, capsys):

@@ -47,8 +47,6 @@ if TYPE_CHECKING:
 
 __all__ = ["DriftReport", "against", "drift", "render_op"]
 
-_DESTRUCTIVE = json.dumps({"destructive": True})
-
 
 @dataclass(frozen=True)
 class DriftReport:
@@ -353,29 +351,13 @@ async def against(
     Raises:
         MigrationRefused: ``using`` is not an open connection.
     """
-    dialect = _core.connection_backend(using)
-    if dialect is None:
+    if _core.connection_backend(using) is None:
         raise MigrationRefused(f"connection `{using}` is not open; connect it first")
-    # The snapshot's live tables and the old table of each live rename hint
-    # (ADR-0032), read by the reconciliation pass's own rule (ADR-0047).
-    live_json, facts_json = await _core._live_schema_ir(using, json.dumps(snapshot))
-    plan = json.loads(
-        _core._plan_from_ir(
-            live_json,
-            json.dumps(snapshot),
-            dialect,
-            _DESTRUCTIVE,
-            False,
-            facts_json,
-        )
-    )
-    # Drift reports what the planner would change, not how each change runs:
-    # the ops without their verdicts.
-    planned = [
-        {key: value for key, value in op.items() if key != "verdict"}
-        for op in plan["operations"]
-    ]
-    operations = _describe(planned, json.loads(live_json), snapshot, dialect)
+    # One core call reads the snapshot's live tables (and the old table of
+    # each live rename hint, ADR-0032) by the pass's own rule (ADR-0047) and
+    # plans them toward the snapshot, destructive changes on.
+    plan = await _core._plan_drift(using, json.dumps(snapshot))
+    operations = _describe(plan["operations"], plan["live"], snapshot, plan["dialect"])
     return DriftReport(
         against=migration,
         lines=[render_op(op) for op in operations],
