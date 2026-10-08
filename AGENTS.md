@@ -79,7 +79,12 @@ For a single model, every emitter must agree on:
     one planner's ops.** What changes and the statement that changes it are
     decided once, by the one planner (`ferro_migrate::plan_from_ir`) and its
     renderer (`ferro_migrate::Plan::render`), over function families in
-    `ferro_ddl_lowering`. The reconciliation pass runs them directly; the
+    `ferro_ddl_lowering`. Every op leaves the planner with its
+    `ferro_migrate::OpVerdict`, decided once (ADR-0050): whether the dialect
+    runs it natively, rebuilds the table, refuses it (naming the fix) or
+    cannot reverse it, and whether it demands values from existing rows,
+    drops data or can fail on them. Every door reads that one verdict and
+    re-decides none of it. The reconciliation pass runs them directly; the
     migrations door writes them into step files; the bridge's one comparator
     (`dispatch_for("schema")` in `src/ferro/migrations/alembic.py`) reads the
     live database through `_core._live_schema_ir` and asks the core for the
@@ -120,7 +125,10 @@ For a single model, every emitter must agree on:
       `ROW_POLICY_COMMANDS`), and the reconciliation of a live table
       (`plan_row_security_reconcile`, with `is_default_row_policy_roles`,
       `ferro_manages_row_security`, `normalize_row_policy_expr`,
-      `row_policy_command_from_catalog_code` and its warning texts). The
+      `row_policy_command_from_catalog_code` and its warning texts), whose
+      flags are decided by `missing_row_security_flags` (the flags to turn
+      on) and `excess_row_security_flags` (the flags to turn off,
+      `migrate_destructive` only), each a `Vec<RowSecurityFlag>`. The
       Python declaration surface (`src/ferro/rowsecurity.py`) consumes the
       name, the cast and the command table over FFI
       (`_core._ddl_row_policy_name`, `_core._rls_shorthand_cast`,
