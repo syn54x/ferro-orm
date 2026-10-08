@@ -19,40 +19,33 @@ use crate::{Dialect, Execution, MigrationOp, PlannedOp, Rider};
 
 /// The phase step an op lands in, in the order a migration's steps run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Phase {
+pub(crate) enum Phase {
     /// Label additions to enum types that already exist (ADR-0011, ADR-0041):
     /// first in the migration, so every later step may write the new label.
     Labels,
-    /// The one atomic DDL step of a migration that needs no data step.
+    /// The one atomic DDL step of a migration that needs no data step, or
+    /// its expand, which adds a demanded column nullable ahead of a backfill
+    /// ([`super::backfill`]).
     Schema,
-    /// Columns added nullable ahead of a backfill ([`super::backfill`]).
-    Expand,
     /// A data step filling values existing rows lack.
     Backfill,
     /// One index built or dropped on an existing table (ticket #527).
     Index,
-    /// Postgres staged `NOT NULL` checks installed `NOT VALID`.
-    AddConstraint,
     /// Validation and `SET NOT NULL` after a backfill, and every op of a
     /// migration with a data step that drops data or goes with a dropped
     /// column: the data steps still read what it removes (ADR-0025).
     Contract,
-    /// Validation of staged constraints with no contract (ticket #527).
-    Validate,
 }
 
 impl Phase {
     /// The step's name after `NN_`.
-    pub fn step_name(self) -> &'static str {
+    pub(crate) fn step_name(self) -> &'static str {
         match self {
             Phase::Labels => "labels",
             Phase::Schema => "schema",
-            Phase::Expand => "expand",
             Phase::Backfill => "backfill",
             Phase::Index => "index",
-            Phase::AddConstraint => "add_constraint",
             Phase::Contract => "contract",
-            Phase::Validate => "validate",
         }
     }
 }

@@ -29,8 +29,9 @@ pub use directory::{
 pub use emit::{CreateTableEmission, order_models_for_create, render_create_table};
 pub use ferro_ddl_lowering::{Dialect, InPlaceChange, Report, ReportKind, Subject};
 pub use generate::{
-    CheckReport, GenerateError, GenerateOptions, GeneratedMigration, check_migrations, generate,
-    generate_with,
+    CheckReport, GenerateError, GenerateOptions, GeneratedMigration, GeneratedStep,
+    NEW_TABLE_PREFIX, Problem, Rendering, STAGED_NOT_NULL_PREFIX, check_migrations, generate,
+    generate_with, new_table_name, staged_not_null_name,
 };
 pub use order::order_by_dependencies;
 pub use plan::{

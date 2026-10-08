@@ -28,14 +28,17 @@
 //! The phase table in [`columns`] reads each op's step off its verdict; an op
 //! no door runs is refused with its recipe.
 
-pub mod backfill;
-pub mod columns;
-pub mod downs;
-pub mod enums;
-pub mod rebuild;
-pub mod renames;
+mod backfill;
+mod columns;
+mod downs;
+pub(crate) mod enums;
+pub(crate) mod rebuild;
+mod renames;
 mod stages;
-pub mod staging;
+mod staging;
+
+pub use backfill::{STAGED_NOT_NULL_PREFIX, staged_not_null_name};
+pub use rebuild::{NEW_TABLE_PREFIX, new_table_name};
 
 use crate::directory::{DirectoryError, Headers, MigrationsDir, StepDialect, StepKind};
 use crate::plan::{HintError, renamed_snapshot};
@@ -313,7 +316,7 @@ fn refuse_unrendered(rendered: &[RenderedOp], dialect: Dialect) -> Result<(), Ge
 }
 
 /// The modelset with no models, in `like`'s IR version: the parent of `0001`.
-pub fn empty_modelset(like: &IrEnvelope<SchemaIrPayload>) -> IrEnvelope<SchemaIrPayload> {
+pub(crate) fn empty_modelset(like: &IrEnvelope<SchemaIrPayload>) -> IrEnvelope<SchemaIrPayload> {
     IrEnvelope {
         ir_kind: like.ir_kind.clone(),
         ir_version: like.ir_version,

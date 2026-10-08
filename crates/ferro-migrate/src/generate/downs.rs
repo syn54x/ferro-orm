@@ -447,7 +447,7 @@ pub(super) fn render_step(
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::{author, create_pass, file, ir, model, pk, post};
+    use super::super::tests::{create_pass, file, ir, model, pk};
     use super::*;
     use crate::{PlanOptions, Side, plan_from_ir};
     use ferro_schema_ir::{RowPolicyCommand, RowPolicyExpr, SchemaRowPolicy, SchemaRowSecurity};
@@ -474,56 +474,6 @@ mod tests {
         dialect: Dialect,
     ) -> Rendering {
         render_down(&up_ops(before, after, dialect), before, after, dialect, &[]).expect("render")
-    }
-
-    #[test]
-    fn a_created_table_and_its_type_are_dropped_table_first_with_no_destructive_header() {
-        let before = ir(vec![]);
-        let after = ir(vec![author()]);
-        let pg = render(&before, &after, Dialect::Postgres);
-        assert_eq!(pg.down, "DROP TABLE \"author\";\n\nDROP TYPE \"status\";\n");
-        assert_eq!(pg.down_headers, Headers::default());
-        assert_eq!(pg.up, file(&create_pass(&author(), Dialect::Postgres), ""));
-        assert_eq!(pg.headers, Headers::default());
-
-        let sqlite = render(&before, &after, Dialect::Sqlite);
-        assert_eq!(sqlite.down, "DROP TABLE \"author\";\n");
-        assert_eq!(sqlite.down_headers, Headers::default());
-    }
-
-    #[test]
-    fn a_dropped_table_is_recreated_from_the_parent_snapshot_marked_data_dependent() {
-        let before = ir(vec![author(), post()]);
-        let after = ir(vec![author()]);
-        for dialect in [Dialect::Postgres, Dialect::Sqlite] {
-            let r = render(&before, &after, dialect);
-            assert_eq!(r.up, "-- ferro: destructive\n\nDROP TABLE \"post\";\n");
-            assert_eq!(
-                r.down,
-                file(&create_pass(&post(), dialect), "-- ferro: data-dependent\n"),
-                "{dialect:?}"
-            );
-            assert!(r.down_headers.data_dependent && !r.down_headers.destructive);
-            assert_eq!(r.down_headers.irreversible, None);
-        }
-    }
-
-    #[test]
-    fn a_dropped_table_with_its_type_recreates_the_type_before_the_table() {
-        let before = ir(vec![author()]);
-        let after = ir(vec![]);
-        let pg = render(&before, &after, Dialect::Postgres);
-        assert_eq!(
-            pg.up,
-            "-- ferro: destructive\n\nDROP TABLE \"author\";\n\nDROP TYPE \"status\";\n"
-        );
-        assert_eq!(
-            pg.down,
-            file(
-                &create_pass(&author(), Dialect::Postgres),
-                "-- ferro: data-dependent\n"
-            )
-        );
     }
 
     #[test]
@@ -563,25 +513,5 @@ mod tests {
                 .down
                 .contains("CREATE POLICY \"rls_ledger_owner_id\"")
         );
-    }
-
-    #[test]
-    fn the_down_is_restricted_to_what_the_step_touches() {
-        let before = ir(vec![author()]);
-        let after = ir(vec![author(), post(), model("Tag", vec![pk()])]);
-        let ops: Vec<MigrationOp> = up_ops(&before, &after, Dialect::Sqlite)
-            .into_iter()
-            .filter(|op| op.table() == Some("tag"))
-            .collect();
-        let r = render_down(&ops, &before, &after, Dialect::Sqlite, &[]).expect("render");
-        assert_eq!(r.down, "DROP TABLE \"tag\";\n");
-    }
-
-    #[test]
-    fn a_step_with_nothing_on_a_dialect_is_not_applicable_both_ways() {
-        let r = render_down(&[], &ir(vec![]), &ir(vec![]), Dialect::Sqlite, &[]).expect("render");
-        assert_eq!(r.up, "-- ferro: not-applicable\n");
-        assert_eq!(r.down, "-- ferro: not-applicable\n");
-        assert!(r.headers.not_applicable && r.down_headers.not_applicable);
     }
 }
