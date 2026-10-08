@@ -693,7 +693,7 @@ fn emit_sql_with_ir_add_column_nullable_fk_sqlite_references_inline() {
 }
 
 #[test]
-fn emit_sql_with_ir_add_column_not_null_fk_with_default_sqlite_warns_naming_migrations() {
+fn emit_sql_with_ir_add_column_not_null_fk_with_default_sqlite_adds_it_nullable_and_warns() {
     let parent = schema_model("team", vec![col("id", "int", false)]);
     let child = SchemaModel {
         foreign_keys: vec![SchemaForeignKey {
@@ -717,33 +717,26 @@ fn emit_sql_with_ir_add_column_not_null_fk_with_default_sqlite_warns_naming_migr
         column: "team_id".to_string(),
     }]);
 
+    // SQLite would keep an ADD COLUMN's backfill DEFAULT for good (ADR-0027):
+    // the column comes in nullable, so it takes its REFERENCES inline, its
+    // rows are backfilled, and the NOT NULL it cannot add is reported.
     let lite = render_flat(&plan, &old_ir, &new_ir, Dialect::Sqlite).unwrap();
     assert_eq!(
         lite.statements,
-        vec!["ALTER TABLE \"user\" ADD COLUMN \"team_id\" integer NOT NULL DEFAULT 1".to_string()],
-        "the column is added; SQLite refuses REFERENCES with a non-NULL default"
+        vec![
+            "ALTER TABLE \"user\" ADD COLUMN \"team_id\" integer \
+             REFERENCES \"team\"(\"id\") ON DELETE RESTRICT"
+                .to_string(),
+            "UPDATE \"user\" SET \"team_id\" = 1 WHERE \"team_id\" IS NULL".to_string(),
+        ],
     );
     assert_eq!(lite.reports.len(), 1, "{:?}", lite.reports);
-    assert!(
-        lite.reports[0].text.contains("user.team_id"),
-        "{}",
-        lite.reports[0].text
-    );
-    assert!(
-        lite.reports[0].text.contains("FOREIGN KEY"),
-        "{}",
-        lite.reports[0].text
-    );
-    assert!(
-        lite.reports[0].text.contains("ferro migrate new"),
-        "{}",
-        lite.reports[0].text
-    );
-    assert!(
-        !lite.reports[0].text.contains("Alembic"),
-        "{}",
-        lite.reports[0].text
-    );
+    let report = &lite.reports[0];
+    assert!(report.blocks(), "{report:?}");
+    for needle in ["user.team_id", "NOT NULL", "ferro migrate new"] {
+        assert!(report.text.contains(needle), "{needle}: {}", report.text);
+    }
+    assert!(!report.text.contains("Alembic"), "{}", report.text);
 
     // Postgres: the column, the backfill drop, then the named constraint.
     let pg = render_flat(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap();
@@ -4103,14 +4096,14 @@ fn render_plan_renders_one_entry_per_op_with_its_own_statements_and_warnings() {
     );
     assert_eq!(
         rendered[0].statements.len(),
-        1,
-        "{:?}",
+        2,
+        "the nullable add and its backfill: {:?}",
         rendered[0].statements
     );
     assert_eq!(
         rendered[0].reports.len(),
         1,
-        "the SQLite FK skip rides its op"
+        "the SQLite NOT NULL skip rides its op"
     );
 }
 

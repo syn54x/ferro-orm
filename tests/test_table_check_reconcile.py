@@ -229,23 +229,21 @@ def test_sqlite_column_check_on_an_existing_column_warns_naming_migrations():
 
 
 def test_sqlite_column_check_on_a_new_column_rides_its_add_column_inline():
-    """#514: SQLite's ADD COLUMN accepts the column CHECK; nothing is skipped."""
+    """#514: SQLite's ADD COLUMN accepts the column CHECK; the check is not
+    skipped. (The required column comes in nullable and backfilled: SQLite
+    would keep a NOT NULL add's DEFAULT for good, ADR-0027.)"""
     _define_cookie(db_check=True)
     pk_only = [
         {"name": "id", "declared_type": "integer", "is_primary_key": True, "is_nullable": False}
     ]
     statements, warnings = _render("cookie", pk_only, [], "sqlite")
-    assert (statements, warnings) == (
-        [
-            'ALTER TABLE "cookie" ADD COLUMN "flavor" text NOT NULL DEFAULT \'sweet\' CONSTRAINT "ck_cookie_flavor" CHECK ("flavor" IN (\'sweet\', \'salty\'))',
-        ],
-        [],
-    )
     assert statements == [
-        'ALTER TABLE "cookie" ADD COLUMN "flavor" text NOT NULL DEFAULT \'sweet\''
-        " CONSTRAINT \"ck_cookie_flavor\" CHECK (\"flavor\" IN ('sweet', 'salty'))"
+        'ALTER TABLE "cookie" ADD COLUMN "flavor" text'
+        " CONSTRAINT \"ck_cookie_flavor\" CHECK (\"flavor\" IN ('sweet', 'salty'))",
+        'UPDATE "cookie" SET "flavor" = \'sweet\' WHERE "flavor" IS NULL',
     ]
-    assert warnings == []
+    assert len(warnings) == 1 and "cookie.flavor" in warnings[0], warnings
+    assert "ck_cookie_flavor" not in warnings[0], "the check is not what is skipped"
 
 
 def test_without_migrate_updates_no_check_is_planned():

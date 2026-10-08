@@ -2102,9 +2102,8 @@ fn execution(
 /// | redefine an index (drop + create) | native |
 /// | rename a table, a column, an index (drop + create), a policy | native |
 /// | rename a constraint (a `ck_` / `fk_` name a rename drags) | rebuild |
-/// | add an optional column, or a required one with a literal default | native |
-/// | add a required column with no default (no `SET NOT NULL` reaches it) | rebuild |
-/// | add a required foreign-key column (SQLite's `REFERENCES` needs a NULL default) | rebuild |
+/// | add an optional column | native |
+/// | add a required column (SQLite's `ADD COLUMN … NOT NULL` keeps its `DEFAULT` for good, and no `SET NOT NULL` reaches it) | rebuild |
 /// | drop a plain column | native |
 /// | drop a foreign-key column | rebuild |
 /// | change a column's type or nullability | rebuild |
@@ -2154,9 +2153,12 @@ fn sqlite_rebuilds(
         | MigrationOp::RenamePolicy { .. } => false,
         // A table constraint's name lives in `CREATE TABLE` (ADR-0046).
         MigrationOp::RenameConstraint { .. } => true,
-        MigrationOp::AddColumn { column, .. } => find_column(now, column).is_some_and(|col| {
-            needs_values(col) || (!col.nullable && has_foreign_key(now, column))
-        }),
+        // ferro persists no server default (ADR-0027), and SQLite has no
+        // `ALTER COLUMN … DROP DEFAULT` to take a backfill `DEFAULT` off
+        // again: only a rebuild adds a column `NOT NULL` and default-free.
+        MigrationOp::AddColumn { column, .. } => {
+            find_column(now, column).is_some_and(|col| !col.nullable)
+        }
         MigrationOp::DropColumn { column, .. } => has_foreign_key(was, column),
         MigrationOp::AlterColumnType { .. }
         | MigrationOp::AlterColumnNullability { .. }

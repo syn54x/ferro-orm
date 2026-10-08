@@ -563,15 +563,17 @@ mod tests {
                 plain.clone(),
                 false,
             ),
-            // A1, A2.
+            // A1; A2: `ADD COLUMN … NOT NULL DEFAULT` would keep the
+            // DEFAULT ferro never persists (ADR-0027), so the rebuild copies
+            // the literal instead.
             (add("bio"), plain.clone(), bio.clone(), false),
-            (add("bio"), plain.clone(), defaulted.clone(), false),
+            (add("bio"), plain.clone(), defaulted.clone(), true),
             // A3: SQLite has no `SET NOT NULL` to reach it (an up answers it
             // with a backfill first; the down of an A4 drop rebuilds).
             (add("bio"), plain.clone(), req_bio.clone(), true),
             // A1 with a foreign key: inline REFERENCES.
             (add("team_id"), plain.clone(), opt_fk.clone(), false),
-            // A required foreign-key column: no REFERENCES on ADD COLUMN.
+            // A required foreign-key column: a required column.
             (add("team_id"), plain.clone(), req_fk.clone(), true),
             // A4 plain, nullable or not.
             (drop("bio"), bio.clone(), plain.clone(), false),

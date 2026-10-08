@@ -1256,25 +1256,45 @@ mod tests {
     }
 
     #[test]
-    fn a_required_column_with_a_literal_default_backfills_it_as_the_pass_does() {
+    fn a_required_column_with_a_literal_default_backfills_it_and_keeps_no_default() {
         let tier = SchemaColumn {
             default: Some(serde_json::json!("free")),
             ..column("tier", "string")
         };
         let after = with_columns(vec![tier]);
         let migration = edit(vec![author()], vec![after.clone()], &BOTH);
-        for dialect in BOTH {
-            let r = rendering(&migration, dialect.into());
-            let up = pass(&ir(vec![author()]), &ir(vec![after.clone()]), dialect);
-            assert!(up[0].contains("NOT NULL DEFAULT 'free'"), "{up:?}");
-            assert_eq!(r.up, file(&up, ""), "{dialect:?}");
-            assert_eq!(r.down, "ALTER TABLE \"author\" DROP COLUMN \"tier\";\n");
-        }
+        // Postgres: the pass's backfill DEFAULT, dropped in the same step.
+        let r = rendering(&migration, StepDialect::Postgres);
+        let up = pass(
+            &ir(vec![author()]),
+            &ir(vec![after.clone()]),
+            Dialect::Postgres,
+        );
+        assert_eq!(r.up, file(&up, ""));
         assert_eq!(
-            rendering(&migration, StepDialect::Postgres).up,
+            r.up,
             "ALTER TABLE \"author\" ADD COLUMN \"tier\" varchar NOT NULL DEFAULT 'free';\n\n\
              ALTER TABLE \"author\" ALTER COLUMN \"tier\" DROP DEFAULT;\n"
         );
+        assert_eq!(r.down, "ALTER TABLE \"author\" DROP COLUMN \"tier\";\n");
+        // SQLite cannot drop a DEFAULT: the table is rebuilt with the column
+        // NOT NULL and default-free, the literal copied into every row.
+        let r = rendering(&migration, StepDialect::Sqlite);
+        assert_eq!(
+            r.up,
+            "-- ferro: foreign-keys-off\n\n\
+             CREATE TABLE IF NOT EXISTS \"_ferro_new_author\" ( \"id\" integer NOT NULL PRIMARY KEY \
+             AUTOINCREMENT, \"name\" varchar NOT NULL, \"status\" varchar(5) NOT NULL, \"tier\" \
+             varchar NOT NULL );\n\n\
+             INSERT INTO \"_ferro_new_author\" (\"id\", \"name\", \"status\", \"tier\") SELECT \"id\", \
+             \"name\", \"status\", 'free' FROM \"author\";\n\n\
+             DELETE FROM sqlite_sequence WHERE name = '_ferro_new_author';\n\n\
+             INSERT INTO sqlite_sequence (name, seq) SELECT '_ferro_new_author', seq FROM \
+             sqlite_sequence WHERE name = 'author';\n\n\
+             DROP TABLE \"author\";\n\n\
+             ALTER TABLE \"_ferro_new_author\" RENAME TO \"author\";\n"
+        );
+        assert_eq!(r.down, "ALTER TABLE \"author\" DROP COLUMN \"tier\";\n");
     }
 
     #[test]

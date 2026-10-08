@@ -696,6 +696,19 @@ pub fn render_label_update(table: &str, column: &str, from: &str, to: &str) -> S
     )
 }
 
+/// The backfill of a column SQLite adds in place without its `NOT NULL`
+/// (a required column on an existing table, which `ADD COLUMN` could only
+/// make `NOT NULL` with a `DEFAULT` it then keeps for good, ADR-0027): every
+/// row the column is new to takes `value`, an SQL literal already rendered
+/// for the dialect. Plain SQL on every dialect.
+pub fn render_backfill_update(table: &str, column: &str, value: &str) -> String {
+    let column = quote_ident(column);
+    format!(
+        "UPDATE {} SET {column} = {value} WHERE {column} IS NULL",
+        quote_ident(table),
+    )
+}
+
 /// Whether any row of `table` still holds `label` in `column`: one existence
 /// query, the liveness read for a label rename on a column that keeps its
 /// labels as text in its rows (ADR-0032: a hint is live while the old name is
@@ -5807,6 +5820,10 @@ mod tests {
         assert_eq!(
             render_label_update("o\"rder", "st", "it's", "its"),
             "UPDATE \"o\"\"rder\" SET \"st\" = 'its' WHERE \"st\" = 'it''s'"
+        );
+        assert_eq!(
+            render_backfill_update("author", "tier", "'free'"),
+            "UPDATE \"author\" SET \"tier\" = 'free' WHERE \"tier\" IS NULL"
         );
         assert_eq!(
             render_relabel_copy(
