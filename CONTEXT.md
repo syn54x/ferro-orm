@@ -157,7 +157,7 @@ One file inside a migration, applied and recorded on its own so a failure resume
 _Avoid_: Operation, phase, sub-migration
 
 **Down** (of a step):
-The reverse of a *step*, kept beside it: what a *run* executes to revert that step. Every step has one. A DDL step's down returns the schema to what the previous migration's *schema snapshot* declares, never the rows a drop removed. A down either does work, declares with a reason that there is nothing to reverse, or declares the step an *irreversible step*.
+The reverse of a *step*, kept beside it: what a *run* executes to revert that step. Every step has one. A DDL step's down returns the schema to what the previous migration's *schema snapshot* declares, never the rows a drop removed. It is the planner run from the step's after-state to its before-state, limited to what the step changed, so a change the step only reported is never undone. The *generated revision*'s downgrade is made the same way, toward the live database. A down either does work, declares with a reason that there is nothing to reverse, or declares the step an *irreversible step*.
 _Avoid_: Rollback (a transaction rolls back), downgrade (Alembic's word), undo
 
 **Irreversible step**:
@@ -296,6 +296,14 @@ _Avoid_: Dangerous step, unsafe step, data-loss migration
 **Data-dependent step**:
 A generated DDL step that discards nothing but fails on a database whose rows do not satisfy it: a type change whose cast fails, a `NOT NULL`, a unique over existing rows, the validation of a *staged constraint*, the removal of an enum label rows still carry. It says so in its file.
 _Avoid_: Risky step, may-fail step, conditional step
+
+**Op verdict**:
+What the planner says about one change on one dialect: whether it runs natively, needs a *table rebuild*, is refused, or is irreversible (and why), and whether it asks existing rows for values, drops data, or can fail on the rows it meets. Every door reads the same verdict: a *migration* turns it into steps and headers, a *generated revision* into markers and refusals.
+_Avoid_: Assignment, needs, classification
+
+**Plan report**:
+Something the planner tells its reader that is not a change it makes: a refused *rename hint*, a leftover ferro check, an extra *enum label*, a foreign or unverifiable policy. Each has a kind and a subject, and some recur on every run until someone acts. A *migration* refuses a report that none of its changes answers.
+_Avoid_: Warning (alone), notice, message
 
 **Drift**:
 A live database whose *ferro-owned artifacts* disagree with the *schema snapshot* of the last migration applied to it. A database behind the newest migration is pending, not drifted. A live table the snapshot does not declare is not drift: it was never ferro's. Drift is reported, never repaired by the migration system and never a generator input.

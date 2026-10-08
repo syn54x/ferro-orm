@@ -18,7 +18,7 @@ report = await ferro.migrate()
   - `"schema"`: the create pass, type statements, the reconciliation pass;
   - `"lock_timeout"`: the `SET LOCAL lock_timeout` and `SET` / `RESET` lines of ADR-0044;
   - `"probe"`: the SQLite label row probe of ADR-0047.
-- `warnings` is a tuple of `Report(kind, subject, text, recurs)`, where `str()` gives the text. It is the typed report decided in ADR-0050 (tier B, in review), which the planner, the renderer and the pass are to share: the planner's and renderer's kinds, plus the pass's own `PendingTableRename`, `StrandedLabelRename` and `RowSecurityUnderMigrator`. The pass's two operational warnings, waiting for the run lock and retrying under the DDL lock timeout, join that enum as `RunLockWait` and `DdlLockRetry`. `recurs` says whether the warning repeats on every pass (today's "always" channel). Every warning is still raised as a Python warning, as before. The report lists it as well.
+- `warnings` is a tuple of `Report(kind, subject, text, recurs)`, where `str()` gives the text. It is the typed report decided in ADR-0052, which the planner, the renderer and the pass are to share: the planner's and renderer's kinds, plus the pass's own `PendingTableRename`, `StrandedLabelRename` and `RowSecurityUnderMigrator`. The pass's two operational warnings, waiting for the run lock and retrying under the DDL lock timeout, join that enum as `RunLockWait` and `DdlLockRetry`. `recurs` says whether the warning repeats on every pass (today's "always" channel). Every warning is still raised as a Python warning, as before. The report lists it as well.
 - A pass that fails partway raises its usual error, carrying `.report`: what committed before the failure, with the failing statement left out. On Postgres each table is its own transaction, so the earlier tables stay changed, and the report is the record of which.
 
 The report is to be built from what the DDL executor actually ran, never rebuilt from the plan, so it can never describe a statement that did not execute. For that, the executor is to take statement lists instead of closures: `ddl.run(engine, unit, &[Statement { subject, sql, role }], on_attempt, settle)` will return the statements it ran, or the index of the one that failed. That makes it the single place every pass statement goes through.
@@ -38,7 +38,7 @@ The recorder did two jobs. Each gets an owner when the recorder is retired:
 
 - **A private test-only door** returning the statements. Rejected: users keep the log as their only answer to "what did auto-migrate do", and the production log stays shaped by tests.
 - **Golden files per test through a fixture.** Rejected: that is the recorder again, with re-recording as the remedy.
-- **`warnings` as plain strings.** Rejected: the planner's reports are to be typed (ADR-0050, tier B, in review), and typing a public field later would be a second public change. This report ships after that type lands.
+- **`warnings` as plain strings.** Rejected: the planner's reports are to be typed (ADR-0052), and typing a public field later would be a second public change. This report ships after that type lands.
 - **`connect()` returning the report.** Rejected: `connect()` is for opening a connection; its auto-migrate flags stay flags, and the report is reached through `migrate()`.
 
 ## Consequences
