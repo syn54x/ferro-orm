@@ -67,7 +67,7 @@ impl Phase {
 /// | an enum label added | labels |
 /// | demands values of existing rows | backfill (the migration's expand → backfill → contract) |
 /// | drops data, or goes with a dropped column, beside a data step | contract |
-/// | an index built, dropped or redefined on its own | index |
+/// | an index built, dropped or redefined on a table that stays, also over a column the migration adds (ADR-0044) | index |
 /// | anything else, natively or by a SQLite rebuild | schema |
 pub(crate) fn phase(op: &PlannedOp, data_steps: bool) -> Option<Phase> {
     let verdict = &op.verdict;
@@ -89,7 +89,7 @@ pub(crate) fn phase(op: &PlannedOp, data_steps: bool) -> Option<Phase> {
         MigrationOp::AddIndex { .. }
             | MigrationOp::DropIndex { .. }
             | MigrationOp::RedefineIndex { .. }
-    ) && verdict.goes_with.is_none()
+    ) && verdict.goes_with != Some(Rider::DroppedColumn)
     {
         Phase::Index
     } else {
@@ -645,18 +645,18 @@ mod tests {
                 assert_eq!(phase(&planned, false), Some(Phase::Index), "{op:?}");
             }
         }
-        // An index over a column the same plan adds rides the column (a down
-        // putting back a column dropped with its index puts it back with it,
-        // in the schema step); one over a column it drops goes with the drop.
+        // An index over a column the same plan adds rides the column's
+        // statement, yet a table that already exists builds it in its own
+        // step (ADR-0044); one over a column it drops goes with the drop.
         let without_bio = author(vec![]);
-        let restore = verdict_between(
+        let added = verdict_between(
             &add_index,
             vec![without_bio.clone()],
             vec![indexed.clone()],
             Dialect::Postgres,
         );
-        assert_eq!(restore.verdict.goes_with, Some(Rider::AddedColumn));
-        assert_eq!(phase(&restore, false), Some(Phase::Schema));
+        assert_eq!(added.verdict.goes_with, Some(Rider::AddedColumn));
+        assert_eq!(phase(&added, false), Some(Phase::Index));
         let dropped = verdict_between(
             &drop_index,
             vec![indexed.clone()],

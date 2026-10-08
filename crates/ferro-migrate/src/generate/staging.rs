@@ -75,7 +75,8 @@ impl IndexOp {
     }
 }
 
-fn declared_indexes(model: &SchemaModel) -> Vec<IndexDef> {
+/// Every standalone index `model` declares, by an entry or a column flag.
+pub(super) fn declared_indexes(model: &SchemaModel) -> Vec<IndexDef> {
     standalone_indexes(model)
         .into_iter()
         .map(|(name, columns, unique)| IndexDef {
@@ -85,42 +86,6 @@ fn declared_indexes(model: &SchemaModel) -> Vec<IndexDef> {
             unique,
         })
         .collect()
-}
-
-/// The index steps of the migration turning `parent` into `target`: every
-/// index added to, dropped from or redefined on a table both declare, table by
-/// table in the target's order, drops first. An index on a table the
-/// migration creates or drops rides the table's statement, and one over a
-/// column the migration drops goes with the column; neither is a step.
-pub fn index_ops(
-    parent: &IrEnvelope<SchemaIrPayload>,
-    target: &IrEnvelope<SchemaIrPayload>,
-) -> Vec<IndexOp> {
-    let mut ops = Vec::new();
-    for after in &target.payload.models {
-        let Some(before) = find_model(parent, &after.table_name) else {
-            continue;
-        };
-        let old = declared_indexes(before);
-        let new = declared_indexes(after);
-        let has_column = |name: &String| after.columns.iter().any(|col| &col.name == name);
-        for def in &old {
-            if !new.iter().any(|index| index.name == def.name) && def.columns.iter().all(has_column)
-            {
-                ops.push(IndexOp::Drop(def.clone()));
-            }
-        }
-        for def in new {
-            let replaces = old.iter().find(|index| index.name == def.name);
-            if replaces != Some(&def) {
-                ops.push(IndexOp::Build {
-                    replaces: replaces.cloned(),
-                    def,
-                });
-            }
-        }
-    }
-    ops
 }
 
 /// Remove the index `name` from `model`: its `indexes` / `uniques` entry and

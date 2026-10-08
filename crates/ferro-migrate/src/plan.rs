@@ -1435,6 +1435,30 @@ fn plan_enum_label_removals(
     }
 }
 
+/// Every `(type, label)` an enum `new` declares adds to the same enum `old`
+/// declares, however each is stored: the labels a generated migration's
+/// `labels` step names on every dialect, also where the dialect keeps labels
+/// as text in the rows and its plan holds no op for them (SQLite). The
+/// planner's own label decider ([`missing_enum_labels`]) over the two
+/// declarations, as [`plan_enum_label_removals`] reads them.
+pub(crate) fn declared_label_additions(
+    old: &IrEnvelope<SchemaIrPayload>,
+    new: &IrEnvelope<SchemaIrPayload>,
+) -> Vec<(String, String)> {
+    let before = declared_enum_labels(&old.payload.models);
+    let after = declared_enum_labels(&new.payload.models);
+    let mut out = Vec::new();
+    for (type_name, labels) in &after.labels {
+        let Some(old_labels) = before.labels.get(type_name) else {
+            continue;
+        };
+        for label in missing_enum_labels(labels, old_labels) {
+            out.push((type_name.clone(), label));
+        }
+    }
+    out
+}
+
 /// Type creation: every declared type the plan introduces
 /// (`enum_type_provenance` over the columns it adds — a new table's, or an
 /// existing table's new column) that `old` does not already hold.
@@ -3250,12 +3274,18 @@ fn diff_model_columns(
         // to another is a type change too: the storage decision reads a live
         // native-enum column as already at any enum target, and only a
         // declared `old` names its type. A move of every column of a type is
-        // its rename, applied before this diff runs (ADR-0032).
+        // its rename, applied before this diff runs (ADR-0032). So is a column
+        // that leaves its native type for a scalar storage, which the storage
+        // decision also reads as no change (a native enum's scalar cascade is
+        // the string's).
         let moved_enum = dialect == Dialect::Postgres
             && matches!(
                 (enum_type_of(old_col), enum_type_of(new_col)),
                 (Some((a, _)), Some((b, _))) if a != b
-            );
+            )
+            || dialect == Dialect::Postgres
+                && enum_type_of(old_col).is_some()
+                && enum_type_of(new_col).is_none();
         if moved_enum || schema_columns_storage_drift(old_col, new_col, dialect) {
             ops.push(MigrationOp::AlterColumnType {
                 table: table.to_string(),

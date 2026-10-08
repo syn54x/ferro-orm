@@ -247,12 +247,30 @@ fn statements(
     Ok((out, !rebuilt.is_empty()))
 }
 
+/// `ops` with their verdicts between a step's two stages, `before` (read as
+/// the planner leaves it, [`plan::planned_before`]) and `after`: what is true
+/// of each op between the sides the step renders it between (ADR-0050). A
+/// demanded column the expand adds nullable is a plain add there, which the
+/// migration's plan, from the parent to the target, does not say.
+pub(super) fn decided(
+    ops: &[MigrationOp],
+    before: &IrEnvelope<SchemaIrPayload>,
+    after: &IrEnvelope<SchemaIrPayload>,
+    dialect: Dialect,
+) -> Vec<PlannedOp> {
+    let old = Side::declared(plan::planned_before(before, after, dialect).into_owned());
+    let new = Side::declared(after.clone());
+    ops.iter()
+        .map(|op| PlannedOp::of(op.clone(), &old, &new, dialect))
+        .collect()
+}
+
 /// [`render_step`] as the step's two files.
 ///
 /// # Errors
 /// What [`render_step`] raises.
-pub fn render_down(
-    step_ops: &[PlannedOp],
+pub(super) fn render_down(
+    step_ops: &[MigrationOp],
     before: &IrEnvelope<SchemaIrPayload>,
     after: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
@@ -271,7 +289,7 @@ pub fn render_down(
 /// written as files: what a step that holds more than the planner's ops (the
 /// contract) composes with its own.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct StepStatements {
+pub(super) struct StepStatements {
     /// The up file's statements.
     pub up: Vec<String>,
     /// The up file's headers.
@@ -283,10 +301,13 @@ pub struct StepStatements {
 }
 
 /// One generated step on `dialect`, both directions: the up file renders
-/// `step_ops` (planned `before → after`, the migration's declared renames
-/// `hints` among them), and the down file renders [`plan_down`]`(step_ops,
-/// after, before)` — the planner run back between the two declared stages,
-/// keeping only the ops whose artifact the step's up touched.
+/// `step_ops` (the migration's plan's ops placed in the step, the declared
+/// renames `hints` among them) between the stages `before` and `after`,
+/// each with its verdict between them ([`decided`]), and the down file
+/// renders [`plan_down`]`(step_ops, after, before)` — the planner run back
+/// between the two declared stages, keeping only the ops whose artifact the
+/// step's up touched. On SQLite the drop of a dropped column's own check is
+/// left out: its `DROP COLUMN` carries it ([`columns::omitted`]).
 ///
 /// On Postgres the up adds every foreign key and check `NOT VALID`
 /// (ADR-0043); the down restores the step's pre-state with plain statements.
@@ -304,13 +325,18 @@ pub struct StepStatements {
 /// renderer), or that renders only a blocking report
 /// ([`GenerateError::Unrenderable`]), or a down op with no way to run
 /// between two declared stages.
-pub fn render_step(
-    step_ops: &[PlannedOp],
+pub(super) fn render_step(
+    step_ops: &[MigrationOp],
     before: &IrEnvelope<SchemaIrPayload>,
     after: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
     hints: &[Hint],
 ) -> Result<StepStatements, GenerateError> {
+    let step_ops: Vec<PlannedOp> = decided(step_ops, before, after, dialect)
+        .into_iter()
+        .filter(|planned| !columns::omitted(planned, dialect))
+        .collect();
+    let step_ops = step_ops.as_slice();
     let ops: Vec<MigrationOp> = step_ops.iter().map(|planned| planned.op.clone()).collect();
     // A step holding the migration's renames (ADR-0032) runs its table and
     // column renames first; everything else in it reads the table under its
@@ -430,14 +456,16 @@ mod tests {
         before: &IrEnvelope<SchemaIrPayload>,
         after: &IrEnvelope<SchemaIrPayload>,
         dialect: Dialect,
-    ) -> Vec<PlannedOp> {
+    ) -> Vec<MigrationOp> {
         plan_from_ir(
             &Side::declared(before.clone()),
             &Side::declared(after.clone()),
             dialect,
             PlanOptions { destructive: true },
         )
-        .operations
+        .ops()
+        .cloned()
+        .collect()
     }
 
     fn render(
@@ -541,9 +569,9 @@ mod tests {
     fn the_down_is_restricted_to_what_the_step_touches() {
         let before = ir(vec![author()]);
         let after = ir(vec![author(), post(), model("Tag", vec![pk()])]);
-        let ops: Vec<PlannedOp> = up_ops(&before, &after, Dialect::Sqlite)
+        let ops: Vec<MigrationOp> = up_ops(&before, &after, Dialect::Sqlite)
             .into_iter()
-            .filter(|planned| planned.op.table() == Some("tag"))
+            .filter(|op| op.table() == Some("tag"))
             .collect();
         let r = render_down(&ops, &before, &after, Dialect::Sqlite, &[]).expect("render");
         assert_eq!(r.down, "DROP TABLE \"tag\";\n");
