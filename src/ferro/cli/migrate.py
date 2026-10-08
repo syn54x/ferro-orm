@@ -27,7 +27,7 @@ import sys
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 from cyclopts import App, Parameter
 
@@ -40,6 +40,9 @@ from ..settings import (
     SettingsError,
 )
 from . import Global, exit_codes
+
+if TYPE_CHECKING:
+    from ..migrations.errors import MigrationRefused
 
 __all__ = ["migrate"]
 
@@ -199,7 +202,6 @@ def new(
     settings = FerroSettings(config=glob.config)
     database = settings.database(glob.database)
     migration = prepare(
-        settings,
         database,
         name,
         sql_step=sql_step,
@@ -232,12 +234,13 @@ def check(*, glob: Annotated[Global, Parameter(parse=False)]) -> int:
     step missing a target dialect's rendering, a data step still holding
     todo(...).
     """
-    from ..migrations.generate import check as generate_check
+    import asyncio
+
+    from ..migrations.generate import check as run_check
 
     _refuse_url(glob, "check")
     settings = FerroSettings(config=glob.config)
-    database = settings.database(glob.database)
-    report = generate_check(settings, database)
+    report = asyncio.run(run_check(settings, glob.database))
     if report.ok:
         head = report.head or "no migration"
         print(f"ok: models match {head}")
@@ -268,22 +271,22 @@ def up(
     """
     import asyncio
 
+    from ..migrations.errors import MigrationRefused
     from ..migrations.runner import up as run_up
 
     settings = FerroSettings(config=glob.config)
-    database = settings.database(glob.database)
-    report = asyncio.run(
-        run_up(
-            settings,
-            database,
-            url=glob.url,
-            lock_timeout=lock_timeout,
-            progress=lambda line: print(line, flush=True),
+    try:
+        report = asyncio.run(
+            run_up(
+                settings,
+                glob.database,
+                url=_url(settings, glob),
+                lock_timeout=lock_timeout,
+                progress=lambda line: print(line, flush=True),
+            )
         )
-    )
-    if report.refusal is not None:
-        print(report.refusal, file=sys.stderr)
-        return exit_codes.REFUSED
+    except MigrationRefused as refused:
+        return _render_run_refusal(refused)
     if not report.applied:
         print("nothing to apply: the database is up to date")
     return exit_codes.OK
@@ -336,14 +339,15 @@ def down(
     """
     import asyncio
 
+    from ..migrations.errors import MigrationRefused
     from ..migrations.runner import DownPlan, plan_down
     from ..migrations.runner import down as run_down
 
     settings = FerroSettings(config=glob.config)
-    database = settings.database(glob.database)
+    url = _url(settings, glob)
     if not yes and not sys.stdin.isatty():
         plan = asyncio.run(
-            plan_down(settings, database, target=to, all=all_, url=glob.url)
+            plan_down(settings, glob.database, url=url, target=to, all=all_)
         )
         if plan.refusal is not None:
             print(plan.refusal, file=sys.stderr)
@@ -359,26 +363,39 @@ def down(
         print(plan.describe(), flush=True)
         return yes or _confirm_revert(plan.question())
 
-    report = asyncio.run(
-        run_down(
-            settings,
-            database,
-            target=to,
-            all=all_,
-            url=glob.url,
-            lock_timeout=lock_timeout,
-            confirm=confirm,
-            progress=lambda line: print(line, flush=True),
+    try:
+        report = asyncio.run(
+            run_down(
+                settings,
+                glob.database,
+                url=url,
+                target=to,
+                all=all_,
+                lock_timeout=lock_timeout,
+                confirm=confirm,
+                progress=lambda line: print(line, flush=True),
+            )
         )
-    )
-    if report.refusal is not None:
-        print(report.refusal, file=sys.stderr)
-        return exit_codes.REFUSED
+    except MigrationRefused as refused:
+        return _render_run_refusal(refused)
     if report.declined:
         print("Nothing was reverted.")
     elif not report.reverted:
         print("nothing to revert")
     return exit_codes.OK
+
+
+def _render_run_refusal(refused: MigrationRefused) -> int:
+    """A refused ``up`` or ``down``: its run report's refusal, as the
+    operator's text (the application's ``allow_ahead=`` hint is not a
+    flag here), and exit 1. A refusal with no run report (the
+    configuration, the connection) prints its own message."""
+    from ..migrations.runner import RunReport
+
+    report = refused.report
+    shown = report.refusal if isinstance(report, RunReport) else None
+    print(refused if shown is None else shown, file=sys.stderr)
+    return exit_codes.REFUSED
 
 
 def _confirm_revert(question: str) -> bool:
@@ -412,8 +429,7 @@ def status(
     from ..migrations.runner import status as run_status
 
     settings = FerroSettings(config=glob.config)
-    database = settings.database(glob.database)
-    report = asyncio.run(run_status(settings, database, url=glob.url))
+    report = asyncio.run(run_status(settings, glob.database, url=_url(settings, glob)))
     print(report.to_json() if json_ else report.render(steps=steps))
     return report.exit_code
 
@@ -430,11 +446,10 @@ def drift(*, glob: Annotated[Global, Parameter(parse=False)]) -> int:
     """
     import asyncio
 
-    from ..migrations.drift import audit
+    from ..migrations.drift import drift as run_drift
 
     settings = FerroSettings(config=glob.config)
-    database = settings.database(glob.database)
-    report = asyncio.run(audit(database, url=glob.url))
+    report = asyncio.run(run_drift(settings, glob.database, url=_url(settings, glob)))
     for warning in report.warnings:
         print(f"warning: {warning}", file=sys.stderr)
     if report.refusal is not None:
@@ -489,23 +504,25 @@ def baseline(
     """
     import asyncio
 
-    from ..migrations.baseline import record, render_removed
-    from ..migrations.baseline import remove as remove_records
+    from ..migrations.baseline import baseline as run_baseline
+    from ..migrations.baseline import remove_baseline, render_removed
 
+    if remove and target is not None:
+        raise SettingsError(
+            "baseline --remove removes the whole baseline; drop the target"
+        )
     settings = FerroSettings(config=glob.config)
-    database = settings.database(glob.database)
+    url = _url(settings, glob)
     if remove:
-        if target is not None:
-            raise SettingsError(
-                "baseline --remove removes the whole baseline; drop the target"
-            )
         removed = asyncio.run(
-            remove_records(database, url=glob.url, lock_timeout=lock_timeout)
+            remove_baseline(settings, glob.database, url=url, lock_timeout=lock_timeout)
         )
         print(render_removed(removed))
         return exit_codes.OK
     report = asyncio.run(
-        record(database, target=target, url=glob.url, lock_timeout=lock_timeout)
+        run_baseline(
+            settings, glob.database, url=url, target=target, lock_timeout=lock_timeout
+        )
     )
     for warning in report.warnings:
         print(f"warning: {warning}", file=sys.stderr)
@@ -571,19 +588,24 @@ def rerecord(
         raise SettingsError("pass --continue or --restart, not both")
     mode: Mode = "continue" if continue_ else "restart" if restart else "record"
     settings = FerroSettings(config=glob.config)
-    database = settings.database(glob.database)
     report = asyncio.run(
         run_rerecord(
             settings,
-            database,
-            target,
+            glob.database,
+            url=_url(settings, glob),
+            target=target,
             mode=mode,
-            url=glob.url,
             lock_timeout=lock_timeout,
         )
     )
     print(report.render())
     return exit_codes.OK
+
+
+def _url(settings: FerroSettings, glob: Global) -> str:
+    """The URL a verb works on: ``--url``, else the database's ``url_env``.
+    The CLI always opens a private connection, closed when the verb ends."""
+    return settings.database(glob.database).url_for(glob.url)
 
 
 def _refuse_url(glob: Global, verb: str) -> None:

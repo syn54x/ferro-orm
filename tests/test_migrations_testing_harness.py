@@ -40,7 +40,7 @@ from ferro.migrations import runner
 from ferro.migrations.errors import MigrationRefused
 from ferro.migrations.testing import Harness, RoundTripResult, harness
 from ferro.registry import SwappedOutModelError
-from ferro.settings import FerroSettings
+from ferro.settings import FerroSettings, SettingsError
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     pkg,
     project,
@@ -278,24 +278,31 @@ async def test_apply_through_runs_the_real_directorys_files_and_stops_at_its_tar
     assert f"ran from {step.resolve()}" in str(refused.value)
 
 
+def _default() -> str:
+    name = _core._default_connection_name()
+    assert name is not None
+    return name
+
+
 async def test_runner_up_through_refuses_a_migration_the_directory_lacks_and_a_step(
     connected,
 ):
-    settings = FerroSettings()
-    database = settings.database()
+    database = FerroSettings().database()
 
-    report = await runner.up(
-        settings, database, using=_core._default_connection_name(), through="0009"
-    )
+    with pytest.raises(MigrationRefused) as missing:
+        await runner._up(_default(), database, through="0009")
+    report = missing.value.report
 
+    assert isinstance(report, runner.RunReport)
     assert report.refusal == (
         f"ferro migrate: there is no migration 0009 in {database.directory}. "
         f"Nothing was applied."
     )
     assert report.applied == []
-    step = await runner.up(
-        settings, database, using=_core._default_connection_name(), through="0002:01"
-    )
+    with pytest.raises(MigrationRefused) as not_a_migration:
+        await runner._up(_default(), database, through="0002:01")
+    step = not_a_migration.value.report
+    assert isinstance(step, runner.RunReport)
     assert step.refusal is not None and "0007:02" in step.refusal
     assert step.refused is not None and step.refused.kind == "not_a_migration"
     assert step.applied == []
@@ -304,14 +311,11 @@ async def test_runner_up_through_refuses_a_migration_the_directory_lacks_and_a_s
 async def test_runner_up_through_below_the_head_applies_and_reverts_nothing(
     connected,
 ):
-    settings = FerroSettings()
-    database = settings.database()
+    database = FerroSettings().database()
     await harness().apply_through("0003")
     before = connected.records()
 
-    report = await runner.up(
-        settings, database, using=_core._default_connection_name(), through="0001"
-    )
+    report = await runner._up(_default(), database, through="0001")
 
     assert report.applied == [] and report.reverted == []
     assert report.refusal is None
@@ -542,6 +546,30 @@ async def test_todays_classes_are_unreachable_inside_models_at_and_restored_afte
 
     async with ferro.engines.session():
         assert [a.slug for a in await author.all()] == ["ada"]
+
+
+async def test_a_settings_error_inside_models_at_reaches_the_test_unchanged(
+    connected,
+):
+    h = harness()
+    await h.apply_through("0002")
+    raised = SettingsError("the test's own configuration error")
+
+    with pytest.raises(SettingsError) as caught:
+        async with h.models_at("0002"):
+            raise raised
+
+    assert caught.value is raised
+    assert not isinstance(caught.value, MigrationRefused)
+
+
+async def test_a_connection_that_is_not_open_is_refused_before_the_verb_runs(chain):
+    with pytest.raises(MigrationRefused, match="connection `nowhere` is not open"):
+        await ferro.migrations.status(using="nowhere")
+    h = harness(using="nowhere")
+    with pytest.raises(MigrationRefused, match="connection `nowhere` is not open"):
+        async with h.models_at("0001"):
+            pass
 
 
 async def test_the_harness_binds_without_a_connection_and_refuses_without_one(chain):

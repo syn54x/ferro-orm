@@ -37,11 +37,10 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from .. import _core
-from ..settings import SettingsError
 from . import runner
-from .api import _connection, _resolve
 from .errors import MigrationRefused
 from .report import RunRefused, StatusReport
+from .target import Target
 
 if TYPE_CHECKING:
     from ..settings import DatabaseSettings, FerroSettings
@@ -442,15 +441,6 @@ async def _audit(name: str, database: DatabaseSettings) -> DriftReport:
     return await against(snapshots[head.number], migration=head.name, using=name)
 
 
-async def audit(
-    database: DatabaseSettings, *, using: str | None = None, url: str | None = None
-) -> DriftReport:
-    """``ferro migrate drift``: ``using`` names an open connection; otherwise
-    ``database``'s URL (or ``url``) is connected for the check and closed after."""
-    async with runner._connection(database, using, url) as name:
-        return await _audit(name, database)
-
-
 async def drift(
     settings: FerroSettings | None = None,
     database: str | None = None,
@@ -475,10 +465,6 @@ async def drift(
             is no connection to work on, or the migrations directory is
             unreadable.
     """
-    _, db = _resolve(settings, database)
-    try:
-        if url is not None:
-            return await audit(db, using=using, url=url)
-        return await _audit(_connection(using), db)
-    except SettingsError as err:
-        raise MigrationRefused(str(err)) from None
+    target = Target.resolve(settings, database, using=using, url=url)
+    async with target.open() as name:
+        return await _audit(name, target.database)

@@ -29,14 +29,15 @@ and the test that every down reaches its parent is one line::
 The harness carries what the application's own calls refuse (ADR-0040,
 ADR-0038): a target on the way up, a revert with no prompt, and the
 historical models outside a data step. It is one object per fixture,
-binding ``settings=``, ``database=`` and ``using=`` once and keeping no
-other state: every call reads where the database stands from its tracking
-table. It never makes a database fresh and never skips a dialect (both are
+binding ``settings=``, ``database=`` and ``using=`` once (one
+:class:`~ferro.migrations.target.Target`, as every verb resolves) and
+keeping no other state: every call reads where the database stands from
+its tracking table. It never makes a database fresh and never skips a dialect (both are
 the project's fixture), and it has no ``reset()`` and no step-level target
 (``"0007:02"``): no snapshot describes the state between two steps.
 
 Nothing here decides how a migration runs. Every step runs through the
-runner (:func:`ferro.migrations.runner.up` / :func:`~ferro.migrations.runner.down`)
+runner (``up`` bounded by its ``through``, :func:`~ferro.migrations.runner.down`)
 under its run lock, every comparison is :func:`ferro.migrations.drift`, and
 every historical model is built by
 :func:`ferro.migrations.historical.build_single` and installed with
@@ -61,12 +62,12 @@ from .. import _core
 from ..registry import REGISTRY
 from ..session import engines
 from . import historical, runner
-from .api import _connection, _resolve
 from .drift import drift, render_op
 from .errors import MigrationRefused
+from .target import Target
 
 if TYPE_CHECKING:
-    from ..settings import DatabaseSettings, FerroSettings
+    from ..settings import FerroSettings
     from .context import HistoricalModels
     from .runner import RunReport
 
@@ -121,15 +122,13 @@ class Harness:
     """A migration chain driven by name, for a test. Build it with
     :func:`harness`."""
 
-    def __init__(
-        self, settings: FerroSettings, database: DatabaseSettings, using: str | None
-    ) -> None:
-        self._settings = settings
-        self._database = database
-        self._using = using
+    def __init__(self, target: Target) -> None:
+        self._target = target
+        self._database = target.database
 
     def __repr__(self) -> str:
-        on = self._using if self._using is not None else "the default connection"
+        using = self._target.using
+        on = using if using is not None else "the default connection"
         return f"<Harness {self._database.name} on {on}>"
 
     # -- the verbs ----------------------------------------------------------------
@@ -143,17 +142,17 @@ class Harness:
         """
         chain = self._chain()
         target = _find(chain, migration)
-        name = _connection(self._using)
-        at = await self._standing(name, f"apply_through({migration!r})")
-        if at > target:
-            raise MigrationRefused(
-                f"harness.apply_through({migration!r}): the database stands at "
-                f"{chain[at].name}, past {chain[target].name}; nothing was applied. "
-                f"Revert to it first with revert_to({chain[target].short!r})."
-            )
-        if at == target:
-            return runner.RunReport()
-        return await self._up_through(name, chain, target)
+        async with self._target.open() as name:
+            at = await self._standing(name, f"apply_through({migration!r})")
+            if at > target:
+                raise MigrationRefused(
+                    f"harness.apply_through({migration!r}): the database stands at "
+                    f"{chain[at].name}, past {chain[target].name}; nothing was applied. "
+                    f"Revert to it first with revert_to({chain[target].short!r})."
+                )
+            if at == target:
+                return runner.RunReport()
+            return await self._up_through(name, chain, target)
 
     async def apply(self, migration: str) -> RunReport:
         """Apply exactly ``migration``, under the run lock.
@@ -165,25 +164,25 @@ class Harness:
         """
         chain = self._chain()
         target = _find(chain, migration)
-        name = _connection(self._using)
-        at = await self._standing(name, f"apply({migration!r})")
-        if at != target - 1:
-            parent = (
-                f"{chain[target - 1].name}, the parent of {chain[target].name}"
-                if target > 0
-                else f"no migration, below {chain[target].name}"
-            )
-            hint = (
-                f" Use apply_through({chain[target].short!r}) to apply every "
-                f"migration up to it."
-                if at < target - 1
-                else ""
-            )
-            raise MigrationRefused(
-                f"harness.apply({migration!r}): the database stands at "
-                f"{_stands(chain, at)}, not at {parent}; nothing was applied.{hint}"
-            )
-        return await self._up_through(name, chain, target)
+        async with self._target.open() as name:
+            at = await self._standing(name, f"apply({migration!r})")
+            if at != target - 1:
+                parent = (
+                    f"{chain[target - 1].name}, the parent of {chain[target].name}"
+                    if target > 0
+                    else f"no migration, below {chain[target].name}"
+                )
+                hint = (
+                    f" Use apply_through({chain[target].short!r}) to apply every "
+                    f"migration up to it."
+                    if at < target - 1
+                    else ""
+                )
+                raise MigrationRefused(
+                    f"harness.apply({migration!r}): the database stands at "
+                    f"{_stands(chain, at)}, not at {parent}; nothing was applied.{hint}"
+                )
+            return await self._up_through(name, chain, target)
 
     async def revert_to(self, migration: str) -> RunReport:
         """Revert every migration above ``migration``, newest first, with no
@@ -195,20 +194,21 @@ class Harness:
         """
         chain = self._chain()
         target = _find(chain, migration)
-        name = _connection(self._using)
-        at = await self._standing(name, None)
-        if at < target:
-            raise MigrationRefused(
-                f"harness.revert_to({migration!r}): the database stands at "
-                f"{_stands(chain, at)}, below {chain[target].name}; nothing was "
-                f"reverted. Apply it with apply_through({chain[target].short!r})."
-            )
-        return await self._down(name, target=chain[target].short)
+        async with self._target.open() as name:
+            at = await self._standing(name, None)
+            if at < target:
+                raise MigrationRefused(
+                    f"harness.revert_to({migration!r}): the database stands at "
+                    f"{_stands(chain, at)}, below {chain[target].name}; nothing was "
+                    f"reverted. Apply it with apply_through({chain[target].short!r})."
+                )
+            return await self._down(name, target=chain[target].short)
 
     async def revert_all(self) -> RunReport:
         """Revert every applied migration, newest first, with no prompt. On a
         database with nothing applied it does nothing and creates nothing."""
-        return await self._down(_connection(self._using), all=True)
+        async with self._target.open() as name:
+            return await self._down(name, all=True)
 
     @asynccontextmanager
     async def models_at(self, migration: str) -> AsyncIterator[HistoricalModels]:
@@ -228,11 +228,11 @@ class Harness:
         """
         chain = self._chain()
         this = chain[_find(chain, migration)]
-        name = _connection(self._using)
-        models = historical.build_single(this.snapshot, this.name)
-        with REGISTRY.swap(models):
-            async with engines.session(name):
-                yield models
+        async with self._target.open() as name:
+            models = historical.build_single(this.snapshot, this.name)
+            with REGISTRY.swap(models):
+                async with engines.session(name):
+                    yield models
 
     async def round_trip(self) -> RoundTripResult:
         """Apply every migration, revert every one, and apply them all again,
@@ -250,38 +250,37 @@ class Harness:
         migration's tables remain (``author table is extra``).
         """
         chain = self._chain()
-        name = _connection(self._using)
-        at = await self._standing(name, "round_trip()")
-        if at >= 0:
-            await self._assert_clean(name, chain[at], "the database as found")
-        at = await self._walk_up(name, chain, at)
-
-        reverted_to: str | None = None
-        irreversible: tuple[str, str, str] | None = None
-        while at >= 0:
-            below = chain[at - 1].short if at > 0 else "0000"
-            report = await runner.down(
-                self._settings, self._database, target=below, using=name
-            )
-            if report.refusal is not None:
-                irreversible = _irreversible(report, chain)
-                if irreversible is None:
-                    raise MigrationRefused(report.refusal)
-                reverted_to = chain[at].name
-                break
-            stop = f"reverting {chain[at].name}"
-            at -= 1
+        async with self._target.open() as name:
+            at = await self._standing(name, "round_trip()")
             if at >= 0:
-                await self._assert_clean(name, chain[at], stop)
-            else:
-                await self._assert_empty(name, chain[0], stop)
+                await self._assert_clean(name, chain[at], "the database as found")
+            at = await self._walk_up(name, chain, at)
 
-        await self._walk_up(name, chain, at)
-        return RoundTripResult(
-            applied=[m.name for m in chain],
-            reverted_to=reverted_to,
-            irreversible=irreversible,
-        )
+            reverted_to: str | None = None
+            irreversible: tuple[str, str, str] | None = None
+            while at >= 0:
+                below = chain[at - 1].short if at > 0 else "0000"
+                try:
+                    await self._down(name, target=below)
+                except MigrationRefused as refused:
+                    irreversible = _irreversible(refused, chain)
+                    if irreversible is None:
+                        raise
+                    reverted_to = chain[at].name
+                    break
+                stop = f"reverting {chain[at].name}"
+                at -= 1
+                if at >= 0:
+                    await self._assert_clean(name, chain[at], stop)
+                else:
+                    await self._assert_empty(name, chain[0], stop)
+
+            await self._walk_up(name, chain, at)
+            return RoundTripResult(
+                applied=[m.name for m in chain],
+                reverted_to=reverted_to,
+                irreversible=irreversible,
+            )
 
     # -- composition --------------------------------------------------------------
 
@@ -308,7 +307,9 @@ class Harness:
         """The index of the last migration fully applied (``-1``: none),
         read without the lock. ``verb`` going up refuses a migration left
         part-way; going down (``None``) the runner resumes it."""
-        status = await runner.status(self._settings, self._database, using=name)
+        status = await runner.status(
+            self._target.settings, self._database.name, using=name
+        )
         if status.ahead:
             raise MigrationRefused(
                 f"harness: the database has applied {', '.join(status.ahead)}, which "
@@ -336,22 +337,18 @@ class Harness:
     ) -> RunReport:
         """``up`` bounded to ``chain[target]``: the runner plans the whole
         directory and runs only the pending steps of migrations through it."""
-        report = await runner.up(
-            self._settings, self._database, using=name, through=chain[target].short
-        )
-        if report.refusal is not None:
-            raise MigrationRefused(report.refusal)
-        return report
+        return await runner._up(name, self._database, through=chain[target].short)
 
     async def _down(
         self, name: str, *, target: str | None = None, all: bool = False
     ) -> RunReport:
-        report = await runner.down(
-            self._settings, self._database, target=target, all=all, using=name
+        return await runner.down(
+            self._target.settings,
+            self._database.name,
+            using=name,
+            target=target,
+            all=all,
         )
-        if report.refusal is not None:
-            raise MigrationRefused(report.refusal)
-        return report
 
     async def _walk_up(self, name: str, chain: list[_Migration], at: int) -> int:
         """Apply one migration per stop from ``at`` to the head, checking
@@ -364,7 +361,7 @@ class Harness:
         return len(chain) - 1
 
     async def _assert_clean(self, name: str, at: _Migration, stop: str) -> None:
-        report = await drift(self._settings, self._database.name, using=name)
+        report = await drift(self._target.settings, self._database.name, using=name)
         if not report.clean:
             detail = report.refusal if report.refusal is not None else report.render()
             raise MigrationRefused(
@@ -419,12 +416,13 @@ def _stands(chain: list[_Migration], at: int) -> str:
 
 
 def _irreversible(
-    report: RunReport, chain: list[_Migration]
+    raised: MigrationRefused, chain: list[_Migration]
 ) -> tuple[str, str, str] | None:
-    """``(migration, step, reason)`` when ``report`` was refused by an
-    irreversible step (the refusal's ``kind``, from the run planner or the
-    data step loader), else ``None``."""
-    refused = report.refused
+    """``(migration, step, reason)`` when the run ``raised`` reports was
+    refused by an irreversible step (the refusal's ``kind``, from the run
+    planner or the data step loader), else ``None``."""
+    report = raised.report
+    refused = report.refused if isinstance(report, runner.RunReport) else None
     if (
         refused is None
         or refused.kind != "irreversible"
@@ -457,5 +455,4 @@ def harness(
         MigrationRefused: no configuration is found, or ``database`` names
             none of its databases.
     """
-    settings, db = _resolve(settings, database)
-    return Harness(settings, db, using)
+    return Harness(Target.resolve(settings, database, using=using))

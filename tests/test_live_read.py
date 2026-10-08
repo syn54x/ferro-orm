@@ -33,6 +33,7 @@ from tests.test_migrate_up import (  # noqa: F401
     configure,
     db,
     new,
+    run_report,
     settings_and_database,
 )
 
@@ -124,7 +125,7 @@ async def test_a_view_named_like_a_model_does_not_trip_the_adoption_refusal(
     settings, database = settings_and_database()
     db.execute(AUTHOR_VIEW)
 
-    report = await runner.up(settings, database, url=db.url)
+    report = await run_report(runner.up(settings, database.name, url=db.url))
 
     assert report.refusal is not None
     assert report.refusal.startswith(

@@ -27,8 +27,8 @@ The Rust core decides (the locked run's ``plan_rerecord``: which record,
 which refusal) and writes (its ``rerecord``: one statement under the run
 lock); this module sequences the two and reads the facts only Python can:
 a data step's declared kind and an edited chunked query's order keys.
-``rerecord`` is a CLI verb and an in-process call for the CLI, never part
-of the application API (ADR-0045).
+``rerecord`` is a CLI verb, never part of the application API
+(ADR-0045); the CLI calls :func:`rerecord` with ``url=``, as every verb.
 """
 
 from __future__ import annotations
@@ -42,10 +42,11 @@ from . import runner
 from .errors import MigrationRefused
 from .report import RunRefused
 from .steps import declared_up_kind
+from .target import Target
 
 if TYPE_CHECKING:
     from .._core import LockedDatabase
-    from ..settings import DatabaseSettings, FerroSettings
+    from ..settings import FerroSettings
 
 __all__ = ["RerecordReport", "rerecord"]
 
@@ -81,13 +82,13 @@ class RerecordReport:
 
 
 async def rerecord(
-    settings: FerroSettings,
-    database: DatabaseSettings,
-    target: str,
+    settings: FerroSettings | None = None,
+    database: str | None = None,
     *,
-    mode: Mode = "record",
     using: str | None = None,
     url: str | None = None,
+    target: str,
+    mode: Mode = "record",
     lock_timeout: str | float = "30s",
 ) -> RerecordReport:
     """Accept a deliberate edit of step ``target`` (``"0007:01"``) under the
@@ -96,9 +97,9 @@ async def rerecord(
 
     ``mode`` is ``"continue"`` or ``"restart"`` for an unfinished chunked
     step with committed batches, and ``"record"`` for anything else.
-    ``using`` names an open connection; otherwise ``database``'s URL (or
-    ``url``) is connected and closed after. A second run waits up to
-    ``lock_timeout``.
+    Works on the database and connection
+    :meth:`~ferro.migrations.target.Target.resolve` picks. A second run waits
+    up to ``lock_timeout``.
 
     Raises:
         RunRefused: ``target`` is not one step (a migration alone, the
@@ -109,12 +110,12 @@ async def rerecord(
             refusal's ``kind`` says which.
         MigrationRefused: an edited data step's file does not load.
     """
-    del settings  # the database carries its project; kept for API symmetry
     if mode not in _MODES:
         raise SettingsError(f"rerecord mode {mode!r} is not one of {', '.join(_MODES)}")
     timeout = runner.parse_lock_timeout(lock_timeout)
-    async with runner._connection(database, using, url) as name:
-        tracked = await runner.open_tracked(name, database)
+    where = Target.resolve(settings, database, using=using, url=url)
+    async with where.open() as name:
+        tracked = await runner.open_tracked(name, where.database)
         async with tracked.locked(timeout, runner.say_waiting) as run:
             return await _rerecord(run, target, mode)
 

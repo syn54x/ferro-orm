@@ -35,12 +35,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from ..settings import SettingsError
 from . import runner
-from .api import _connection, _resolve
 from .drift import DriftReport, against
 from .errors import MigrationRefused
 from .steps import declared_up_kind
+from .target import Target
 
 if TYPE_CHECKING:
     from ..settings import DatabaseSettings, FerroSettings
@@ -159,32 +158,6 @@ async def _remove(
     return [names[number] for number in sorted({m for m, _ in removed})]
 
 
-async def record(
-    database: DatabaseSettings,
-    *,
-    target: str | None = None,
-    using: str | None = None,
-    url: str | None = None,
-    lock_timeout: str | float = "30s",
-) -> BaselineReport:
-    """``ferro migrate baseline``: ``using`` names an open connection;
-    otherwise ``database``'s URL (or ``url``) is connected and closed after."""
-    async with runner._connection(database, using, url) as name:
-        return await _record(name, database, target, lock_timeout)
-
-
-async def remove(
-    database: DatabaseSettings,
-    *,
-    using: str | None = None,
-    url: str | None = None,
-    lock_timeout: str | float = "30s",
-) -> list[str]:
-    """``ferro migrate baseline --remove``, on a connection as :func:`record`."""
-    async with runner._connection(database, using, url) as name:
-        return await _remove(name, database, lock_timeout)
-
-
 async def baseline(
     settings: FerroSettings | None = None,
     database: str | None = None,
@@ -192,7 +165,7 @@ async def baseline(
     target: str | None = None,
     using: str | None = None,
     url: str | None = None,
-    lock_timeout: str = "30s",
+    lock_timeout: str | float = "30s",
 ) -> BaselineReport:
     """Record every migration through ``target`` (the head when ``None``;
     ``"0006"`` or ``"0006_add_teams"``) as applied on a database that already
@@ -210,15 +183,9 @@ async def baseline(
             target is not in the migrations directory, the lock wait outlasts
             ``lock_timeout``, or the configuration names no single database.
     """
-    _, db = _resolve(settings, database)
-    try:
-        if url is not None:
-            return await record(
-                db, target=target, using=using, url=url, lock_timeout=lock_timeout
-            )
-        return await _record(_connection(using), db, target, lock_timeout)
-    except SettingsError as err:
-        raise MigrationRefused(str(err)) from None
+    where = Target.resolve(settings, database, using=using, url=url)
+    async with where.open() as name:
+        return await _record(name, where.database, target, lock_timeout)
 
 
 async def remove_baseline(
@@ -227,7 +194,7 @@ async def remove_baseline(
     *,
     using: str | None = None,
     url: str | None = None,
-    lock_timeout: str = "30s",
+    lock_timeout: str | float = "30s",
 ) -> list[str]:
     """Delete every record a baseline wrote, under the run lock (``ferro
     migrate baseline --remove``). Returns the migrations whose baseline was
@@ -239,10 +206,6 @@ async def remove_baseline(
             (revert it with ``ferro migrate down`` first; the message names
             it), or the lock wait outlasts ``lock_timeout``.
     """
-    _, db = _resolve(settings, database)
-    try:
-        if url is not None:
-            return await remove(db, using=using, url=url, lock_timeout=lock_timeout)
-        return await _remove(_connection(using), db, lock_timeout)
-    except SettingsError as err:
-        raise MigrationRefused(str(err)) from None
+    target = Target.resolve(settings, database, using=using, url=url)
+    async with target.open() as name:
+        return await _remove(name, target.database, lock_timeout)
