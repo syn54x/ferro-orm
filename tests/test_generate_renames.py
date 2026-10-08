@@ -32,6 +32,7 @@ from typing import Annotated
 import pytest
 
 from ferro import BackRef, Field, ForeignKey, Model, Relation
+from tests._pg_sequence import pg_sequence_rename
 from tests.test_generate_columns import (  # noqa: F401 - fixtures
     no_bytecode,
     refused,
@@ -305,10 +306,7 @@ def test_a_table_rename_drags_every_owned_name_and_its_join_table_with_rows(
         # key's sequence follows its table: a table created as `author` owns
         # `author_id_seq`, and `RENAME` alone keeps `writer_id_seq`.
         assert up == structural[:1] + [
-            "DO $$ DECLARE seq regclass := pg_get_serial_sequence('\"author\"', 'id')"
-            "::regclass; BEGIN IF seq IS NOT NULL AND (SELECT relname FROM pg_class "
-            "WHERE oid = seq) <> 'author_id_seq' THEN EXECUTE format('ALTER SEQUENCE "
-            "%s RENAME TO %I', seq, 'author_id_seq'); END IF; END $$",
+            pg_sequence_rename("author"),
         ] + structural[1:] + [
             'ALTER INDEX "uq_writer_name" RENAME TO "uq_author_name"',
             'ALTER TABLE "author" RENAME CONSTRAINT "ck_writer_named" TO "ck_author_named"',
@@ -370,16 +368,6 @@ class Author(Model):
 """
 
 
-def sequence_rename(table: str, column: str) -> str:
-    target = f"{table}_{column}_seq"
-    return (
-        f"DO $$ DECLARE seq regclass := pg_get_serial_sequence('\"{table}\"', "
-        f"'{column}')::regclass; BEGIN IF seq IS NOT NULL AND (SELECT relname FROM "
-        f"pg_class WHERE oid = seq) <> '{target}' THEN EXECUTE format('ALTER SEQUENCE "
-        f"%s RENAME TO %I', seq, '{target}'); END IF; END $$"
-    )
-
-
 @backend_matrix
 def test_a_table_and_its_serial_key_renamed_together_carry_the_sequence(
     project, pkg, db
@@ -399,15 +387,15 @@ def test_a_table_and_its_serial_key_renamed_together_carry_the_sequence(
     if db.backend == "postgres":
         assert up == [
             'ALTER TABLE "writer" RENAME TO "author"',
-            sequence_rename("author", "id"),
+            pg_sequence_rename("author", "id"),
             'ALTER TABLE "author" RENAME COLUMN "id" TO "author_id"',
-            sequence_rename("author", "author_id"),
+            pg_sequence_rename("author", "author_id"),
         ]
         assert down == [
             'ALTER TABLE "author" RENAME TO "writer"',
-            sequence_rename("writer", "author_id"),
+            pg_sequence_rename("writer", "author_id"),
             'ALTER TABLE "writer" RENAME COLUMN "author_id" TO "id"',
-            sequence_rename("writer", "id"),
+            pg_sequence_rename("writer", "id"),
         ]
     else:
         assert up == [

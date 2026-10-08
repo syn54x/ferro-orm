@@ -885,6 +885,20 @@ FINDINGS: dict[str, Finding] = {
 }
 
 
+KEPT_DEFAULTS: dict[tuple[str, str], dict[tuple[str, str], str]] = {
+    ("A2-required-column-with-a-literal-default", "sqlite"): {
+        ("author", "tier"): "'free'",
+    },
+}
+"""ADR-0034's SQLite exception, by case and dialect: the server default the
+reconciliation pass leaves on a column it adds to an existing table. SQLite
+has no ``ALTER COLUMN … DROP DEFAULT`` and the pass never rebuilds a table,
+so it adds a required column as ``NOT NULL DEFAULT <literal>``: nullability
+and type are the model's (AGENTS.md I-1 item 10), and the one default it
+keeps is the model's own literal. A migration rebuilds the table without it,
+and Alembic autogenerate, which cannot write a rebuild, refuses the op."""
+
+
 def expect_finding(request, case_id: str, dialect: str, pin: str) -> None:
     finding = FINDINGS.get(case_id)
     if finding and pin in finding.pins and dialect in finding.dialects:
@@ -1533,6 +1547,7 @@ def test_pin_e_a_migrated_database_holds_the_auto_migrated_server_defaults(
     request,
     project,
     second_db,
+    tmp_path,
     case_id,
     db_url,
     db_backend,
@@ -1544,15 +1559,42 @@ def test_pin_e_a_migrated_database_holds_the_auto_migrated_server_defaults(
     ADR-0027), compared on the catalog itself between the database the
     chain ``0001`` → ``0002`` migrated and the one ``connect(auto_migrate=
     True)`` built from the same models. Its own test, so a finding against
-    it (``"e-defaults"``) leaves the rest of pin (e) pinned."""
+    it (``"e-defaults"``) leaves the rest of pin (e) pinned.
+
+    Where the pass, run over the ``before`` database, adds a column it can
+    only add with a ``DEFAULT`` (``KEPT_DEFAULTS``, ADR-0034's SQLite
+    exception), a third database reconciled that way holds the migrated
+    one's defaults plus exactly that literal, NOT NULL as the model is."""
     expect_finding(request, case_id, db_backend, "e-defaults")
-    migrate_through(project, CASEBOOK[case_id], db_url, db_backend)
+    case = CASEBOOK[case_id]
+    migrate_through(project, case, db_url, db_backend)
     second, second_schema = second_db
-    project.register(CASEBOOK[case_id].after)
+    project.register(case.after)
     auto_migrate(second)
     migrated = Db(db_url, db_backend, postgres_base_url, db_schema_name)
     auto = Db(second, db_backend, postgres_base_url, second_schema)
     assert column_defaults(migrated) == column_defaults(auto), case_id
+
+    kept = KEPT_DEFAULTS.get((case_id, db_backend))
+    if kept is None:
+        return
+    reconciled_url = f"sqlite:{tmp_path / 'reconciled.db'}?mode=rwc"
+    project.register(case.before)
+    auto_migrate(reconciled_url, name="kept_default_before")
+    project.register(case.after)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        asyncio.run(
+            connect(reconciled_url, name="kept_default_after", migrate_updates=True)
+        )
+    reconciled = Db(reconciled_url, db_backend, None, None)
+    assert column_defaults(reconciled) == {**column_defaults(migrated), **kept}
+    for table, column in kept:
+        assert [
+            row[3]
+            for row in reconciled.rows(f'PRAGMA table_info("{table}")')
+            if row[1] == column
+        ] == [1], f"{table}.{column} is NOT NULL"
 
 
 # -- pin (f): the bridge's revision runs the pass's DDL -------------------------------
@@ -1590,10 +1632,8 @@ def _run_statements(
 
 def _pass_declines(url: str) -> bool:
     """Whether the reconciliation pass, run for real, declines the change
-    and points at ``ferro migrate new``: it refuses so, or it warns so
-    (ADR-0014's SQLite posture), having made only what SQLite can make in
-    place (a required column comes in nullable and backfilled, its
-    ``NOT NULL`` left to the rebuild the warning names)."""
+    and points at ``ferro migrate new``: it refuses so, or it warns so and
+    leaves the table as it is (ADR-0014's SQLite posture)."""
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         try:
@@ -1644,7 +1684,10 @@ def test_pin_f_the_bridge_revision_runs_the_pass_ddl(
     (the pass refuses naming ``ferro migrate new``), and a change SQLite can
     only make by a table rebuild is refused naming ``ferro migrate new``
     (the pass declines it too, by a warning or a refusal naming the same
-    command)."""
+    command), but for ADR-0034's SQLite exception: a required column with a
+    literal default, which the pass adds keeping that literal as its
+    ``DEFAULT`` (``KEPT_DEFAULTS``) and a revision, which cannot rebuild,
+    refuses."""
     expect_finding(request, case_id, db_backend, "f")
     case = CASEBOOK[case_id]
     second, second_schema = second_db
@@ -1676,6 +1719,13 @@ def test_pin_f_the_bridge_revision_runs_the_pass_ddl(
     except RuntimeError as refusal:
         assert "autogenerate refused" in str(refusal), refusal
         assert "`ferro migrate new`" in str(refusal), refusal
+        kept = KEPT_DEFAULTS.get((case_id, db_backend))
+        if kept is not None:
+            assert "keeps for good" in str(refusal), refusal
+            asyncio.run(connect(second, name="p538_pass_run", migrate_updates=True))
+            defaults = column_defaults(databases[1])
+            assert {column: defaults[column] for column in kept} == kept
+            return
         assert _pass_declines(second), str(refusal)
         if rows_of:
             # Neither door changed a row: the relabel is the generated

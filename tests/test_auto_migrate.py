@@ -8,6 +8,7 @@ from pydantic import Field
 import ferro
 from ferro import BackRef, ManyToMany, Model, PassReport, Relation
 from ferro.base import FerroField
+from tests._pg_sequence import pg_sequence_rename
 from tests._pass_harness import (
     auto_migrate,
     on,
@@ -17,32 +18,6 @@ from tests._pass_harness import (
 )
 
 pytestmark = pytest.mark.backend_matrix
-
-
-def pg_sequence_rename(table: str, column: str = "id") -> str:
-    """The pass's statement that gives ``table``'s ``column`` sequence the
-    name a table created as ``table`` owns (``<table>_<column>_seq``) after a
-    rename: ``ALTER TABLE … RENAME`` alone keeps the old name."""
-    target = f"{table}_{column}_seq"
-    return (
-        f"DO $$ DECLARE seq regclass := pg_get_serial_sequence('\"{table}\"', "
-        f"'{column}')::regclass; BEGIN IF seq IS NOT NULL AND (SELECT relname FROM "
-        f"pg_class WHERE oid = seq) <> '{target}' THEN EXECUTE format('ALTER SEQUENCE "
-        f"%s RENAME TO %I', seq, '{target}'); END IF; END $$"
-    )
-
-
-def sqlite_not_null_add(table: str, column: str, value: str) -> str:
-    """The pass's report for a required column it adds on SQLite: nullable,
-    backfilled by ``UPDATE``, the ``NOT NULL`` left to a rebuild, since
-    SQLite's ``ADD COLUMN … NOT NULL`` keeps its ``DEFAULT`` for good and
-    ferro persists none (ADR-0027)."""
-    return (
-        f"Column '{table}.{column}' was added nullable and its existing rows set to "
-        f"{value}: SQLite adds a NOT NULL column only with a DEFAULT it keeps for good, "
-        "and the model declares no server default. Generate a reviewed migration "
-        "with `ferro migrate new` to rebuild the table with the column NOT NULL."
-    )
 
 
 class AutoMigratedUser(Model):
@@ -1059,10 +1034,9 @@ async def test_json_factory_default_backfills_existing_rows(
     assert schema_steps(report) == on(
         db_url,
         sqlite=[
-            ("migturns", 'ALTER TABLE "migturns" ADD COLUMN "turns" JSON'),
             (
                 "migturns",
-                'UPDATE "migturns" SET "turns" = \'{}\' WHERE "turns" IS NULL',
+                'ALTER TABLE "migturns" ADD COLUMN "turns" JSON NOT NULL DEFAULT \'{}\'',
             ),
         ],
         postgres=[
@@ -1073,9 +1047,7 @@ async def test_json_factory_default_backfills_existing_rows(
             ("migturns", 'ALTER TABLE "migturns" ALTER COLUMN "turns" DROP DEFAULT'),
         ],
     )
-    assert warning_texts(report) == on(
-        db_url, sqlite=[sqlite_not_null_add("migturns", "turns", "'{}'")], postgres=[]
-    )
+    assert warning_texts(report) == []
     async with ferro.engines.session():
         rows = await MigTurns.all()
         assert len(rows) == 1
@@ -1094,7 +1066,7 @@ async def test_json_factory_default_backfills_existing_rows(
             assert info[0]["column_default"] is None, "backfill default must not linger"
         else:
             dflt = _sqlite_columns(db_url, "migturns")["turns"][4]
-            assert dflt is None, "SQLite adds it default-free and backfills by UPDATE"
+            assert dflt == "'{}'", "SQLite keeps the model's literal (ADR-0034)"
 
 
 @pytest.mark.asyncio
@@ -1125,10 +1097,9 @@ async def test_json_static_object_default_backfills_existing_rows(
     assert schema_steps(report) == on(
         db_url,
         sqlite=[
-            ("migflags", 'ALTER TABLE "migflags" ADD COLUMN "flags" JSON'),
             (
                 "migflags",
-                'UPDATE "migflags" SET "flags" = \'{}\' WHERE "flags" IS NULL',
+                'ALTER TABLE "migflags" ADD COLUMN "flags" JSON NOT NULL DEFAULT \'{}\'',
             ),
         ],
         postgres=[
@@ -1139,9 +1110,7 @@ async def test_json_static_object_default_backfills_existing_rows(
             ("migflags", 'ALTER TABLE "migflags" ALTER COLUMN "flags" DROP DEFAULT'),
         ],
     )
-    assert warning_texts(report) == on(
-        db_url, sqlite=[sqlite_not_null_add("migflags", "flags", "'{}'")], postgres=[]
-    )
+    assert warning_texts(report) == []
     async with ferro.engines.session():
         rows = await MigFlags.all()
         assert rows[0].flags == {}
@@ -1149,14 +1118,16 @@ async def test_json_static_object_default_backfills_existing_rows(
 
 @pytest.mark.asyncio
 @pytest.mark.sqlite_only
-async def test_a_required_column_with_a_default_leaves_no_server_default_on_sqlite(
+async def test_a_required_column_with_a_default_keeps_the_model_literal_on_sqlite(
     db_url, clean_registry
 ):
-    """SQLite has no ``ALTER COLUMN … DROP DEFAULT``, so the pass never adds a
-    ``NOT NULL … DEFAULT`` column there: the column comes in nullable with no
-    ``dflt_value``, the rows are backfilled, and the ``NOT NULL`` is reported
-    with the rebuild that adds it (`ferro migrate new`). A table
-    ``create_tables()`` builds holds no ``DEFAULT`` either (ADR-0027)."""
+    """SQLite has no ``ALTER COLUMN … DROP DEFAULT``, and the pass never
+    rebuilds a table (ADR-0014), so it adds a required column as
+    ``NOT NULL DEFAULT <literal>``: nullability and type are the model's
+    (AGENTS.md I-1 item 10), the one ``DEFAULT`` left behind is the model's
+    own literal, so a raw insert gets what the model would give, and a
+    migration's rebuild removes it (ADR-0034, the SQLite exception). No
+    warning, and a second pass has nothing to do."""
     await ferro.connect(db_url)
     async with ferro.engines.session():
         await execute(
@@ -1171,17 +1142,26 @@ async def test_a_required_column_with_a_default_leaves_no_server_default_on_sqli
         name: str
         tier: str = "free"
 
-    report = await auto_migrate(db_url, updates=True)
+    report = await warned_auto_migrate(db_url, updates=True)
     assert schema_steps(report) == [
-        ("migtier", 'ALTER TABLE "migtier" ADD COLUMN "tier" varchar'),
-        ("migtier", 'UPDATE "migtier" SET "tier" = \'free\' WHERE "tier" IS NULL'),
+        (
+            "migtier",
+            'ALTER TABLE "migtier" ADD COLUMN "tier" varchar NOT NULL DEFAULT \'free\'',
+        ),
     ]
-    assert warning_texts(report) == [sqlite_not_null_add("migtier", "tier", "'free'")]
+    assert warning_texts(report) == []
     tier = _sqlite_columns(db_url, "migtier")["tier"]
-    assert tier[4] is None, "no server default"
+    assert (tier[3], tier[4]) == (1, "'free'"), "NOT NULL, the model's literal"
     async with ferro.engines.session():
         rows = await MigTier.all()
         assert [row.tier for row in rows] == ["free"]
+        await execute('INSERT INTO "migtier" ("name") VALUES (\'beta\')')
+        rows = await fetch_all('SELECT "tier" FROM "migtier" WHERE "name" = \'beta\'')
+        assert rows[0]["tier"] == "free", "a raw insert gets the model's value"
+    ferro.reset_engine()
+
+    again = await warned_auto_migrate(db_url, updates=True)
+    assert (schema_steps(again), warning_texts(again)) == ([], [])
 
 
 @pytest.mark.asyncio
@@ -1416,10 +1396,9 @@ async def test_migrate_updates_adds_columns_before_composite_unique_referencing_
     assert schema_steps(report) == on(
         db_url,
         sqlite=[
-            ("provtxn", 'ALTER TABLE "provtxn" ADD COLUMN "pending" integer'),
             (
                 "provtxn",
-                'UPDATE "provtxn" SET "pending" = FALSE WHERE "pending" IS NULL',
+                'ALTER TABLE "provtxn" ADD COLUMN "pending" integer NOT NULL DEFAULT FALSE',
             ),
             (
                 "provtxn",
@@ -1446,9 +1425,7 @@ async def test_migrate_updates_adds_columns_before_composite_unique_referencing_
             ),
         ],
     )
-    assert warning_texts(report) == on(
-        db_url, sqlite=[sqlite_not_null_add("provtxn", "pending", "FALSE")], postgres=[]
-    )
+    assert warning_texts(report) == []
     async with ferro.engines.session():
         rows = await ProvTxn.all()
         assert len(rows) == 1
@@ -3614,6 +3591,45 @@ async def test_migrate_updates_renames_a_table_and_its_serial_key_with_its_seque
 
     again = await auto_migrate(db_url, updates=True)
     assert schema_steps(again) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_a_sequence_rename_onto_a_taken_name_refuses_naming_the_holder_and_fix(
+    db_url, clean_registry
+):
+    """``trnwriter`` becomes ``trnauthor`` while a sequence someone made by
+    hand already holds ``trnauthor_id_seq``, the name the key's sequence
+    takes after the rename. The rename refuses with ferro's text, naming the
+    sequence, the column, the holder and the fix, instead of Postgres's bare
+    ``relation already exists``; nothing is renamed. Once the holder is
+    dropped, the same pass goes through."""
+    await _trn_writer_with_rows(db_url)
+    await ferro.connect(db_url)
+    async with ferro.engines.session():
+        await execute('CREATE SEQUENCE "trnauthor_id_seq"')
+    ferro.reset_engine()
+    _define_trn_author()
+
+    with pytest.raises(Exception) as refused:
+        await auto_migrate(db_url, updates=True)
+    assert (
+        "Cannot rename sequence trnwriter_id_seq, owned by \"trnauthor\".\"id\", to "
+        'trnauthor_id_seq, the name a table created as "trnauthor" gives it: sequence '
+        "trnauthor_id_seq already holds that name. Rename or drop that sequence, then "
+        "run the change again."
+    ) in str(refused.value)
+    ferro.reset_engine()
+    assert await _trn_tables(db_url) == {"trnwriter"}
+
+    await ferro.connect(db_url)
+    async with ferro.engines.session():
+        await execute('DROP SEQUENCE "trnauthor_id_seq"')
+    ferro.reset_engine()
+    report = await auto_migrate(db_url, updates=True)
+    assert pg_sequence_rename("trnauthor") in [sql for _, sql in schema_steps(report)]
+    ferro.reset_engine()
+    assert await _trn_tables(db_url) == {"trnauthor"}
 
 
 @pytest.mark.asyncio

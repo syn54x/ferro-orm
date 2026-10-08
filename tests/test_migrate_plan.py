@@ -126,17 +126,14 @@ class TestAddColumn:
             'ALTER TABLE "invoice" ALTER COLUMN "status" DROP DEFAULT',
         ]
 
-        # SQLite cannot DROP DEFAULT, and ferro persists none (ADR-0027): the
-        # column comes in nullable, is backfilled, and the NOT NULL is
-        # reported with the rebuild that adds it.
+        # SQLite cannot DROP DEFAULT: the pass keeps the model's literal as the
+        # column's DEFAULT, so nullability and type match the model (ADR-0034,
+        # the SQLite exception; a migration rebuilds the table without it).
         stmts, warns = render(schema, PK_ONLY_LIVE, "sqlite")
         assert stmts == [
-            'ALTER TABLE "invoice" ADD COLUMN "status" varchar',
-            'UPDATE "invoice" SET "status" = \'draft\' WHERE "status" IS NULL',
+            'ALTER TABLE "invoice" ADD COLUMN "status" varchar NOT NULL DEFAULT \'draft\'',
         ]
-        assert len(warns) == 1
-        assert "invoice.status" in warns[0] and "NOT NULL" in warns[0]
-        assert "ferro migrate new" in warns[0]
+        assert warns == []
 
     def test_not_null_json_object_default_backfills_with_storage_cast(self):
         """#373: a JSON object default is a backfill literal on json-family storage."""
@@ -156,8 +153,7 @@ class TestAddColumn:
         ]
         stmts, _ = render(derived, PK_ONLY_LIVE, "sqlite")
         assert stmts == [
-            'ALTER TABLE "invoice" ADD COLUMN "turns" JSON',
-            'UPDATE "invoice" SET "turns" = \'{}\' WHERE "turns" IS NULL',
+            'ALTER TABLE "invoice" ADD COLUMN "turns" JSON NOT NULL DEFAULT \'{}\'',
         ]
 
         explicit_json = schema_with(
@@ -285,9 +281,7 @@ class TestAddColumn:
         ]
         assert warns == []
 
-    def test_not_null_fk_column_with_default_is_added_nullable_with_its_reference_on_sqlite(
-        self,
-    ):
+    def test_not_null_fk_column_with_default_warns_naming_migrations_on_sqlite(self):
         schema = schema_with(
             {
                 "client_id": {
@@ -298,16 +292,12 @@ class TestAddColumn:
                 }
             }
         )
-        # Added nullable (SQLite would keep a NOT NULL add's DEFAULT for good),
-        # so SQLite takes its REFERENCES inline; the NOT NULL is reported.
         stmts, warns = render(schema, PK_ONLY_LIVE, "sqlite")
         assert stmts == [
-            'ALTER TABLE "invoice" ADD COLUMN "client_id" integer'
-            ' REFERENCES "client"("id") ON DELETE RESTRICT',
-            'UPDATE "invoice" SET "client_id" = 1 WHERE "client_id" IS NULL',
+            'ALTER TABLE "invoice" ADD COLUMN "client_id" integer NOT NULL DEFAULT 1'
         ]
         assert len(warns) == 1
-        assert "invoice.client_id" in warns[0] and "NOT NULL" in warns[0]
+        assert "invoice.client_id" in warns[0] and "FOREIGN KEY" in warns[0]
         assert "ferro migrate new" in warns[0] and "Alembic" not in warns[0]
 
         # Postgres is unchanged: add, drop the backfill default, named constraint.
