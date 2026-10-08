@@ -19,9 +19,10 @@ migration through the target as applied without running it, and only after
 checking: under the run lock, with no step records yet, the live database
 is planned against the target migration's schema snapshot exactly as
 ``ferro migrate drift`` plans it against the last applied one: both call
-:func:`ferro.migrations.drift.against`, so the lines are the same. Any line means nothing is recorded; there is no
-flag that records past one. Live tables the snapshot does not declare
-(``alembic_version``, a later migration's tables) are never drift.
+:func:`ferro.migrations.drift.against`, so the lines are the same. Any
+line means nothing is recorded; there is no flag that records past one.
+Live tables the snapshot does not declare (``alembic_version``, a later
+migration's tables) are never drift.
 
 ``baseline --remove`` deletes the baseline's records again, refused while a
 run has applied a migration above them; ``down`` never reverts a baselined

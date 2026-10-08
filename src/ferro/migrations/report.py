@@ -73,36 +73,53 @@ class RunRefused(MigrationRefused):
 class _State:
     """What one step state means to every reader of a status report."""
 
+    word: str
+    """The word the core serializes (``applied_baseline``)."""
     shown: str
-    """The word ``status`` prints."""
+    """The word ``status`` prints (``applied (baseline)``)."""
     applied: bool = False
     """The step has a finished step record, so it is not pending."""
     unfinished: bool = False
     """A run left the step part-way, or is in it."""
+    running: bool = False
+    """A run holding the run lock is in the step."""
     attention: bool = False
     """A person has to look before anything runs (exit 4)."""
+    whole: bool = False
+    """A migration whose every step is in this state prints on one line."""
 
 
-_STATES = {
-    "applied": _State("applied", applied=True),
-    "applied_different_checksum": _State(
-        "applied (different checksum)", applied=True, attention=True
+_STATES = (
+    _State("applied", "applied", applied=True, whole=True),
+    _State(
+        "applied_different_checksum",
+        "applied (different checksum)",
+        applied=True,
+        attention=True,
     ),
-    "applied_baseline": _State("applied (baseline)", applied=True),
-    "pending": _State("pending"),
-    "running": _State("running", unfinished=True),
-    "failed": _State("failed", unfinished=True, attention=True),
-    "interrupted": _State("interrupted", unfinished=True, attention=True),
-    "reverting": _State("reverting", unfinished=True, attention=True),
-}
+    _State("applied_baseline", "applied (baseline)", applied=True, whole=True),
+    _State("pending", "pending", whole=True),
+    _State("running", "running", unfinished=True, running=True),
+    _State("failed", "failed", unfinished=True, attention=True),
+    _State("interrupted", "interrupted", unfinished=True, attention=True),
+    _State("reverting", "reverting", unfinished=True, attention=True),
+)
 """The one Python reading of the core's step states (``StepState`` in
-``crates/ferro-migrate/src/run_plan.rs``), keyed by the word the core
-serializes. Every question this module answers about where a step, a
-migration or a database stands is read from this table; ``drift`` and the
-test harness ask the report rather than keep their own copy."""
-_SHOWN = {state.shown: state for state in _STATES.values()}
-_WHOLE = {"applied", "applied (baseline)", "pending"}
-"""The migration states ``status`` prints on one line."""
+``crates/ferro-migrate/src/run_plan.rs``). Every question this module
+answers about where a step, a migration or a database stands is read from
+this table; ``drift`` and the test harness ask the report rather than keep
+their own copy."""
+
+
+def _state(*, word: str | None = None, shown: str | None = None) -> _State:
+    """The row of :data:`_STATES` with this core ``word`` or this ``shown`` word."""
+    for state in _STATES:
+        if state.word == word or state.shown == shown:
+            return state
+    raise ValueError(f"no step state {word or shown!r}; the core and report disagree")
+
+
+_RUNNING = next(state for state in _STATES if state.running)
 
 
 @dataclass(frozen=True)
@@ -137,17 +154,22 @@ class StepStatus:
     def applied(self) -> bool:
         """The step has a finished step record (``applied``, ``applied
         (different checksum)`` or ``applied (baseline)``)."""
-        return _SHOWN[self.state].applied
+        return _state(shown=self.state).applied
 
     @property
     def unfinished(self) -> bool:
         """A run left this step part-way, or is in it (``running``,
         ``failed``, ``interrupted`` or ``reverting``)."""
-        return _SHOWN[self.state].unfinished
+        return _state(shown=self.state).unfinished
+
+    @property
+    def running(self) -> bool:
+        """A run holding the run lock is in this step."""
+        return _state(shown=self.state).running
 
     @property
     def needs_attention(self) -> bool:
-        return _SHOWN[self.state].attention
+        return _state(shown=self.state).attention
 
     @property
     def pending(self) -> bool:
@@ -190,7 +212,17 @@ class MigrationStatus:
     @property
     def running(self) -> bool:
         """A run holding the run lock is in this migration."""
-        return any(step.state == "running" for step in self.steps)
+        return any(step.running for step in self.steps)
+
+    @property
+    def _whole(self) -> str | None:
+        """The one state every step is in, when it prints on one line."""
+        words = {step.state for step in self.steps}
+        if len(words) == 1:
+            word = next(iter(words))
+            if _state(shown=word).whole:
+                return word
+        return None
 
     @property
     def state(self) -> str:
@@ -198,11 +230,11 @@ class MigrationStatus:
         step agrees; ``running`` while a run is in it; ``applied (different
         checksum)`` when every step is applied and one changed; else
         ``partial, X of N steps``."""
-        words = {step.state for step in self.steps}
-        if len(words) == 1 and next(iter(words)) in _WHOLE:
-            return next(iter(words))
+        whole = self._whole
+        if whole is not None:
+            return whole
         if self.running:
-            return "running"
+            return _RUNNING.shown
         if not self.pending:
             return "applied (different checksum)"
         done = sum(1 for step in self.steps if step.applied)
@@ -211,7 +243,7 @@ class MigrationStatus:
     @property
     def expands(self) -> bool:
         """Whether ``status`` prints this migration's steps without ``--steps``."""
-        return self.state not in _WHOLE
+        return self._whole is None
 
 
 @dataclass(frozen=True)
@@ -302,7 +334,7 @@ class StatusReport:
                     StepStatus(
                         step=s["step"],
                         file=s["file"],
-                        state=_STATES[s["state"]].shown,
+                        state=_state(word=s["state"]).shown,
                         error=s["error"],
                         applied_checksum=s["applied_checksum"],
                         on_disk_checksum=s["on_disk_checksum"],
