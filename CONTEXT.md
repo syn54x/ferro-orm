@@ -249,7 +249,7 @@ One invocation of the in-house migration runner against one database, from takin
 _Avoid_: Deploy, session, migration (a run applies migrations; it is not one)
 
 **Run lock**:
-The lock that admits one *run* per database at a time. It is released by the database or the operating system when the running process dies, never by a timeout or an operator, so a crashed run can always be told from a live one.
+The lock that admits one *run* per database at a time. It is held by a run, a *baseline*, a rerecord and an auto-migrate pass, so none of them changes a database while another does. It is released by the database or the operating system when the running process dies, never by a timeout or an operator, so a crashed run can always be told from a live one.
 _Avoid_: Migration lock, lock row, mutex
 
 **Tracking table**:
