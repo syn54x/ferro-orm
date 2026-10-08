@@ -630,7 +630,8 @@ async def test_autocommit_runs_a_statement_that_cannot_be_wrapped(db_url):
 
     async with engines.session():
         indexes = await fetch_all(
-            "SELECT indexname FROM pg_indexes WHERE tablename = 'scopecontrolrow'"
+            "SELECT indexname FROM pg_indexes "
+            "WHERE schemaname = current_schema() AND tablename = 'scopecontrolrow'"
         )
         assert "idx_scopecontrolrow_label" in {row["indexname"] for row in indexes}
 

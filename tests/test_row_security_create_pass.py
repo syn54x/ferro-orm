@@ -847,7 +847,8 @@ async def test_force_binds_the_table_owner(db_url, tenant_role):
             async with transaction() as tx:
                 await tx.execute(f'SET LOCAL ROLE "{tenant_role}"')
                 owner = await tx.fetch_one(
-                    "SELECT tableowner FROM pg_tables WHERE tablename = 'ledgerrow'"
+                    "SELECT tableowner FROM pg_tables "
+                    "WHERE schemaname = current_schema() AND tablename = 'ledgerrow'"
                 )
                 assert owner["tableowner"] == tenant_role
                 assert await tx.fetch_all("SELECT label FROM ledgerrow") == []
