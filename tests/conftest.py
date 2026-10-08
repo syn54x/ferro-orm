@@ -192,20 +192,28 @@ def db_url(request: pytest.FixtureRequest, tmp_path: Path):
 
 
 @pytest.fixture(scope="function")
-def pg_role(request: pytest.FixtureRequest, db_url: str | None) -> Callable[[str], str]:
+def pg_role(request: pytest.FixtureRequest, db_url: str | None) -> Callable[..., str]:
     """Name a role for this Postgres test: ``pg_role("tenant")`` is
     ``<schema>_tenant`` (:func:`postgres_test_role_name`).
 
+    ``schema=`` names it after another schema the test made for itself (a
+    second tenant), which must carry the test's schema name as its prefix.
     The test creates the role itself (its attributes are the test's
     business); ``db_url`` drops it — owned objects and grants first — right
     after the test's schema, whether the test's own teardown ran or not.
     """
     schema_name = getattr(request.node, "_ferro_db_schema", None)
 
-    def name(label: str) -> str:
+    def name(label: str, *, schema: str | None = None) -> str:
         if schema_name is None:
             raise RuntimeError("pg_role names roles for Postgres tests only")
-        role = postgres_test_role_name(schema_name, label)
+        owner = schema or schema_name
+        if not owner.startswith(schema_name):
+            raise ValueError(
+                f"pg_role(schema={owner!r}): name roles after this test's own "
+                f"schemas, which start with {schema_name!r}"
+            )
+        role = postgres_test_role_name(owner, label)
         if role not in request.node._ferro_pg_roles:
             request.node._ferro_pg_roles.append(role)
         return role

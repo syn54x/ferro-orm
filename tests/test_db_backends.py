@@ -174,3 +174,15 @@ def test_the_schema_teardown_drops_the_roles_named_after_it(
             "SELECT rolname FROM pg_roles WHERE rolname = %s", (role,)
         ).fetchall()
     assert left == []
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.postgres_only
+def test_pg_role_names_a_role_after_a_schema_of_the_tests_own_only(
+    db_schema_name, pg_role
+):
+    assert pg_role("tenant", schema=f"{db_schema_name}_b") == (
+        f"{db_schema_name}_b_tenant"
+    )
+    with pytest.raises(ValueError, match="this test's own schemas"):
+        pg_role("tenant", schema="public")

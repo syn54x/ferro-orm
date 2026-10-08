@@ -145,45 +145,64 @@ async def test_auto_migrate_survives_a_neighbour_dropped_while_the_guard_reads_i
 
 
 @pytest.mark.asyncio
-async def test_two_tenants_migrate_side_by_side_while_a_third_comes_and_goes(
-    db_url, second_tenant, db_schema_name, pg_role, churn
+async def test_two_tenants_with_the_same_names_migrate_side_by_side_and_see_only_their_own_rows(
+    db_url, second_tenant, db_schema_name, pg_role
 ):
-    """Two schemas take the same models through the same passes at the same
-    time — a create, then a declared table rename plus a forced row-security
-    table — while a third, tracked tenant is provisioned and dropped
-    meanwhile. Both succeed, and each tenant's role is bound by its own
-    tenant's policy alone."""
-    tenants = {"a": db_url, "b": second_tenant}
+    """Two schemas of one database take the same models through the same
+    passes at the same time: a create, then a declared table rename plus a
+    forced row-security table. Every name is shared: the tables, the policy,
+    the role label. Each tenant's role owns its own ``isoledger``, so
+    ``FORCE`` is what binds it, and through it each tenant reads its own
+    ledger's rows and nothing of the other's. Anything that reached a table,
+    policy or role by name across the two schemas would collide here."""
+    schemas = {"a": db_schema_name, "b": f"{db_schema_name}_b"}
+    urls = {"a": db_url, "b": second_tenant}
+    ledgers = {"a": uuid.uuid4(), "b": uuid.uuid4()}
 
     _define_writer()
-    await asyncio.gather(
-        *(auto_migrate(url, name=name) for name, url in tenants.items())
-    )
+    await asyncio.gather(*(auto_migrate(url, name=name) for name, url in urls.items()))
     _rewind()
 
     _define_author_and_ledger()
     await asyncio.gather(
-        *(auto_migrate(url, name=name, updates=True) for name, url in tenants.items())
+        *(auto_migrate(url, name=name, updates=True) for name, url in urls.items())
     )
 
-    for name in tenants:
-        role = pg_role(f"tenant_{name}")
-        schema = (await fetch_all("SELECT current_schema() AS s", using=name))[0]["s"]
-        assert schema == (db_schema_name if name == "a" else f"{db_schema_name}_b")
+    roles = {name: pg_role("tenant", schema=schema) for name, schema in schemas.items()}
+    assert roles["a"] != roles["b"]
+    for name, schema in schemas.items():
+        role = roles[name]
+        assert (await fetch_all("SELECT current_schema() AS s", using=name)) == [
+            {"s": schema}
+        ]
         tables = await fetch_all(
             "SELECT tablename FROM pg_tables WHERE schemaname = current_schema() "
             "ORDER BY tablename",
             using=name,
         )
         assert [row["tablename"] for row in tables] == ["isoauthor", "isoledger"]
-        await execute(f'CREATE ROLE "{role}" NOSUPERUSER', using=name)
-        await execute(f'GRANT USAGE ON SCHEMA "{schema}" TO "{role}"', using=name)
-        await execute(f'GRANT SELECT ON "isoledger" TO "{role}"', using=name)
         await execute(
             "INSERT INTO isoledger (ledger_id, label) VALUES "
-            f"('{uuid.uuid4()}', 'hidden')",
+            f"('{ledgers['a']}', '{name}: ledger a'), "
+            f"('{ledgers['b']}', '{name}: ledger b')",
             using=name,
         )
+        await execute(f'CREATE ROLE "{role}" NOSUPERUSER', using=name)
+        await execute(f'GRANT USAGE ON SCHEMA "{schema}" TO "{role}"', using=name)
+        await execute(f'ALTER TABLE "isoledger" OWNER TO "{role}"', using=name)
+
+    for name, role in roles.items():
         async with ferro.transaction(using=name) as tx:
             await tx.execute(f'SET LOCAL ROLE "{role}"')
+            owner = await tx.fetch_all(
+                "SELECT tableowner, rowsecurity FROM pg_tables "
+                "WHERE schemaname = current_schema() AND tablename = 'isoledger'"
+            )
+            # The owner, and still filtered: FORCE binds it.
+            assert owner == [{"tableowner": role, "rowsecurity": True}]
             assert await tx.fetch_all("SELECT label FROM isoledger") == []
+            await tx.execute(
+                f"SELECT set_config('iso.ledger_id', '{ledgers[name]}', true)"
+            )
+            seen = await tx.fetch_all("SELECT label FROM isoledger ORDER BY label")
+            assert seen == [{"label": f"{name}: ledger {name}"}]
