@@ -147,12 +147,14 @@ def _plan_from_ir(
     ``_live_schema_ir`` returns beside a live envelope; omitted, the old
     snapshot reads as declared. Returns JSON
     ``{"operations": [{"kind": ..., <op fields>}], "reports": [...]}``, ops in
-    execution order. Each report is ``{"kind", "subject", "text", "recurs"}``:
+    execution order. Each report is ``{"kind", "subject", "text", "recurs",
+    "blocks"}``:
     ``kind`` is its name (``"PrimaryKeyKept"``) or ``{name: fields}``
     (``{"HintRefused": {...}}``), ``subject`` is ``{"scope": "table",
     "table": ...}`` (or ``column``, ``enum_type``, ``modelset``), ``text`` the
     sentence printed, ``recurs`` whether it holds on every run until someone
-    acts. With ``render`` each op also carries its ``statements`` and
+    acts, ``blocks`` whether it stands in for a statement its op does not
+    render (the op is left out, so a reviewed file refuses it). With ``render`` each op also carries its ``statements`` and
     ``reports`` for ``dialect`` — the byte-identical statements the
     reconciliation pass executes (I-1) — and an ``AddTable`` its
     ``row_security_statements``; the ops at the ``unrendered`` indexes carry

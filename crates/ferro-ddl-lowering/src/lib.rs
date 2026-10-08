@@ -3605,7 +3605,10 @@ pub fn render_json_backfill_default(
 /// `subject` are what a program reads. `recurs` says it describes a standing
 /// condition of the live database that holds on every run until someone
 /// acts, so a caller says it every time (the "always" channel).
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+///
+/// On the wire it also carries `blocks` ([`Report::blocks`]), so a reader in
+/// another language acts on the one decision and never re-derives it.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Report {
     /// What is reported.
     pub kind: ReportKind,
@@ -3646,6 +3649,19 @@ impl Report {
                 | ReportKind::SqliteInPlace { .. }
                 | ReportKind::PrimaryKeyKept
         )
+    }
+}
+
+impl serde::Serialize for Report {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut out = serializer.serialize_struct("Report", 5)?;
+        out.serialize_field("kind", &self.kind)?;
+        out.serialize_field("subject", &self.subject)?;
+        out.serialize_field("text", &self.text)?;
+        out.serialize_field("recurs", &self.recurs)?;
+        out.serialize_field("blocks", &self.blocks())?;
+        out.end()
     }
 }
 
@@ -8084,9 +8100,12 @@ mod tests {
             serde_json::json!({"scope": "table", "table": "t"})
         );
         assert_eq!(wire["recurs"], serde_json::json!(false));
+        assert_eq!(wire["blocks"], serde_json::json!(false));
         assert_eq!(wire["text"], serde_json::json!(leftover.text));
         let kept = serde_json::to_value(primary_key_kept_warning("t", &[], &[])).unwrap();
         assert_eq!(kept["kind"], serde_json::json!("PrimaryKeyKept"));
+        // `blocks` on the wire is the one `Report::blocks`, never re-derived.
+        assert_eq!(kept["blocks"], serde_json::json!(true));
         let refused = hint_refusal_warning(&HintError::OldStillDeclared {
             table: "t".into(),
             field: Some("b".into()),

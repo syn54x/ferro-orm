@@ -2169,12 +2169,19 @@ mod tests {
                     warning: leftover.text.clone(),
                 })
             );
-            // A drop of a different check answers nothing.
+            // A drop of a different check answers nothing, and neither does a
+            // drop of the same name on another table: a report is matched by
+            // its subject.
             let other = vec![MigrationOp::DropCheck {
                 table: "author".into(),
                 name: "ck_author_other".into(),
             }];
             assert!(!leftover.answered_by(&other));
+            let elsewhere = vec![MigrationOp::DropCheck {
+                table: "book".into(),
+                name: "ck_author_named".into(),
+            }];
+            assert!(!leftover.answered_by(&elsewhere));
         }
         // A refused hint is answered by no op, and refused as the hint it is.
         let refusal = HintError::OldStillDeclared {

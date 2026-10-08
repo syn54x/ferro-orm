@@ -70,7 +70,8 @@ class DriftReport:
     reports: list[dict[str, Any]] = field(default_factory=list)
     """What the planner reports without planning an op for it (a foreign
     or unverifiable row policy, ...), each ``{"kind", "subject", "text",
-    "recurs"}``. Never makes the report unclean."""
+    "recurs", "blocks"}``, in planning order. Never makes the report
+    unclean."""
 
     @property
     def warnings(self) -> list[str]:

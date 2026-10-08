@@ -611,6 +611,16 @@ def _report_kind(report: Dict[str, Any]) -> str:
     return kind if isinstance(kind, str) else next(iter(kind))
 
 
+def _blocking(op: Dict[str, Any]) -> "str | None":
+    """The text of the first report on a rendered op that blocks it (the
+    core's ``Report::blocks``: its op renders no statement and is left out),
+    or ``None``."""
+    return next(
+        (report["text"] for report in op.get("reports") or [] if report["blocks"]),
+        None,
+    )
+
+
 def _upgrade_plan(
     live: _LiveDatabase, declared: Dict[str, Any], dialect: str
 ) -> Dict[str, Any]:
@@ -677,13 +687,15 @@ def _upgrade_plan(
         written = {**written, "verdict": op["verdict"]}
         # An op the pass renders to nothing at all (a SQLite type change
         # whose storage is the same) is one the pass does not run: neither
-        # does the revision. One it only warns about has no statement to
-        # write: refused with the renderer's reason.
+        # does the revision. One whose rendering reports that it blocks (a
+        # refused cast, a change SQLite cannot make in place) has no
+        # statement to write: refused with the renderer's reason. Whether a
+        # report blocks is the core's word (`blocks`), never decided here.
         if not written["statements"]:
-            if written["reports"] and written["kind"] != "AddTable":
-                raise _refuse(written["reports"][0]["text"])
-            if written["kind"] != "AddTable":
-                continue
+            blocking = _blocking(written)
+            if blocking is not None:
+                raise _refuse(blocking)
+            continue
         kept.append(written)
     return {**plan, "operations": kept, "target": declared, "dialect": dialect}
 
@@ -746,7 +758,7 @@ def _downgrade_plan(
     for index, op in enumerate(operations):
         verdict = op.get("verdict")
         if index not in unrendered and not (
-            "irreversible" in op or op["statements"] or op["reports"]
+            "irreversible" in op or op["statements"] or _blocking(op) is not None
         ):
             continue
         if "irreversible" not in op and verdict and verdict["needs"] == "rebuild":
@@ -759,8 +771,9 @@ def _downgrade_plan(
                 "reason": f"{_sqlite_cannot_add_required(op)}; `ferro migrate new` "
                 f"writes it"
             }
-        if "irreversible" not in op and not op["statements"] and op["reports"]:
-            op["irreversible"] = {"reason": op["reports"][0]["text"]}
+        blocking = None if op["statements"] else _blocking(op)
+        if "irreversible" not in op and blocking is not None:
+            op["irreversible"] = {"reason": blocking}
         kept.append(op)
     return {**plan, "operations": kept, "target": before, "dialect": dialect}
 

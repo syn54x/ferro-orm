@@ -1018,6 +1018,38 @@ def test_plan_from_an_empty_modelset_adds_every_model_parents_first(
     assert [sql.split('"')[1] for sql in creates] == ["planauthor", "planbook"]
 
 
+def test_a_rendering_that_leaves_its_op_out_says_so_in_blocks(clean_registry):
+    """SQLite cannot make a column ``NOT NULL`` in place: the op renders no
+    statement and a report that blocks. ``blocks`` is the core's own word on
+    the wire, and it is all the Alembic bridge reads to refuse the op."""
+    from ferro import Model, clear_registry
+    from ferro.base import FerroField
+    from ferro.migrations.alembic import _blocking
+
+    class PlanNote(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        body: str | None = None
+
+    before = _declared_modelset()
+    clear_registry()
+
+    class PlanNote(Model):  # noqa: F811 - the same model, edited
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        body: str
+
+    after = _declared_modelset()
+    plan = json.loads(
+        _plan_from_ir(before, after, "sqlite", '{"destructive": false}', render=True)
+    )
+    (op,) = plan["operations"]
+    assert (op["kind"], op["statements"]) == ("AlterColumnNullability", [])
+    assert [(report["kind"], report["blocks"]) for report in op["reports"]] == [
+        ({"SqliteInPlace": {"what": "AlterColumnNullability"}}, True)
+    ]
+    assert _blocking(op) == op["reports"][0]["text"]
+    assert _blocking({**op, "reports": [{**op["reports"][0], "blocks": False}]}) is None
+
+
 def test_plan_from_ir_rejects_what_it_cannot_plan(clean_registry):
     with pytest.raises(ValueError, match="Unknown dialect"):
         _plan_from_ir(EMPTY_MODELSET, EMPTY_MODELSET, "mysql", "{}")

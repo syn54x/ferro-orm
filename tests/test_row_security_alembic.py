@@ -400,9 +400,12 @@ def test_a_foreign_policy_and_an_unverifiable_body_are_recurring_reports_never_o
         destructive=True,
     )
     assert ops_of(plan) == []
-    assert [(report["kind"], report["recurs"]) for report in plan["reports"]] == [
-        ({"ForeignPolicies": {"names": [FOREIGN_NAME]}}, True),
-        ({"UnverifiablePolicy": {"name": POLICY_NAME}}, True),
+    assert [
+        (report["kind"], report["recurs"], report["blocks"])
+        for report in plan["reports"]
+    ] == [
+        ({"ForeignPolicies": {"names": [FOREIGN_NAME]}}, True, False),
+        ({"UnverifiablePolicy": {"name": POLICY_NAME}}, True, False),
     ]
     assert {report["subject"]["table"] for report in plan["reports"]} == {"ledgerrow"}
 

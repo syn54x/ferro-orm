@@ -1130,8 +1130,8 @@ pub fn _plan_reverse_from_ir(
     Ok(out.to_string())
 }
 
-/// Reports as plan JSON: each `{"kind", "subject", "text", "recurs"}`, its
-/// kind a name or `{name: fields}`.
+/// Reports as plan JSON: each `{"kind", "subject", "text", "recurs",
+/// "blocks"}`, its kind a name or `{name: fields}`.
 fn reports_json(reports: &[Report]) -> PyResult<serde_json::Value> {
     serde_json::to_value(reports).map_err(|e| {
         pyo3::exceptions::PyRuntimeError::new_err(format!("could not serialize the plan: {e}"))
@@ -1180,7 +1180,7 @@ pub(crate) fn parse_schema_envelope(
 /// `_live_schema_ir` returned beside it, with an entry for every table;
 /// omitted, a declared snapshot (`LiveFacts::declared`). The result is
 /// `{"operations": [{"kind": …, <op fields>}], "reports": [{"kind", "subject",
-/// "text", "recurs"}]}`; with `render`, each op also carries the
+/// "text", "recurs", "blocks"}]}`; with `render`, each op also carries the
 /// `statements` and `reports` it renders to, but the ops at the `unrendered`
 /// indexes, which carry none and render nothing: the ones a caller writes
 /// its own way (the Alembic bridge's column adds that demand values of
