@@ -9,12 +9,12 @@ context.configure(connection=connection, target_metadata=get_metadata(), **ferro
 ```
 
 ``alembic revision --autogenerate`` reads the live database through the
-reconciliation pass's converter (``_core._live_schema_ir``), plans it
-against the models with destructive changes on (``_core._plan_from_ir``) and
-translates the planner's ops (:mod:`ferro.migrations.translate`); its
-``downgrade()`` is the planner run back to the live database
-(``_core._plan_reverse_from_ir``). An empty revision and "no drift" are the
-same statement. ``ferro_options()`` hides ferro's tables and both tracking
+reconciliation pass's converter (``_core._live_schema_ir``), asks the core
+for the whole revision in one call (``_core._plan_revision``: the upgrade
+planned against the models with destructive changes on, the downgrade the
+planner run back to the live database, and every refusal and marker) and
+hands it to the translator (:mod:`ferro.migrations.translate`), which
+decides nothing. An empty revision and "no drift" are the same statement. ``ferro_options()`` hides ferro's tables and both tracking
 tables from Alembic's own comparator, so every op on a ferro table is the
 planner's; a project's own SQLAlchemy tables keep Alembic's comparison.
 """
@@ -563,7 +563,6 @@ def _read_live(
 # The comparator: one decider, the planner (ADR-0041).
 # ---------------------------------------------------------------------------
 
-_DESTRUCTIVE = json.dumps({"destructive": True})
 _DIALECTS = {"postgresql": "postgres", "sqlite": "sqlite"}
 
 
@@ -578,191 +577,6 @@ def _ferro_metadata(metadata: Any) -> "_FerroMetadata | None":
 
 def _refuse(text: str) -> RuntimeError:
     return RuntimeError(f"ferro: autogenerate refused: {text}")
-
-
-def _subject(op: Dict[str, Any]) -> str:
-    table = op.get("table") or op.get("type_name") or op.get("new") or ""
-    return f"{table}.{op['column']}" if op.get("column") else table
-
-
-def _demands_values(op: Dict[str, Any]) -> bool:
-    """A column added ``NOT NULL`` with no value for the rows already there,
-    by the upgrade or (putting a dropped required column back) by the
-    downgrade: the pass has no statement for it (it refuses the add), so the
-    revision writes the plain Alembic op, marked ``data-dependent``. The
-    planner's verdict decides it (ADR-0050), the same on both sides."""
-    return op["kind"] == "AddColumn" and op["verdict"]["demands_values"]
-
-
-def _execution(op: Dict[str, Any], how: str) -> "str | None":
-    """The verdict's ``execution`` when it is ``how``: ``"rebuild"`` (its
-    value), or ``"refused"`` / ``"irreversible"`` (the text it carries);
-    ``None`` otherwise."""
-    execution = op["verdict"]["execution"]
-    if isinstance(execution, dict):
-        return execution.get(how)
-    return execution if execution == how else None
-
-
-def _rebuild_refusal(op: Dict[str, Any]) -> str:
-    return (
-        f"{op['kind']} on {_subject(op)} needs a SQLite table rebuild, which an "
-        f"Alembic revision cannot write"
-    )
-
-
-def _sqlite_cannot_add_required(op: Dict[str, Any]) -> str:
-    """Why SQLite takes no column :func:`_demands_values` names, on either
-    side of a revision: ``ALTER TABLE … ADD COLUMN … NOT NULL`` needs a
-    default even on an empty table."""
-    return (
-        f"{op['kind']} on {_subject(op)} adds a NOT NULL column with no value for "
-        f"the rows already there, which SQLite cannot add in place"
-    )
-
-
-def _report_kind(report: Dict[str, Any]) -> str:
-    """A plan report's kind by name: the planner serializes a kind with no
-    fields as its name and one with fields as ``{name: fields}``."""
-    kind = report["kind"]
-    return kind if isinstance(kind, str) else next(iter(kind))
-
-
-def _blocking(op: Dict[str, Any]) -> "str | None":
-    """The text of the first report on a rendered op that blocks it (the
-    core's ``Report::blocks``: its op renders no statement and is left out),
-    or ``None``."""
-    return next(
-        (report["text"] for report in op.get("reports") or [] if report["blocks"]),
-        None,
-    )
-
-
-def _upgrade_plan(
-    live: _LiveDatabase, declared: Dict[str, Any], dialect: str
-) -> Dict[str, Any]:
-    """The planner's upgrade, every op read off its verdict: an op no door
-    runs (a primary-key change, a move to or from a native enum type) and a
-    SQLite table rebuild are refused (no Alembic op writes them), an op the
-    pass has no statement for is refused with the renderer's reason, and a
-    change needing values of existing rows is marked."""
-    declared_json = json.dumps(declared)
-    plan = json.loads(
-        _core._plan_from_ir(
-            live.schema_ir, declared_json, dialect, _DESTRUCTIVE, False, live.facts
-        )
-    )
-    # A refused rename hint renames nothing: the revision is refused with
-    # the planner's own sentence for it.
-    for report in plan["reports"]:
-        if _report_kind(report) == "HintRefused":
-            raise _refuse(report["text"])
-    operations = plan["operations"]
-    for op in operations:
-        refusal = _execution(op, "refused")
-        if refusal is not None:
-            raise _refuse(refusal)
-        if _demands_values(op) and dialect == "sqlite":
-            raise _refuse(
-                f"{_sqlite_cannot_add_required(op)}. Give it a default, or write the "
-                f"change as a migration, which generates the backfill: "
-                f"`ferro migrate new`"
-            )
-        if _execution(op, "rebuild") is not None:
-            raise _refuse(
-                f"{_rebuild_refusal(op)} (batch mode has no foreign-key pragma "
-                f"handling, so the drop cascades into ON DELETE CASCADE children). "
-                f"Write this change as a migration: `ferro migrate new`"
-            )
-    unrendered = [index for index, op in enumerate(operations) if _demands_values(op)]
-    rendered = json.loads(
-        _core._plan_from_ir(
-            live.schema_ir,
-            declared_json,
-            dialect,
-            _DESTRUCTIVE,
-            True,
-            live.facts,
-            unrendered,
-        )
-    )["operations"]
-    kept = []
-    for index, written in enumerate(rendered):
-        if index in unrendered:
-            kept.append(written)
-            continue
-        # An op the pass renders to nothing at all (a SQLite type change
-        # whose storage is the same) is one the pass does not run: neither
-        # does the revision. One whose rendering reports that it blocks (a
-        # refused cast, a change SQLite cannot make in place) has no
-        # statement to write: refused with the renderer's reason. Whether a
-        # report blocks is the core's word (`blocks`), never decided here.
-        if not written["statements"]:
-            blocking = _blocking(written)
-            if blocking is not None:
-                raise _refuse(blocking)
-            continue
-        kept.append(written)
-    return {**plan, "operations": kept, "target": declared, "dialect": dialect}
-
-
-def _downgrade_plan(
-    live: _LiveDatabase, declared: Dict[str, Any], dialect: str
-) -> Dict[str, Any]:
-    """The upgrade's down (ADR-0050): the one down every door uses, planned
-    from the models back to the live database and scoped to what the upgrade
-    touched (``_core._plan_reverse_from_ir``), every op read off its verdict.
-    What the live database cannot express (an enum label removed, a policy
-    applying ``TO`` a role list), a step SQLite can only take by rebuilding
-    the table, and one the renderer has no statement for cannot be undone by
-    this revision: each is irreversible, with the reason. A re-added column
-    that demands values of existing rows is left out of the rendering, as the
-    upgrade leaves out its own, and written as the plain op marked
-    ``data-dependent`` (on SQLite, which cannot add it in place, it is
-    irreversible)."""
-    declared_json = json.dumps(declared)
-
-    def down(render: bool, unrendered: "list[int] | None" = None) -> Dict[str, Any]:
-        return json.loads(
-            _core._plan_reverse_from_ir(
-                live.schema_ir,
-                declared_json,
-                dialect,
-                _DESTRUCTIVE,
-                live.facts,
-                render,
-                unrendered,
-            )
-        )
-
-    plan = down(False)
-    operations = plan["operations"]
-    unrendered = [index for index, op in enumerate(operations) if _demands_values(op)]
-    for op, written in zip(operations, down(True, unrendered)["operations"]):
-        op["statements"] = written["statements"]
-        op["reports"] = written["reports"]
-    kept = []
-    for index, op in enumerate(operations):
-        reason = _execution(op, "irreversible") or _execution(op, "refused")
-        if reason is None and _execution(op, "rebuild") is not None:
-            reason = f"{_rebuild_refusal(op)}; `ferro migrate new` writes it"
-        if reason is None and index in unrendered and dialect == "sqlite":
-            reason = f"{_sqlite_cannot_add_required(op)}; `ferro migrate new` writes it"
-        if reason is None and index not in unrendered and not op["statements"]:
-            reason = _blocking(op)
-            if reason is None:
-                # Nothing to run on this dialect (row security of a new
-                # SQLite table is its create's warning).
-                continue
-        if reason is not None:
-            op["irreversible"] = {"reason": reason}
-        kept.append(op)
-    return {
-        **plan,
-        "operations": kept,
-        "target": json.loads(live.schema_ir),
-        "dialect": dialect,
-    }
 
 
 try:
@@ -820,12 +634,22 @@ if _HAS_ALEMBIC:
                 "drops get_metadata() from env.py's target_metadata and keeps "
                 "**ferro_options()"
             )
-        up = _upgrade_plan(live, ferro.envelope, dialect)
-        if not up["operations"]:
+        revision = _core._plan_revision(
+            live.schema_ir, live.facts, json.dumps(ferro.envelope), dialect
+        )
+        if revision["refusal"] is not None:
+            raise _refuse(revision["refusal"]["text"])
+        if not revision["upgrade"]:
             return
-        down = _downgrade_plan(live, ferro.envelope, dialect)
-        upgrade = translate(up, direction="up")
-        downgrade = translate(down, direction="down")
+        upgrade = translate(
+            revision["upgrade"],
+            target=ferro.envelope,
+            dialect=dialect,
+            reports=revision["reports"],
+        )
+        downgrade = translate(
+            revision["downgrade"], target=json.loads(live.schema_ir), dialect=dialect
+        )
         _require_enum_rendering(autogen_context, upgrade + downgrade)
         upgrade_ops.ops.insert(0, FerroRevisionOps(upgrade, downgrade))
 

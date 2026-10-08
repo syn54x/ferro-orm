@@ -82,16 +82,18 @@ For a single model, every emitter must agree on:
     `ferro_ddl_lowering`. The reconciliation pass runs them directly; the
     migrations door writes them into step files; the bridge's one comparator
     (`dispatch_for("schema")` in `src/ferro/migrations/alembic.py`) reads the
-    live database through `_core._live_schema_ir`, plans with
-    `_core._plan_from_ir(render=True)` (the facts beside the live side),
-    renders per op through `_core._render_plan_ops`, and `translate.py`
-    writes each op as Alembic's own op where it has one and as
-    `op.execute(sa.DDL(...))` of the pass's statement, byte for byte, where
-    it does not. `downgrade()` is the one down every door uses,
-    `ferro_migrate::plan_down` (`_core._plan_reverse_from_ir`): the planner
-    run from the models back to the live database, scoped to the artifacts
-    the upgrade touched (ADR-0050), a check or policy put back with the body
-    the catalog printed through `render_check_restore`. The per-family comparators,
+    live database through `_core._live_schema_ir` and asks the core for the
+    whole revision in one call, `_core._plan_revision`
+    (`ferro_migrate::plan_revision`): the upgrade planned live → models with
+    destructive changes on, its `downgrade()` the one down every door uses,
+    `ferro_migrate::plan_down`, run from the models back to the live
+    database and scoped to the artifacts the upgrade touched (ADR-0050; a
+    check or policy put back with the body the catalog printed through
+    `render_check_restore`), both rendered by the one renderer, with every
+    refusal, marker, irreversible reason, Alembic-twin choice, autocommit
+    and foreign-key rider decided there. `translate.py` writes that answer and decides nothing: Alembic's
+    own op where the core says it has one, `op.execute(sa.DDL(...))` of the
+    pass's statement, byte for byte, where it does not. The per-family comparators,
     their slot registrations and the `_plan_check_*` FFI are gone (#533).
     The families, each one decision consumed by every door:
     - **Enum labels** — `missing_enum_labels` / `extra_enum_labels` +
