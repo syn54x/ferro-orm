@@ -101,3 +101,13 @@ That call returns the upgrade's and the downgrade's ops, each with its statement
 The translator is to build Alembic ops from that answer and decide nothing. A refusal keeps today's exact text. A refused rename hint is to reach the bridge as a typed report (ADR-0052), never matched by its text.
 
 **A redefined index and a removed foreign key are to be planner ops** (ADR-0051). The bridge is to write them as Alembic's drop and create, and as `op.drop_constraint`.
+
+As built (2026-10-08, deepening B4): `plan_revision` has the signature above, and `_core._plan_revision(live_ir_json, facts_json, declared_json, dialect)` returns it as a dict. `RevisionOp` carries five more fields so that the translator decides nothing:
+
+- `twin` says whether Alembic's own op writes the op or `op.execute` of its statements does: a column add with a literal default, or with SQLite's inline `REFERENCES` / `CHECK`, is the pass's statement.
+- `autocommit` says the op's statements run committed in `op.get_context().autocommit_block()`: a label addition, which no later statement of the same transaction can use.
+- `foreign_key` holds what `op.create_foreign_key` writes with the op: an `AddForeignKey`'s key, or the rider (`column_riders`) of a column that demands values of existing rows, whose plain add has no statement of the pass's to carry it.
+- `index` holds a `RedefineIndex`'s `(columns, unique)`, read from the side the revision leads to.
+- `row_security_statements` holds what an `AddTable` runs beside Alembic's `create_table`.
+
+`Marker` carries its comment text. `RevisionRefusal` has seven variants: `HintRefused`, `Refused` (a primary-key change or an enum type move), `SqliteRequiredColumn`, `Rebuild`, `Blocked`, `SnapshotOnly` (an op only two declared snapshots plan, such as a label removal, met going up from the live database: a ferro bug), and `Render`, which is an emission error and raises `ValueError` as before. `Revision.reports` holds only the upgrade's one-off reports, the ones the revision writes as comments. An upgrade with nothing to write returns an empty revision.

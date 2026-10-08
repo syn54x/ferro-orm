@@ -118,25 +118,33 @@ def _render_migration_sql_for_test(
     """
     ...
 
-def _plan_reverse_from_ir(
-    live_json: str,
-    declared_json: str,
-    dialect: str,
-    options_json: str,
-    facts_json: str,
-    render: bool = True,
-    unrendered: list[int] | None = None,
-) -> str:
-    """The down of the live-origin plan (``_plan_from_ir(live_json,
-    declared_json, ..., facts_json)``): what turns the database it leaves
-    back into the live one — ``plan_down``, the planner run from the models
-    back to the database and scoped to the artifacts the upgrade touched
-    (ADR-0050). Same JSON shape as ``_plan_from_ir``; an op the live
-    database cannot express carries the verdict ``{"execution":
-    {"irreversible": <reason>}}``, and a check or policy comes back with the
-    body the catalog printed. With ``render``, the ops at the ``unrendered``
-    indexes carry no statement: the ones the bridge writes itself (a
-    re-added column that demands values of existing rows)."""
+def _plan_revision(
+    live_ir_json: str, facts_json: str, declared_json: str, dialect: str
+) -> dict[str, Any]:
+    """The Alembic bridge's revision in one call (``plan_revision``, ADR-0041
+    as amended by ADR-0050..0052), for the live database ``live_ir_json``
+    (with the ``facts_json`` ``_live_schema_ir`` returned beside it) and the
+    models ``declared_json``.
+
+    Returns ``{"upgrade": [op, ...], "downgrade": [op, ...], "reports":
+    [report, ...], "refusal": None}``. Each op is ``{"op": {"kind": ...,
+    <fields>}, "statements": [...], "row_security_statements": [...],
+    "twin": bool, "autocommit": bool, "foreign_key": {"name", "column",
+    "to_table", "to_column", "on_delete"} | None, "index": {"columns",
+    "unique"} | None, "marker": {"kind", "comment"} | None, "irreversible":
+    str | None}``: ``twin`` says Alembic's own op writes it (else
+    ``op.execute`` of each statement), ``autocommit`` that its statements run
+    committed in ``op.get_context().autocommit_block()`` (a label addition),
+    ``foreign_key`` the key ``op.create_foreign_key`` writes with it (an
+    ``AddForeignKey``'s, or the rider of a column added with no statement),
+    ``index`` is a
+    ``RedefineIndex``'s definition, ``marker`` the ``# ferro:`` comment above
+    it and ``irreversible`` the reason a ``raise`` replaces it. ``reports``
+    are the planner's one-off reports the upgrade writes as comments, in
+    ``_plan_from_ir``'s report shape. When no revision is written, the lists
+    are empty and ``refusal`` is ``{"kind", "text"}``, ``text`` the sentence
+    after ``ferro: autogenerate refused: ``. A plan that cannot render
+    raises ``ValueError``."""
     ...
 
 def _plan_from_ir(
@@ -146,7 +154,6 @@ def _plan_from_ir(
     options_json: str,
     render: bool = False,
     facts_json: str | None = None,
-    unrendered: list[int] | None = None,
 ) -> str:
     """The one planner: every change that turns one SchemaIR snapshot into another.
 
@@ -173,9 +180,7 @@ def _plan_from_ir(
     render (the op is left out, so a reviewed file refuses it). With ``render`` each op also carries its ``statements`` and
     ``reports`` for ``dialect`` — the byte-identical statements the
     reconciliation pass executes (I-1) — and an ``AddTable`` its
-    ``row_security_statements``; the ops at the ``unrendered`` indexes carry
-    none (the ones a caller writes its own way), and the rest render as that
-    subset alone.
+    ``row_security_statements``.
     """
     ...
 
