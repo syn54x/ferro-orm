@@ -3,15 +3,20 @@
 //!
 //! The reconciliation pass, the migration generator, the drift check and the
 //! Alembic bridge all ask [`plan_from_ir`] the same question — "what turns
-//! `old` into `new`?" — and differ only in where `old` comes from: a declared
-//! snapshot, or the live database read into an IR. What a live database holds
-//! that the IR cannot say (catalog CHECK bodies, validity flags, row policies
-//! as `pg_policy` prints them, live enum labels) travels beside it as
-//! [`LiveFacts`].
+//! `old` into `new`?" — and differ only in their sides (ADR-0050): each is a
+//! [`Side`], a declared modelset or a live database read into an IR, with what
+//! the IR cannot say (catalog CHECK bodies, validity flags, row policies as
+//! `pg_policy` prints them, live enum labels) beside it as [`LiveFacts`].
+//! Either side may be the target: a down ([`plan_down`]) is the planner run
+//! from an up's after-side back to its before-side, scoped to the artifacts
+//! the up touched — toward a live database for the Alembic bridge.
+//!
+//! Every op leaves with its [`OpVerdict`], computed once here: what is true
+//! of it between the two sides on the dialect, which every door reads.
 //!
 //! Every decision is the `ferro_ddl_lowering` function the pass consumed
 //! before this module existed (AGENTS.md § I-1 items 11–16); this module only
-//! decides *where* in the plan each verdict lands.
+//! decides *where* in the plan each decision lands.
 
 use crate::{
     Dialect, LiveCheckValidity, LiveFkValidity, LiveIndexValidity, MigrationOp, Plan, PlanOptions,
@@ -20,15 +25,14 @@ use crate::{
 use ferro_ddl_lowering::Report;
 pub(crate) use ferro_ddl_lowering::and_list;
 use ferro_ddl_lowering::{
-    EnumTypeProvenance, LiveRowPolicy, LiveRowSecurity, ResolvedStorage, declared_row_policy_names,
-    drifted_check_names, dropped_row_security_warning, enum_label_strings, enum_type_provenance,
-    excess_row_security_flag_statements, extra_check_names, extra_check_names_warning,
-    extra_enum_labels, extra_enum_labels_warning, extra_row_policy_names_warning,
+    EnumTypeProvenance, LiveRowPolicy, LiveRowSecurity, ResolvedStorage, RowSecurityFlag,
+    declared_check_bodies, declared_check_names, declared_row_policy_names, drifted_check_names,
+    dropped_row_security_warning, enum_label_strings, enum_type_provenance,
+    excess_row_security_flags, extra_check_names, extra_check_names_warning, extra_enum_labels,
+    extra_enum_labels_warning, extra_row_policy_names_warning, ferro_manages_row_security,
     fk_action_from_str, fk_action_sql, fk_name, foreign_fk_drift_warning, is_ferro_fk_name,
-    is_ferro_row_policy_name, missing_check_names, missing_enum_labels,
-    missing_row_security_flag_statements, normalize_check_definition, normalize_row_policy_expr,
-    plan_row_security_reconcile, quote_label, render_check_body, render_disable_row_security,
-    render_enable_row_security, render_force_row_security, render_no_force_row_security,
+    is_ferro_row_policy_name, missing_check_names, missing_enum_labels, normalize_check_definition,
+    normalize_row_policy_expr, plan_row_security_reconcile, quote_label, render_check_body,
     render_table_check_body, resolve_column_storage, row_policy_clauses, row_policy_command_token,
     schema_columns_storage_drift,
 };
@@ -78,31 +82,11 @@ pub struct LiveTableFacts {
     pub row_security: LiveRowSecurity,
 }
 
-/// What the `old` side of a plan is: the caller says, the planner never
-/// infers it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum OldSide {
-    /// A live database, read through its facts (the reconciliation pass,
-    /// `drift`, `baseline`): every table of `old` has an entry in
-    /// [`LiveFacts::tables`], and a missing one is a [`PlanError`].
-    #[default]
-    Live,
-    /// A declared snapshot (the generator): every artifact on it is ferro's
-    /// own declaration, read from `old` itself; no fact is read.
-    Snapshot,
-}
-
-/// The facts a live database holds beside its IR, keyed by table — or, for
-/// [`LiveFacts::declared`], the marker that `old` is a declared snapshot.
-///
-/// On the live side ([`LiveFacts::live`], and every facts value read from
-/// JSON) each table of `old` has its entry in [`tables`](Self::tables); a
-/// type absent from [`enum_labels`](Self::enum_labels) reads its labels from
-/// `old`'s columns. On the snapshot side ([`LiveFacts::declared`]) every
-/// table reads as `old` declares it: every declared CHECK present with its
-/// canonical body and valid, every FK and index valid, its row security
-/// exactly as declared, and the parent snapshot is the proof of what ferro
-/// installed (ADR-0033).
+/// The facts a live database holds beside its IR, keyed by table: every live
+/// table's checks, validity flags and row security, and every live native
+/// enum type's labels. A live side ([`Side::live`]) carries an entry for each
+/// table of its IR; a type absent from [`enum_labels`](Self::enum_labels)
+/// reads its labels from the IR's columns.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LiveFacts {
     /// Live facts per table name.
@@ -111,13 +95,9 @@ pub struct LiveFacts {
     /// Every live native enum type's labels in enum sort order (Postgres).
     #[serde(default)]
     pub enum_labels: BTreeMap<String, Vec<String>>,
-    /// Which side `old` is. Never on the wire: facts read from JSON are a
-    /// live database's.
-    #[serde(skip)]
-    side: OldSide,
 }
 
-/// Why [`plan_from_ir`] plans nothing.
+/// Why a [`Side`] cannot be built.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PlanError {
     /// The live side's facts carry no entry for a table its schema holds.
@@ -125,24 +105,11 @@ pub enum PlanError {
         /// The table.
         table: String,
     },
-    /// A live plan to reverse carries an op only two declared snapshots
-    /// plan ([`MigrationOp::RemoveEnumLabel`]): it was not decided from the
-    /// live database it claims to reverse.
-    SnapshotOnlyOp {
-        /// The op kind.
-        op: String,
-    },
 }
 
 impl std::fmt::Display for PlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PlanError::SnapshotOnlyOp { op } => write!(
-                f,
-                "the plan to reverse carries {op}, which only two declared snapshots plan \
-                 (`ferro migrate new`), never a live database: reverse the plan \
-                 `plan_from_ir` decided from the live facts"
-            ),
             PlanError::MissingLiveFacts { table } => write!(
                 f,
                 "the live facts carry no entry for table '{table}', which the live schema \
@@ -155,51 +122,317 @@ impl std::fmt::Display for PlanError {
 
 impl std::error::Error for PlanError {}
 
-impl LiveFacts {
-    /// The snapshot side: `old` is a declared snapshot and every table and
-    /// type reads as it declares them (the generator).
-    pub fn declared() -> Self {
-        Self {
-            side: OldSide::Snapshot,
-            ..Self::default()
+/// One side of a plan (ADR-0050): a declared modelset, or a live database
+/// read as its IR plus the facts introspection returned beside it. The
+/// planner never asks which one it holds; it asks the side questions
+/// (a table's facts, an enum type's labels, a check's or policy's body,
+/// whether it proves ferro installed a table's row security, …), and each
+/// adapter answers them its own way.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Side(SideKind);
+
+#[derive(Clone, Debug, PartialEq)]
+enum SideKind {
+    /// A modelset: every artifact on it is ferro's own declaration.
+    Declared(IrEnvelope<SchemaIrPayload>),
+    /// A database: its IR, and its facts for every table the IR holds.
+    Live {
+        ir: IrEnvelope<SchemaIrPayload>,
+        facts: LiveFacts,
+    },
+}
+
+/// A check's body as one side holds it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Body {
+    /// The canonical expression, as ferro renders a declaration.
+    Canonical(String),
+    /// The catalog's text (`CHECK (…)`), restored as the catalog printed it.
+    Catalog(String),
+}
+
+impl Body {
+    /// The body's text, for the one normalizer.
+    pub(crate) fn text(&self) -> &str {
+        match self {
+            Body::Canonical(text) | Body::Catalog(text) => text,
         }
     }
+}
 
-    /// The live side: a live database's facts for every table of its schema.
-    pub fn live(
-        tables: BTreeMap<String, LiveTableFacts>,
-        enum_labels: BTreeMap<String, Vec<String>>,
-    ) -> Self {
-        Self {
-            tables,
-            enum_labels,
-            side: OldSide::Live,
-        }
+/// A row policy as one side holds it: its declaration (a live policy as a
+/// raw one, its bodies as the catalog printed them) and the roles it
+/// applies `TO` (none for a declaration, which never writes the clause).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct PolicyBody {
+    /// The policy, as `CREATE POLICY` writes it.
+    pub(crate) policy: ferro_schema_ir::SchemaRowPolicy,
+    /// `pg_policy.polroles` for a live policy.
+    pub(crate) roles: Vec<String>,
+}
+
+impl Side {
+    /// A declared modelset: the models, or a schema snapshot.
+    pub fn declared(ir: IrEnvelope<SchemaIrPayload>) -> Side {
+        Side(SideKind::Declared(ir))
     }
 
-    /// Which side `old` is.
-    pub fn side(&self) -> OldSide {
-        self.side
-    }
-
-    /// Every table of `old` has its facts on the live side; the snapshot side
-    /// reads none.
-    fn cover(&self, old: &IrEnvelope<SchemaIrPayload>) -> Result<(), PlanError> {
-        if self.side == OldSide::Snapshot {
-            return Ok(());
-        }
-        match old
+    /// A live database, read as its IR and the facts introspection returned
+    /// beside it (`_live_schema_ir`).
+    ///
+    /// # Errors
+    /// [`PlanError::MissingLiveFacts`] when `facts` carries no entry for a
+    /// table `ir` holds: the side is refused when it is built, never halfway
+    /// through a plan.
+    pub fn live(ir: IrEnvelope<SchemaIrPayload>, facts: LiveFacts) -> Result<Side, PlanError> {
+        if let Some(model) = ir
             .payload
             .models
             .iter()
-            .find(|model| !self.tables.contains_key(&model.table_name))
+            .find(|model| !facts.tables.contains_key(&model.table_name))
         {
-            Some(model) => Err(PlanError::MissingLiveFacts {
+            return Err(PlanError::MissingLiveFacts {
                 table: model.table_name.clone(),
-            }),
-            None => Ok(()),
+            });
+        }
+        Ok(Side(SideKind::Live { ir, facts }))
+    }
+
+    /// The side's IR.
+    pub fn ir(&self) -> &IrEnvelope<SchemaIrPayload> {
+        match &self.0 {
+            SideKind::Declared(ir) | SideKind::Live { ir, .. } => ir,
         }
     }
+
+    /// The model of `table`, when the side holds one.
+    pub(crate) fn model(&self, table: &str) -> Option<&SchemaModel> {
+        self.ir()
+            .payload
+            .models
+            .iter()
+            .find(|model| model.table_name == table)
+    }
+
+    /// The facts of one of the side's tables: a declaration's are read off
+    /// it (every declared check present with its canonical body and valid,
+    /// every foreign key and index valid, row security exactly as declared);
+    /// a live table's are the introspected facts.
+    pub(crate) fn table_facts(&self, model: &SchemaModel) -> Cow<'_, LiveTableFacts> {
+        match &self.0 {
+            SideKind::Declared(_) => Cow::Owned(declared_table_facts(model)),
+            SideKind::Live { facts, .. } => facts
+                .tables
+                .get(&model.table_name)
+                .map_or_else(|| Cow::Owned(LiveTableFacts::default()), Cow::Borrowed),
+        }
+    }
+
+    /// One of the side's tables as introspection would report it, the shape
+    /// the storage decision compares: a declared Postgres column whose
+    /// storage resolves to a native enum reads back as one.
+    pub(crate) fn table_view<'a>(
+        &self,
+        model: &'a SchemaModel,
+        dialect: Dialect,
+    ) -> Cow<'a, SchemaModel> {
+        match &self.0 {
+            SideKind::Declared(_) => declared_live_view(model, dialect),
+            SideKind::Live { .. } => Cow::Borrowed(model),
+        }
+    }
+
+    /// The labels of the native enum type `type_name`, when the side holds
+    /// it: the declaration's, or the live database's.
+    pub(crate) fn enum_labels(&self, type_name: &str) -> Option<Vec<String>> {
+        let declared = || {
+            declared_enum_types(&self.ir().payload.models)
+                .labels
+                .get(type_name)
+                .cloned()
+        };
+        match &self.0 {
+            SideKind::Declared(_) => declared(),
+            SideKind::Live { facts, .. } => {
+                facts.enum_labels.get(type_name).cloned().or_else(declared)
+            }
+        }
+    }
+
+    /// Every check of `model` as the side holds them, as `(name, body)`, in
+    /// its order: a declaration's table checks then column checks, each with
+    /// its canonical body; a live table's checks with the catalog's text.
+    pub(crate) fn checks(&self, model: &SchemaModel) -> Vec<(String, Body)> {
+        match &self.0 {
+            SideKind::Declared(_) => declared_check_bodies(model)
+                .into_iter()
+                .map(|(name, body)| (name, Body::Canonical(body)))
+                .collect(),
+            SideKind::Live { .. } => self
+                .table_facts(model)
+                .checks
+                .iter()
+                .map(|check| (check.name.clone(), Body::Catalog(check.definition.clone())))
+                .collect(),
+        }
+    }
+
+    /// The body of the check `name` on `table`, as the side holds it.
+    pub(crate) fn check_body(&self, table: &str, name: &str) -> Option<Body> {
+        let model = self.model(table)?;
+        self.checks(model)
+            .into_iter()
+            .find(|(check, _)| check == name)
+            .map(|(_, body)| body)
+    }
+
+    /// `model` with its row security as the side holds it: a declaration's
+    /// own, or a live table's flags and policies as a declaration would state
+    /// them (each policy raw, its bodies as the catalog printed them). A live
+    /// table whose row security is off declares none.
+    pub(crate) fn declaration<'a>(&self, model: &'a SchemaModel) -> Cow<'a, SchemaModel> {
+        if matches!(self.0, SideKind::Declared(_)) {
+            return Cow::Borrowed(model);
+        }
+        let facts = self.table_facts(model);
+        let live = &facts.row_security;
+        let mut view = model.clone();
+        view.row_security = live.enabled.then(|| ferro_schema_ir::SchemaRowSecurity {
+            force: live.forced,
+            policies: live
+                .policies
+                .iter()
+                .filter_map(|policy| live_policy_body(policy).map(|body| body.policy))
+                .collect(),
+        });
+        Cow::Owned(view)
+    }
+
+    /// The row policy `name` on `table`, as the side holds it.
+    pub(crate) fn policy(&self, table: &str, name: &str) -> Option<PolicyBody> {
+        let model = self.model(table)?;
+        match &self.0 {
+            SideKind::Declared(_) => model
+                .row_security
+                .as_ref()?
+                .policies
+                .iter()
+                .find(|policy| policy.name == name)
+                .map(|policy| PolicyBody {
+                    policy: policy.clone(),
+                    roles: Vec::new(),
+                }),
+            SideKind::Live { .. } => self
+                .table_facts(model)
+                .row_security
+                .policies
+                .iter()
+                .find(|policy| policy.name == name)
+                .and_then(live_policy_body),
+        }
+    }
+
+    /// Whether the side is itself the proof that ferro installed a table's
+    /// row security: a declaration is (ferro wrote what it declares); a live
+    /// table proves it only with a ferro-named policy.
+    pub(crate) fn proves_row_security_installed(&self) -> bool {
+        matches!(self.0, SideKind::Declared(_))
+    }
+
+    /// Whether a policy body ferro cannot verify, planned from this side, is
+    /// rebuilt: yes from a declaration (both texts are ferro's own copies of
+    /// a declaration, so a difference is the author's edit); no from a live
+    /// database, which only warns (ADR-0019).
+    pub(crate) fn rebuilds_unverifiable_bodies(&self) -> bool {
+        matches!(self.0, SideKind::Declared(_))
+    }
+
+    /// Whether a label this side's enum type holds and the target's drops is
+    /// planned as its removal: yes from a declaration (#536); a live
+    /// database's extra label is reported, never removed (ADR-0011).
+    pub(crate) fn plans_label_removals(&self) -> bool {
+        matches!(self.0, SideKind::Declared(_))
+    }
+
+    /// Whether a plan from this side reports its standing conditions (a
+    /// foreign policy, an extra label, an unverifiable body): a live database
+    /// does; from a declaration every difference is an op.
+    pub(crate) fn reports_conditions(&self) -> bool {
+        matches!(self.0, SideKind::Live { .. })
+    }
+
+    /// Whether the side, as a plan's target, can express `op`. A declaration
+    /// expresses every op. A live database cannot have an enum label removed
+    /// (labels are append-only, ADR-0011, and rows may hold it), nor a row
+    /// policy put back that applies `TO` a role list other than the default
+    /// (ferro's `CREATE POLICY` never writes the clause): each refusal is the
+    /// reason a revision's reader acts on.
+    pub(crate) fn expresses(&self, op: &MigrationOp) -> Result<(), String> {
+        if matches!(self.0, SideKind::Declared(_)) {
+            return Ok(());
+        }
+        match op {
+            MigrationOp::RemoveEnumLabel {
+                type_name, label, ..
+            } => Err(format!(
+                "label {label:?} of enum type {type_name} cannot be removed: enum labels are \
+                 append-only (ADR-0011), and rows may hold it"
+            )),
+            MigrationOp::AddRowPolicy { table, name }
+            | MigrationOp::RebuildRowPolicy { table, name } => match self.policy(table, name) {
+                Some(body) if !ferro_ddl_lowering::is_default_row_policy_roles(&body.roles) => {
+                    Err(format!(
+                        "row policy {name} on {table} applies TO {}, a clause ferro's CREATE \
+                         POLICY never writes; restore it by hand",
+                        body.roles.join(", ")
+                    ))
+                }
+                _ => Ok(()),
+            },
+            _ => Ok(()),
+        }
+    }
+
+    /// The side as the rename `ops` (planned from it under `hints`) leave
+    /// it: the planned-before side every other op of the plan reads.
+    fn renamed(&self, ops: &[MigrationOp], hints: &[Hint], new: &Side, dialect: Dialect) -> Side {
+        let ir = before_renamed_by(self.ir(), hints, dialect);
+        match &self.0 {
+            SideKind::Declared(_) => Side::declared(ir),
+            SideKind::Live { facts, .. } => Side(SideKind::Live {
+                ir,
+                facts: renamed_facts(facts, ops, new.ir(), dialect),
+            }),
+        }
+    }
+
+    /// The renames of the names only a live database's facts carry — a live
+    /// IR holds no check and no row policy ([`fact_renames`]). A declaration
+    /// carries every name in its IR, so it adds none.
+    fn fact_renames(&self, ops: &mut Vec<MigrationOp>, hints: &[Hint], dialect: Dialect) {
+        if let SideKind::Live { ir, facts } = &self.0 {
+            fact_renames(ops, facts, ir, hints, dialect);
+        }
+    }
+}
+
+/// A live policy as a declaration of it: raw, its bodies as the catalog
+/// printed them, and the roles it applies `TO`. `None` for a command the
+/// vocabulary does not know.
+fn live_policy_body(policy: &LiveRowPolicy) -> Option<PolicyBody> {
+    let command = serde_json::from_value(serde_json::Value::String(policy.command.clone())).ok()?;
+    Some(PolicyBody {
+        policy: ferro_schema_ir::SchemaRowPolicy {
+            name: policy.name.clone(),
+            command,
+            restrictive: policy.restrictive,
+            expr: ferro_schema_ir::RowPolicyExpr::Raw {
+                using: policy.using.clone(),
+                with_check: policy.with_check.clone(),
+            },
+        },
+        roles: policy.roles.clone(),
+    })
 }
 
 /// `LiveRowSecurity` lives in `ferro_ddl_lowering` with `Deserialize` only;
@@ -323,11 +556,8 @@ fn declared_row_security(model: &SchemaModel) -> LiveRowSecurity {
 
 /// Decide every change that turns `old` into `new`, for the whole modelset.
 ///
-/// `facts` says which side `old` is: [`LiveFacts::live`] (or facts read from
-/// JSON) carries what the live database holds beside its IR, one entry per
-/// table of `old`; [`LiveFacts::declared`] says `old` is a declared snapshot.
-/// The side is the caller's word, never inferred from what the facts lack.
-/// `options`
+/// Each side is an adapter ([`Side::declared`], [`Side::live`]); the planner
+/// asks it questions and never which one it holds (ADR-0050). `options`
 /// gates the ops that remove something (ADR-0013's ladder): without
 /// `destructive`, drops are left out and their leftover reports stand.
 ///
@@ -336,7 +566,10 @@ fn declared_row_security(model: &SchemaModel) -> LiveRowSecurity {
 /// 1. On Postgres, label additions to existing enum types (ADR-0011) — first,
 ///    so any later statement may name a new label — then the creation of
 ///    every enum type the plan introduces and that does not yet exist.
-/// 2. New tables, parents before children.
+/// 2. New tables, parents before children, each followed by what its
+///    `CREATE TABLE` cannot carry from the side it is read from (a live
+///    table's checks, row-security flags and policies, which its IR does not
+///    hold).
 /// 3. Every table in both snapshots, ordered by model name and then so a
 ///    table follows the tables its foreign keys reference, each table's ops
 ///    in the reconciliation pass's order: column adds and alters; index adds
@@ -361,52 +594,54 @@ fn declared_row_security(model: &SchemaModel) -> LiveRowSecurity {
 /// ([`HintError`]) applies no rename and stands in
 /// [`Plan::reports`] as [`crate::ReportKind::HintRefused`]; the generator
 /// refuses it before writing anything.
-///
-/// # Errors
-/// [`PlanError::MissingLiveFacts`] when, on the live side, a table of `old`
-/// has no entry in `facts`.
-pub fn plan_from_ir(
-    old: &IrEnvelope<SchemaIrPayload>,
-    new: &IrEnvelope<SchemaIrPayload>,
-    dialect: Dialect,
-    facts: &LiveFacts,
-    options: PlanOptions,
-) -> Result<Plan, PlanError> {
-    facts.cover(old)?;
-    // The snapshot side reads no fact, whatever the value carries.
-    let declared = LiveFacts::declared();
-    let facts = if facts.side == OldSide::Snapshot {
-        &declared
-    } else {
-        facts
-    };
-    let hints = match live_hints(&old.payload, &new.payload) {
-        Ok(hints) => hints,
+pub fn plan_from_ir(old: &Side, new: &Side, dialect: Dialect, options: PlanOptions) -> Plan {
+    match live_hints(&old.ir().payload, &new.ir().payload) {
+        Ok(hints) => plan_with_hints(old, new, &hints, dialect, options),
         Err(refusal) => {
-            let mut plan = plan_named(old, new, dialect, facts, options)?;
-            plan.reports.push(hint_refusal_warning(&refusal));
-            return Ok(plan);
+            let mut draft = plan_named(old, new, dialect, options);
+            draft.reports.push(hint_refusal_warning(&refusal));
+            Plan::decided(old.clone(), new.clone(), dialect, draft)
         }
-    };
-    if hints.is_empty() {
-        return plan_named(old, new, dialect, facts, options);
     }
-    let renamed = renamed_snapshot(old, &hints);
-    let mut operations = rename_ops(old, &renamed, dialect);
-    fact_renames(&mut operations, facts, old, &hints, dialect);
-    let facts = renamed_facts(facts, &operations, new, dialect);
-    let renamed = before_renamed_by(old, &hints, dialect);
-    let mut plan = plan_named(&renamed, new, dialect, &facts, options)?;
-    operations.append(&mut plan.operations);
-    plan.operations = operations;
-    Ok(plan)
+}
+
+/// [`plan_from_ir`] with the renames `hints` declare: their rename ops
+/// first, then everything else planned from `old` as they leave it.
+fn plan_with_hints(
+    old: &Side,
+    new: &Side,
+    hints: &[Hint],
+    dialect: Dialect,
+    options: PlanOptions,
+) -> Plan {
+    if hints.is_empty() {
+        let draft = plan_named(old, new, dialect, options);
+        return Plan::decided(old.clone(), new.clone(), dialect, draft);
+    }
+    let renamed = renamed_snapshot(old.ir(), hints);
+    let mut operations = rename_ops(old.ir(), &renamed, dialect);
+    old.fact_renames(&mut operations, hints, dialect);
+    let before = old.renamed(&operations, hints, new, dialect);
+    let mut draft = plan_named(&before, new, dialect, options);
+    operations.append(&mut draft.operations);
+    draft.operations = operations;
+    Plan::decided(before, new.clone(), dialect, draft)
+}
+
+/// What planning decides before each op gets its verdict: the ops in
+/// execution order and the reports raised beside them.
+#[derive(Default)]
+pub(crate) struct Draft {
+    /// The ops, in execution order.
+    pub(crate) operations: Vec<MigrationOp>,
+    /// The reports, in the order planning raised them.
+    pub(crate) reports: Vec<Report>,
 }
 
 /// `old` as the renames [`plan_from_ir`]`(old, new, dialect, …)` plans leave
 /// it: the side every op of that plan but the renames was decided against,
 /// which the [`Plan`] holds and renders against. The generator's own renders
-/// between stages ([`crate::render::render_ops`]), the reverse
-/// ([`reverse_live_plan`]) and the generator's step assignment read it too. A
+/// between stages ([`crate::render::render_ops`]) read it too. A
 /// type change of a renamed column names the column by its new name, which
 /// only this side holds.
 ///
@@ -442,7 +677,7 @@ fn before_renamed_by(
 /// that made it (a column check through `db_check_constraint_name`, a table
 /// check and a policy through their suffix), exactly as [`renamed_snapshot`]
 /// re-derives a declared one; a name an IR rename op already covers is left
-/// alone. With [`LiveFacts::declared`] there is nothing to add.
+/// alone.
 fn fact_renames(
     ops: &mut Vec<MigrationOp>,
     facts: &LiveFacts,
@@ -516,8 +751,7 @@ fn fact_renames(
 /// rebuilds it in this same plan. A rename the dialect
 /// cannot run in place renames no fact: on SQLite a constraint keeps its live
 /// name until a generated migration's rebuild renames it, so the plan reports
-/// the catalog as it is. The facts of [`LiveFacts::declared`] carry no table
-/// and are returned unchanged.
+/// the catalog as it is.
 fn renamed_facts(
     facts: &LiveFacts,
     ops: &[MigrationOp],
@@ -685,16 +919,10 @@ fn renamed_facts(
 /// Every change [`plan_from_ir`] plans once the tables and columns of `old`
 /// and `new` are matched by name: `old` is the planned-before side the plan
 /// holds.
-fn plan_named(
-    old: &IrEnvelope<SchemaIrPayload>,
-    new: &IrEnvelope<SchemaIrPayload>,
-    dialect: Dialect,
-    facts: &LiveFacts,
-    options: PlanOptions,
-) -> Result<Plan, PlanError> {
-    let old_models = index_models(&old.payload.models);
-    let new_models = index_models(&new.payload.models);
-    let mut plan = Plan::between(old, new, dialect);
+fn plan_named(old: &Side, new: &Side, dialect: Dialect, options: PlanOptions) -> Draft {
+    let old_models = index_models(&old.ir().payload.models);
+    let new_models = index_models(&new.ir().payload.models);
+    let mut plan = Draft::default();
 
     let added: Vec<&SchemaModel> = new_models
         .iter()
@@ -708,44 +936,23 @@ fn plan_named(
         .collect();
 
     if dialect == Dialect::Postgres {
-        plan_enum_label_additions(old, new, facts, &mut plan);
-        plan_enum_type_creation(old, new, &old_models, facts, &mut plan);
+        plan_enum_label_additions(old, new, &mut plan);
+        plan_enum_type_creation(old, new, &old_models, &mut plan);
     }
-    if facts.side == OldSide::Snapshot {
-        plan_enum_label_removals(old, new, &mut plan);
+    if old.plans_label_removals() {
+        plan_enum_label_removals(old.ir(), new.ir(), &mut plan);
     }
 
     for model in emit::order_models_for_create(&added) {
         plan.operations.push(MigrationOp::AddTable {
             table: model.table_name.clone(),
         });
+        plan.operations
+            .extend(beyond_the_create(new, model, dialect));
     }
 
     for (old_model, new_model) in order_existing_tables(&old_models, &new_models) {
-        let (old_view, table_facts) = match facts.side {
-            OldSide::Snapshot => (
-                declared_live_view(old_model, dialect),
-                Cow::Owned(declared_table_facts(old_model)),
-            ),
-            OldSide::Live => {
-                let live = facts.tables.get(&new_model.table_name).ok_or_else(|| {
-                    PlanError::MissingLiveFacts {
-                        table: new_model.table_name.clone(),
-                    }
-                })?;
-                (Cow::Borrowed(old_model), Cow::Borrowed(live))
-            }
-        };
-        let side = facts.side;
-        plan_existing_table(
-            &old_view,
-            new_model,
-            dialect,
-            &table_facts,
-            side,
-            options,
-            &mut plan,
-        );
+        plan_existing_table(old, new, old_model, new_model, dialect, options, &mut plan);
     }
 
     if options.destructive {
@@ -755,11 +962,53 @@ fn plan_named(
             });
         }
         if dialect == Dialect::Postgres {
-            plan_enum_type_drops(old, new, &old_models, &new_models, &mut plan);
+            plan_enum_type_drops(old.ir(), new.ir(), &old_models, &new_models, &mut plan);
         }
     }
 
-    Ok(plan)
+    plan
+}
+
+/// What a table `side` holds needs beyond its `CREATE TABLE`, which renders
+/// the table's IR: each check, row-security flag and policy its facts hold
+/// that its IR does not declare. A declaration's facts are its IR, so it
+/// needs nothing more; a live table's checks and row security are facts
+/// only, put back after the table as the catalog printed them.
+fn beyond_the_create(side: &Side, model: &SchemaModel, dialect: Dialect) -> Vec<MigrationOp> {
+    let table = model.table_name.as_str();
+    let facts = side.table_facts(model);
+    let declared_checks = declared_check_names(model);
+    let mut ops: Vec<MigrationOp> = facts
+        .checks
+        .iter()
+        .filter(|check| !declared_checks.contains(&check.name))
+        .map(|check| MigrationOp::AddCheck {
+            table: table.to_string(),
+            name: check.name.clone(),
+        })
+        .collect();
+    if dialect != Dialect::Postgres {
+        return ops;
+    }
+    let declared = model.row_security.as_ref();
+    let live = &facts.row_security;
+    if live.enabled && declared.is_none() {
+        ops.push(flag_op(table, RowSecurityFlag::Enable));
+    }
+    if live.forced && !declared.is_some_and(|declaration| declaration.force) {
+        ops.push(flag_op(table, RowSecurityFlag::Force));
+    }
+    let declared_policies = declared_row_policy_names(model);
+    ops.extend(
+        live.policies
+            .iter()
+            .filter(|policy| !declared_policies.contains(&policy.name))
+            .map(|policy| MigrationOp::AddRowPolicy {
+                table: table.to_string(),
+                name: policy.name.clone(),
+            }),
+    );
+    ops
 }
 
 /// Tables present in both snapshots, sorted by model name and then so each
@@ -788,15 +1037,18 @@ fn order_existing_tables<'a>(
 }
 
 fn plan_existing_table(
+    old: &Side,
+    new: &Side,
     old_model: &SchemaModel,
     new_model: &SchemaModel,
     dialect: Dialect,
-    facts: &LiveTableFacts,
-    side: OldSide,
     options: PlanOptions,
-    plan: &mut Plan,
+    plan: &mut Draft,
 ) {
     let table = new_model.table_name.as_str();
+    let facts = old.table_facts(old_model);
+    let old_view = old.table_view(old_model, dialect);
+    let old_model = old_view.as_ref();
     let mut ops = Vec::new();
     let mut column_drops = Vec::new();
 
@@ -838,6 +1090,14 @@ fn plan_existing_table(
         &mut plan.reports,
     );
 
+    // The checks the target holds, each with its body as the target holds it
+    // (a declaration's canonical rendering, or a live table's catalog text).
+    let target_checks: Vec<(String, String)> = new
+        .checks(new_model)
+        .into_iter()
+        .map(|(name, body)| (name, body.text().to_string()))
+        .collect();
+    let target_names: Vec<String> = target_checks.iter().map(|(name, _)| name.clone()).collect();
     // Check addition (#343; ADR-0013) lands after the column ops, so a CHECK
     // over a newly added column follows its ADD COLUMN.
     let live_check_names: Vec<String> = facts
@@ -849,6 +1109,7 @@ fn plan_existing_table(
         table,
         old_model,
         new_model,
+        &target_names,
         &live_check_names,
     ));
     // Body drift (#344; ADR-0015), after the adds. Only ferro-owned names are
@@ -859,7 +1120,7 @@ fn plan_existing_table(
         .filter(|check| check.ferro_owned)
         .map(|check| (check.name.clone(), check.definition.clone()))
         .collect();
-    ops.extend(check_rebuilds(table, new_model, &live_ferro_owned));
+    ops.extend(check_rebuilds(table, &target_checks, &live_ferro_owned));
     // Validation (#515; ADR-0043): after every add, leaving out any name a
     // rebuild covers — the rebuild's bare ADD installs a valid constraint.
     let rebuilt: Vec<String> = ops
@@ -891,21 +1152,24 @@ fn plan_existing_table(
         .iter()
         .map(|(name, _)| name.clone())
         .collect();
-    let extras = extra_check_names(&declared_check_names(new_model), &live_ferro_owned_names);
+    let extras = extra_check_names(&target_names, &live_ferro_owned_names);
     plan.reports
         .extend(extra_check_names_warning(table, &extras));
     if options.destructive {
-        ops.extend(check_drops(table, new_model, &live_ferro_owned_names));
+        ops.extend(extras.into_iter().map(|name| MigrationOp::DropCheck {
+            table: table.to_string(),
+            name,
+        }));
     }
 
     // Row security lands last for the table (#413; PRD #406 user story 20):
     // every column change and data-shaped step above has run before any
     // policy starts filtering the rows it touches.
     plan_row_security(
-        new_model,
+        old,
+        &new.declaration(new_model),
         &facts.row_security,
         dialect,
-        side,
         options.destructive,
         &mut ops,
         &mut plan.reports,
@@ -917,31 +1181,28 @@ fn plan_existing_table(
     plan.operations.extend(ops);
 }
 
-/// Translate the row-security reconciliation decision for one live table
+/// Translate the row-security reconciliation decision for one table
 /// (`plan_row_security_reconcile`, the single seam; AGENTS.md § I-1 item 16)
 /// into ops, in its execution order: missing flags, policy additions,
-/// rebuilds, then (destructive) orphan drops and the flag teardown. Its
-/// reports — foreign and unverifiable policies, dropped declarations,
-/// teardowns — become the plan's recurring reports; a foreign policy and an
-/// unverifiable raw body are reported and never become an op.
+/// rebuilds, then (destructive) orphan drops and the flag teardown. `model`
+/// is the table as the target declares it ([`Side::declaration`]) and `live`
+/// its row security on the `old` side.
 ///
-/// Between two declared snapshots ([`OldSide::Snapshot`], the generator)
-/// the parent snapshot answers the two questions a live table cannot
-/// (ADR-0019, ADR-0033): a raw body that differs is the author's edit, since
-/// both texts are ferro's own copies of a declaration, so it is rebuilt like
-/// a shorthand one; and row security the parent declared was installed by
-/// ferro, so a declaration the target drops is torn down
-/// ([`snapshot_flag_teardown`]) whether or not a ferro-named policy is left
-/// to witness it. Every difference is then an op in a reviewed file, so the
-/// decision's reports of live conditions (unverifiable and replaced bodies,
-/// a teardown done) are not carried; a non-destructive plan still reports
-/// the removals it withholds.
-#[allow(clippy::too_many_arguments)]
+/// The `old` side answers what a live table cannot (ADR-0019, ADR-0033):
+/// planned from a declaration, a raw body that differs is the author's edit
+/// ([`Side::rebuilds_unverifiable_bodies`]), so it is rebuilt like a
+/// shorthand one; and row security the declaration declared was installed by
+/// ferro ([`Side::proves_row_security_installed`]), so a declaration the
+/// target drops is torn down whether or not a ferro-named policy is left to
+/// witness it. Every difference is then an op, so the decision's reports of
+/// live conditions (unverifiable and replaced bodies, a teardown done) are
+/// carried only from a live side ([`Side::reports_conditions`]); a
+/// non-destructive plan still reports the removals it withholds.
 fn plan_row_security(
+    old: &Side,
     model: &SchemaModel,
     live: &LiveRowSecurity,
     dialect: Dialect,
-    side: OldSide,
     destructive: bool,
     ops: &mut Vec<MigrationOp>,
     reports: &mut Vec<Report>,
@@ -953,22 +1214,23 @@ fn plan_row_security(
         return;
     };
     let table = model.table_name.as_str();
-    match side {
-        OldSide::Live => reports.extend(decision.reports),
-        OldSide::Snapshot if !destructive => reports.extend(
+    if old.reports_conditions() {
+        reports.extend(decision.reports);
+    } else if !destructive {
+        reports.extend(
             dropped_row_security_warning(model, live)
                 .into_iter()
                 .chain(extra_row_policy_names_warning(table, &decision.extra)),
-        ),
-        OldSide::Snapshot => {}
+        );
     }
     if dialect != Dialect::Postgres {
         return;
     }
     ops.extend(
-        missing_row_security_flag_statements(model, live)
+        decision
+            .missing_flags
             .iter()
-            .filter_map(|statement| row_security_flag_op(table, statement)),
+            .map(|flag| flag_op(table, *flag)),
     );
     ops.extend(
         decision
@@ -979,11 +1241,11 @@ fn plan_row_security(
                 name,
             }),
     );
-    // Rebuilds in declaration order: drifted bodies, and on a snapshot the
-    // edited raw ones.
+    // Rebuilds in declaration order: drifted bodies, and from a declaration
+    // the edited raw ones.
     let rebuilt = |name: &String| {
         decision.drifted.contains(name)
-            || (side == OldSide::Snapshot && decision.unverifiable.contains(name))
+            || (old.rebuilds_unverifiable_bodies() && decision.unverifiable.contains(name))
     };
     ops.extend(
         declared_row_policy_names(model)
@@ -1004,69 +1266,25 @@ fn plan_row_security(
                     name,
                 }),
         );
-        let teardown = match side {
-            OldSide::Live => excess_row_security_flag_statements(model, live),
-            OldSide::Snapshot => snapshot_flag_teardown(model, live),
-        };
+        let installed_by_ferro =
+            old.proves_row_security_installed() || ferro_manages_row_security(live);
         ops.extend(
-            teardown
-                .iter()
-                .filter_map(|statement| row_security_flag_op(table, statement)),
+            excess_row_security_flags(model, live, installed_by_ferro)
+                .into_iter()
+                .map(|flag| flag_op(table, flag)),
         );
     }
 }
 
-/// The flag teardown a file between two snapshots owes: the pass's
-/// (`excess_row_security_flag_statements`), except that the parent snapshot
-/// declaring row security is itself the proof ferro installed it (ADR-0033) —
-/// the evidence the pass reads off a ferro-named policy — so a declaration
-/// the target drops clears `FORCE` and `ENABLE` even with no policy left.
-fn snapshot_flag_teardown(model: &SchemaModel, live: &LiveRowSecurity) -> Vec<String> {
-    let table = model.table_name.as_str();
-    match model.row_security {
-        None => [
-            live.forced.then(|| render_no_force_row_security(table)),
-            live.enabled.then(|| render_disable_row_security(table)),
-        ]
-        .into_iter()
-        .flatten()
-        .collect(),
-        Some(_) => excess_row_security_flag_statements(model, live),
+/// The op that sets one row-security flag on `table`.
+fn flag_op(table: &str, flag: RowSecurityFlag) -> MigrationOp {
+    let table = table.to_string();
+    match flag {
+        RowSecurityFlag::Enable => MigrationOp::EnableRowSecurity { table },
+        RowSecurityFlag::Force => MigrationOp::ForceRowSecurity { table },
+        RowSecurityFlag::NoForce => MigrationOp::NoForceRowSecurity { table },
+        RowSecurityFlag::Disable => MigrationOp::DisableRowSecurity { table },
     }
-}
-
-/// The op whose rendering is `statement`, one of the four flag statements the
-/// row-security family decides (`missing_row_security_flag_statements` /
-/// `excess_row_security_flag_statements` return nothing else).
-fn row_security_flag_op(table: &str, statement: &str) -> Option<MigrationOp> {
-    let table_owned = table.to_string();
-    [
-        (
-            render_enable_row_security(table),
-            MigrationOp::EnableRowSecurity {
-                table: table_owned.clone(),
-            },
-        ),
-        (
-            render_force_row_security(table),
-            MigrationOp::ForceRowSecurity {
-                table: table_owned.clone(),
-            },
-        ),
-        (
-            render_no_force_row_security(table),
-            MigrationOp::NoForceRowSecurity {
-                table: table_owned.clone(),
-            },
-        ),
-        (
-            render_disable_row_security(table),
-            MigrationOp::DisableRowSecurity { table: table_owned },
-        ),
-    ]
-    .into_iter()
-    .find(|(rendered, _)| rendered == statement)
-    .map(|(_, op)| op)
 }
 
 /// Every enum the models declare, with the labels of its first declaring
@@ -1155,35 +1373,24 @@ fn declared_enum_labels(models: &[SchemaModel]) -> DeclaredEnumTypes {
     collect_enums(models, enum_declaration)
 }
 
-/// Label addition (ADR-0011): for every declared type that already exists,
-/// the labels it lacks, and a warning naming the live labels the model no
-/// longer declares (warn-never-act). A type's existing labels are the live
-/// database's when `facts` records it, else the `old` snapshot's.
-fn plan_enum_label_additions(
-    old: &IrEnvelope<SchemaIrPayload>,
-    new: &IrEnvelope<SchemaIrPayload>,
-    facts: &LiveFacts,
-    plan: &mut Plan,
-) {
-    let declared = declared_enum_types(&new.payload.models);
-    let before = declared_enum_types(&old.payload.models);
+/// Label addition (ADR-0011): for every type `new` declares that `old`
+/// already holds, the labels it lacks; from a live database, a report naming
+/// the live labels the model no longer declares (warn-never-act).
+fn plan_enum_label_additions(old: &Side, new: &Side, plan: &mut Draft) {
+    let declared = declared_enum_types(&new.ir().payload.models);
     for (type_name, labels) in &declared.labels {
-        let Some(existing) = facts
-            .enum_labels
-            .get(type_name)
-            .or_else(|| before.labels.get(type_name))
-        else {
+        let Some(existing) = old.enum_labels(type_name) else {
             continue;
         };
-        // Between two snapshots a dropped label is a removal the generator
-        // answers ([`plan_enum_label_removals`]); live, it only warns.
-        let extra = extra_enum_labels(labels, existing);
-        if facts.side == OldSide::Live
+        // From a declaration a dropped label is a removal
+        // ([`plan_enum_label_removals`]); from a live database, it only warns.
+        let extra = extra_enum_labels(labels, &existing);
+        if old.reports_conditions()
             && let Some(report) = extra_enum_labels_warning(type_name, &extra)
         {
             plan.reports.push(report);
         }
-        for label in missing_enum_labels(labels, existing) {
+        for label in missing_enum_labels(labels, &existing) {
             plan.operations.push(MigrationOp::AddEnumLabel {
                 type_name: type_name.clone(),
                 label,
@@ -1192,8 +1399,8 @@ fn plan_enum_label_additions(
     }
 }
 
-/// Label removal between two declared snapshots (#536; never on the live
-/// side, where ADR-0011 warns and never acts): every label an enum of `old`
+/// Label removal from a declared `old` (#536; never from a live database,
+/// where ADR-0011 warns and never acts): every label an enum of `old`
 /// declares that the same enum in `new` drops, how ever it is stored, unless
 /// a declared hint renames it ([`enum_rename_ops`] owns that). One op per
 /// label, over every column of `new` declaring the type. Planned on every
@@ -1202,7 +1409,7 @@ fn plan_enum_label_additions(
 fn plan_enum_label_removals(
     old: &IrEnvelope<SchemaIrPayload>,
     new: &IrEnvelope<SchemaIrPayload>,
-    plan: &mut Plan,
+    plan: &mut Draft,
 ) {
     let before = declared_enum_labels(&old.payload.models);
     let after = declared_enum_labels(&new.payload.models);
@@ -1230,20 +1437,17 @@ fn plan_enum_label_removals(
 
 /// Type creation: every declared type the plan introduces
 /// (`enum_type_provenance` over the columns it adds — a new table's, or an
-/// existing table's new column) that neither the live database nor the `old`
-/// snapshot already has.
+/// existing table's new column) that `old` does not already hold.
 fn plan_enum_type_creation(
-    old: &IrEnvelope<SchemaIrPayload>,
-    new: &IrEnvelope<SchemaIrPayload>,
+    old: &Side,
+    new: &Side,
     old_models: &BTreeMap<String, &SchemaModel>,
-    facts: &LiveFacts,
-    plan: &mut Plan,
+    plan: &mut Draft,
 ) {
-    let declared = declared_enum_types(&new.payload.models);
-    let before = declared_enum_types(&old.payload.models);
+    let declared = declared_enum_types(&new.ir().payload.models);
     let mut added_columns = Vec::new();
     let mut inline_created_columns = Vec::new();
-    for model in &new.payload.models {
+    for model in &new.ir().payload.models {
         let old_model = old_models.get(&model.table_name);
         for col in &model.columns {
             let pair = (model.table_name.clone(), col.name.clone());
@@ -1262,9 +1466,9 @@ fn plan_enum_type_creation(
     for (type_name, provenance) in
         enum_type_provenance(&declared.declaring, &added_columns, &inline_created_columns)
     {
-        let exists =
-            facts.enum_labels.contains_key(&type_name) || before.labels.contains_key(&type_name);
-        if matches!(provenance, EnumTypeProvenance::Introduced { .. }) && !exists {
+        if matches!(provenance, EnumTypeProvenance::Introduced { .. })
+            && old.enum_labels(&type_name).is_none()
+        {
             let labels = declared.labels.get(&type_name).cloned().unwrap_or_default();
             plan.operations
                 .push(MigrationOp::CreateEnumType { type_name, labels });
@@ -1280,7 +1484,7 @@ fn plan_enum_type_drops(
     new: &IrEnvelope<SchemaIrPayload>,
     old_models: &BTreeMap<String, &SchemaModel>,
     new_models: &BTreeMap<String, &SchemaModel>,
-    plan: &mut Plan,
+    plan: &mut Draft,
 ) {
     let before = declared_enum_types(&old.payload.models);
     let after = declared_enum_types(&new.payload.models);
@@ -1315,17 +1519,19 @@ fn plan_enum_type_drops(
 }
 
 /// Plan the [`MigrationOp::AddCheck`] operations for one table (#343;
-/// ADR-0013): every declared CHECK constraint — table check or column check —
-/// that `live_check_names` does not already cover. The decision is name-based
-/// and single-sourced in `ferro_ddl_lowering::missing_check_names`.
+/// ADR-0013): every check the target holds (`target_names`) — table check or
+/// column check — that `live_check_names` does not already cover. The
+/// decision is name-based and single-sourced in
+/// `ferro_ddl_lowering::missing_check_names`.
 fn missing_checks(
     table: &str,
     old_model: &SchemaModel,
     new_model: &SchemaModel,
+    target_names: &[String],
     live_check_names: &[String],
 ) -> Vec<MigrationOp> {
     let riders = added_column_riders(old_model, new_model);
-    missing_check_names(new_model, live_check_names)
+    missing_check_names(target_names, live_check_names)
         .into_iter()
         // A column check of an added column rides its `AddColumn`. Table
         // checks always stand alone.
@@ -1338,46 +1544,20 @@ fn missing_checks(
 }
 
 /// Plan the [`MigrationOp::RebuildCheck`] operations for one table (#344;
-/// ADR-0015): every declared CHECK whose live counterpart exists and whose
-/// normalized body differs from the canonical rendering. `live` is
-/// `(name, catalog definition)` pairs of ferro-owned CHECKs.
+/// ADR-0015): every check the target holds (`target`, `(name, body)`) whose
+/// counterpart on the old side exists and whose normalized body differs.
+/// `live` is `(name, catalog definition)` pairs of ferro-owned CHECKs.
 fn check_rebuilds(
     table: &str,
-    new_model: &SchemaModel,
+    target: &[(String, String)],
     live: &[(String, String)],
 ) -> Vec<MigrationOp> {
-    drifted_check_names(new_model, live)
+    drifted_check_names(target, live)
         .into_iter()
         .map(|name| MigrationOp::RebuildCheck {
             table: table.to_string(),
             name,
         })
-        .collect()
-}
-
-/// Plan the [`MigrationOp::DropCheck`] operations for one table (#345;
-/// ADR-0013): every live ferro-owned CHECK name the model no longer declares,
-/// in live order.
-fn check_drops(
-    table: &str,
-    new_model: &SchemaModel,
-    live_ferro_owned_names: &[String],
-) -> Vec<MigrationOp> {
-    extra_check_names(&declared_check_names(new_model), live_ferro_owned_names)
-        .into_iter()
-        .map(|name| MigrationOp::DropCheck {
-            table: table.to_string(),
-            name,
-        })
-        .collect()
-}
-
-fn declared_check_names(model: &SchemaModel) -> Vec<String> {
-    model
-        .table_checks
-        .iter()
-        .map(|check| check.name.clone())
-        .chain(model.checks.iter().map(|check| check.name.clone()))
         .collect()
 }
 
@@ -1440,6 +1620,757 @@ fn index_rebuilds(
             unique,
         })
         .collect()
+}
+
+// -- the op verdict (ADR-0050) ----------------------------------------------------------
+
+/// One op the planner decided, with its verdict: what is true of running it
+/// between the plan's two sides on the plan's dialect.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct PlannedOp {
+    /// The op, name-only.
+    pub op: MigrationOp,
+    /// Its verdict, computed once, when the plan is decided.
+    pub verdict: OpVerdict,
+}
+
+/// What is true of one op, its two sides and the dialect — never which way
+/// a file goes. Every door reads it and acts on it its own way: a demanding
+/// column is a migration up's backfill, its down's `data-dependent` header,
+/// and the bridge's plain op under a marker.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct OpVerdict {
+    /// How the dialect runs it.
+    pub execution: Execution,
+    /// It asks existing rows for a value no statement supplies: a `NOT NULL`
+    /// column added with no default, or a column made `NOT NULL`.
+    pub demands_values: bool,
+    /// It drops data: a table, a column, or the enum type that follows them.
+    pub drops_data: bool,
+    /// Whether its statements can fail on the rows the table holds.
+    pub fails_on_rows: RowRisk,
+    /// It brings back a table or a `NOT NULL` column, whose rows are gone.
+    pub recreates: bool,
+    /// It rides the statement of a column the same plan drops or adds.
+    pub goes_with: Option<Rider>,
+}
+
+/// How the dialect runs an op.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Execution {
+    /// The dialect's own statement, as the plan renders it.
+    #[default]
+    Native,
+    /// A SQLite table rebuild (ADR-0046): only a generated migration writes
+    /// it.
+    Rebuild,
+    /// No door runs it; the refusal says what to do instead.
+    Refused(Refusal),
+    /// A live target cannot express it (ADR-0050): the reason a revision's
+    /// reader acts on.
+    Irreversible(String),
+}
+
+/// Why no door runs an op, with the recipe that does it instead (AGENTS.md
+/// I-6: every refusal names its fix).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// The op changes a table's primary key (it moves to other columns,
+    /// gains or loses one, or a key column's type changes).
+    PrimaryKeyChange {
+        /// The table.
+        table: String,
+    },
+    /// The op moves a column to or from a native Postgres enum type, which
+    /// no statement converts in place.
+    EnumTypeMove {
+        /// The table.
+        table: String,
+        /// The column.
+        column: String,
+    },
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Refusal::PrimaryKeyChange { table } => write!(
+                f,
+                "changing the primary key of \"{table}\" is not generated: write it as a new \
+                 table (ferro migrate new --data-step …), a backfill of parent and children, \
+                 and a drop; see the Migrations docs § Changing a primary key"
+            ),
+            Refusal::EnumTypeMove { table, column } => write!(
+                f,
+                "changing \"{table}\".\"{column}\" to or from a native enum type is not \
+                 generated: add a column of the new type, copy the values across in a data step \
+                 (ferro migrate new --data-step …), then drop the old column"
+            ),
+        }
+    }
+}
+
+impl serde::Serialize for Refusal {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+/// Whether an op's statements can fail on the rows its table holds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RowRisk {
+    /// They cannot.
+    #[default]
+    None,
+    /// They always scan the rows: a cast, a `SET NOT NULL`, a unique index,
+    /// a `NOT NULL` column added with no value to give them.
+    Always,
+    /// A check or foreign key, which scans the rows when it is added
+    /// validated; one added `NOT VALID` scans nothing until its validation.
+    WhenValidated,
+}
+
+/// The column whose statement an op rides.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Rider {
+    /// A check or index over a column the same plan drops, which the
+    /// column's drop takes with it.
+    DroppedColumn,
+    /// An index, check or foreign key over a column the same plan adds.
+    AddedColumn,
+}
+
+impl PlannedOp {
+    /// `op` with its verdict, between `before` and `target` on `dialect`.
+    pub(crate) fn of(op: MigrationOp, before: &Side, target: &Side, dialect: Dialect) -> Self {
+        let verdict = verdict(&op, before, target, dialect);
+        PlannedOp { op, verdict }
+    }
+}
+
+/// Whether existing rows need a value for `col` that no statement supplies:
+/// it is `NOT NULL` and declares no default to fill them with.
+pub(crate) fn needs_values(col: &ferro_schema_ir::SchemaColumn) -> bool {
+    !col.nullable && col.default.as_ref().is_none_or(serde_json::Value::is_null)
+}
+
+/// Whether `col` is stored as a native Postgres enum type.
+fn native_enum(col: &ferro_schema_ir::SchemaColumn) -> bool {
+    enum_type_of(col).is_some()
+}
+
+fn find_column<'a>(
+    model: Option<&'a SchemaModel>,
+    name: &str,
+) -> Option<&'a ferro_schema_ir::SchemaColumn> {
+    model?.columns.iter().find(|col| col.name == name)
+}
+
+/// The verdict of `op` between `before` and `target` on `dialect`: the one
+/// decision every door reads (ADR-0050).
+fn verdict(op: &MigrationOp, before: &Side, target: &Side, dialect: Dialect) -> OpVerdict {
+    let table = op.table();
+    let was = table.and_then(|table| before.model(table));
+    let now = table.and_then(|table| target.model(table));
+    let goes_with = goes_with(op, was, now);
+    OpVerdict {
+        execution: execution(op, was, now, goes_with, target, dialect),
+        demands_values: demands_values(op, was, now),
+        drops_data: matches!(
+            op,
+            MigrationOp::DropTable { .. }
+                | MigrationOp::DropEnumType { .. }
+                | MigrationOp::DropColumn { .. }
+        ),
+        fails_on_rows: fails_on_rows(op, now),
+        recreates: match op {
+            MigrationOp::AddTable { .. } => true,
+            MigrationOp::AddColumn { column, .. } => {
+                find_column(now, column).is_some_and(|col| !col.nullable)
+            }
+            _ => false,
+        },
+        goes_with,
+    }
+}
+
+/// Whether `op` asks the rows its table already holds (a table on both
+/// sides) for a value no statement can supply: a new non-key column that
+/// [`needs_values`], a nullable column made `NOT NULL`, or a removed enum
+/// label rows may hold. A property of the models, never of the dialect.
+fn demands_values(op: &MigrationOp, was: Option<&SchemaModel>, now: Option<&SchemaModel>) -> bool {
+    match op {
+        MigrationOp::AddColumn { column, .. } => {
+            was.is_some()
+                && find_column(now, column).is_some_and(|col| !col.primary_key && needs_values(col))
+        }
+        MigrationOp::AlterColumnNullability { column, .. } => matches!(
+            (find_column(was, column), find_column(now, column)),
+            (Some(old), Some(new))
+                if old.nullable && !new.nullable && !old.primary_key && !new.primary_key
+        ),
+        MigrationOp::RemoveEnumLabel { .. } => true,
+        _ => false,
+    }
+}
+
+/// Whether `op`'s statements can fail on the rows its table holds, `now`
+/// being its table on the target.
+fn fails_on_rows(op: &MigrationOp, now: Option<&SchemaModel>) -> RowRisk {
+    let always = |yes: bool| if yes { RowRisk::Always } else { RowRisk::None };
+    match op {
+        MigrationOp::AlterColumnType { .. } => RowRisk::Always,
+        MigrationOp::AlterColumnNullability { column, .. } => {
+            always(find_column(now, column).is_some_and(|col| !col.nullable))
+        }
+        MigrationOp::AddIndex { unique, .. } => always(*unique),
+        MigrationOp::AddCheck { .. }
+        | MigrationOp::RebuildCheck { .. }
+        | MigrationOp::AddForeignKey { .. }
+        | MigrationOp::RebuildForeignKey { .. } => RowRisk::WhenValidated,
+        MigrationOp::AddColumn { column, .. } => always(
+            find_column(now, column)
+                .is_some_and(|col| needs_values(col) || (!col.nullable && col.unique)),
+        ),
+        _ => RowRisk::None,
+    }
+}
+
+/// The column whose statement `op` rides: a check of, or an index over, a
+/// column the plan drops (Postgres drops both with the column, SQLite a
+/// column's own inline check); or an index, a column check or a foreign key
+/// over a column the plan adds — a rider of the added column
+/// ([`emit::column_riders`]), or a composite index over it.
+fn goes_with(
+    op: &MigrationOp,
+    was: Option<&SchemaModel>,
+    now: Option<&SchemaModel>,
+) -> Option<Rider> {
+    let (Some(was), Some(now)) = (was, now) else {
+        return None;
+    };
+    let dropped = |name: &str| {
+        find_column(Some(was), name).is_some() && find_column(Some(now), name).is_none()
+    };
+    let added = |name: &str| {
+        find_column(Some(was), name).is_none() && find_column(Some(now), name).is_some()
+    };
+    let riders = || {
+        now.columns
+            .iter()
+            .filter(|col| added(&col.name))
+            .map(|col| emit::column_riders(now, &col.name))
+    };
+    match op {
+        MigrationOp::DropCheck { name, .. } => was
+            .checks
+            .iter()
+            .any(|check| &check.name == name && dropped(&check.column))
+            .then_some(Rider::DroppedColumn),
+        MigrationOp::DropIndex { name, .. } => emit::standalone_indexes(was)
+            .into_iter()
+            .any(|(index, columns, _)| &index == name && columns.iter().any(|c| dropped(c)))
+            .then_some(Rider::DroppedColumn),
+        MigrationOp::AddIndex { columns, .. } => columns
+            .iter()
+            .any(|name| added(name))
+            .then_some(Rider::AddedColumn),
+        MigrationOp::AddCheck { name, .. } => riders()
+            .any(|riders| riders.has_check(name))
+            .then_some(Rider::AddedColumn),
+        MigrationOp::AddForeignKey { column, .. } => riders()
+            .any(|riders| riders.foreign_key.is_some_and(|fk| &fk.column == column))
+            .then_some(Rider::AddedColumn),
+        _ => None,
+    }
+}
+
+/// How `dialect` runs `op` toward `target`: what the target cannot express
+/// is irreversible; a primary-key change and a move to or from a native
+/// enum type are refused with their recipe; what SQLite's `ALTER TABLE`
+/// cannot do ([`sqlite_rebuilds`]) is a rebuild.
+fn execution(
+    op: &MigrationOp,
+    was: Option<&SchemaModel>,
+    now: Option<&SchemaModel>,
+    goes_with: Option<Rider>,
+    target: &Side,
+    dialect: Dialect,
+) -> Execution {
+    if let Err(reason) = target.expresses(op) {
+        return Execution::Irreversible(reason);
+    }
+    let table = || op.table().unwrap_or_default().to_string();
+    let key = |col: Option<&ferro_schema_ir::SchemaColumn>| col.is_some_and(|col| col.primary_key);
+    let primary_key = match op {
+        MigrationOp::ChangePrimaryKey { .. } => true,
+        MigrationOp::AddColumn { column, .. } => key(find_column(now, column)),
+        MigrationOp::DropColumn { column, .. } => key(find_column(was, column)),
+        MigrationOp::AlterColumnType { column, .. }
+        | MigrationOp::AlterColumnNullability { column, .. } => {
+            key(find_column(was, column)) || key(find_column(now, column))
+        }
+        _ => false,
+    };
+    if primary_key {
+        return Execution::Refused(Refusal::PrimaryKeyChange { table: table() });
+    }
+    if dialect == Dialect::Sqlite && sqlite_rebuilds(op, was, now, goes_with) {
+        return Execution::Rebuild;
+    }
+    if let MigrationOp::AlterColumnType { column, .. } = op
+        && (find_column(was, column).is_some_and(native_enum)
+            || find_column(now, column).is_some_and(native_enum))
+    {
+        // To, from or between native enum types: no statement converts the
+        // column in place.
+        return Execution::Refused(Refusal::EnumTypeMove {
+            table: table(),
+            column: column.clone(),
+        });
+    }
+    Execution::Native
+}
+
+/// Whether SQLite can run `op` only through a table rebuild (ADR-0046).
+///
+/// | Op | SQLite |
+/// | :-- | :-- |
+/// | add/drop a table, an enum type or label, an index | native |
+/// | redefine an index (drop + create) | native |
+/// | rename a table, a column, an index (drop + create), a policy | native |
+/// | rename a constraint (a `ck_` / `fk_` name a rename drags) | rebuild |
+/// | add an optional column, or a required one with a literal default | native |
+/// | add a required column with no default (no `SET NOT NULL` reaches it) | rebuild |
+/// | add a required foreign-key column (SQLite's `REFERENCES` needs a NULL default) | rebuild |
+/// | drop a plain column | native |
+/// | drop a foreign-key column | rebuild |
+/// | change a column's type or nullability | rebuild |
+/// | add, change or drop a check (but a dropped column's own) | rebuild |
+/// | add, retarget or drop a foreign key (on a kept column) | rebuild |
+/// | change the primary key | rebuild |
+/// | validate a constraint, rebuild an invalid index, row security | native (nothing on SQLite) |
+///
+/// A foreign-key column comes off natively only while it is the inline
+/// `REFERENCES` column `ADD COLUMN` wrote; once any rebuild has written the
+/// table (as `FOREIGN KEY (…)`, `CREATE TABLE`'s shape) SQLite refuses to
+/// drop it in place, and nothing can know which shape it finds, so the drop
+/// is always a rebuild.
+fn sqlite_rebuilds(
+    op: &MigrationOp,
+    was: Option<&SchemaModel>,
+    now: Option<&SchemaModel>,
+    goes_with: Option<Rider>,
+) -> bool {
+    let has_foreign_key = |model: Option<&SchemaModel>, column: &str| {
+        model.is_some_and(|model| model.foreign_keys.iter().any(|fk| fk.column == column))
+    };
+    match op {
+        MigrationOp::AddTable { .. }
+        | MigrationOp::DropTable { .. }
+        | MigrationOp::CreateEnumType { .. }
+        | MigrationOp::DropEnumType { .. }
+        | MigrationOp::AddEnumLabel { .. }
+        | MigrationOp::RenameEnumLabel { .. }
+        | MigrationOp::RemoveEnumLabel { .. }
+        | MigrationOp::RenameEnumType { .. }
+        | MigrationOp::AddIndex { .. }
+        | MigrationOp::DropIndex { .. }
+        | MigrationOp::RedefineIndex { .. }
+        | MigrationOp::RebuildIndex { .. }
+        | MigrationOp::ValidateConstraint { .. }
+        | MigrationOp::AddRowPolicy { .. }
+        | MigrationOp::RebuildRowPolicy { .. }
+        | MigrationOp::DropRowPolicy { .. }
+        | MigrationOp::EnableRowSecurity { .. }
+        | MigrationOp::ForceRowSecurity { .. }
+        | MigrationOp::DisableRowSecurity { .. }
+        | MigrationOp::NoForceRowSecurity { .. }
+        | MigrationOp::RenameTable { .. }
+        | MigrationOp::RenameColumn { .. }
+        | MigrationOp::RenameIndex { .. }
+        | MigrationOp::RenamePolicy { .. } => false,
+        // A table constraint's name lives in `CREATE TABLE` (ADR-0046).
+        MigrationOp::RenameConstraint { .. } => true,
+        MigrationOp::AddColumn { column, .. } => find_column(now, column).is_some_and(|col| {
+            needs_values(col) || (!col.nullable && has_foreign_key(now, column))
+        }),
+        MigrationOp::DropColumn { column, .. } => has_foreign_key(was, column),
+        MigrationOp::AlterColumnType { .. }
+        | MigrationOp::AlterColumnNullability { .. }
+        | MigrationOp::ChangePrimaryKey { .. }
+        | MigrationOp::AddCheck { .. }
+        | MigrationOp::RebuildCheck { .. }
+        | MigrationOp::AddForeignKey { .. }
+        | MigrationOp::DropForeignKey { .. }
+        | MigrationOp::RebuildForeignKey { .. } => true,
+        MigrationOp::DropCheck { .. } => goes_with != Some(Rider::DroppedColumn),
+    }
+}
+
+// -- a down (ADR-0050) --------------------------------------------------------------------
+
+/// The ops that undo the step `up` (planned from `before` to `after`): the
+/// planner run from `after` back to `before` on `dialect`, keeping only the
+/// ops whose artifact the up touched (ADR-0050). Both doors use it: a
+/// generated step's down, between the stages on either side of the step,
+/// and the Alembic bridge's `downgrade()`, from the models to the database.
+///
+/// - **Renames** come from the up's own rename ops, swapped: the hints they
+///   give back are planned like any declared hint, so a down
+///   needs no hints of its own and its renames run first.
+/// - **Destructive changes are on**: a column, table or index the up added
+///   is dropped by the down. That is a planning option, never a header.
+/// - **The scope is the artifact**, not the table or the type: a column, an
+///   index, a named constraint (a foreign key by its column), a policy, a
+///   row-security flag, an enum type, one enum label, a table — a table's
+///   scope holding everything on it. An added column's scope includes the
+///   index, check and foreign key that ride its statement. Scoping keeps the
+///   warn-only categories one-way: an extra live label, a foreign policy or a
+///   leftover check the up left alone is never "restored".
+///
+/// What a live `before` cannot express is the op's
+/// [`Execution::Irreversible`] verdict; between two declared stages no op
+/// is (ADR-0033).
+pub fn plan_down(up: &[MigrationOp], after: &Side, before: &Side, dialect: Dialect) -> Plan {
+    let hints = hints_undoing(up);
+    let mut plan = plan_with_hints(
+        after,
+        before,
+        &hints,
+        dialect,
+        PlanOptions { destructive: true },
+    );
+    let mut back = KeyRenames::of(plan.ops().filter(|op| is_rename(op)));
+    back.undo_names(up);
+    let mut scope: BTreeSet<Artifact> = BTreeSet::new();
+    for op in up {
+        scope.extend(key(op).map(|key| back.apply(key)));
+        // What rides an added or a dropped column's statement is its scope
+        // too ([`emit::column_riders`]): read where the column stands.
+        let riders = match op {
+            MigrationOp::AddColumn { table, column } => after
+                .model(table)
+                .map(|model| emit::column_riders(model, column))
+                .map(|riders| (back.table(table), riders, true)),
+            MigrationOp::DropColumn { table, column } => {
+                let table = back.table(table);
+                let column = back.column(&table, column);
+                before
+                    .model(&table)
+                    .map(|model| emit::column_riders(model, &column))
+                    .map(|riders| (table, riders, false))
+            }
+            _ => None,
+        };
+        // An added column's riders are named as the up names them; a dropped
+        // one's are read from `before`, already under the down's names.
+        if let Some((table, riders, up_names)) = riders {
+            let renamed = |name: &str| {
+                if up_names {
+                    back.name(&table, name)
+                } else {
+                    name.to_string()
+                }
+            };
+            scope.extend(
+                riders
+                    .index
+                    .iter()
+                    .chain(&riders.unique)
+                    .map(|name| Artifact::Index(table.clone(), renamed(name))),
+            );
+            scope.extend(
+                riders
+                    .check
+                    .map(|check| Artifact::Constraint(table.clone(), renamed(&check.name))),
+            );
+            scope.extend(riders.foreign_key.map(|fk| {
+                let column = if up_names {
+                    back.column(&table, &fk.column)
+                } else {
+                    fk.column.clone()
+                };
+                Artifact::ForeignKey(table.clone(), column)
+            }));
+        }
+    }
+    plan.operations.retain(|planned| {
+        is_rename(&planned.op)
+            || planned
+                .op
+                .table()
+                .is_some_and(|table| scope.contains(&Artifact::Table(table.to_string())))
+            || key(&planned.op).is_some_and(|key| scope.contains(&key))
+    });
+    plan
+}
+
+/// The hints that undo the renames `up` runs: each table, column, enum type
+/// and label rename the other way round, by the names the down plans with.
+fn hints_undoing(up: &[MigrationOp]) -> Vec<Hint> {
+    let old_table = |table: &str| {
+        up.iter()
+            .find_map(|op| match op {
+                MigrationOp::RenameTable { old, new } if new == table => Some(old.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| table.to_string())
+    };
+    let old_type = |type_name: &str| {
+        up.iter()
+            .find_map(|op| match op {
+                MigrationOp::RenameEnumType { old, new } if new == type_name => Some(old.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| type_name.to_string())
+    };
+    up.iter()
+        .filter_map(|op| match op {
+            MigrationOp::RenameTable { old, new } => Some(Hint::Table {
+                old: new.clone(),
+                new: old.clone(),
+            }),
+            MigrationOp::RenameColumn { table, old, new } => Some(Hint::Column {
+                table: old_table(table),
+                old: new.clone(),
+                new: old.clone(),
+            }),
+            MigrationOp::RenameEnumType { old, new } => Some(Hint::EnumType {
+                old: new.clone(),
+                new: old.clone(),
+            }),
+            MigrationOp::RenameEnumLabel {
+                type_name,
+                old,
+                new,
+                ..
+            } => Some(Hint::Label {
+                type_name: old_type(type_name),
+                old: new.clone(),
+                new: old.clone(),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// One artifact an op touches: what scopes a down (ADR-0050).
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Artifact {
+    /// A whole table, everything on it included.
+    Table(String),
+    /// A column.
+    Column(String, String),
+    /// A table's primary key.
+    PrimaryKey(String),
+    /// A standalone index, by name.
+    Index(String, String),
+    /// A named check.
+    Constraint(String, String),
+    /// A foreign key, by its column: one per column, and its name follows
+    /// its target.
+    ForeignKey(String, String),
+    /// A row policy, by name.
+    Policy(String, String),
+    /// A table's `ENABLE` flag (`true`) or its `FORCE` flag (`false`).
+    Flag(String, bool),
+    /// A native enum type.
+    EnumType(String),
+    /// One label of an enum type.
+    Label(String, String),
+}
+
+/// The artifact `op` touches, or `None` for a rename (a down takes the up's
+/// renames whole).
+fn key(op: &MigrationOp) -> Option<Artifact> {
+    let t = |table: &String| table.clone();
+    Some(match op {
+        MigrationOp::AddEnumLabel { type_name, label }
+        | MigrationOp::RemoveEnumLabel {
+            type_name, label, ..
+        } => Artifact::Label(type_name.clone(), label.clone()),
+        MigrationOp::CreateEnumType { type_name, .. } | MigrationOp::DropEnumType { type_name } => {
+            Artifact::EnumType(type_name.clone())
+        }
+        MigrationOp::AddTable { table } | MigrationOp::DropTable { table } => {
+            Artifact::Table(t(table))
+        }
+        MigrationOp::AddColumn { table, column }
+        | MigrationOp::DropColumn { table, column }
+        | MigrationOp::AlterColumnType { table, column }
+        | MigrationOp::AlterColumnNullability { table, column } => {
+            Artifact::Column(t(table), column.clone())
+        }
+        MigrationOp::ChangePrimaryKey { table, .. } => Artifact::PrimaryKey(t(table)),
+        MigrationOp::AddIndex { table, name, .. }
+        | MigrationOp::DropIndex { table, name }
+        | MigrationOp::RedefineIndex { table, name }
+        | MigrationOp::RebuildIndex { table, name, .. } => Artifact::Index(t(table), name.clone()),
+        MigrationOp::AddForeignKey { table, column }
+        | MigrationOp::DropForeignKey { table, column, .. }
+        | MigrationOp::RebuildForeignKey { table, column, .. } => {
+            Artifact::ForeignKey(t(table), column.clone())
+        }
+        MigrationOp::AddCheck { table, name }
+        | MigrationOp::RebuildCheck { table, name }
+        | MigrationOp::DropCheck { table, name }
+        | MigrationOp::ValidateConstraint { table, name } => {
+            Artifact::Constraint(t(table), name.clone())
+        }
+        MigrationOp::AddRowPolicy { table, name }
+        | MigrationOp::RebuildRowPolicy { table, name }
+        | MigrationOp::DropRowPolicy { table, name } => Artifact::Policy(t(table), name.clone()),
+        MigrationOp::EnableRowSecurity { table } | MigrationOp::DisableRowSecurity { table } => {
+            Artifact::Flag(t(table), true)
+        }
+        MigrationOp::ForceRowSecurity { table } | MigrationOp::NoForceRowSecurity { table } => {
+            Artifact::Flag(t(table), false)
+        }
+        MigrationOp::RenameTable { .. }
+        | MigrationOp::RenameColumn { .. }
+        | MigrationOp::RenameIndex { .. }
+        | MigrationOp::RenameConstraint { .. }
+        | MigrationOp::RenamePolicy { .. }
+        | MigrationOp::RenameEnumLabel { .. }
+        | MigrationOp::RenameEnumType { .. } => return None,
+    })
+}
+
+/// A down's renames as a map from the up's names to the down's: what turns
+/// the key of an up op into the key of the down op that undoes it.
+#[derive(Default)]
+struct KeyRenames {
+    tables: BTreeMap<String, String>,
+    columns: BTreeMap<(String, String), String>,
+    names: BTreeMap<(String, String), String>,
+    types: BTreeMap<String, String>,
+    labels: BTreeMap<(String, String), String>,
+}
+
+impl KeyRenames {
+    fn of<'a>(renames: impl Iterator<Item = &'a MigrationOp>) -> Self {
+        let mut map = KeyRenames::default();
+        for op in renames {
+            match op {
+                MigrationOp::RenameTable { old, new } => {
+                    map.tables.insert(old.clone(), new.clone());
+                }
+                MigrationOp::RenameColumn { table, old, new } => {
+                    map.columns
+                        .insert((table.clone(), old.clone()), new.clone());
+                }
+                MigrationOp::RenameIndex { table, old, new }
+                | MigrationOp::RenameConstraint { table, old, new }
+                | MigrationOp::RenamePolicy { table, old, new } => {
+                    map.names.insert((table.clone(), old.clone()), new.clone());
+                }
+                MigrationOp::RenameEnumType { old, new } => {
+                    map.types.insert(old.clone(), new.clone());
+                }
+                MigrationOp::RenameEnumLabel {
+                    type_name,
+                    old,
+                    new,
+                    ..
+                } => {
+                    map.labels
+                        .insert((type_name.clone(), old.clone()), new.clone());
+                }
+                _ => {}
+            }
+        }
+        map
+    }
+
+    /// Each index, constraint and policy name `up` renames that the down's
+    /// own renames do not rename back — a name only a live database's facts
+    /// carry (a leftover check on a renamed table, `fact_renames`) — mapped
+    /// back to the name it had: the down's keys are compared after the up's
+    /// renames are undone, so the down restores the artifact under its old
+    /// name.
+    fn undo_names(&mut self, up: &[MigrationOp]) {
+        for op in up {
+            if let MigrationOp::RenameIndex { table, old, new }
+            | MigrationOp::RenameConstraint { table, old, new }
+            | MigrationOp::RenamePolicy { table, old, new } = op
+            {
+                let key = (self.table(table), new.clone());
+                self.names.entry(key).or_insert_with(|| old.clone());
+            }
+        }
+    }
+
+    fn table(&self, table: &str) -> String {
+        self.tables
+            .get(table)
+            .cloned()
+            .unwrap_or_else(|| table.to_string())
+    }
+
+    /// Column `column` of `table` (already the down's table name).
+    fn column(&self, table: &str, column: &str) -> String {
+        self.columns
+            .get(&(table.to_string(), column.to_string()))
+            .cloned()
+            .unwrap_or_else(|| column.to_string())
+    }
+
+    /// Index, constraint or policy `name` on `table` (the down's name).
+    fn name(&self, table: &str, name: &str) -> String {
+        self.names
+            .get(&(table.to_string(), name.to_string()))
+            .cloned()
+            .unwrap_or_else(|| name.to_string())
+    }
+
+    fn apply(&self, key: Artifact) -> Artifact {
+        match key {
+            Artifact::Table(t) => Artifact::Table(self.table(&t)),
+            Artifact::Column(t, c) => {
+                let t = self.table(&t);
+                let c = self.column(&t, &c);
+                Artifact::Column(t, c)
+            }
+            Artifact::PrimaryKey(t) => Artifact::PrimaryKey(self.table(&t)),
+            Artifact::Index(t, n) => {
+                let t = self.table(&t);
+                let n = self.name(&t, &n);
+                Artifact::Index(t, n)
+            }
+            Artifact::Constraint(t, n) => {
+                let t = self.table(&t);
+                let n = self.name(&t, &n);
+                Artifact::Constraint(t, n)
+            }
+            Artifact::ForeignKey(t, c) => {
+                let t = self.table(&t);
+                let c = self.column(&t, &c);
+                Artifact::ForeignKey(t, c)
+            }
+            Artifact::Policy(t, n) => {
+                let t = self.table(&t);
+                let n = self.name(&t, &n);
+                Artifact::Policy(t, n)
+            }
+            Artifact::Flag(t, flag) => Artifact::Flag(self.table(&t), flag),
+            Artifact::EnumType(name) => {
+                Artifact::EnumType(self.types.get(&name).cloned().unwrap_or(name))
+            }
+            Artifact::Label(type_name, label) => {
+                let type_name = self.types.get(&type_name).cloned().unwrap_or(type_name);
+                let label = self
+                    .labels
+                    .get(&(type_name.clone(), label.clone()))
+                    .cloned()
+                    .unwrap_or(label);
+                Artifact::Label(type_name, label)
+            }
+        }
+    }
 }
 
 // -- rename hints (ADR-0032) ----------------------------------------------------------
@@ -2057,11 +2988,6 @@ fn renamed_model(model: &SchemaModel, renames: &Renames<'_>) -> SchemaModel {
     out
 }
 
-/// The name `hints` give the table `table` (unchanged when no hint renames it).
-pub(crate) fn renamed_table(hints: &[Hint], table: &str) -> String {
-    Renames { hints }.table(table).to_string()
-}
-
 /// `old` as `hints` leave it: what the database holds once the renames have
 /// run, and so the side every other change of the migration is planned
 /// against. Models stay in `old`'s order, one for one.
@@ -2504,134 +3430,10 @@ fn diff_model_foreign_keys(
     }
 }
 
-// -- the reverse of a live-origin plan (ADR-0041) ---------------------------------
-
-/// One step of [`reverse_live_plan`]: what undoes one op of a plan whose old
-/// side was a live database.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ReverseOp {
-    /// A planner op, rendered from the declared side back to the live one.
-    Planned(MigrationOp),
-    /// A CHECK the forward plan dropped (`replace: false`) or rebuilt
-    /// (`replace: true`, the declared body is dropped first), put back with
-    /// the body the catalog printed for it: the IR carries one body language,
-    /// so a live body travels here, never as a `CheckExpr`.
-    RestoreCheck {
-        /// Owning table.
-        table: String,
-        /// Constraint name.
-        name: String,
-        /// The catalog definition (`pg_get_constraintdef`).
-        definition: String,
-        /// Drop the declared constraint of that name first.
-        replace: bool,
-    },
-    /// A row policy the forward plan dropped (`replace: false`) or rebuilt
-    /// (`replace: true`), put back as the catalog printed it.
-    RestoreRowPolicy {
-        /// Owning table.
-        table: String,
-        /// The live policy.
-        policy: LiveRowPolicy,
-        /// Drop the declared policy of that name first.
-        replace: bool,
-    },
-    /// A foreign key the forward plan added to an existing column, dropped by
-    /// its name.
-    DropForeignKey {
-        /// Owning table.
-        table: String,
-        /// Local FK column.
-        column: String,
-        /// Constraint name.
-        name: String,
-    },
-    /// A forward op nothing undoes, with why.
-    Irreversible {
-        /// The forward op.
-        op: MigrationOp,
-        /// Why it cannot be undone, in words a revision's reader acts on.
-        reason: String,
-    },
-}
-
-/// The reverse of a live-origin plan: its steps in execution order, and the
-/// live database as the forward plan's renames leave it (the side the
-/// planned steps render against).
-#[derive(Clone, Debug, PartialEq)]
-pub struct ReversePlan {
-    /// Steps, in execution order: the forward order reversed.
-    pub operations: Vec<ReverseOp>,
-    /// `live` under the forward plan's rename hints.
-    pub before: IrEnvelope<SchemaIrPayload>,
-}
-
-/// One rendered [`ReverseOp`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RenderedReverseOp {
-    /// The step.
-    pub op: ReverseOp,
-    /// Statements to execute, in order.
-    pub statements: Vec<String>,
-    /// What rendering reports.
-    pub reports: Vec<Report>,
-}
-
-impl ReverseOp {
-    /// The step as plan JSON: a planned op is the op itself; a restore is
-    /// its own `kind`; an irreversible step is the forward op carrying
-    /// `irreversible: {"reason": …}`.
-    pub fn to_json(&self) -> serde_json::Value {
-        use serde_json::json;
-        match self {
-            ReverseOp::Planned(op) => serde_json::to_value(op).unwrap_or(serde_json::Value::Null),
-            ReverseOp::RestoreCheck {
-                table,
-                name,
-                definition,
-                replace,
-            } => json!({
-                "kind": "RestoreCheck",
-                "table": table,
-                "name": name,
-                "definition": definition,
-                "replace": replace,
-            }),
-            ReverseOp::RestoreRowPolicy {
-                table,
-                policy,
-                replace,
-            } => json!({
-                "kind": "RestoreRowPolicy",
-                "table": table,
-                "name": policy.name,
-                "replace": replace,
-            }),
-            ReverseOp::DropForeignKey {
-                table,
-                column,
-                name,
-            } => json!({
-                "kind": "DropForeignKey",
-                "table": table,
-                "column": column,
-                "name": name,
-            }),
-            ReverseOp::Irreversible { op, reason } => {
-                let mut value = serde_json::to_value(op).unwrap_or(serde_json::Value::Null);
-                if let Some(fields) = value.as_object_mut() {
-                    fields.insert("irreversible".into(), json!({ "reason": reason }));
-                }
-                value
-            }
-        }
-    }
-}
-
 /// Whether `op` is a rename op: a table, column, index, constraint, policy,
 /// enum label or enum type rename. The crate's one test — the live facts a
-/// plan's renames carry ([`renamed_facts`]), the reverse's renames and the
-/// generator's rename steps all read it.
+/// plan's renames carry (`renamed_facts`), a down's renames
+/// ([`plan_down`]) and the generator's rename steps all read it.
 pub fn is_rename(op: &MigrationOp) -> bool {
     matches!(
         op,
@@ -2645,560 +3447,13 @@ pub fn is_rename(op: &MigrationOp) -> bool {
     )
 }
 
-/// A rename op the other way round.
-fn swapped(op: &MigrationOp) -> MigrationOp {
-    match op.clone() {
-        MigrationOp::RenameTable { old, new } => MigrationOp::RenameTable { old: new, new: old },
-        MigrationOp::RenameColumn { table, old, new } => MigrationOp::RenameColumn {
-            table,
-            old: new,
-            new: old,
-        },
-        MigrationOp::RenameIndex { table, old, new } => MigrationOp::RenameIndex {
-            table,
-            old: new,
-            new: old,
-        },
-        MigrationOp::RenameConstraint { table, old, new } => MigrationOp::RenameConstraint {
-            table,
-            old: new,
-            new: old,
-        },
-        MigrationOp::RenamePolicy { table, old, new } => MigrationOp::RenamePolicy {
-            table,
-            old: new,
-            new: old,
-        },
-        MigrationOp::RenameEnumType { old, new } => MigrationOp::RenameEnumType { old: new, new: old },
-        MigrationOp::RenameEnumLabel {
-            type_name,
-            old,
-            new,
-            columns,
-        } => MigrationOp::RenameEnumLabel {
-            type_name,
-            old: new,
-            new: old,
-            columns,
-        },
-        other => other,
-    }
-}
-
-/// The declared name of the foreign key on `table.column`.
-fn declared_fk_name(
-    models: &BTreeMap<String, &SchemaModel>,
-    table: &str,
-    column: &str,
-) -> Option<String> {
-    models
-        .get(table)
-        .and_then(|model| model.foreign_keys.iter().find(|fk| fk.column == column))
-        .map(|fk| {
-            fk.name
-                .clone()
-                .unwrap_or_else(|| fk_name(table, column, &fk.to_table))
-        })
-}
-
-/// The reverse of `forward`, the plan [`plan_from_ir`] decided from the live
-/// database `live` (read with `facts`) to `declared`: what turns the database
-/// that plan leaves back into `live` (ADR-0041 — the Alembic bridge's
-/// `downgrade()`).
-///
-/// Scoped to the objects `forward` touches — a column, an index, a named
-/// constraint, a policy, a table's row-security flag, an enum type — never a
-/// whole table, and each restored to its live form: columns, indexes and
-/// foreign keys from `live`'s IR (renamed by the forward renames, which run
-/// back last), a CHECK or policy the forward plan dropped or rebuilt from the
-/// body the catalog printed ([`ReverseOp::RestoreCheck`],
-/// [`ReverseOp::RestoreRowPolicy`]). What nothing undoes is an explicit
-/// [`ReverseOp::Irreversible`] naming why: an enum label addition
-/// (ADR-0011: labels are append-only), a primary-key change, and what the
-/// dialect cannot express in place. The steps run in `forward`'s order
-/// reversed.
-///
-/// # Errors
-/// [`PlanError::MissingLiveFacts`] when a table of `live` has no facts.
-pub fn reverse_live_plan(
-    forward: &Plan,
-    live: &IrEnvelope<SchemaIrPayload>,
-    facts: &LiveFacts,
-    declared: &IrEnvelope<SchemaIrPayload>,
-    dialect: Dialect,
-) -> Result<ReversePlan, PlanError> {
-    facts.cover(live)?;
-    let before = planned_before(live, declared, dialect).into_owned();
-    let renames: Vec<MigrationOp> = forward
-        .operations
-        .iter()
-        .filter(|op| is_rename(op))
-        .cloned()
-        .collect();
-    let facts = renamed_facts(facts, &renames, declared, dialect);
-    let before_models = index_models(&before.payload.models);
-    let declared_models = index_models(&declared.payload.models);
-
-    let irreversible = |op: &MigrationOp, reason: String| ReverseOp::Irreversible {
-        op: op.clone(),
-        reason,
-    };
-    let restore_check = |op: &MigrationOp, table: &str, name: &str, replace: bool| {
-        let live = facts
-            .tables
-            .get(table)
-            .and_then(|live| live.checks.iter().find(|check| check.name == name));
-        match (live, dialect) {
-            (_, Dialect::Sqlite) => irreversible(
-                op,
-                format!(
-                    "SQLite cannot put CHECK {name} back on the existing table {table} in \
-                     place; `ferro migrate new` writes the table rebuild that can"
-                ),
-            ),
-            (Some(check), Dialect::Postgres) => ReverseOp::RestoreCheck {
-                table: table.to_string(),
-                name: name.to_string(),
-                definition: check.definition.clone(),
-                replace,
-            },
-            (None, Dialect::Postgres) => irreversible(
-                op,
-                format!("the live database holds no CHECK {name} on {table} to restore"),
-            ),
-        }
-    };
-    let restore_policy = |op: &MigrationOp, table: &str, name: &str, replace: bool| {
-        let live = facts.tables.get(table).and_then(|live| {
-            live.row_security
-                .policies
-                .iter()
-                .find(|policy| policy.name == name)
-        });
-        match live {
-            Some(policy) if ferro_ddl_lowering::is_default_row_policy_roles(&policy.roles) => {
-                ReverseOp::RestoreRowPolicy {
-                    table: table.to_string(),
-                    policy: policy.clone(),
-                    replace,
-                }
-            }
-            Some(policy) => irreversible(
-                op,
-                format!(
-                    "row policy {name} on {table} applies TO {}, a clause ferro's CREATE \
-                     POLICY never writes; restore it by hand",
-                    policy.roles.join(", ")
-                ),
-            ),
-            None => irreversible(
-                op,
-                format!("the live database holds no row policy {name} on {table} to restore"),
-            ),
-        }
-    };
-    let planned = ReverseOp::Planned;
-
-    let mut operations = Vec::new();
-    for op in forward.operations.iter().rev() {
-        match op {
-            MigrationOp::AddEnumLabel { type_name, label } => operations.push(irreversible(
-                op,
-                format!(
-                    "label {label:?} of enum type {type_name} cannot be removed: enum labels \
-                     are append-only (ADR-0011), and rows may hold it"
-                ),
-            )),
-            MigrationOp::CreateEnumType { type_name, .. } => {
-                operations.push(planned(MigrationOp::DropEnumType {
-                    type_name: type_name.clone(),
-                }))
-            }
-            MigrationOp::DropEnumType { type_name } => match facts.enum_labels.get(type_name) {
-                Some(labels) => operations.push(planned(MigrationOp::CreateEnumType {
-                    type_name: type_name.clone(),
-                    labels: labels.clone(),
-                })),
-                None => operations.push(irreversible(
-                    op,
-                    format!("the live database holds no labels for enum type {type_name}"),
-                )),
-            },
-            // Planned only between two snapshots (#536): never in a live plan.
-            MigrationOp::RemoveEnumLabel { .. } => {
-                return Err(PlanError::SnapshotOnlyOp {
-                    op: "RemoveEnumLabel".to_string(),
-                });
-            }
-            MigrationOp::AddTable { table } => operations.push(planned(MigrationOp::DropTable {
-                table: table.clone(),
-            })),
-            MigrationOp::DropTable { table } => {
-                operations.push(planned(MigrationOp::AddTable {
-                    table: table.clone(),
-                }));
-                if let Some(live) = facts.tables.get(table) {
-                    for check in &live.checks {
-                        operations.push(restore_check(op, table, &check.name, false));
-                    }
-                    if dialect == Dialect::Postgres {
-                        if live.row_security.enabled {
-                            operations.push(planned(MigrationOp::EnableRowSecurity {
-                                table: table.clone(),
-                            }));
-                        }
-                        if live.row_security.forced {
-                            operations.push(planned(MigrationOp::ForceRowSecurity {
-                                table: table.clone(),
-                            }));
-                        }
-                        for policy in &live.row_security.policies {
-                            operations.push(restore_policy(op, table, &policy.name, false));
-                        }
-                    }
-                }
-            }
-            MigrationOp::AddColumn { table, column } => {
-                operations.push(planned(MigrationOp::DropColumn {
-                    table: table.clone(),
-                    column: column.clone(),
-                }))
-            }
-            MigrationOp::DropColumn { table, column } => {
-                operations.push(planned(MigrationOp::AddColumn {
-                    table: table.clone(),
-                    column: column.clone(),
-                }))
-            }
-            // The same op the other way: rendered from the declared column
-            // back to the live one.
-            MigrationOp::AlterColumnType { .. } | MigrationOp::AlterColumnNullability { .. } => {
-                operations.push(planned(op.clone()))
-            }
-            MigrationOp::ChangePrimaryKey { table, .. } => operations.push(irreversible(
-                op,
-                format!(
-                    "a table's primary key cannot change in place; {table}'s is changed by \
-                     declaring a new model, copying the rows across, and dropping the old one"
-                ),
-            )),
-            MigrationOp::AddIndex { table, name, .. } => {
-                operations.push(planned(MigrationOp::DropIndex {
-                    table: table.clone(),
-                    name: name.clone(),
-                }))
-            }
-            MigrationOp::DropIndex { table, name } => {
-                let found = before_models.get(table.as_str()).and_then(|model| {
-                    emit::standalone_indexes(model)
-                        .into_iter()
-                        .find(|(index, _, _)| index == name)
-                });
-                match found {
-                    Some((_, columns, unique)) => {
-                        operations.push(planned(MigrationOp::AddIndex {
-                            table: table.clone(),
-                            name: name.clone(),
-                            columns,
-                            unique,
-                        }))
-                    }
-                    None => operations.push(irreversible(
-                        op,
-                        format!("the live database holds no index {name} on {table} to restore"),
-                    )),
-                }
-            }
-            // Nothing to undo: a rebuilt invalid index and a validated
-            // constraint are the live objects, made usable.
-            MigrationOp::RebuildIndex { .. } | MigrationOp::ValidateConstraint { .. } => {}
-            // The same op back: rendered against the live side, it builds the
-            // live definition again under the name.
-            MigrationOp::RedefineIndex { .. } => operations.push(planned(op.clone())),
-            // Added back as the live database held it, read from the live side.
-            MigrationOp::DropForeignKey { table, column, .. } => match dialect {
-                Dialect::Postgres => operations.push(planned(MigrationOp::AddForeignKey {
-                    table: table.clone(),
-                    column: column.clone(),
-                })),
-                Dialect::Sqlite => operations.push(irreversible(
-                    op,
-                    format!(
-                        "SQLite cannot put the foreign key on {table}.{column} back in place; \
-                         `ferro migrate new` writes the table rebuild that can"
-                    ),
-                )),
-            },
-            MigrationOp::AddForeignKey { table, column } => {
-                match (declared_fk_name(&declared_models, table, column), dialect) {
-                    (Some(name), Dialect::Postgres) => {
-                        operations.push(ReverseOp::DropForeignKey {
-                            table: table.clone(),
-                            column: column.clone(),
-                            name,
-                        })
-                    }
-                    (_, Dialect::Sqlite) => operations.push(irreversible(
-                        op,
-                        format!(
-                            "SQLite cannot drop the foreign key on {table}.{column} in place; \
-                             `ferro migrate new` writes the table rebuild that can"
-                        ),
-                    )),
-                    (None, Dialect::Postgres) => operations.push(irreversible(
-                        op,
-                        format!("the models declare no foreign key on {table}.{column}"),
-                    )),
-                }
-            }
-            MigrationOp::RebuildForeignKey { table, column, .. } => {
-                let live_fk = before_models
-                    .get(table.as_str())
-                    .is_some_and(|model| model.foreign_keys.iter().any(|fk| fk.column == *column));
-                match (
-                    declared_fk_name(&declared_models, table, column),
-                    live_fk,
-                    dialect,
-                ) {
-                    (Some(old_name), true, Dialect::Postgres) => {
-                        operations.push(planned(MigrationOp::RebuildForeignKey {
-                            table: table.clone(),
-                            column: column.clone(),
-                            old_name,
-                        }))
-                    }
-                    _ => operations.push(irreversible(
-                        op,
-                        format!(
-                            "the foreign key on {table}.{column} cannot be put back as the live \
-                             database held it in place; `ferro migrate new` writes the table \
-                             rebuild that can"
-                        ),
-                    )),
-                }
-            }
-            MigrationOp::AddCheck { table, name } => {
-                operations.push(planned(MigrationOp::DropCheck {
-                    table: table.clone(),
-                    name: name.clone(),
-                }))
-            }
-            MigrationOp::RebuildCheck { table, name } => {
-                operations.push(restore_check(op, table, name, true))
-            }
-            MigrationOp::DropCheck { table, name } => {
-                operations.push(restore_check(op, table, name, false))
-            }
-            MigrationOp::AddRowPolicy { table, name } => {
-                operations.push(planned(MigrationOp::DropRowPolicy {
-                    table: table.clone(),
-                    name: name.clone(),
-                }))
-            }
-            MigrationOp::RebuildRowPolicy { table, name } => {
-                operations.push(restore_policy(op, table, name, true))
-            }
-            MigrationOp::DropRowPolicy { table, name } => {
-                operations.push(restore_policy(op, table, name, false))
-            }
-            MigrationOp::EnableRowSecurity { table } => {
-                operations.push(planned(MigrationOp::DisableRowSecurity {
-                    table: table.clone(),
-                }))
-            }
-            MigrationOp::ForceRowSecurity { table } => {
-                operations.push(planned(MigrationOp::NoForceRowSecurity {
-                    table: table.clone(),
-                }))
-            }
-            MigrationOp::DisableRowSecurity { table } => {
-                operations.push(planned(MigrationOp::EnableRowSecurity {
-                    table: table.clone(),
-                }))
-            }
-            MigrationOp::NoForceRowSecurity { table } => {
-                operations.push(planned(MigrationOp::ForceRowSecurity {
-                    table: table.clone(),
-                }))
-            }
-            // The renames ran first; they are undone last, below, from the
-            // one list `is_rename` collects — never here too.
-            MigrationOp::RenameTable { .. }
-            | MigrationOp::RenameColumn { .. }
-            | MigrationOp::RenameIndex { .. }
-            | MigrationOp::RenameConstraint { .. }
-            | MigrationOp::RenamePolicy { .. }
-            | MigrationOp::RenameEnumLabel { .. }
-            | MigrationOp::RenameEnumType { .. } => {}
-        }
-    }
-    operations.extend(renames.iter().rev().map(|op| ReverseOp::Planned(swapped(op))));
-    Ok(ReversePlan { operations, before })
-}
-
-/// Render `plan` ([`reverse_live_plan`]) for `dialect`: each planned step
-/// through the one renderer from `declared` back to the live side, each
-/// restore through the `ferro_ddl_lowering` renderers, an irreversible step
-/// to no statement.
-///
-/// `unrendered` holds the indexes of the steps the caller writes itself and
-/// the renderer leaves at no statement: a re-added column that demands values
-/// of existing rows, which the pass has no statement for and the Alembic
-/// bridge writes as the plain op under `# ferro: data-dependent` — the same
-/// subset its upgrade leaves unrendered (ADR-0041).
-///
-/// # Errors
-/// An [`crate::EmissionError`] when a planned step cannot render.
-pub fn render_reverse_plan(
-    plan: &ReversePlan,
-    declared: &IrEnvelope<SchemaIrPayload>,
-    dialect: Dialect,
-    unrendered: &BTreeSet<usize>,
-) -> Result<Vec<RenderedReverseOp>, crate::EmissionError> {
-    use ferro_ddl_lowering::{
-        render_check_restore, render_create_row_policy, render_drop_constraint,
-        render_drop_row_policy,
-    };
-    // Every planned step but the renames renders in one call, so a type the
-    // reverse creates is created once, and each table and column it reads is
-    // the live one under the forward plan's names.
-    let planned: Vec<MigrationOp> = plan
-        .operations
-        .iter()
-        .enumerate()
-        .filter_map(|(index, op)| match op {
-            ReverseOp::Planned(op) if !is_rename(op) && !unrendered.contains(&index) => {
-                Some(op.clone())
-            }
-            _ => None,
-        })
-        .collect();
-    let mut rendered = crate::render::render_ops(
-        &planned,
-        declared,
-        &plan.before,
-        dialect,
-        ferro_ddl_lowering::ConstraintMode::Plain,
-    )?
-    .into_iter();
-    let before_models = index_models(&plan.before.payload.models);
-
-    let mut out = Vec::with_capacity(plan.operations.len());
-    for (index, op) in plan.operations.iter().enumerate() {
-        let (statements, reports) = match op {
-            _ if unrendered.contains(&index) => (Vec::new(), Vec::new()),
-            ReverseOp::Planned(planned) if is_rename(planned) => {
-                rename_statements(planned, &plan.before, dialect)?
-            }
-            ReverseOp::Planned(_) => {
-                let next = rendered.next().ok_or_else(|| crate::EmissionError {
-                    message: "the reverse plan rendered fewer steps than it planned".into(),
-                })?;
-                (next.statements, next.reports)
-            }
-            ReverseOp::RestoreCheck {
-                table,
-                name,
-                definition,
-                replace,
-            } => {
-                let mut statements = Vec::new();
-                if *replace {
-                    statements.push(render_drop_constraint(table, name));
-                }
-                statements.push(render_check_restore(table, name, definition));
-                (statements, Vec::new())
-            }
-            ReverseOp::RestoreRowPolicy {
-                table,
-                policy,
-                replace,
-            } => {
-                let model =
-                    before_models
-                        .get(table.as_str())
-                        .ok_or_else(|| crate::EmissionError {
-                            message: format!("model '{table}' not found in the live IR"),
-                        })?;
-                let command =
-                    serde_json::from_value(serde_json::Value::String(policy.command.clone()))
-                        .map_err(|_| crate::EmissionError {
-                            message: format!(
-                                "row policy '{}' on '{table}' has the unknown command '{}'",
-                                policy.name, policy.command
-                            ),
-                        })?;
-                let live_policy = ferro_schema_ir::SchemaRowPolicy {
-                    name: policy.name.clone(),
-                    command,
-                    restrictive: policy.restrictive,
-                    expr: ferro_schema_ir::RowPolicyExpr::Raw {
-                        using: policy.using.clone(),
-                        with_check: policy.with_check.clone(),
-                    },
-                };
-                let mut statements = Vec::new();
-                if *replace {
-                    statements.push(render_drop_row_policy(table, &policy.name));
-                }
-                statements.push(
-                    render_create_row_policy(model, &live_policy)
-                        .map_err(|message| crate::EmissionError { message })?,
-                );
-                (statements, Vec::new())
-            }
-            ReverseOp::DropForeignKey { table, name, .. } => {
-                (vec![render_drop_constraint(table, name)], Vec::new())
-            }
-            ReverseOp::Irreversible { .. } => (Vec::new(), Vec::new()),
-        };
-        out.push(RenderedReverseOp {
-            op: op.clone(),
-            statements,
-            reports,
-        });
-    }
-    Ok(out)
-}
-
-/// A reversed rename's statements. SQLite renames an index by dropping it and
-/// building it under its new name, read from the table as the step finds it:
-/// the live index, under the name the forward plan gave it.
-fn rename_statements(
-    op: &MigrationOp,
-    before: &IrEnvelope<SchemaIrPayload>,
-    dialect: Dialect,
-) -> Result<(Vec<String>, Vec<Report>), crate::EmissionError> {
-    let mut view = before.clone();
-    if let MigrationOp::RenameIndex { table, old, new } = op {
-        for model in view
-            .payload
-            .models
-            .iter_mut()
-            .filter(|model| &model.table_name == table)
-        {
-            for index in model.indexes.iter_mut().filter(|index| &index.name == old) {
-                index.name = new.clone();
-            }
-        }
-    }
-    let rendered = crate::render::render_ops(
-        std::slice::from_ref(op),
-        before,
-        &view,
-        dialect,
-        ferro_ddl_lowering::ConstraintMode::Plain,
-    )?;
-    Ok(rendered
-        .into_iter()
-        .next()
-        .map(|op| (op.statements, op.reports))
-        .unwrap_or_default())
-}
-
 #[cfg(test)]
-mod reverse_tests {
+mod down_tests {
+    //! `plan_down` (ADR-0050): the up's artifacts planned back, from the
+    //! models to a live database (the Alembic bridge's `downgrade()`) or
+    //! between two declared stages (a generated step's down).
     use super::*;
+    use ferro_ddl_lowering::LiveRowPolicy;
     use ferro_schema_ir::{SchemaColumn, SchemaTableCheck};
 
     fn envelope(models: Vec<SchemaModel>) -> IrEnvelope<SchemaIrPayload> {
@@ -3234,6 +3489,22 @@ mod reverse_tests {
         }
     }
 
+    fn status(labels: &[&str], live: bool) -> SchemaColumn {
+        SchemaColumn {
+            logical_type: "string".into(),
+            db_type: None,
+            enum_values: Some(
+                labels
+                    .iter()
+                    .map(|label| serde_json::json!(label))
+                    .collect(),
+            ),
+            enum_type_name: Some("status".into()),
+            postgres_native_enum: live,
+            ..column("status", "status", false)
+        }
+    }
+
     fn card(columns: Vec<SchemaColumn>) -> SchemaModel {
         SchemaModel {
             renamed_from: None,
@@ -3249,91 +3520,359 @@ mod reverse_tests {
         }
     }
 
-    fn live_facts(table: LiveTableFacts) -> LiveFacts {
-        let mut tables = BTreeMap::new();
-        tables.insert("card".to_string(), table);
-        LiveFacts::live(tables, BTreeMap::new())
+    fn not_null_check(name: &str, column: &str) -> SchemaTableCheck {
+        SchemaTableCheck {
+            name: name.into(),
+            predicate: serde_json::from_value(serde_json::json!({
+                "kind": "is_null", "column": column, "negated": true
+            }))
+            .expect("predicate"),
+        }
     }
 
-    fn statements(
-        forward: &Plan,
-        live: &IrEnvelope<SchemaIrPayload>,
-        facts: &LiveFacts,
-        declared: &IrEnvelope<SchemaIrPayload>,
-    ) -> Vec<Vec<String>> {
-        let reverse = reverse_live_plan(forward, live, facts, declared, Dialect::Postgres)
-            .expect("reverse plan");
-        render_reverse_plan(&reverse, declared, Dialect::Postgres, &BTreeSet::new())
+    fn live(models: Vec<SchemaModel>, card: LiveTableFacts) -> Side {
+        let mut facts = LiveFacts::default();
+        facts.tables.insert("card".into(), card);
+        Side::live(envelope(models), facts).expect("live side")
+    }
+
+    fn declared(models: Vec<SchemaModel>) -> Side {
+        Side::declared(envelope(models))
+    }
+
+    const DESTRUCTIVE: PlanOptions = PlanOptions { destructive: true };
+
+    /// The up from `before` to `after` and its down, on `dialect`.
+    fn up_and_down(
+        before: &Side,
+        after: &Side,
+        dialect: Dialect,
+        options: PlanOptions,
+    ) -> (Plan, Plan) {
+        let up = plan_from_ir(before, after, dialect, options);
+        let ops: Vec<MigrationOp> = up.ops().cloned().collect();
+        let down = plan_down(&ops, after, before, dialect);
+        (up, down)
+    }
+
+    fn ops(plan: &Plan) -> Vec<MigrationOp> {
+        plan.ops().cloned().collect()
+    }
+
+    fn statements(plan: &Plan) -> Vec<Vec<String>> {
+        plan.render()
             .expect("renders")
             .into_iter()
             .map(|op| op.statements)
             .collect()
     }
 
-    #[test]
-    fn an_empty_forward_plan_reverses_to_nothing() {
-        let live = envelope(vec![card(vec![column("id", "int", false)])]);
-        let facts = live_facts(LiveTableFacts::default());
-        let reverse = reverse_live_plan(
-            &Plan::unplaced(Vec::new()),
-            &live,
-            &facts,
-            &live,
-            Dialect::Postgres,
-        )
-        .expect("reverse plan");
-        assert!(reverse.operations.is_empty());
-    }
+    // -- ADR-0050's four worked cases --------------------------------------
 
     #[test]
-    fn a_snapshot_only_op_in_a_live_plan_is_refused_naming_it() {
-        let live = envelope(vec![card(vec![column("id", "int", false)])]);
-        let facts = live_facts(LiveTableFacts::default());
-        let forward = Plan {
-            operations: vec![MigrationOp::RemoveEnumLabel {
-                type_name: "status".into(),
-                label: "gone".into(),
-                columns: vec![],
-            }],
-            ..Plan::unplaced(Vec::new())
-        };
-        let err = reverse_live_plan(&forward, &live, &facts, &live, Dialect::Postgres)
-            .expect_err("refused");
+    fn an_extra_live_label_stays_and_the_added_label_cannot_come_off_a_live_type() {
+        // Live `status` holds [a, x]; the models declare [a, y].
+        let live_card = card(vec![column("id", "int", false), status(&["a", "x"], true)]);
+        let mut facts = LiveFacts::default();
+        facts
+            .tables
+            .insert("card".into(), LiveTableFacts::default());
+        facts
+            .enum_labels
+            .insert("status".into(), vec!["a".into(), "x".into()]);
+        let live = Side::live(envelope(vec![live_card]), facts).expect("live side");
+        let models = declared(vec![card(vec![
+            column("id", "int", false),
+            status(&["a", "y"], false),
+        ])]);
+        let (up, down) = up_and_down(&live, &models, Dialect::Postgres, DESTRUCTIVE);
+        // The up adds `y` and reports `x`.
         assert_eq!(
-            err,
-            PlanError::SnapshotOnlyOp {
-                op: "RemoveEnumLabel".into()
+            ops(&up),
+            vec![MigrationOp::AddEnumLabel {
+                type_name: "status".into(),
+                label: "y".into()
+            }]
+        );
+        assert!(
+            up.reports
+                .iter()
+                .any(|report| matches!(&report.kind, crate::ReportKind::ExtraEnumLabels { labels } if labels == &["x".to_string()]))
+        );
+        // Backwards the planner would remove `y` and add `x`: adding `x` is
+        // out of scope, and removing `y` is irreversible on a live type.
+        let [PlannedOp { op, verdict }] = down.operations.as_slice() else {
+            panic!("{:?}", down.operations);
+        };
+        assert_eq!(
+            op,
+            &MigrationOp::RemoveEnumLabel {
+                type_name: "status".into(),
+                label: "y".into(),
+                columns: vec![("card".into(), "status".into())],
             }
         );
-        assert!(err.to_string().contains("RemoveEnumLabel"), "{err}");
+        let Execution::Irreversible(reason) = &verdict.execution else {
+            panic!("{verdict:?}");
+        };
+        assert_eq!(
+            reason,
+            "label \"y\" of enum type status cannot be removed: enum labels are append-only \
+             (ADR-0011), and rows may hold it"
+        );
+    }
+
+    fn policy(name: &str, ferro_owned: bool, roles: &[&str]) -> LiveRowPolicy {
+        LiveRowPolicy {
+            name: name.into(),
+            command: "select".into(),
+            restrictive: false,
+            using: Some("(id > 0)".into()),
+            with_check: None,
+            roles: roles.iter().map(|role| role.to_string()).collect(),
+            ferro_owned,
+        }
     }
 
     #[test]
-    fn an_added_column_and_its_check_come_off_in_reverse_order() {
-        let live = envelope(vec![card(vec![column("id", "int", false)])]);
-        let mut declared_card = card(vec![
+    fn a_foreign_policy_is_never_touched_and_the_added_one_comes_off() {
+        // Live `card` holds the foreign policy `audit`, row security on; the
+        // models add `rls_card_owner`.
+        let bare = card(vec![column("id", "int", false)]);
+        let live = live(
+            vec![bare.clone()],
+            LiveTableFacts {
+                row_security: LiveRowSecurity {
+                    enabled: true,
+                    forced: false,
+                    policies: vec![policy("audit", false, &["public"])],
+                },
+                ..LiveTableFacts::default()
+            },
+        );
+        let mut guarded = bare;
+        guarded.row_security = Some(ferro_schema_ir::SchemaRowSecurity {
+            force: false,
+            policies: vec![ferro_schema_ir::SchemaRowPolicy {
+                name: "rls_card_owner".into(),
+                command: ferro_schema_ir::RowPolicyCommand::Select,
+                restrictive: false,
+                expr: ferro_schema_ir::RowPolicyExpr::Raw {
+                    using: Some("id > 0".into()),
+                    with_check: None,
+                },
+            }],
+        });
+        let models = declared(vec![guarded]);
+        let (up, down) = up_and_down(&live, &models, Dialect::Postgres, DESTRUCTIVE);
+        assert_eq!(
+            ops(&up),
+            vec![MigrationOp::AddRowPolicy {
+                table: "card".into(),
+                name: "rls_card_owner".into()
+            }]
+        );
+        assert_eq!(
+            ops(&down),
+            vec![MigrationOp::DropRowPolicy {
+                table: "card".into(),
+                name: "rls_card_owner".into()
+            }]
+        );
+        assert_eq!(
+            statements(&down),
+            vec![vec![
+                "DROP POLICY \"rls_card_owner\" ON \"card\"".to_string()
+            ]]
+        );
+    }
+
+    fn leftover() -> (Side, Side) {
+        let bare = card(vec![column("id", "int", false)]);
+        let live = live(
+            vec![bare.clone()],
+            LiveTableFacts {
+                checks: vec![LiveCheckFact {
+                    name: "ck_card_old".into(),
+                    definition: "CHECK ((id > 0))".into(),
+                    ferro_owned: true,
+                    validated: true,
+                }],
+                ..LiveTableFacts::default()
+            },
+        );
+        (live, declared(vec![bare]))
+    }
+
+    #[test]
+    fn a_leftover_check_the_up_left_alone_is_not_restored() {
+        let (live, models) = leftover();
+        let (up, down) = up_and_down(&live, &models, Dialect::Postgres, PlanOptions::default());
+        assert!(up.is_empty(), "{:?}", up.operations);
+        assert!(down.is_empty(), "{:?}", down.operations);
+    }
+
+    #[test]
+    fn a_leftover_check_the_up_dropped_comes_back_with_the_body_the_catalog_printed() {
+        let (live, models) = leftover();
+        let (up, down) = up_and_down(&live, &models, Dialect::Postgres, DESTRUCTIVE);
+        assert_eq!(
+            ops(&up),
+            vec![MigrationOp::DropCheck {
+                table: "card".into(),
+                name: "ck_card_old".into()
+            }]
+        );
+        assert_eq!(
+            ops(&down),
+            vec![MigrationOp::AddCheck {
+                table: "card".into(),
+                name: "ck_card_old".into()
+            }]
+        );
+        assert_eq!(
+            statements(&down),
+            vec![vec![
+                "ALTER TABLE \"card\" ADD CONSTRAINT \"ck_card_old\" CHECK ((id > 0))".to_string()
+            ]]
+        );
+        // On SQLite a check comes back to an existing table only by a
+        // rebuild: the bridge's downgrade makes that irreversible.
+        let (_, down) = up_and_down(&live, &models, Dialect::Sqlite, DESTRUCTIVE);
+        assert_eq!(down.operations.len(), 1);
+        assert_eq!(down.operations[0].verdict.execution, Execution::Rebuild);
+    }
+
+    #[test]
+    fn a_leftover_check_renamed_with_its_table_and_dropped_comes_back_under_its_old_name() {
+        // ADR-0050's fourth case beside a table rename: the models rename
+        // `card` to `deck`, and the live `card` holds the leftover
+        // `ck_card_old`, which only the live facts carry.
+        let (live, _) = leftover();
+        let mut deck = card(vec![column("id", "int", false)]);
+        deck.table_name = "deck".into();
+        deck.model_name = "app.Deck".into();
+        deck.renamed_from = Some("card".into());
+        let models = declared(vec![deck]);
+        let (up, down) = up_and_down(&live, &models, Dialect::Postgres, DESTRUCTIVE);
+        assert_eq!(
+            ops(&up),
+            vec![
+                MigrationOp::RenameTable {
+                    old: "card".into(),
+                    new: "deck".into()
+                },
+                MigrationOp::RenameConstraint {
+                    table: "deck".into(),
+                    old: "ck_card_old".into(),
+                    new: "ck_deck_old".into()
+                },
+                MigrationOp::DropCheck {
+                    table: "deck".into(),
+                    name: "ck_deck_old".into()
+                },
+            ]
+        );
+        // The down undoes the up's renames before it compares keys: the
+        // check comes back with the catalog's body under its old name.
+        assert_eq!(
+            ops(&down),
+            vec![
+                MigrationOp::RenameTable {
+                    old: "deck".into(),
+                    new: "card".into()
+                },
+                MigrationOp::AddCheck {
+                    table: "card".into(),
+                    name: "ck_card_old".into()
+                },
+            ]
+        );
+        assert_eq!(
+            statements(&down),
+            vec![
+                vec!["ALTER TABLE \"deck\" RENAME TO \"card\"".to_string()],
+                vec![
+                    "ALTER TABLE \"card\" ADD CONSTRAINT \"ck_card_old\" CHECK ((id > 0))"
+                        .to_string()
+                ],
+            ]
+        );
+    }
+
+    // -- the second live-side refusal ----------------------------------------
+
+    #[test]
+    fn a_policy_applying_to_a_role_list_cannot_be_put_back_on_a_live_table() {
+        let bare = card(vec![column("id", "int", false)]);
+        let live = live(
+            vec![bare.clone()],
+            LiveTableFacts {
+                row_security: LiveRowSecurity {
+                    enabled: true,
+                    forced: false,
+                    policies: vec![policy("rls_card_admin", true, &["admin", "auditor"])],
+                },
+                ..LiveTableFacts::default()
+            },
+        );
+        let mut guarded = bare;
+        guarded.row_security = Some(ferro_schema_ir::SchemaRowSecurity {
+            force: false,
+            policies: Vec::new(),
+        });
+        let models = declared(vec![guarded]);
+        let (up, down) = up_and_down(&live, &models, Dialect::Postgres, DESTRUCTIVE);
+        assert_eq!(
+            ops(&up),
+            vec![MigrationOp::DropRowPolicy {
+                table: "card".into(),
+                name: "rls_card_admin".into()
+            }]
+        );
+        let [PlannedOp { op, verdict }] = down.operations.as_slice() else {
+            panic!("{:?}", down.operations);
+        };
+        assert_eq!(
+            op,
+            &MigrationOp::AddRowPolicy {
+                table: "card".into(),
+                name: "rls_card_admin".into()
+            }
+        );
+        assert_eq!(
+            verdict.execution,
+            Execution::Irreversible(
+                "row policy rls_card_admin on card applies TO admin, auditor, a clause \
+                 ferro's CREATE POLICY never writes; restore it by hand"
+                    .into()
+            )
+        );
+    }
+
+    // -- the reverse cases, now planned back -------------------------------
+
+    #[test]
+    fn an_empty_up_has_an_empty_down() {
+        let (live, models) = leftover();
+        assert!(plan_down(&[], &models, &live, Dialect::Postgres).is_empty());
+    }
+
+    #[test]
+    fn an_added_column_and_its_check_come_off_check_first() {
+        let bare = card(vec![column("id", "int", false)]);
+        let live = live(vec![bare], LiveTableFacts::default());
+        let mut flavored = card(vec![
             column("id", "int", false),
             column("flavor", "varchar", true),
         ]);
-        declared_card.table_checks.push(SchemaTableCheck {
-            name: "ck_card_flavor_set".into(),
-            predicate: serde_json::from_value(serde_json::json!({
-                "kind": "is_null", "column": "flavor", "negated": true
-            }))
-            .expect("predicate"),
-        });
-        let declared = envelope(vec![declared_card]);
-        let facts = live_facts(LiveTableFacts::default());
-        let forward = plan_from_ir(
-            &live,
-            &declared,
-            Dialect::Postgres,
-            &facts,
-            PlanOptions { destructive: true },
-        )
-        .expect("forward");
+        flavored
+            .table_checks
+            .push(not_null_check("ck_card_flavor_set", "flavor"));
+        let models = declared(vec![flavored]);
+        let (up, down) = up_and_down(&live, &models, Dialect::Postgres, DESTRUCTIVE);
         assert_eq!(
-            forward.operations,
+            ops(&up),
             vec![
                 MigrationOp::AddColumn {
                     table: "card".into(),
@@ -3346,7 +3885,7 @@ mod reverse_tests {
             ]
         );
         assert_eq!(
-            statements(&forward, &live, &facts, &declared),
+            statements(&down),
             vec![
                 vec!["ALTER TABLE \"card\" DROP CONSTRAINT \"ck_card_flavor_set\"".to_string()],
                 vec!["ALTER TABLE \"card\" DROP COLUMN \"flavor\"".to_string()],
@@ -3355,94 +3894,82 @@ mod reverse_tests {
     }
 
     #[test]
-    fn a_re_added_required_column_is_left_to_the_caller_when_unrendered() {
-        // Dropping `nickname: str` (NOT NULL, no default): its reverse
-        // re-adds a column existing rows hold no value for. The renderer has
-        // no statement for it; the caller names it unrendered and writes it.
-        let live = envelope(vec![card(vec![
-            column("id", "int", false),
-            column("nickname", "varchar", false),
-            column("bio", "varchar", true),
-        ])]);
-        let declared = envelope(vec![card(vec![column("id", "int", false)])]);
-        let facts = live_facts(LiveTableFacts::default());
-        let forward = plan_from_ir(
-            &live,
-            &declared,
-            Dialect::Postgres,
-            &facts,
-            PlanOptions { destructive: true },
-        )
-        .expect("forward");
-        let reverse = reverse_live_plan(&forward, &live, &facts, &declared, Dialect::Postgres)
-            .expect("reverse plan");
-        let nickname = reverse
+    fn a_re_added_required_column_demands_values_and_is_left_to_the_caller() {
+        // Dropping `nickname: str` (NOT NULL, no default): its down re-adds
+        // a column existing rows hold no value for. The renderer has no
+        // statement for it; the caller leaves it out and writes it.
+        let live = live(
+            vec![card(vec![
+                column("id", "int", false),
+                column("nickname", "varchar", false),
+                column("bio", "varchar", true),
+            ])],
+            LiveTableFacts::default(),
+        );
+        let models = declared(vec![card(vec![column("id", "int", false)])]);
+        let (_, down) = up_and_down(&live, &models, Dialect::Postgres, DESTRUCTIVE);
+        let nickname = down
             .operations
             .iter()
-            .position(|op| {
-                op == &ReverseOp::Planned(MigrationOp::AddColumn {
-                    table: "card".into(),
-                    column: "nickname".into(),
-                })
+            .position(|planned| {
+                planned.op
+                    == MigrationOp::AddColumn {
+                        table: "card".into(),
+                        column: "nickname".into(),
+                    }
             })
             .expect("the re-add is planned");
-
-        let err = render_reverse_plan(&reverse, &declared, Dialect::Postgres, &BTreeSet::new())
+        let verdict = &down.operations[nickname].verdict;
+        assert!(verdict.demands_values && verdict.recreates, "{verdict:?}");
+        let err = down
+            .render()
             .expect_err("no statement backfills existing rows");
         assert!(err.message.contains("card.nickname"), "{}", err.message);
-
-        let rendered = render_reverse_plan(
-            &reverse,
-            &declared,
-            Dialect::Postgres,
-            &BTreeSet::from([nickname]),
-        )
-        .expect("renders the rest");
-        assert_eq!(rendered.len(), reverse.operations.len());
-        assert!(rendered[nickname].statements.is_empty());
-        assert!(
-            rendered.iter().any(|op| op.statements
-                == vec!["ALTER TABLE \"card\" ADD COLUMN \"bio\" varchar".to_string()]),
-            "{rendered:?}"
+        let rest: Vec<usize> = (0..down.operations.len())
+            .filter(|&index| index != nickname)
+            .collect();
+        let rendered = down.render_ops(&rest).expect("renders the rest");
+        assert_eq!(
+            rendered
+                .into_iter()
+                .map(|op| op.statements)
+                .collect::<Vec<_>>(),
+            vec![vec![
+                "ALTER TABLE \"card\" ADD COLUMN \"bio\" varchar".to_string()
+            ]]
         );
     }
 
     #[test]
-    fn a_dropped_or_rebuilt_check_comes_back_with_its_catalog_body() {
-        let live = envelope(vec![card(vec![column("id", "int", false)])]);
-        let declared = live.clone();
-        let facts = live_facts(LiveTableFacts {
-            checks: vec![LiveCheckFact {
-                name: "ck_card_legacy".into(),
-                definition: "CHECK ((id > 0))".into(),
-                ferro_owned: true,
-                validated: true,
-            }],
-            ..LiveTableFacts::default()
-        });
-        let forward = Plan {
-            operations: vec![MigrationOp::DropCheck {
-                table: "card".into(),
-                name: "ck_card_legacy".into(),
-            }],
-            ..Plan::unplaced(Vec::new())
-        };
-        assert_eq!(
-            statements(&forward, &live, &facts, &declared),
-            vec![vec![
-                "ALTER TABLE \"card\" ADD CONSTRAINT \"ck_card_legacy\" CHECK ((id > 0))"
-                    .to_string()
-            ]]
+    fn a_rebuilt_check_comes_back_with_its_catalog_body() {
+        let bare = card(vec![column("id", "int", false)]);
+        let live = live(
+            vec![bare.clone()],
+            LiveTableFacts {
+                checks: vec![LiveCheckFact {
+                    name: "ck_card_legacy".into(),
+                    definition: "CHECK ((id > 0))".into(),
+                    ferro_owned: true,
+                    validated: true,
+                }],
+                ..LiveTableFacts::default()
+            },
         );
-        let rebuild = Plan {
-            operations: vec![MigrationOp::RebuildCheck {
-                table: "card".into(),
-                name: "ck_card_legacy".into(),
-            }],
-            ..Plan::unplaced(Vec::new())
-        };
+        let mut checked = bare;
+        checked
+            .table_checks
+            .push(not_null_check("ck_card_legacy", "id"));
+        let models = declared(vec![checked]);
+        let (up, down) = up_and_down(&live, &models, Dialect::Postgres, DESTRUCTIVE);
         assert_eq!(
-            statements(&rebuild, &live, &facts, &declared),
+            ops(&up),
+            vec![MigrationOp::RebuildCheck {
+                table: "card".into(),
+                name: "ck_card_legacy".into()
+            }]
+        );
+        assert_eq!(
+            statements(&down),
             vec![vec![
                 "ALTER TABLE \"card\" DROP CONSTRAINT \"ck_card_legacy\"".to_string(),
                 "ALTER TABLE \"card\" ADD CONSTRAINT \"ck_card_legacy\" CHECK ((id > 0))"
@@ -3453,31 +3980,44 @@ mod reverse_tests {
 
     #[test]
     fn a_rebuilt_policy_comes_back_as_the_catalog_printed_it() {
-        let live = envelope(vec![card(vec![column("id", "int", false)])]);
-        let facts = live_facts(LiveTableFacts {
-            row_security: LiveRowSecurity {
-                enabled: true,
-                forced: false,
-                policies: vec![LiveRowPolicy {
-                    name: "rls_card_mine".into(),
-                    command: "select".into(),
-                    using: Some("(id > 0)".into()),
-                    roles: vec!["public".into()],
-                    ferro_owned: true,
-                    ..LiveRowPolicy::default()
-                }],
+        let bare = card(vec![column("id", "int", false)]);
+        let live = live(
+            vec![bare.clone()],
+            LiveTableFacts {
+                row_security: LiveRowSecurity {
+                    enabled: true,
+                    forced: false,
+                    policies: vec![policy("rls_card_mine", true, &["public"])],
+                },
+                ..LiveTableFacts::default()
             },
-            ..LiveTableFacts::default()
-        });
-        let forward = Plan {
-            operations: vec![MigrationOp::RebuildRowPolicy {
-                table: "card".into(),
+        );
+        // The models write the policy for every command: a drift the up
+        // rebuilds.
+        let mut guarded = bare;
+        guarded.row_security = Some(ferro_schema_ir::SchemaRowSecurity {
+            force: false,
+            policies: vec![ferro_schema_ir::SchemaRowPolicy {
                 name: "rls_card_mine".into(),
+                command: ferro_schema_ir::RowPolicyCommand::All,
+                restrictive: false,
+                expr: ferro_schema_ir::RowPolicyExpr::Raw {
+                    using: Some("(id > 0)".into()),
+                    with_check: None,
+                },
             }],
-            ..Plan::unplaced(Vec::new())
-        };
+        });
+        let models = declared(vec![guarded]);
+        let (up, down) = up_and_down(&live, &models, Dialect::Postgres, DESTRUCTIVE);
         assert_eq!(
-            statements(&forward, &live, &facts, &live),
+            ops(&up),
+            vec![MigrationOp::RebuildRowPolicy {
+                table: "card".into(),
+                name: "rls_card_mine".into()
+            }]
+        );
+        assert_eq!(
+            statements(&down),
             vec![vec![
                 "DROP POLICY \"rls_card_mine\" ON \"card\"".to_string(),
                 "CREATE POLICY \"rls_card_mine\" ON \"card\" FOR SELECT USING ((id > 0))"
@@ -3487,65 +4027,84 @@ mod reverse_tests {
     }
 
     #[test]
-    fn a_label_addition_is_irreversible_and_says_why() {
-        let live = envelope(vec![card(vec![column("id", "int", false)])]);
-        let forward = Plan {
-            operations: vec![MigrationOp::AddEnumLabel {
-                type_name: "flavor".into(),
-                label: "salty".into(),
-            }],
-            ..Plan::unplaced(Vec::new())
-        };
-        let reverse = reverse_live_plan(
-            &forward,
-            &live,
-            &live_facts(LiveTableFacts::default()),
-            &live,
-            Dialect::Postgres,
-        )
-        .expect("reverse");
-        let [ReverseOp::Irreversible { reason, .. }] = reverse.operations.as_slice() else {
-            panic!("{:?}", reverse.operations);
-        };
-        assert!(reason.contains("append-only"), "{reason}");
-        assert_eq!(
-            reverse.operations[0].to_json()["irreversible"]["reason"],
-            serde_json::json!(reason)
+    fn renames_run_back_first_the_other_way_round() {
+        let live = live(
+            vec![card(vec![
+                column("id", "int", false),
+                column("label", "varchar", true),
+            ])],
+            LiveTableFacts::default(),
         );
-    }
-
-    #[test]
-    fn renames_run_back_last_the_other_way_round() {
-        let live = envelope(vec![card(vec![
-            column("id", "int", false),
-            column("label", "varchar", true),
-        ])]);
-        let mut renamed = card(vec![
+        let models = declared(vec![card(vec![
             column("id", "int", false),
             SchemaColumn {
                 renamed_from: Some("label".into()),
                 ..column("title", "varchar", true)
             },
             column("note", "varchar", true),
-        ]);
-        renamed.model_name = "app.Card".into();
-        let declared = envelope(vec![renamed]);
-        let facts = live_facts(LiveTableFacts::default());
-        let forward = plan_from_ir(
-            &live,
-            &declared,
-            Dialect::Postgres,
-            &facts,
-            PlanOptions { destructive: true },
-        )
-        .expect("forward");
+        ])]);
+        let (_, down) = up_and_down(&live, &models, Dialect::Postgres, DESTRUCTIVE);
         assert_eq!(
-            statements(&forward, &live, &facts, &declared),
+            statements(&down),
             vec![
-                vec!["ALTER TABLE \"card\" DROP COLUMN \"note\"".to_string()],
                 vec!["ALTER TABLE \"card\" RENAME COLUMN \"title\" TO \"label\"".to_string()],
+                vec!["ALTER TABLE \"card\" DROP COLUMN \"note\"".to_string()],
             ]
         );
+    }
+
+    // -- between two declared stages ---------------------------------------
+
+    #[test]
+    fn a_down_between_two_declared_stages_is_never_irreversible() {
+        // Every shape a live target refuses, between two declarations: an
+        // added label (its down removes it), a dropped policy applying to no
+        // role list (a declaration writes none), a dropped and a rebuilt
+        // check, a dropped column and table.
+        let mut base = card(vec![column("id", "int", false), status(&["a"], false)]);
+        base.table_checks.push(not_null_check("ck_card_old", "id"));
+        base.row_security = Some(ferro_schema_ir::SchemaRowSecurity {
+            force: true,
+            policies: vec![ferro_schema_ir::SchemaRowPolicy {
+                name: "rls_card_mine".into(),
+                command: ferro_schema_ir::RowPolicyCommand::Select,
+                restrictive: false,
+                expr: ferro_schema_ir::RowPolicyExpr::Raw {
+                    using: Some("id > 0".into()),
+                    with_check: None,
+                },
+            }],
+        });
+        let mut other = card(vec![column("id", "int", false)]);
+        other.table_name = "tag".into();
+        other.model_name = "app.Tag".into();
+        let before = vec![base.clone(), other];
+        let mut edited = card(vec![
+            column("id", "int", false),
+            status(&["a", "b"], false),
+            column("note", "varchar", false),
+        ]);
+        edited.row_security = Some(ferro_schema_ir::SchemaRowSecurity {
+            force: false,
+            policies: Vec::new(),
+        });
+        for dialect in [Dialect::Postgres, Dialect::Sqlite] {
+            for (old, new) in [
+                (before.clone(), vec![edited.clone()]),
+                (vec![edited.clone()], before.clone()),
+            ] {
+                let (up, down) = up_and_down(&declared(old), &declared(new), dialect, DESTRUCTIVE);
+                assert!(!down.is_empty() && !up.is_empty());
+                assert!(
+                    down.operations.iter().all(|planned| !matches!(
+                        planned.verdict.execution,
+                        Execution::Irreversible(_)
+                    )),
+                    "{dialect:?} {:?}",
+                    down.operations
+                );
+            }
+        }
     }
 }
 

@@ -16,18 +16,17 @@
 //!                               CREATE UNIQUE INDEX IF NOT EXISTS "uq_author_name" ON "author" ("name");
 //! ```
 //!
-//! [`needs_rebuild`] is the one table deciding, per op and per direction,
-//! whether SQLite runs an op natively or only through a rebuild; [`render`]
-//! writes the rebuild. The `CREATE TABLE` is the create pass's own
+//! Whether SQLite runs an op natively or only through a rebuild is the op's
+//! verdict ([`crate::Execution::Rebuild`], decided once by the planner);
+//! [`render`] writes the rebuild. The `CREATE TABLE` is the create pass's own
 //! ([`crate::emit::render_create_table_as`]) for the shape the step leaves,
 //! byte for byte apart from the table's name, and the indexes after the
 //! rename are the create pass's own statements (AGENTS.md § I-1). The file
 //! holds only these statements: the `foreign-keys-off` header hands the
 //! pragma, the transaction and `PRAGMA foreign_key_check` to the runner.
 
-use super::columns::{PlanContext, PlanDirection, goes_with_a_dropped_column, needs_values};
 use crate::emit::{backfill_value_sql, render_create_table_as};
-use crate::{Dialect, EmissionError, MigrationOp};
+use crate::{Dialect, EmissionError, Execution, PlannedOp};
 use ferro_ddl_lowering::{
     CanonicalType, ResolvedStorage, quote_ident, render_relabel_copy, resolve_column_storage,
     sqlite_declared_type,
@@ -45,113 +44,13 @@ pub fn new_table_name(table: &str) -> String {
     format!("{NEW_TABLE_PREFIX}{table}")
 }
 
-fn has_foreign_key(model: Option<&SchemaModel>, column: &str) -> bool {
-    model.is_some_and(|model| model.foreign_keys.iter().any(|fk| fk.column == column))
-}
-
-fn column<'a>(model: Option<&'a SchemaModel>, name: &str) -> Option<&'a SchemaColumn> {
-    model?.columns.iter().find(|col| col.name == name)
-}
-
-/// Whether SQLite can run `op` only through a table rebuild, in the file
-/// going `direction` that `ctx` describes. Always `false` on Postgres, which
-/// never rebuilds.
-///
-/// | Op | Up | Down |
-/// | :-- | :-- | :-- |
-/// | add/drop a table, an enum type or label, an index | native | native |
-/// | redefine an index (drop + create) | native | native |
-/// | rename a table, a column, an index (drop + create), a policy | native | native |
-/// | rename a constraint (a `ck_` / `fk_` name a rename drags) | rebuild | rebuild |
-/// | add an optional column, or a required one with a literal default | native | native |
-/// | add a required column with no default | (backfill) | rebuild |
-/// | add a required foreign-key column (SQLite's `REFERENCES` needs a NULL default) | rebuild | rebuild |
-/// | drop a plain column | native | native |
-/// | drop a foreign-key column | rebuild | rebuild |
-/// | change a column's type or nullability | rebuild | rebuild |
-/// | add, change or drop a check (but a dropped column's own) | rebuild | rebuild |
-/// | add, retarget or drop a foreign key (on a kept column) | rebuild | rebuild |
-/// | change the primary key | rebuild | rebuild |
-/// | validate a constraint, rebuild an invalid index, row security | native (nothing on SQLite) | native |
-///
-/// A foreign-key column comes off natively only while it is the inline
-/// `REFERENCES` column `ADD COLUMN` wrote; once any rebuild has written the
-/// table (as `FOREIGN KEY (…)`, `CREATE TABLE`'s shape) SQLite refuses to
-/// drop it in place, and a down cannot know which shape it finds, so the
-/// drop is always a rebuild.
-pub fn needs_rebuild(op: &MigrationOp, direction: PlanDirection, ctx: &PlanContext<'_>) -> bool {
-    if ctx.dialect != Dialect::Sqlite {
-        return false;
-    }
-    match op {
-        MigrationOp::AddTable { .. }
-        | MigrationOp::DropTable { .. }
-        | MigrationOp::CreateEnumType { .. }
-        | MigrationOp::DropEnumType { .. }
-        | MigrationOp::AddEnumLabel { .. }
-        | MigrationOp::RenameEnumLabel { .. }
-        | MigrationOp::RemoveEnumLabel { .. }
-        | MigrationOp::RenameEnumType { .. }
-        | MigrationOp::AddIndex { .. }
-        | MigrationOp::DropIndex { .. }
-        | MigrationOp::RedefineIndex { .. }
-        | MigrationOp::RebuildIndex { .. }
-        | MigrationOp::ValidateConstraint { .. }
-        | MigrationOp::AddRowPolicy { .. }
-        | MigrationOp::RebuildRowPolicy { .. }
-        | MigrationOp::DropRowPolicy { .. }
-        | MigrationOp::EnableRowSecurity { .. }
-        | MigrationOp::ForceRowSecurity { .. }
-        | MigrationOp::DisableRowSecurity { .. }
-        | MigrationOp::NoForceRowSecurity { .. }
-        | MigrationOp::RenameTable { .. }
-        | MigrationOp::RenameColumn { .. }
-        | MigrationOp::RenameIndex { .. }
-        | MigrationOp::RenamePolicy { .. } => false,
-        // A table constraint's name lives in `CREATE TABLE` (ADR-0046).
-        MigrationOp::RenameConstraint { .. } => true,
-        MigrationOp::AddColumn { column: name, .. } => {
-            let Some(col) = column(ctx.after, name) else {
-                return false;
-            };
-            if needs_values(col) {
-                // Going up the rows need values first (a backfill); a down
-                // putting the column back has no `SET NOT NULL` to reach it.
-                direction == PlanDirection::Down
-            } else {
-                !col.nullable && has_foreign_key(ctx.after, name)
-            }
-        }
-        MigrationOp::DropColumn { column: name, .. } => has_foreign_key(ctx.before, name),
-        MigrationOp::AlterColumnType { .. }
-        | MigrationOp::AlterColumnNullability { .. }
-        | MigrationOp::ChangePrimaryKey { .. }
-        | MigrationOp::AddCheck { .. }
-        | MigrationOp::RebuildCheck { .. }
-        | MigrationOp::AddForeignKey { .. }
-        | MigrationOp::DropForeignKey { .. }
-        | MigrationOp::RebuildForeignKey { .. } => true,
-        MigrationOp::DropCheck { .. } => !goes_with_a_dropped_column(op, ctx),
-    }
-}
-
-/// The tables a file going `direction` from `old` to `new` rebuilds on
-/// `dialect`: each table one of `ops` needs a rebuild for. Every other op on
-/// such a table folds into its one rebuild (ADR-0046: one copy per table per
-/// phase step).
-pub fn tables_to_rebuild(
-    ops: &[MigrationOp],
-    old: &IrEnvelope<SchemaIrPayload>,
-    new: &IrEnvelope<SchemaIrPayload>,
-    dialect: Dialect,
-    direction: PlanDirection,
-) -> BTreeSet<String> {
+/// The tables a file rebuilds: each table one of `ops` has the
+/// [`Execution::Rebuild`] verdict for. Every other op on such a table folds
+/// into its one rebuild (ADR-0046: one copy per table per phase step).
+pub fn tables_to_rebuild(ops: &[PlannedOp]) -> BTreeSet<String> {
     ops.iter()
-        .filter(|op| {
-            let ctx = PlanContext::of(op, old, new, dialect, direction);
-            needs_rebuild(op, direction, &ctx)
-        })
-        .filter_map(|op| op.table().map(str::to_string))
+        .filter(|planned| planned.verdict.execution == Execution::Rebuild)
+        .filter_map(|planned| planned.op.table().map(str::to_string))
         .collect()
 }
 
@@ -484,13 +383,11 @@ pub fn rebuilt_tables(statements: &[String]) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::columns::PlanContext;
     use super::super::tests::{column, ir, model, pk};
     use super::*;
+    use crate::MigrationOp;
     use crate::render_create_table;
     use ferro_schema_ir::{SchemaCheck, SchemaForeignKey, SchemaIndex, SchemaUnique};
-
-    const DIRECTIONS: [PlanDirection; 2] = [PlanDirection::Up, PlanDirection::Down];
 
     fn nullable(name: &str, logical_type: &str) -> SchemaColumn {
         SchemaColumn {
@@ -526,17 +423,20 @@ mod tests {
         model
     }
 
-    /// `needs_rebuild` of `op` in a file turning `before` into `after`.
+    /// Whether `op`'s verdict between `before` and `after` is a rebuild.
     fn rebuilds(
         op: &MigrationOp,
         before: &SchemaModel,
         after: &SchemaModel,
         dialect: Dialect,
-        direction: PlanDirection,
     ) -> bool {
-        let (before, after) = (ir(vec![before.clone()]), ir(vec![after.clone()]));
-        let ctx = PlanContext::of(op, &before, &after, dialect, direction);
-        needs_rebuild(op, direction, &ctx)
+        let planned = PlannedOp::of(
+            op.clone(),
+            &crate::Side::declared(ir(vec![before.clone()])),
+            &crate::Side::declared(ir(vec![after.clone()])),
+            dialect,
+        );
+        planned.verdict.execution == Execution::Rebuild
     }
 
     fn t() -> String {
@@ -544,8 +444,9 @@ mod tests {
     }
 
     /// Every op the planner emits, with the table shapes it is decided
-    /// against and whether SQLite rebuilds it going (up, down).
-    fn the_table() -> Vec<(MigrationOp, SchemaModel, SchemaModel, (bool, bool))> {
+    /// against and whether SQLite rebuilds it: one answer, whichever way a
+    /// file runs it (ADR-0050).
+    fn the_table() -> Vec<(MigrationOp, SchemaModel, SchemaModel, bool)> {
         let plain = author(vec![]);
         let bio = author(vec![nullable("bio", "string")]);
         let req_bio = author(vec![column("bio", "string")]);
@@ -585,13 +486,13 @@ mod tests {
                 MigrationOp::AddTable { table: t() },
                 plain.clone(),
                 plain.clone(),
-                (false, false),
+                false,
             ),
             (
                 MigrationOp::DropTable { table: t() },
                 plain.clone(),
                 plain.clone(),
-                (false, false),
+                false,
             ),
             (
                 MigrationOp::CreateEnumType {
@@ -600,7 +501,7 @@ mod tests {
                 },
                 plain.clone(),
                 plain.clone(),
-                (false, false),
+                false,
             ),
             (
                 MigrationOp::DropEnumType {
@@ -608,7 +509,7 @@ mod tests {
                 },
                 plain.clone(),
                 plain.clone(),
-                (false, false),
+                false,
             ),
             (
                 MigrationOp::AddEnumLabel {
@@ -617,27 +518,23 @@ mod tests {
                 },
                 plain.clone(),
                 plain.clone(),
-                (false, false),
+                false,
             ),
             // A1, A2.
-            (add("bio"), plain.clone(), bio.clone(), (false, false)),
-            (add("bio"), plain.clone(), defaulted.clone(), (false, false)),
-            // A3 up is a backfill; the down of an A4 drop puts it back.
-            (add("bio"), plain.clone(), req_bio.clone(), (false, true)),
+            (add("bio"), plain.clone(), bio.clone(), false),
+            (add("bio"), plain.clone(), defaulted.clone(), false),
+            // A3: SQLite has no `SET NOT NULL` to reach it (an up answers it
+            // with a backfill first; the down of an A4 drop rebuilds).
+            (add("bio"), plain.clone(), req_bio.clone(), true),
             // A1 with a foreign key: inline REFERENCES.
-            (
-                add("team_id"),
-                plain.clone(),
-                opt_fk.clone(),
-                (false, false),
-            ),
+            (add("team_id"), plain.clone(), opt_fk.clone(), false),
             // A required foreign-key column: no REFERENCES on ADD COLUMN.
-            (add("team_id"), plain.clone(), req_fk.clone(), (true, true)),
+            (add("team_id"), plain.clone(), req_fk.clone(), true),
             // A4 plain, nullable or not.
-            (drop("bio"), bio.clone(), plain.clone(), (false, false)),
-            (drop("bio"), req_bio.clone(), plain.clone(), (false, false)),
+            (drop("bio"), bio.clone(), plain.clone(), false),
+            (drop("bio"), req_bio.clone(), plain.clone(), false),
             // C2, and the down of A1-with-FK.
-            (drop("team_id"), opt_fk.clone(), plain.clone(), (true, true)),
+            (drop("team_id"), opt_fk.clone(), plain.clone(), true),
             // A6.
             (
                 MigrationOp::AlterColumnType {
@@ -646,7 +543,7 @@ mod tests {
                 },
                 age_int.clone(),
                 age_text.clone(),
-                (true, true),
+                true,
             ),
             // A7a, A7b.
             (
@@ -656,9 +553,11 @@ mod tests {
                 },
                 req_bio.clone(),
                 bio.clone(),
-                (true, true),
+                true,
             ),
             (
+                // SQLite would rebuild it, but its verdict is the primary-key
+                // refusal, which no door runs.
                 MigrationOp::ChangePrimaryKey {
                     table: t(),
                     from: vec!["id".into()],
@@ -666,7 +565,7 @@ mod tests {
                 },
                 plain.clone(),
                 plain.clone(),
-                (true, true),
+                false,
             ),
             // A9.
             (
@@ -678,7 +577,7 @@ mod tests {
                 },
                 bio.clone(),
                 indexed.clone(),
-                (false, false),
+                false,
             ),
             (
                 MigrationOp::DropIndex {
@@ -687,7 +586,7 @@ mod tests {
                 },
                 indexed.clone(),
                 bio.clone(),
-                (false, false),
+                false,
             ),
             (
                 MigrationOp::RebuildIndex {
@@ -698,7 +597,7 @@ mod tests {
                 },
                 indexed.clone(),
                 indexed.clone(),
-                (false, false),
+                false,
             ),
             // A10 add, change, drop.
             (
@@ -708,7 +607,7 @@ mod tests {
                 },
                 bio.clone(),
                 checked_bio.clone(),
-                (true, true),
+                true,
             ),
             (
                 MigrationOp::RebuildCheck {
@@ -717,7 +616,7 @@ mod tests {
                 },
                 checked_bio.clone(),
                 checked_bio.clone(),
-                (true, true),
+                true,
             ),
             (
                 MigrationOp::DropCheck {
@@ -726,7 +625,7 @@ mod tests {
                 },
                 checked_bio.clone(),
                 bio.clone(),
-                (true, true),
+                true,
             ),
             // A dropped column's own check goes with its DROP COLUMN.
             (
@@ -736,7 +635,7 @@ mod tests {
                 },
                 checked_bio.clone(),
                 plain.clone(),
-                (false, false),
+                false,
             ),
             // C3, and a foreign key added to an existing column.
             (
@@ -746,7 +645,7 @@ mod tests {
                 },
                 author(vec![nullable("team_id", "integer")]),
                 opt_fk.clone(),
-                (true, true),
+                true,
             ),
             (
                 MigrationOp::RebuildForeignKey {
@@ -756,7 +655,7 @@ mod tests {
                 },
                 opt_fk.clone(),
                 opt_fk.clone(),
-                (true, true),
+                true,
             ),
             (
                 MigrationOp::ValidateConstraint {
@@ -765,7 +664,7 @@ mod tests {
                 },
                 checked_bio.clone(),
                 checked_bio.clone(),
-                (false, false),
+                false,
             ),
             (
                 MigrationOp::AddRowPolicy {
@@ -774,7 +673,7 @@ mod tests {
                 },
                 plain.clone(),
                 plain.clone(),
-                (false, false),
+                false,
             ),
             (
                 MigrationOp::RebuildRowPolicy {
@@ -783,7 +682,7 @@ mod tests {
                 },
                 plain.clone(),
                 plain.clone(),
-                (false, false),
+                false,
             ),
             (
                 MigrationOp::DropRowPolicy {
@@ -792,37 +691,37 @@ mod tests {
                 },
                 plain.clone(),
                 plain.clone(),
-                (false, false),
+                false,
             ),
             (
                 MigrationOp::EnableRowSecurity { table: t() },
                 plain.clone(),
                 plain.clone(),
-                (false, false),
+                false,
             ),
             (
                 MigrationOp::ForceRowSecurity { table: t() },
                 plain.clone(),
                 plain.clone(),
-                (false, false),
+                false,
             ),
             (
                 MigrationOp::DisableRowSecurity { table: t() },
                 plain.clone(),
                 plain.clone(),
-                (false, false),
+                false,
             ),
             (
                 MigrationOp::NoForceRowSecurity { table: t() },
                 plain.clone(),
                 plain,
-                (false, false),
+                false,
             ),
         ]
     }
 
     #[test]
-    fn the_native_or_rebuild_table_for_every_op_and_direction() {
+    fn the_native_or_rebuild_verdict_for_every_op() {
         let table = the_table();
         // Every planner op kind is pinned.
         let kinds: std::collections::BTreeSet<String> = table
@@ -830,18 +729,16 @@ mod tests {
             .map(|(op, ..)| super::super::op_kind(op))
             .collect();
         assert_eq!(kinds.len(), 26, "{kinds:?}");
-        for (op, before, after, (up, down)) in table {
-            for (direction, expected) in DIRECTIONS.into_iter().zip([up, down]) {
-                assert_eq!(
-                    rebuilds(&op, &before, &after, Dialect::Sqlite, direction),
-                    expected,
-                    "{op:?} {direction:?}"
-                );
-                assert!(
-                    !rebuilds(&op, &before, &after, Dialect::Postgres, direction),
-                    "Postgres never rebuilds: {op:?} {direction:?}"
-                );
-            }
+        for (op, before, after, expected) in table {
+            assert_eq!(
+                rebuilds(&op, &before, &after, Dialect::Sqlite),
+                expected,
+                "{op:?}"
+            );
+            assert!(
+                !rebuilds(&op, &before, &after, Dialect::Postgres),
+                "Postgres never rebuilds: {op:?}"
+            );
         }
     }
 

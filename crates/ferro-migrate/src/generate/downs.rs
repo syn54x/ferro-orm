@@ -1,6 +1,6 @@
 //! The generated down (ADR-0033): one step's reverse is the one planner run
-//! backwards, from the migration's snapshot to its parent's, restricted to
-//! what the step touches.
+//! backwards, from the stage after the step to the stage before it,
+//! restricted to the artifacts the step touches.
 //!
 //! ```text
 //! 0002_drop_author/01_schema.up.postgres.sql     DROP TABLE "author"; DROP TYPE "status"
@@ -8,8 +8,10 @@
 //!                                                CREATE TYPE "status" …; CREATE TABLE "author" (…)
 //! ```
 //!
-//! Every statement comes from the one renderer over [`crate::plan_from_ir`]`(after,
-//! before)`: no statement is built here (AGENTS.md § I-1). The down restores
+//! The down is [`crate::plan_down`]`(step_ops, after, before)`, the one down
+//! every door uses (ADR-0050): the planner run back, keeping only the ops
+//! whose artifact the step's up touched, every statement from the one
+//! renderer — no statement is built here (AGENTS.md § I-1). The down restores
 //! schema, never data, so a down that recreates a dropped table or `NOT NULL`
 //! column carries `-- ferro: data-dependent`, as does one whose statements
 //! can fail on the rows it finds (a cast, `SET NOT NULL`, a unique); a down
@@ -29,42 +31,19 @@
 //! ```
 
 use super::backfill;
-use super::columns::{self, Phase, PlanContext, PlanDirection};
+use super::columns;
 use super::rebuild;
 use super::renames;
 use super::{GenerateError, refuse_unrendered, step_text};
 use crate::directory::Headers;
-use crate::plan::{
-    self, Hint, rename_ops, renamed_snapshot, renamed_table, reverse_hints, storage_hints,
-};
+use crate::plan::{self, Hint, renamed_snapshot};
 use crate::render::render_ops;
-use crate::{Dialect, MigrationOp, RenderedOp};
+use crate::{Dialect, Execution, MigrationOp, PlannedOp, RenderedOp, RowRisk, Side, plan_down};
 use ferro_ddl_lowering::ConstraintMode;
 use ferro_schema_ir::{IrEnvelope, SchemaColumn, SchemaIrPayload};
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::Rendering;
-
-/// What an op changes: its table, or the enum type it creates or drops.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum Subject {
-    Table(String),
-    EnumType(String),
-}
-
-fn subject(op: &MigrationOp) -> Option<Subject> {
-    match op {
-        MigrationOp::CreateEnumType { type_name, .. }
-        | MigrationOp::DropEnumType { type_name }
-        | MigrationOp::AddEnumLabel { type_name, .. }
-        | MigrationOp::RenameEnumLabel { type_name, .. }
-        | MigrationOp::RemoveEnumLabel { type_name, .. }
-        | MigrationOp::RenameEnumType { new: type_name, .. } => {
-            Some(Subject::EnumType(type_name.clone()))
-        }
-        other => other.table().map(|table| Subject::Table(table.to_string())),
-    }
-}
 
 fn find_column<'a>(
     ir: &'a IrEnvelope<SchemaIrPayload>,
@@ -80,65 +59,24 @@ fn find_column<'a>(
         .find(|col| col.name == column)
 }
 
-/// The column `op` adds, or whose type or nullability it changes, as `new`
-/// declares it.
-fn target_column<'a>(
-    op: &MigrationOp,
-    new: &'a IrEnvelope<SchemaIrPayload>,
-) -> Option<&'a SchemaColumn> {
-    match op {
-        MigrationOp::AddColumn { table, column }
-        | MigrationOp::AlterColumnType { table, column }
-        | MigrationOp::AlterColumnNullability { table, column } => find_column(new, table, column),
-        _ => None,
-    }
-}
-
-/// Whether running `op` brings back something the up removed, whose rows are
-/// gone: a table, or a `NOT NULL` column (a nullable one comes back exactly
-/// as declared, holding nothing).
-fn recreates(op: &MigrationOp, new: &IrEnvelope<SchemaIrPayload>) -> bool {
-    match op {
-        MigrationOp::AddTable { .. } => true,
-        MigrationOp::AddColumn { .. } => target_column(op, new).is_some_and(|col| !col.nullable),
-        _ => false,
-    }
-}
-
 /// Whether `op`'s statements, its constraints added in `constraints` mode,
-/// can fail on the rows the table holds: a cast, a `SET NOT NULL`, a unique
-/// over existing values, a `NOT NULL` column added with no value to give
-/// them, or a check or foreign key validated as it is added (one added
-/// `NOT VALID` scans nothing; its validate step is the data-dependent one).
-fn may_fail_on_rows(
-    op: &MigrationOp,
-    new: &IrEnvelope<SchemaIrPayload>,
-    constraints: ConstraintMode,
-) -> bool {
-    let column = target_column(op, new);
-    match op {
-        MigrationOp::AlterColumnType { .. } => true,
-        MigrationOp::AlterColumnNullability { .. } => column.is_some_and(|col| !col.nullable),
-        MigrationOp::AddIndex { unique, .. } => *unique,
-        // A check or a foreign key over rows already there (a SQLite rebuild
-        // copies them under it).
-        MigrationOp::AddCheck { .. }
-        | MigrationOp::RebuildCheck { .. }
-        | MigrationOp::AddForeignKey { .. }
-        | MigrationOp::RebuildForeignKey { .. } => constraints == ConstraintMode::Plain,
-        MigrationOp::AddColumn { .. } => {
-            column.is_some_and(|col| columns::needs_values(col) || (!col.nullable && col.unique))
-        }
-        _ => false,
+/// can fail on the rows the table holds (its verdict's [`RowRisk`]): a check
+/// or foreign key added `NOT VALID` scans nothing — its validate step is the
+/// data-dependent one.
+fn may_fail_on_rows(op: &PlannedOp, constraints: ConstraintMode) -> bool {
+    match op.verdict.fails_on_rows {
+        RowRisk::None => false,
+        RowRisk::Always => true,
+        RowRisk::WhenValidated => constraints == ConstraintMode::Plain,
     }
 }
 
 /// Whether `ops` rewrite rows on `dialect`: a label rename over a column that
 /// keeps the label as text in its rows ([`plan::relabels_rows`], as `ir`
 /// declares the column) is an `UPDATE`, which the rows' constraints can reject.
-fn rewrites_rows(ops: &[MigrationOp], ir: &IrEnvelope<SchemaIrPayload>, dialect: Dialect) -> bool {
-    ops.iter().any(|op| {
-        let MigrationOp::RenameEnumLabel { columns, .. } = op else {
+fn rewrites_rows(ops: &[PlannedOp], ir: &IrEnvelope<SchemaIrPayload>, dialect: Dialect) -> bool {
+    ops.iter().any(|planned| {
+        let MigrationOp::RenameEnumLabel { columns, .. } = &planned.op else {
             return false;
         };
         columns.iter().any(|(table, column)| {
@@ -147,40 +85,40 @@ fn rewrites_rows(ops: &[MigrationOp], ir: &IrEnvelope<SchemaIrPayload>, dialect:
     })
 }
 
-/// Whether `op` drops data.
-pub fn drops_data(op: &MigrationOp) -> bool {
-    matches!(
-        op,
-        MigrationOp::DropTable { .. }
-            | MigrationOp::DropEnumType { .. }
-            | MigrationOp::DropColumn { .. }
-    )
+/// The mode a file adds its foreign keys and checks in: `NOT VALID` in an up
+/// file on Postgres, where each one is on a table that already exists (a new
+/// table's ride its `CREATE TABLE`) and a later step validates it
+/// (ADR-0043); plain in a down, which restores its step's pre-state in that
+/// step, and on SQLite, which has no unvalidated constraint.
+fn constraint_mode(dialect: Dialect, up: bool) -> ConstraintMode {
+    if dialect == Dialect::Postgres && up {
+        ConstraintMode::NotValid
+    } else {
+        ConstraintMode::Plain
+    }
 }
 
-/// `new` with every `NOT NULL` column that `ops` adds with no value for
-/// existing rows declared nullable, and the `SET NOT NULL` that brings each
-/// back to `new`: the two halves of putting such a column back on Postgres.
+/// `new` with every `NOT NULL` column that `ops` add demanding values of the
+/// rows already there declared nullable, and the `SET NOT NULL` that brings
+/// each back to `new`: the two halves of putting such a column back on
+/// Postgres.
 fn relaxed(
-    ops: &[MigrationOp],
-    old: &IrEnvelope<SchemaIrPayload>,
+    ops: &[PlannedOp],
     new: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
 ) -> (IrEnvelope<SchemaIrPayload>, Vec<MigrationOp>) {
     let mut loose = Vec::new();
     let mut tighten = Vec::new();
     if dialect == Dialect::Postgres {
-        for op in ops {
-            let MigrationOp::AddColumn { table, column } = op else {
+        for planned in ops.iter().filter(|planned| planned.verdict.demands_values) {
+            let MigrationOp::AddColumn { table, column } = &planned.op else {
                 continue;
             };
-            let ctx = PlanContext::of(op, old, new, dialect, PlanDirection::Down);
-            if columns::restores_values(op, &ctx) {
-                loose.push((table.clone(), column.clone()));
-                tighten.push(MigrationOp::AlterColumnNullability {
-                    table: table.clone(),
-                    column: column.clone(),
-                });
-            }
+            loose.push((table.clone(), column.clone()));
+            tighten.push(MigrationOp::AlterColumnNullability {
+                table: table.clone(),
+                column: column.clone(),
+            });
         }
     }
     (backfill::relax_columns(new, &loose), tighten)
@@ -197,11 +135,11 @@ fn rendered(
 }
 
 /// Each of `ops`' statements on `dialect`, planned `old → new`, op by op. A
-/// down (`restore`) adds a `NOT NULL` column with no default nullable and
-/// sets it `NOT NULL` right after its own statements; an up never meets one
-/// ([`columns::assign`] sends it to a backfill).
+/// down (`restore`) adds a `NOT NULL` column that demands values nullable
+/// and sets it `NOT NULL` right after its own statements; an up never meets
+/// one (the phase table sends it to a backfill).
 fn native_statements(
-    ops: Vec<MigrationOp>,
+    ops: Vec<PlannedOp>,
     old: &IrEnvelope<SchemaIrPayload>,
     new: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
@@ -209,10 +147,11 @@ fn native_statements(
     constraints: ConstraintMode,
 ) -> Result<Vec<Vec<String>>, GenerateError> {
     let (relaxed, tighten) = if restore {
-        relaxed(&ops, old, new, dialect)
+        relaxed(&ops, new, dialect)
     } else {
         (new.clone(), Vec::new())
     };
+    let ops: Vec<MigrationOp> = ops.into_iter().map(|planned| planned.op).collect();
     let ops_rendered = rendered(ops, old, &relaxed, dialect, constraints)?;
     refuse_unrendered(&ops_rendered, dialect)?;
     let tighten_rendered = rendered(tighten, &relaxed, new, dialect, constraints)?;
@@ -236,25 +175,28 @@ fn native_statements(
     Ok(out)
 }
 
-/// The statements `ops` render to on `dialect` in a file going `direction`
-/// from `old` to `new`, and whether any table is rebuilt. On SQLite every op
-/// on a table that needs a rebuild folds into that table's one
-/// [`rebuild::render_table`], placed where the table's first op stands;
-/// every other op renders natively, in the planner's order (ADR-0046).
+/// The statements `ops` render to on `dialect` in a file from `old` to
+/// `new`, and whether any table is rebuilt. On SQLite every op on a table one
+/// of `ops` rebuilds ([`rebuild::tables_to_rebuild`]) folds into that table's
+/// one [`rebuild::render_table`], placed where the table's first op stands;
+/// every other op renders natively, in the planner's order (ADR-0046). A
+/// down (`restore`) puts a demanding column back as [`native_statements`]
+/// does.
 fn statements(
-    ops: Vec<MigrationOp>,
+    ops: Vec<PlannedOp>,
     old: &IrEnvelope<SchemaIrPayload>,
     new: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
-    direction: PlanDirection,
+    restore: bool,
+    constraints: ConstraintMode,
 ) -> Result<(Vec<String>, bool), GenerateError> {
-    let rebuilt = rebuild::tables_to_rebuild(&ops, old, new, dialect, direction);
+    let rebuilt = rebuild::tables_to_rebuild(&ops);
     // A table the step rebuilds relabels its rows in the rebuild's copy, where
     // they meet the table's new check; its label rename leaves it out.
     let mut relabels: BTreeMap<String, Vec<(String, String, String)>> = BTreeMap::new();
-    let ops: Vec<MigrationOp> = ops
+    let ops: Vec<PlannedOp> = ops
         .into_iter()
-        .filter_map(|op| match op {
+        .filter_map(|planned| match planned.op {
             MigrationOp::RenameEnumLabel {
                 type_name,
                 old: from,
@@ -270,33 +212,27 @@ fn statements(
                         .or_default()
                         .push((column, from.clone(), to.clone()));
                 }
-                (!updated.is_empty() || dialect == Dialect::Postgres).then_some(
-                    MigrationOp::RenameEnumLabel {
+                (!updated.is_empty() || dialect == Dialect::Postgres).then_some(PlannedOp {
+                    op: MigrationOp::RenameEnumLabel {
                         type_name,
                         old: from,
                         new: to,
                         columns: updated,
                     },
-                )
+                    verdict: planned.verdict,
+                })
             }
-            other => Some(other),
+            _ => Some(planned),
         })
         .collect();
     let folded = |op: &MigrationOp| op.table().is_some_and(|table| rebuilt.contains(table));
-    let native: Vec<MigrationOp> = ops.iter().filter(|op| !folded(op)).cloned().collect();
-    let mut native = native_statements(
-        native,
-        old,
-        new,
-        dialect,
-        direction == PlanDirection::Down,
-        columns::constraint_mode(dialect, direction),
-    )?
-    .into_iter();
+    let native: Vec<PlannedOp> = ops.iter().filter(|p| !folded(&p.op)).cloned().collect();
+    let mut native =
+        native_statements(native, old, new, dialect, restore, constraints)?.into_iter();
     let mut out = Vec::new();
     let mut written = BTreeSet::new();
-    for op in &ops {
-        match op.table().filter(|table| rebuilt.contains(*table)) {
+    for planned in &ops {
+        match planned.op.table().filter(|table| rebuilt.contains(*table)) {
             Some(table) => {
                 if written.insert(table) {
                     let relabelled = relabels.get(table).map(Vec::as_slice).unwrap_or(&[]);
@@ -304,7 +240,7 @@ fn statements(
                 }
             }
             None => out.extend(native.next().ok_or_else(|| {
-                GenerateError::Render(format!("{op:?} rendered no statement group"))
+                GenerateError::Render(format!("{:?} rendered no statement group", planned.op))
             })?),
         }
     }
@@ -316,15 +252,13 @@ fn statements(
 /// # Errors
 /// What [`render_step`] raises.
 pub fn render_down(
-    step_ops: &[MigrationOp],
+    step_ops: &[PlannedOp],
     before: &IrEnvelope<SchemaIrPayload>,
     after: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
-    phase: Phase,
     hints: &[Hint],
-    data_steps: bool,
 ) -> Result<Rendering, GenerateError> {
-    let step = render_step(step_ops, before, after, dialect, phase, hints, data_steps)?;
+    let step = render_step(step_ops, before, after, dialect, hints)?;
     Ok(Rendering {
         up: step_text(&step.headers, &step.up),
         down: step_text(&step.down_headers, &step.down),
@@ -349,82 +283,50 @@ pub struct StepStatements {
 }
 
 /// One generated step on `dialect`, both directions: the up file renders
-/// `step_ops` (planned `before → after`), and the down file renders the
-/// inverse — [`crate::plan_from_ir`]`(after, before)` with every drop planned,
-/// restricted to the tables and enum types `step_ops` touch and to the ops
-/// [`columns::assign`] puts in the step's `phase` in a migration that has
-/// (`data_steps`) or lacks a data step after its schema step.
+/// `step_ops` (planned `before → after`, the migration's declared renames
+/// `hints` among them), and the down file renders [`plan_down`]`(step_ops,
+/// after, before)` — the planner run back between the two declared stages,
+/// keeping only the ops whose artifact the step's up touched.
 ///
 /// On Postgres the up adds every foreign key and check `NOT VALID`
-/// ([`columns::constraint_mode`], ADR-0043); the down restores the step's
-/// pre-state with plain statements.
+/// (ADR-0043); the down restores the step's pre-state with plain statements.
 ///
-/// The up's headers: `destructive` when it drops a table, a column or an
-/// enum type; `data-dependent` when its statements can fail on existing rows.
-/// The down's: `data-dependent` when an inverse op recreates a dropped table
-/// or `NOT NULL` column, or can fail on the rows it finds; `not-applicable`
-/// when the step has nothing to reverse on `dialect`; never `destructive`,
-/// never `irreversible`.
+/// The up's headers: `destructive` when it drops data (a table, a column or
+/// an enum type); `data-dependent` when its statements can fail on existing
+/// rows. The down's: `data-dependent` when an op of it recreates a dropped
+/// table or `NOT NULL` column, or can fail on the rows it finds;
+/// `not-applicable` when the step has nothing to reverse on `dialect`; never
+/// `destructive`, and never `irreversible`: between two declared stages
+/// every op is expressible (ADR-0033).
 ///
 /// # Errors
 /// An op that cannot render (an [`crate::EmissionError`] from the
 /// renderer), or that renders only a blocking report
-/// ([`GenerateError::Unrenderable`]).
+/// ([`GenerateError::Unrenderable`]), or a down op with no way to run
+/// between two declared stages.
 pub fn render_step(
-    step_ops: &[MigrationOp],
+    step_ops: &[PlannedOp],
     before: &IrEnvelope<SchemaIrPayload>,
     after: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
-    phase: Phase,
     hints: &[Hint],
-    data_steps: bool,
 ) -> Result<StepStatements, GenerateError> {
+    let ops: Vec<MigrationOp> = step_ops.iter().map(|planned| planned.op.clone()).collect();
     // A step holding the migration's renames (ADR-0032) runs its table and
     // column renames first; everything else in it reads the table under its
-    // new names. Its down undoes them first the other way, then restores the
-    // rest under the parent's names (ADR-0033).
-    let hints: &[Hint] = if step_ops.iter().any(renames::is_rename) {
+    // new names.
+    let hints: &[Hint] = if ops.iter().any(renames::is_rename) {
         hints
     } else {
         &[]
     };
     let renamed_before = renamed_snapshot(before, hints);
-    let reverse = reverse_hints(hints);
-    let renamed_after = renamed_snapshot(after, &reverse);
-    // The side the down is planned from: on SQLite with its labels as the
-    // step leaves them, so a column the label renames widened is narrowed back
-    // ([`storage_hints`]).
-    let planned_after = renamed_snapshot(after, &storage_hints(&reverse, dialect));
-    let (up_structural, up_rest): (Vec<MigrationOp>, Vec<MigrationOp>) =
-        step_ops.iter().cloned().partition(renames::is_structural);
-    let (down_structural, down_derived): (Vec<MigrationOp>, Vec<MigrationOp>) =
-        rename_ops(after, &renamed_after, dialect)
-            .into_iter()
-            .filter(|_| !hints.is_empty())
-            .partition(renames::is_structural);
-
-    // The step's tables by the names the down restores them under.
-    let subjects: BTreeSet<Subject> = step_ops
+    let (up_structural, up_rest): (Vec<PlannedOp>, Vec<PlannedOp>) = step_ops
         .iter()
-        .filter_map(subject)
-        .map(|s| match s {
-            Subject::Table(table) => Subject::Table(renamed_table(&reverse, &table)),
-            other => other,
-        })
-        .collect();
-    let inverse: Vec<MigrationOp> = super::plan(&planned_after, before, dialect)?
-        .operations
-        .into_iter()
-        .filter(|op| subject(op).is_some_and(|s| subjects.contains(&s)))
-        .filter(|op| {
-            let ctx = PlanContext::of(op, &planned_after, before, dialect, PlanDirection::Down)
-                .with_data_steps(data_steps);
-            !columns::carried_by_its_column_drop(op, &ctx)
-                && columns::assign(op, &ctx).phase == phase
-        })
-        .collect();
+        .cloned()
+        .partition(|planned| renames::is_structural(&planned.op));
 
-    let up_mode = columns::constraint_mode(dialect, PlanDirection::Up);
+    let up_mode = constraint_mode(dialect, true);
     let mut up_statements: Vec<String> = native_statements(
         up_structural,
         before,
@@ -436,30 +338,56 @@ pub fn render_step(
     .into_iter()
     .flatten()
     .collect();
-    let (rest, up_rebuilds) =
-        statements(up_rest, &renamed_before, after, dialect, PlanDirection::Up)?;
+    let (rest, up_rebuilds) = statements(up_rest, &renamed_before, after, dialect, false, up_mode)?;
     up_statements.extend(rest);
     let headers = Headers {
         foreign_keys_off: up_rebuilds,
-        destructive: !up_statements.is_empty() && step_ops.iter().any(drops_data),
+        destructive: !up_statements.is_empty()
+            && step_ops.iter().any(|planned| planned.verdict.drops_data),
         data_dependent: !up_statements.is_empty()
             && (rewrites_rows(step_ops, &renamed_before, dialect)
-                || step_ops
-                    .iter()
-                    .any(|op| may_fail_on_rows(op, after, up_mode))),
+                || step_ops.iter().any(|op| may_fail_on_rows(op, up_mode))),
         not_applicable: up_statements.is_empty(),
         ..Headers::default()
     };
 
-    let down_mode = columns::constraint_mode(dialect, PlanDirection::Down);
-    let data_dependent = rewrites_rows(&down_derived, &renamed_after, dialect)
-        || inverse
+    // The down: the planner run back, scoped to what the up touched, its
+    // renames (the up's, swapped) first.
+    let down = plan_down(
+        &ops,
+        &Side::declared(after.clone()),
+        &Side::declared(before.clone()),
+        dialect,
+    );
+    let down_ops: Vec<PlannedOp> = down
+        .operations
+        .iter()
+        .filter(|planned| !columns::omitted(planned, dialect))
+        .cloned()
+        .collect();
+    if let Some(planned) = down_ops.iter().find(|planned| {
+        matches!(
+            planned.verdict.execution,
+            Execution::Refused(_) | Execution::Irreversible(_)
+        )
+    }) {
+        return Err(GenerateError::Render(format!(
+            "the down of {:?} has no way to run between two declared stages: {:?}",
+            planned.op, planned.verdict.execution
+        )));
+    }
+    let down_mode = constraint_mode(dialect, false);
+    let data_dependent = rewrites_rows(&down_ops, down.before.ir(), dialect)
+        || down_ops
             .iter()
-            .any(|op| recreates(op, before) || may_fail_on_rows(op, before, down_mode));
+            .any(|op| op.verdict.recreates || may_fail_on_rows(op, down_mode));
+    let (down_structural, down_rest): (Vec<PlannedOp>, Vec<PlannedOp>) = down_ops
+        .into_iter()
+        .partition(|planned| renames::is_structural(&planned.op));
     let mut down_statements: Vec<String> = native_statements(
         down_structural,
         after,
-        &renamed_after,
+        down.before.ir(),
         dialect,
         false,
         down_mode,
@@ -467,14 +395,13 @@ pub fn render_step(
     .into_iter()
     .flatten()
     .collect();
-    let mut down_ops = down_derived;
-    down_ops.extend(inverse);
     let (rest, down_rebuilds) = statements(
-        down_ops,
-        &renamed_after,
+        down_rest,
+        down.before.ir(),
         before,
         dialect,
-        PlanDirection::Down,
+        true,
+        down_mode,
     )?;
     down_statements.extend(rest);
     let down_headers = Headers {
@@ -496,22 +423,20 @@ pub fn render_step(
 mod tests {
     use super::super::tests::{author, create_pass, file, ir, model, pk, post};
     use super::*;
-    use crate::{LiveFacts, PlanOptions, plan_from_ir};
+    use crate::{PlanOptions, Side, plan_from_ir};
     use ferro_schema_ir::{RowPolicyCommand, RowPolicyExpr, SchemaRowPolicy, SchemaRowSecurity};
 
     fn up_ops(
         before: &IrEnvelope<SchemaIrPayload>,
         after: &IrEnvelope<SchemaIrPayload>,
         dialect: Dialect,
-    ) -> Vec<MigrationOp> {
+    ) -> Vec<PlannedOp> {
         plan_from_ir(
-            before,
-            after,
+            &Side::declared(before.clone()),
+            &Side::declared(after.clone()),
             dialect,
-            &LiveFacts::declared(),
             PlanOptions { destructive: true },
         )
-        .expect("plan")
         .operations
     }
 
@@ -520,16 +445,7 @@ mod tests {
         after: &IrEnvelope<SchemaIrPayload>,
         dialect: Dialect,
     ) -> Rendering {
-        render_down(
-            &up_ops(before, after, dialect),
-            before,
-            after,
-            dialect,
-            Phase::Schema,
-            &[],
-            false,
-        )
-        .expect("render")
+        render_down(&up_ops(before, after, dialect), before, after, dialect, &[]).expect("render")
     }
 
     #[test]
@@ -625,35 +541,17 @@ mod tests {
     fn the_down_is_restricted_to_what_the_step_touches() {
         let before = ir(vec![author()]);
         let after = ir(vec![author(), post(), model("Tag", vec![pk()])]);
-        let ops: Vec<MigrationOp> = up_ops(&before, &after, Dialect::Sqlite)
+        let ops: Vec<PlannedOp> = up_ops(&before, &after, Dialect::Sqlite)
             .into_iter()
-            .filter(|op| op.table() == Some("tag"))
+            .filter(|planned| planned.op.table() == Some("tag"))
             .collect();
-        let r = render_down(
-            &ops,
-            &before,
-            &after,
-            Dialect::Sqlite,
-            Phase::Schema,
-            &[],
-            false,
-        )
-        .expect("render");
+        let r = render_down(&ops, &before, &after, Dialect::Sqlite, &[]).expect("render");
         assert_eq!(r.down, "DROP TABLE \"tag\";\n");
     }
 
     #[test]
     fn a_step_with_nothing_on_a_dialect_is_not_applicable_both_ways() {
-        let r = render_down(
-            &[],
-            &ir(vec![]),
-            &ir(vec![]),
-            Dialect::Sqlite,
-            Phase::Schema,
-            &[],
-            false,
-        )
-        .expect("render");
+        let r = render_down(&[], &ir(vec![]), &ir(vec![]), Dialect::Sqlite, &[]).expect("render");
         assert_eq!(r.up, "-- ferro: not-applicable\n");
         assert_eq!(r.down, "-- ferro: not-applicable\n");
         assert!(r.headers.not_applicable && r.down_headers.not_applicable);

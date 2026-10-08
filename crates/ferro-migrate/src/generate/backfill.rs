@@ -12,8 +12,8 @@
 //!                                                           (SQLite: the table rebuilt to the target shape)
 //! ```
 //!
-//! [`columns::assign`] decides *that* an op demands values
-//! ([`columns::demands_values`]); this module decides what follows from it:
+//! The planner decides *that* an op demands values (its verdict's
+//! `demands_values`, ADR-0050); this module decides what follows from it:
 //! the [`Demand`] (why, and whether the backfill pages by keyset), the
 //! migration's intermediate shape with every demanded column nullable
 //! ([`relaxed`]), and the steps after the backfill — the Postgres staged
@@ -36,7 +36,7 @@
 //!                                        04_contract        …; DROP COLUMN "name"
 //! ```
 
-use super::columns::{self, Phase, PlanContext, PlanDirection};
+use super::columns;
 use super::staging::StagedConstraint;
 use super::{
     GenerateError, GeneratedStep, Rendering, downs, enums, find_model, rebuild, staging, step_text,
@@ -45,7 +45,7 @@ use crate::directory::{Headers, StepDialect, StepKind};
 use crate::order::order_by_dependencies;
 use crate::plan::enum_declaration;
 use crate::render::render_ops;
-use crate::{Dialect, MigrationOp};
+use crate::{Dialect, MigrationOp, PlannedOp};
 use ferro_ddl_lowering::{
     ConstraintMode, ResolvedStorage, positioned_missing_enum_labels, quote_ident, quote_label,
     render_drop_constraint, render_pg_enum_add_value_at, render_validate_constraint,
@@ -141,21 +141,17 @@ fn driver_of(model: &SchemaModel) -> Driver {
     }
 }
 
-/// The demand `op` makes in the up file turning `before` into `after`, or
-/// `None` when it asks the existing rows for nothing.
-pub fn demands(
-    op: &MigrationOp,
-    before: &IrEnvelope<SchemaIrPayload>,
-    after: &IrEnvelope<SchemaIrPayload>,
-) -> Option<Demand> {
-    // Whether an op demands values is a property of the models, never of the
-    // dialect: every dialect's context answers the same.
-    let ctx = PlanContext::of(op, before, after, Dialect::Postgres, PlanDirection::Up);
-    if !columns::demands_values(op, &ctx) {
+/// The demand `op` makes of a column in the up file leading to `after`, or
+/// `None` when its verdict asks the existing rows for nothing. Whether an op
+/// demands values is a property of the models, never of the dialect: every
+/// dialect's plan says the same. A removed label's demands are
+/// [`label_demands`]'.
+pub fn demands(op: &PlannedOp, after: &IrEnvelope<SchemaIrPayload>) -> Option<Demand> {
+    if !op.verdict.demands_values {
         return None;
     }
-    let model = ctx.after?;
-    let (column, reason) = match op {
+    let model = op.op.table().and_then(|table| find_model(after, table))?;
+    let (column, reason) = match &op.op {
         MigrationOp::AddColumn { column, .. } => {
             let col = model.columns.iter().find(|col| &col.name == column)?;
             let reason = if model.foreign_keys.iter().any(|fk| &fk.column == column) {
@@ -223,15 +219,15 @@ pub fn label_demands(
 /// them), columns in the order the model declares them; a column's removed
 /// labels in the order the plan removes them.
 pub fn collect(
-    ops: &[MigrationOp],
+    ops: &[PlannedOp],
     before: &IrEnvelope<SchemaIrPayload>,
     after: &IrEnvelope<SchemaIrPayload>,
 ) -> Vec<Demand> {
     let mut found: Vec<Demand> = Vec::new();
     for op in ops {
-        for demand in demands(op, before, after)
+        for demand in demands(op, after)
             .into_iter()
-            .chain(label_demands(op, before, after))
+            .chain(label_demands(&op.op, before, after))
         {
             if !found.contains(&demand) {
                 found.push(demand);
@@ -391,7 +387,7 @@ pub fn with_removed_labels(
 /// removes: the schema the data steps run against, where the historical
 /// model's union (ADR-0025) still reads what the migration drops. `withheld`
 /// is exactly what the phase table sends to the contract
-/// ([`columns::waits_for_the_data_steps`]), and nothing else comes back: a
+/// (`columns::phase`), and nothing else comes back: a
 /// dropped table; a dropped column at its place, with its foreign key (no op
 /// of its own: `DROP COLUMN` takes it); the index, unique or column check a
 /// held-back op drops with it. A removal the phase table leaves in the schema
@@ -861,7 +857,7 @@ fn nullability(
 /// target shape, whose copy fails on a row that still holds `NULL`; its down
 /// rebuilds it back.
 ///
-/// Every op [`columns::waits_for_the_data_steps`] withheld (ADR-0025),
+/// Every op the phase table (`columns::phase`) withheld (ADR-0025),
 /// `withheld` per dialect in `dialects`' order, drops here, after the data steps, as a migration without one drops it in its
 /// schema step ([`downs::render_step`]): `DROP COLUMN`, `DROP TABLE`, then
 /// the `DROP TYPE` that follows them, before a removed label's type swap (a
@@ -883,7 +879,7 @@ fn nullability(
 pub fn contract_step(
     demands: &[Demand],
     staged: &[StagedConstraint],
-    withheld: &[Vec<MigrationOp>],
+    withheld: &[Vec<PlannedOp>],
     kept_target: &IrEnvelope<SchemaIrPayload>,
     relaxed_target: &IrEnvelope<SchemaIrPayload>,
     target: &IrEnvelope<SchemaIrPayload>,
@@ -900,26 +896,13 @@ pub fn contract_step(
         // The drops the phase table held back for the contract, rendered
         // `kept_target` → `relaxed_target` but the SQLite check drop its
         // `DROP COLUMN` carries.
-        let withheld: Vec<MigrationOp> = held
+        let withheld: Vec<PlannedOp> = held
             .iter()
-            .filter(|op| {
-                let ctx =
-                    PlanContext::of(op, kept_target, relaxed_target, dialect, PlanDirection::Up);
-                !columns::carried_by_its_column_drop(op, &ctx)
-            })
+            .filter(|op| !columns::omitted(op, dialect))
             .cloned()
             .collect();
-        let drops = |ops: &[MigrationOp]| {
-            downs::render_step(
-                ops,
-                kept_target,
-                relaxed_target,
-                dialect,
-                Phase::Contract,
-                &[],
-                true,
-            )
-        };
+        let drops =
+            |ops: &[PlannedOp]| downs::render_step(ops, kept_target, relaxed_target, dialect, &[]);
         let rendering = match dialect {
             Dialect::Postgres => {
                 let mut up = Vec::new();
@@ -979,7 +962,7 @@ pub fn contract_step(
                 }
                 // A table a removed label reshapes (its check, or a column
                 // narrowed to the longest label left).
-                for op in super::plan(relaxed_target, target, Dialect::Sqlite)?.operations {
+                for op in super::plan(relaxed_target, target, Dialect::Sqlite).ops() {
                     if let Some(table) = op.table()
                         && !tables.iter().any(|t| t == table)
                     {
@@ -987,9 +970,11 @@ pub fn contract_step(
                     }
                 }
                 // A drop from a table rebuilt here folds into its rebuild.
-                let (folded, native): (Vec<MigrationOp>, Vec<MigrationOp>) =
-                    withheld.into_iter().partition(|op| {
-                        op.table()
+                let (folded, native): (Vec<PlannedOp>, Vec<PlannedOp>) =
+                    withheld.into_iter().partition(|planned| {
+                        planned
+                            .op
+                            .table()
                             .is_some_and(|table| tables.iter().any(|t| t == table))
                     });
                 let dropped = drops(&native)?;
@@ -1009,7 +994,7 @@ pub fn contract_step(
                 }
                 // The rebuild's down copies rows into a column the up dropped:
                 // a `NOT NULL` one fails on a populated table (ADR-0033).
-                let restores_not_null = folded.iter().any(|op| match op {
+                let restores_not_null = folded.iter().any(|planned| match &planned.op {
                     MigrationOp::DropColumn { table, column } => find_model(kept_target, table)
                         .and_then(|model| model.columns.iter().find(|col| &col.name == column))
                         .is_some_and(|col| !col.nullable),
@@ -1018,7 +1003,8 @@ pub fn contract_step(
                 let up_headers = Headers {
                     foreign_keys_off: !rebuilt_up.is_empty() || dropped.headers.foreign_keys_off,
                     destructive: dropped.headers.destructive
-                        || (!rebuilt_up.is_empty() && folded.iter().any(downs::drops_data)),
+                        || (!rebuilt_up.is_empty()
+                            && folded.iter().any(|planned| planned.verdict.drops_data)),
                     data_dependent: !rebuilt_up.is_empty() || dropped.headers.data_dependent,
                     ..Headers::default()
                 };
@@ -1075,7 +1061,10 @@ fn label_contract(
         super::refuse_unrendered(&rendered, Dialect::Postgres)?;
         Ok(rendered.into_iter().flat_map(|op| op.statements).collect())
     };
-    let forward = super::plan(relaxed_target, target, Dialect::Postgres)?.operations;
+    let forward: Vec<MigrationOp> = super::plan(relaxed_target, target, Dialect::Postgres)
+        .ops()
+        .cloned()
+        .collect();
     let mut up = Vec::new();
     let mut swapped: Vec<&str> = Vec::new();
     for op in &forward {
@@ -1117,7 +1106,10 @@ fn label_contract(
         }
     }
     up.extend(rendered(rest(forward), relaxed_target, target)?);
-    let backward = super::plan(target, relaxed_target, Dialect::Postgres)?.operations;
+    let backward: Vec<MigrationOp> = super::plan(target, relaxed_target, Dialect::Postgres)
+        .ops()
+        .cloned()
+        .collect();
     let (restored, backward): (Vec<_>, Vec<_>) = rest(backward)
         .into_iter()
         .partition(|op| matches!(op, MigrationOp::AddEnumLabel { .. }));
@@ -1285,8 +1277,23 @@ mod tests {
         }
     }
 
+    /// `op` with its verdict, planned between the two modelsets.
+    fn planned(
+        op: &MigrationOp,
+        before: &IrEnvelope<SchemaIrPayload>,
+        after: &IrEnvelope<SchemaIrPayload>,
+    ) -> PlannedOp {
+        PlannedOp::of(
+            op.clone(),
+            &crate::Side::declared(before.clone()),
+            &crate::Side::declared(after.clone()),
+            Dialect::Postgres,
+        )
+    }
+
     fn demand_of(op: &MigrationOp, before: SchemaModel, after: SchemaModel) -> Option<Demand> {
-        demands(op, &ir(vec![before]), &ir(vec![after]))
+        let (before, after) = (ir(vec![before]), ir(vec![after]));
+        demands(&planned(op, &before, &after), &after)
     }
 
     fn status(labels: &[&str]) -> SchemaColumn {
@@ -1312,9 +1319,10 @@ mod tests {
                 ("author".into(), "previous".into()),
             ],
         };
-        assert_eq!(demands(&op, &before, &after), None);
+        assert_eq!(demands(&planned(&op, &before, &after), &after), None);
+        let twice = [planned(&op, &before, &after), planned(&op, &before, &after)];
         assert_eq!(
-            collect(&[op.clone(), op], &before, &after),
+            collect(&twice, &before, &after),
             [Demand {
                 table: "author".into(),
                 column: "status".into(),
@@ -1417,7 +1425,10 @@ mod tests {
         );
         // A table the same file creates has no rows.
         let created = ir(vec![author(vec![column("slug", "string")])]);
-        assert_eq!(demands(&add("slug"), &ir(vec![]), &created), None);
+        assert_eq!(
+            demands(&planned(&add("slug"), &ir(vec![]), &created), &created),
+            None
+        );
     }
 
     #[test]
@@ -1475,6 +1486,7 @@ mod tests {
                 column: "slug".into(),
             },
         ];
+        let ops = ops.map(|op| planned(&op, &before, &after));
         let tables: Vec<String> = collect(&ops, &before, &after)
             .into_iter()
             .map(|d| d.table)

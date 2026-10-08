@@ -24,7 +24,6 @@
 //! `render_add_fk_sql` / `render_check_addition` in
 //! [`ConstraintMode::NotValid`], and `render_validate_constraint`.
 
-use super::columns::{PlanContext, PlanDirection, stages_constraints};
 use super::{GenerateError, GeneratedStep, Rendering, find_model, step_text};
 use crate::directory::{Headers, StepDialect, StepKind};
 use crate::emit::{
@@ -335,10 +334,13 @@ pub struct StagedConstraint {
     pub add: Vec<String>,
 }
 
-/// Every foreign key and check `ops` stage when the file turning `before`
-/// into `after` renders them on `dialect` ([`stages_constraints`]), in the
-/// order the file adds them: an added or rebuilt foreign key or check, and an
-/// added column's own check and foreign key. Empty on SQLite.
+/// Every foreign key and check `ops` stage when the up file turning `before`
+/// into `after` renders them on `dialect`, in the order the file adds them:
+/// an added or rebuilt foreign key or check, and an added column's own check
+/// and foreign key. Every Postgres up file stages them on a table that
+/// already exists (a new table's ride its `CREATE TABLE`) and validates them
+/// in a later step (ADR-0043); SQLite has no unvalidated constraint (a
+/// rebuild validates by copying), so it stages none.
 ///
 /// # Errors
 /// [`GenerateError::Render`] when an op names a constraint `after` does not
@@ -350,9 +352,14 @@ pub fn staged_constraints(
     dialect: Dialect,
 ) -> Result<Vec<StagedConstraint>, GenerateError> {
     let mut staged = Vec::new();
+    if dialect != Dialect::Postgres {
+        return Ok(staged);
+    }
     for op in ops {
-        let ctx = PlanContext::of(op, before, after, dialect, PlanDirection::Up);
-        let Some(model) = ctx.after.filter(|_| stages_constraints(&ctx)) else {
+        let Some(table) = op.table() else {
+            continue;
+        };
+        let (Some(_), Some(model)) = (find_model(before, table), find_model(after, table)) else {
             continue;
         };
         let table = &model.table_name;

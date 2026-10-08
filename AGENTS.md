@@ -87,9 +87,11 @@ For a single model, every emitter must agree on:
     renders per op through `_core._render_plan_ops`, and `translate.py`
     writes each op as Alembic's own op where it has one and as
     `op.execute(sa.DDL(...))` of the pass's statement, byte for byte, where
-    it does not. `downgrade()` is the planner's own `reverse_live_plan`
-    (`_core._plan_reverse_from_ir`; a check or policy put back from the
-    catalog through `render_check_restore`). The per-family comparators,
+    it does not. `downgrade()` is the one down every door uses,
+    `ferro_migrate::plan_down` (`_core._plan_reverse_from_ir`): the planner
+    run from the models back to the live database, scoped to the artifacts
+    the upgrade touched (ADR-0050), a check or policy put back with the body
+    the catalog printed through `render_check_restore`. The per-family comparators,
     their slot registrations and the `_plan_check_*` FFI are gone (#533).
     The families, each one decision consumed by every door:
     - **Enum labels** — `missing_enum_labels` / `extra_enum_labels` +

@@ -312,14 +312,13 @@ _EXECUTED = {
     "ForceRowSecurity",
     "DisableRowSecurity",
     "NoForceRowSecurity",
-    "RestoreCheck",
-    "RestoreRowPolicy",
 }
 """Ops with no Alembic twin: the revision runs the planner's statements."""
 
 _SNAPSHOT_ONLY = {"RemoveEnumLabel"}
-"""Ops planned only between two declared snapshots (a label removal, #536):
-the bridge diffs a live database, so meeting one is a bug, refused loudly."""
+"""Ops a live database never takes (a label removal, #536): going up the
+planner never plans one from it, and going down one toward it is
+irreversible (ADR-0050). Meeting one to write is a bug, refused loudly."""
 
 
 def _executed(
@@ -477,9 +476,9 @@ def translate(
     render=True)`` going up, ``_plan_reverse_from_ir`` going down) as the
     bridge hands it over: ``plan["target"]`` is the envelope the plan leads
     to (the models going up, the live database going down) and
-    ``plan["dialect"]`` its dialect; each op may carry the generator's
-    ``verdict`` (``_plan_step_verdicts``) for its marker. An op with
-    ``irreversible`` becomes ``raise RuntimeError(<reason>)``. Going up, the
+    ``plan["dialect"]`` its dialect; each op carries the planner's
+    ``verdict`` (ADR-0050) for its marker. An op with ``irreversible``
+    becomes ``raise RuntimeError(<reason>)``. Going up, the
     planner's one-off ``reports`` (no op for them, such as an enum label the
     model no longer declares) lead the revision as comments, by their text;
     its recurring ones (a foreign or unverifiable row policy) stay the
@@ -494,16 +493,16 @@ def translate(
             if not report["recurs"]
         )
     for op in plan["operations"]:
+        irreversible = op.get("irreversible")
+        if irreversible is not None:
+            out.append(FerroIrreversibleOp(irreversible["reason"]))
+            continue
         if op["kind"] in _SNAPSHOT_ONLY:
             raise RuntimeError(
                 f"ferro: the plan carries a {op['kind']} op, which only two declared "
                 "snapshots plan (`ferro migrate new`), never the live database the "
                 "Alembic bridge diffs; this is a ferro bug, please file an issue"
             )
-        irreversible = op.get("irreversible")
-        if irreversible is not None:
-            out.append(FerroIrreversibleOp(irreversible["reason"]))
-            continue
         verdict = op.get("verdict") or {}
         if not op["statements"] and not verdict.get("demands_values"):
             # The pass runs nothing for it on this dialect (row security of

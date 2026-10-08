@@ -6,19 +6,20 @@ use crate::emit::{
     emit_add_column, emit_alter_column_nullability, emit_alter_column_type, find_column,
     find_foreign_key, find_model, render_add_fk_sql, render_index_sql, standalone_indexes,
 };
-use crate::plan::{index_models, planned_before, relabels_rows};
+use crate::plan::{Body, Side, index_models, planned_before, relabels_rows};
 use crate::{Dialect, EmissionError, MigrationOp, Report, render_create_table};
 use ferro_ddl_lowering::{
     ConstraintMode, InPlaceChange, IndexMode, ResolvedStorage, Subject, fk_action_from_str,
     fk_action_sql, primary_key_kept_warning, quote_ident, render_check_addition, render_check_drop,
-    render_check_rebuild, render_create_row_policy, render_disable_row_security,
-    render_drop_constraint, render_drop_index_sql, render_drop_row_policy,
-    render_enable_row_security, render_force_row_security, render_label_update,
-    render_no_force_row_security, render_pg_enum_add_value, render_pg_enum_create_type,
-    render_pg_enum_drop_type, render_pg_enum_rename_type, render_pg_enum_rename_value,
-    render_rename_column, render_rename_constraint, render_rename_index, render_rename_policy,
-    render_rename_table, render_validate_constraint, resolve_column_storage, row_policy_clauses,
-    row_policy_rebuild_statements, row_security_statements, sqlite_in_place_report,
+    render_check_rebuild, render_check_restore, render_create_row_policy,
+    render_disable_row_security, render_drop_constraint, render_drop_index_sql,
+    render_drop_row_policy, render_enable_row_security, render_force_row_security,
+    render_label_update, render_no_force_row_security, render_pg_enum_add_value,
+    render_pg_enum_create_type, render_pg_enum_drop_type, render_pg_enum_rename_type,
+    render_pg_enum_rename_value, render_rename_column, render_rename_constraint,
+    render_rename_index, render_rename_policy, render_rename_table, render_validate_constraint,
+    resolve_column_storage, row_policy_clauses, row_policy_rebuild_statements,
+    row_security_statements, sqlite_in_place_report,
 };
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
 use std::collections::{BTreeSet, HashSet};
@@ -95,8 +96,8 @@ pub(crate) fn render_ops(
     validate_schema_ir(old)?;
     render_from(
         ops,
-        planned_before(old, new, dialect).as_ref(),
-        new,
+        &Side::declared(planned_before(old, new, dialect).into_owned()),
+        &Side::declared(new.clone()),
         dialect,
         constraints,
     )
@@ -105,8 +106,11 @@ pub(crate) fn render_ops(
 /// `ops` rendered for `dialect` against `old` exactly as given (already the
 /// planned-before side) and `new`, in order, every foreign key and check
 /// added in `constraints` mode: `NOT VALID` is the generator's staged
-/// constraint on an existing Postgres table (ADR-0043). An op reads the
-/// declaration it creates from `new` and the shape it changes from `old`.
+/// constraint on an existing Postgres table (ADR-0043). An op reads what it
+/// creates from `new` — a table and column from its IR, a check's or policy's
+/// body as `new` holds it (a declaration's canonical expression, or a live
+/// table's catalog text, put back as the catalog printed it) — and the shape
+/// it changes from `old`.
 ///
 /// A native enum type a `CreateEnumType` op among `ops` creates is created
 /// there and only there; an `AddTable` / `AddColumn` of any other native enum
@@ -119,11 +123,12 @@ pub(crate) fn render_ops(
 /// names, or when the op cannot exist on `dialect`.
 pub(crate) fn render_from(
     ops: &[MigrationOp],
-    old: &IrEnvelope<SchemaIrPayload>,
-    new: &IrEnvelope<SchemaIrPayload>,
+    old_side: &Side,
+    new_side: &Side,
     dialect: Dialect,
     constraints: ConstraintMode,
 ) -> Result<Vec<RenderedOp>, EmissionError> {
+    let (old, new) = (old_side.ir(), new_side.ir());
     validate_schema_ir(old)?;
     validate_schema_ir(new)?;
     let old_models = index_models(&old.payload.models);
@@ -542,34 +547,59 @@ pub(crate) fn render_from(
             }
             MigrationOp::AddCheck { table, name } => {
                 let model = find_model(&new_models, table)?;
-                let emission = render_check_addition(table, model, name, dialect, constraints)
-                    .ok_or_else(|| EmissionError {
-                        message: format!(
-                            "Check-addition operation for '{}' on table '{}' has no matching \
-                             CHECK constraint in the declared IR",
-                            name, table
-                        ),
-                    })?;
-                out.statements.extend(emission.statement);
-                out.reports.extend(emission.warning);
+                let missing = || EmissionError {
+                    message: format!(
+                        "Check-addition operation for '{}' on table '{}' has no matching \
+                         CHECK constraint in the declared IR",
+                        name, table
+                    ),
+                };
+                match new_side.check_body(table, name).ok_or_else(missing)? {
+                    Body::Canonical(_) => {
+                        let emission =
+                            render_check_addition(table, model, name, dialect, constraints)
+                                .ok_or_else(missing)?;
+                        out.statements.extend(emission.statement);
+                        out.reports.extend(emission.warning);
+                    }
+                    Body::Catalog(definition) => match dialect {
+                        Dialect::Postgres => {
+                            out.statements
+                                .push(render_check_restore(table, name, &definition))
+                        }
+                        Dialect::Sqlite => out.reports.push(catalog_check_in_place(table, name)),
+                    },
+                }
             }
             MigrationOp::RebuildCheck { table, name } => {
                 let model = find_model(&new_models, table)?;
-                let emission = render_check_rebuild(table, model, name, dialect, constraints)
-                    .ok_or_else(|| EmissionError {
-                        message: format!(
-                            "Check-rebuild operation for '{}' on table '{}' has no matching \
-                             CHECK constraint in the declared IR",
-                            name, table
-                        ),
-                    })?;
-                out.statements.extend(emission.statements);
-                out.reports.extend(emission.warning);
+                let missing = || EmissionError {
+                    message: format!(
+                        "Check-rebuild operation for '{}' on table '{}' has no matching \
+                         CHECK constraint in the declared IR",
+                        name, table
+                    ),
+                };
+                match new_side.check_body(table, name).ok_or_else(missing)? {
+                    Body::Canonical(_) => {
+                        let emission =
+                            render_check_rebuild(table, model, name, dialect, constraints)
+                                .ok_or_else(missing)?;
+                        out.statements.extend(emission.statements);
+                        out.reports.extend(emission.warning);
+                    }
+                    Body::Catalog(definition) => match dialect {
+                        Dialect::Postgres => {
+                            out.statements.push(render_drop_constraint(table, name));
+                            out.statements
+                                .push(render_check_restore(table, name, &definition));
+                        }
+                        Dialect::Sqlite => out.reports.push(catalog_check_in_place(table, name)),
+                    },
+                }
             }
             MigrationOp::DropCheck { table, name } => {
-                let model = find_model(&new_models, table)?;
-                let still_declared = model.table_checks.iter().any(|check| check.name == *name)
-                    || model.checks.iter().any(|check| check.name == *name);
+                let still_declared = new_side.check_body(table, name).is_some();
                 if still_declared {
                     return Err(EmissionError {
                         message: format!(
@@ -585,33 +615,27 @@ pub(crate) fn render_from(
             MigrationOp::AddRowPolicy { table, name } => {
                 require_postgres(op, dialect)?;
                 let model = find_model(&new_models, table)?;
-                let policy = model
-                    .row_security
-                    .as_ref()
-                    .and_then(|declaration| declaration.policies.iter().find(|p| p.name == *name))
+                let body = new_side
+                    .policy(table, name)
                     .ok_or_else(|| undeclared_policy(op, table, name))?;
                 out.statements.push(
-                    render_create_row_policy(model, policy)
+                    render_create_row_policy(model, &body.policy)
                         .map_err(|message| EmissionError { message })?,
                 );
             }
             MigrationOp::RebuildRowPolicy { table, name } => {
                 require_postgres(op, dialect)?;
-                let model = find_model(&new_models, table)?;
-                let statements = row_policy_rebuild_statements(model, name)
+                // The policy as the target holds it: a declaration's, or a
+                // live one as the catalog printed it.
+                let model = new_side.declaration(find_model(&new_models, table)?);
+                let statements = row_policy_rebuild_statements(&model, name)
                     .map_err(|message| EmissionError { message })?
                     .ok_or_else(|| undeclared_policy(op, table, name))?;
                 out.statements.extend(statements);
             }
             MigrationOp::DropRowPolicy { table, name } => {
                 require_postgres(op, dialect)?;
-                let model = find_model(&new_models, table)?;
-                let still_declared = model.row_security.as_ref().is_some_and(|declaration| {
-                    declaration
-                        .policies
-                        .iter()
-                        .any(|policy| policy.name == *name)
-                });
+                let still_declared = new_side.policy(table, name).is_some();
                 if still_declared {
                     return Err(EmissionError {
                         message: format!(
@@ -664,6 +688,20 @@ fn created_type_guards(
             _ => None,
         })
         .collect()
+}
+
+/// The report standing in for a check put back as the catalog printed it on
+/// an existing SQLite table, which takes a constraint only by being rebuilt.
+fn catalog_check_in_place(table: &str, name: &str) -> Report {
+    sqlite_in_place_report(
+        InPlaceChange::AddCheck,
+        Subject::table(table),
+        format!(
+            "CHECK constraint '{name}' on table '{table}' cannot be put back on the existing \
+             table in place: SQLite takes a constraint only by rebuilding the table, which \
+             `ferro migrate new` writes."
+        ),
+    )
 }
 
 /// Enum-type and row-security ops exist only on Postgres (SQLite stores enums

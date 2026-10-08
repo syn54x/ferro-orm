@@ -33,8 +33,8 @@ use ferro_ddl_lowering::{
     run_lock_wait_warning,
 };
 use ferro_migrate::{
-    LiveFacts, MigrationOp, PlanOptions, RenderedOp, Report, ReportKind, Subject, plan_from_ir,
-    validate_schema_ir,
+    LiveFacts, MigrationOp, Plan, PlanOptions, RenderedOp, Report, ReportKind, Side, Subject,
+    plan_down, plan_from_ir, validate_schema_ir,
 };
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload};
 use pyo3::prelude::*;
@@ -850,8 +850,12 @@ async fn run_passes(
         })
         .collect();
     let (live, facts) = live_schema_ir(&engine, &existing).await?;
-    let plan =
-        plan_from_ir(&live, &modelset, backend, &facts, opts.plan_options()).map_err(plan_error)?;
+    let plan = plan_from_ir(
+        &Side::live(live, facts).map_err(plan_error)?,
+        &Side::declared(modelset.clone()),
+        backend,
+        opts.plan_options(),
+    );
     let rendered = plan.render().map_err(emission_error)?;
 
     if backend == Dialect::Postgres {
@@ -1196,8 +1200,12 @@ pub fn _render_migration_sql_for_test(
         return Ok((Vec::new(), Vec::new()));
     }
     let (live, facts) = live_tables_to_schema_ir(vec![table], Default::default(), backend);
-    let plan =
-        plan_from_ir(&live, &declared, backend, &facts, opts.plan_options()).map_err(plan_error)?;
+    let plan = plan_from_ir(
+        &Side::live(live, facts).map_err(plan_error)?,
+        &Side::declared(declared),
+        backend,
+        opts.plan_options(),
+    );
     let rendered = plan.render().map_err(emission_error)?;
 
     let mut statements = Vec::new();
@@ -1214,29 +1222,27 @@ pub fn _render_migration_sql_for_test(
     ))
 }
 
-/// The reverse of the live-origin plan over FFI (ADR-0041): what turns the
+/// The down of the live-origin plan over FFI (ADR-0050): what turns the
 /// database `_plan_from_ir(live_json, declared_json, …, facts_json)` leaves
-/// back into the live one (`ferro_migrate::plan::reverse_live_plan`) — the
-/// Alembic bridge's `downgrade()`. `facts_json` is the facts
+/// back into the live one — `ferro_migrate::plan_down(up, models, live)`,
+/// the one down every door uses, run back from the models (declared) to the
+/// database (live) and scoped to the artifacts the upgrade touched. It is
+/// the Alembic bridge's `downgrade()`. `facts_json` is the facts
 /// `_live_schema_ir` returned beside `live_json`.
 ///
 /// The result has `_plan_from_ir`'s shape: `{"operations": [{"kind": …,
-/// <fields>}], "reports": []}`, plus `before`: the
-/// live envelope under the forward plan's renames, the side the reverse's
-/// steps turn the database into (what `_plan_step_verdicts` reads them
-/// against). A step nothing undoes
-/// is the forward op carrying `"irreversible": {"reason": …}`; a check or
-/// policy put back from the catalog is a `RestoreCheck` / `RestoreRowPolicy`;
-/// a foreign key the forward plan added comes off as `DropForeignKey`. With
-/// `render`, each op also carries its `statements` and `reports`; the ops at
-/// the `unrendered` indexes carry none: those the bridge writes itself, a
-/// re-added column that demands values of existing rows (the same subset its
-/// upgrade leaves `unrendered` in `_plan_from_ir`).
+/// <fields>, "verdict": {…}}], "reports": […]}`. An op the live database
+/// cannot express carries the verdict's `{"execution": {"irreversible":
+/// <reason>}}`. With `render`, each op also carries its `statements` and
+/// `reports` but the ops at the `unrendered` indexes, which carry none:
+/// those the bridge writes itself, a re-added column that demands values of
+/// existing rows (the same subset its upgrade leaves `unrendered` in
+/// `_plan_from_ir`).
 ///
 /// # Errors
 /// `ValueError` when a JSON argument is malformed, an envelope is not a
-/// `schema` IR, the dialect is unknown, a live table has no facts entry, or a
-/// step cannot render.
+/// `schema` IR, the dialect is unknown, a live table has no facts entry, or
+/// an op cannot render.
 #[pyfunction]
 #[pyo3(name = "_plan_reverse_from_ir")]
 #[pyo3(signature = (live_json, declared_json, dialect, options_json, facts_json, render=true, unrendered=None))]
@@ -1249,7 +1255,6 @@ pub fn _plan_reverse_from_ir(
     render: bool,
     unrendered: Option<Vec<usize>>,
 ) -> PyResult<String> {
-    use ferro_migrate::plan::{render_reverse_plan, reverse_live_plan};
     let backend = parse_dialect(&dialect)?;
     let live = parse_schema_envelope(&live_json, "live_json")?;
     let declared = parse_schema_envelope(&declared_json, "declared_json")?;
@@ -1260,36 +1265,14 @@ pub fn _plan_reverse_from_ir(
         pyo3::exceptions::PyValueError::new_err(format!("invalid facts_json: {e}"))
     })?;
     validate_schema_ir(&declared).map_err(emission_error)?;
-    let forward = plan_from_ir(&live, &declared, backend, &facts, options).map_err(plan_error)?;
-    let reverse =
-        reverse_live_plan(&forward, &live, &facts, &declared, backend).map_err(plan_error)?;
-    let operations: Vec<serde_json::Value> = if render {
-        let unrendered: std::collections::BTreeSet<usize> =
-            unrendered.unwrap_or_default().into_iter().collect();
-        render_reverse_plan(&reverse, &declared, backend, &unrendered)
-            .map_err(emission_error)?
-            .into_iter()
-            .map(|rendered| {
-                let mut op = rendered.op.to_json();
-                if let Some(fields) = op.as_object_mut() {
-                    fields.insert("statements".into(), rendered.statements.into());
-                    fields.insert("reports".into(), reports_json(&rendered.reports)?);
-                }
-                Ok(op)
-            })
-            .collect::<PyResult<_>>()?
-    } else {
-        reverse.operations.iter().map(|op| op.to_json()).collect()
-    };
-    let before = serde_json::to_value(&reverse.before).map_err(|e| {
-        pyo3::exceptions::PyRuntimeError::new_err(format!("could not serialize the plan: {e}"))
-    })?;
-    let out = serde_json::json!({
-        "operations": operations,
-        "reports": Vec::<Report>::new(),
-        "before": before,
-    });
-    Ok(out.to_string())
+    let live = Side::live(live, facts).map_err(plan_error)?;
+    let declared = Side::declared(declared);
+    let up: Vec<MigrationOp> = plan_from_ir(&live, &declared, backend, options)
+        .ops()
+        .cloned()
+        .collect();
+    let down = plan_down(&up, &declared, &live, backend);
+    plan_json(&down, render, unrendered)
 }
 
 /// Reports as plan JSON: each `{"kind", "subject", "text", "recurs",
@@ -1339,10 +1322,11 @@ pub(crate) fn parse_schema_envelope(
 ///
 /// `options_json` is `{"destructive": bool}`. `facts_json` says which side
 /// `old_ir_json` is: given (even `"{}"`), a live database whose side-table
-/// `_live_schema_ir` returned beside it, with an entry for every table;
-/// omitted, a declared snapshot (`LiveFacts::declared`). The result is
-/// `{"operations": [{"kind": …, <op fields>}], "reports": [{"kind", "subject",
-/// "text", "recurs", "blocks"}]}`; with `render`, each op also carries the
+/// `_live_schema_ir` returned beside it, with an entry for every table
+/// (`Side::live`); omitted, a declared snapshot (`Side::declared`). The result is
+/// `{"operations": [{"kind": …, <op fields>, "verdict": {…}}], "reports":
+/// [{"kind", "subject", "text", "recurs", "blocks"}]}` — each op beside its
+/// verdict ([`ferro_migrate::OpVerdict`]); with `render`, each op also carries the
 /// `statements` and `reports` it renders to, but the ops at the `unrendered`
 /// indexes, which carry none and render nothing: the ones a caller writes
 /// its own way (the Alembic bridge's column adds that demand values of
@@ -1372,52 +1356,74 @@ pub fn _plan_from_ir(
     let options: PlanOptions = serde_json::from_str(&options_json).map_err(|e| {
         pyo3::exceptions::PyValueError::new_err(format!("invalid options_json: {e}"))
     })?;
-    let facts: LiveFacts = match facts_json {
-        Some(json) => serde_json::from_str(&json).map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!("invalid facts_json: {e}"))
-        })?,
-        None => LiveFacts::declared(),
-    };
     validate_schema_ir(&old).map_err(emission_error)?;
     validate_schema_ir(&new).map_err(emission_error)?;
+    let old = match facts_json {
+        Some(json) => {
+            let facts: LiveFacts = serde_json::from_str(&json).map_err(|e| {
+                pyo3::exceptions::PyValueError::new_err(format!("invalid facts_json: {e}"))
+            })?;
+            Side::live(old, facts).map_err(plan_error)?
+        }
+        None => Side::declared(old),
+    };
 
-    let plan = plan_from_ir(&old, &new, backend, &facts, options).map_err(plan_error)?;
+    let plan = plan_from_ir(&old, &Side::declared(new), backend, options);
+    plan_json(&plan, render, unrendered)
+}
+
+/// `plan` as the FFI's plan JSON: `{"operations": [{"kind": …, <op fields>,
+/// "verdict": {…}}], "reports": […]}` — each op beside its verdict (the one
+/// every door reads, ADR-0050). With `render`, each op also carries the
+/// `statements` and `reports` it renders to (and an `AddTable` its
+/// `row_security_statements`), but the ops at the `unrendered` indexes,
+/// which carry none and render nothing; the rest render as that subset
+/// alone (`Plan::render_ops`).
+fn plan_json(plan: &Plan, render: bool, unrendered: Option<Vec<usize>>) -> PyResult<String> {
     let to_value = |value: serde_json::Result<serde_json::Value>| {
         value.map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("could not serialize the plan: {e}"))
         })
     };
-    let operations: Vec<serde_json::Value> = if render {
-        let unrendered: BTreeSet<usize> = unrendered.unwrap_or_default().into_iter().collect();
+    let unrendered: BTreeSet<usize> = unrendered.unwrap_or_default().into_iter().collect();
+    let mut rendered = if render {
         let kept: Vec<usize> = (0..plan.operations.len())
             .filter(|index| !unrendered.contains(index))
             .collect();
-        let mut rendered = plan.render_ops(&kept).map_err(emission_error)?.into_iter();
-        plan.operations
-            .iter()
-            .enumerate()
-            .map(|(index, op)| {
-                if unrendered.contains(&index) {
-                    let mut value = to_value(serde_json::to_value(op))?;
+        Some(plan.render_ops(&kept).map_err(emission_error)?.into_iter())
+    } else {
+        None
+    };
+    let operations: Vec<serde_json::Value> = plan
+        .operations
+        .iter()
+        .enumerate()
+        .map(|(index, planned)| {
+            let mut value = match rendered.as_mut() {
+                Some(_) if unrendered.contains(&index) => {
+                    let mut value = to_value(serde_json::to_value(&planned.op))?;
                     if let Some(fields) = value.as_object_mut() {
                         fields.insert("statements".into(), serde_json::json!([]));
                         fields.insert("reports".into(), serde_json::json!([]));
                     }
-                    return Ok(value);
+                    value
                 }
-                rendered_op_json(rendered.next().ok_or_else(|| {
+                Some(rendered) => rendered_op_json(rendered.next().ok_or_else(|| {
                     pyo3::exceptions::PyRuntimeError::new_err(
                         "the plan rendered fewer ops than it holds",
                     )
-                })?)
-            })
-            .collect::<PyResult<_>>()?
-    } else {
-        plan.operations
-            .iter()
-            .map(|op| to_value(serde_json::to_value(op)))
-            .collect::<PyResult<_>>()?
-    };
+                })?)?,
+                None => to_value(serde_json::to_value(&planned.op))?,
+            };
+            if let Some(fields) = value.as_object_mut() {
+                fields.insert(
+                    "verdict".into(),
+                    to_value(serde_json::to_value(&planned.verdict))?,
+                );
+            }
+            Ok(value)
+        })
+        .collect::<PyResult<_>>()?;
     let out = serde_json::json!({
         "operations": operations,
         "reports": reports_json(&plan.reports)?,

@@ -585,13 +585,30 @@ def _subject(op: Dict[str, Any]) -> str:
     return f"{table}.{op['column']}" if op.get("column") else table
 
 
-def _demands_values(op: Dict[str, Any], verdict: Dict[str, Any]) -> bool:
+def _demands_values(op: Dict[str, Any]) -> bool:
     """A column added ``NOT NULL`` with no value for the rows already there,
     by the upgrade or (putting a dropped required column back) by the
     downgrade: the pass has no statement for it (it refuses the add), so the
     revision writes the plain Alembic op, marked ``data-dependent``. The
-    generator's verdict decides it, for both sides."""
-    return op["kind"] == "AddColumn" and verdict["demands_values"]
+    planner's verdict decides it (ADR-0050), the same on both sides."""
+    return op["kind"] == "AddColumn" and op["verdict"]["demands_values"]
+
+
+def _execution(op: Dict[str, Any], how: str) -> "str | None":
+    """The verdict's ``execution`` when it is ``how``: ``"rebuild"`` (its
+    value), or ``"refused"`` / ``"irreversible"`` (the text it carries);
+    ``None`` otherwise."""
+    execution = op["verdict"]["execution"]
+    if isinstance(execution, dict):
+        return execution.get(how)
+    return execution if execution == how else None
+
+
+def _rebuild_refusal(op: Dict[str, Any]) -> str:
+    return (
+        f"{op['kind']} on {_subject(op)} needs a SQLite table rebuild, which an "
+        f"Alembic revision cannot write"
+    )
 
 
 def _sqlite_cannot_add_required(op: Dict[str, Any]) -> str:
@@ -624,11 +641,11 @@ def _blocking(op: Dict[str, Any]) -> "str | None":
 def _upgrade_plan(
     live: _LiveDatabase, declared: Dict[str, Any], dialect: str
 ) -> Dict[str, Any]:
-    """The planner's upgrade, every op checked against the generator's
-    verdicts: a primary-key change and a SQLite table rebuild are refused
-    (no Alembic op writes them), an op the pass has no statement for is
-    refused with the renderer's reason, and a change needing values of
-    existing rows is marked."""
+    """The planner's upgrade, every op read off its verdict: an op no door
+    runs (a primary-key change, a move to or from a native enum type) and a
+    SQLite table rebuild are refused (no Alembic op writes them), an op the
+    pass has no statement for is refused with the renderer's reason, and a
+    change needing values of existing rows is marked."""
     declared_json = json.dumps(declared)
     plan = json.loads(
         _core._plan_from_ir(
@@ -641,33 +658,23 @@ def _upgrade_plan(
         if _report_kind(report) == "HintRefused":
             raise _refuse(report["text"])
     operations = plan["operations"]
-    verdicts = json.loads(
-        _core._plan_step_verdicts(
-            live.schema_ir, declared_json, dialect, "up", json.dumps(operations)
-        )
-    )
-    for op, verdict in zip(operations, verdicts):
-        if verdict["refusal"] is not None:
-            raise _refuse(verdict["refusal"])
-        if verdict["needs"] == "rebuild":
-            raise _refuse(
-                f"{op['kind']} on {_subject(op)} needs a SQLite table rebuild, which an "
-                f"Alembic revision cannot write (batch mode has no foreign-key pragma "
-                f"handling, so the drop cascades into ON DELETE CASCADE children). "
-                f"Write this change as a migration: `ferro migrate new`"
-            )
-        if _demands_values(op, verdict) and dialect == "sqlite":
+    for op in operations:
+        refusal = _execution(op, "refused")
+        if refusal is not None:
+            raise _refuse(refusal)
+        if _demands_values(op) and dialect == "sqlite":
             raise _refuse(
                 f"{_sqlite_cannot_add_required(op)}. Give it a default, or write the "
                 f"change as a migration, which generates the backfill: "
                 f"`ferro migrate new`"
             )
-        op["verdict"] = verdict
-    unrendered = [
-        index
-        for index, op in enumerate(operations)
-        if _demands_values(op, op["verdict"])
-    ]
+        if _execution(op, "rebuild") is not None:
+            raise _refuse(
+                f"{_rebuild_refusal(op)} (batch mode has no foreign-key pragma "
+                f"handling, so the drop cascades into ON DELETE CASCADE children). "
+                f"Write this change as a migration: `ferro migrate new`"
+            )
+    unrendered = [index for index, op in enumerate(operations) if _demands_values(op)]
     rendered = json.loads(
         _core._plan_from_ir(
             live.schema_ir,
@@ -680,11 +687,10 @@ def _upgrade_plan(
         )
     )["operations"]
     kept = []
-    for index, (op, written) in enumerate(zip(operations, rendered)):
+    for index, written in enumerate(rendered):
         if index in unrendered:
-            kept.append({**op, "statements": [], "reports": []})
+            kept.append(written)
             continue
-        written = {**written, "verdict": op["verdict"]}
         # An op the pass renders to nothing at all (a SQLite type change
         # whose storage is the same) is one the pass does not run: neither
         # does the revision. One whose rendering reports that it blocks (a
@@ -703,17 +709,20 @@ def _upgrade_plan(
 def _downgrade_plan(
     live: _LiveDatabase, declared: Dict[str, Any], dialect: str
 ) -> Dict[str, Any]:
-    """The planner run back from the models to the live database, every
-    step checked against the generator's verdicts the way the upgrade's are.
-    A step SQLite can only take by rebuilding the table, or one the renderer
-    has no statement for, cannot be undone by this revision: it is
-    irreversible, with the reason. A re-added column that demands values of
-    existing rows is left out of the rendering, as the upgrade leaves out
-    its own, and written as the plain op marked ``data-dependent`` (on
-    SQLite, which cannot add it in place, it is irreversible)."""
+    """The upgrade's down (ADR-0050): the one down every door uses, planned
+    from the models back to the live database and scoped to what the upgrade
+    touched (``_core._plan_reverse_from_ir``), every op read off its verdict.
+    What the live database cannot express (an enum label removed, a policy
+    applying ``TO`` a role list), a step SQLite can only take by rebuilding
+    the table, and one the renderer has no statement for cannot be undone by
+    this revision: each is irreversible, with the reason. A re-added column
+    that demands values of existing rows is left out of the rendering, as the
+    upgrade leaves out its own, and written as the plain op marked
+    ``data-dependent`` (on SQLite, which cannot add it in place, it is
+    irreversible)."""
     declared_json = json.dumps(declared)
 
-    def reverse(render: bool, unrendered: "list[int] | None" = None) -> Dict[str, Any]:
+    def down(render: bool, unrendered: "list[int] | None" = None) -> Dict[str, Any]:
         return json.loads(
             _core._plan_reverse_from_ir(
                 live.schema_ir,
@@ -726,56 +735,34 @@ def _downgrade_plan(
             )
         )
 
-    plan = reverse(False)
-    before = plan["before"]
+    plan = down(False)
     operations = plan["operations"]
-    planner_ops = [
-        op
-        for op in operations
-        if "irreversible" not in op
-        and not op["kind"].startswith(("Restore", "DropForeignKey"))
-    ]
-    verdicts = json.loads(
-        _core._plan_step_verdicts(
-            declared_json,
-            json.dumps(before),
-            dialect,
-            "down",
-            json.dumps(planner_ops),
-        )
-    )
-    for op, verdict in zip(planner_ops, verdicts):
-        op["verdict"] = verdict
-    unrendered = [
-        index
-        for index, op in enumerate(operations)
-        if "verdict" in op and _demands_values(op, op["verdict"])
-    ]
-    for op, written in zip(operations, reverse(True, unrendered)["operations"]):
+    unrendered = [index for index, op in enumerate(operations) if _demands_values(op)]
+    for op, written in zip(operations, down(True, unrendered)["operations"]):
         op["statements"] = written["statements"]
         op["reports"] = written["reports"]
     kept = []
     for index, op in enumerate(operations):
-        verdict = op.get("verdict")
-        if index not in unrendered and not (
-            "irreversible" in op or op["statements"] or _blocking(op) is not None
-        ):
-            continue
-        if "irreversible" not in op and verdict and verdict["needs"] == "rebuild":
-            op["irreversible"] = {
-                "reason": f"{op['kind']} on {_subject(op)} needs a SQLite table rebuild, "
-                f"which an Alembic revision cannot write; `ferro migrate new` writes it"
-            }
-        if "irreversible" not in op and index in unrendered and dialect == "sqlite":
-            op["irreversible"] = {
-                "reason": f"{_sqlite_cannot_add_required(op)}; `ferro migrate new` "
-                f"writes it"
-            }
-        blocking = None if op["statements"] else _blocking(op)
-        if "irreversible" not in op and blocking is not None:
-            op["irreversible"] = {"reason": blocking}
+        reason = _execution(op, "irreversible") or _execution(op, "refused")
+        if reason is None and _execution(op, "rebuild") is not None:
+            reason = f"{_rebuild_refusal(op)}; `ferro migrate new` writes it"
+        if reason is None and index in unrendered and dialect == "sqlite":
+            reason = f"{_sqlite_cannot_add_required(op)}; `ferro migrate new` writes it"
+        if reason is None and index not in unrendered and not op["statements"]:
+            reason = _blocking(op)
+            if reason is None:
+                # Nothing to run on this dialect (row security of a new
+                # SQLite table is its create's warning).
+                continue
+        if reason is not None:
+            op["irreversible"] = {"reason": reason}
         kept.append(op)
-    return {**plan, "operations": kept, "target": before, "dialect": dialect}
+    return {
+        **plan,
+        "operations": kept,
+        "target": json.loads(live.schema_ir),
+        "dialect": dialect,
+    }
 
 
 try:
