@@ -49,3 +49,4 @@ A generated down is never irreversible. Only a person declares that.
 - Down files carry `data-dependent` where it applies and never `destructive`: nearly every down of an add is a drop.
 - `down` asks for confirmation before executing; `--yes` skips the prompt.
 - A deliberate floor ("never revert below this") is an irreversible step. Baseline is not that mechanism.
+- A step's down is the planner run from the step's after-state to its before-state, keeping only what the step changed, through the same function as the Alembic bridge's `downgrade()` (ADR-0050).
