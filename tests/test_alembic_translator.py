@@ -309,6 +309,67 @@ async def test_rename_hints_render_alembic_renames_and_the_derived_names(
 
 
 @pytest.mark.backend_matrix
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_a_leftover_check_renamed_with_its_table_comes_back_under_its_old_name(
+    db_url, postgres_base_url, db_schema_name
+):
+    """ADR-0050's dropped-leftover case beside a table rename: the upgrade
+    renames ``tr533card`` and the leftover check only the live facts carry,
+    then drops the check; the downgrade renames the table back and restores
+    the check under its old name, with the body the catalog printed."""
+
+    class Tr533Card(Model):
+        id: int | None = Field(default=None, primary_key=True)
+
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        await execute(
+            'ALTER TABLE "tr533card" ADD CONSTRAINT "ck_tr533card_old" CHECK (id > 0)'
+        )
+    _rewind_registry()
+
+    class Tr533Deck(Model):
+        __ferro_renamed_from__: ClassVar[str] = "tr533card"
+
+        id: int | None = Field(default=None, primary_key=True)
+
+    upgrade, downgrade = autogenerate(db_url, postgres_base_url, db_schema_name)
+    assert "op.rename_table('tr533card', 'tr533deck')" in upgrade, upgrade
+    assert_statement_in_code(
+        'ALTER TABLE "tr533deck" RENAME CONSTRAINT "ck_tr533card_old" TO "ck_tr533deck_old"',
+        upgrade,
+    )
+    assert_statement_in_code(
+        'ALTER TABLE "tr533deck" DROP CONSTRAINT "ck_tr533deck_old"', upgrade
+    )
+    assert "op.rename_table('tr533deck', 'tr533card')" in downgrade, downgrade
+    assert_statement_in_code(
+        'ALTER TABLE "tr533card" ADD CONSTRAINT "ck_tr533card_old" CHECK ((id > 0))',
+        downgrade,
+    )
+
+    run_revision(upgrade, db_url, postgres_base_url, db_schema_name)
+    run_revision(downgrade, db_url, postgres_base_url, db_schema_name)
+    engine = engine_for(db_url, postgres_base_url)
+    try:
+        with engine.connect() as conn:
+            names = conn.execute(
+                sa.text(
+                    "SELECT c.conname FROM pg_constraint c "
+                    "JOIN pg_class t ON t.oid = c.conrelid "
+                    "JOIN pg_namespace n ON n.oid = t.relnamespace "
+                    "WHERE n.nspname = :schema AND t.relname = 'tr533card' "
+                    "AND c.contype = 'c'"
+                ),
+                {"schema": db_schema_name},
+            ).scalars()
+            assert list(names) == ["ck_tr533card_old"]
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.backend_matrix
 @pytest.mark.asyncio
 async def test_a_live_hints_old_table_is_read_by_the_hint_alone(
     db_url, postgres_base_url, db_schema_name

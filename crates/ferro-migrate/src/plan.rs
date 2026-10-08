@@ -2044,7 +2044,8 @@ pub fn plan_down(up: &[MigrationOp], after: &Side, before: &Side, dialect: Diale
         dialect,
         PlanOptions { destructive: true },
     );
-    let back = KeyRenames::of(plan.ops().filter(|op| is_rename(op)));
+    let mut back = KeyRenames::of(plan.ops().filter(|op| is_rename(op)));
+    back.undo_names(up);
     let mut scope: BTreeSet<Artifact> = BTreeSet::new();
     for op in up {
         scope.extend(key(op).map(|key| back.apply(key)));
@@ -2283,6 +2284,24 @@ impl KeyRenames {
             }
         }
         map
+    }
+
+    /// Each index, constraint and policy name `up` renames that the down's
+    /// own renames do not rename back — a name only a live database's facts
+    /// carry (a leftover check on a renamed table, `fact_renames`) — mapped
+    /// back to the name it had: the down's keys are compared after the up's
+    /// renames are undone, so the down restores the artifact under its old
+    /// name.
+    fn undo_names(&mut self, up: &[MigrationOp]) {
+        for op in up {
+            if let MigrationOp::RenameIndex { table, old, new }
+            | MigrationOp::RenameConstraint { table, old, new }
+            | MigrationOp::RenamePolicy { table, old, new } = op
+            {
+                let key = (self.table(table), new.clone());
+                self.names.entry(key).or_insert_with(|| old.clone());
+            }
+        }
     }
 
     fn table(&self, table: &str) -> String {
@@ -3722,6 +3741,63 @@ mod down_tests {
         let (_, down) = up_and_down(&live, &models, Dialect::Sqlite, DESTRUCTIVE);
         assert_eq!(down.operations.len(), 1);
         assert_eq!(down.operations[0].verdict.execution, Execution::Rebuild);
+    }
+
+    #[test]
+    fn a_leftover_check_renamed_with_its_table_and_dropped_comes_back_under_its_old_name() {
+        // ADR-0050's fourth case beside a table rename: the models rename
+        // `card` to `deck`, and the live `card` holds the leftover
+        // `ck_card_old`, which only the live facts carry.
+        let (live, _) = leftover();
+        let mut deck = card(vec![column("id", "int", false)]);
+        deck.table_name = "deck".into();
+        deck.model_name = "app.Deck".into();
+        deck.renamed_from = Some("card".into());
+        let models = declared(vec![deck]);
+        let (up, down) = up_and_down(&live, &models, Dialect::Postgres, DESTRUCTIVE);
+        assert_eq!(
+            ops(&up),
+            vec![
+                MigrationOp::RenameTable {
+                    old: "card".into(),
+                    new: "deck".into()
+                },
+                MigrationOp::RenameConstraint {
+                    table: "deck".into(),
+                    old: "ck_card_old".into(),
+                    new: "ck_deck_old".into()
+                },
+                MigrationOp::DropCheck {
+                    table: "deck".into(),
+                    name: "ck_deck_old".into()
+                },
+            ]
+        );
+        // The down undoes the up's renames before it compares keys: the
+        // check comes back with the catalog's body under its old name.
+        assert_eq!(
+            ops(&down),
+            vec![
+                MigrationOp::RenameTable {
+                    old: "deck".into(),
+                    new: "card".into()
+                },
+                MigrationOp::AddCheck {
+                    table: "card".into(),
+                    name: "ck_card_old".into()
+                },
+            ]
+        );
+        assert_eq!(
+            statements(&down),
+            vec![
+                vec!["ALTER TABLE \"deck\" RENAME TO \"card\"".to_string()],
+                vec![
+                    "ALTER TABLE \"card\" ADD CONSTRAINT \"ck_card_old\" CHECK ((id > 0))"
+                        .to_string()
+                ],
+            ]
+        );
     }
 
     // -- the second live-side refusal ----------------------------------------
