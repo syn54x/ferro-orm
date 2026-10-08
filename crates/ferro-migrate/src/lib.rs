@@ -26,7 +26,7 @@ pub use directory::{
     DirectoryError, Headers, Migration, MigrationsDir, Step, StepDialect, StepKind,
 };
 pub use emit::{CreateTableEmission, order_models_for_create, render_create_table};
-pub use ferro_ddl_lowering::Dialect;
+pub use ferro_ddl_lowering::{Dialect, InPlaceChange, Report, ReportKind, Subject};
 pub use generate::{
     CheckReport, GenerateError, GenerateOptions, GeneratedMigration, check_migrations, generate,
     generate_with,
@@ -43,13 +43,13 @@ pub use run_plan::{
 };
 pub use snapshot::{Snapshot, SnapshotError};
 
-/// Executable SQL plus non-fatal warnings for one rendered op.
+/// Executable SQL plus the reports for one rendered op.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct EmissionResult {
     /// DDL statements to execute in order.
     pub statements: Vec<String>,
-    /// Human-readable warnings (backend limitations, skipped alters, …).
-    pub warnings: Vec<String>,
+    /// What rendering reports (a backend limitation, a refused cast, …).
+    pub reports: Vec<Report>,
 }
 
 /// Hard failure during SQL emission (missing IR metadata, unsafe add, …).
@@ -454,22 +454,100 @@ pub struct LiveIndexValidity {
     pub valid: bool,
 }
 
-/// The whole modelset's ordered operations plus the warnings planning raised.
+/// The whole modelset's ordered operations plus the reports planning raised.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct MigrationPlan {
     /// Operations to apply, in execution order (see [`plan_from_ir`]).
     pub operations: Vec<MigrationOp>,
-    /// Advisory warnings planning raised (a user-owned FK that drifts,
-    /// leftover CHECKs, extra enum labels). Warnings an op raises while
-    /// rendering travel on its [`RenderedOp`] instead.
-    pub warnings: Vec<String>,
-    /// Warnings about a standing condition of the live database that holds
-    /// on every run until someone acts — every row-security report (a
-    /// foreign or unverifiable policy, a dropped declaration, a teardown).
-    /// Callers surface these every time: a table whose rows are not fenced
-    /// the way the model says is still not fenced on the next run, and
-    /// silence after the first would be misread as safety.
-    pub always_warnings: Vec<String>,
+    /// What planning reports beside its ops (a refused rename hint, leftover
+    /// CHECKs, extra enum labels, a user-owned FK that drifts, every
+    /// row-security report), in the order planning raised them. A report
+    /// about a standing condition of the live database [`Report::recurs`]:
+    /// callers surface it every time, since a table whose rows are not
+    /// fenced the way the model says is still not fenced on the next run.
+    /// Reports an op raises while rendering travel on its [`RenderedOp`].
+    pub reports: Vec<Report>,
+}
+
+/// Whether a plan's own ops answer a [`Report`]: the change it reports is
+/// one they make. A door that writes a reviewed file refuses every report no
+/// op answers, since writing nothing for it would leave it out silently.
+pub trait AnsweredBy {
+    /// `true` when `ops` make the change this report is about.
+    fn answered_by(&self, ops: &[MigrationOp]) -> bool;
+}
+
+impl AnsweredBy for Report {
+    fn answered_by(&self, ops: &[MigrationOp]) -> bool {
+        let on_table = |table: &str| match &self.subject {
+            Subject::Table { table: subject } | Subject::Column { table: subject, .. } => {
+                subject == table
+            }
+            _ => false,
+        };
+        let has = |pred: &dyn Fn(&MigrationOp) -> bool| ops.iter().any(pred);
+        match &self.kind {
+            // Each leftover is dropped by the plan.
+            ReportKind::LeftoverChecks { names } => names.iter().all(|name| {
+                has(&|op| {
+                    matches!(op, MigrationOp::DropCheck { table, name: dropped }
+                        if on_table(table) && dropped == name)
+                })
+            }),
+            ReportKind::ExtraPolicies { names } => names.iter().all(|name| {
+                has(&|op| {
+                    matches!(op, MigrationOp::DropRowPolicy { table, name: dropped }
+                        if on_table(table) && dropped == name)
+                })
+            }),
+            ReportKind::ExtraEnumLabels { labels } => labels.iter().all(|label| {
+                has(&|op| {
+                    matches!((op, &self.subject), (
+                        MigrationOp::RemoveEnumLabel { type_name, label: removed, .. },
+                        Subject::EnumType { type_name: subject },
+                    ) if type_name == subject && removed == label)
+                })
+            }),
+            // Row security the model stopped asking for, torn down.
+            ReportKind::DroppedRowSecurity => has(&|op| {
+                matches!(op, MigrationOp::DisableRowSecurity { table }
+                    | MigrationOp::NoForceRowSecurity { table } if on_table(table))
+            }),
+            // The report of a change the plan makes: its ops.
+            ReportKind::RowSecurityTeardown { names } => {
+                names.iter().all(|name| {
+                    has(&|op| {
+                        matches!(op, MigrationOp::DropRowPolicy { table, name: dropped }
+                            if on_table(table) && dropped == name)
+                    })
+                }) && (!names.is_empty()
+                    || has(&|op| {
+                        matches!(op, MigrationOp::DisableRowSecurity { table }
+                            | MigrationOp::NoForceRowSecurity { table } if on_table(table))
+                    }))
+            }
+            ReportKind::PolicyBodyReplaced { name } => has(&|op| {
+                matches!(op, MigrationOp::RebuildRowPolicy { table, name: rebuilt }
+                    if on_table(table) && rebuilt == name)
+            }),
+            // A condition no op changes: a refused hint renames nothing, a
+            // foreign artifact is never touched, an unverifiable body is left
+            // as it is, and a rendering report stands in for a statement.
+            ReportKind::HintRefused(_)
+            | ReportKind::ForeignFkDrift { .. }
+            | ReportKind::ForeignPolicies { .. }
+            | ReportKind::UnverifiablePolicy { .. }
+            | ReportKind::RefusedConversion
+            | ReportKind::SqliteInPlace { .. }
+            | ReportKind::PrimaryKeyKept
+            | ReportKind::RowSecuritySkipped
+            | ReportKind::PendingTableRename
+            | ReportKind::StrandedLabelRename
+            | ReportKind::RowSecurityUnderMigrator
+            | ReportKind::RunLockWait
+            | ReportKind::DdlLockRetry => false,
+        }
+    }
 }
 
 /// What a plan may do beyond bringing the database up to the model.

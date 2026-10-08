@@ -13,7 +13,8 @@ Two postures ADR-0019 sets, on purpose:
   changes on, since a generated revision is reviewed before it runs; the
   ``migrate_destructive`` flag is connect-time safety.
 * A **foreign** policy and an **unverifiable** raw-body drift never become
-  an op at all: the planner reports them in ``always_warnings`` and plans
+  an op at all: the planner reports them (``ForeignPolicies``,
+  ``UnverifiablePolicy``, each recurring) and plans
   nothing, so autogenerate says nothing and the runtime's own connect-time
   warnings remain the only word on them.
 """
@@ -378,6 +379,32 @@ async def test_unverifiable_raw_body_drift_is_silent(
     code = _autogen_upgrade_code(postgres_base_url, db_schema_name)
     assert "POLICY" not in code.upper(), code
     assert "pass" in code, code
+
+
+def test_a_foreign_policy_and_an_unverifiable_body_are_recurring_reports_never_ops():
+    """What keeps autogenerate silent about both: the planner hands them over
+    as reports of their own kind, and plans no op for either."""
+    _define_ledger_row_raw(using='"label" IS NULL')
+    unverifiable = {
+        "name": POLICY_NAME,
+        "command": "all",
+        "restrictive": False,
+        "using": "(label IS NOT NULL)",
+        "with_check": "(label IS NOT NULL)",
+        "roles": ["public"],
+        "ferro_owned": True,
+    }
+    foreign = {**unverifiable, "name": FOREIGN_NAME, "ferro_owned": False}
+    plan = plan_live_ledgerrow(
+        {"enabled": True, "forced": True, "policies": [unverifiable, foreign]},
+        destructive=True,
+    )
+    assert ops_of(plan) == []
+    assert [(report["kind"], report["recurs"]) for report in plan["reports"]] == [
+        ({"ForeignPolicies": {"names": [FOREIGN_NAME]}}, True),
+        ({"UnverifiablePolicy": {"name": POLICY_NAME}}, True),
+    ]
+    assert {report["subject"]["table"] for report in plan["reports"]} == {"ledgerrow"}
 
 
 # ---------------------------------------------------------------------------

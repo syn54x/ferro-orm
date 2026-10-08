@@ -67,9 +67,15 @@ class DriftReport:
     lines: list[str] = field(default_factory=list)
     operations: list[dict[str, Any]] = field(default_factory=list)
     refusal: str | None = None
-    warnings: list[str] = field(default_factory=list)
+    reports: list[dict[str, Any]] = field(default_factory=list)
     """What the planner reports without planning an op for it (a foreign
-    or unverifiable row policy, ...). Never makes the report unclean."""
+    or unverifiable row policy, ...), each ``{"kind", "subject", "text",
+    "recurs"}``. Never makes the report unclean."""
+
+    @property
+    def warnings(self) -> list[str]:
+        """Each report's sentence, in order."""
+        return [report["text"] for report in self.reports]
 
     @property
     def clean(self) -> bool:
@@ -323,7 +329,7 @@ async def against(
         against=migration,
         lines=[render_op(op) for op in operations],
         operations=operations,
-        warnings=list(plan["warnings"]) + list(plan["always_warnings"]),
+        reports=list(plan["reports"]),
     )
 
 

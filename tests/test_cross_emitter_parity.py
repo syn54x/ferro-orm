@@ -394,7 +394,9 @@ def test_label_addition_statement_parity_pin():
         # removal (#536); the pass renders it as ADR-0011's warning only.
         ("RemoveEnumLabel", []),
     ]
-    assert any("legacy" in warning for warning in plan["operations"][1]["warnings"])
+    assert [report["kind"] for report in plan["operations"][1]["reports"]] == [
+        {"ExtraEnumLabels": {"labels": ["legacy"]}}
+    ]
 
 
 def test_enum_type_provenance_parity_pin():

@@ -10,6 +10,7 @@ use ferro_ddl_lowering::{
     render_table_check_body, resolve_column_storage, row_security_statements, single_index_name,
     single_unique_index_name, sqlite_declared_type, sqlite_type_storage_drift,
 };
+use ferro_ddl_lowering::{InPlaceChange, Report, Subject, sqlite_in_place_report};
 use ferro_schema_ir::{SchemaColumn, SchemaModel};
 use sea_query::{
     Alias, ColumnDef, Expr, ForeignKey, Index, PostgresQueryBuilder, QueryBuilder,
@@ -36,8 +37,8 @@ pub struct CreateTableEmission {
     /// Standalone `CREATE [UNIQUE] INDEX` statements plus the Postgres `db_check`
     /// `ALTER`. Never contains foreign keys (those are inline in `create_sql`).
     pub post_create_sqls: Vec<String>,
-    /// Non-fatal warnings (e.g. the SQLite row-security skip).
-    pub warnings: Vec<String>,
+    /// What the emission reports (the SQLite row-security skip).
+    pub reports: Vec<Report>,
 }
 
 /// Apply a resolved storage to a sea-query [`ColumnDef`]. Enum columns render
@@ -266,12 +267,12 @@ pub fn render_create_table_as(
     };
     let create_sql = append_named_table_checks(create_sql, model)?;
 
-    let (post_create_sqls, warnings) = post_create_artifacts(model, &check_emissions, dialect)?;
+    let (post_create_sqls, reports) = post_create_artifacts(model, &check_emissions, dialect)?;
     Ok(CreateTableEmission {
         pre_create_sqls,
         create_sql,
         post_create_sqls,
-        warnings,
+        reports,
     })
 }
 
@@ -353,10 +354,10 @@ fn post_create_artifacts(
     model: &SchemaModel,
     check_emissions: &[(&ferro_schema_ir::SchemaCheck, CheckEmission)],
     dialect: Dialect,
-) -> Result<(Vec<String>, Vec<String>), EmissionError> {
+) -> Result<(Vec<String>, Vec<Report>), EmissionError> {
     let table_lower = model.table_name.as_str();
     let mut statements = Vec::new();
-    let mut warnings = Vec::new();
+    let mut reports = Vec::new();
 
     for (name, columns, unique) in standalone_indexes(model) {
         statements.push(render_index_sql(
@@ -374,9 +375,7 @@ fn post_create_artifacts(
         if let Some(stmt) = &emission.statement {
             statements.push(stmt.clone());
         }
-        if let Some(warning) = &emission.warning {
-            warnings.push(warning.clone());
-        }
+        reports.extend(emission.warning.iter().cloned());
     }
 
     // Row security lands last: the flags and policies go on after the table's
@@ -384,11 +383,9 @@ fn post_create_artifacts(
     // fresh table is itself filtered (PRD #406).
     let rls = row_security_statements(model, dialect).map_err(|message| EmissionError { message })?;
     statements.extend(rls.statements);
-    if let Some(warning) = rls.warning {
-        warnings.push(warning);
-    }
+    reports.extend(rls.warning);
 
-    Ok((statements, warnings))
+    Ok((statements, reports))
 }
 
 
@@ -576,9 +573,7 @@ pub(crate) fn emit_add_column(
         if let Some(stmt) = emission.statement {
             result.statements.push(stmt);
         }
-        if let Some(warning) = emission.warning {
-            result.warnings.push(warning);
-        }
+        result.reports.extend(emission.warning);
     }
 
     if let Some(fk) = fk {
@@ -587,13 +582,18 @@ pub(crate) fn emit_add_column(
                 .statements
                 .push(render_add_fk_sql(table, fk, constraints)),
             Dialect::Sqlite if sqlite_inline_fk => {}
-            Dialect::Sqlite => result.warnings.push(format!(
-                "Added foreign-key column '{}.{}' without its FOREIGN KEY constraint: SQLite's \
-                 ADD COLUMN accepts a REFERENCES clause only for a column whose default is \
-                 NULL, and this column is NOT NULL with a backfill default. Referential \
-                 integrity for this column is not database-enforced; generate a reviewed \
-                 migration with `ferro migrate new` to rebuild the table with the constraint.",
-                table, column
+            Dialect::Sqlite => result.reports.push(sqlite_in_place_report(
+                InPlaceChange::AddForeignKey,
+                Subject::column(table, column),
+                format!(
+                    "Added foreign-key column '{}.{}' without its FOREIGN KEY constraint: \
+                     SQLite's ADD COLUMN accepts a REFERENCES clause only for a column whose \
+                     default is NULL, and this column is NOT NULL with a backfill default. \
+                     Referential integrity for this column is not database-enforced; generate \
+                     a reviewed migration with `ferro migrate new` to rebuild the table with \
+                     the constraint.",
+                    table, column
+                ),
             )),
         }
     }
@@ -722,7 +722,7 @@ pub(crate) fn emit_alter_column_type(
                         )
                     }
                 };
-                result.warnings.push(refused_conversion_warning(
+                result.reports.push(refused_conversion_warning(
                     kind,
                     table,
                     column,
@@ -760,14 +760,18 @@ pub(crate) fn emit_alter_column_type(
                 }
             })?;
             if sqlite_type_storage_drift(old_col.db_type.as_deref().unwrap_or(""), new_canonical) {
-                result.warnings.push(format!(
-                    "Column '{}.{}' is declared '{}' in the database but the model expects \
-                     '{}'. SQLite cannot change column types in place; generate a \
-                     reviewed migration with `ferro migrate new` to migrate this column.",
-                    table,
-                    column,
-                    old_col.db_type.as_deref().unwrap_or(""),
-                    sqlite_declared_type(new_canonical),
+                result.reports.push(sqlite_in_place_report(
+                    InPlaceChange::AlterColumnType,
+                    Subject::column(table, column),
+                    format!(
+                        "Column '{}.{}' is declared '{}' in the database but the model expects \
+                         '{}'. SQLite cannot change column types in place; generate a \
+                         reviewed migration with `ferro migrate new` to migrate this column.",
+                        table,
+                        column,
+                        old_col.db_type.as_deref().unwrap_or(""),
+                        sqlite_declared_type(new_canonical),
+                    ),
                 ));
             }
         }
@@ -805,22 +809,26 @@ pub(crate) fn emit_alter_column_nullability(
         }
         Dialect::Sqlite => {
             if old_col.nullable != new_col.nullable {
-                result.warnings.push(format!(
-                    "Column '{}.{}' is {} in the database but the model expects {}. SQLite \
-                     cannot change column nullability in place; generate a reviewed \
-                     migration with `ferro migrate new` to migrate this column.",
-                    table,
-                    column,
-                    if old_col.nullable {
-                        "nullable"
-                    } else {
-                        "NOT NULL"
-                    },
-                    if new_col.nullable {
-                        "nullable"
-                    } else {
-                        "NOT NULL"
-                    },
+                result.reports.push(sqlite_in_place_report(
+                    InPlaceChange::AlterColumnNullability,
+                    Subject::column(table, column),
+                    format!(
+                        "Column '{}.{}' is {} in the database but the model expects {}. SQLite \
+                         cannot change column nullability in place; generate a reviewed \
+                         migration with `ferro migrate new` to migrate this column.",
+                        table,
+                        column,
+                        if old_col.nullable {
+                            "nullable"
+                        } else {
+                            "NOT NULL"
+                        },
+                        if new_col.nullable {
+                            "nullable"
+                        } else {
+                            "NOT NULL"
+                        },
+                    ),
                 ));
             }
         }

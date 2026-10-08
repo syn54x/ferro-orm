@@ -604,6 +604,13 @@ def _sqlite_cannot_add_required(op: Dict[str, Any]) -> str:
     )
 
 
+def _report_kind(report: Dict[str, Any]) -> str:
+    """A plan report's kind by name: the planner serializes a kind with no
+    fields as its name and one with fields as ``{name: fields}``."""
+    kind = report["kind"]
+    return kind if isinstance(kind, str) else next(iter(kind))
+
+
 def _upgrade_plan(
     live: _LiveDatabase, declared: Dict[str, Any], dialect: str
 ) -> Dict[str, Any]:
@@ -618,12 +625,11 @@ def _upgrade_plan(
             live.schema_ir, declared_json, dialect, _DESTRUCTIVE, False, live.facts
         )
     )
-    # The planner reports a refused hint only as text (`plan_from_ir` pushes
-    # "rename hint refused: …" into `always_warnings`; the plan carries no
-    # structured kind for it), so its own prefix is what is matched.
-    for warning in plan["always_warnings"]:
-        if warning.startswith("rename hint refused"):
-            raise _refuse(warning)
+    # A refused rename hint renames nothing: the revision is refused with
+    # the planner's own sentence for it.
+    for report in plan["reports"]:
+        if _report_kind(report) == "HintRefused":
+            raise _refuse(report["text"])
     operations = plan["operations"]
     verdicts = json.loads(
         _core._plan_step_verdicts(
@@ -662,7 +668,7 @@ def _upgrade_plan(
     kept = []
     for op in operations:
         if _demands_values(op, op["verdict"]):
-            kept.append({**op, "statements": [], "warnings": []})
+            kept.append({**op, "statements": [], "reports": []})
             continue
         written = {**next(rendered), "verdict": op["verdict"]}
         # An op the pass renders to nothing at all (a SQLite type change
@@ -670,8 +676,8 @@ def _upgrade_plan(
         # does the revision. One it only warns about has no statement to
         # write: refused with the renderer's reason.
         if not written["statements"]:
-            if written["warnings"] and written["kind"] != "AddTable":
-                raise _refuse(written["warnings"][0])
+            if written["reports"] and written["kind"] != "AddTable":
+                raise _refuse(written["reports"][0]["text"])
             if written["kind"] != "AddTable":
                 continue
         kept.append(written)
@@ -731,12 +737,12 @@ def _downgrade_plan(
     ]
     for op, written in zip(operations, reverse(True, unrendered)["operations"]):
         op["statements"] = written["statements"]
-        op["warnings"] = written["warnings"]
+        op["reports"] = written["reports"]
     kept = []
     for index, op in enumerate(operations):
         verdict = op.get("verdict")
         if index not in unrendered and not (
-            "irreversible" in op or op["statements"] or op["warnings"]
+            "irreversible" in op or op["statements"] or op["reports"]
         ):
             continue
         if "irreversible" not in op and verdict and verdict["needs"] == "rebuild":
@@ -749,8 +755,8 @@ def _downgrade_plan(
                 "reason": f"{_sqlite_cannot_add_required(op)}; `ferro migrate new` "
                 f"writes it"
             }
-        if "irreversible" not in op and not op["statements"] and op["warnings"]:
-            op["irreversible"] = {"reason": op["warnings"][0]}
+        if "irreversible" not in op and not op["statements"] and op["reports"]:
+            op["irreversible"] = {"reason": op["reports"][0]["text"]}
         kept.append(op)
     return {**plan, "operations": kept, "target": before, "dialect": dialect}
 

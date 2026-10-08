@@ -7,18 +7,18 @@ use crate::emit::{
     find_foreign_key, find_model, render_add_fk_sql, render_index_sql, standalone_indexes,
 };
 use crate::plan::{index_models, planned_before, relabels_rows};
-use crate::{Dialect, EmissionError, MigrationOp, MigrationPlan, render_create_table};
+use crate::{Dialect, EmissionError, MigrationOp, MigrationPlan, Report, render_create_table};
 use ferro_ddl_lowering::{
-    ConstraintMode, IndexMode, ResolvedStorage, fk_action_from_str, fk_action_sql, quote_ident,
-    render_check_addition, render_check_drop, render_check_rebuild, render_create_row_policy,
-    render_disable_row_security, render_drop_constraint, render_drop_index_sql,
-    render_drop_row_policy, render_enable_row_security, render_force_row_security,
-    render_label_update, render_no_force_row_security, render_pg_enum_add_value,
-    render_pg_enum_create_type, render_pg_enum_drop_type, render_pg_enum_rename_type,
-    render_pg_enum_rename_value, render_rename_column, render_rename_constraint,
-    render_rename_index, render_rename_policy, render_rename_table, render_validate_constraint,
-    resolve_column_storage, row_policy_clauses, row_policy_rebuild_statements,
-    row_security_statements,
+    ConstraintMode, InPlaceChange, IndexMode, ResolvedStorage, Subject, fk_action_from_str,
+    fk_action_sql, primary_key_kept_warning, quote_ident, render_check_addition, render_check_drop,
+    render_check_rebuild, render_create_row_policy, render_disable_row_security,
+    render_drop_constraint, render_drop_index_sql, render_drop_row_policy,
+    render_enable_row_security, render_force_row_security, render_label_update,
+    render_no_force_row_security, render_pg_enum_add_value, render_pg_enum_create_type,
+    render_pg_enum_drop_type, render_pg_enum_rename_type, render_pg_enum_rename_value,
+    render_rename_column, render_rename_constraint, render_rename_index, render_rename_policy,
+    render_rename_table, render_validate_constraint, resolve_column_storage, row_policy_clauses,
+    row_policy_rebuild_statements, row_security_statements, sqlite_in_place_report,
 };
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
 use std::collections::{BTreeSet, HashSet};
@@ -28,10 +28,13 @@ use std::collections::{BTreeSet, HashSet};
 pub struct RenderedOp {
     /// The op.
     pub op: MigrationOp,
-    /// Statements to execute, in order (none when the dialect can only warn).
+    /// Statements to execute, in order (none when the dialect can only
+    /// report).
     pub statements: Vec<String>,
-    /// Warnings rendering raised (a backend limitation that skips the op).
-    pub warnings: Vec<String>,
+    /// What rendering reports (a backend limitation that skips the op, a
+    /// refused cast). One that [`Report::blocks`] stands in for a statement
+    /// the op has none of.
+    pub reports: Vec<Report>,
     /// For an `AddTable`, the row-security statements among `statements`
     /// (its flags and policies, last): what a consumer that creates the
     /// table its own way still executes as written (the Alembic bridge's
@@ -44,7 +47,7 @@ impl RenderedOp {
         Self {
             op: op.clone(),
             statements: Vec::new(),
-            warnings: Vec::new(),
+            reports: Vec::new(),
             row_security_statements: Vec::new(),
         }
     }
@@ -164,7 +167,7 @@ pub(crate) fn render_plan_in(
             MigrationOp::RemoveEnumLabel {
                 type_name, label, ..
             } => {
-                out.warnings
+                out.reports
                     .extend(ferro_ddl_lowering::extra_enum_labels_warning(
                         type_name,
                         std::slice::from_ref(label),
@@ -243,7 +246,7 @@ pub(crate) fn render_plan_in(
                 }
                 out.statements.push(emission.create_sql);
                 out.statements.extend(emission.post_create_sqls);
-                out.warnings.extend(emission.warnings);
+                out.reports.extend(emission.reports);
                 // The same statements the emission ends with, from the one
                 // function it takes them from.
                 out.row_security_statements = row_security_statements(model, dialect)
@@ -291,10 +294,14 @@ pub(crate) fn render_plan_in(
                 Dialect::Postgres => out
                     .statements
                     .push(render_rename_constraint(table, old, new)),
-                Dialect::Sqlite => out.warnings.push(format!(
-                    "Constraint '{old}' on '{table}' is now named '{new}', and SQLite cannot \
-                     rename a table constraint in place; `ferro migrate new` renames it by \
-                     rebuilding the table."
+                Dialect::Sqlite => out.reports.push(sqlite_in_place_report(
+                    InPlaceChange::RenameConstraint,
+                    Subject::table(table),
+                    format!(
+                        "Constraint '{old}' on '{table}' is now named '{new}', and SQLite \
+                         cannot rename a table constraint in place; `ferro migrate new` \
+                         renames it by rebuilding the table."
+                    ),
                 )),
             },
             MigrationOp::RenamePolicy { table, old, new } => {
@@ -312,7 +319,7 @@ pub(crate) fn render_plan_in(
                     constraints,
                 )?;
                 out.statements.extend(emission.statements);
-                out.warnings.extend(emission.warnings);
+                out.reports.extend(emission.reports);
             }
             MigrationOp::DropColumn { table, column } => {
                 let old_model = find_model(&old_models, table)?;
@@ -338,7 +345,7 @@ pub(crate) fn render_plan_in(
                 let new_col = find_column(find_model(&new_models, table)?, column)?;
                 let emission = emit_alter_column_type(table, column, old_col, new_col, dialect)?;
                 out.statements.extend(emission.statements);
-                out.warnings.extend(emission.warnings);
+                out.reports.extend(emission.reports);
             }
             MigrationOp::AlterColumnNullability { table, column } => {
                 let old_col = find_column(find_model(&old_models, table)?, column)?;
@@ -346,18 +353,11 @@ pub(crate) fn render_plan_in(
                 let emission =
                     emit_alter_column_nullability(table, column, old_col, new_col, dialect);
                 out.statements.extend(emission.statements);
-                out.warnings.extend(emission.warnings);
+                out.reports.extend(emission.reports);
             }
             // No door changes a primary key in place: warn and skip.
             MigrationOp::ChangePrimaryKey { table, from, to } => {
-                out.warnings.push(format!(
-                    "Table '{}' declares primary key ({}) but its primary key is ({}). A \
-                     primary key cannot be changed in place, so the live key remains; \
-                     generate a reviewed migration with `ferro migrate new`.",
-                    table,
-                    to.join(", "),
-                    from.join(", "),
-                ));
+                out.reports.push(primary_key_kept_warning(table, to, from));
             }
             MigrationOp::AddIndex {
                 table,
@@ -420,15 +420,19 @@ pub(crate) fn render_plan_in(
                         out.statements
                             .push(render_add_fk_sql(table, fk, constraints))
                     }
-                    Dialect::Sqlite => out.warnings.push(format!(
-                        "Declared FOREIGN KEY on '{}.{}' (on_delete {}) has no live \
-                         constraint, and SQLite cannot add table constraints to an \
-                         existing table. Referential integrity for this column is not \
-                         database-enforced; generate a reviewed migration with \
-                         `ferro migrate new` to rebuild the table with the constraint.",
-                        table,
-                        column,
-                        fk_action_sql(fk_action_from_str(fk.on_delete.as_deref())),
+                    Dialect::Sqlite => out.reports.push(sqlite_in_place_report(
+                        InPlaceChange::AddForeignKey,
+                        Subject::column(table, column),
+                        format!(
+                            "Declared FOREIGN KEY on '{}.{}' (on_delete {}) has no live \
+                             constraint, and SQLite cannot add table constraints to an \
+                             existing table. Referential integrity for this column is not \
+                             database-enforced; generate a reviewed migration with \
+                             `ferro migrate new` to rebuild the table with the constraint.",
+                            table,
+                            column,
+                            fk_action_sql(fk_action_from_str(fk.on_delete.as_deref())),
+                        ),
                     )),
                 }
             }
@@ -455,15 +459,20 @@ pub(crate) fn render_plan_in(
                                 fk_action_sql(fk_action_from_str(live.on_delete.as_deref()))
                             })
                             .unwrap_or("<unknown>");
-                        out.warnings.push(format!(
-                            "Foreign key on '{}.{}' declares on_delete {} but the live \
-                             constraint enforces {}; SQLite cannot alter constraints in \
-                             place, so the live behavior remains. Generate a reviewed \
-                             migration with `ferro migrate new` to apply the declared action.",
-                            table,
-                            column,
-                            fk_action_sql(fk_action_from_str(fk.on_delete.as_deref())),
-                            live_action,
+                        out.reports.push(sqlite_in_place_report(
+                            InPlaceChange::RebuildForeignKey,
+                            Subject::column(table, column),
+                            format!(
+                                "Foreign key on '{}.{}' declares on_delete {} but the live \
+                                 constraint enforces {}; SQLite cannot alter constraints in \
+                                 place, so the live behavior remains. Generate a reviewed \
+                                 migration with `ferro migrate new` to apply the declared \
+                                 action.",
+                                table,
+                                column,
+                                fk_action_sql(fk_action_from_str(fk.on_delete.as_deref())),
+                                live_action,
+                            ),
                         ));
                     }
                 }
@@ -479,7 +488,7 @@ pub(crate) fn render_plan_in(
                         ),
                     })?;
                 out.statements.extend(emission.statement);
-                out.warnings.extend(emission.warning);
+                out.reports.extend(emission.warning);
             }
             MigrationOp::RebuildCheck { table, name } => {
                 let model = find_model(&new_models, table)?;
@@ -492,7 +501,7 @@ pub(crate) fn render_plan_in(
                         ),
                     })?;
                 out.statements.extend(emission.statements);
-                out.warnings.extend(emission.warning);
+                out.reports.extend(emission.warning);
             }
             MigrationOp::DropCheck { table, name } => {
                 let model = find_model(&new_models, table)?;
@@ -508,7 +517,7 @@ pub(crate) fn render_plan_in(
                 }
                 let emission = render_check_drop(table, name, dialect);
                 out.statements.extend(emission.statement);
-                out.warnings.extend(emission.warning);
+                out.reports.extend(emission.warning);
             }
             MigrationOp::AddRowPolicy { table, name } => {
                 require_postgres(op, dialect)?;

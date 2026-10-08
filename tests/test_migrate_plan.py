@@ -1003,8 +1003,7 @@ def test_plan_from_an_empty_modelset_adds_every_model_parents_first(
         assert plan["operations"][0]["labels"] == ["draft", "published"]
     else:
         assert kinds == tables
-    assert plan["warnings"] == []
-    assert plan["always_warnings"] == []
+    assert plan["reports"] == []
 
     rendered = json.loads(
         _plan_from_ir(
@@ -1056,7 +1055,7 @@ async def test_a_freshly_migrated_database_reads_back_as_a_plan_with_nothing_to_
                 facts_json=facts_json,
             )
         )
-        assert plan == {"operations": [], "warnings": [], "always_warnings": []}
+        assert plan == {"operations": [], "reports": []}
 
     # A table the live database lacks is an add; reading only one table
     # makes the other one missing.

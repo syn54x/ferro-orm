@@ -31,7 +31,8 @@ use crate::schema::internal_create_tables;
 use crate::state::{MODEL_REGISTRY, engine_for_connection};
 use ferro_ddl_lowering::{Dialect, LiveRowSecurity, row_security_migrator_warning};
 use ferro_migrate::{
-    LiveFacts, MigrationOp, PlanOptions, RenderedOp, plan_from_ir, render_plan, validate_schema_ir,
+    LiveFacts, MigrationOp, PlanOptions, RenderedOp, Report, ReportKind, plan_from_ir, render_plan,
+    validate_schema_ir,
 };
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload};
 use pyo3::prelude::*;
@@ -733,17 +734,21 @@ async fn run_passes(engine: Arc<EngineHandle>, opts: MigrateOptions) -> PyResult
             .collect();
         if !forced_tables.is_empty()
             && !connected_role_bypasses_row_security(&engine).await?
-            && let Some(warning) = row_security_migrator_warning(&forced_tables)
+            && let Some(report) = row_security_migrator_warning(&forced_tables)
         {
             // Emitted HERE, not queued with the rest: it warns that the data
             // steps below may see zero rows, and a warning that arrives after
             // those steps have already run silently succeeded is no warning at
             // all (#413 gate).
-            crate::emit_user_warning_always(&warning);
+            emit_report(&report);
         }
     }
 
-    let mut warnings = plan.warnings.clone();
+    // The plan's one-off reports and every rendering's are said once, after
+    // the DDL; its recurring ones (every row-security note, a refused hint)
+    // last, every time.
+    let (recurring, mut reports): (Vec<&Report>, Vec<&Report>) =
+        plan.reports.iter().partition(|report| report.recurs);
     let mut ddl_ran = false;
     let mut index = 0;
     while index < rendered.len() {
@@ -779,7 +784,7 @@ async fn run_passes(engine: Arc<EngineHandle>, opts: MigrateOptions) -> PyResult
                 })?;
                 ddl_ran = true;
             }
-            warnings.extend(current.warnings.iter().cloned());
+            reports.extend(&current.reports);
             index += 1;
             continue;
         };
@@ -802,7 +807,7 @@ async fn run_passes(engine: Arc<EngineHandle>, opts: MigrateOptions) -> PyResult
             ));
         }
         for op in &group {
-            warnings.extend(op.warnings.iter().cloned());
+            reports.extend(&op.reports);
         }
         index += consumed;
     }
@@ -816,22 +821,40 @@ async fn run_passes(engine: Arc<EngineHandle>, opts: MigrateOptions) -> PyResult
         })?;
     }
 
-    for warning in &warnings {
-        crate::emit_user_warning(warning);
+    for report in reports {
+        emit_report(report);
     }
     // After the renames ran, so each table and column is read by its
-    // declared name.
+    // declared name. A refused hint renames nothing and is the planner's to
+    // report, so no row is read for one.
     let reconciled: HashSet<String> = reconciled.into_iter().map(str::to_string).collect();
-    for warning in stranded_label_warnings(&engine, &modelset, &reconciled).await? {
-        crate::emit_user_warning_always(&warning);
+    let hint_refused = plan
+        .reports
+        .iter()
+        .any(|report| matches!(report.kind, ReportKind::HintRefused(_)));
+    if !hint_refused {
+        for report in stranded_label_warnings(&engine, &modelset, &reconciled).await? {
+            emit_report(&report);
+        }
     }
     // Row-security notes describe whether THIS connect left rows fenced, so
     // the warning registry must never quiet them down after the first boot.
-    for warning in &plan.always_warnings {
-        crate::emit_user_warning_always(warning);
+    for report in recurring {
+        emit_report(report);
     }
 
     Ok(())
+}
+
+/// Say `report` as a Python warning: every time when it [`Report::recurs`]
+/// (a standing condition the registry must never quiet after the first
+/// run), once otherwise.
+pub(crate) fn emit_report(report: &Report) {
+    if report.recurs {
+        crate::emit_user_warning_always(&report.text);
+    } else {
+        crate::emit_user_warning(&report.text);
+    }
 }
 
 /// The warnings for the live label renames (`__ferro_renamed_labels__`) on
@@ -846,7 +869,8 @@ async fn run_passes(engine: Arc<EngineHandle>, opts: MigrateOptions) -> PyResult
 /// must never pay for a hint that may stay (ADR-0047, ADR-0011, ADR-0032).
 /// The pass changes the schema, never rows (ADR-0014), so a live hint is one
 /// warning naming `ferro migrate new`, whose migration relabels the rows; an
-/// inert one is silent. A refused hint is the planner's to report.
+/// inert one is silent. A refused hint is the planner's to report
+/// ([`ReportKind::HintRefused`]); the caller reads none then.
 ///
 /// `existing` are the tables that stood before this connect's create pass, as
 /// they stand now; a declared column they lack (its rename still pending) is
@@ -855,14 +879,12 @@ async fn stranded_label_warnings(
     engine: &EngineHandle,
     modelset: &IrEnvelope<SchemaIrPayload>,
     existing: &HashSet<String>,
-) -> PyResult<Vec<String>> {
+) -> PyResult<Vec<Report>> {
     use ferro_ddl_lowering::{
         check_lists_label, db_check_constraint_name, stranded_label_rename_warning,
     };
     let mut warnings = Vec::new();
-    if engine.backend() != Dialect::Sqlite
-        || ferro_migrate::plan::refuse_hints(&modelset.payload).is_err()
-    {
+    if engine.backend() != Dialect::Sqlite {
         return Ok(warnings);
     }
     for model in &modelset.payload.models {
@@ -961,8 +983,8 @@ fn parse_json_or_default<T: serde::de::DeserializeOwned + Default>(
 /// Test-only helper: plan and render the reconciliation of one table against
 /// a JSON description of its live state, without a database. Returns
 /// `(statements, warnings)` — every rendered statement in plan order, then
-/// the planning warnings, the rendering warnings and the row-security
-/// warnings. Column drops render as their plain `DROP COLUMN` (the SQLite
+/// the text of the plan's one-off reports, the rendering reports and the
+/// plan's recurring reports. Column drops render as their plain `DROP COLUMN` (the SQLite
 /// index-dependency handling needs a live database and is exercised by
 /// integration tests).
 ///
@@ -1017,13 +1039,17 @@ pub fn _render_migration_sql_for_test(
     let rendered = render_plan(&plan, &live, &declared, backend).map_err(emission_error)?;
 
     let mut statements = Vec::new();
-    let mut warnings = plan.warnings;
+    let (recurring, mut warnings): (Vec<Report>, Vec<Report>) =
+        plan.reports.into_iter().partition(|report| report.recurs);
     for op in rendered {
         statements.extend(op.statements);
-        warnings.extend(op.warnings);
+        warnings.extend(op.reports);
     }
-    warnings.extend(plan.always_warnings);
-    Ok((statements, warnings))
+    warnings.extend(recurring);
+    Ok((
+        statements,
+        warnings.into_iter().map(|report| report.text).collect(),
+    ))
 }
 
 /// The reverse of the live-origin plan over FFI (ADR-0041): what turns the
@@ -1033,14 +1059,14 @@ pub fn _render_migration_sql_for_test(
 /// `_live_schema_ir` returned beside `live_json`.
 ///
 /// The result has `_plan_from_ir`'s shape: `{"operations": [{"kind": …,
-/// <fields>}], "warnings": [], "always_warnings": []}`, plus `before`: the
+/// <fields>}], "reports": []}`, plus `before`: the
 /// live envelope under the forward plan's renames, the side the reverse's
 /// steps turn the database into (what `_plan_step_verdicts` reads them
 /// against). A step nothing undoes
 /// is the forward op carrying `"irreversible": {"reason": …}`; a check or
 /// policy put back from the catalog is a `RestoreCheck` / `RestoreRowPolicy`;
 /// a foreign key the forward plan added comes off as `DropForeignKey`. With
-/// `render`, each op also carries its `statements` and `warnings`; the ops at
+/// `render`, each op also carries its `statements` and `reports`; the ops at
 /// the `unrendered` indexes carry none: those the bridge writes itself, a
 /// re-added column that demands values of existing rows (the same subset its
 /// upgrade leaves out of `_render_plan_ops`).
@@ -1085,11 +1111,11 @@ pub fn _plan_reverse_from_ir(
                 let mut op = rendered.op.to_json();
                 if let Some(fields) = op.as_object_mut() {
                     fields.insert("statements".into(), rendered.statements.into());
-                    fields.insert("warnings".into(), rendered.warnings.into());
+                    fields.insert("reports".into(), reports_json(&rendered.reports)?);
                 }
-                op
+                Ok(op)
             })
-            .collect()
+            .collect::<PyResult<_>>()?
     } else {
         reverse.operations.iter().map(|op| op.to_json()).collect()
     };
@@ -1098,14 +1124,21 @@ pub fn _plan_reverse_from_ir(
     })?;
     let out = serde_json::json!({
         "operations": operations,
-        "warnings": Vec::<String>::new(),
-        "always_warnings": Vec::<String>::new(),
+        "reports": Vec::<Report>::new(),
         "before": before,
     });
     Ok(out.to_string())
 }
 
-/// One rendered op as plan JSON: the op, its `statements` and `warnings`,
+/// Reports as plan JSON: each `{"kind", "subject", "text", "recurs"}`, its
+/// kind a name or `{name: fields}`.
+fn reports_json(reports: &[Report]) -> PyResult<serde_json::Value> {
+    serde_json::to_value(reports).map_err(|e| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!("could not serialize the plan: {e}"))
+    })
+}
+
+/// One rendered op as plan JSON: the op, its `statements` and `reports`,
 /// and an `AddTable`'s `row_security_statements`.
 fn rendered_op_json(rendered: RenderedOp) -> PyResult<serde_json::Value> {
     let mut op = serde_json::to_value(&rendered.op).map_err(|e| {
@@ -1113,7 +1146,7 @@ fn rendered_op_json(rendered: RenderedOp) -> PyResult<serde_json::Value> {
     })?;
     if let Some(fields) = op.as_object_mut() {
         fields.insert("statements".into(), rendered.statements.into());
-        fields.insert("warnings".into(), rendered.warnings.into());
+        fields.insert("reports".into(), reports_json(&rendered.reports)?);
         if matches!(rendered.op, MigrationOp::AddTable { .. }) {
             fields.insert(
                 "row_security_statements".into(),
@@ -1183,9 +1216,9 @@ pub(crate) fn parse_schema_envelope(
 /// `old_ir_json` is: given (even `"{}"`), a live database whose side-table
 /// `_live_schema_ir` returned beside it, with an entry for every table;
 /// omitted, a declared snapshot (`LiveFacts::declared`). The result is
-/// `{"operations": [{"kind": …, <op fields>}], "warnings": […],
-/// "always_warnings": […]}`; with `render`, each op also carries the
-/// `statements` and `warnings` it renders to.
+/// `{"operations": [{"kind": …, <op fields>}], "reports": [{"kind", "subject",
+/// "text", "recurs"}]}`; with `render`, each op also carries the
+/// `statements` and `reports` it renders to.
 ///
 /// # Errors
 /// `ValueError` when a JSON argument is malformed, an envelope is not a
@@ -1237,8 +1270,7 @@ pub fn _plan_from_ir(
     };
     let out = serde_json::json!({
         "operations": operations,
-        "warnings": plan.warnings,
-        "always_warnings": plan.always_warnings,
+        "reports": reports_json(&plan.reports)?,
     });
     Ok(out.to_string())
 }

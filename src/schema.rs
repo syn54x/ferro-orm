@@ -5,7 +5,7 @@
 
 use crate::backend::EngineHandle;
 use crate::ddl_exec::{DdlError, DdlExecutor, Door, Failed, Unit};
-use crate::migrate::{pass_attempt_warning, pass_lock_timeout_error};
+use crate::migrate::{emit_report, pass_attempt_warning, pass_lock_timeout_error};
 use crate::state::{Dialect, MODEL_REGISTRY, engine_for_connection};
 use ferro_migrate::plan::{
     hint_refusal_warning, pending_table_rename_warning, refuse_hints, table_rename_hint,
@@ -133,10 +133,10 @@ pub async fn internal_create_tables(
             // reconciliation pass emits no row-security DDL at all (ADR-0014),
             // so the warning always stands there.
             if (!reconciliation_follows || dialect != Dialect::Postgres)
-                && let Some(warning) =
+                && let Some(report) =
                     ferro_ddl_lowering::row_security_existing_table_warning(model, dialect)
             {
-                crate::emit_user_warning_always(&warning);
+                emit_report(&report);
             }
             continue;
         }
@@ -209,8 +209,8 @@ pub async fn internal_create_tables(
     for (model, emission) in &to_create {
         create_one_table(&engine, model, emission, ddl).await?;
 
-        for warning in &emission.warnings {
-            crate::emit_user_warning(warning);
+        for report in &emission.reports {
+            emit_report(report);
         }
 
         crate::log_debug(format!("✅ Ferro Engine: Table '{}' created", model.table_name));
@@ -292,7 +292,7 @@ fn warn_pending_renames(
         return;
     }
     if let Err(refusal) = refuse_hints(declared) {
-        crate::emit_user_warning_always(&hint_refusal_warning(&refusal));
+        emit_report(&hint_refusal_warning(&refusal));
         return;
     }
     for model in &declared.models {
@@ -305,7 +305,7 @@ fn warn_pending_renames(
             .filter(|(table, roots)| *table != new && roots.contains(new))
             .map(|(table, _)| table.clone())
             .collect();
-        crate::emit_user_warning_always(&pending_table_rename_warning(old, new, &dependents));
+        emit_report(&pending_table_rename_warning(old, new, &dependents));
     }
 }
 
