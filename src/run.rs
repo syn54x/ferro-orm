@@ -565,7 +565,7 @@ const HELD_BY_ANY_SESSION: &str = "SELECT EXISTS (SELECT 1 FROM pg_locks \
      AND classid::bigint = $1 AND objid::bigint = $2)";
 
 impl RunLock {
-    /// Take the run lock for `governed_schema` (the connection's current
+    /// Take the run lock for the governed `schema` (the connection's current
     /// schema when `None`), waiting up to `timeout`. `on_wait` is called once,
     /// at once, with [`WAITING_TEXT`] when the lock is held by another run.
     ///
@@ -574,7 +574,7 @@ impl RunLock {
     /// lock cannot be verified on its own session; a database error.
     pub async fn acquire(
         engine: &EngineHandle,
-        governed_schema: Option<&str>,
+        schema: Option<&str>,
         timeout: Duration,
         on_wait: impl FnOnce(&str),
     ) -> PyResult<RunLock> {
@@ -590,9 +590,9 @@ impl RunLock {
         };
         match engine.backend() {
             Dialect::Postgres => {
-                let governed = match governed_schema {
+                let governed = match schema {
                     Some(schema) => schema.to_string(),
-                    None => governed_schema_of(engine).await?,
+                    None => governed_schema(engine).await?,
                 };
                 let key = run_lock_key(&governed);
                 let pool = engine
@@ -771,7 +771,7 @@ impl RunLock {
     /// # Errors
     /// A refusal for a non-Postgres engine; a database error.
     pub async fn unacquired_for_test(engine: &EngineHandle) -> PyResult<RunLock> {
-        let governed = governed_schema_of(engine).await?;
+        let governed = governed_schema(engine).await?;
         let pool = engine
             .postgres_pool()
             .ok_or_else(|| refused("ferro migrate: the engine has no Postgres pool"))?;
@@ -799,17 +799,17 @@ impl RunLock {
         }
     }
 
-    /// Whether any run holds the lock for `governed_schema` (the current
+    /// Whether any run holds the lock for the governed `schema` (the current
     /// schema when `None`), without taking it: `status`'s `running` probe.
     ///
     /// # Errors
     /// A database error.
-    pub async fn is_held(engine: &EngineHandle, governed_schema: Option<&str>) -> PyResult<bool> {
+    pub async fn is_held(engine: &EngineHandle, schema: Option<&str>) -> PyResult<bool> {
         match engine.backend() {
             Dialect::Postgres => {
-                let governed = match governed_schema {
+                let governed = match schema {
                     Some(schema) => schema.to_string(),
-                    None => governed_schema_of(engine).await?,
+                    None => governed_schema(engine).await?,
                 };
                 let (classid, objid) = lock_ids(run_lock_key(&governed));
                 let rows = engine
@@ -838,10 +838,6 @@ impl RunLock {
             },
         }
     }
-}
-
-async fn governed_schema_of(engine: &EngineHandle) -> PyResult<String> {
-    governed_schema(engine).await
 }
 
 // -- the tracking tables ------------------------------------------------------------
