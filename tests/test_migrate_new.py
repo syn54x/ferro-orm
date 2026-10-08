@@ -512,7 +512,7 @@ async def test_the_up_file_is_what_auto_migrate_executes(
         assert any("CREATE POLICY" in sql for sql in generated)
 
     # And the snapshot describes exactly what the create pass built.
-    live, facts = await _live_schema_ir()
+    live, facts = await _live_schema_ir(None, (migration / "ir.json").read_text())
     plan = json.loads(
         _plan_from_ir(
             live,

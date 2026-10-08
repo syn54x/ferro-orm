@@ -578,9 +578,9 @@ def test_drift_takes_no_lock_and_creates_nothing(project, pkg, db, capsys, monke
     held_while_reading: list[bool] = []
     live_schema_ir = _core._live_schema_ir
 
-    async def probing(using=None, tables_json=None, declared_json=None):
+    async def probing(using, declared_json, extra_tables_json=None):
         held_while_reading.append(await _core._run_lock_is_held(using))
-        return await live_schema_ir(using, tables_json, declared_json)
+        return await live_schema_ir(using, declared_json, extra_tables_json)
 
     monkeypatch.setattr(_core, "_live_schema_ir", probing)
     assert drift_api(db).clean

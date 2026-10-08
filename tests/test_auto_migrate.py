@@ -2582,9 +2582,7 @@ async def test_migrate_updates_renames_a_hinted_table_with_its_rows_and_index(
     from ferro.ir.compiler import compile_registry_schema_ir
 
     declared = json.dumps(compile_registry_schema_ir())
-    live_json, facts_json = await _core._live_schema_ir(
-        None, json.dumps(["trnauthor"]), declared
-    )
+    live_json, facts_json = await _core._live_schema_ir(None, declared)
     plan = json.loads(
         _core._plan_from_ir(
             live_json,

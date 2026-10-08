@@ -304,27 +304,22 @@ async fn table_exists(engine: &EngineHandle, tracking: &Tracking, name: &str) ->
     Ok(!rows.is_empty())
 }
 
-/// The tables in the governed schema (SQLite: `main`, without its own
-/// `sqlite_*` tables) — what the adoption refusal compares against the first
-/// migration's snapshot.
+/// The tables in the governed schema, sorted — what the adoption refusal
+/// compares against the first migration's snapshot. The one live-table
+/// reader decides what a table is
+/// ([`crate::introspect::live_table_names`]: base tables only, never a view
+/// or SQLite's own `sqlite_*` tables), so a view named like a model holds
+/// no table here either.
 ///
 /// # Errors
 /// A database error.
 pub async fn live_tables(engine: &EngineHandle) -> PyResult<Vec<String>> {
-    let sql = match engine.backend() {
-        Dialect::Sqlite => {
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'"
-        }
-        Dialect::Postgres => {
-            "SELECT table_name::text FROM information_schema.tables \
-             WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'"
-        }
-    };
-    let rows = engine
-        .fetch_all_sql_unprepared(sql)
-        .await
-        .map_err(|e| db_error("reading the catalog", e))?;
-    Ok(rows.iter().filter_map(|row| text(column(row, 0))).collect())
+    let mut names: Vec<String> = crate::introspect::live_table_names(engine)
+        .await?
+        .into_iter()
+        .collect();
+    names.sort();
+    Ok(names)
 }
 
 // -- the pre-rebuild live check (ADR-0034) ---------------------------------------------

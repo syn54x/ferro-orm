@@ -305,12 +305,9 @@ async def against(
     dialect = _core.connection_backend(using)
     if dialect is None:
         raise MigrationRefused(f"connection `{using}` is not open; connect it first")
-    tables = [model["table_name"] for model in snapshot["payload"]["models"]]
-    # The old table of a live rename hint is read too (ADR-0032), as the
-    # reconciliation pass reads it.
-    live_json, facts_json = await _core._live_schema_ir(
-        using, json.dumps(tables), json.dumps(snapshot)
-    )
+    # The snapshot's live tables and the old table of each live rename hint
+    # (ADR-0032), read by the reconciliation pass's own rule (ADR-0047).
+    live_json, facts_json = await _core._live_schema_ir(using, json.dumps(snapshot))
     plan = json.loads(
         _core._plan_from_ir(
             live_json,

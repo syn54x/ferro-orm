@@ -353,7 +353,8 @@ async def _tracking_tables_for(using: str | None, schema: str | None = None) -> 
     ...
 
 async def _live_tables(using: str | None = None) -> str:
-    """JSON list of the governed schema's tables."""
+    """JSON list of the governed schema's tables, sorted: base tables only,
+    never a view or SQLite's own ``sqlite_*`` tables."""
     ...
 
 async def _disconnect(name: str) -> None:
@@ -361,19 +362,23 @@ async def _disconnect(name: str) -> None:
     ...
 
 async def _live_schema_ir(
-    using: str | None = None,
-    tables_json: str | None = None,
-    declared_json: str | None = None,
+    using: str | None,
+    declared_json: str,
+    extra_tables_json: str | None = None,
 ) -> tuple[str, str]:
-    """Read the database behind connection ``using`` into the planner's input.
+    """Read the database behind connection ``using``, planned against
+    ``declared_json`` (a schema IR envelope), into the planner's input.
+
+    The tables read are the reconciliation pass's (ADR-0047): every declared
+    table that is live, the old table of every live
+    ``__ferro_renamed_from__`` hint (ADR-0032), and every live table in
+    ``extra_tables_json`` (a JSON list of names; the Alembic bridge's
+    dropped tables). A live table is a base table — never a view, never
+    SQLite's own ``sqlite_*`` tables.
 
     Returns ``(ir_json, facts_json)``: a ``schema`` IR envelope with one model
-    per live table (only the tables in ``tables_json``, a JSON list of names,
-    when given) and the live facts the IR cannot carry — CHECK and policy
-    bodies as the catalog prints them, validity flags, enum labels. With
-    ``declared_json`` (the schema IR envelope the read is planned against),
-    the old table of every live ``__ferro_renamed_from__`` hint it declares is
-    read beside ``tables_json`` (ADR-0032).
+    per table read and the live facts the IR cannot carry — CHECK and policy
+    bodies as the catalog prints them, validity flags, enum labels.
     """
     ...
 
