@@ -13,7 +13,11 @@ FerroError
 │   ├── ForeignKeyViolationError
 │   ├── NotNullViolationError
 │   └── CheckViolationError
-└── ModelDoesNotExist       (also a LookupError)
+├── ModelDoesNotExist       (also a LookupError)
+├── SettingsError           the project configuration is missing a key, malformed, or contradicts itself
+└── MigrationRefused        a migration call refused; .report says how far it got
+    ├── PendingMigrationsError
+    └── DatabaseAheadError
 ```
 
 `ForeignKeyViolationError` covers every foreign-key rejection: a dangling
@@ -54,6 +58,38 @@ exception — and by `save()` on a persisted instance whose row no longer exists
 It remains a `LookupError`, so pre-existing `except LookupError` handlers keep
 working.
 
+`SettingsError` is raised by `FerroSettings` and every call that reads the
+project configuration; its message names the key to add or move, the line to
+write, or the variable to set.
+
+A refused migration call raises
+[`MigrationRefused`](migrations.md#ferro.migrations.MigrationRefused), or one
+of its two subclasses: [`PendingMigrationsError`](migrations.md#ferro.migrations.PendingMigrationsError)
+when `require_applied()` finds the database behind its migrations, and
+[`DatabaseAheadError`](migrations.md#ferro.migrations.DatabaseAheadError) when
+the database has applied migrations this checkout does not have. Its `.report`
+is the report of the call that refused, when it has one: the run's report
+(what `up()` applied before it stopped, the refusal itself as
+`report.refused`) or the `check()` report whose `raise_for_problems()`
+raised it. A refusal is raised, never returned: an application
+that called `up()` must not go on serving a database the run did not reach.
+
+```python
+import ferro.migrations
+from ferro.migrations import MigrationRefused
+
+try:
+    await ferro.migrations.up()
+except MigrationRefused as exc:
+    print(exc)          # what refused, and the command that fixes it
+    print(exc.report)   # what the run applied before it stopped
+```
+
+An auto-migrate pass (`connect(auto_migrate=True)`, `ferro.migrate()`,
+`ferro.create_tables()`) that fails partway raises its usual error, also with
+`.report` set: the [`PassReport`](connection.md#ferro.PassReport) of what
+committed before the failure.
+
 ::: ferro.FerroError
 
 ::: ferro.InterfaceError
@@ -73,3 +109,5 @@ working.
 ::: ferro.CheckViolationError
 
 ::: ferro.ModelDoesNotExist
+
+::: ferro.SettingsError

@@ -226,6 +226,24 @@ def test_each_api_page_identifier_resolves_at_runtime(identifier: str) -> None:
     _resolve(identifier)
 
 
+def test_the_api_pages_document_every_public_name_of_ferro() -> None:
+    import ferro
+
+    documented = {id(_resolve(target)) for target in _api_targets()}
+    undocumented = [
+        name for name in ferro.__all__ if id(getattr(ferro, name)) not in documented
+    ]
+    assert undocumented == []
+
+
+def test_the_pass_report_types_and_settings_error_are_public_names() -> None:
+    import ferro
+
+    for name in ("PassReport", "ExecutedStatement", "Report", "SettingsError"):
+        assert name in ferro.__all__, name
+    assert ferro.Report is ferro.pass_report.Report
+
+
 def test_baseline_and_drift_are_the_functions_on_the_package() -> None:
     from ferro.migrations._baseline import baseline
     from ferro.migrations._drift import drift

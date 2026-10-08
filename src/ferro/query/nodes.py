@@ -813,6 +813,9 @@ class MergeValueExpr(ValueExpr):
 
 
 now = NowExpr()
+"""The database clock: a recipe ``update()`` that assigns ``now`` (the
+singleton, not ``now()``) to a ``datetime`` column stamps it with the
+database's current timestamp."""
 
 
 def validate_query_column(model_cls: type, name: str) -> str:
