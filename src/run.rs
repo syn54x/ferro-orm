@@ -22,7 +22,9 @@
 use crate::backend::{
     EngineBindValue, EngineConnection, EngineHandle, EngineRow, EngineValue, NullKind,
 };
-use crate::ddl_exec::{Attempt, DdlError, DdlExecutor, StatementError, pool_connection};
+use crate::ddl_exec::{
+    Attempt, DdlError, DdlExecutor, Door, Executed, Failed, Role, Unit, pool_connection,
+};
 use ferro_ddl_lowering::Dialect;
 use ferro_migrate::generate::rebuild::rebuilt_tables;
 use ferro_migrate::plan::{Hint, live_hints, reverse_hints};
@@ -1453,36 +1455,44 @@ impl From<sqlx::Error> for StepFailure {
     }
 }
 
-impl From<StatementError> for StepFailure {
-    fn from(err: StatementError) -> Self {
-        let counted = crate::errors::counted_failure_of_error(err.statement.as_deref(), &err.error);
-        StepFailure(error_text(&err.error), counted)
+impl StepFailure {
+    /// `failed` as the step's failure: the statement it names (its place in
+    /// the step's `statements`) decides whether it is a counted failure.
+    fn of_statement(statements: &[String], failed: Failed) -> Self {
+        let statement = failed
+            .index
+            .and_then(|index| statements.get(index))
+            .map(String::as_str);
+        let counted = crate::errors::counted_failure_of_error(statement, &failed.error);
+        StepFailure(error_text(&failed.error), counted)
     }
-}
 
-impl From<DdlError<StatementError>> for StepFailure {
-    fn from(err: DdlError<StatementError>) -> Self {
+    fn of_unit(statements: &[String], err: DdlError<Failed>) -> Self {
         match err {
             DdlError::LockTimeout(timeout) => StepFailure(timeout.to_string(), None),
-            DdlError::Failed(failure) => failure.into(),
+            DdlError::Failed(failed) => Self::of_statement(statements, failed),
         }
     }
 }
 
-fn log_step_statement(file: &str, statement: &str) {
+pub(crate) fn log_step_statement(file: &str, statement: &str) {
     crate::log_debug(format!("ferro migrate: {file}: {statement}"));
 }
 
 async fn run_statements(
     conn: &mut EngineConnection,
+    executed: &mut Executed,
     statements: &[String],
     file: &str,
-) -> Result<(), StatementError> {
-    for statement in statements {
-        log_step_statement(file, statement);
-        conn.execute_sql_unprepared(statement)
+) -> Result<(), Failed> {
+    for (index, statement) in statements.iter().enumerate() {
+        executed
+            .send(conn, Door::Run(file), Role::Schema, statement)
             .await
-            .map_err(|error| StatementError::at(statement, error))?;
+            .map_err(|error| Failed {
+                index: Some(index),
+                error,
+            })?;
     }
     Ok(())
 }
@@ -1510,25 +1520,35 @@ enum Settle {
     Remove { migration: u16, step: u8 },
 }
 
+impl Settle {
+    /// The statement that settles the record, with its binds: the upsert of
+    /// the finished record, or the removal.
+    fn statement(
+        self,
+        dialect: Dialect,
+        tracking_schema: Option<&str>,
+    ) -> (String, Vec<EngineBindValue>) {
+        match self {
+            Settle::Write(record) => (
+                upsert_sql(dialect, &Tracking::new(dialect, tracking_schema)),
+                record_binds(&record),
+            ),
+            Settle::Remove { migration, step } => {
+                remove_record_statement(dialect, tracking_schema, migration, step)
+            }
+        }
+    }
+}
+
 async fn settle(
     conn: &mut EngineConnection,
     tracking_schema: Option<&str>,
     settle: Settle,
 ) -> Result<(), sqlx::Error> {
-    match settle {
-        Settle::Write(record) => {
-            let dialect = conn.dialect();
-            conn.fetch_all_sql_unprepared_with_binds(
-                &upsert_sql(dialect, &Tracking::new(dialect, tracking_schema)),
-                &record_binds(&record),
-            )
-            .await
-            .map(|_| ())
-        }
-        Settle::Remove { migration, step } => {
-            remove_record(conn, tracking_schema, migration, step).await
-        }
-    }
+    let (sql, binds) = settle.statement(conn.dialect(), tracking_schema);
+    conn.fetch_all_sql_unprepared_with_binds(&sql, &binds)
+        .await
+        .map(|_| ())
 }
 
 /// Remove the record of `(migration, step)` on `tx` — inside the transaction
@@ -1543,22 +1563,31 @@ pub async fn remove_record(
     migration: u16,
     step: u8,
 ) -> Result<(), sqlx::Error> {
-    let dialect = tx.dialect();
+    let (sql, binds) = remove_record_statement(tx.dialect(), tracking_schema, migration, step);
+    tx.fetch_all_sql_unprepared_with_binds(&sql, &binds)
+        .await
+        .map(|_| ())
+}
+
+fn remove_record_statement(
+    dialect: Dialect,
+    tracking_schema: Option<&str>,
+    migration: u16,
+    step: u8,
+) -> (String, Vec<EngineBindValue>) {
     let sql = format!(
         "DELETE FROM {} WHERE migration = {} AND step = {}",
         Tracking::new(dialect, tracking_schema).table(TRACKING_TABLE),
         param(dialect, 1),
         param(dialect, 2)
     );
-    tx.fetch_all_sql_unprepared_with_binds(
-        &sql,
-        &[
+    (
+        sql,
+        vec![
             EngineBindValue::I64(i64::from(migration)),
             EngineBindValue::I64(i64::from(step)),
         ],
     )
-    .await
-    .map(|_| ())
 }
 
 /// The statement that commits one batch of a chunked step on its record
@@ -1699,13 +1728,17 @@ pub async fn rerecord_checksum(
     Ok(())
 }
 
+/// A SQLite `foreign-keys-off` step, outside the DDL executor on purpose:
+/// the pragma read back, `BEGIN IMMEDIATE`, the file, `foreign_key_check`
+/// as a failure, the record settled, `COMMIT`. Its statements are sent as
+/// the executor sends them, and returned the same way.
 async fn foreign_keys_off(
     conn: &mut EngineConnection,
     statements: &[String],
     file: &str,
     tracking_schema: Option<&str>,
     finished: impl FnOnce() -> Settle,
-) -> Result<(), StepFailure> {
+) -> Result<Executed, StepFailure> {
     conn.execute_sql_unprepared("PRAGMA foreign_keys = OFF")
         .await?;
     let read = conn
@@ -1718,7 +1751,10 @@ async fn foreign_keys_off(
         ));
     }
     conn.execute_sql_unprepared("BEGIN IMMEDIATE").await?;
-    run_statements(conn, statements, file).await?;
+    let mut executed = Executed::default();
+    run_statements(conn, &mut executed, statements, file)
+        .await
+        .map_err(|failed| StepFailure::of_statement(statements, failed))?;
     let violations = conn
         .fetch_all_sql_unprepared_with_binds("PRAGMA foreign_key_check", &[])
         .await?;
@@ -1733,7 +1769,7 @@ async fn foreign_keys_off(
     }
     settle(conn, tracking_schema, finished()).await?;
     conn.execute_sql_unprepared("COMMIT").await?;
-    Ok(())
+    Ok(executed)
 }
 
 /// A foreign-keys-off step's outcome and whether its connection must be
@@ -1907,30 +1943,36 @@ pub async fn execute_sql_step(
         }
     };
 
-    // One attempt of a transactional or no-transaction step: the file's
-    // statements, then the record settled on the same connection (inside the
-    // transaction, for a transactional step). The executor wraps it in the
-    // DDL lock timeout and re-runs it from the first statement on a timeout.
+    // A transactional or no-transaction step is one unit of the DDL
+    // executor: the file's statements, then the record settled on the same
+    // connection (inside the transaction, for a transactional step), under
+    // the DDL lock timeout, re-run from the first statement on a timeout.
     let (statements, shown, finish, elapsed) = (&statements, &shown, &finish, &elapsed);
-    let attempt = |mut conn: EngineConnection| async move {
-        let result = async {
-            run_statements(&mut conn, statements, shown).await?;
-            settle(&mut conn, tracking_schema, finish(elapsed(clock))).await?;
-            Ok::<(), StatementError>(())
-        }
-        .await;
-        (conn, result)
+    let dialect = engine.backend();
+    let record = || {
+        crate::ddl_exec::Settle::new(move || {
+            finish(elapsed(clock)).statement(dialect, tracking_schema)
+        })
     };
-    let log = |sql: &str| log_step_statement(shown, sql);
+    let unit = |unit: Unit| {
+        ddl.run(
+            engine,
+            unit,
+            Door::Run(shown),
+            statements,
+            on_attempt,
+            Some(record()),
+        )
+    };
     let outcome: Result<(), StepFailure> = match step.mode {
-        ExecMode::Transactional => ddl
-            .transactional(engine, log, on_attempt, attempt)
+        ExecMode::Transactional => unit(Unit::Transactional)
             .await
-            .map_err(StepFailure::from),
-        ExecMode::NoTransaction => ddl
-            .unwrapped(engine, log, on_attempt, attempt)
+            .map(|_| ())
+            .map_err(|err| StepFailure::of_unit(statements, err)),
+        ExecMode::NoTransaction => unit(Unit::Unwrapped)
             .await
-            .map_err(StepFailure::from),
+            .map(|_| ())
+            .map_err(|err| StepFailure::of_unit(statements, err)),
         ExecMode::ForeignKeysOff => match pool_connection(engine).await {
             Err(err) => Err(err.into()),
             Ok(mut conn) => {
@@ -1952,7 +1994,7 @@ pub async fn execute_sql_step(
                          ON on its connection failed ({err}); closing the connection"
                     ));
                 }
-                let (result, close) = foreign_keys_off_outcome(step, restore);
+                let (result, close) = foreign_keys_off_outcome(step.map(|_| ()), restore);
                 if close {
                     let _ = conn.detach_and_close().await;
                 }

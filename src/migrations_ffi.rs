@@ -714,7 +714,7 @@ pub fn _execute_sql_step(
                 if let Some(callback) = &on_attempt
                     && callback_error.is_none()
                 {
-                    let text = attempt.describe(ddl.max_attempts);
+                    let text = attempt.describe();
                     callback_error = Python::attach(|py| callback.call1(py, (text,)).err());
                 }
             },
