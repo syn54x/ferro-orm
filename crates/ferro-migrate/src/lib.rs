@@ -50,8 +50,9 @@ pub use run_plan::{
 pub use snapshot::{Snapshot, SnapshotError};
 
 /// The columns and uniqueness of the standalone index `name` that `ir`
-/// declares on `table` (an `indexes` entry, a `uniques` entry or a column
-/// flag), as every door builds it; `None` when it declares none.
+/// declares on `table` (an `indexes` or a `uniques` entry: a column's `index`
+/// or `unique` flag reaches the IR already placed in those lists), as every
+/// door builds it; `None` when it declares none.
 pub fn declared_index(
     ir: &ferro_schema_ir::IrEnvelope<ferro_schema_ir::SchemaIrPayload>,
     table: &str,
@@ -474,6 +475,15 @@ impl MigrationOp {
             | MigrationOp::NoForceRowSecurity { table } => Some(table),
         }
     }
+
+    /// Whether the op is a label added to an enum type, which runs alone:
+    /// Postgres lets no later statement of the transaction that added a
+    /// label use it. The generator writes such ops in their own `labels`
+    /// step, first in the migration; the Alembic bridge runs them in an
+    /// autocommit block.
+    pub(crate) fn commits_alone(&self) -> bool {
+        matches!(self, MigrationOp::AddEnumLabel { .. })
+    }
 }
 
 /// Whether one live FK constraint is validated (`pg_constraint.convalidated`;
@@ -606,6 +616,7 @@ impl AnsweredBy for Report {
             | ReportKind::RefusedConversion
             | ReportKind::SqliteInPlace { .. }
             | ReportKind::PrimaryKeyKept
+            | ReportKind::EnumTypeMove
             | ReportKind::RowSecuritySkipped
             | ReportKind::PendingTableRename
             | ReportKind::StrandedLabelRename

@@ -5,7 +5,7 @@ use ferro_ddl_lowering::{
     self, CheckEmission, ConstraintMode, IndexMode, ResolvedStorage, apply_canonical_type_for,
     canonical_from_schema_column, canonical_to_db_type_token, db_check_constraint_name,
     fk_action_from_str, fk_action_sql, fk_name, literal_default_value, pg_alter_type_target,
-    quote_ident, refused_conversion, refused_conversion_warning, render_db_check,
+    quote_ident, refused_conversion_warning, refused_scalar_conversion, render_db_check,
     render_json_backfill_default, render_pg_enum_create_type, render_sqlite_add_column_references,
     render_table_check_body, resolve_column_storage, row_security_statements, single_index_name,
     single_unique_index_name, sqlite_declared_type, sqlite_type_storage_drift,
@@ -474,7 +474,10 @@ pub(crate) fn column_riders<'a>(model: &'a SchemaModel, column: &str) -> Riders<
     Riders {
         index: col.index.then(|| single_index_name(table, column)),
         unique: col.unique.then(|| single_unique_index_name(table, column)),
-        check: model.checks.iter().find(|check| check.name == own_check),
+        check: model
+            .checks
+            .iter()
+            .find(|check| check.name == own_check && check.column == column),
         foreign_key: model.foreign_keys.iter().find(|fk| fk.column == column),
     }
 }
@@ -725,62 +728,56 @@ pub(crate) fn emit_alter_column_type(
 
     match dialect {
         Dialect::Postgres => {
-            // A live native-enum column is never auto-reconciled, whatever the
-            // model says: enum-to-anything casts (and label changes) are
-            // reviewed-migration territory. A matching enum model is a no-op;
-            // a scalar model against a live enum is left to Alembic.
-            if old_col.postgres_native_enum {
-                return Ok(result);
-            }
             if old_col.primary_key || new_col.primary_key {
                 return Ok(result);
             }
-            let new_storage =
-                resolve_column_storage(new_col, ld).map_err(|message| EmissionError {
-                    message: format!("Cannot alter type for '{}.{}': {}", table, column, message),
-                })?;
+            // To, from or between native enum types no statement converts the
+            // column in place: no door does, and every door says so in the
+            // generator's words, the recipe a migration follows instead.
+            if let Some(crate::Refusal::EnumTypeMove {
+                table,
+                column,
+                keep,
+            }) = crate::plan::enum_type_move(table, column, old_col, new_col)
+            {
+                result
+                    .reports
+                    .push(ferro_ddl_lowering::enum_type_move_report(
+                        &table,
+                        &column,
+                        keep.as_deref(),
+                    ));
+                return Ok(result);
+            }
+            let cannot = |message: String| EmissionError {
+                message: format!("Cannot alter type for '{}.{}': {}", table, column, message),
+            };
+            let ResolvedStorage::Scalar(new_canonical) =
+                resolve_column_storage(new_col, ld).map_err(cannot)?
+            else {
+                return Err(cannot(
+                    "a native enum target is an enum type move; this is a ferro bug, please \
+                     file an issue"
+                        .to_string(),
+                ));
+            };
             // Refusal rails (#154 generalized): a conversion that could
             // reinterpret or destroy stored values warns and skips — never a
-            // silent ALTER (FF-B B1/B2).
-            if let Some(kind) = refused_conversion(old_col, &new_storage, ld) {
-                let old_db_type = old_col.db_type.clone().unwrap_or_default();
-                let (new_target, keep_db_type) = match &new_storage {
-                    ResolvedStorage::PgEnum { type_name, .. } => {
-                        (type_name.clone(), old_db_type.clone())
-                    }
-                    ResolvedStorage::Scalar(new_c) => {
-                        let old_canonical =
-                            canonical_from_schema_column(old_col, ld).map_err(|message| {
-                                EmissionError {
-                                    message: format!(
-                                        "Cannot alter type for '{}.{}': {}",
-                                        table, column, message
-                                    ),
-                                }
-                            })?;
-                        (
-                            pg_alter_type_target(*new_c),
-                            canonical_to_db_type_token(old_canonical, ld),
-                        )
-                    }
-                };
+            // silent ALTER (FF-B B1/B2). A live type ferro cannot read is no
+            // conversion it knows to refuse.
+            if let Ok(old_canonical) = canonical_from_schema_column(old_col, ld)
+                && let Some(kind) = refused_scalar_conversion(old_canonical, new_canonical)
+            {
                 result.reports.push(refused_conversion_warning(
                     kind,
                     table,
                     column,
-                    &old_db_type,
-                    &new_target,
-                    &keep_db_type,
+                    &old_col.db_type.clone().unwrap_or_default(),
+                    &pg_alter_type_target(new_canonical),
+                    &canonical_to_db_type_token(old_canonical, ld),
                 ));
                 return Ok(result);
             }
-            let new_canonical = match new_storage {
-                ResolvedStorage::Scalar(canonical) => canonical,
-                // Live column already IS the native enum (otherwise the rail
-                // above refused): nothing to alter. Label additions/renames
-                // are reviewed-migration territory.
-                ResolvedStorage::PgEnum { .. } => return Ok(result),
-            };
             let target = pg_alter_type_target(new_canonical);
             result.statements.push(format!(
                 "ALTER TABLE {table} ALTER COLUMN {col} TYPE {target} USING {col}::{target}",

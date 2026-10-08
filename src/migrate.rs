@@ -1110,7 +1110,6 @@ fn is_create_pass_add(op: &MigrationOp, after_renames: &BTreeSet<String>) -> boo
 /// governed by ferro migrations; `tracking_schemas` are the project's
 /// configured `tracking_schema`s.
 ///
-/// # Errors
 /// Returns the pass's report as JSON ([`PassReport::to_json`]), which
 /// `ferro.migrate` reads into a `PassReport`.
 ///
@@ -1305,6 +1304,24 @@ fn rendered_op_json(rendered: RenderedOp) -> PyResult<serde_json::Value> {
         }
     }
     Ok(op)
+}
+
+/// The columns and uniqueness of the standalone index `name` the envelope
+/// `ir_json` (a snapshot or a live read) holds on `table`, or `None`:
+/// `ferro_migrate::declared_index`, the one reading every door shares, for
+/// `ferro migrate drift`'s description of a redefined index.
+///
+/// # Errors
+/// `ValueError` when `ir_json` is not a schema envelope.
+#[pyfunction]
+#[pyo3(name = "_declared_index")]
+pub fn _declared_index(
+    ir_json: String,
+    table: String,
+    name: String,
+) -> PyResult<Option<(Vec<String>, bool)>> {
+    let ir = parse_schema_envelope(&ir_json, "ir_json")?;
+    Ok(ferro_migrate::declared_index(&ir, &table, &name))
 }
 
 pub(crate) fn parse_schema_envelope(

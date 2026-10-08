@@ -90,6 +90,13 @@ pub struct LiveCheck {
     /// `NOT VALID` check is drift the pass validates in place (ADR-0043).
     #[serde(default = "serde_default_true")]
     pub validated: bool,
+    /// The one column the check belongs to: SQLite, the column whose
+    /// definition carries it inline (`DROP COLUMN` takes it with the
+    /// column); Postgres, the only column it reads (`pg_constraint.conkey`).
+    /// `None` for a table-level SQLite `CHECK`, or one reading several
+    /// columns.
+    #[serde(default)]
+    pub column: Option<String>,
 }
 
 /// Ferro emits table and column CHECKs as `ck_<table>_<suffix>`. Reconciliation
@@ -790,12 +797,13 @@ async fn sqlite_table_checks(engine: &EngineHandle, table: &str) -> PyResult<Vec
     };
     Ok(parse_sqlite_inline_named_checks(&create_sql)
         .into_iter()
-        .map(|(name, definition)| LiveCheck {
-            ferro_owned: is_ferro_check_name(&name),
-            name,
-            definition,
+        .map(|check| LiveCheck {
+            ferro_owned: is_ferro_check_name(&check.name),
+            name: check.name,
+            definition: check.definition,
             // SQLite has no unvalidated constraints.
             validated: true,
+            column: check.column,
         })
         .collect())
 }
@@ -804,7 +812,12 @@ async fn postgres_table_checks(engine: &EngineHandle, table: &str) -> PyResult<V
     let sql = r#"
         SELECT con.conname::text AS name,
                pg_get_constraintdef(con.oid)::text AS definition,
-               con.convalidated AS validated
+               con.convalidated AS validated,
+               CASE WHEN cardinality(con.conkey) = 1 THEN (
+                   SELECT att.attname::text
+                   FROM pg_attribute att
+                   WHERE att.attrelid = con.conrelid AND att.attnum = con.conkey[1]
+               ) END AS column_name
         FROM pg_constraint con
         JOIN pg_class rel ON rel.oid = con.conrelid
         JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
@@ -828,14 +841,124 @@ async fn postgres_table_checks(engine: &EngineHandle, table: &str) -> PyResult<V
                 name,
                 definition,
                 validated: row_bool(row, "validated"),
+                column: row_string(row, "column_name"),
             })
         })
         .collect())
 }
 
+/// One `CONSTRAINT <name> CHECK (...)` clause of a SQLite `CREATE TABLE`.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct SqliteNamedCheck {
+    pub(crate) name: String,
+    /// The `CHECK (...)` fragment.
+    pub(crate) definition: String,
+    /// The column whose definition carries it, or `None` for a table-level
+    /// constraint.
+    pub(crate) column: Option<String>,
+}
+
 /// Parse `CONSTRAINT <name> CHECK (...)` clauses from a SQLite `CREATE TABLE`
-/// statement stored in `sqlite_master.sql`.
-pub(crate) fn parse_sqlite_inline_named_checks(create_sql: &str) -> Vec<(String, String)> {
+/// statement stored in `sqlite_master.sql`, each with the column whose
+/// definition carries it. SQLite's `DROP COLUMN` takes a column's own inline
+/// `CHECK` with it and refuses while a table-level one reads the column, so
+/// where the clause sits is a fact the planner reads.
+pub(crate) fn parse_sqlite_inline_named_checks(create_sql: &str) -> Vec<SqliteNamedCheck> {
+    let bytes = create_sql.as_bytes();
+    let Some(open) = first_unquoted(bytes, b'(') else {
+        return Vec::new();
+    };
+    let Some(close) = matching_close_paren(bytes, open) else {
+        return Vec::new();
+    };
+    top_level_items(create_sql, open + 1, close)
+        .into_iter()
+        .flat_map(|item| {
+            let column = column_definition_name(item);
+            named_checks(item)
+                .into_iter()
+                .map(move |(name, definition)| SqliteNamedCheck {
+                    name,
+                    definition,
+                    column: column.clone(),
+                })
+        })
+        .collect()
+}
+
+/// The first `needle` byte outside a quoted identifier or string.
+fn first_unquoted(bytes: &[u8], needle: u8) -> Option<usize> {
+    let mut quote: Option<u8> = None;
+    for (at, &ch) in bytes.iter().enumerate() {
+        match quote {
+            Some(q) if ch == q => quote = None,
+            Some(_) => {}
+            None if matches!(ch, b'"' | b'\'' | b'`') => quote = Some(ch),
+            None if ch == b'[' => quote = Some(b']'),
+            None if ch == needle => return Some(at),
+            None => {}
+        }
+    }
+    None
+}
+
+/// The comma-separated items of `sql[start..end]` (a `CREATE TABLE` body):
+/// each column definition and table constraint, split at the commas outside
+/// parentheses and quotes.
+fn top_level_items(sql: &str, start: usize, end: usize) -> Vec<&str> {
+    let bytes = sql.as_bytes();
+    let mut items = Vec::new();
+    let (mut depth, mut quote, mut from) = (0i32, None::<u8>, start);
+    for at in start..end {
+        let ch = bytes[at];
+        match quote {
+            Some(q) if ch == q => quote = None,
+            Some(_) => {}
+            None => match ch {
+                b'"' | b'\'' | b'`' => quote = Some(ch),
+                b'[' => quote = Some(b']'),
+                b'(' => depth += 1,
+                b')' => depth -= 1,
+                b',' if depth == 0 => {
+                    items.push(&sql[from..at]);
+                    from = at + 1;
+                }
+                _ => {}
+            },
+        }
+    }
+    items.push(&sql[from..end]);
+    items
+}
+
+/// The column a `CREATE TABLE` item defines, or `None` for a table
+/// constraint (`CONSTRAINT`, `PRIMARY KEY`, `UNIQUE`, `CHECK`, `FOREIGN KEY`).
+fn column_definition_name(item: &str) -> Option<String> {
+    let bytes = item.as_bytes();
+    let mut i = skip_ascii_whitespace(bytes, 0);
+    let table_constraint = [
+        b"CONSTRAINT".as_slice(),
+        b"PRIMARY",
+        b"UNIQUE",
+        b"CHECK",
+        b"FOREIGN",
+    ]
+    .iter()
+    .any(|keyword| {
+        starts_ascii_case_insensitive(bytes, i, keyword)
+            && bytes
+                .get(i + keyword.len())
+                .is_none_or(|next| !(next.is_ascii_alphanumeric() || *next == b'_'))
+    });
+    if table_constraint {
+        return None;
+    }
+    parse_sql_identifier(bytes, &mut i)
+}
+
+/// Every `CONSTRAINT <name> CHECK (...)` clause in `sql`, as `(name, the
+/// CHECK (...) fragment)`.
+fn named_checks(create_sql: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let bytes = create_sql.as_bytes();
     let mut i = 0usize;
@@ -971,7 +1094,8 @@ fn matching_close_paren(haystack: &[u8], open: usize) -> Option<usize> {
 
 /// Test-only: read live CHECK constraints on `table` from the connected engine.
 ///
-/// Returns a list of dicts with keys `name`, `definition`, and `ferro_owned`.
+/// Returns a list of dicts with keys `name`, `definition`, `ferro_owned` and
+/// `column`.
 #[pyfunction]
 #[pyo3(name = "_live_table_checks_for_test")]
 #[pyo3(signature = (table, using=None))]
@@ -990,6 +1114,7 @@ pub fn _live_table_checks_for_test(
                 row.set_item("name", check.name)?;
                 row.set_item("definition", check.definition)?;
                 row.set_item("ferro_owned", check.ferro_owned)?;
+                row.set_item("column", check.column)?;
                 out.append(row)?;
             }
             Ok(out.into_any().unbind())
@@ -1202,13 +1327,39 @@ mod tests {
         )";
         let checks = parse_sqlite_inline_named_checks(create_sql);
         assert_eq!(checks.len(), 2);
-        assert_eq!(checks[0].0, "ck_transfer_at_most_one_outflow");
+        assert_eq!(checks[0].name, "ck_transfer_at_most_one_outflow");
         assert_eq!(
-            checks[0].1,
+            checks[0].definition,
             "CHECK ((\"outflow_transaction_id\" IS NULL) OR (\"outflow_activity_id\" IS NULL))"
         );
-        assert_eq!(checks[1].0, "user_positive");
-        assert_eq!(checks[1].1, "CHECK (amount > 0)");
+        assert_eq!(checks[1].name, "user_positive");
+        assert_eq!(checks[1].definition, "CHECK (amount > 0)");
+        // Both are table-level: they belong to no column.
+        assert!(checks.iter().all(|check| check.column.is_none()));
+    }
+
+    #[test]
+    fn a_check_written_on_a_column_belongs_to_it_and_a_table_check_to_none() {
+        // `ADD COLUMN` and `CREATE TABLE` both write a column's own check
+        // inline; a table check of the same name sits in the constraint list.
+        let create_sql = "CREATE TABLE \"author\" ( \"id\" integer PRIMARY KEY, \
+            \"name\" varchar NOT NULL, \"note\" text DEFAULT 'a, (b)', \
+            \"mood\" text CONSTRAINT \"ck_author_mood\" CHECK (\"mood\" IN ('calm', 'loud')), \
+            CONSTRAINT \"ck_author_named\" CHECK (\"name\" <> ''), \
+            UNIQUE (\"name\"), \
+            \"tier\" text CONSTRAINT \"ck_author_tier\" CHECK (\"tier\" IN ('a')) )";
+        let checks: Vec<(String, Option<String>)> = parse_sqlite_inline_named_checks(create_sql)
+            .into_iter()
+            .map(|check| (check.name, check.column))
+            .collect();
+        assert_eq!(
+            checks,
+            [
+                ("ck_author_mood".to_string(), Some("mood".to_string())),
+                ("ck_author_named".to_string(), None),
+                ("ck_author_tier".to_string(), Some("tier".to_string())),
+            ]
+        );
     }
 
     #[tokio::test]

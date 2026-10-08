@@ -62,6 +62,13 @@ pub struct LiveCheckFact {
     /// `pg_constraint.convalidated`; always `true` on SQLite.
     #[serde(default = "serde_default_true")]
     pub validated: bool,
+    /// The one column the check belongs to, when it belongs to one: on
+    /// SQLite the column whose definition carries it inline (a table-level
+    /// `CHECK` belongs to the table, whatever it reads); on Postgres the only
+    /// column it reads (`pg_constraint.conkey`). Postgres drops such a check
+    /// with its column, and SQLite drops an inline one with it.
+    #[serde(default)]
+    pub column: Option<String>,
 }
 
 /// Everything about one live table the planner reads that is not IR.
@@ -286,6 +293,36 @@ impl Side {
             .map(|(_, body)| body)
     }
 
+    /// The name of `column`'s own check on `model` as the side holds it — the
+    /// rider [`emit::column_riders`] names: a declaration's column check; a
+    /// live table's check of that name the catalog reports on that column.
+    /// A live table-level `CHECK` of the same name is the table's, never the
+    /// column's.
+    pub(crate) fn column_check(&self, model: &SchemaModel, column: &str) -> Option<String> {
+        let view = match &self.0 {
+            SideKind::Declared(_) => Cow::Borrowed(model),
+            SideKind::Live { .. } => {
+                let mut view = model.clone();
+                view.checks = self
+                    .table_facts(model)
+                    .checks
+                    .iter()
+                    .filter_map(|check| {
+                        Some(ferro_schema_ir::SchemaCheck {
+                            name: check.name.clone(),
+                            column: check.column.clone()?,
+                            values: Vec::new(),
+                        })
+                    })
+                    .collect();
+                Cow::Owned(view)
+            }
+        };
+        emit::column_riders(&view, column)
+            .check
+            .map(|check| check.name.clone())
+    }
+
     /// `model` with its row security as the side holds it: a declaration's
     /// own, or a live table's flags and policies as a declaration would state
     /// them (each policy raw, its bodies as the catalog printed them). A live
@@ -472,18 +509,20 @@ fn declared_table_facts(old_model: &SchemaModel) -> LiveTableFacts {
     let checks = old_model
         .table_checks
         .iter()
-        .map(|check| (check.name.clone(), render_table_check_body(check)))
-        .chain(
-            old_model
-                .checks
-                .iter()
-                .map(|check| (check.name.clone(), render_check_body(check))),
-        )
-        .map(|(name, body)| LiveCheckFact {
+        .map(|check| (check.name.clone(), render_table_check_body(check), None))
+        .chain(old_model.checks.iter().map(|check| {
+            (
+                check.name.clone(),
+                render_check_body(check),
+                Some(check.column.clone()),
+            )
+        }))
+        .map(|(name, body, column)| LiveCheckFact {
             name,
             definition: format!("CHECK ({body})"),
             ferro_owned: true,
             validated: true,
+            column,
         })
         .collect();
     LiveTableFacts {
@@ -1148,13 +1187,30 @@ fn plan_existing_table(
     );
     // Leftovers (#345; ADR-0013): always reported — a leftover CHECK keeps
     // rejecting rows the model now allows — and dropped only when destructive.
+    // A dropped column's own check is no leftover: it goes with its column.
     let live_ferro_owned_names: Vec<String> = live_ferro_owned
         .iter()
         .map(|(name, _)| name.clone())
         .collect();
     let extras = extra_check_names(&target_names, &live_ferro_owned_names);
+    let riding: Vec<String> = if options.destructive {
+        column_drops
+            .iter()
+            .filter_map(|op| match op {
+                MigrationOp::DropColumn { column, .. } => old.column_check(old_model, column),
+                _ => None,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let leftovers: Vec<String> = extras
+        .iter()
+        .filter(|name| !riding.contains(name))
+        .cloned()
+        .collect();
     plan.reports
-        .extend(extra_check_names_warning(table, &extras));
+        .extend(extra_check_names_warning(table, &leftovers));
     if options.destructive {
         ops.extend(extras.into_iter().map(|name| MigrationOp::DropCheck {
             table: table.to_string(),
@@ -1713,6 +1769,10 @@ pub enum Refusal {
         table: String,
         /// The column.
         column: String,
+        /// On a move to an enum type from a text column, the `db_type` token
+        /// that keeps the values in a text column
+        /// ([`ferro_ddl_lowering::string_storage_token`]).
+        keep: Option<String>,
     },
 }
 
@@ -1725,11 +1785,12 @@ impl std::fmt::Display for Refusal {
                  table (ferro migrate new --data-step …), a backfill of parent and children, \
                  and a drop; see the Migrations docs § Changing a primary key"
             ),
-            Refusal::EnumTypeMove { table, column } => write!(
-                f,
-                "changing \"{table}\".\"{column}\" to or from a native enum type is not \
-                 generated: add a column of the new type, copy the values across in a data step \
-                 (ferro migrate new --data-step …), then drop the old column"
+            Refusal::EnumTypeMove {
+                table,
+                column,
+                keep,
+            } => f.write_str(
+                &ferro_ddl_lowering::enum_type_move_report(table, column, keep.as_deref()).text,
             ),
         }
     }
@@ -1787,7 +1848,34 @@ pub(crate) fn needs_values(col: &ferro_schema_ir::SchemaColumn) -> bool {
 
 /// Whether `col` is stored as a native Postgres enum type.
 fn native_enum(col: &ferro_schema_ir::SchemaColumn) -> bool {
-    enum_type_of(col).is_some()
+    col.postgres_native_enum || enum_type_of(col).is_some()
+}
+
+/// The refusal of changing `table.column` from `old` to `new` when it moves
+/// the column to, from or between native Postgres enum types, which no
+/// statement converts in place ([`Refusal::EnumTypeMove`]); `None` when it
+/// does not. A move to an enum type from a text column carries the token
+/// that keeps the values in a text column. The verdict
+/// refuses with it; the renderer reports it in the same words
+/// ([`ferro_ddl_lowering::enum_type_move_report`]).
+pub(crate) fn enum_type_move(
+    table: &str,
+    column: &str,
+    old: &ferro_schema_ir::SchemaColumn,
+    new: &ferro_schema_ir::SchemaColumn,
+) -> Option<Refusal> {
+    if !(native_enum(old) || native_enum(new)) {
+        return None;
+    }
+    let keep = (!native_enum(old))
+        .then(|| ferro_ddl_lowering::canonical_from_schema_column(old, Dialect::Postgres).ok())
+        .flatten()
+        .and_then(ferro_ddl_lowering::string_storage_token);
+    Some(Refusal::EnumTypeMove {
+        table: table.to_string(),
+        column: column.to_string(),
+        keep,
+    })
 }
 
 fn find_column<'a>(
@@ -1803,7 +1891,7 @@ fn verdict(op: &MigrationOp, before: &Side, target: &Side, dialect: Dialect) -> 
     let table = op.table();
     let was = table.and_then(|table| before.model(table));
     let now = table.and_then(|table| target.model(table));
-    let goes_with = goes_with(op, was, now).or_else(|| {
+    let goes_with = goes_with(op, before, target).or_else(|| {
         (before.plans_label_removals() && rides_removed_label(op, was, now))
             .then_some(Rider::RemovedLabel)
     });
@@ -1870,17 +1958,18 @@ fn fails_on_rows(op: &MigrationOp, now: Option<&SchemaModel>) -> RowRisk {
     }
 }
 
-/// The column whose statement `op` rides: a check of, or an index over, a
-/// column the plan drops (Postgres drops both with the column, SQLite a
-/// column's own inline check); or an index, a column check or a foreign key
-/// over a column the plan adds — a rider of the added column
-/// ([`emit::column_riders`]), or a composite index over it.
-fn goes_with(
-    op: &MigrationOp,
-    was: Option<&SchemaModel>,
-    now: Option<&SchemaModel>,
-) -> Option<Rider> {
-    let (Some(was), Some(now)) = (was, now) else {
+/// The column whose statement `op`, planned from `before` to `target`, rides:
+/// a dropped column's own check ([`Side::column_check`], which Postgres and
+/// SQLite both drop with the column: SQLite's `DROP COLUMN` takes the
+/// `CHECK` written inline on the column, and refuses only for one a
+/// table-level `CHECK` reads) or an index over a dropped column; or an
+/// index, a column check or a foreign key over a column the plan adds — a
+/// rider of the added column ([`emit::column_riders`]), or a composite index
+/// over it. The renderer reads it too: a check riding its column's drop has
+/// no statement of its own on SQLite.
+pub(crate) fn goes_with(op: &MigrationOp, before: &Side, target: &Side) -> Option<Rider> {
+    let table = op.table()?;
+    let (Some(was), Some(now)) = (before.model(table), target.model(table)) else {
         return None;
     };
     let dropped = |name: &str| {
@@ -1897,9 +1986,10 @@ fn goes_with(
     };
     match op {
         MigrationOp::DropCheck { name, .. } => was
-            .checks
+            .columns
             .iter()
-            .any(|check| &check.name == name && dropped(&check.column))
+            .filter(|col| dropped(&col.name))
+            .any(|col| before.column_check(was, &col.name).as_ref() == Some(name))
             .then_some(Rider::DroppedColumn),
         MigrationOp::DropIndex { name, .. } => emit::standalone_indexes(was)
             .into_iter()
@@ -1994,15 +2084,12 @@ fn execution(
         return Execution::Rebuild;
     }
     if let MigrationOp::AlterColumnType { column, .. } = op
-        && (find_column(was, column).is_some_and(native_enum)
-            || find_column(now, column).is_some_and(native_enum))
+        && let (Some(old), Some(new)) = (find_column(was, column), find_column(now, column))
+        && let Some(refusal) = enum_type_move(&table(), column, old, new)
     {
         // To, from or between native enum types: no statement converts the
         // column in place.
-        return Execution::Refused(Refusal::EnumTypeMove {
-            table: table(),
-            column: column.clone(),
-        });
+        return Execution::Refused(refusal);
     }
     Execution::Native
 }
@@ -3775,6 +3862,7 @@ mod down_tests {
                     definition: "CHECK ((id > 0))".into(),
                     ferro_owned: true,
                     validated: true,
+                    column: None,
                 }],
                 ..LiveTableFacts::default()
             },
@@ -4029,6 +4117,7 @@ mod down_tests {
                     definition: "CHECK ((id > 0))".into(),
                     ferro_owned: true,
                     validated: true,
+                    column: None,
                 }],
                 ..LiveTableFacts::default()
             },

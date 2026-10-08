@@ -130,6 +130,7 @@ fn flavor_check_fact() -> LiveTableFacts {
             definition: "CHECK (flavor IN ('a'))".into(),
             ferro_owned: true,
             validated: true,
+            column: None,
         }],
         ..LiveTableFacts::default()
     }
@@ -269,26 +270,46 @@ fn an_op_rendering_nothing_is_left_out() {
 
 #[test]
 fn an_op_whose_rendering_blocks_is_refused_with_the_renderers_reason() {
-    // A column check SQLite cannot drop in place with its column.
-    let mut checked = card(vec![id(), column("flavor", "text", true)]);
-    checked.checks.push(flavor_check());
+    // A naive `timestamp` the model now stores as `timestamptz`: Postgres
+    // could run the cast, but the renderer refuses to reinterpret the values.
     let refusal = plan_revision(
-        &live_with(vec![checked], &[("card", flavor_check_fact())], &[]),
-        &envelope(vec![card(vec![id()])]),
-        Dialect::Sqlite,
+        &live(vec![card(vec![id(), column("seen", "timestamp", true)])]),
+        &envelope(vec![card(vec![id(), column("seen", "timestamptz", true)])]),
+        Dialect::Postgres,
     )
     .expect_err("a blocking rendering is refused");
     let RevisionRefusal::Blocked(report) = &refusal else {
         panic!("{refusal:?}");
     };
     assert!(report.blocks());
-    assert_eq!(report.subject, Subject::table("card"));
+    assert_eq!(report.kind, ReportKind::RefusedConversion);
+    assert_eq!(report.subject, Subject::column("card", "seen"));
     assert_eq!(refusal.to_string(), report.text);
-    assert!(
-        refusal
-            .to_string()
-            .ends_with("`ferro migrate new` to drop it.")
-    );
+}
+
+#[test]
+fn a_dropped_columns_own_check_rides_the_drop_on_sqlite() {
+    // `flavor` and its own check, written inline on the column, go: SQLite's
+    // `DROP COLUMN` takes the check, so the revision is the drop alone.
+    let fact = LiveTableFacts {
+        checks: vec![LiveCheckFact {
+            column: Some("flavor".into()),
+            ..flavor_check_fact().checks[0].clone()
+        }],
+        ..LiveTableFacts::default()
+    };
+    let revision = plan_revision(
+        &live_with(
+            vec![card(vec![id(), column("flavor", "text", true)])],
+            &[("card", fact)],
+            &[],
+        ),
+        &envelope(vec![card(vec![id()])]),
+        Dialect::Sqlite,
+    )
+    .expect("a revision");
+    assert_eq!(kinds(&revision.upgrade), ["DropColumn"]);
+    assert!(revision.reports.is_empty(), "{:?}", revision.reports);
 }
 
 #[test]
@@ -506,8 +527,8 @@ fn what_sqlite_cannot_undo_in_place_is_irreversible() {
         )]
     );
 
-    // A column check: the column's drop takes it, but SQLite cannot drop
-    // it in place; the renderer's reason is the irreversible one.
+    // A column check added inline with its column: the down's `DROP COLUMN`
+    // takes it, so the down is the drop alone, and reversible.
     let mut checked = card(vec![id(), column("flavor", "text", true)]);
     checked.checks.push(flavor_check());
     let revision = plan_revision(
@@ -517,17 +538,8 @@ fn what_sqlite_cannot_undo_in_place_is_irreversible() {
     )
     .expect("a revision");
     assert_eq!(kinds(&revision.upgrade), ["AddColumn"]);
-    assert_eq!(kinds(&revision.downgrade), ["DropCheck", "DropColumn"]);
-    let reason = revision.downgrade[0]
-        .irreversible
-        .as_deref()
-        .unwrap_or_default();
-    assert!(
-        reason
-            .starts_with("CHECK constraint 'ck_card_flavor' on table 'card' is no longer declared"),
-        "{reason}"
-    );
-    assert_eq!(revision.downgrade[1].irreversible, None);
+    assert_eq!(kinds(&revision.downgrade), ["DropColumn"]);
+    assert_eq!(revision.downgrade[0].irreversible, None);
 }
 
 // -- ADR-0041's amendment: a dropped model's table ---------------------------------------
@@ -545,6 +557,7 @@ fn a_dropped_table_goes_before_its_type_and_comes_back_after_it() {
             definition: "CHECK ((id IS NOT NULL))".into(),
             ferro_owned: true,
             validated: true,
+            column: None,
         }],
         row_security: LiveRowSecurity {
             enabled: true,

@@ -4566,3 +4566,101 @@ async def test_a_foreign_key_removed_from_a_kept_column_is_dropped_only_when_des
             "Foreign key 'fk_dfkmember_team_id_dfkteam' on 'dfkmember.team_id' is no longer declared, and SQLite cannot drop a table constraint in place, so it stays and keeps enforcing its reference. Generate a reviewed migration with `ferro migrate new` to rebuild the table without it.",
         ]
     assert _live_foreign_keys(db_url, db_backend, "dfkmember") == ["team_id"]
+
+
+# -- a move to or from a native enum type: the pass reports the generator's recipe --
+
+
+def _enum_move_models(native: bool, kept: bool = False) -> dict:
+    """``EnumMove`` with ``mood`` declared as a ``StrEnum`` (a native type on
+    Postgres), as one kept in a ``text`` column (``kept``), or as ``str``;
+    returns the declared modelset."""
+    from enum import StrEnum
+
+    from ferro import clear_registry, ensure_resolved_modelset, reset_engine
+    from ferro.registry import REGISTRY
+
+    reset_engine()
+    clear_registry()
+    REGISTRY.reset_for_test()
+
+    class MoveMood(StrEnum):
+        CALM = "calm"
+        LOUD = "loud"
+
+    if kept:
+
+        class EnumMove(Model):
+            id: Annotated[int | None, FerroField(primary_key=True)] = None
+            mood: Annotated[MoveMood | None, FerroField(db_type="text")] = None
+
+    elif native:
+
+        class EnumMove(Model):  # noqa: F811 - the same model, edited
+            id: Annotated[int | None, FerroField(primary_key=True)] = None
+            mood: MoveMood | None = None
+
+    else:
+
+        class EnumMove(Model):  # noqa: F811 - the same model, edited
+            id: Annotated[int | None, FerroField(primary_key=True)] = None
+            mood: str | None = None
+
+    return ensure_resolved_modelset()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("native_before", [True, False], ids=["from-enum", "to-enum"])
+async def test_a_move_to_or_from_a_native_enum_type_reports_the_generators_recipe(
+    db_url, db_backend, clean_registry, native_before
+):
+    """``mood: MoveMood`` becomes ``mood: str`` (or back). No statement
+    converts a column to or from a native Postgres enum type in place, so the
+    pass runs no DDL for it and says so in the generator's own words, the
+    recipe ``ferro migrate new`` refuses with (ADR-0052, ``EnumTypeMove``).
+    A move *to* the enum type also names the fix that keeps the values in a
+    text column, ``db_type="text"``, and that fix ends the report. SQLite
+    stores an enum as text: there is no type to move, and nothing to say."""
+    import json
+
+    from ferro import _core
+
+    before = _enum_move_models(native_before)
+    await auto_migrate(db_url)
+    after = _enum_move_models(not native_before)
+    report = await auto_migrate(db_url, updates=True)
+
+    assert schema_steps(report) == []
+    if db_backend == "sqlite":
+        assert warning_texts(report) == []
+        return
+    recipe = (
+        '"enummove"."mood" moves to or from a native enum type, which no statement '
+        "converts in place: add a column of the new type, copy the values across in a "
+        "data step (ferro migrate new --data-step …), then drop the old column"
+    )
+    if not native_before:
+        recipe += (
+            "; or keep the values in a text column by declaring the field with "
+            'db_type="text"'
+        )
+    assert [(w.kind, w.text) for w in report.warnings] == [("EnumTypeMove", recipe)]
+    with pytest.raises(Exception) as refused:
+        _core._generate_migration(json.dumps(before), json.dumps(after), ["postgres"])
+    assert str(refused.value) == recipe
+
+    if not native_before:
+        # The fix the text names keeps the values (varchar widens to text)
+        # and ends the report.
+        _enum_move_models(True, kept=True)
+        kept = await auto_migrate(db_url, updates=True)
+        assert warning_texts(kept) == []
+        assert schema_steps(kept) == [
+            (
+                "enummove",
+                'ALTER TABLE "enummove" ALTER COLUMN "mood" TYPE text USING "mood"::text',
+            )
+        ]
+        ferro.reset_engine()
+        again = await auto_migrate(db_url, updates=True)
+        assert (schema_steps(again), warning_texts(again)) == ([], [])

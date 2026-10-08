@@ -100,7 +100,8 @@ impl IndexOp {
     }
 }
 
-/// Every standalone index `model` declares, by an entry or a column flag.
+/// Every standalone index `model` declares: its `indexes` and `uniques`
+/// entries, a column flag's index among them.
 pub(super) fn declared_indexes(model: &SchemaModel) -> Vec<IndexDef> {
     standalone_indexes(model)
         .into_iter()

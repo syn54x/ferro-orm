@@ -434,13 +434,13 @@ pub(crate) fn unique_build_failure_message(index: &str, count: i64, resume_at: &
 
 /// The reconciliation pass's counted unique build failure (ADR-0051): `2
 /// values are duplicated under "uq_author_email" on "author"; fix the rows
-/// and connect again`. The pass has no step to resume at: connecting (or
-/// `ferro.migrate()`) runs it again.
+/// and connect again`, as its uncounted siblings say. The pass has no step to
+/// resume at: connecting runs it again.
 pub(crate) fn pass_unique_build_failure_message(index: &str, table: &str, count: i64) -> String {
     let values = if count == 1 { "value is" } else { "values are" };
     format!(
         "{count} {values} duplicated under \"{index}\" on \"{table}\"; fix the rows and connect \
-         again (or run ferro.migrate())"
+         again"
     )
 }
 
@@ -1078,7 +1078,7 @@ mod counted_failure_tests {
         assert_eq!(
             pass_unique_build_failure_message("uq_author_email", "author", 2),
             "2 values are duplicated under \"uq_author_email\" on \"author\"; fix the rows \
-             and connect again (or run ferro.migrate())"
+             and connect again"
         );
         assert!(
             pass_unique_build_failure_message("uq_author_email", "author", 1)

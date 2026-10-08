@@ -1522,7 +1522,8 @@ fn emit_add_column_enum_postgres_creates_type_then_column() {
 #[test]
 fn emit_alter_refuses_varchar_to_enum_and_varchar_to_time() {
     // Live varchar columns (old lowering) targeted at native enum / time are
-    // REFUSED: warning, no ALTER (the #154 pattern generalized).
+    // REFUSED: warning, no ALTER (the #154 pattern generalized). The enum is
+    // a move to a native enum type: the generator's recipe, word for word.
     let live_enum_col = col("status", "varchar", false);
     let live_time_col = col("wake_time", "varchar", false);
     let model = SchemaModel {
@@ -1556,34 +1557,61 @@ fn emit_alter_refuses_varchar_to_enum_and_varchar_to_time() {
     let result = render_flat(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap();
     assert!(result.statements.is_empty(), "{:?}", result.statements);
     assert_eq!(result.reports.len(), 2, "{:?}", result.reports);
-    assert!(result.reports[0].text.contains("ticket.status"), "{}", result.reports[0].text);
-    assert!(result.reports[0].text.contains("USING"), "{}", result.reports[0].text);
+    assert_eq!(
+        result.reports[0],
+        ferro_ddl_lowering::enum_type_move_report("ticket", "status", Some("text"))
+    );
     assert!(result.reports[1].text.contains("ticket.wake_time"), "{}", result.reports[1].text);
 }
 
+/// `mood: Mood` (a native Postgres enum type) becomes `mood: str`, and back:
+/// no statement converts the column in place. The pass reads the database
+/// and reports the generator's recipe in its words, as a blocking report and
+/// no DDL; the verdict refuses with the same text. SQLite stores an enum as
+/// text, so there is no type to move.
 #[test]
-fn emit_alter_native_enum_live_is_noop() {
-    let live = SchemaColumn {
-        postgres_native_enum: true,
-        enum_renamed_labels: Default::default(),
-        default_factory: None,
-        ..col("status", "varchar", false)
-    };
-    let model_col = SchemaColumn {
-        enum_values: Some(vec![serde_json::json!("draft")]),
-        enum_type_name: Some("status".to_string()),
+fn a_move_to_or_from_a_native_enum_type_reports_the_generators_recipe() {
+    let native = SchemaColumn {
+        enum_values: Some(vec![serde_json::json!("calm")]),
+        enum_type_name: Some("mood".to_string()),
         db_type: None,
-        ..col("status", "text", false)
+        ..col("mood", "text", true)
     };
-    let old_ir = envelope(vec![schema_model("ticket", vec![live])]);
-    let new_ir = envelope(vec![schema_model("ticket", vec![model_col])]);
-    let plan = Plan::unplaced(vec![MigrationOp::AlterColumnType {
-        table: "ticket".to_string(),
-        column: "status".to_string(),
-    }]);
-    let result = render_flat(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap();
-    assert!(result.statements.is_empty());
-    assert!(result.reports.is_empty());
+    let live_native = SchemaColumn {
+        postgres_native_enum: true,
+        ..native.clone()
+    };
+    let scalar = col("mood", "varchar", true);
+    let author = |mood: SchemaColumn| schema_model("author", vec![pk_col("id", "integer"), mood]);
+    let mut facts = LiveFacts::default();
+    facts
+        .tables
+        .insert("author".into(), LiveTableFacts::default());
+    // From an enum type: the migration only. To one: the migration, or
+    // keeping the values in a text column (`db_type="text"`).
+    for (live, declared, keep) in [
+        (live_native, scalar.clone(), None),
+        (scalar, native, Some("text")),
+    ] {
+        let recipe = ferro_ddl_lowering::enum_type_move_report("author", "mood", keep);
+        let plan = plan_from_ir(
+            &Side::live(envelope(vec![author(live)]), facts.clone()).expect("live side"),
+            &Side::declared(envelope(vec![author(declared)])),
+            Dialect::Postgres,
+            PlanOptions::default(),
+        );
+        let [planned] = plan.operations.as_slice() else {
+            panic!("{:?}", plan.op_list());
+        };
+        let Execution::Refused(refusal) = &planned.verdict.execution else {
+            panic!("{:?}", planned.verdict);
+        };
+        assert_eq!(refusal.to_string(), recipe.text);
+        let rendered = plan.render().expect("render");
+        assert!(rendered[0].statements.is_empty());
+        assert_eq!(rendered[0].reports, [recipe.clone()]);
+        assert!(recipe.blocks());
+    }
 }
 
 // Verify the runtime's `CASCADE` default (`unwrap_or("CASCADE")`) is mirrored:
@@ -3683,6 +3711,7 @@ fn live_check(name: &str, definition: &str) -> LiveCheckFact {
         definition: definition.into(),
         ferro_owned: name.starts_with("ck_"),
         validated: true,
+        column: None,
     }
 }
 
@@ -4701,6 +4730,7 @@ mod renames {
                     definition: "CHECK (\"genre\" IN ('novel', 'poem'))".to_string(),
                     ferro_owned: true,
                     validated: true,
+                    column: None,
                 }],
                 ..Default::default()
             },
@@ -4753,6 +4783,7 @@ mod renames {
                     definition: "CHECK (\"genre\" IN ('novel'))".to_string(),
                     ferro_owned: true,
                     validated: true,
+                    column: None,
                 }],
                 ..Default::default()
             },
@@ -5859,6 +5890,79 @@ fn a_foreign_key_on_a_dropped_column_goes_with_the_column() {
             column: "team_id".to_string(),
         }]
     );
+}
+
+/// `mood: Mood | None = Field(db_type="text", db_check=True)` deleted from a
+/// live table: its own check `ck_author_mood` is read on the column (SQLite
+/// writes it inline; Postgres reports it on that column alone), so it rides
+/// the column's drop. SQLite's `DROP COLUMN` takes it; Postgres drops it
+/// explicitly first. It is no leftover: nothing warns.
+#[test]
+fn a_dropped_columns_own_live_check_rides_the_drop_on_both_dialects() {
+    let live_model = schema_model(
+        "author",
+        vec![pk_col("id", "integer"), col("mood", "text", true)],
+    );
+    let declared = schema_model("author", vec![pk_col("id", "integer")]);
+    let drop_check = MigrationOp::DropCheck {
+        table: "author".to_string(),
+        name: "ck_author_mood".to_string(),
+    };
+    let plan_with = |column: Option<&str>, dialect: Dialect| {
+        let mut facts = LiveFacts::default();
+        facts.tables.insert(
+            "author".into(),
+            LiveTableFacts {
+                checks: vec![LiveCheckFact {
+                    column: column.map(str::to_string),
+                    ..live_check("ck_author_mood", "CHECK (\"mood\" IN ('calm', 'loud'))")
+                }],
+                ..LiveTableFacts::default()
+            },
+        );
+        plan_from_ir(
+            &Side::live(envelope(vec![live_model.clone()]), facts).expect("live side"),
+            &Side::declared(envelope(vec![declared.clone()])),
+            dialect,
+            destructive(),
+        )
+    };
+    for dialect in [Dialect::Postgres, Dialect::Sqlite] {
+        let plan = plan_with(Some("mood"), dialect);
+        let check = plan
+            .operations
+            .iter()
+            .find(|planned| planned.op == drop_check)
+            .expect("the check's drop is planned");
+        assert_eq!(check.verdict.goes_with, Some(Rider::DroppedColumn));
+        assert_eq!(check.verdict.execution, Execution::Native, "{dialect:?}");
+        assert!(plan.reports.is_empty(), "{dialect:?}: {:?}", plan.reports);
+        let rendered = plan.render().expect("render");
+        assert!(
+            rendered.iter().all(|op| op.reports.is_empty()),
+            "{dialect:?}: {rendered:?}"
+        );
+        let statements: Vec<&str> = rendered
+            .iter()
+            .flat_map(|op| op.statements.iter().map(String::as_str))
+            .collect();
+        let mut expected = vec!["ALTER TABLE \"author\" DROP COLUMN \"mood\""];
+        if dialect == Dialect::Postgres {
+            expected.insert(0, "ALTER TABLE \"author\" DROP CONSTRAINT \"ck_author_mood\"");
+        }
+        assert_eq!(statements, expected, "{dialect:?}");
+    }
+    // A table-level CHECK of the same name (SQLite reports it on no column)
+    // is the table's: SQLite cannot drop it in place, and it is a leftover.
+    let table_level = plan_with(None, Dialect::Sqlite);
+    let check = table_level
+        .operations
+        .iter()
+        .find(|planned| planned.op == drop_check)
+        .expect("the check's drop is planned");
+    assert_eq!(check.verdict.goes_with, None);
+    assert_eq!(check.verdict.execution, Execution::Rebuild);
+    assert_eq!(table_level.reports.len(), 1);
 }
 
 /// Between two snapshots (the generator) the drop is planned the same way,
