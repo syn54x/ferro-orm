@@ -5987,3 +5987,148 @@ fn a_removed_foreign_key_between_snapshots_and_on_sqlite() {
     assert!(sqlite[0].statements.is_empty());
     assert!(sqlite[0].reports[0].blocks());
 }
+
+/// `ALTER TABLE … RENAME` leaves a serial's sequence under the old table's
+/// name, so the renamed table's key would default to
+/// `nextval('writer_id_seq')` where a table created as `author` defaults to
+/// `nextval('author_id_seq')`: on Postgres the rename carries the sequence
+/// to the name a fresh create gives it, and the down carries it back. SQLite
+/// keeps `AUTOINCREMENT`'s mark in `sqlite_sequence`, renamed with the table.
+#[test]
+fn a_table_rename_carries_its_serial_sequence_to_the_new_name_and_back() {
+    let writer = envelope(vec![schema_model(
+        "writer",
+        vec![pk_col("id", "int"), col("name", "varchar", false)],
+    )]);
+    let author = envelope(vec![SchemaModel {
+        renamed_from: Some("writer".to_string()),
+        ..schema_model(
+            "author",
+            vec![pk_col("id", "int"), col("name", "varchar", false)],
+        )
+    }]);
+    let sequence_rename = |table: &str, target: &str| {
+        format!(
+            "DO $$ DECLARE seq regclass := pg_get_serial_sequence('\"{table}\"', 'id')::regclass; \
+             BEGIN IF seq IS NOT NULL AND (SELECT relname FROM pg_class WHERE oid = seq) <> \
+             '{target}' THEN EXECUTE format('ALTER SEQUENCE %s RENAME TO %I', seq, '{target}'); \
+             END IF; END $$"
+        )
+    };
+    let rendered = |plan: &Plan,
+                    old: &IrEnvelope<SchemaIrPayload>,
+                    new: &IrEnvelope<SchemaIrPayload>,
+                    dialect: Dialect| {
+        render_plan(plan, old, new, dialect)
+            .unwrap()
+            .into_iter()
+            .flat_map(|op| op.statements)
+            .collect::<Vec<String>>()
+    };
+    let up = plan_from_ir(
+        &Side::declared(writer.clone()),
+        &Side::declared(author.clone()),
+        Dialect::Postgres,
+        destructive(),
+    );
+    assert_eq!(
+        rendered(&up, &writer, &author, Dialect::Postgres),
+        vec![
+            "ALTER TABLE \"writer\" RENAME TO \"author\"".to_string(),
+            sequence_rename("author", "author_id_seq"),
+        ]
+    );
+
+    let down = plan_down(
+        &up.op_list(),
+        &Side::declared(author.clone()),
+        &Side::declared(writer.clone()),
+        Dialect::Postgres,
+    );
+    assert_eq!(
+        rendered(&down, &author, &writer, Dialect::Postgres),
+        vec![
+            "ALTER TABLE \"author\" RENAME TO \"writer\"".to_string(),
+            sequence_rename("writer", "writer_id_seq"),
+        ]
+    );
+
+    let up = plan_from_ir(
+        &Side::declared(writer.clone()),
+        &Side::declared(author.clone()),
+        Dialect::Sqlite,
+        destructive(),
+    );
+    assert_eq!(
+        rendered(&up, &writer, &author, Dialect::Sqlite),
+        vec!["ALTER TABLE \"writer\" RENAME TO \"author\"".to_string()]
+    );
+}
+
+/// A renamed serial key column's sequence follows it too, and a table with
+/// no serial key renames alone.
+#[test]
+fn a_serial_key_column_rename_carries_its_sequence_and_a_plain_table_renames_alone() {
+    let before = envelope(vec![schema_model(
+        "author",
+        vec![pk_col("id", "int"), col("name", "varchar", false)],
+    )]);
+    let after = envelope(vec![schema_model(
+        "author",
+        vec![
+            SchemaColumn {
+                renamed_from: Some("id".to_string()),
+                ..pk_col("author_id", "int")
+            },
+            col("name", "varchar", false),
+        ],
+    )]);
+    let up = plan_from_ir(
+        &Side::declared(before.clone()),
+        &Side::declared(after.clone()),
+        Dialect::Postgres,
+        destructive(),
+    );
+    let statements: Vec<String> = render_plan(&up, &before, &after, Dialect::Postgres)
+        .unwrap()
+        .into_iter()
+        .flat_map(|op| op.statements)
+        .collect();
+    assert_eq!(
+        statements,
+        vec![
+            "ALTER TABLE \"author\" RENAME COLUMN \"id\" TO \"author_id\"".to_string(),
+            ferro_ddl_lowering::render_pg_serial_sequence_rename("author", "author_id"),
+        ]
+    );
+
+    let keyed = |table: &str, renamed_from: Option<&str>| SchemaModel {
+        renamed_from: renamed_from.map(str::to_string),
+        ..schema_model(
+            table,
+            vec![SchemaColumn {
+                autoincrement: false,
+                ..pk_col("code", "varchar")
+            }],
+        )
+    };
+    let (old, new) = (
+        envelope(vec![keyed("writer", None)]),
+        envelope(vec![keyed("author", Some("writer"))]),
+    );
+    let up = plan_from_ir(
+        &Side::declared(old.clone()),
+        &Side::declared(new.clone()),
+        Dialect::Postgres,
+        destructive(),
+    );
+    let statements: Vec<String> = render_plan(&up, &old, &new, Dialect::Postgres)
+        .unwrap()
+        .into_iter()
+        .flat_map(|op| op.statements)
+        .collect();
+    assert_eq!(
+        statements,
+        vec!["ALTER TABLE \"writer\" RENAME TO \"author\"".to_string()]
+    );
+}

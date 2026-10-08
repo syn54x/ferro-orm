@@ -882,17 +882,6 @@ FINDINGS: dict[str, Finding] = {
         pins=frozenset({"g"}),
         dialects=frozenset({"sqlite"}),
     ),
-    "B3-rename-a-model": Finding(
-        reason=(
-            'pin (e), server defaults: ALTER TABLE "writer" RENAME TO '
-            '"author" keeps the serial\'s sequence, so the migrated '
-            '"author"."id" defaults to nextval(\'writer_id_seq\') where the '
-            "auto-migrated one defaults to nextval('author_id_seq')"
-        ),
-        raises=AssertionError,
-        pins=frozenset({"e-defaults"}),
-        dialects=frozenset({"postgres"}),
-    ),
 }
 
 

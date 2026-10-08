@@ -19,6 +19,18 @@ from tests._pass_harness import (
 pytestmark = pytest.mark.backend_matrix
 
 
+def pg_sequence_rename(table: str) -> str:
+    """The pass's statement that gives ``table``'s ``id`` sequence the name a
+    table created as ``table`` owns (``<table>_id_seq``) after a rename:
+    ``ALTER TABLE … RENAME`` alone keeps the old name."""
+    return (
+        f"DO $$ DECLARE seq regclass := pg_get_serial_sequence('\"{table}\"', 'id')"
+        "::regclass; BEGIN IF seq IS NOT NULL AND (SELECT relname FROM pg_class "
+        f"WHERE oid = seq) <> '{table}_id_seq' THEN EXECUTE format('ALTER SEQUENCE "
+        f"%s RENAME TO %I', seq, '{table}_id_seq'); END IF; END $$"
+    )
+
+
 def sqlite_not_null_add(table: str, column: str, value: str) -> str:
     """The pass's report for a required column it adds on SQLite: nullable,
     backfilled by ``UPDATE``, the ``NOT NULL`` left to a rebuild, since
@@ -3600,6 +3612,7 @@ async def test_migrate_updates_renames_a_hinted_table_with_its_rows_and_index(
             ],
             postgres=[
                 ("trnauthor", 'ALTER TABLE "trnwriter" RENAME TO "trnauthor"'),
+                ("trnauthor", pg_sequence_rename("trnauthor")),
                 (
                     "trnauthor",
                     'ALTER INDEX "idx_trnwriter_name" RENAME TO "idx_trnauthor_name"',
@@ -3948,6 +3961,7 @@ async def test_a_new_table_referencing_a_renamed_one_is_created_after_the_rename
         ],
         postgres=[
             ("trnauthor", 'ALTER TABLE "trnwriter" RENAME TO "trnauthor"'),
+            ("trnauthor", pg_sequence_rename("trnauthor")),
             (
                 "trnauthor",
                 'ALTER INDEX "idx_trnwriter_name" RENAME TO "idx_trnauthor_name"',
@@ -4070,6 +4084,7 @@ async def test_a_table_two_references_from_a_renamed_one_waits_for_the_rename_to
         ],
         postgres=[
             ("trnauthor", 'ALTER TABLE "trnwriter" RENAME TO "trnauthor"'),
+            ("trnauthor", pg_sequence_rename("trnauthor")),
             (
                 "trnauthor",
                 'ALTER INDEX "idx_trnwriter_name" RENAME TO "idx_trnauthor_name"',

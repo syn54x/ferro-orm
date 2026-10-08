@@ -1120,6 +1120,74 @@ pub fn render_rename_table(old: &str, new: &str) -> String {
     )
 }
 
+/// Whether the create pass writes `col` as a Postgres `serial` /
+/// `bigserial` / `smallserial`: an integer primary key flagged
+/// autoincrement, which owns a sequence Postgres names after its table and
+/// column ([`pg_serial_sequence_name`]).
+pub fn is_pg_serial_column(col: &SchemaColumn) -> bool {
+    col.primary_key
+        && col.autoincrement
+        && matches!(
+            resolve_column_storage(col, Dialect::Postgres),
+            Ok(ResolvedStorage::Scalar(
+                CanonicalType::Integer | CanonicalType::BigInt | CanonicalType::SmallInt
+            ))
+        )
+}
+
+/// The name Postgres gives the sequence a `serial` column `table.column`
+/// owns when the table is created: `<table>_<column>_seq`, cut as Postgres's
+/// `makeObjectName` cuts it to fit 63 bytes (the longer of the two names
+/// loses a byte at a time, never splitting a character).
+pub fn pg_serial_sequence_name(table: &str, column: &str) -> String {
+    const NAME_BYTES: usize = 63;
+    const LABEL: &str = "seq";
+    let available = NAME_BYTES - (1 + LABEL.len() + 1);
+    let (mut t, mut c) = (table.len(), column.len());
+    while t + c > available {
+        if t > c {
+            t -= 1;
+        } else {
+            c -= 1;
+        }
+    }
+    let clip = |name: &str, mut len: usize| {
+        while !name.is_char_boundary(len) {
+            len -= 1;
+        }
+        name[..len].to_string()
+    };
+    format!("{}_{}_{LABEL}", clip(table, t), clip(column, c))
+}
+
+/// After a table or column rename on Postgres, the sequence the `serial`
+/// column `table.column` owns takes the name a table created under the new
+/// names would give it ([`pg_serial_sequence_name`]): `ALTER TABLE … RENAME`
+/// leaves `author_id_seq` behind, so the column's default would read
+/// `nextval('author_id_seq')` where a fresh `writer` reads
+/// `nextval('writer_id_seq')`.
+///
+/// The sequence is found through `pg_get_serial_sequence`, the column's own
+/// ownership link (a table created outside ferro may have named it anything),
+/// inside a guard: a column that owns no sequence, or one already under the
+/// name, is left alone, so the statement never fails a migration over a
+/// sequence that is not there (`ALTER SEQUENCE` has no `IF EXISTS` for a
+/// rename). The statement is the same on every door; only its run reads the
+/// catalog, as the guarded `CREATE TYPE` does.
+pub fn render_pg_serial_sequence_rename(table: &str, column: &str) -> String {
+    let literal = |text: &str| text.replace('\'', "''");
+    let target = pg_serial_sequence_name(table, column);
+    format!(
+        "DO $$ DECLARE seq regclass := pg_get_serial_sequence('{table}', '{column}')::regclass; \
+         BEGIN IF seq IS NOT NULL AND (SELECT relname FROM pg_class WHERE oid = seq) <> \
+         '{target}' THEN EXECUTE format('ALTER SEQUENCE %s RENAME TO %I', seq, '{target}'); \
+         END IF; END $$",
+        table = literal(&quote_ident(table)),
+        column = literal(column),
+        target = literal(&target),
+    )
+}
+
 /// `ALTER TABLE "t" RENAME COLUMN "old" TO "new"` — a declared column rename
 /// (ADR-0032). Native on both dialects; SQLite (3.25+) rewrites the indexes
 /// and checks that name the column.
@@ -5820,6 +5888,30 @@ mod tests {
         assert_eq!(
             render_label_update("o\"rder", "st", "it's", "its"),
             "UPDATE \"o\"\"rder\" SET \"st\" = 'its' WHERE \"st\" = 'it''s'"
+        );
+        assert_eq!(pg_serial_sequence_name("writer", "id"), "writer_id_seq");
+        // Postgres's makeObjectName: 58 bytes for the two names, the longer
+        // one cut first (pinned against a live CREATE TABLE in
+        // tests/test_migrate_drift.py).
+        let long_table = "t".repeat(70);
+        assert_eq!(
+            pg_serial_sequence_name(&long_table, "id"),
+            format!("{}_id_seq", "t".repeat(56))
+        );
+        assert_eq!(
+            pg_serial_sequence_name(&"a".repeat(40), &"b".repeat(40)),
+            format!("{}_{}_seq", "a".repeat(29), "b".repeat(29))
+        );
+        assert_eq!(
+            pg_serial_sequence_name(&"é".repeat(40), "id"),
+            format!("{}_id_seq", "é".repeat(28))
+        );
+        assert_eq!(
+            render_pg_serial_sequence_rename("o'rder", "id"),
+            "DO $$ DECLARE seq regclass := pg_get_serial_sequence('\"o''rder\"', 'id')::regclass; \
+             BEGIN IF seq IS NOT NULL AND (SELECT relname FROM pg_class WHERE oid = seq) <> \
+             'o''rder_id_seq' THEN EXECUTE format('ALTER SEQUENCE %s RENAME TO %I', seq, \
+             'o''rder_id_seq'); END IF; END $$"
         );
         assert_eq!(
             render_backfill_update("author", "tier", "'free'"),

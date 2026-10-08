@@ -289,6 +289,66 @@ def test_a_rename_undone_by_hand_reads_the_hinted_old_table(project, pkg, db, ca
     assert [op["kind"] for op in report.operations] == ["RenameTable"]
 
 
+PLAIN_TEAM = (
+    AUTHOR
+    + """
+
+class Team(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    name: str
+"""
+)
+# 61 characters: Postgres cuts the sequence's name to fit 63 bytes.
+LONG_TEAM = "SquadsWithANameLongEnoughThatPostgresCutsItsKeySequenceNameXy"
+LONG_SQUADS = PLAIN_TEAM.replace(
+    "class Team(Model):\n",
+    f'class {LONG_TEAM}(Model):\n    __ferro_renamed_from__ = "team"\n',
+)
+
+
+@pytest.mark.parametrize("target", ["Squad", LONG_TEAM])
+def test_a_renamed_tables_key_sequence_takes_the_name_a_fresh_table_gives_it(
+    project, pkg, db, capsys, target
+):
+    """``ALTER TABLE "team" RENAME TO "squad"`` alone keeps ``team_id_seq``,
+    so ``squad.id`` would default to ``nextval('team_id_seq')`` where a
+    table created as ``squad`` defaults to ``nextval('squad_id_seq')``. The
+    rename carries the sequence (Postgres; SQLite's ``sqlite_sequence`` row
+    follows the table): no drift, and the default is the one a fresh
+    ``CREATE TABLE`` under the new name gives, even where Postgres cuts the
+    name to fit 63 bytes. ``down`` carries it back."""
+    configure(project, pkg, db.backend)
+    write_models(project, pkg, PLAIN_TEAM)
+    new("create_team")
+    assert run("migrate", "up", "--url", db.url) == 0
+    write_models(project, pkg, LONG_SQUADS.replace(LONG_TEAM, target))
+    new("rename_team")
+    assert run("migrate", "up", "--url", db.url) == 0
+    capsys.readouterr()
+    assert drift_api(db).lines == []
+    if db.backend != "postgres":
+        return
+    table = target.lower()
+
+    def key_default(name: str) -> str:
+        return db.rows(
+            "SELECT column_default FROM information_schema.columns "
+            f"WHERE table_schema = current_schema() AND table_name = '{name}' "
+            "AND column_name = 'id'"
+        )[0][0]
+
+    assert key_default(table) == f"nextval('{table[:56]}_id_seq'::regclass)"
+    # Postgres's own cut of a serial's sequence name (makeObjectName): the
+    # longer name loses a byte at a time until the two fit 58 bytes.
+    probe = "p" * 63
+    db.execute(f'CREATE TABLE "{probe}" ("id" serial PRIMARY KEY)')
+    assert key_default(probe) == f"nextval('{probe[:56]}_id_seq'::regclass)"
+    db.execute(f'DROP TABLE "{probe}"')
+
+    assert run("migrate", "down", "--yes", "--url", db.url) == 0
+    assert key_default("team") == "nextval('team_id_seq'::regclass)"
+
+
 def test_a_changed_type_and_nullability_name_both_sides(project, pkg, db, capsys):
     if db.backend != "postgres":
         pytest.skip("SQLite cannot alter a column in place")

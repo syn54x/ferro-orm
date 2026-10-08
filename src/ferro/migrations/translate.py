@@ -305,10 +305,16 @@ def _twin(written: dict[str, Any], target: _Target) -> list[ops.MigrateOperation
         )
     if kind == "DropTable":
         return [ops.DropTableOp(op["table"])]
+    # A serial key's sequence follows a rename on Postgres: the pass's
+    # statement after the rename, which Alembic has no op for.
     if kind == "RenameTable":
-        return [FerroRenameTableOp(op["old"], op["new"])]
+        return [FerroRenameTableOp(op["old"], op["new"])] + _executed(
+            written, statements[1:]
+        )
     if kind == "RenameColumn":
-        return [ops.AlterColumnOp(op["table"], op["old"], modify_name=op["new"])]
+        return [
+            ops.AlterColumnOp(op["table"], op["old"], modify_name=op["new"])
+        ] + _executed(written, statements[1:])
     if kind == "AddColumn":
         table, column = op["table"], op["column"]
         added: list[ops.MigrateOperation] = [
