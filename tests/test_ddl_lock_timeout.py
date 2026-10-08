@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from typing import Annotated, Any
 
 import pytest
@@ -117,10 +118,33 @@ class Holder:
             conn.execute(f'SET search_path TO "{self.db.schema}"')
             conn.execute(self.sql)
             self.locked.set()
-            self.release.wait(self.seconds or self.SAFETY_HOLD)
+            if self.seconds is None:
+                self.release.wait(self.SAFETY_HOLD)
+            else:
+                self._await_a_waiter(conn)
+                self.release.wait(self.seconds)
             conn.commit()
         finally:
             conn.close()
+
+    def _await_a_waiter(self, conn) -> None:
+        """Block until another session queues behind this lock on the table.
+
+        ``seconds`` is how long the statement under test waits, so its clock
+        starts when that statement first waits, not when the lock was taken:
+        on a loaded machine (two runs of the suite against one server) the
+        run's setup between the two can eat most of a short hold, and the
+        statement would then find the lock already gone."""
+        deadline = time.monotonic() + self.SAFETY_HOLD
+        while not self.release.is_set() and time.monotonic() < deadline:
+            waiting = conn.execute(
+                "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE NOT granted "
+                "AND relation = to_regclass(%s) AND pid <> pg_backend_pid())",
+                (f'"{self.db.schema}"."{self.table}"',),
+            ).fetchone()[0]
+            if waiting:
+                return
+            time.sleep(0.02)
 
     def __enter__(self) -> Holder:
         self.thread.start()
