@@ -1159,21 +1159,51 @@ pub fn pg_serial_sequence_name(table: &str, column: &str) -> String {
 /// inside a guard: a column that owns no sequence, or one already under the
 /// name, is left alone, so the statement never fails a migration over a
 /// sequence that is not there (`ALTER SEQUENCE` has no `IF EXISTS` for a
-/// rename). The statement is the same on every door; only its run reads the
-/// catalog, as the guarded `CREATE TYPE` does.
+/// rename). Another relation already holding the name in the sequence's
+/// schema is a refusal naming it and the fix, never Postgres's bare
+/// `relation already exists` ([`PG_SERIAL_SEQUENCE_NAME_TAKEN`]). The
+/// statement is the same on every door; only its run reads the catalog, as
+/// the guarded `CREATE TYPE` does.
 pub fn render_pg_serial_sequence_rename(table: &str, column: &str) -> String {
     let literal = |text: &str| text.replace('\'', "''");
     let target = pg_serial_sequence_name(table, column);
     format!(
         "DO $$ DECLARE seq regclass := pg_get_serial_sequence('{table}', '{column}')::regclass; \
+         holder regclass; kind text; \
          BEGIN IF seq IS NOT NULL AND (SELECT relname FROM pg_class WHERE oid = seq) <> \
-         '{target}' THEN EXECUTE format('ALTER SEQUENCE %s RENAME TO %I', seq, '{target}'); \
+         '{target}' THEN \
+         SELECT c.oid, CASE c.relkind WHEN 'S' THEN 'sequence' WHEN 'r' THEN 'table' \
+         WHEN 'p' THEN 'table' WHEN 'i' THEN 'index' WHEN 'I' THEN 'index' \
+         WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized view' ELSE 'relation' END \
+         INTO holder, kind FROM pg_class c WHERE c.relname = '{target}' \
+         AND c.relnamespace = (SELECT relnamespace FROM pg_class WHERE oid = seq); \
+         IF holder IS NOT NULL THEN RAISE EXCEPTION USING ERRCODE = 'duplicate_table', \
+         MESSAGE = format('{taken}', seq, '{owner}', '{target}', '{table}', kind, holder, kind); \
+         END IF; \
+         EXECUTE format('ALTER SEQUENCE %s RENAME TO %I', seq, '{target}'); \
          END IF; END $$",
         table = literal(&quote_ident(table)),
         column = literal(column),
+        owner = literal(&format!("{}.{}", quote_ident(table), quote_ident(column))),
         target = literal(&target),
+        taken = literal(PG_SERIAL_SEQUENCE_NAME_TAKEN),
     )
 }
+
+/// The refusal [`render_pg_serial_sequence_rename`] raises when another
+/// relation already holds the sequence's canonical name, as Postgres
+/// `format()` fills it: the sequence, the owning column, the name, the
+/// table, then the holder's kind, the holder, and its kind again.
+///
+/// ```text
+/// Cannot rename sequence writer_id_seq, owned by "author"."id", to
+/// author_id_seq, the name a table created as "author" gives it: table
+/// author_id_seq already holds that name. Rename or drop that table, then
+/// run the change again.
+/// ```
+const PG_SERIAL_SEQUENCE_NAME_TAKEN: &str = "Cannot rename sequence %s, owned by %s, to %I, \
+     the name a table created as %s gives it: %s %s already holds that name. Rename or drop \
+     that %s, then run the change again.";
 
 /// `ALTER TABLE "t" RENAME COLUMN "old" TO "new"` — a declared column rename
 /// (ADR-0032). Native on both dialects; SQLite (3.25+) rewrites the indexes
@@ -5896,9 +5926,22 @@ mod tests {
         assert_eq!(
             render_pg_serial_sequence_rename("o'rder", "id"),
             "DO $$ DECLARE seq regclass := pg_get_serial_sequence('\"o''rder\"', 'id')::regclass; \
+             holder regclass; kind text; \
              BEGIN IF seq IS NOT NULL AND (SELECT relname FROM pg_class WHERE oid = seq) <> \
-             'o''rder_id_seq' THEN EXECUTE format('ALTER SEQUENCE %s RENAME TO %I', seq, \
-             'o''rder_id_seq'); END IF; END $$"
+             'o''rder_id_seq' THEN \
+             SELECT c.oid, CASE c.relkind WHEN 'S' THEN 'sequence' WHEN 'r' THEN 'table' \
+             WHEN 'p' THEN 'table' WHEN 'i' THEN 'index' WHEN 'I' THEN 'index' \
+             WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized view' ELSE 'relation' END \
+             INTO holder, kind FROM pg_class c WHERE c.relname = 'o''rder_id_seq' \
+             AND c.relnamespace = (SELECT relnamespace FROM pg_class WHERE oid = seq); \
+             IF holder IS NOT NULL THEN RAISE EXCEPTION USING ERRCODE = 'duplicate_table', \
+             MESSAGE = format('Cannot rename sequence %s, owned by %s, to %I, the name a table \
+             created as %s gives it: %s %s already holds that name. Rename or drop that %s, \
+             then run the change again.', seq, '\"o''rder\".\"id\"', 'o''rder_id_seq', \
+             '\"o''rder\"', kind, holder, kind); \
+             END IF; \
+             EXECUTE format('ALTER SEQUENCE %s RENAME TO %I', seq, 'o''rder_id_seq'); \
+             END IF; END $$"
         );
         assert_eq!(
             render_relabel_copy(

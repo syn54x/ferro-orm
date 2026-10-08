@@ -8,6 +8,7 @@ from pydantic import Field
 import ferro
 from ferro import BackRef, ManyToMany, Model, PassReport, Relation
 from ferro.base import FerroField
+from tests._pg_sequence import pg_sequence_rename
 from tests._pass_harness import (
     auto_migrate,
     on,
@@ -17,19 +18,6 @@ from tests._pass_harness import (
 )
 
 pytestmark = pytest.mark.backend_matrix
-
-
-def pg_sequence_rename(table: str, column: str = "id") -> str:
-    """The pass's statement that gives ``table``'s ``column`` sequence the
-    name a table created as ``table`` owns (``<table>_<column>_seq``) after a
-    rename: ``ALTER TABLE … RENAME`` alone keeps the old name."""
-    target = f"{table}_{column}_seq"
-    return (
-        f"DO $$ DECLARE seq regclass := pg_get_serial_sequence('\"{table}\"', "
-        f"'{column}')::regclass; BEGIN IF seq IS NOT NULL AND (SELECT relname FROM "
-        f"pg_class WHERE oid = seq) <> '{target}' THEN EXECUTE format('ALTER SEQUENCE "
-        f"%s RENAME TO %I', seq, '{target}'); END IF; END $$"
-    )
 
 
 class AutoMigratedUser(Model):
@@ -3603,6 +3591,45 @@ async def test_migrate_updates_renames_a_table_and_its_serial_key_with_its_seque
 
     again = await auto_migrate(db_url, updates=True)
     assert schema_steps(again) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_a_sequence_rename_onto_a_taken_name_refuses_naming_the_holder_and_fix(
+    db_url, clean_registry
+):
+    """``trnwriter`` becomes ``trnauthor`` while a sequence someone made by
+    hand already holds ``trnauthor_id_seq``, the name the key's sequence
+    takes after the rename. The rename refuses with ferro's text, naming the
+    sequence, the column, the holder and the fix, instead of Postgres's bare
+    ``relation already exists``; nothing is renamed. Once the holder is
+    dropped, the same pass goes through."""
+    await _trn_writer_with_rows(db_url)
+    await ferro.connect(db_url)
+    async with ferro.engines.session():
+        await execute('CREATE SEQUENCE "trnauthor_id_seq"')
+    ferro.reset_engine()
+    _define_trn_author()
+
+    with pytest.raises(Exception) as refused:
+        await auto_migrate(db_url, updates=True)
+    assert (
+        "Cannot rename sequence trnwriter_id_seq, owned by \"trnauthor\".\"id\", to "
+        'trnauthor_id_seq, the name a table created as "trnauthor" gives it: sequence '
+        "trnauthor_id_seq already holds that name. Rename or drop that sequence, then "
+        "run the change again."
+    ) in str(refused.value)
+    ferro.reset_engine()
+    assert await _trn_tables(db_url) == {"trnwriter"}
+
+    await ferro.connect(db_url)
+    async with ferro.engines.session():
+        await execute('DROP SEQUENCE "trnauthor_id_seq"')
+    ferro.reset_engine()
+    report = await auto_migrate(db_url, updates=True)
+    assert pg_sequence_rename("trnauthor") in [sql for _, sql in schema_steps(report)]
+    ferro.reset_engine()
+    assert await _trn_tables(db_url) == {"trnauthor"}
 
 
 @pytest.mark.asyncio

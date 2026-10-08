@@ -6002,13 +6002,14 @@ fn a_table_rename_carries_its_serial_sequence_to_the_new_name_and_back() {
             vec![pk_col("id", "int"), col("name", "varchar", false)],
         )
     }]);
+    // The statement's text is pinned in ferro-ddl-lowering; here, its target.
     let sequence_rename = |table: &str, target: &str| {
-        format!(
-            "DO $$ DECLARE seq regclass := pg_get_serial_sequence('\"{table}\"', 'id')::regclass; \
-             BEGIN IF seq IS NOT NULL AND (SELECT relname FROM pg_class WHERE oid = seq) <> \
-             '{target}' THEN EXECUTE format('ALTER SEQUENCE %s RENAME TO %I', seq, '{target}'); \
-             END IF; END $$"
-        )
+        let sql = ferro_ddl_lowering::render_pg_serial_sequence_rename(table, "id");
+        assert!(
+            sql.contains(&format!("RENAME TO %I', seq, '{target}')")),
+            "{sql}"
+        );
+        sql
     };
     let rendered = |plan: &Plan,
                     old: &IrEnvelope<SchemaIrPayload>,
