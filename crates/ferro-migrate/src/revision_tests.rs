@@ -164,6 +164,35 @@ fn a_sqlite_rebuild_is_refused_naming_ferro_migrate_new() {
 }
 
 #[test]
+fn a_required_sqlite_column_with_a_default_is_refused_for_the_default_it_would_keep() {
+    let tier = SchemaColumn {
+        default: Some(serde_json::json!("free")),
+        ..column("tier", "text", false)
+    };
+    let refusal = plan_revision(
+        &live(vec![card(vec![id()])]),
+        &envelope(vec![card(vec![id(), tier])]),
+        Dialect::Sqlite,
+    )
+    .expect_err("a NOT NULL add is a rebuild on SQLite");
+    assert_eq!(
+        refusal,
+        RevisionRefusal::SqliteKeptDefault {
+            kind: "AddColumn".into(),
+            subject: "card.tier".into()
+        }
+    );
+    assert_eq!(refusal.kind(), "sqlite_kept_default");
+    assert_eq!(
+        refusal.to_string(),
+        "AddColumn on card.tier adds a NOT NULL column, which SQLite's ADD COLUMN takes only \
+         with a DEFAULT it keeps for good, and ferro persists no server default; the table \
+         must be rebuilt, which an Alembic revision cannot write. Make the field optional, or \
+         write the change as a migration, which rebuilds the table: `ferro migrate new`"
+    );
+}
+
+#[test]
 fn a_demanding_column_is_the_plain_op_under_its_data_dependent_marker() {
     let before = live(vec![card(vec![id()])]);
     let after = envelope(vec![card(vec![id(), column("flavor", "text", false)])]);
