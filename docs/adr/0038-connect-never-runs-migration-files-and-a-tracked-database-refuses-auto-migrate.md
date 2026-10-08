@@ -44,7 +44,7 @@ For both doors to exclude each other the lock has to be the same lock wherever t
 
 Amended by ADR-0045: `drift()` and `check()` join the public calls, each returning the report its CLI verb prints and raising nothing; `raise_for_problems()` on the report raises carrying it. The targets and the promptless revert this ADR keeps off the application API live in `ferro.migrations.testing`.
 
-Amended by ADR-0049: `ferro.migrate()` and `ferro.create_tables()` return a `PassReport` (every statement the pass executed, and every warning, typed). A failed pass's error carries `.report`. `connect()` with an auto-migrate flag stays `-> None` and logs from the same report.
+Amended by ADR-0049 (2026-10-07): `ferro.migrate()` and `ferro.create_tables()` return a `PassReport` (every statement the pass executed, and every warning, typed). A failed pass's error carries `.report`. `connect()` with an auto-migrate flag stays `-> None` and logs from the same report.
 
 **A database ahead of the code is refused by default.** When the tracking table holds records for migrations the directory does not have, `up()` and `require_applied()` raise `DatabaseAheadError` naming them. `allow_ahead=True` on either call turns that off.
 

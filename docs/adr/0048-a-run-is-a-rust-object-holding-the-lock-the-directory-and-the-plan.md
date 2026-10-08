@@ -18,7 +18,7 @@ async with tracked.locked(timeout, on_wait) as run:          # records re-read u
             await run.execute(step, on_attempt)               # 01_expand, 03_contract
 ```
 
-Rust owns the connection name, the dialect, the tracking schema, the run lock, one read of the migrations directory and the plan made from it. `run.execute(step)` runs the bytes that read hashed. Nothing crosses back to be checked: no step JSON, no SQL text, no record, no direction. Execution never goes back to disk. The planned step carries what its execution needs, all from the held read:
+Rust will own the connection name, the dialect, the tracking schema, the run lock, one read of the migrations directory and the plan made from it. `run.execute(step)` runs the bytes that read hashed. Nothing crosses back to be checked: no step JSON, no SQL text, no record, no direction. Execution never goes back to disk. The planned step carries what its execution needs, all from the held read:
 
 - the migration's first data step (the backfill a contract's recipe re-runs);
 - the snapshots a data step's historical models are built from;
@@ -50,9 +50,19 @@ StepHandle        migration  migration_name  step  file  path  checksum  data
 
 A preview plan's steps cannot be executed. The first write of a locked run creates the tracking tables where they are missing, so there is no separate "ensure" call. Baseline and rerecord are planned on the locked object, because they only ever run under the lock. The test-only doors (closing the lock's connection; a lock that never took the advisory lock, as a transaction-mode pooler hands back) are `_`-prefixed methods on these objects, never module functions.
 
+## The Python side
+
+The Python loop shrinks to match:
+
+- `up` and `down` become one walk, `_walk(run, plan, say)`. The plan's direction decides which transition settles each step and whether the progress line reads `applied (N ms)` or `reverted`. One builder makes the historical models of migration N from the held directory, for the walk and for the order-key computation alike.
+- Each verb is one public function, `(settings=None, database=None, *, using=None, url=None, …verb options)`. The CLI and the application call the same function. Its database and connection are resolved once by `Target.resolve(...)`, which owns three things: "one of `using` or `url`", the default connection, and turning a `SettingsError` into a `MigrationRefused`. `Target.open()` gives the connection name for the verb's lifetime, closing a private connection afterwards.
+- `ferro/migrations/api.py` is deleted. `require_applied` moves beside `status`.
+- `up` and `down` raise `MigrationRefused` for every caller, the CLI included, carrying the `RunReport` as `.report`. The CLI catches it and renders the report, with exit code 1. `drift`, `check` and `baseline` keep returning reports with `raise_for_problems()` (ADR-0045).
+- Modules move, names do not: the public names and `ferro.migrations.__all__` stay exactly as documented.
+
 ## Considered options
 
-- **The plan as richer JSON** (`PlannedStep` grows direction, rebuild expectations, snapshot IR, SQL bytes). Rejected: every step would carry its snapshots through JSON, and Rust would still have to check what came back against what it planned.
+- **A Rust object holding only the lock and the connection, with the plan staying JSON.** Here `PlannedStep` would grow every field execution needs as JSON (direction, snapshot IR, SQL bytes, rebuild expectations) and travel to Python and back. Rejected: every step would carry its snapshots through JSON, and Rust would still have to check each returned step against what it planned. The planned step does carry those facts in this decision, but it holds them in Rust, and Python sees only a handle.
 - **A Python-side session over the existing calls.** Rejected: the integer lock-handle registry, the optional `lock=` and verify-as-a-caller-duty all survive it.
 - **One object with an optional lock**, whose writes refuse at run time. Rejected: two types make the unlocked write impossible to call rather than an error.
 - **Record transitions in Python first, moved to Rust later.** Rejected as a stop-gap (AGENTS.md I-6). ADR-0028 already gives step records to Rust.
