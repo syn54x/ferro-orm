@@ -192,6 +192,11 @@ CASES: tuple[Case, ...] = (
         sqlite_rebuild.members("Team"),
         sqlite_rebuild.members("Club"),
     ),
+    Case(
+        "C4-drop-a-foreign-key-keep-its-column",
+        indexes.LINKED,
+        indexes.UNLINKED,
+    ),
     # -- D: enums -----------------------------------------------------------------
     Case(
         "D1-add-a-label",

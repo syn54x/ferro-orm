@@ -3151,3 +3151,65 @@ async def test_a_unique_redefinition_over_duplicates_fails_counted_naming_the_fi
             ["code"],
             False,
         )
+
+
+def _live_foreign_keys(db_url: str, db_backend: str, table: str) -> list[str]:
+    """The columns of ``table`` a live foreign key constrains."""
+    if db_backend == "sqlite":
+        rows = _by_hand(
+            db_url, db_backend, f"PRAGMA foreign_key_list(\"{table}\")", fetch=True
+        )
+        return sorted(row[3] for row in rows)
+    rows = _by_hand(
+        db_url,
+        db_backend,
+        "SELECT a.attname::text FROM pg_constraint c JOIN pg_attribute a "
+        "ON a.attrelid = c.conrelid AND a.attnum = c.conkey[1] "
+        f"WHERE c.contype = 'f' AND c.conrelid = '\"{table}\"'::regclass",
+        fetch=True,
+    )
+    return sorted(name for (name,) in rows)
+
+
+@pytest.mark.asyncio
+@pytest.mark.backend_matrix
+async def test_a_foreign_key_removed_from_a_kept_column_is_dropped_only_when_destructive(
+    db_url, db_backend, clean_registry
+):
+    """``team: Annotated[DfkTeam, ForeignKey(...)]`` becomes ``team_id: int``:
+    the column stays and its constraint is ferro's. ``migrate_updates``
+    leaves it (ADR-0013's ladder); ``migrate_destructive`` drops it on
+    Postgres. SQLite cannot drop a table constraint in place: it warns,
+    naming the reviewed path, and the constraint stays."""
+    from ferro import ForeignKey
+
+    class DfkTeam(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        members: Relation[list["DfkMember"]] = BackRef()
+
+    class DfkMember(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        team: Annotated[DfkTeam | None, ForeignKey(related_name="members")] = None
+
+    await ferro.connect(db_url, auto_migrate=True)
+    assert _live_foreign_keys(db_url, db_backend, "dfkmember") == ["team_id"]
+    _rewind()
+
+    class DfkTeam(Model):  # noqa: F811 — intentional redefinition
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+
+    class DfkMember(Model):  # noqa: F811 — intentional redefinition
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        team_id: int | None = None
+
+    await ferro.connect(db_url, migrate_updates=True)
+    assert _live_foreign_keys(db_url, db_backend, "dfkmember") == ["team_id"]
+    ferro.reset_engine()
+
+    if db_backend == "postgres":
+        await ferro.connect(db_url, migrate_destructive=True)
+        assert _live_foreign_keys(db_url, db_backend, "dfkmember") == []
+        return
+    with pytest.warns(UserWarning, match="fk_dfkmember_team_id_dfkteam"):
+        await ferro.connect(db_url, migrate_destructive=True)
+    assert _live_foreign_keys(db_url, db_backend, "dfkmember") == ["team_id"]

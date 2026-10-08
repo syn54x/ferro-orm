@@ -300,6 +300,19 @@ pub enum MigrationOp {
         /// Local FK column.
         column: String,
     },
+    /// A live ferro-owned FK on a column both sides keep that the model no
+    /// longer declares (ADR-0051) — `ALTER TABLE … DROP CONSTRAINT` on
+    /// Postgres; a table rebuild on SQLite. Planned only under
+    /// `migrate_destructive` (ADR-0013's ladder), though no row is lost; the
+    /// generator always writes it. An FK on a dropped column goes with it.
+    DropForeignKey {
+        /// Owning table.
+        table: String,
+        /// Local FK column.
+        column: String,
+        /// Live constraint name (`fk_<table>_<col>_<to_table>`).
+        name: String,
+    },
     /// A declared CHECK constraint — table check or column check — with no live
     /// constraint of that name (#343). Looked up by `name` in the declared
     /// model's `table_checks`, then its `checks`.
@@ -440,6 +453,7 @@ impl MigrationOp {
             | MigrationOp::DropIndex { table, .. }
             | MigrationOp::RedefineIndex { table, .. }
             | MigrationOp::AddForeignKey { table, .. }
+            | MigrationOp::DropForeignKey { table, .. }
             | MigrationOp::AddCheck { table, .. }
             | MigrationOp::RebuildCheck { table, .. }
             | MigrationOp::DropCheck { table, .. }

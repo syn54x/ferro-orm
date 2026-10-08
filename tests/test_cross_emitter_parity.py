@@ -991,6 +991,7 @@ REBUILD_CASES = (
     "C1-add-a-required-foreign-key",
     "C2-drop-a-foreign-key-column",
     "C3-retarget-a-foreign-key",
+    "C4-drop-a-foreign-key-keep-its-column",
     "D3-rename-a-label",
     "F2-a-rename-and-a-type-change",
     "F3-a-type-change-and-a-new-index",

@@ -21,6 +21,15 @@
     ],
     "warnings": []
   },
+  "tests/test_auto_migrate.py::test_a_foreign_key_removed_from_a_kept_column_is_dropped_only_when_destructive[sqlite]": {
+    "statements": [
+      "'dfkteam': CREATE TABLE IF NOT EXISTS \"dfkteam\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT )",
+      "'dfkmember': CREATE TABLE IF NOT EXISTS \"dfkmember\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"team_id\" integer, CONSTRAINT \"fk_dfkmember_team_id_dfkteam\" FOREIGN KEY (\"team_id\") REFERENCES \"dfkteam\" (\"id\") ON DELETE CASCADE )"
+    ],
+    "warnings": [
+      "Foreign key 'fk_dfkmember_team_id_dfkteam' on 'dfkmember.team_id' is no longer declared, and SQLite cannot drop a table constraint in place, so it stays and keeps enforcing its reference. Generate a reviewed migration with `ferro migrate new` to rebuild the table without it."
+    ]
+  },
   "tests/test_auto_migrate.py::test_a_hinted_table_whose_new_name_is_also_live_is_inert[sqlite]": {
     "statements": [
       "'trnwriter': CREATE TABLE IF NOT EXISTS \"trnwriter\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"name\" varchar NOT NULL )",

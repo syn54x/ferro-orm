@@ -191,7 +191,9 @@ _RENDERERS: dict[str, Callable[[dict[str, Any]], str]] = {
     "DropIndex": lambda op: f"{op['name']} index is extra",
     "RedefineIndex": lambda op: _redefined(op),
     "RebuildIndex": lambda op: f"{op['name']} index is invalid",
-    "AddForeignKey": lambda op: f"{_column(op)} foreign key is missing",    "RebuildForeignKey": lambda op: (
+    "AddForeignKey": lambda op: f"{_column(op)} foreign key is missing",
+    "DropForeignKey": lambda op: f"{op['name']} foreign key is extra",
+    "RebuildForeignKey": lambda op: (
         f"{op['old_name']} foreign key differs from the snapshot"
     ),
     "AddCheck": lambda op: f"{op['name']} check is missing",

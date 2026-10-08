@@ -466,6 +466,39 @@ pub(crate) fn render_from(
                     )),
                 }
             }
+            MigrationOp::DropForeignKey {
+                table,
+                column,
+                name,
+            } => {
+                let declared = find_model(&new_models, table)?
+                    .foreign_keys
+                    .iter()
+                    .any(|fk| fk.column == *column);
+                if declared {
+                    return Err(EmissionError {
+                        message: format!(
+                            "Foreign-key drop for '{name}' on '{table}.{column}' is still \
+                             declared in the model IR"
+                        ),
+                    });
+                }
+                match dialect {
+                    Dialect::Postgres => {
+                        out.statements.push(render_drop_constraint(table, name));
+                    }
+                    Dialect::Sqlite => out.reports.push(sqlite_in_place_report(
+                        InPlaceChange::DropForeignKey,
+                        Subject::column(table, column),
+                        format!(
+                            "Foreign key '{name}' on '{table}.{column}' is no longer declared, \
+                             and SQLite cannot drop a table constraint in place, so it stays \
+                             and keeps enforcing its reference. Generate a reviewed migration \
+                             with `ferro migrate new` to rebuild the table without it."
+                        ),
+                    )),
+                }
+            }
             MigrationOp::RebuildForeignKey {
                 table,
                 column,

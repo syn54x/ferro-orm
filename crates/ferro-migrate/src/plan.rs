@@ -829,7 +829,14 @@ fn plan_existing_table(
                 !matches!(op, MigrationOp::RebuildIndex { name, .. } if redefined.contains(name))
             }),
     );
-    diff_model_foreign_keys(table, old_model, new_model, &mut ops, &mut plan.reports);
+    diff_model_foreign_keys(
+        table,
+        old_model,
+        new_model,
+        options.destructive,
+        &mut ops,
+        &mut plan.reports,
+    );
 
     // Check addition (#343; ADR-0013) lands after the column ops, so a CHECK
     // over a newly added column follows its ADD COLUMN.
@@ -2400,10 +2407,37 @@ fn diff_model_foreign_keys(
     table: &str,
     old_model: &SchemaModel,
     new_model: &SchemaModel,
+    destructive: bool,
     ops: &mut Vec<MigrationOp>,
     reports: &mut Vec<Report>,
 ) {
     let riders = added_column_riders(old_model, new_model);
+
+    // A ferro-owned FK on a column both sides keep that the model no longer
+    // declares (ADR-0051): removed under ADR-0013's ladder, like every other
+    // constraint the model stops declaring. A user-owned one is never
+    // touched; one on a dropped column goes with the column. SQLite exposes
+    // no live constraint name, so its FK reads as the canonical one.
+    if destructive {
+        for live in &old_model.foreign_keys {
+            let kept = new_model.columns.iter().any(|col| col.name == live.column);
+            let declared = new_model
+                .foreign_keys
+                .iter()
+                .any(|fk| fk.column == live.column);
+            let name = live
+                .name
+                .clone()
+                .unwrap_or_else(|| fk_name(table, &live.column, &live.to_table));
+            if kept && !declared && is_ferro_fk_name(&name) {
+                ops.push(MigrationOp::DropForeignKey {
+                    table: table.to_string(),
+                    column: live.column.clone(),
+                    name,
+                });
+            }
+        }
+    }
 
     for fk in &new_model.foreign_keys {
         // An FK on a newly added column rides its `AddColumn`; the reconcile
@@ -2881,6 +2915,20 @@ pub fn reverse_live_plan(
             // The same op back: rendered against the live side, it builds the
             // live definition again under the name.
             MigrationOp::RedefineIndex { .. } => operations.push(planned(op.clone())),
+            // Added back as the live database held it, read from the live side.
+            MigrationOp::DropForeignKey { table, column, .. } => match dialect {
+                Dialect::Postgres => operations.push(planned(MigrationOp::AddForeignKey {
+                    table: table.clone(),
+                    column: column.clone(),
+                })),
+                Dialect::Sqlite => operations.push(irreversible(
+                    op,
+                    format!(
+                        "SQLite cannot put the foreign key on {table}.{column} back in place; \
+                         `ferro migrate new` writes the table rebuild that can"
+                    ),
+                )),
+            },
             MigrationOp::AddForeignKey { table, column } => {
                 match (declared_fk_name(&declared_models, table, column), dialect) {
                     (Some(name), Dialect::Postgres) => {

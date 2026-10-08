@@ -5902,3 +5902,128 @@ fn an_index_with_the_same_definition_is_not_redefined() {
     );
     assert!(plan.operations.is_empty(), "{:?}", plan.operations);
 }
+
+// ---------------------------------------------------------------------------
+// A removed foreign key (ADR-0051): a ferro-owned FK on a column both sides
+// keep, no longer declared, is planned `DropForeignKey` under
+// `migrate_destructive`.
+// ---------------------------------------------------------------------------
+
+/// `member` with an optional `team_id`, a foreign key on it when `fk` names
+/// one.
+fn member(fk: Option<&str>) -> SchemaModel {
+    let mut model = schema_model(
+        "member",
+        vec![pk_col("id", "integer"), col("team_id", "integer", true)],
+    );
+    if let Some(name) = fk {
+        model.foreign_keys.push(SchemaForeignKey {
+            renamed_from: None,
+            column: "team_id".to_string(),
+            to_table: "team".to_string(),
+            to_column: "id".to_string(),
+            on_delete: Some("CASCADE".to_string()),
+            name: Some(name.to_string()),
+        });
+    }
+    model
+}
+
+fn drop_fk(name: &str) -> MigrationOp {
+    MigrationOp::DropForeignKey {
+        table: "member".to_string(),
+        column: "team_id".to_string(),
+        name: name.to_string(),
+    }
+}
+
+#[test]
+fn a_foreign_key_removed_from_a_kept_column_is_dropped_only_when_destructive() {
+    let live = member(Some("fk_member_team_id_team"));
+    let declared = member(None);
+    let kept = plan_live_table(
+        live.clone(),
+        declared.clone(),
+        LiveTableFacts::default(),
+        updates_only(),
+    );
+    assert!(kept.operations.is_empty(), "{:?}", kept.operations);
+
+    let dropped = plan_live_table(live, declared, LiveTableFacts::default(), destructive());
+    assert_eq!(dropped.operations, vec![drop_fk("fk_member_team_id_team")]);
+    let rendered = dropped.render().expect("render");
+    assert_eq!(
+        rendered[0].statements,
+        vec!["ALTER TABLE \"member\" DROP CONSTRAINT \"fk_member_team_id_team\"".to_string()]
+    );
+}
+
+#[test]
+fn a_user_owned_or_a_still_declared_foreign_key_is_never_dropped() {
+    let user_owned = plan_live_table(
+        member(Some("member_team_id_fkey")),
+        member(None),
+        LiveTableFacts::default(),
+        destructive(),
+    );
+    assert!(
+        user_owned.operations.is_empty(),
+        "{:?}",
+        user_owned.operations
+    );
+
+    let declared = member(Some("fk_member_team_id_team"));
+    let same = plan_live_table(
+        declared.clone(),
+        declared,
+        LiveTableFacts::default(),
+        destructive(),
+    );
+    assert!(same.operations.is_empty(), "{:?}", same.operations);
+}
+
+#[test]
+fn a_foreign_key_on_a_dropped_column_goes_with_the_column() {
+    let declared = schema_model("member", vec![pk_col("id", "integer")]);
+    let plan = plan_live_table(
+        member(Some("fk_member_team_id_team")),
+        declared,
+        LiveTableFacts::default(),
+        destructive(),
+    );
+    assert_eq!(
+        plan.operations,
+        vec![MigrationOp::DropColumn {
+            table: "member".to_string(),
+            column: "team_id".to_string(),
+        }]
+    );
+}
+
+/// Between two snapshots (the generator) the drop is planned the same way,
+/// and SQLite answers it with the in-place report a migration's rebuild
+/// replaces.
+#[test]
+fn a_removed_foreign_key_between_snapshots_and_on_sqlite() {
+    let (old, new) = (
+        envelope(vec![member(Some("fk_member_team_id_team"))]),
+        envelope(vec![member(None)]),
+    );
+    for dialect in [Dialect::Postgres, Dialect::Sqlite] {
+        let plan =
+            plan_from_ir(&old, &new, dialect, &LiveFacts::declared(), destructive()).expect("plan");
+        assert_eq!(plan.operations, vec![drop_fk("fk_member_team_id_team")]);
+    }
+    let sqlite = plan_from_ir(
+        &old,
+        &new,
+        Dialect::Sqlite,
+        &LiveFacts::declared(),
+        destructive(),
+    )
+    .expect("plan")
+    .render()
+    .expect("render");
+    assert!(sqlite[0].statements.is_empty());
+    assert!(sqlite[0].reports[0].blocks());
+}

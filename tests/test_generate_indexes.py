@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import pytest
 
+from tests import test_generate_sqlite_rebuild as sqlite_rebuild
 from tests.test_generate_postgres_staging import (  # noqa: F401 - fixtures
     files,
     generate,
@@ -40,6 +41,7 @@ from tests.test_generate_postgres_staging import (  # noqa: F401 - fixtures
 )
 from tests.test_migrate_down import migration_dir  # noqa: F401
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
+    AUTHOR,
     listing,
     pkg,
     project,
@@ -107,6 +109,16 @@ WIDE = invoice_lines("billing_period_start", "billing_period_end", "customer_id"
 TRUNCATED = "idx_subscriptioninvoiceline_billing_period_start_billing_pe_idx"
 JOINED = lines("order_id", "kind")
 REJOINED = lines("order", "id_kind")
+LINKED = sqlite_rebuild.members("Team")
+"""``author.team_id`` with its foreign key to ``team``."""
+UNLINKED = (
+    sqlite_rebuild.TEAM
+    + sqlite_rebuild.CLUB
+    + AUTHOR
+    + "    team_id: int | None = None\n"
+)
+"""The same column, no longer a foreign key."""
+FK = "fk_author_team_id_team"
 
 
 def built(name: str, table: str, columns: str, *, concurrent: bool) -> str:
@@ -167,5 +179,39 @@ def test_an_underscore_join_collision_is_its_own_index_step_both_ways(project, p
     assert text(migration, step, "down", "sqlite") == built(
         "idx_line_order_id_kind", "line", '"order_id", "kind"', concurrent=False
     )
+
+    round_trip(project, db, steps=1)
+
+
+# -- a removed foreign key -----------------------------------------------------------
+
+
+@backend_matrix
+def test_a_foreign_key_removed_from_a_kept_column_is_dropped_and_its_down_adds_it(
+    project, pkg, db
+):
+    """``team: Annotated[Team, ForeignKey(...)]`` becomes ``team_id: int``: the
+    column stays, its constraint goes. No door planned it before (ADR-0051)."""
+    start(project, pkg, db, LINKED)
+
+    migration = generate(project, pkg, UNLINKED, "unlink_team")
+
+    assert listing(migration) == files(migration, "01_schema")
+    assert text(migration, "01_schema", "up", "postgres") == (
+        f'ALTER TABLE "author" DROP CONSTRAINT "{FK}";\n'
+    )
+    # Rows written since may reference no team: putting it back can fail.
+    assert text(migration, "01_schema", "down", "postgres") == (
+        "-- ferro: data-dependent\n\n"
+        f'ALTER TABLE "author" ADD CONSTRAINT "{FK}" FOREIGN KEY ("team_id") '
+        'REFERENCES "team" ("id") ON DELETE SET NULL;\n'
+    )
+    # SQLite drops a table constraint by rebuilding the table, both ways.
+    for direction in ("up", "down"):
+        assert text(migration, "01_schema", direction, "sqlite").startswith(
+            sqlite_rebuild.REBUILD
+        )
+    assert FK not in text(migration, "01_schema", "up", "sqlite")
+    assert FK in text(migration, "01_schema", "down", "sqlite")
 
     round_trip(project, db, steps=1)

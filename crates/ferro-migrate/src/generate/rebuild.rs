@@ -70,7 +70,7 @@ fn column<'a>(model: Option<&'a SchemaModel>, name: &str) -> Option<&'a SchemaCo
 /// | drop a foreign-key column | rebuild | rebuild |
 /// | change a column's type or nullability | rebuild | rebuild |
 /// | add, change or drop a check (but a dropped column's own) | rebuild | rebuild |
-/// | add or retarget a foreign key | rebuild | rebuild |
+/// | add, retarget or drop a foreign key (on a kept column) | rebuild | rebuild |
 /// | change the primary key | rebuild | rebuild |
 /// | validate a constraint, rebuild an invalid index, row security | native (nothing on SQLite) | native |
 ///
@@ -129,6 +129,7 @@ pub fn needs_rebuild(op: &MigrationOp, direction: PlanDirection, ctx: &PlanConte
         | MigrationOp::AddCheck { .. }
         | MigrationOp::RebuildCheck { .. }
         | MigrationOp::AddForeignKey { .. }
+        | MigrationOp::DropForeignKey { .. }
         | MigrationOp::RebuildForeignKey { .. } => true,
         MigrationOp::DropCheck { .. } => !goes_with_a_dropped_column(op, ctx),
     }

@@ -489,6 +489,7 @@ fn needs(op: &MigrationOp, ctx: &PlanContext<'_>) -> Needs {
         | MigrationOp::RebuildCheck { .. }
         | MigrationOp::DropCheck { .. }
         | MigrationOp::AddForeignKey { .. }
+        | MigrationOp::DropForeignKey { .. }
         | MigrationOp::RebuildForeignKey { .. } => native_or_rebuild,
         MigrationOp::ValidateConstraint { .. } | MigrationOp::RebuildIndex { .. } => {
             Needs::Refused(Refusal::LiveOnly)
