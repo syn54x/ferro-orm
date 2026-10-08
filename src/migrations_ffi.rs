@@ -683,7 +683,7 @@ pub fn _execute_sql_step(
     let record: ferro_migrate::StepRecord = parse_json(&record_json, "record_json")?;
     let direction = match direction_json {
         Some(json) => parse_json(&json, "direction_json")?,
-        None => ferro_migrate::Direction::Up,
+        None => ferro_migrate::Direction::Up { through: None },
     };
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let engine = crate::state::engine_for_connection(using)?;

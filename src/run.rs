@@ -2694,7 +2694,7 @@ mod baseline_tests {
             &dir,
             &plan.records,
             Dialect::Sqlite,
-            Direction::Up,
+            Direction::Up { through: None },
             false,
             None,
         )
@@ -2807,11 +2807,18 @@ mod baseline_tests {
         step.files.remove(&StepDialect::Postgres);
         let migrations = dir(vec![("create_author", vec![step], &["author"])]);
         for dialect in [Dialect::Sqlite, Dialect::Postgres] {
-            let planned = plan_run(&migrations, &[], dialect, Direction::Up, false, None)
-                .expect("up plans")
-                .steps
-                .remove(0)
-                .record;
+            let planned = plan_run(
+                &migrations,
+                &[],
+                dialect,
+                Direction::Up { through: None },
+                false,
+                None,
+            )
+            .expect("up plans")
+            .steps
+            .remove(0)
+            .record;
             let baseline = plan_baseline(&migrations, &[], dialect, None, NOW, "v")
                 .expect("plan")
                 .records
