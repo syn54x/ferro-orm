@@ -1739,7 +1739,7 @@ def test_pin_g_the_pass_executes_the_plan_it_renders(
     executed = _by_subject(
         (s.subject, s.sql)
         for s in report.statements
-        if s.role == "schema" and not _create_pass_type_guard(s, planned)
+        if s.role == "schema" and not _create_pass_type_guard(s, planned, facts)
     )
     assert executed == planned
 
@@ -1755,27 +1755,44 @@ def test_pin_g_the_pass_executes_the_plan_it_renders(
         _report_key(w.kind, dataclasses.asdict(w.subject))
         for w in report.warnings
         if w.kind not in PASS_ONLY_KINDS
-        and not _create_pass_existing_table_word(w, added)
+        and not _create_pass_existing_table_word(w, added, dialect)
     )
     assert reported == planned_reports
 
 
-def _create_pass_type_guard(statement, planned: dict[str, list[str]]) -> bool:
+_TYPE_GUARD = re.compile(
+    r"^DO \$\$ BEGIN IF NOT EXISTS \(SELECT 1 FROM pg_type t .*? "
+    r"WHERE t\.typname = '((?:[^']|'')*)'"
+)
+
+
+def _create_pass_type_guard(
+    statement, planned: dict[str, list[str]], facts: str
+) -> bool:
     """The create pass's guarded ``CREATE TYPE`` for a type a new table
     declares that already exists live: a no-op by its own guard
     (``IF NOT EXISTS``), which the planner, seeing the type live, does not
-    plan."""
-    return statement.subject not in planned and statement.sql.startswith(
-        "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_type"
-    )
+    plan. Only a type the live read holds: a guard for a type the planner
+    failed to plan is a statement the pin must see."""
+    guard = _TYPE_GUARD.match(statement.sql)
+    if statement.subject in planned or guard is None:
+        return False
+    live_types = json.loads(facts).get("enum_labels") or {}
+    return guard[1].replace("''", "'") in live_types
 
 
-def _create_pass_existing_table_word(warning, added: set[str]) -> bool:
+def _create_pass_existing_table_word(warning, added: set[str], dialect: str) -> bool:
     """The create pass's word on a row-security declaration of a table
     already there, on SQLite (ADR-0014): the create pass says it of every
     existing table it leaves; the planner, which has no row security on
-    SQLite, reports it only for a table it adds."""
-    return warning.kind == "RowSecuritySkipped" and warning.subject.table not in added
+    SQLite, reports it only for a table it adds. On Postgres the pass that
+    reconciles never says it (the reconciliation applies the declaration),
+    so there the word is never filtered."""
+    return (
+        dialect == "sqlite"
+        and warning.kind == "RowSecuritySkipped"
+        and warning.subject.table not in added
+    )
 
 
 # -- a dropped column's own check rides the drop on every door ------------------------

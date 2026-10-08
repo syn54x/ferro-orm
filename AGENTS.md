@@ -91,10 +91,11 @@ For a single model, every emitter must agree on:
     check or policy put back with the body the catalog printed through
     `render_check_restore`), both rendered by the one renderer, with every
     refusal, marker, irreversible reason, Alembic-twin choice, autocommit
-    and foreign-key rider decided there. `translate.py` writes that answer and decides nothing: Alembic's
-    own op where the core says it has one, `op.execute(sa.DDL(...))` of the
-    pass's statement, byte for byte, where it does not. The per-family comparators,
-    their slot registrations and the `_plan_check_*` FFI are gone (#533).
+    and foreign-key rider decided there. `translate.py` writes that answer
+    and decides nothing: Alembic's own op where the core says it has one,
+    `op.execute(sa.DDL(...))` of the pass's statement, byte for byte, where
+    it does not. The per-family comparators, their slot registrations and
+    the `_plan_check_*` FFI are gone (#533).
     The families, each one decision consumed by every door:
     - **Enum labels** — `missing_enum_labels` / `extra_enum_labels` +
       `render_pg_enum_add_value` (ADR-0011: append-only, update-gated; an

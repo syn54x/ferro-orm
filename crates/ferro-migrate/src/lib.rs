@@ -50,8 +50,9 @@ pub use run_plan::{
 pub use snapshot::{Snapshot, SnapshotError};
 
 /// The columns and uniqueness of the standalone index `name` that `ir`
-/// declares on `table` (an `indexes` entry, a `uniques` entry or a column
-/// flag), as every door builds it; `None` when it declares none.
+/// declares on `table` (an `indexes` or a `uniques` entry: a column's `index`
+/// or `unique` flag reaches the IR already placed in those lists), as every
+/// door builds it; `None` when it declares none.
 pub fn declared_index(
     ir: &ferro_schema_ir::IrEnvelope<ferro_schema_ir::SchemaIrPayload>,
     table: &str,

@@ -260,24 +260,15 @@ def _columns(envelope: dict[str, Any]) -> dict[tuple[str, str], dict[str, Any]]:
     }
 
 
-def _indexes(envelope: dict[str, Any]) -> dict[tuple[str, str], dict[str, Any]]:
-    """Every standalone index of ``envelope`` by ``(table, name)``, as
-    ``{"columns", "unique"}``: a declared unique sits in ``uniques``, a live
-    one in ``indexes``."""
-    out: dict[tuple[str, str], dict[str, Any]] = {}
-    for model in envelope["payload"]["models"]:
-        table = model["table_name"]
-        for index in model.get("indexes") or []:
-            out[(table, index["name"])] = {
-                "columns": list(index["columns"]),
-                "unique": bool(index.get("unique")),
-            }
-        for unique in model.get("uniques") or []:
-            out[(table, unique["name"])] = {
-                "columns": list(unique["columns"]),
-                "unique": True,
-            }
-    return out
+def _index(envelope: dict[str, Any], table: str, name: str) -> dict[str, Any] | None:
+    """The standalone index ``name`` of ``envelope`` on ``table``, as
+    ``{"columns", "unique"}``: the core's one reading of it
+    (``_declared_index``), whether a snapshot's or a live read's."""
+    found = _core._declared_index(json.dumps(envelope), table, name)
+    if found is None:
+        return None
+    columns, unique = found
+    return {"columns": columns, "unique": unique}
 
 
 def _describe(
@@ -295,16 +286,16 @@ def _describe(
     ):
         return operations
     live_columns, snapshot_columns = _columns(live), _columns(snapshot)
-    live_indexes, snapshot_indexes = _indexes(live), _indexes(snapshot)
     described = []
     for op in operations:
         if op["kind"] == "RedefineIndex":
-            index = (op["table"], op["name"])
-            if index in live_indexes and index in snapshot_indexes:
+            live_index = _index(live, op["table"], op["name"])
+            snapshot_index = _index(snapshot, op["table"], op["name"])
+            if live_index is not None and snapshot_index is not None:
                 op = {
                     **op,
-                    "live_index": live_indexes[index],
-                    "snapshot_index": snapshot_indexes[index],
+                    "live_index": live_index,
+                    "snapshot_index": snapshot_index,
                 }
             described.append(op)
             continue
