@@ -254,14 +254,15 @@ def check(*, glob: Annotated[Global, Parameter(parse=False)]) -> int:
 def up(
     *,
     lock_timeout: Annotated[
-        str,
+        str | None,
         Parameter(
             help=(
                 "How long to wait for another run's lock: 30s, 500ms, 1m, or a "
-                "number of seconds (0 refuses at once)."
+                "number of seconds (0 refuses at once). Defaults to the "
+                "database's lock_timeout (30s)."
             )
         ),
-    ] = "30s",
+    ] = None,
     glob: Annotated[Global, Parameter(parse=False)],
 ) -> int:
     """Apply every pending migration, in order, under the run lock.
@@ -320,14 +321,15 @@ def down(
         ),
     ] = False,
     lock_timeout: Annotated[
-        str,
+        str | None,
         Parameter(
             help=(
                 "How long to wait for another run's lock: 30s, 500ms, 1m, or a "
-                "number of seconds (0 refuses at once)."
+                "number of seconds (0 refuses at once). Defaults to the "
+                "database's lock_timeout (30s)."
             )
         ),
-    ] = "30s",
+    ] = None,
     glob: Annotated[Global, Parameter(parse=False)],
 ) -> int:
     """Revert applied migrations, newest step first, under the run lock.
@@ -482,14 +484,15 @@ def baseline(
         ),
     ] = False,
     lock_timeout: Annotated[
-        str,
+        str | None,
         Parameter(
             help=(
                 "How long to wait for another run's lock: 30s, 500ms, 1m, or a "
-                "number of seconds (0 refuses at once)."
+                "number of seconds (0 refuses at once). Defaults to the "
+                "database's lock_timeout (30s)."
             )
         ),
-    ] = "30s",
+    ] = None,
     glob: Annotated[Global, Parameter(parse=False)],
 ) -> int:
     """Record migrations as applied on a database that already has their schema.
@@ -562,14 +565,15 @@ def rerecord(
         ),
     ] = False,
     lock_timeout: Annotated[
-        str,
+        str | None,
         Parameter(
             help=(
                 "How long to wait for another run's lock: 30s, 500ms, 1m, or a "
-                "number of seconds (0 refuses at once)."
+                "number of seconds (0 refuses at once). Defaults to the "
+                "database's lock_timeout (30s)."
             )
         ),
-    ] = "30s",
+    ] = None,
     glob: Annotated[Global, Parameter(parse=False)],
 ) -> int:
     """Accept a deliberate edit of a step this database already ran.

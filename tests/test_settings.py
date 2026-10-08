@@ -451,6 +451,7 @@ def test_an_unknown_database_name_is_refused_listing_the_configured_ones(
         ("directory", '"m"'),
         ("tracking_schema", '"ferro"'),
         ("ddl_lock_timeout", '"1s"'),
+        ("lock_timeout", '"1m"'),
     ],
 )
 def test_a_database_key_beside_a_databases_table_is_refused_naming_the_key(
@@ -749,6 +750,116 @@ def test_ddl_lock_timeout_forms(project: Path, value: str, seconds: float):
     )
 
     assert FerroSettings().database().ddl_lock_timeout_seconds == seconds
+
+
+def test_lock_timeout_defaults_to_the_cli_default(project: Path):
+    _write(project / "ferro.toml", 'models = ["m"]\ndialects = ["postgres"]\n')
+
+    db = FerroSettings().database()
+
+    assert db.lock_timeout == "30s"
+    assert db.lock_timeout_seconds == 30.0
+
+
+@pytest.mark.parametrize(
+    "value, seconds",
+    [("250ms", 0.25), ("2s", 2.0), ("1m", 60.0), ("45", 45.0)],
+)
+def test_lock_timeout_takes_the_lock_timeout_flag_forms(
+    project: Path, value: str, seconds: float
+):
+    _write(
+        project / "ferro.toml",
+        f'models = ["m"]\ndialects = ["postgres"]\nlock_timeout = "{value}"\n',
+    )
+
+    assert FerroSettings().database().lock_timeout_seconds == seconds
+
+
+def test_a_lock_timeout_of_zero_waits_without_a_limit(project: Path):
+    """The flag's ``0`` refuses at once; the setting's ``"0"`` is no limit,
+    since a configured wait of nothing would refuse every contended run."""
+    from ferro.settings import MAX_LOCK_TIMEOUT_S
+
+    _write(
+        project / "ferro.toml",
+        'models = ["m"]\ndialects = ["postgres"]\nlock_timeout = "0"\n',
+    )
+    db = FerroSettings().database()
+
+    assert db.lock_timeout_seconds == MAX_LOCK_TIMEOUT_S
+    assert db.lock_wait() == MAX_LOCK_TIMEOUT_S
+    # The flag wins, in its own forms.
+    assert db.lock_wait(0) == 0.0
+    assert db.lock_wait("5s") == 5.0
+
+
+@pytest.mark.parametrize("value", ["five seconds", "-1s", "1h", "2y"])
+def test_an_unparseable_lock_timeout_is_refused_naming_the_forms(
+    project: Path, value: str
+):
+    _write(
+        project / "ferro.toml",
+        f'models = ["m"]\ndialects = ["postgres"]\nlock_timeout = "{value}"\n',
+    )
+
+    with pytest.raises(SettingsError) as exc:
+        FerroSettings()
+
+    message = str(exc.value)
+    assert "lock_timeout" in message
+    assert '"500ms"' in message and '"30s"' in message and '"1m"' in message
+    assert '"0" to wait without a limit' in message
+
+
+def test_an_auto_migrate_pass_reads_one_lock_timeout_from_every_database(
+    project: Path,
+):
+    """``connect()`` names no database, so its pass takes the value every
+    configured database sets, and databases that disagree are refused
+    naming each value: ``lock_timeout`` exactly as ``ddl_lock_timeout``."""
+    from ferro import _auto_migrate_settings
+
+    def configure(a: str, b: str) -> None:
+        _write(
+            project / "ferro.toml",
+            f"""
+            [databases.a]
+            models = ["a"]
+            dialects = ["postgres"]
+            lock_timeout = "{a}"
+
+            [databases.b]
+            models = ["b"]
+            dialects = ["postgres"]
+            lock_timeout = "{b}"
+            """,
+        )
+
+    configure("1m", "60")
+    agreed = _auto_migrate_settings()
+    assert agreed["lock_timeout_s"] == 60.0
+    assert agreed["ddl_lock_timeout_s"] == 5.0
+
+    configure("1m", "10s")
+    with pytest.raises(SettingsError) as exc:
+        _auto_migrate_settings()
+    assert str(exc.value) == (
+        f'{project / "ferro.toml"} sets different lock_timeout values (`a` = "1m", '
+        f'`b` = "10s"), and an auto-migrate pass does not name a database to take '
+        f"one from; set the same lock_timeout on every database, or configure one "
+        f"database"
+    )
+
+
+def test_without_a_config_an_auto_migrate_pass_takes_the_defaults(project: Path):
+    from ferro import _auto_migrate_settings
+
+    assert _auto_migrate_settings() == {
+        "tracking_schemas": [],
+        "ddl_lock_timeout_s": 5.0,
+        "lock_timeout_s": 30.0,
+    }
 
 
 def test_parse_lock_timeout_accepts_the_bound_and_refuses_beyond_it():

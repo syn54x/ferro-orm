@@ -87,7 +87,7 @@ Apply every pending migration, in order, under the run lock. Prints one line per
 
 | Flag | What it does |
 | :--- | :--- |
-| `--lock-timeout DURATION` | How long to wait for another run's lock: `30s` (default), `500ms`, `1m`, a number of seconds, or `0` to refuse at once. |
+| `--lock-timeout DURATION` | How long to wait for another run's lock: `30s`, `500ms`, `1m`, a number of seconds, or `0` to refuse at once. Defaults to the database's [`lock_timeout`](configuration.md#lock_timeout) (`30s`); the flag wins. |
 
 ## `ferro migrate down`
 
@@ -165,7 +165,7 @@ A key ferro does not know:
 
 <!-- refusal: unknown-key -->
 ```text
-/srv/app/ferro.toml: unknown key `migrations_dir` in the top level of ferro.toml; the keys allowed there are models, dialects, url_env, directory, tracking_schema, ddl_lock_timeout
+/srv/app/ferro.toml: unknown key `migrations_dir` in the top level of ferro.toml; the keys allowed there are models, dialects, url_env, directory, tracking_schema, ddl_lock_timeout, lock_timeout
 ```
 
 The [Configuration reference](configuration.md#refusals) lists the rest.

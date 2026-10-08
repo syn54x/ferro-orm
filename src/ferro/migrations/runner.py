@@ -76,7 +76,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 from .. import _core
 from ..models import transaction
 from ..registry import REGISTRY
-from ..settings import _DURATION, _DURATION_UNITS, SettingsError
+from ..settings import MAX_LOCK_TIMEOUT_S, SettingsError, parse_lock_timeout
 from ..state import resolve_operation_scope
 from . import historical
 from .chunked import BatchFailed, order_keys, run_chunked
@@ -102,6 +102,7 @@ if TYPE_CHECKING:
     from ..settings import DatabaseSettings, FerroSettings
 
 __all__ = [
+    "MAX_LOCK_TIMEOUT_S",
     "AppliedStep",
     "DownPlan",
     "RunReport",
@@ -168,49 +169,6 @@ class RunReport:
         raise MigrationRefused(self.refusal, report=self)
 
 
-MAX_LOCK_TIMEOUT_S = 60.0 * 60 * 24 * 365
-"""The longest lock timeout accepted: one year, the same "until it is free"
-bound an auto-migrate pass waits under ``ddl_lock_timeout = "0"`` (ADR-0038)."""
-
-
-def parse_lock_timeout(value: str | float) -> float:
-    """Seconds from ``"30s"``, ``"500ms"``, ``"1m"`` or a plain number of
-    seconds (``0`` tries the lock once, :data:`MAX_LOCK_TIMEOUT_S` is the
-    most).
-
-    Raises:
-        SettingsError: ``value`` is not a duration, is negative, or is longer
-            than :data:`MAX_LOCK_TIMEOUT_S`.
-    """
-    if isinstance(value, int | float) and not isinstance(value, bool):
-        seconds = float(value)
-    elif isinstance(value, str) and re.fullmatch(r"\d+(\.\d+)?", value.strip()):
-        seconds = float(value)
-    elif isinstance(value, str) and (match := _DURATION.match(value.strip())):
-        unit = _DURATION_UNITS[match.group(2)]
-        seconds = (
-            float(match.group(1))
-            * {
-                "milliseconds": 0.001,
-                "seconds": 1.0,
-                "minutes": 60.0,
-            }[unit]
-        )
-    else:
-        raise SettingsError(
-            f'lock timeout {value!r} is not a duration; write it as "30s", '
-            f'"500ms", "1m" or a number of seconds (0 refuses at once)'
-        )
-    if seconds < 0:
-        raise SettingsError(f"lock timeout {value!r} is negative; use 0 or more")
-    if not seconds <= MAX_LOCK_TIMEOUT_S:  # also refuses nan
-        raise SettingsError(
-            f"lock timeout {value!r} is too long; use at most one year "
-            f"({MAX_LOCK_TIMEOUT_S:.0f} seconds)"
-        )
-    return seconds
-
-
 def tracking_schema_for(database: DatabaseSettings, dialect: str) -> str | None:
     """Where ``database``'s tracking tables live on ``dialect``: its
     ``tracking_schema`` on Postgres, else the governed schema (``None``)."""
@@ -250,7 +208,7 @@ async def up(
     *,
     using: str | None = None,
     url: str | None = None,
-    lock_timeout: str | float = "30s",
+    lock_timeout: str | float | None = None,
     allow_ahead: bool = False,
     progress: Callable[[str], Any] | None = None,
 ) -> RunReport:
@@ -260,7 +218,8 @@ async def up(
     Works on ``database`` of ``settings`` over ``using``, a private
     connection to ``url``, or the default connection
     (:meth:`~ferro.migrations.target.Target.resolve`). A second run waits up
-    to ``lock_timeout``, saying so on stderr at once. ``allow_ahead`` lets a
+    to ``lock_timeout`` (the database's configured ``lock_timeout`` when
+    ``None``), saying so on stderr at once. ``allow_ahead`` lets a
     database holding migrations the directory lacks through (ADR-0038).
     ``progress`` receives each line as the run goes: one per applied step,
     and one per attempt a step makes while it waits for a table lock under
@@ -292,7 +251,7 @@ async def _up(
     name: str,
     database: DatabaseSettings,
     *,
-    lock_timeout: str | float = "30s",
+    lock_timeout: str | float | None = None,
     allow_ahead: bool = False,
     progress: Callable[[str], Any] | None = None,
     through: str | None = None,
@@ -308,7 +267,7 @@ async def _up(
     nothing pending to run: the run applies nothing and reverts nothing
     (going down is :func:`down`'s).
     """
-    timeout = parse_lock_timeout(lock_timeout)
+    timeout = database.lock_wait(lock_timeout)
     direction: dict[str, Any] = {"direction": "up"}
     if through is not None:
         direction["through"] = through
@@ -1036,7 +995,7 @@ async def down(
     url: str | None = None,
     target: str | None = None,
     all: bool = False,
-    lock_timeout: str | float = "30s",
+    lock_timeout: str | float | None = None,
     confirm: Callable[[DownPlan], bool] | None = None,
     progress: Callable[[str], Any] | None = None,
 ) -> RunReport:
@@ -1068,9 +1027,9 @@ async def down(
             still ``reverting`` at its cursor. The next ``down`` resumes at it.
     """
     direction = parse_target(target, all=all)
-    timeout = parse_lock_timeout(lock_timeout)
     report = RunReport()
     where = Target.resolve(settings, database, using=using, url=url)
+    timeout = where.database.lock_wait(lock_timeout)
     async with where.open() as name:
         tracked = await open_tracked(name, where.database)
         try:

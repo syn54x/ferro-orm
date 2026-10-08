@@ -326,9 +326,9 @@ async def test_the_waiting_warning_names_the_call_that_waits(project, db):
 def lock_wait_refusal(call: str, schema: str, timeout: str) -> str:
     return (
         f"{call} gave up waiting for the run lock on {schema}: another ferro "
-        f"migration run or auto-migrate pass held it longer than ddl_lock_timeout "
+        f"migration run or auto-migrate pass held it longer than lock_timeout "
         f"({timeout}). Nothing was applied. Wait for that run to finish and try "
-        f"again, or raise ddl_lock_timeout; `ferro migrate status` shows a "
+        f"again, or raise lock_timeout; `ferro migrate status` shows a "
         f"migration run while it holds the lock."
     )
 
@@ -355,13 +355,16 @@ async def test_a_tracked_database_refuses_at_once_while_a_run_holds_the_lock(
 
 
 @pytest.mark.parametrize("door", ["connect", "create_tables"])
-async def test_the_pass_waits_for_the_run_lock_up_to_ddl_lock_timeout(
+async def test_the_pass_waits_for_the_run_lock_up_to_lock_timeout(
     project, pkg, db, door
 ):
     """The pass's wait for the run lock is bounded by the configured
-    ``ddl_lock_timeout`` (ADR-0038 as amended), and its refusal names the
-    call, the schema, the setting and where to see the run."""
-    configure(project, pkg, db.backend, 'ddl_lock_timeout = "1s"\n')
+    ``lock_timeout`` (ADR-0038 as amended), not ``ddl_lock_timeout``, and its
+    refusal names the call, the schema, the setting and where to see the
+    run."""
+    configure(
+        project, pkg, db.backend, 'lock_timeout = "1s"\nddl_lock_timeout = "1m"\n'
+    )
     declare_fresh_model()
     if door == "create_tables":
         await ferro.connect(db.url)

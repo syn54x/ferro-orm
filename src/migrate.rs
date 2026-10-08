@@ -15,7 +15,7 @@
 //! `ferro_ddl_lowering` functions every migration door uses (AGENTS.md § I-1).
 
 use crate::backend::{EngineBindValue, EngineHandle};
-use crate::ddl_exec::{DdlError, DdlExecutor, Door, Executed, Failed, Role, SETTING, Unit};
+use crate::ddl_exec::{DdlError, DdlExecutor, Door, Executed, Failed, Role, Unit};
 use crate::introspect::{
     LiveCheck, LiveColumn, LiveForeignKey, LiveIndex, connected_role_bypasses_row_security,
     live_table_checks, live_table_columns, sqlite_indexes_covering_column,
@@ -125,6 +125,14 @@ pub fn _clear_schema_ir_modelset_for_test() -> PyResult<()> {
 /// `ddl_lock_timeout`'s default (ADR-0044), for a project with no config.
 pub const DEFAULT_DDL_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// `lock_timeout`'s default (ADR-0038 as amended), for a project with no
+/// config: the same 30 seconds `ferro migrate up` waits for another run.
+pub const DEFAULT_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The setting that bounds the pass's wait for the run lock, named by its
+/// refusal.
+const LOCK_TIMEOUT_SETTING: &str = "lock_timeout";
+
 /// Which migration behaviors beyond table creation are enabled.
 #[derive(Clone, Copy, Debug)]
 pub struct MigrateOptions {
@@ -137,6 +145,10 @@ pub struct MigrateOptions {
     /// waits for a table lock on Postgres before its unit is retried
     /// (ADR-0044); `None` waits without limit.
     pub ddl_lock_timeout: Option<Duration>,
+    /// How long the pass waits for the run lock another run or pass holds:
+    /// the project's `lock_timeout` (ADR-0038 as amended; its `"0"`, no
+    /// limit, arrives as the one-year bound `ferro migrate` accepts).
+    pub lock_timeout: Duration,
 }
 
 impl MigrateOptions {
@@ -147,7 +159,25 @@ impl MigrateOptions {
             updates: updates || destructive,
             destructive,
             ddl_lock_timeout: Some(DEFAULT_DDL_LOCK_TIMEOUT),
+            lock_timeout: DEFAULT_LOCK_TIMEOUT,
         }
+    }
+
+    /// The same options under the project's `lock_timeout`, in seconds as
+    /// Python reads it from `FerroSettings`.
+    ///
+    /// # Errors
+    /// `ValueError` for a negative, non-finite or unrepresentable number.
+    pub fn with_lock_timeout_seconds(self, seconds: f64) -> PyResult<Self> {
+        let lock_timeout = Duration::try_from_secs_f64(seconds).map_err(|_| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "{LOCK_TIMEOUT_SETTING} must be a non-negative number of seconds; got {seconds}"
+            ))
+        })?;
+        Ok(Self {
+            lock_timeout,
+            ..self
+        })
     }
 
     /// The same options under the project's `ddl_lock_timeout`, in seconds
@@ -563,32 +593,19 @@ async fn execute_sqlite_table_ops(
     Ok(())
 }
 
-/// The auto-migrate pass's wait for the run lock under `ddl_lock_timeout =
-/// "0"`, which waits without a limit for every lock the pass needs: "until
-/// it is free", far inside `Instant`'s range (ADR-0038 as amended
-/// 2026-10-08).
-const UNBOUNDED_LOCK_WAIT: Duration = Duration::from_secs(60 * 60 * 24 * 365);
-
-/// How long an auto-migrate pass waits for the run lock: the project's
-/// `ddl_lock_timeout`, the bound it already waits under for every table
-/// lock (ADR-0044), so one setting says how long a boot waits on another
-/// process's lock of either kind; `"0"` (`None`) waits without a limit.
-fn pass_lock_wait(opts: &MigrateOptions) -> Duration {
-    opts.ddl_lock_timeout.unwrap_or(UNBOUNDED_LOCK_WAIT)
-}
-
 /// The refusal when the pass's wait for the run lock on `schema` outlasts
-/// `ddl_lock_timeout` (`timeout`): `call` names the public call that gave up.
+/// the project's `lock_timeout` (`timeout`): `call` names the public call
+/// that gave up.
 ///
 /// ```text
-/// connect(auto_migrate=…) gave up waiting for the run lock on public: another ferro migration run or auto-migrate pass held it longer than ddl_lock_timeout (5s). Nothing was applied. Wait for that run to finish and try again, or raise ddl_lock_timeout; `ferro migrate status` shows a migration run while it holds the lock.
+/// connect(auto_migrate=…) gave up waiting for the run lock on public: another ferro migration run or auto-migrate pass held it longer than lock_timeout (30s). Nothing was applied. Wait for that run to finish and try again, or raise lock_timeout; `ferro migrate status` shows a migration run while it holds the lock.
 /// ```
 pub fn pass_lock_timeout_refusal(call: &str, schema: &str, timeout: Duration) -> String {
     format!(
         "{call} gave up waiting for the run lock on {schema}: another ferro migration run or \
-         auto-migrate pass held it longer than {SETTING} ({}). Nothing was applied. Wait for \
-         that run to finish and try again, or raise {SETTING}; `ferro migrate status` shows a \
-         migration run while it holds the lock.",
+         auto-migrate pass held it longer than {LOCK_TIMEOUT_SETTING} ({}). Nothing was \
+         applied. Wait for that run to finish and try again, or raise {LOCK_TIMEOUT_SETTING}; \
+         `ferro migrate status` shows a migration run while it holds the lock.",
         show_duration(timeout)
     )
 }
@@ -744,8 +761,8 @@ pub async fn guard_tracked_schema(
 /// Run the full auto-migrate pass under the run lock (ADR-0038): refuse a
 /// schema ferro migrations govern ([`guard_tracked_schema`], a catalog read
 /// that needs no lock), take the lock a migration run takes, waiting up to
-/// `ddl_lock_timeout` ([`pass_lock_wait`]), check the guard again under it
-/// (a `baseline` may have adopted the database while the pass waited), then
+/// the project's `lock_timeout` (`opts.lock_timeout`), check the guard again
+/// under it (a `baseline` may have adopted the database while the pass waited), then
 /// create missing tables and (per `MigrateOptions`) reconcile existing
 /// ones. Two processes booting together serialize here, and the second
 /// sees the first's DDL. The lock is released on every exit path.
@@ -768,7 +785,7 @@ pub async fn internal_migrate(
 ) -> PyResult<()> {
     guard_tracked_schema(&engine, tracking_schemas).await?;
     let governed = governed_schema(&engine).await?;
-    let wait = pass_lock_wait(&opts);
+    let wait = opts.lock_timeout;
     let lock = RunLock::acquire_or(
         &engine,
         Some(&governed),
@@ -1172,7 +1189,8 @@ fn is_create_pass_add(op: &MigrationOp, after_renames: &BTreeSet<String>) -> boo
 /// defaults to true — calling `migrate()` and getting create-only behavior
 /// would be surprising; use `create_tables()` for that. The reconciliation
 /// runs under the project's `ddl_lock_timeout` (`ddl_lock_timeout_s`
-/// seconds, read by `ferro.migrate` from `FerroSettings`; `0` disables).
+/// seconds, read by `ferro.migrate` from `FerroSettings`; `0` disables),
+/// and waits for the run lock up to its `lock_timeout` (`lock_timeout_s`).
 ///
 /// On Postgres each table's plan runs in one transaction (a mid-plan failure
 /// rolls that table back); SQLite applies statements one at a time. Like
@@ -1187,7 +1205,7 @@ fn is_create_pass_add(op: &MigrationOp, after_renames: &BTreeSet<String>) -> boo
 /// Returns a `PyErr` if the engine is not initialized or the migration
 /// fails; a failure of the pass carries its report ([`with_pass_report`]).
 #[pyfunction]
-#[pyo3(signature = (using=None, updates=true, destructive=false, tracking_schemas=Vec::new(), ddl_lock_timeout_s=5.0))]
+#[pyo3(signature = (using=None, updates=true, destructive=false, tracking_schemas=Vec::new(), ddl_lock_timeout_s=5.0, lock_timeout_s=30.0))]
 pub fn migrate(
     py: Python<'_>,
     using: Option<String>,
@@ -1195,9 +1213,11 @@ pub fn migrate(
     destructive: bool,
     tracking_schemas: Vec<String>,
     ddl_lock_timeout_s: f64,
+    lock_timeout_s: f64,
 ) -> PyResult<Bound<'_, PyAny>> {
     let opts = MigrateOptions::laddered(updates, destructive)
-        .with_ddl_lock_timeout_seconds(ddl_lock_timeout_s)?;
+        .with_ddl_lock_timeout_seconds(ddl_lock_timeout_s)?
+        .with_lock_timeout_seconds(lock_timeout_s)?;
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let engine = engine_for_connection(using)?;
         run_pass_for_python(engine, opts, &tracking_schemas, AutoMigrateDoor::Migrate).await

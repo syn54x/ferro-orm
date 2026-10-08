@@ -119,9 +119,9 @@ async def _record(
     name: str,
     database: DatabaseSettings,
     target: str | None,
-    lock_timeout: str | float,
+    lock_timeout: str | float | None,
 ) -> BaselineReport:
-    timeout = runner.parse_lock_timeout(lock_timeout)
+    timeout = database.lock_wait(lock_timeout)
     tracked = await runner.open_tracked(name, database)
     async with tracked.locked(timeout, runner.say_waiting) as run:
         plan = run.plan_baseline(target)
@@ -148,9 +148,9 @@ async def _record(
 
 
 async def _remove(
-    name: str, database: DatabaseSettings, lock_timeout: str | float
+    name: str, database: DatabaseSettings, lock_timeout: str | float | None
 ) -> list[str]:
-    timeout = runner.parse_lock_timeout(lock_timeout)
+    timeout = database.lock_wait(lock_timeout)
     tracked = await runner.open_tracked(name, database)
     async with tracked.locked(timeout, runner.say_waiting) as run:
         names = {r["migration"]: r["migration_name"] for r in run.records}
@@ -165,7 +165,7 @@ async def baseline(
     target: str | None = None,
     using: str | None = None,
     url: str | None = None,
-    lock_timeout: str | float = "30s",
+    lock_timeout: str | float | None = None,
 ) -> BaselineReport:
     """Record every migration through ``target`` (the head when ``None``;
     ``"0006"`` or ``"0006_add_teams"``) as applied on a database that already
@@ -194,7 +194,7 @@ async def remove_baseline(
     *,
     using: str | None = None,
     url: str | None = None,
-    lock_timeout: str | float = "30s",
+    lock_timeout: str | float | None = None,
 ) -> list[str]:
     """Delete every record a baseline wrote, under the run lock (``ferro
     migrate baseline --remove``). Returns the migrations whose baseline was
