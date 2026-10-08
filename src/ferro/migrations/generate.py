@@ -34,10 +34,9 @@ from .._core import (
     _load_snapshot,
     _store_snapshot,
 )
-from . import backfill_scaffold
+from . import scaffold
 from .errors import MigrationRefused
-from .scaffold import TEMPLATES_DIR, step_name
-from .scaffold import data_step as scaffold_data_step
+from .scaffold import TEMPLATES_DIR
 from .steps import StepRefused, scan_todos, unwritten
 from .layout import (
     SNAPSHOT_FILE,
@@ -264,9 +263,12 @@ def prepare(
             migration = migration.with_sql_step(sql_step)
         if data_step is not None:
             model = _snapshot_model(migration.snapshot_json, data_step)
+            # The record the generator writes for --data-step when models
+            # changed (``hand_data_step``), placed last here.
+            hand = {"name": f"backfill_{model.lower()}", "hand_model": model}
             migration = migration.with_data_step(
-                step_name(model),
-                scaffold_data_step(model, template_dir=directory / TEMPLATES_DIR),
+                hand["name"],
+                scaffold.render(hand, template_dir=directory / TEMPLATES_DIR),
             )
     else:
         generated = json.loads(raw)
@@ -278,28 +280,15 @@ def prepare(
     return migration
 
 
-def _todo(column: str, reason: dict[str, Any], var: str, chunked: bool) -> str | None:
-    """The ``todo`` message for a factory column the backfill cannot pre-fill."""
-    if reason["kind"] != "default_factory":
-        return None
-    factory = reason["factory"]
-    if chunked:
-        return f"call {factory} for an existing {var}"
-    return (
-        f"one {column} for every existing {var} ({factory} was its default_factory; "
-        f"{var} has no single primary key to give each row its own)"
-    )
-
-
 def _with_data_steps(
     migration: GeneratedMigration,
     generated: dict[str, Any],
     template_dir: Path,
 ) -> GeneratedMigration:
-    """``migration`` with each data step's file written, as the generator
-    decided the step: the backfill scaffold, (``guard``) the guard, or
-    (``hand_model``, ``--data-step``) the data step a person writes. The
-    step's name and place are the generator's."""
+    """``migration`` with each data step's file written from the step record
+    the generator produced (:func:`scaffold.render`), and each backfill that
+    still needs writing named in the summary. The step's name and place are
+    the generator's."""
     by_ordinal = {step["ordinal"]: step for step in generated["steps"]}
     steps: list[GeneratedStep] = []
     notes: list[str] = []
@@ -308,82 +297,24 @@ def _with_data_steps(
             # A --sql-step the generator placed: its placeholder files.
             steps.append(portable_sql_step(step.ordinal, step.name))
             continue
-        hand = by_ordinal[step.ordinal].get("hand_model")
-        if hand is not None:
-            text = scaffold_data_step(hand, template_dir=template_dir)
-            steps.append(
-                GeneratedStep(
-                    step.ordinal,
-                    step.name,
-                    "data",
-                    {f"{step.ordinal:02d}_{step.name}.py": text},
-                )
-            )
-            continue
-        data = by_ordinal[step.ordinal].get("data")
-        if data is None:
+        record = by_ordinal[step.ordinal]
+        if record.get("data") is None and record.get("hand_model") is None:
             steps.append(step)
             continue
-        model, table = data["model"], data["table"]
-        # A column appears once per reason: a removed enum label (D2) is a
-        # reason of its own, one per label.
-        columns = list(dict.fromkeys(column["name"] for column in data["columns"]))
-        removed: dict[str, list[str]] = {}
-        nulls: set[str] = set()
-        for column in data["columns"]:
-            reason = column["reason"]
-            if reason["kind"] == "label_removed":
-                removed.setdefault(column["name"], []).append(reason["label"])
-            else:
-                nulls.add(column["name"])
-        name = step.name
-        if data["guard"]:
-            text = backfill_scaffold.guard(
-                model,
-                columns,
-                template_dir=template_dir,
-                removed=removed,
-                nulls=nulls,
-            )
-        else:
-            skip = " ".join(f"--no-backfill {table}.{c}" for c in columns)
-            chunked = data["driver"] == "chunked"
-            prefill: dict[str, str] = {}
-            todos: dict[str, str] = {}
-            for column in data["columns"]:
-                reason = column["reason"]
-                if reason["kind"] == "default_factory" and chunked:
-                    call = backfill_scaffold.prefill_for(reason["factory"])
-                    if call is not None:
-                        prefill[column["name"]] = call
-                        continue
-                message = _todo(column["name"], reason, model.lower(), chunked)
-                if message is not None:
-                    todos[column["name"]] = message
-            text = backfill_scaffold.backfill(
-                model,
-                columns,
-                driver=data["driver"],
-                prefill=prefill,
-                template_dir=template_dir,
-                todos=todos,
-                key=data.get("key"),
-                reverse=data["reverse"],
-                skip=skip,
-                removed=removed,
-                nulls=nulls,
-            )
-            if removed or len(prefill) < len(columns):
-                notes.append(
-                    f"{step.ordinal:02d}_{name}.py needs writing where it says todo(...); "
-                    f"if no {model.lower()} needs a value, delete {migration.dir_name}/ and "
-                    f"run: ferro migrate new {migration.name} {skip}"
-                )
+        text = scaffold.render(record, template_dir=template_dir)
         steps.append(
             GeneratedStep(
-                step.ordinal, name, "data", {f"{step.ordinal:02d}_{name}.py": text}
+                step.ordinal,
+                step.name,
+                "data",
+                {f"{step.ordinal:02d}_{step.name}.py": text},
             )
         )
+        note = scaffold.note(
+            record, dir_name=migration.dir_name, migration_name=migration.name
+        )
+        if note is not None:
+            notes.append(note)
     summary = "\n".join(line for line in (migration.summary, *notes) if line)
     return replace(migration, steps=tuple(steps), summary=summary)
 
