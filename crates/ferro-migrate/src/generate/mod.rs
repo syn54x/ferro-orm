@@ -1770,7 +1770,6 @@ mod tests {
             .post_create_sqls
     }
 
-    /// The check a rebuild runs on a retyped column of `author`.
     /// The `author` rebuild's carry of its `AUTOINCREMENT` sequence.
     fn carried_sequence() -> [String; 2] {
         [
@@ -1781,6 +1780,7 @@ mod tests {
         ]
     }
 
+    /// The check a rebuild runs on a retyped column of `author`.
     fn guarded(column: &str, target: &str, class: &str) -> Vec<String> {
         vec![
             format!(
