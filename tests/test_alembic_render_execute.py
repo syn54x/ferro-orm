@@ -118,7 +118,8 @@ def test_rendered_execute_reaches_postgres_byte_identical(
             stored = conn.execute(
                 sa.text(
                     "SELECT e.enumlabel FROM pg_enum e JOIN pg_type t ON t.oid = e.enumtypid "
-                    "WHERE t.typname = 'probe'"
+                    "WHERE t.typname = 'probe' "
+                    "AND t.typnamespace = current_schema()::regnamespace"
                 )
             ).scalar()
             conn.rollback()

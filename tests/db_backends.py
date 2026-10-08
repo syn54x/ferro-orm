@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 
@@ -85,6 +88,57 @@ def build_postgres_test_url(base_url: str, schema_name: str) -> str:
     params = parse_qsl(parsed.query, keep_blank_values=True)
     params.append(("ferro_search_path", schema_name))
     return urlunparse(parsed._replace(query=urlencode(params)))
+
+
+def postgres_test_role_name(schema_name: str, label: str) -> str:
+    """The name of a role a Postgres test creates: its schema's name, then
+    ``label``.
+
+    Roles are server-global while every test's tables live in its own
+    ``ferro_<hex>`` schema, so a role named after the schema can neither
+    collide with another run's nor outlive the schema unseen: ``db_url``
+    drops every role it handed out right after the schema.
+    """
+    name = f"{schema_name}_{label}"
+    if len(name.encode()) > 63:
+        raise ValueError(
+            f"role name {name!r} is longer than Postgres' 63-byte identifier "
+            "limit: pass a shorter label"
+        )
+    return name
+
+
+# The first key of every test-side server lock (`pg_advisory_lock(int4, int4)`).
+# Ferro's own run lock takes the one-bigint form, which ``pg_locks`` keeps
+# apart (``objsubid`` 1 against 2), so no test lock can block a run.
+SERVER_LOCK_CLASS = 0x0F3E
+
+
+def server_lock_ids(name: str) -> tuple[int, int]:
+    """The ``(classid, objid)`` of the server lock named ``name``: a stable
+    32-bit hash of the name under :data:`SERVER_LOCK_CLASS`."""
+    digest = hashlib.sha256(name.encode()).digest()
+    return SERVER_LOCK_CLASS, int.from_bytes(digest[:4], "big", signed=True)
+
+
+@contextmanager
+def postgres_server_lock(base_url: str, name: str) -> Iterator[None]:
+    """Hold the server lock ``name`` for the block, on a connection of its own.
+
+    For a test that touches an object one per *database* rather than one per
+    schema (an extension, a server setting): every concurrent run of the
+    suite against the same server takes the same lock around it, so two runs
+    never install, read and drop the same object at once.
+    """
+    import psycopg
+
+    classid, objid = server_lock_ids(name)
+    with psycopg.connect(base_url, autocommit=True) as conn:
+        conn.execute("SELECT pg_advisory_lock(%s, %s)", (classid, objid))
+        try:
+            yield
+        finally:
+            conn.execute("SELECT pg_advisory_unlock(%s, %s)", (classid, objid))
 
 
 def build_postgres_url_from_connection_params(params: dict[str, str]) -> str:

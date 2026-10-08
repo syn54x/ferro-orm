@@ -758,7 +758,8 @@ def test_a_late_null_row_fails_the_contract_with_the_count_and_the_recipe_that_w
         # Mid-migration, the staging check is nobody's declared check: the
         # planner (the pass's reconciliation, the drift check) never drops it.
         live = db.rows(
-            "SELECT conname FROM pg_constraint WHERE conname LIKE '_ferro_notnull_%'"
+            "SELECT conname FROM pg_constraint WHERE conname LIKE '_ferro_notnull_%' "
+            "AND connamespace = current_schema()::regnamespace"
         )
         assert live == [("_ferro_notnull_author_slug",)]
         ops = plan_against(db, snapshot(project, 2), snapshot(project, 1))

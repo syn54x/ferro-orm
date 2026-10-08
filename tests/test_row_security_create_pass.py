@@ -680,9 +680,9 @@ async def test_sqlite_registers_warns_and_skips_the_ddl(db_url, recwarn):
 
 
 @pytest.fixture
-def tenant_role():
-    """A cluster-unique NOSUPERUSER role name, dropped after the test."""
-    return f"ferro_rls_{uuid.uuid4().hex[:12]}"
+def tenant_role(pg_role):
+    """A NOSUPERUSER role name of the test's own, dropped with its schema."""
+    return pg_role("rls")
 
 
 async def _grant(role: str, table: str, *, own_table: bool = False) -> None:
@@ -847,7 +847,8 @@ async def test_force_binds_the_table_owner(db_url, tenant_role):
             async with transaction() as tx:
                 await tx.execute(f'SET LOCAL ROLE "{tenant_role}"')
                 owner = await tx.fetch_one(
-                    "SELECT tableowner FROM pg_tables WHERE tablename = 'ledgerrow'"
+                    "SELECT tableowner FROM pg_tables "
+                    "WHERE schemaname = current_schema() AND tablename = 'ledgerrow'"
                 )
                 assert owner["tableowner"] == tenant_role
                 assert await tx.fetch_all("SELECT label FROM ledgerrow") == []

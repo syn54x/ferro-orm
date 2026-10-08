@@ -106,6 +106,21 @@ fn db_error(context: &str, err: sqlx::Error) -> PyErr {
     crate::errors::map_db_error(context, err)
 }
 
+/// Postgres' `undefined_table` and `invalid_schema_name`: what a read of a
+/// schema-qualified table raises once that table or its schema is dropped.
+const MISSING_RELATION_SQLSTATES: [&str; 2] = ["42P01", "3F000"];
+
+/// Whether `err` is Postgres saying the relation it was asked to read (or
+/// its schema) does not exist.
+fn names_a_missing_relation(err: &sqlx::Error) -> bool {
+    match err {
+        sqlx::Error::Database(db) => db
+            .code()
+            .is_some_and(|code| MISSING_RELATION_SQLSTATES.contains(&code.as_ref())),
+        _ => false,
+    }
+}
+
 /// Why the run lock is not (or no longer) this run's.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RunLockRefusal {
@@ -1243,13 +1258,27 @@ pub async fn tracking_tables_for(
         let tracking = Tracking {
             schema: home.clone(),
         };
-        let rows = engine
+        let rows = match engine
             .fetch_all_sql_unprepared(&format!(
                 "SELECT format, governed_schema FROM {}",
                 tracking.table(FORMAT_TABLE)
             ))
             .await
-            .map_err(|e| db_error("reading a tracking table's format", e))?;
+        {
+            Ok(rows) => rows,
+            // The listing and the read are two statements, and another
+            // session may drop a neighbour's schema between them (a tenant
+            // deprovisioned while this one boots). A format table that is
+            // gone governs nothing, so it is skipped — once the catalog
+            // confirms it is gone, never on the error alone.
+            Err(err)
+                if names_a_missing_relation(&err)
+                    && !table_exists(engine, &tracking, FORMAT_TABLE).await? =>
+            {
+                continue;
+            }
+            Err(err) => return Err(db_error("reading a tracking table's format", err)),
+        };
         for row in rows {
             let governed = text(column(&row, 1)).unwrap_or_default();
             if governed == wanted {

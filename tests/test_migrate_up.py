@@ -354,7 +354,8 @@ def test_create_index_concurrently_runs_in_a_no_transaction_step(
     assert run("migrate", "up", "--url", db.url) == 0
 
     assert db.rows(
-        "SELECT indexname FROM pg_indexes WHERE indexname = 'idx_author_name_c'"
+        "SELECT indexname FROM pg_indexes "
+        "WHERE schemaname = current_schema() AND indexname = 'idx_author_name_c'"
     ) == [("idx_author_name_c",)]
     assert db.records()[1][4] == "ddl-no-transaction"
 

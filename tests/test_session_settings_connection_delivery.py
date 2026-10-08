@@ -607,9 +607,9 @@ def _tenant_url(db_url: str, role: str) -> str:
 
 
 @pytest.fixture
-def tenant_role() -> str:
-    """A cluster-unique role name; the test drops it in its own ``finally``."""
-    return f"ferro_conn_delivery_{uuid.uuid4().hex[:12]}"
+def tenant_role(pg_role) -> str:
+    """A role name of the test's own, dropped with its schema."""
+    return pg_role("conn_delivery")
 
 
 @pytest.mark.asyncio

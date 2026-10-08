@@ -275,7 +275,11 @@ async def test_a_lock_lost_before_a_no_transaction_step_starts_runs_nothing(
             await run.execute(index)
 
     assert (
-        db.rows("SELECT indexname FROM pg_indexes WHERE indexname = 'idx_lost'") == []
+        db.rows(
+            "SELECT indexname FROM pg_indexes "
+            "WHERE schemaname = current_schema() AND indexname = 'idx_lost'"
+        )
+        == []
     )
     assert [(r[0], r[1]) for r in db.rows(RECORDS)] == [(1, 1)]
 

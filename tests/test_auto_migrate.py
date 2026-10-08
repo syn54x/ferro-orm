@@ -2052,7 +2052,9 @@ async def test_db_check_reconnect_is_idempotent(db_url):
     async with ferro.engines.session():
 
         rows = await fetch_all(
-            "SELECT conname FROM pg_constraint WHERE conname = 'ck_reconnectdoc_status'"
+            "SELECT conname FROM pg_constraint "
+            "WHERE conname = 'ck_reconnectdoc_status' "
+            "AND connamespace = current_schema()::regnamespace"
         )
         assert len(rows) == 1, f"expected exactly one CHECK constraint, got: {rows}"
 
@@ -2095,7 +2097,7 @@ async def test_pg_failed_migration_rolls_back_whole_table_plan(db_url, clean_reg
         )
         cols = await fetch_all(
             "SELECT column_name, data_type FROM information_schema.columns "
-            "WHERE table_name = 'migtxrollback'"
+            "WHERE table_schema = current_schema() AND table_name = 'migtxrollback'"
         )
         by_name = {c["column_name"]: c["data_type"] for c in cols}
         assert "added" not in by_name, "ADD COLUMN must be rolled back"
