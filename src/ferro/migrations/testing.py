@@ -374,8 +374,12 @@ class Harness:
 
     async def _assert_empty(self, name: str, first: _Migration, stop: str) -> None:
         """With every migration reverted there is no snapshot to compare
-        with: none of the first migration's tables may remain."""
-        live = set(json.loads(await _core._live_tables(name)))
+        with: none of the first migration's tables may remain. The live
+        tables are read by the one live reader, against that snapshot."""
+        live_json, _ = await _core._live_schema_ir(name, json.dumps(first.snapshot))
+        live = {
+            model["table_name"] for model in json.loads(live_json)["payload"]["models"]
+        }
         left = [
             model["table_name"]
             for model in first.snapshot["payload"]["models"]

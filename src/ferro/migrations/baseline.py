@@ -31,18 +31,15 @@ migration, whose down would drop tables it never created.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .. import _core
 from ..settings import SettingsError
 from . import runner
 from .api import _connection, _resolve
 from .drift import DriftReport, against
 from .errors import MigrationRefused
-from .report import RunRefused
 from .steps import declared_up_kind
 
 if TYPE_CHECKING:
@@ -119,83 +116,46 @@ def _span(names: list[str]) -> str:
     return names[0] if len(names) == 1 else f"{names[0]} … {names[-1]}"
 
 
-async def _locked(
-    name: str, database: DatabaseSettings, lock_timeout: str | float
-) -> tuple[str, str | None, int]:
-    """The connection's dialect, its tracking schema and a run-lock handle."""
-    dialect = runner.connection_dialect(name, database)
-    tracking = runner.tracking_schema_for(database, dialect)
-    timeout = runner.parse_lock_timeout(lock_timeout)
-    handle = await _core._acquire_run_lock(name, None, timeout, runner._say_waiting)
-    return dialect, tracking, handle
-
-
-def _record_declared_kinds(directory: Path, records: list[dict[str, Any]]) -> None:
-    """Give each data step's record the shape its ``up`` declares
-    (``atomic`` / ``chunked``), read from the file's syntax tree: a baseline
-    never runs a data step, so its file is never executed (ADR-0035).
-
-    Raises:
-        StepRefused: a data step whose ``up`` is undeclared or misdeclared.
-    """
-    for record in records:
-        if record["file"].endswith(".py"):
-            path = directory / record["migration_name"] / record["file"]
-            record["kind"] = declared_up_kind(path)
-
-
 async def _record(
     name: str,
     database: DatabaseSettings,
     target: str | None,
     lock_timeout: str | float,
 ) -> BaselineReport:
-    dialect, tracking, handle = await _locked(name, database, lock_timeout)
-    try:
-        state = json.loads(await _core._read_records(name, tracking))
-        if state["refusal"] is not None:
-            raise RunRefused(state["refusal"])
-        plan = json.loads(
-            _core._plan_baseline(
-                str(database.directory),
-                json.dumps(state["records"]),
-                dialect,
-                target,
-                runner._ferro_version(),
-            )
-        )
-        _record_declared_kinds(database.directory, plan["records"])
-        drift = await against(plan["snapshot"], migration=plan["target"], using=name)
+    timeout = runner.parse_lock_timeout(lock_timeout)
+    tracked = await runner.open_tracked(name, database)
+    async with tracked.locked(timeout, runner.say_waiting) as run:
+        plan = run.plan_baseline(target)
+        # A baseline never runs a data step, so its file is never executed:
+        # each one's record holds the shape its up declares, read from the
+        # file's syntax tree (ADR-0035).
+        kinds = {
+            (migration, step): declared_up_kind(Path(path))
+            for migration, step, path in plan.data_step_files
+        }
+        drift = await against(plan.snapshot, migration=plan.target, using=name)
         if not drift.clean:
             return BaselineReport(
                 recorded=[], data_steps_listed=[], drift=drift, reports=drift.reports
             )
-        await _core._write_baseline_records(
-            name, json.dumps(plan["records"]), tracking, handle
-        )
+        await run.write_baseline(plan, kinds)
         return BaselineReport(
-            recorded=list(plan["recorded"]),
-            data_steps_listed=list(plan["data_steps"]),
+            recorded=list(plan.recorded),
+            data_steps_listed=list(plan.data_steps),
             drift=None,
-            steps=len(plan["records"]),
+            steps=plan.steps,
             reports=drift.reports,
         )
-    finally:
-        await _core._release_run_lock(handle)
 
 
 async def _remove(
     name: str, database: DatabaseSettings, lock_timeout: str | float
 ) -> list[str]:
-    _, tracking, handle = await _locked(name, database, lock_timeout)
-    try:
-        state = json.loads(await _core._read_records(name, tracking))
-        names = {r["migration"]: r["migration_name"] for r in state["records"]}
-        removed = json.loads(
-            await _core._remove_baseline_records(name, tracking, handle)
-        )
-    finally:
-        await _core._release_run_lock(handle)
+    timeout = runner.parse_lock_timeout(lock_timeout)
+    tracked = await runner.open_tracked(name, database)
+    async with tracked.locked(timeout, runner.say_waiting) as run:
+        names = {r["migration"]: r["migration_name"] for r in run.records}
+        removed = await run.remove_baseline()
     return [names[number] for number in sorted({m for m, _ in removed})]
 
 

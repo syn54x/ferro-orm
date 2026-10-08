@@ -125,13 +125,14 @@ async def test_require_applied_carries_the_edited_file_refusal_and_takes_no_lock
     assert expected is not None and "was edited after it was applied" in expected
 
     held_while_reading: list[bool] = []
-    read_records = _core._read_records
+    open_tracked = _core._open_tracked
 
-    async def probing_read_records(*args, **kwargs):
-        held_while_reading.append(await _core._run_lock_is_held(None))
-        return await read_records(*args, **kwargs)
+    async def probing_open_tracked(*args, **kwargs):
+        tracked = await open_tracked(*args, **kwargs)
+        held_while_reading.append(await tracked.lock_held())
+        return tracked
 
-    monkeypatch.setattr(_core, "_read_records", probing_read_records)
+    monkeypatch.setattr(_core, "_open_tracked", probing_open_tracked)
     with pytest.raises(PendingMigrationsError) as raised:
         await ferro.migrations.require_applied()
 
@@ -148,12 +149,10 @@ async def test_require_applied_answers_while_a_run_holds_the_lock(project, pkg, 
     await connect(db.url)
     await ferro.migrations.up()
     await connect(db.url, name="holder")
-    handle = await _core._acquire_run_lock("holder", None, 0)
-    try:
-        assert await _core._run_lock_is_held(None) is True
+    tracked = await _core._open_tracked("holder", None, str(migrations(project)))
+    async with tracked.locked(0):
+        assert await tracked.lock_held() is True
         assert await asyncio.wait_for(ferro.migrations.require_applied(), 10) is None
-    finally:
-        await _core._release_run_lock(handle)
 
 
 # -- ahead --------------------------------------------------------------------------

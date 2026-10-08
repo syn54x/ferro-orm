@@ -18,6 +18,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import warnings
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Annotated
 
 import pytest
@@ -53,6 +55,21 @@ def guard_text(governed: str, home: str) -> str:
         f"migrations ({home}._ferro_migrations). Use ferro migrate up, or drop the "
         f"tracking tables to leave migrations."
     )
+
+
+@asynccontextmanager
+async def holding(db) -> AsyncIterator[None]:
+    """The run lock, held by a run of the test's own on a connection of its
+    own, as another process's run would hold it."""
+    await ferro.connect(db.url, name="holder")
+    tracked = await _core._open_tracked("holder", None, "migrations")
+    async with tracked.locked(0):
+        yield
+
+
+async def lock_held(using: str | None = None) -> bool:
+    """Whether a run holds the run lock, asked without taking it."""
+    return await (await _core._open_tracked(using, None, "migrations")).lock_held()
 
 
 def governed(db) -> str:
@@ -119,7 +136,7 @@ async def test_create_tables_still_creates_on_an_untracked_database(
 
     assert "guardfresh" in db.tables()
     assert len(executed) == 1 and '"guardfresh"' in executed[0]
-    assert await _core._run_lock_is_held(None) is False
+    assert await lock_held() is False
 
 
 async def test_without_a_config_file_the_catalog_still_refuses(
@@ -212,17 +229,13 @@ async def test_a_plain_connect_reads_no_config_and_runs_no_guard(
     the lock held elsewhere a plain connect that ran it would wait; it
     returns at once instead."""
     await track(project, pkg, db)
-    await ferro.connect(db.url, name="holder")
-    handle = await _core._acquire_run_lock("holder", None, 0)
 
     def no_config(*_args, **_kwargs):
         raise AssertionError("a plain connect() must not read the config")
 
-    monkeypatch.setattr(ferro.settings.FerroSettings, "__init__", no_config)
-    try:
+    async with holding(db):
+        monkeypatch.setattr(ferro.settings.FerroSettings, "__init__", no_config)
         await asyncio.wait_for(ferro.connect(db.url), 5)
-    finally:
-        await _core._release_run_lock(handle)
 
     assert _core._catalog_query_count_for_test() == 0
     assert _core.connection_backend() == db.backend
@@ -295,17 +308,13 @@ async def test_two_concurrent_auto_migrates_serialize_on_the_run_lock(
 
 async def test_auto_migrate_waits_for_a_held_run_lock_then_runs(project, db):
     declare_fresh_model()
-    await ferro.connect(db.url, name="holder")
-    handle = await _core._acquire_run_lock("holder", None, 0)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        try:
+        async with holding(db):
             boot = asyncio.create_task(ferro.connect(db.url, migrate_updates=True))
             await asyncio.sleep(0.5)
             assert not boot.done()
             assert "guardfresh" not in db.tables()
-        finally:
-            await _core._release_run_lock(handle)
         await asyncio.wait_for(boot, 10)
 
     assert "guardfresh" in db.tables()
@@ -319,16 +328,12 @@ async def test_auto_migrate_waits_for_a_held_run_lock_then_runs(project, db):
 async def test_the_waiting_warning_names_the_call_that_waits(project, db):
     declare_fresh_model()
     await ferro.connect(db.url)
-    await ferro.connect(db.url, name="holder")
-    handle = await _core._acquire_run_lock("holder", None, 0)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        try:
+        async with holding(db):
             pending = asyncio.create_task(ferro.create_tables())
             await asyncio.sleep(0.5)
             assert not pending.done()
-        finally:
-            await _core._release_run_lock(handle)
         await asyncio.wait_for(pending, 10)
 
     assert "guardfresh" in db.tables()

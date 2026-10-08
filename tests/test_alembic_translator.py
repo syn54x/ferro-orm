@@ -707,7 +707,10 @@ async def test_ferros_tracking_tables_are_never_dropped(
     name = f"tr_{uuid.uuid4().hex}"
     await connect(db_url, name=name)
     try:
-        await _core._ensure_tracking_tables(name, None)
+        # A locked run's first write creates the tracking tables.
+        tracked = await _core._open_tracked(name, None, "migrations")
+        async with tracked.locked(5.0) as run:
+            await run.remove_baseline()
     finally:
         await _core._disconnect(name)
     _rewind_registry()
@@ -842,7 +845,10 @@ async def test_a_tracked_database_is_refused_naming_ferro_migrate_new(
     name = f"tr533_{uuid.uuid4().hex}"
     await connect(db_url, name=name)
     try:
-        await _core._ensure_tracking_tables(name, None)
+        # A locked run's first write creates the tracking tables.
+        tracked = await _core._open_tracked(name, None, "migrations")
+        async with tracked.locked(5.0) as run:
+            await run.remove_baseline()
     finally:
         await _core._disconnect(name)
 
