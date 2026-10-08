@@ -10,19 +10,19 @@ use crate::plan::{Body, Side, index_models, planned_before, relabels_rows};
 use crate::{Dialect, EmissionError, MigrationOp, Report, render_create_table};
 use ferro_ddl_lowering::{
     ConstraintMode, InPlaceChange, IndexMode, ResolvedStorage, Subject, fk_action_from_str,
-    fk_action_sql, primary_key_kept_warning, quote_ident, render_check_addition, render_check_drop,
-    render_check_rebuild, render_check_restore, render_create_row_policy,
-    render_disable_row_security, render_drop_constraint, render_drop_index_sql,
-    render_drop_row_policy, render_enable_row_security, render_force_row_security,
-    render_label_update, render_no_force_row_security, render_pg_enum_add_value,
-    render_pg_enum_create_type, render_pg_enum_drop_type, render_pg_enum_rename_type,
-    render_pg_enum_rename_value, render_rename_column, render_rename_constraint,
-    render_rename_index, render_rename_policy, render_rename_table, render_validate_constraint,
-    resolve_column_storage, row_policy_clauses, row_policy_rebuild_statements,
-    row_security_statements, sqlite_in_place_report,
+    fk_action_sql, is_pg_serial_column, primary_key_kept_warning, quote_ident,
+    render_check_addition, render_check_drop, render_check_rebuild, render_check_restore,
+    render_create_row_policy, render_disable_row_security, render_drop_constraint,
+    render_drop_index_sql, render_drop_row_policy, render_enable_row_security,
+    render_force_row_security, render_label_update, render_no_force_row_security,
+    render_pg_enum_add_value, render_pg_enum_create_type, render_pg_enum_drop_type,
+    render_pg_enum_rename_type, render_pg_enum_rename_value, render_pg_serial_sequence_rename,
+    render_rename_column, render_rename_constraint, render_rename_index, render_rename_policy,
+    render_rename_table, render_validate_constraint, resolve_column_storage, row_policy_clauses,
+    row_policy_rebuild_statements, row_security_statements, sqlite_in_place_report,
 };
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 /// One planned op with what it renders to on one dialect.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
@@ -283,9 +283,31 @@ pub(crate) fn render_from(
             }
             MigrationOp::RenameTable { old, new } => {
                 out.statements.push(render_rename_table(old, new));
+                // Each serial key under the name it has right after the
+                // table rename: a column rename of the same plan runs later
+                // and carries the sequence again under its new name.
+                if dialect == Dialect::Postgres {
+                    let standing: BTreeSet<String> =
+                        serial_columns(&[&old_models, &new_models], &[old, new])
+                            .into_iter()
+                            .map(|column| before_column_renames(ops, new, column))
+                            .collect();
+                    for column in standing {
+                        out.statements
+                            .push(render_pg_serial_sequence_rename(new, &column));
+                    }
+                }
             }
             MigrationOp::RenameColumn { table, old, new } => {
                 out.statements.push(render_rename_column(table, old, new));
+                if dialect == Dialect::Postgres
+                    && serial_columns(&[&old_models, &new_models], &[table])
+                        .iter()
+                        .any(|column| column == new || column == old)
+                {
+                    out.statements
+                        .push(render_pg_serial_sequence_rename(table, new));
+                }
             }
             MigrationOp::RenameIndex { table, old, new } => match dialect {
                 Dialect::Postgres => out.statements.push(render_rename_index(old, new)),
@@ -700,6 +722,38 @@ fn created_type_guards(
             _ => None,
         })
         .collect()
+}
+
+/// The `serial` columns ([`is_pg_serial_column`]) of the table named any of
+/// `tables` on either side: a rename's sequence follows it whichever side
+/// declares the key (a live side reads no `autoincrement`, so a down planned
+/// back to the database finds it on the side it starts from).
+fn serial_columns(
+    sides: &[&BTreeMap<String, &SchemaModel>],
+    tables: &[&String],
+) -> BTreeSet<String> {
+    sides
+        .iter()
+        .flat_map(|models| tables.iter().filter_map(|table| models.get(table.as_str())))
+        .flat_map(|model| &model.columns)
+        .filter(|col| is_pg_serial_column(col))
+        .map(|col| col.name.clone())
+        .collect()
+}
+
+/// `column` of `table` under the name it has before `ops`' column renames:
+/// the old name of the `RenameColumn` that gives it `column`, else `column`.
+fn before_column_renames(ops: &[MigrationOp], table: &str, column: String) -> String {
+    ops.iter()
+        .find_map(|op| match op {
+            MigrationOp::RenameColumn {
+                table: renamed,
+                old,
+                new,
+            } if renamed == table && *new == column => Some(old.clone()),
+            _ => None,
+        })
+        .unwrap_or(column)
 }
 
 /// The report standing in for a check put back as the catalog printed it on

@@ -311,6 +311,136 @@ async def test_rename_hints_render_alembic_renames_and_the_derived_names(
     assert await _drift(db_url) == []
 
 
+def _sequence_rename(table: str, column: str = "id") -> str:
+    """The pass's statement giving ``table``'s ``column`` sequence the name
+    a fresh ``CREATE TABLE`` gives it (``<table>_<column>_seq``)."""
+    target = f"{table}_{column}_seq"
+    return (
+        f"DO $$ DECLARE seq regclass := pg_get_serial_sequence('\"{table}\"', "
+        f"'{column}')::regclass; BEGIN IF seq IS NOT NULL AND (SELECT relname FROM "
+        f"pg_class WHERE oid = seq) <> '{target}' THEN EXECUTE format('ALTER SEQUENCE "
+        f"%s RENAME TO %I', seq, '{target}'); END IF; END $$"
+    )
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_a_table_rename_carries_its_serial_sequence_as_the_passs_statement(
+    db_url, postgres_base_url, db_schema_name
+):
+    """``op.rename_table`` leaves the key's sequence named ``tr533card_id_seq``,
+    where a table created as ``tr533deck`` owns ``tr533deck_id_seq``: the
+    revision runs the pass's sequence rename after it, as written, and the
+    downgrade the pass's rename back."""
+
+    class Tr533Card(Model):
+        id: int | None = Field(default=None, primary_key=True)
+
+    await connect(db_url, auto_migrate=True)
+    _rewind_registry()
+
+    class Tr533Deck(Model):
+        __ferro_renamed_from__: ClassVar[str] = "tr533card"
+
+        id: int | None = Field(default=None, primary_key=True)
+
+    upgrade, downgrade = autogenerate(db_url, postgres_base_url, db_schema_name)
+    assert "op.rename_table('tr533card', 'tr533deck')" in upgrade, upgrade
+    # `sa.DDL` reads `%` as a bind marker: the bridge writes it doubled.
+    assert_statement_in_code(_sequence_rename("tr533deck").replace("%", "%%"), upgrade)
+    assert "op.rename_table('tr533deck', 'tr533card')" in downgrade, downgrade
+    assert_statement_in_code(
+        _sequence_rename("tr533card").replace("%", "%%"), downgrade
+    )
+
+    def key_default() -> str:
+        """The key's default, read off the test schema's search path (so
+        the sequence reads schema-qualified)."""
+        engine = engine_for(db_url, postgres_base_url)
+        try:
+            with engine.connect() as conn:
+                return conn.execute(
+                    sa.text(
+                        "SELECT column_default FROM information_schema.columns "
+                        "WHERE table_schema = :schema AND column_name = 'id' "
+                        "AND table_name IN ('tr533card', 'tr533deck')"
+                    ),
+                    {"schema": db_schema_name},
+                ).scalar_one()
+        finally:
+            engine.dispose()
+
+    run_revision(upgrade, db_url, postgres_base_url, db_schema_name)
+    assert key_default() == f"nextval('{db_schema_name}.tr533deck_id_seq'::regclass)"
+    assert await _drift(db_url) == []
+    run_revision(downgrade, db_url, postgres_base_url, db_schema_name)
+    assert key_default() == f"nextval('{db_schema_name}.tr533card_id_seq'::regclass)"
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_a_table_and_its_serial_key_renamed_together_carry_the_sequence_in_order(
+    db_url, postgres_base_url, db_schema_name
+):
+    """Right after ``op.rename_table`` the key is still ``id``, so the
+    table's sequence rename names ``id``; after ``op.alter_column`` the
+    column's names ``card_id``, the name a fresh ``tr533deck`` gives it. The
+    downgrade undoes both, and neither side drifts."""
+
+    class Tr533Card(Model):
+        id: int | None = Field(default=None, primary_key=True)
+
+    await connect(db_url, auto_migrate=True)
+    _rewind_registry()
+
+    def renamed() -> None:
+        class Tr533Deck(Model):
+            __ferro_renamed_from__: ClassVar[str] = "tr533card"
+
+            card_id: int | None = Field(
+                default=None, primary_key=True, renamed_from="id"
+            )
+
+    renamed()
+    upgrade, downgrade = autogenerate(db_url, postgres_base_url, db_schema_name)
+    code = " ".join(upgrade.split())
+    first = repr(_sequence_rename("tr533deck").replace("%", "%%"))
+    second = repr(_sequence_rename("tr533deck", "card_id").replace("%", "%%"))
+    order = [
+        code.index("op.rename_table('tr533card', 'tr533deck')"),
+        code.index(first),
+        code.index("op.alter_column('tr533deck', 'id', new_column_name='card_id')"),
+        code.index(second),
+    ]
+    assert order == sorted(order), upgrade
+
+    run_revision(upgrade, db_url, postgres_base_url, db_schema_name)
+    assert await _drift(db_url) == []
+    engine = engine_for(db_url, postgres_base_url)
+    try:
+        with engine.connect() as conn:
+            default = conn.execute(
+                sa.text(
+                    "SELECT column_default FROM information_schema.columns "
+                    "WHERE table_schema = :schema AND table_name = 'tr533deck' "
+                    "AND column_name = 'card_id'"
+                ),
+                {"schema": db_schema_name},
+            ).scalar_one()
+    finally:
+        engine.dispose()
+    assert default == f"nextval('{db_schema_name}.tr533deck_card_id_seq'::regclass)"
+    run_revision(downgrade, db_url, postgres_base_url, db_schema_name)
+    _rewind_registry()
+
+    class Tr533Card(Model):  # type: ignore[no-redef]  # noqa: F811
+        id: int | None = Field(default=None, primary_key=True)
+
+    assert await _drift(db_url) == []
+
+
 @pytest.mark.backend_matrix
 @pytest.mark.postgres_only
 @pytest.mark.asyncio

@@ -301,8 +301,15 @@ def test_a_table_rename_drags_every_owned_name_and_its_join_table_with_rows(
     ]
     if db.backend == "postgres":
         # Table and column renames first, then each table's derived names
-        # together: the renamed tables', then the referencing table's.
-        assert up == structural + [
+        # together: the renamed tables', then the referencing table's. The
+        # key's sequence follows its table: a table created as `author` owns
+        # `author_id_seq`, and `RENAME` alone keeps `writer_id_seq`.
+        assert up == structural[:1] + [
+            "DO $$ DECLARE seq regclass := pg_get_serial_sequence('\"author\"', 'id')"
+            "::regclass; BEGIN IF seq IS NOT NULL AND (SELECT relname FROM pg_class "
+            "WHERE oid = seq) <> 'author_id_seq' THEN EXECUTE format('ALTER SEQUENCE "
+            "%s RENAME TO %I', seq, 'author_id_seq'); END IF; END $$",
+        ] + structural[1:] + [
             'ALTER INDEX "uq_writer_name" RENAME TO "uq_author_name"',
             'ALTER TABLE "author" RENAME CONSTRAINT "ck_writer_named" TO "ck_author_named"',
             'ALTER POLICY "rls_writer_id" ON "author" RENAME TO "rls_author_id"',
@@ -326,16 +333,96 @@ def test_a_table_rename_drags_every_owned_name_and_its_join_table_with_rows(
         # One rebuild per table whose constraint name moved, in one step.
         assert sorted(rebuilt(up)) == ["author", "author_tags", "book"]
 
+    def key_default(table: str) -> str:
+        return db.rows(
+            "SELECT column_default FROM information_schema.columns WHERE "
+            f"table_schema = current_schema() AND table_name = '{table}' "
+            "AND column_name = 'id'"
+        )[0][0]
+
     round_trip(project, db)
     assert db.rows('SELECT "name" FROM "author"') == [("Ann",)]
     assert db.rows('SELECT "author_id", "tag_id" FROM "author_tags"') == [(1, 1)]
     assert db.rows('SELECT "title", "writer_id" FROM "book"') == [("Odes", 1)]
     assert "writer" not in db.tables()
+    if db.backend == "postgres":
+        assert key_default("author") == "nextval('author_id_seq'::regclass)"
     assert run("migrate", "down", "--yes", "--url", db.url) == 0
     assert db.rows('SELECT "name" FROM "writer"') == [("Ann",)]
     assert db.rows('SELECT "writer_id", "tag_id" FROM "writer_tags"') == [(1, 1)]
     assert db.rows('SELECT "title", "writer_id" FROM "book"') == [("Odes", 1)]
     assert "author" not in db.tables()
+    if db.backend == "postgres":
+        assert key_default("writer") == "nextval('writer_id_seq'::regclass)"
+
+
+WRITER_KEY = """
+class Writer(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    name: str
+"""
+
+AUTHOR_KEY = """
+class Author(Model):
+    __ferro_renamed_from__ = "writer"
+    author_id: Annotated[int | None, FerroField(primary_key=True, renamed_from="id")] = None
+    name: str
+"""
+
+
+def sequence_rename(table: str, column: str) -> str:
+    target = f"{table}_{column}_seq"
+    return (
+        f"DO $$ DECLARE seq regclass := pg_get_serial_sequence('\"{table}\"', "
+        f"'{column}')::regclass; BEGIN IF seq IS NOT NULL AND (SELECT relname FROM "
+        f"pg_class WHERE oid = seq) <> '{target}' THEN EXECUTE format('ALTER SEQUENCE "
+        f"%s RENAME TO %I', seq, '{target}'); END IF; END $$"
+    )
+
+
+@backend_matrix
+def test_a_table_and_its_serial_key_renamed_together_carry_the_sequence(
+    project, pkg, db
+):
+    """Right after ``ALTER TABLE … RENAME`` the key is still ``id``, so the
+    table's sequence rename names ``id``; the column rename then carries the
+    sequence to ``author_author_id_seq``, the name a fresh ``author`` gives
+    it. The down undoes both. SQLite's ``sqlite_sequence`` row follows the
+    table, so it renames only."""
+    start(project, pkg, db, WRITER_KEY)
+    db.execute('INSERT INTO "writer" ("name") VALUES (\'Ann\')')
+    write_models(project, pkg, AUTHOR_KEY)
+    new("rename_writer")
+
+    up = statements(schema_file(project, 2, "up", db.backend))
+    down = statements(schema_file(project, 2, "down", db.backend))
+    if db.backend == "postgres":
+        assert up == [
+            'ALTER TABLE "writer" RENAME TO "author"',
+            sequence_rename("author", "id"),
+            'ALTER TABLE "author" RENAME COLUMN "id" TO "author_id"',
+            sequence_rename("author", "author_id"),
+        ]
+        assert down == [
+            'ALTER TABLE "author" RENAME TO "writer"',
+            sequence_rename("writer", "author_id"),
+            'ALTER TABLE "writer" RENAME COLUMN "author_id" TO "id"',
+            sequence_rename("writer", "id"),
+        ]
+    else:
+        assert up == [
+            'ALTER TABLE "writer" RENAME TO "author"',
+            'ALTER TABLE "author" RENAME COLUMN "id" TO "author_id"',
+        ]
+
+    round_trip(project, db)
+    assert db.rows('SELECT "author_id", "name" FROM "author"') == [(1, "Ann")]
+    if db.backend == "postgres":
+        assert db.rows(
+            "SELECT column_default FROM information_schema.columns WHERE "
+            "table_schema = current_schema() AND table_name = 'author' "
+            "AND column_name = 'author_id'"
+        ) == [("nextval('author_author_id_seq'::regclass)",)]
 
 
 # -- hint lifetime ------------------------------------------------------------------

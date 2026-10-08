@@ -271,7 +271,9 @@ mod tests {
                 Execution::Native,
                 false,
             ),
-            // A2: a literal default fills existing rows.
+            // A2: a literal default fills existing rows. SQLite's
+            // `ADD COLUMN … NOT NULL DEFAULT` would keep the DEFAULT, which
+            // ferro never persists (ADR-0027): a rebuild copies the literal.
             (
                 defaulted("tier"),
                 false,
@@ -283,10 +285,10 @@ mod tests {
                 defaulted("tier"),
                 false,
                 Dialect::Sqlite,
-                Execution::Native,
+                Execution::Rebuild,
                 false,
             ),
-            // A required FK column with a default: no REFERENCES on SQLite.
+            // A required FK column with a default: a rebuild on SQLite too.
             (
                 SchemaColumn {
                     default: Some(serde_json::json!(1)),

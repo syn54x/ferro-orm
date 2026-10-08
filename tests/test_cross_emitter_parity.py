@@ -882,28 +882,6 @@ FINDINGS: dict[str, Finding] = {
         pins=frozenset({"g"}),
         dialects=frozenset({"sqlite"}),
     ),
-    "A2-required-column-with-a-literal-default": Finding(
-        reason=(
-            "pin (e), server defaults: SQLite has no ALTER COLUMN DROP DEFAULT, "
-            "so the backfill DEFAULT 'free' of `ADD COLUMN \"tier\" varchar NOT "
-            "NULL DEFAULT 'free'` stays in the migrated table; the auto-migrated "
-            "one, created with the column, holds none (ADR-0027)"
-        ),
-        raises=AssertionError,
-        pins=frozenset({"e-defaults"}),
-        dialects=frozenset({"sqlite"}),
-    ),
-    "B3-rename-a-model": Finding(
-        reason=(
-            'pin (e), server defaults: ALTER TABLE "writer" RENAME TO '
-            '"author" keeps the serial\'s sequence, so the migrated '
-            '"author"."id" defaults to nextval(\'writer_id_seq\') where the '
-            "auto-migrated one defaults to nextval('author_id_seq')"
-        ),
-        raises=AssertionError,
-        pins=frozenset({"e-defaults"}),
-        dialects=frozenset({"postgres"}),
-    ),
 }
 
 
@@ -1014,6 +992,7 @@ def test_a_plain_statement_is_its_own_twin():
 # generator writes so they cannot go stale.
 
 REBUILD_CASES = (
+    "A2-required-column-with-a-literal-default",
     "A2b-required-column-with-a-factory",
     "A3-required-column-without-a-default",
     "A4-drop-a-required-column",
@@ -1611,8 +1590,10 @@ def _run_statements(
 
 def _pass_declines(url: str) -> bool:
     """Whether the reconciliation pass, run for real, declines the change
-    and points at ``ferro migrate new``: it refuses so, or it warns so and
-    leaves the table as it is (ADR-0014's SQLite posture)."""
+    and points at ``ferro migrate new``: it refuses so, or it warns so
+    (ADR-0014's SQLite posture), having made only what SQLite can make in
+    place (a required column comes in nullable and backfilled, its
+    ``NOT NULL`` left to the rebuild the warning names)."""
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         try:

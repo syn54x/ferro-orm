@@ -347,6 +347,39 @@ def test_a7b_relaxing_not_null_rebuilds_and_its_down_fails_on_a_null(
 
 
 @sqlite_only
+def test_a2_a_required_column_with_a_literal_default_rebuilds_with_no_default(
+    project, pkg, db
+):
+    """SQLite's ``ADD COLUMN … NOT NULL DEFAULT 'free'`` would keep the
+    ``DEFAULT`` for good (no ``DROP DEFAULT``), where ferro persists none
+    (ADR-0027): the table is rebuilt with the column ``NOT NULL`` and
+    default-free, the literal copied into every row. The down drops the
+    plain column."""
+    start(project, pkg, db, AUTHOR)
+    db.execute("INSERT INTO author (name, status) VALUES ('ada', 'draft')")
+
+    number = generate(project, pkg, AUTHOR + '    tier: str = "free"\n', "tier")
+
+    up = step_file(project, number, "up", db.backend)
+    down = step_file(project, number, "down", db.backend)
+    assert up.read_text().startswith(REBUILD + "\n")
+    assert statements(up) == rebuild_of(
+        project,
+        number,
+        "author",
+        '("id", "name", "status", "tier") SELECT "id", "name", "status", \'free\'',
+    )
+    assert down.read_text() == 'ALTER TABLE "author" DROP COLUMN "tier";\n'
+    round_trip(project, db, number)
+    assert db.rows("SELECT name, tier FROM author") == [("ada", "free")]
+    tier = next(
+        row for row in db.rows('PRAGMA table_info("author")') if row[1] == "tier"
+    )
+    assert tier[3] == 1, "NOT NULL"
+    assert tier[4] is None, "no server default"
+
+
+@sqlite_only
 def test_a4_a_dropped_not_null_column_comes_back_by_a_rebuild(project, pkg, db, capsys):
     start(project, pkg, db, NICKNAME)
 
