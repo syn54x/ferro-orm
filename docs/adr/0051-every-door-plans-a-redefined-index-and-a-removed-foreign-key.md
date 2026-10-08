@@ -39,5 +39,7 @@ Each op is to be pinned on all three doors (the pass, `drift`, the bridge) and i
 ## Consequences
 
 - `staging::index_ops`, its `IndexOp` and the undo logic in `schema_shape` are to be deleted, and the generator's phase table is to assign the planner's index ops to index steps.
+
+  As built (2026-10-08, panel 2 F21): the generator's own index diff and `IndexOp` are gone. An index step runs one of the planner's `AddIndex`, `RedefineIndex` or `DropIndex` ops, and an index that rides an added column on an existing table becomes an `AddIndex` from the target's declaration. `stages::index_ops` keeps only the order: table by table, drops before builds. `schema_shape` still builds the stage before the index steps as the target with those ops undone, because every stage in `Stages` is built that way (see ADR-0050's as-built line).
 - A database brought up by the pass before this change, holding an old definition under a ferro-owned name, will get the redefinition on its next `migrate_updates` connect, and `drift` will report it until then.
 - The bridge's hand-written `DropForeignKey` inverse is to be replaced by the planner's op.
