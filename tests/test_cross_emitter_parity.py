@@ -1308,11 +1308,17 @@ def migrate_through(
     return migration
 
 
-async def _read_live(url: str, tables: set[str]) -> tuple[str, str]:
+async def _read_live(
+    url: str, declared: dict, extra: frozenset[str] = frozenset()
+) -> tuple[str, str]:
+    """The live read planned against ``declared``, with the live tables in
+    ``extra`` (the tables a change drops) beside it."""
     name = f"p538_{uuid.uuid4().hex}"
     await connect(url, name=name)
     try:
-        return await _core._live_schema_ir(name, json.dumps(sorted(tables)))
+        return await _core._live_schema_ir(
+            name, json.dumps(declared), json.dumps(sorted(extra))
+        )
     finally:
         await _core._disconnect(name)
 
@@ -1330,9 +1336,9 @@ def _canonical(value):
     return value
 
 
-def live_schema(url: str, tables: set[str]) -> dict:
+def live_schema(url: str, declared: dict, extra: frozenset[str] = frozenset()) -> dict:
     """The live schema and facts as the reconciliation pass reads them."""
-    live, facts = asyncio.run(_read_live(url, tables))
+    live, facts = asyncio.run(_read_live(url, declared, extra))
     return _canonical({"schema": json.loads(live), "facts": json.loads(facts)})
 
 
@@ -1421,7 +1427,7 @@ def test_pin_d_the_validate_step_is_the_pass_statement(
     assert _cli("migrate", "down", "--yes", "--to", "0002:01", "--url", db_url) == 0
     target = json.loads((migration / "ir.json").read_text())
 
-    live, facts = asyncio.run(_read_live(db_url, _tables(target)))
+    live, facts = asyncio.run(_read_live(db_url, target))
     plan = json.loads(
         _core._plan_from_ir(
             live, json.dumps(target), "postgres", DESTRUCTIVE, True, facts
@@ -1457,8 +1463,7 @@ def test_pin_e_a_migrated_database_is_the_auto_migrated_one(
     after = project.register(case.after)
     auto_migrate(second)
 
-    tables = _tables(after)
-    assert live_schema(db_url, tables) == live_schema(second, tables)
+    assert live_schema(db_url, after) == live_schema(second, after)
     _empty_autogenerate(second, postgres_base_url, second_schema)
     with pytest.raises(RuntimeError, match="tracked by ferro migrations"):
         autogenerate(db_url, postgres_base_url, db_schema_name)
@@ -1569,8 +1574,8 @@ def test_pin_f_the_bridge_revision_runs_the_pass_ddl(
             db.execute(seed)
     held = [db.rows(rows_of) for db in databases] if rows_of else None
     after = project.register(case.after)
-    tables = _tables(before) | _tables(after)
-    live, facts = asyncio.run(_read_live(db_url, tables))
+    dropped = frozenset(_tables(before))
+    live, facts = asyncio.run(_read_live(db_url, after, dropped))
     try:
         planned = _plan_live(live, after, db_backend, facts)
     except ValueError as refusal:
@@ -1600,4 +1605,4 @@ def test_pin_f_the_bridge_revision_runs_the_pass_ddl(
     _run_statements(
         second, db_backend, postgres_base_url, second_schema, statements_planned
     )
-    assert live_schema(db_url, tables) == live_schema(second, tables)
+    assert live_schema(db_url, after, dropped) == live_schema(second, after, dropped)

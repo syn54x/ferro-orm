@@ -210,20 +210,25 @@ pub async fn live_table_columns(
     })
 }
 
-/// The set of live table names in the connected schema — one query, taken by
-/// the create pass so it can leave every existing table to the reconciliation
-/// pass (ADR-0010) instead of leaning on `IF NOT EXISTS` per statement.
+/// The live tables of the connected schema, by name — the one answer to
+/// "which tables does this database hold" on every door (ADR-0047): the
+/// create pass leaves each to the reconciliation pass (ADR-0010), the live
+/// read covers them ([`crate::live_ir::tables_to_read`]) and the adoption
+/// refusal compares them against the first migration's snapshot. A live
+/// table is a base table: never a view, and never SQLite's own `sqlite_*`
+/// bookkeeping (`sqlite_sequence`, `sqlite_stat1`, …), which no model can own.
 pub async fn live_table_names(
     engine: &EngineHandle,
 ) -> PyResult<std::collections::HashSet<String>> {
     let (sql, context) = match engine.backend() {
         Dialect::Sqlite => (
-            "SELECT name FROM sqlite_master WHERE type = 'table'",
+            "SELECT name FROM sqlite_master WHERE type = 'table' \
+             AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'",
             "sqlite_master",
         ),
         Dialect::Postgres => (
             "SELECT table_name::text AS name FROM information_schema.tables \
-             WHERE table_schema = current_schema()",
+             WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'",
             "information_schema.tables",
         ),
     };
@@ -1173,21 +1178,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_table_names_lists_sqlite_tables() {
+    async fn live_table_names_lists_sqlite_base_tables_only() {
         let engine = memory_engine().await;
-        engine
-            .execute_sql("CREATE TABLE alpha (id integer)")
-            .await
-            .unwrap();
-        engine
-            .execute_sql("CREATE TABLE beta (id integer)")
-            .await
-            .unwrap();
+        for sql in [
+            "CREATE TABLE alpha (id integer)",
+            "CREATE TABLE beta (id integer PRIMARY KEY AUTOINCREMENT)",
+            "INSERT INTO beta DEFAULT VALUES",
+            "CREATE VIEW gamma AS SELECT id FROM alpha",
+        ] {
+            engine.execute_sql(sql).await.unwrap();
+        }
 
-        let names = live_table_names(&engine).await.unwrap();
-        assert!(names.contains("alpha"));
-        assert!(names.contains("beta"));
-        assert!(!names.contains("gamma"));
+        let mut names: Vec<String> = live_table_names(&engine)
+            .await
+            .unwrap()
+            .into_iter()
+            .collect();
+        names.sort();
+        // Never the view, never SQLite's own `sqlite_sequence`.
+        assert_eq!(names, ["alpha", "beta"]);
     }
 
     #[tokio::test]

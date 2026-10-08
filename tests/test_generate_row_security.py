@@ -149,15 +149,16 @@ def reconcile(project: Path, db) -> list[str]:
 
     async def read() -> list[str]:
         name = f"rls_live_{uuid.uuid4().hex}"
+        declared = json.dumps(snapshot(project, 2))
         await ferro.connect(db.url, name=name)
         try:
-            live, facts = await _core._live_schema_ir(name, json.dumps([TABLE]))
+            live, facts = await _core._live_schema_ir(name, declared)
         finally:
             await _core._disconnect(name)
         plan = json.loads(
             _core._plan_from_ir(
                 live,
-                json.dumps(snapshot(project, 2)),
+                declared,
                 "postgres",
                 '{"destructive": true}',
                 True,

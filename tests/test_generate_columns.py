@@ -84,7 +84,7 @@ def pass_statements(db, target: dict, parent: dict) -> list[str]:
         await ferro.connect(db.url, name=name)
         try:
             live, facts = await _core._live_schema_ir(
-                name, json.dumps(sorted(tables_of(parent) | tables_of(target)))
+                name, json.dumps(target), json.dumps(sorted(tables_of(parent)))
             )
         finally:
             await _core._disconnect(name)
