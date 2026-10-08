@@ -546,6 +546,11 @@ pub struct GenerateOptions {
     /// there is none.
     #[serde(default)]
     pub sql_step: Option<String>,
+    /// `--data-only`: the migration is the `--data-step` alone, with no
+    /// schema plan, whatever the models changed; its snapshot is the
+    /// parent's, linked to it (ADR-0037).
+    #[serde(default)]
+    pub data_only: bool,
 }
 
 impl GenerateOptions {
@@ -576,13 +581,19 @@ impl GenerateOptions {
 }
 
 /// [`generate`] with `options`: a `--no-backfill` column's backfill is its
-/// model's guard step.
+/// model's guard step, and the steps a person asks for (`--sql-step`,
+/// `--data-step`) are laid out here whether or not the models changed. A
+/// migration made only of such steps stores the target snapshot; with
+/// `--data-only` the target is the parent (no schema plan). `Ok(None)` only
+/// when the models change nothing and no step is asked for.
 ///
 /// # Errors
-/// What [`generate`] raises, and [`GenerateError::NoBackfill`] for a
+/// What [`generate`] raises, [`GenerateError::NoBackfill`] for a
 /// `--no-backfill` the migration cannot honour (malformed, naming a column
 /// nothing backfills, or only some of a model's columns, or given when the
-/// models change nothing).
+/// models change nothing, or beside `--data-only`), and
+/// [`GenerateError::DataStep`] for a `--data-step` model the snapshot lacks
+/// or a `--data-only` without exactly one `--data-step`.
 pub fn generate_with(
     parent: Option<&Snapshot>,
     target: &IrEnvelope<SchemaIrPayload>,
@@ -593,6 +604,25 @@ pub fn generate_with(
     if dialects.is_empty() {
         return Err(GenerateError::NoDialects);
     }
+    if options.data_only && !skipped.is_empty() {
+        return Err(GenerateError::NoBackfill(
+            "--no-backfill replaces a generated backfill, and --data-only generates none; \
+             drop one of them"
+                .to_string(),
+        ));
+    }
+    if options.data_only && (options.data_step.is_none() || options.sql_step.is_some()) {
+        return Err(GenerateError::DataStep(
+            "--data-only writes one data step and nothing else; name its model with \
+             --data-step <Model> (and drop --sql-step)"
+                .to_string(),
+        ));
+    }
+    let empty = empty_modelset(target);
+    let parent_ir = parent.map(|snapshot| &snapshot.ir).unwrap_or(&empty);
+    // `--data-only` plans nothing: the migration leads from the parent to
+    // the parent.
+    let target = if options.data_only { parent_ir } else { target };
     let hand = options
         .data_step
         .as_deref()
@@ -606,8 +636,6 @@ pub fn generate_with(
         data: None,
         hand_model: None,
     });
-    let empty = empty_modelset(target);
-    let parent_ir = parent.map(|snapshot| &snapshot.ir).unwrap_or(&empty);
     // Declared renames (ADR-0032): the planner puts them first; every other
     // op reads its table from `before`, the parent as the renames leave it.
     // A refused hint stops `new` here, before anything is written.
@@ -1085,6 +1113,59 @@ mod tests {
         edited.columns[1].default = Some(serde_json::json!("anonymous"));
         edited.model_name = "myapp.renamed_module.Author".into();
         assert_eq!(generate(Some(&parent), &ir(vec![edited]), &BOTH), Ok(None));
+    }
+
+    #[test]
+    fn hand_steps_alone_are_laid_out_here_and_store_the_target_snapshot() {
+        // The models change nothing that renders DDL, but they did change:
+        // the migration's snapshot is the target (the glossary's "declared
+        // modelset as it was when a migration was generated").
+        let parent = snapshot_of(&ir(vec![author()]), None);
+        let mut edited = author();
+        edited.columns[1].default = Some(serde_json::json!("anonymous"));
+        let target = ir(vec![edited]);
+        let sql = GenerateOptions {
+            sql_step: Some("audit".into()),
+            ..GenerateOptions::default()
+        };
+        let migration = generate_with(Some(&parent), &target, &BOTH, &sql)
+            .expect("ok")
+            .expect("a migration");
+        assert_eq!(step_names(&migration), ["01_audit"]);
+        assert_eq!(migration.steps[0].kind, StepKind::PortableSql);
+        assert_eq!(migration.snapshot.ir, target);
+        assert_eq!(migration.snapshot.parent_checksum, Some(parent.checksum));
+        assert_eq!(
+            migration.snapshot_json.as_bytes(),
+            Snapshot::store(&target, Some(parent.checksum))
+                .expect("store")
+                .as_slice()
+        );
+        assert_eq!(migration.summary, "");
+        // With a data step too, the SQL step goes right before it.
+        let both = GenerateOptions {
+            data_step: Some("Author".into()),
+            ..sql.clone()
+        };
+        let migration = generate_with(Some(&parent), &target, &BOTH, &both)
+            .expect("ok")
+            .expect("a migration");
+        assert_eq!(step_names(&migration), ["01_audit", "02_backfill_author"]);
+        assert_eq!(migration.steps[1].hand_model.as_deref(), Some("Author"));
+        // `--data-only` is the same path with no schema plan: whatever the
+        // models changed, its snapshot is the parent's, linked to it.
+        let changed = ir(vec![with_columns(vec![column("slug", "string")])]);
+        let data_only = GenerateOptions {
+            data_step: Some("Author".into()),
+            data_only: true,
+            ..GenerateOptions::default()
+        };
+        let migration = generate_with(Some(&parent), &changed, &BOTH, &data_only)
+            .expect("ok")
+            .expect("a migration");
+        assert_eq!(step_names(&migration), ["01_backfill_author"]);
+        assert_eq!(migration.snapshot.ir, parent.ir);
+        assert_eq!(migration.snapshot.parent_checksum, Some(parent.checksum));
     }
 
     /// What the reconciliation pass executes to turn `before` into `after`
