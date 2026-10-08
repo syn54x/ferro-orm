@@ -15,7 +15,7 @@ default (postgres) · public._ferro_migrations
 
 A fully applied or fully pending migration is one line; its steps expand
 where something needs attention, or everywhere with ``--steps``. Every state
-is decided in the Rust core (``_core._run_status``); this module names and
+is decided in the Rust core (the tracked database's ``status()``); this module names and
 prints them (a chunked step's ``rows_done`` comes from its record), and is
 the one place that reads them into where the database stands: its last
 fully applied migration, the one a run left unfinished, and whether
@@ -50,7 +50,9 @@ class RunRefused(MigrationRefused):
     ``"edited_applied"``, ``"edited_chunked"``, ...), ``migration`` and
     ``step`` (numbers, when it names them) and ``reason`` (an irreversible
     step's declared reason). Each is ``None`` for a refusal that is not the
-    planner's (a lost lock, a missing schema).
+    planner's (a lost lock, a missing schema). ``ahead_only`` is true when
+    the database holds migrations the directory lacks and ``allow_ahead``
+    alone would have let the run through.
     """
 
     def __init__(
@@ -61,12 +63,14 @@ class RunRefused(MigrationRefused):
         migration: int | None = None,
         step: int | None = None,
         reason: str | None = None,
+        ahead_only: bool = False,
     ) -> None:
         super().__init__(message)
         self.kind = kind
         self.migration = migration
         self.step = step
         self.reason = reason
+        self.ahead_only = ahead_only
 
 
 @dataclass(frozen=True)
@@ -321,10 +325,9 @@ class StatusReport:
         refusal: str | None = None,
         rows_done: dict[tuple[int, int], int] | None = None,
     ) -> StatusReport:
-        """Build the report from ``_core._run_status``'s document; ``refusal``
-        (the newer-format text) replaces the planner's when given;
-        ``rows_done`` holds each chunked step's committed rows by
-        ``(migration, step)``."""
+        """Build the report from the tracked database's ``status()``
+        document; ``refusal`` replaces its refusal when given; ``rows_done``
+        holds each chunked step's committed rows by ``(migration, step)``."""
         rows_done = rows_done or {}
         migrations = [
             MigrationStatus(

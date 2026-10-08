@@ -23,8 +23,8 @@ edited query pages over the same order keys the cursor was committed
 under; ``--restart`` clears the cursor and ``rows_done`` so the next ``up``
 starts from the first row.
 
-The Rust core decides (``_core._rerecord_plan``: which record, which
-refusal) and writes (``_core._rerecord``: one statement under the run
+The Rust core decides (the locked run's ``plan_rerecord``: which record,
+which refusal) and writes (its ``rerecord``: one statement under the run
 lock); this module sequences the two and reads the facts only Python can:
 a data step's declared kind and an edited chunked query's order keys.
 ``rerecord`` is a CLI verb and an in-process call for the CLI, never part
@@ -33,12 +33,10 @@ of the application API (ADR-0045).
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from .. import _core
 from ..settings import SettingsError
 from . import runner
 from .errors import MigrationRefused
@@ -46,6 +44,7 @@ from .report import RunRefused
 from .steps import declared_up_kind
 
 if TYPE_CHECKING:
+    from .._core import LockedDatabase
     from ..settings import DatabaseSettings, FerroSettings
 
 __all__ = ["RerecordReport", "rerecord"]
@@ -115,55 +114,29 @@ async def rerecord(
         raise SettingsError(f"rerecord mode {mode!r} is not one of {', '.join(_MODES)}")
     timeout = runner.parse_lock_timeout(lock_timeout)
     async with runner._connection(database, using, url) as name:
-        dialect = runner.connection_dialect(name, database)
-        tracking = runner.tracking_schema_for(database, dialect)
-        handle = await _core._acquire_run_lock(name, None, timeout, runner._say_waiting)
-        try:
-            return await _rerecord(
-                name, database, dialect, tracking, handle, target, mode
-            )
-        finally:
-            await _core._release_run_lock(handle)
+        tracked = await runner.open_tracked(name, database)
+        async with tracked.locked(timeout, runner.say_waiting) as run:
+            return await _rerecord(run, target, mode)
 
 
-async def _rerecord(
-    name: str,
-    database: DatabaseSettings,
-    dialect: str,
-    tracking: str | None,
-    handle: int,
-    target: str,
-    mode: Mode,
-) -> RerecordReport:
-    state = json.loads(await _core._read_records(name, tracking))
-    if state["refusal"] is not None:
-        raise RunRefused(state["refusal"])
-    records = state["records"]
+async def _rerecord(run: LockedDatabase, target: str, mode: Mode) -> RerecordReport:
     try:
-        keys = runner.order_keys_on_disk(database.directory, records)
+        keys = runner.order_keys_on_disk(run)
     except MigrationRefused as refused:
         raise RunRefused(f"{refused}. Nothing was changed.") from None
-    action = json.loads(
-        _core._rerecord_plan(
-            str(database.directory),
-            json.dumps(records),
-            target,
-            mode,
-            dialect,
-            keys,
-        )
-    )
-    if action["data"]:
+    action = run.plan_rerecord(target, mode, keys)
+    kind = None
+    if action.data:
         # A data step's record holds the shape its up declares, read from the
         # file's syntax tree as baseline reads it (the file is never run).
         try:
-            action["kind"] = declared_up_kind(Path(action["path"]))
+            kind = declared_up_kind(Path(action.path))
         except MigrationRefused as refused:
             raise RunRefused(f"{refused}. Nothing was changed.") from None
-    await _core._rerecord(name, json.dumps(action), tracking, handle)
+    await run.rerecord(action, kind)
     return RerecordReport(
-        file=f"{action['migration_name']}/{action['file']}",
-        old_checksum=action["old_checksum"],
-        new_checksum=action["new_checksum"],
+        file=f"{action.migration_name}/{action.file}",
+        old_checksum=action.old_checksum,
+        new_checksum=action.new_checksum,
         mode=mode,
     )

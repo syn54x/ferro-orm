@@ -337,34 +337,27 @@ async def against(
 async def _audit(name: str, database: DatabaseSettings) -> DriftReport:
     """Drift on open connection ``name``: refuses, or plans the live database
     against the last applied snapshot."""
-    dialect = runner.connection_dialect(name, database)
-    tracking = runner.tracking_schema_for(database, dialect)
-    state = json.loads(await _core._read_records(name, tracking))
-    if state["refusal"] is not None:
-        return _refused(state["refusal"])
-    if not state["records"]:
+    tracked = await runner.open_tracked(name, database)
+    if tracked.refusal is not None:
+        return _refused(tracked.refusal)
+    if not tracked.records:
         return _refused(
             "ferro migrate drift: this database has no migration records, so "
             "there is no applied snapshot to compare it with. Run `ferro migrate "
             "baseline` to record a schema it already has, or `ferro migrate up` "
             "to build it."
         )
-    held = await _core._run_lock_is_held(name, None)
-    directory = str(database.directory)
+    held = await tracked.lock_held()
     try:
-        status = StatusReport.from_core(
-            json.loads(
-                _core._run_status(
-                    directory, json.dumps(state["records"]), dialect, held
-                )
-            ),
-            database=database.name,
-            dialect=dialect,
-            table=state["table"],
-        )
-        contents = json.loads(_core._read_migrations_dir(directory))
-    except (ValueError, RunRefused) as err:
+        contents = tracked.migrations
+    except RunRefused as err:
         raise MigrationRefused(str(err)) from None
+    status = StatusReport.from_core(
+        tracked.status(lock_held=held),
+        database=database.name,
+        dialect=tracked.dialect,
+        table=tracked.tracking_table,
+    )
     mid_run = _mid_run(status) or (
         "a migration run holds the run lock" if held else None
     )

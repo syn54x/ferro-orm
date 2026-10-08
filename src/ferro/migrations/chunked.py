@@ -50,20 +50,20 @@ from __future__ import annotations
 import enum
 import json
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import TypeAdapter
 
-from .. import _core
 from .._bind_payload import canonicalize_wire_scalar
 from ..models import transaction
 from ..state import resolve_operation_scope
+from .report import RunRefused
 from .steps import Chunked, StepRefused
 
 if TYPE_CHECKING:
+    from .._core import LockedDatabase, StepHandle
     from ..query import Query
     from ..raw import Transaction
     from .context import StepContext
@@ -207,50 +207,46 @@ def _order_key_types(query: Query[Any]) -> tuple[Any, ...]:
 # -- the loop ----------------------------------------------------------------------
 
 
-def _now() -> str:
-    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-
-
 async def run_chunked(
     ctx_factory: Callable[[Transaction], StepContext],
     declared: Declared,
-    record: dict[str, Any],
+    run: LockedDatabase,
+    step: StepHandle,
     *,
     direction: Literal["up", "down"],
     using: str | None = None,
-    tracking_schema: str | None = None,
-    verify_lock: Callable[[], Awaitable[Any]] | None = None,
 ) -> ChunkOutcome:
     """Run ``declared`` (a ``@chunked`` step function) to its last batch.
 
     ``ctx_factory(tx)`` is the step's context on one batch's transaction;
-    ``record`` is the step's record as it stands (going up, the started
-    record the runner wrote before the step runs, carrying the cursor of an
-    earlier attempt; going down, the standing record). Batches run on
-    connection ``using``; ``verify_lock`` is awaited before each one
-    (ADR-0029), and what it raises propagates untouched.
+    ``step`` is the step's handle on the locked ``run``, which carries the
+    cursor an earlier attempt committed (``step.resume_cursor``: going up the
+    started record's, going down a reverting record's). Batches run on
+    connection ``using``. Each batch's record moves through the run's
+    transitions inside the batch's transaction, each verifying the run lock
+    first (ADR-0029 as amended): a lost lock commits nothing and propagates
+    untouched.
 
-    Going up the cursor is ``resume_cursor`` and the last batch writes the
-    finished record; going down it is ``revert_cursor`` with the record
-    marked ``reverting``, and the last batch removes the record. Each batch
-    is ``transaction(immediate=True)``: on SQLite a ``BEGIN IMMEDIATE`` that
-    holds the write lock before the batch reads, so its read-then-write
-    cannot fail upgrading into ``SQLITE_BUSY`` (ADR-0024); on Postgres a
-    plain ``BEGIN``.
+    Going up a batch advances ``resume_cursor`` (``run.advance``) and the
+    last batch writes the finished record (``run.finish``); going down a
+    batch advances ``revert_cursor`` with the record marked ``reverting``
+    (``run.advance_revert``), and the last batch removes the record
+    (``run.remove``). Each batch is ``transaction(immediate=True)``: on
+    SQLite a ``BEGIN IMMEDIATE`` that holds the write lock before the batch
+    reads, so its read-then-write cannot fail upgrading into
+    ``SQLITE_BUSY`` (ADR-0024); on Postgres a plain ``BEGIN``.
 
     Raises:
         BatchFailed: a batch raised; it rolled back, and what the record
             holds is on the exception.
+        RunRefused: the run lock was lost; the batch rolled back.
     """
     shape = declared.shape
     if not isinstance(shape, Chunked):
         raise TypeError(f"run_chunked runs a @chunked step, not @{shape.kind}")
     down = direction == "down"
-    migration, step = record["migration"], record["step"]
-    stored = record["revert_cursor"] if down else record["resume_cursor"]
-    if down and not record["reverting"]:
-        stored = None
-    committed = not down or bool(record["reverting"])
+    stored = step.resume_cursor
+    committed = not down or bool((step.standing or {}).get("reverting"))
     cursor: str | None = stored
     rows_done = 0
     keys: tuple[Any, ...] | None = None
@@ -258,8 +254,6 @@ async def run_chunked(
     clock = time.monotonic()
 
     while True:
-        if verify_lock is not None:
-            await verify_lock()
         try:
             async with transaction(using=using, immediate=True) as tx:
                 route = resolve_operation_scope(using=None, session=None)
@@ -279,31 +273,21 @@ async def run_chunked(
                     cursor = encode_cursor(keys, rows_done, order_by=order_by)
                 last = len(batch) < shape.batch_size
                 if last and down:
-                    await _core._remove_record(route, migration, step, tracking_schema)
+                    await run.remove(step, route)
                 elif last:
-                    finished = {
-                        **record,
-                        "finished_at": _now(),
-                        "failed_at": None,
-                        "error": None,
-                        "resume_cursor": cursor,
-                        "rows_done": rows_done,
-                        "duration_ms": int((time.monotonic() - clock) * 1000),
-                    }
-                    await _core._write_record(
-                        using, json.dumps(finished), tracking_schema, route
-                    )
-                else:
-                    await _core._write_cursor(
-                        using,
-                        migration,
+                    await run.finish(
                         step,
-                        cursor,
-                        rows_done,
-                        down,
-                        tracking_schema,
+                        int((time.monotonic() - clock) * 1000),
                         route,
+                        cursor=cursor,
+                        rows_done=rows_done,
                     )
+                elif down:
+                    await run.advance_revert(step, cursor, rows_done, route)
+                else:
+                    await run.advance(step, cursor, rows_done, route)
+        except RunRefused:
+            raise
         except Exception as err:
             raise BatchFailed(
                 err,

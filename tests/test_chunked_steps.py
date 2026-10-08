@@ -37,7 +37,9 @@ from typing import Any
 
 import pytest
 
+import ferro
 from ferro.migrations import runner
+from ferro.migrations.report import RunRefused
 from ferro.migrations.chunked import decode_cursor, encode_cursor
 from ferro.settings import FerroSettings
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
@@ -280,6 +282,45 @@ def test_zero_matching_rows_is_one_empty_pass_and_a_finished_record(project, pkg
     assert final["finished_at"] is not None
     assert final["rows_done"] == 0
     assert final["resume_cursor"] is None
+
+
+def test_a_lock_lost_mid_batch_rolls_that_batch_back_and_keeps_the_cursor(
+    project, pkg, db
+):
+    """Each batch's cursor is written inside the batch's transaction once
+    the lock is verified there (ADR-0029 as amended): a lock lost while
+    batch 2 runs rolls batch 2 back, batch 1's 1,000 rows stay done, and the
+    run stops as a lost lock."""
+    if db.backend != "postgres":
+        pytest.skip("only a Postgres lock lives on a connection that can drop")
+    probe = project_with_authors(project, pkg, db)
+
+    async def scenario() -> runner.RunReport:
+        probe.reset()
+        probe.pause_on = ("up", 2)
+        await ferro.connect(db.url, name="walker")
+        tracked = await runner.open_tracked("walker", FerroSettings().database())
+        async with tracked.locked(5.0) as run:
+            plan = await run.plan({"direction": "up"})
+            task = asyncio.create_task(runner._walk(run, plan, None, using="walker"))
+            await paused_at(probe, task)
+            await run._close_lock_connection_for_test()
+            probe.release.set()
+            return await task
+
+    report = asyncio.run(scenario())
+
+    assert report.refused is not None and isinstance(report.refused, RunRefused)
+    assert "the run lock was lost" in (report.refusal or "")
+    assert slugged(db) == 1000, "batch 1 committed, batch 2 rolled back"
+    stands = record(db)
+    assert stands["finished_at"] is None and stands["failed_at"] is None
+    assert stands["rows_done"] == 1000
+    assert stands["resume_cursor"] == {
+        "keys": [1000],
+        "order_by": ["author.id"],
+        "rows_done": 1000,
+    }
 
 
 # -- failure and resume ---------------------------------------------------------------

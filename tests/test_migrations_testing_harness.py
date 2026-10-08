@@ -28,7 +28,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import importlib
-import json
 import re
 from pathlib import Path
 
@@ -41,7 +40,7 @@ from ferro.migrations import runner
 from ferro.migrations.errors import MigrationRefused
 from ferro.migrations.testing import Harness, RoundTripResult, harness
 from ferro.registry import SwappedOutModelError
-from ferro.settings import FerroSettings, SettingsError
+from ferro.settings import FerroSettings
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     pkg,
     project,
@@ -164,8 +163,8 @@ def migrations_settings(chain) -> FerroSettings:
     return FerroSettings()
 
 
-async def tracking_exists() -> bool:
-    return json.loads(await _core._read_records(None, None))["exists"]
+def tracking_exists(db) -> bool:
+    return "_ferro_migrations" in db.tables()
 
 
 def applied(db) -> list[tuple[int, int]]:
@@ -294,8 +293,12 @@ async def test_runner_up_through_refuses_a_migration_the_directory_lacks_and_a_s
         f"Nothing was applied."
     )
     assert report.applied == []
-    with pytest.raises(SettingsError, match="0007:02"):
-        await runner.up(settings, database, through="0002:01")
+    step = await runner.up(
+        settings, database, using=_core._default_connection_name(), through="0002:01"
+    )
+    assert step.refusal is not None and "0007:02" in step.refusal
+    assert step.refused is not None and step.refused.kind == "not_a_migration"
+    assert step.applied == []
 
 
 async def test_runner_up_through_below_the_head_applies_and_reverts_nothing(
@@ -346,7 +349,7 @@ async def test_apply_on_an_empty_database_refuses_a_migration_with_a_parent(conn
     with pytest.raises(MigrationRefused, match="0001_create_author"):
         await harness().apply("0002")
 
-    assert not await tracking_exists()
+    assert not tracking_exists(connected)
 
 
 async def test_an_unknown_migration_is_refused_naming_the_chain(connected):
@@ -373,7 +376,7 @@ async def test_revert_all_on_an_empty_database_is_a_no_op_creating_nothing(conne
     report = await h.revert_all()
 
     assert report.reverted == [] and report.refusal is None
-    assert not await tracking_exists()
+    assert not tracking_exists(connected)
 
 
 async def test_revert_all_reverts_everything(connected):
@@ -394,18 +397,23 @@ async def test_the_harness_creates_no_tracking_tables_until_it_mutates(connected
     with pytest.raises(MigrationRefused):
         await h.apply("0003")
 
-    assert not await tracking_exists()
+    assert not tracking_exists(connected)
 
     await h.apply("0001")
 
-    assert await tracking_exists()
+    assert tracking_exists(connected)
+
+
+async def tracked_on(url: str, name: str):
+    """The project's database opened on a connection of its own."""
+    await ferro.connect(url, name=name)
+    return await runner.open_tracked(name, FerroSettings().database())
 
 
 async def probe_lock(url: str) -> bool:
     """Whether a run holds the lock, asked on a connection of its own."""
-    await ferro.connect(url, name="hrn_probe")
     try:
-        return await _core._run_lock_is_held("hrn_probe")
+        return await (await tracked_on(url, "hrn_probe")).lock_held()
     finally:
         await _core._disconnect("hrn_probe")
 
@@ -418,14 +426,14 @@ async def test_only_the_mutating_verbs_take_the_run_lock(connected, monkeypatch)
         await h.apply("0003")
     assert await probe_lock(connected.url) is False
 
-    execute = runner._execute_sql_step
+    walk = runner._walk
     seen: list[bool] = []
 
-    async def observed(*args):
+    async def observed(*args, **kwargs):
         seen.append(await asyncio.create_task(probe_lock(connected.url)))
-        return await execute(*args)
+        return await walk(*args, **kwargs)
 
-    monkeypatch.setattr(runner, "_execute_sql_step", observed)
+    monkeypatch.setattr(runner, "_walk", observed)
     await h.apply_through("0002")
 
     assert seen and all(seen)
@@ -433,16 +441,15 @@ async def test_only_the_mutating_verbs_take_the_run_lock(connected, monkeypatch)
 
 
 async def test_the_read_only_path_never_waits_on_a_held_lock(connected):
-    await ferro.connect(connected.url, name="hrn_holder")
-    handle = await _core._acquire_run_lock("hrn_holder", None, 0.0, print)
+    tracked = await tracked_on(connected.url, "hrn_holder")
     try:
-        h = harness()
-        async with h.models_at("0002") as models:
-            assert models.rev == "0002_index_name"
-        with pytest.raises(MigrationRefused, match="another migration run holds"):
-            await h.apply("0002")
+        async with tracked.locked(0.0, print):
+            h = harness()
+            async with h.models_at("0002") as models:
+                assert models.rev == "0002_index_name"
+            with pytest.raises(MigrationRefused, match="another migration run holds"):
+                await h.apply("0002")
     finally:
-        await _core._release_run_lock(handle)
         await _core._disconnect("hrn_holder")
 
 

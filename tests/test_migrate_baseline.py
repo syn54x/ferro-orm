@@ -418,37 +418,31 @@ def test_down_below_a_baseline_is_refused_naming_it(project, pkg, db, capsys):
 
 def test_baseline_holds_the_run_lock_while_it_writes(project, pkg, db, monkeypatch):
     auto_migrated(project, pkg, db)
-    write = _core._write_baseline_records
+    against = baseline_module.against
     seen: list[bool] = []
 
-    async def observed(using, records_json, tracking_schema=None, lock=None):
+    async def observed(*args, **kwargs):
         # Asked from a second task, on its own connection, while baseline
-        # is about to write.
-        async def probe() -> bool:
-            await ferro.connect(db.url, name="probe")
-            try:
-                return await _core._run_lock_is_held("probe")
-            finally:
-                await _core._disconnect("probe")
+        # checks the database and is about to write.
+        seen.append(await asyncio.create_task(_probe(db.url, "probe")))
+        return await against(*args, **kwargs)
 
-        seen.append(await asyncio.create_task(probe()))
-        return await write(using, records_json, tracking_schema, lock)
-
-    monkeypatch.setattr(_core, "_write_baseline_records", observed)
+    monkeypatch.setattr(baseline_module, "against", observed)
 
     report = asyncio.run(baseline(url=db.url))
 
     assert report.recorded == ["0001_create_author", "0002_add_teams"]
     assert seen == [True]
-    assert asyncio.run(_probe_released(db.url)) is False
+    assert asyncio.run(_probe(db.url, "after")) is False
 
 
-async def _probe_released(url: str) -> bool:
-    await ferro.connect(url, name="after")
+async def _probe(url: str, name: str) -> bool:
+    """Whether a run holds the run lock, asked on a connection of its own."""
+    await ferro.connect(url, name=name)
     try:
-        return await _core._run_lock_is_held("after")
+        return await (await _core._open_tracked(name, None, "migrations")).lock_held()
     finally:
-        await _core._disconnect("after")
+        await _core._disconnect(name)
 
 
 def test_the_module_and_its_function_are_both_reachable():

@@ -2,9 +2,10 @@
 """The run lock (#519, ADR-0029): one run at a time, and it dies with the process.
 
 On Postgres it is a session advisory lock on a dedicated connection, verified
-after acquiring and before every step; on SQLite an OS file lock on
-``<database>.ferro-migrate.lock``. A second run says at once that it is
-waiting, waits up to ``lock_timeout``, then re-reads the records.
+after acquiring and by every write of the locked run (ADR-0048); on SQLite an
+OS file lock on ``<database>.ferro-migrate.lock``. A second run says at once
+that it is waiting, waits up to ``lock_timeout``, then re-reads the records.
+A holder here is the run object itself: ``tracked.locked(...)``.
 """
 
 from __future__ import annotations
@@ -14,7 +15,6 @@ import asyncio
 import pytest
 
 import ferro
-from ferro import _core
 from ferro.migrations import runner
 from ferro.migrations.report import RunRefused
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
@@ -27,6 +27,7 @@ from tests.test_migrate_new import (  # noqa: F401 - fixtures
 from tests.test_migrate_up import (  # noqa: F401 - fixtures
     configure,
     db,
+    migrations,
     new,
     settings_and_database,
     sql_step,
@@ -53,33 +54,28 @@ def _project(project, pkg, db, *steps: str):
     return settings_and_database()
 
 
-async def _hold(db) -> int:
-    """Take the run lock from the test, as another run would."""
-    await ferro.connect(db.url, name="holder")
-    return await _core._acquire_run_lock("holder", None, 5.0)
+async def _tracked(db, database, name: str = "holder"):
+    """``database`` opened on a connection of the test's own, as another
+    run would open it."""
+    await ferro.connect(db.url, name=name)
+    return await runner.open_tracked(name, database)
 
 
 async def test_a_second_run_waits_says_so_and_applies_nothing_after_the_first(
-    project, pkg, db, capsys, monkeypatch
+    project, pkg, db, capsys
 ):
     settings, database = _project(project, pkg, db)
-    real = runner._execute_sql_step
+    tracked = await _tracked(db, database)
+    async with tracked.locked(5.0) as first:
+        second = asyncio.create_task(runner.up(settings, database, url=db.url))
+        await asyncio.sleep(0.7)
+        assert WAITING in capsys.readouterr().err
+        assert not second.done()
+        plan = await first.plan({"direction": "up"})
+        outcomes = [await first.execute(step) for step in plan.steps]
+    done_second = await second
 
-    async def slow(*args, **kwargs):
-        await asyncio.sleep(1.5)
-        return await real(*args, **kwargs)
-
-    monkeypatch.setattr(runner, "_execute_sql_step", slow)
-    first = asyncio.create_task(runner.up(settings, database, url=db.url))
-    await asyncio.sleep(0.3)
-    second = asyncio.create_task(runner.up(settings, database, url=db.url))
-    await asyncio.sleep(0.7)
-
-    assert WAITING in capsys.readouterr().err
-    assert not second.done()
-    done_first, done_second = await asyncio.gather(first, second)
-
-    assert done_first.refusal is None and len(done_first.applied) == 1
+    assert [outcome["ok"] for outcome in outcomes] == [True]
     assert done_second.refusal is None and done_second.applied == []
 
 
@@ -87,76 +83,111 @@ async def test_a_lock_timeout_gives_up_naming_it_and_leaves_the_holder_alone(
     project, pkg, db, capsys
 ):
     settings, database = _project(project, pkg, db)
-    handle = await _hold(db)
-    try:
+    tracked = await _tracked(db, database)
+    async with tracked.locked(5.0):
         report = await runner.up(settings, database, url=db.url, lock_timeout="1s")
 
         assert report.refusal is not None
         assert "lock timeout (1s)" in report.refusal
         assert report.applied == []
         assert WAITING in capsys.readouterr().err
-        assert await _core._run_lock_is_held("holder", None)
-    finally:
-        await _core._release_run_lock(handle)
-    assert not await _core._run_lock_is_held("holder", None)
+        assert await tracked.lock_held()
+    assert not await tracked.lock_held()
 
 
 async def test_status_shows_running_while_a_run_holds_the_lock(project, pkg, db):
     settings, database = _project(project, pkg, db, "second")
-    handle = await _hold(db)
-    try:
+    tracked = await _tracked(db, database)
+    async with tracked.locked(5.0):
         report = await runner.status(settings, database, url=db.url)
-    finally:
-        await _core._release_run_lock(handle)
 
     assert [m.state for m in report.migrations] == ["running", "pending"]
     assert "  01_schema.up." in report.render(steps=False)
     assert report.exit_code == 3
 
 
-async def test_a_lock_connection_lost_between_steps_stops_the_run(
-    project, pkg, db, monkeypatch
-):
+async def test_a_lock_connection_lost_between_steps_stops_the_run(project, pkg, db):
     if db.backend != "postgres":
         pytest.skip("only a Postgres lock lives on a connection that can drop")
-    settings, database = _project(project, pkg, db, "second")
-    handles: list[int] = []
-    acquire = runner._acquire_run_lock
-    execute = runner._execute_sql_step
+    _, database = _project(project, pkg, db, "second")
+    tracked = await _tracked(db, database)
+    async with tracked.locked(5.0) as run:
+        first, second = (await run.plan({"direction": "up"})).steps
+        assert (await run.execute(first))["ok"]
+        await run._close_lock_connection_for_test()
+        with pytest.raises(RunRefused, match="the run lock was lost"):
+            await run.execute(second)
 
-    async def capture(*args, **kwargs):
-        handle = await acquire(*args, **kwargs)
-        handles.append(handle)
-        return handle
-
-    async def after_first(*args, **kwargs):
-        outcome = await execute(*args, **kwargs)
-        await _core._close_run_lock_connection_for_test(handles[0])
-        return outcome
-
-    monkeypatch.setattr(runner, "_acquire_run_lock", capture)
-    monkeypatch.setattr(runner, "_execute_sql_step", after_first)
-
-    report = await runner.up(settings, database, url=db.url)
-
-    assert [a.migration for a in report.applied] == ["0001_create_author"]
-    assert report.refusal is not None
-    assert "the run lock was lost" in report.refusal
+    assert "author" in db.tables()
     assert "second" not in db.tables()
+    assert [(r[0], r[1]) for r in db.rows(RECORDS)] == [(1, 1)]
+
+
+RECORDS = "SELECT migration, step FROM _ferro_migrations ORDER BY migration, step"
+
+
+async def test_a_lock_lost_while_a_transactional_step_runs_commits_nothing(
+    project, pkg, db
+):
+    """The finished record is written inside the step's transaction once the
+    lock is verified there (ADR-0029 as amended): a lock lost while the
+    step's statements run rolls the step back, and the run refuses as a
+    lost lock."""
+    if db.backend != "postgres":
+        pytest.skip("only a Postgres lock lives on a connection that can drop")
+    _, database = _project(project, pkg, db)
+    sql_step(
+        project, "slow", 'SELECT pg_sleep(1);\nCREATE TABLE "slow" ("id" integer);\n'
+    )
+    tracked = await _tracked(db, database)
+    async with tracked.locked(5.0) as run:
+        first, slow = (await run.plan({"direction": "up"})).steps
+        assert (await run.execute(first))["ok"]
+        running = asyncio.ensure_future(run.execute(slow))
+        await asyncio.sleep(0.4)
+        await run._close_lock_connection_for_test()
+        with pytest.raises(RunRefused, match="the run lock was lost"):
+            await running
+
+    assert "slow" not in db.tables()
+    assert [(r[0], r[1]) for r in db.rows(RECORDS)] == [(1, 1), (2, 1)]
+    assert db.rows("SELECT finished_at FROM _ferro_migrations WHERE migration = 2") == [
+        (None,)
+    ]
+
+
+async def test_a_released_run_writes_nothing(project, pkg, db):
+    _, database = _project(project, pkg, db)
+    tracked = await _tracked(db, database)
+    async with tracked.locked(5.0) as run:
+        (step,) = (await run.plan({"direction": "up"})).steps
+
+    with pytest.raises(RunRefused, match="lock was released"):
+        await run.execute(step)
+    assert "author" not in db.tables()
+
+
+async def test_a_preview_plan_cannot_execute(project, pkg, db):
+    _, database = _project(project, pkg, db)
+    tracked = await _tracked(db, database)
+    (preview,) = (await tracked.plan({"direction": "up"})).steps
+    async with tracked.locked(5.0) as run:
+        with pytest.raises(ValueError, match="preview plan"):
+            await run.execute(preview)
+
+    assert "author" not in db.tables()
 
 
 async def test_lock_timeout_zero_from_the_cli_refuses_at_once_without_waiting(
     project, pkg, db, capsys
 ):
-    _project(project, pkg, db)
-    handle = await _hold(db)
+    _, database = _project(project, pkg, db)
+    tracked = await _tracked(db, database)
     capsys.readouterr()
-    try:
+    async with tracked.locked(5.0):
         code = await asyncio.to_thread(
             run, "migrate", "up", "--url", db.url, "--lock-timeout", "0"
         )
-    finally:
-        await _core._release_run_lock(handle)
 
     captured = capsys.readouterr()
     assert code == 1
@@ -171,17 +202,16 @@ async def test_a_session_that_never_took_the_lock_fails_the_first_check_as_a_poo
 ):
     if db.backend != "postgres":
         pytest.skip("only a Postgres lock is checked on its session")
-    _project(project, pkg, db)
-    await ferro.connect(db.url, name="pooled")
-    handle = await _core._unacquired_run_lock_for_test("pooled")
-    try:
+    _, database = _project(project, pkg, db)
+    tracked = await _tracked(db, database, "pooled")
+    async with tracked._locked_unacquired_for_test() as run:
+        (step,) = (await run.plan({"direction": "up"})).steps
         with pytest.raises(RunRefused) as refused:
-            await _core._verify_run_lock(handle)
-    finally:
-        await _core._release_run_lock(handle)
+            await run.execute(step)
 
     assert "migrations need a direct or session-mode connection" in str(refused.value)
     assert "Nothing was applied." in str(refused.value)
+    assert "author" not in db.tables()
 
 
 async def test_a_lock_timeout_beyond_the_bound_is_refused_from_the_cli(
@@ -210,6 +240,97 @@ def test_parse_lock_timeout_accepts_the_bound_and_refuses_beyond_it():
         runner.parse_lock_timeout(runner.MAX_LOCK_TIMEOUT_S + 1)
 
 
-async def test_the_ffi_refuses_an_unrepresentable_timeout_without_panicking():
+async def test_the_ffi_refuses_an_unrepresentable_timeout_without_panicking(
+    project, pkg, db
+):
+    _, database = _project(project, pkg, db)
+    tracked = await _tracked(db, database)
     with pytest.raises(ValueError, match="1e+20"):
-        await _core._acquire_run_lock(None, None, 1e20)
+        tracked.locked(1e20)
+
+
+async def test_a_lock_lost_before_a_no_transaction_step_starts_runs_nothing(
+    project, pkg, db
+):
+    """A no-transaction step commits statement by statement, so its one
+    check is before it starts (ADR-0029 as amended): a lost lock refuses it
+    there, before its started record and before any statement."""
+    if db.backend != "postgres":
+        pytest.skip("no-transaction is Postgres-only")
+    _, database = _project(project, pkg, db)
+    sql_step(
+        project,
+        "idx",
+        '-- ferro: no-transaction\nCREATE INDEX CONCURRENTLY "idx_lost" ON "author" ("id");\n',
+    )
+    tracked = await _tracked(db, database)
+    async with tracked.locked(5.0) as run:
+        first, index = (await run.plan({"direction": "up"})).steps
+        assert (await run.execute(first))["ok"]
+        await run._close_lock_connection_for_test()
+        with pytest.raises(RunRefused, match="the run lock was lost"):
+            await run.execute(index)
+
+    assert (
+        db.rows("SELECT indexname FROM pg_indexes WHERE indexname = 'idx_lost'") == []
+    )
+    assert [(r[0], r[1]) for r in db.rows(RECORDS)] == [(1, 1)]
+
+
+async def test_a_lock_lost_inside_a_downs_transaction_is_the_lost_lock_refusal(
+    project, pkg, db
+):
+    """A transactional down verifies the lock inside its transaction, before
+    it removes the record: a lock lost while it runs rolls the down back and
+    stops the run as a lost lock, never as a failed step."""
+    if db.backend != "postgres":
+        pytest.skip("only a Postgres lock lives on a connection that can drop")
+    settings, database = _project(project, pkg, db)
+    sql_step(project, "slow", 'CREATE TABLE "slow" ("id" integer);\n')
+    down_file = migrations(project) / "0002_slow" / "01_slow.down.sql"
+    down_file.write_text('SELECT pg_sleep(1);\nDROP TABLE "slow";\n')
+    assert (await runner.up(settings, database, url=db.url)).refusal is None
+    tracked = await _tracked(db, database)
+    async with tracked.locked(5.0) as run:
+        (step,) = (await run.plan({"direction": "down", "target": "latest"})).steps
+        running = asyncio.ensure_future(run.execute(step))
+        await asyncio.sleep(0.4)
+        await run._close_lock_connection_for_test()
+        with pytest.raises(RunRefused, match="the run lock was lost"):
+            await running
+
+    assert "slow" in db.tables()
+    assert [(r[0], r[1]) for r in db.rows(RECORDS)] == [(1, 1), (2, 1)]
+
+
+async def test_a_baseline_planned_by_another_run_is_never_written(project, pkg, db):
+    """A baseline plan is bound to the locked run that read the records it
+    writes over: kept across an ``up``, it is refused rather than turning
+    run records into baseline ones."""
+    settings, database = _project(project, pkg, db)
+    tracked = await _tracked(db, database)
+    async with tracked.locked(5.0) as run:
+        stale = run.plan_baseline(None)
+    assert (await runner.up(settings, database, url=db.url)).refusal is None
+    tracked = await runner.open_tracked("holder", database)
+    async with tracked.locked(5.0) as run:
+        with pytest.raises(ValueError, match="another locked run"):
+            await run.write_baseline(stale, {})
+
+    assert db.rows("SELECT origin FROM _ferro_migrations") == [("run",)]
+
+
+async def test_a_rerecord_planned_by_another_run_is_never_written(project, pkg, db):
+    settings, database = _project(project, pkg, db)
+    assert (await runner.up(settings, database, url=db.url)).refusal is None
+    up_file = migrations(project) / f"0001_create_author/01_schema.up.{db.backend}.sql"
+    up_file.write_bytes(up_file.read_bytes() + b"\n")
+    tracked = await _tracked(db, database)
+    async with tracked.locked(5.0) as run:
+        stale = run.plan_rerecord("0001:01", "record")
+    before = db.rows("SELECT checksum FROM _ferro_migrations")
+    async with tracked.locked(5.0) as run:
+        with pytest.raises(ValueError, match="another locked run"):
+            await run.rerecord(stale)
+
+    assert db.rows("SELECT checksum FROM _ferro_migrations") == before

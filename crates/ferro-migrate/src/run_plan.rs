@@ -24,10 +24,13 @@ use crate::directory::{
     DirectoryError, Headers, Migration, MigrationsDir, SNAPSHOT_FILE, Step, StepDialect, StepFile,
     StepKind,
 };
-use crate::plan::and_list;
+use crate::generate::rebuild::rebuilt_tables;
+use crate::plan::{Hint, and_list, live_hints, reverse_hints};
 use crate::snapshot::{Snapshot, encode_checksum, sha384};
+use ferro_schema_ir::{SchemaIrPayload, SchemaModel};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// The tracking table format this ferro reads and writes.
 pub const TRACKING_FORMAT: i64 = 1;
@@ -184,12 +187,21 @@ pub enum Target {
     Latest,
 }
 
-/// Which way a run goes.
+/// Which way a run goes. As JSON: `{"direction": "up"}`, `{"direction":
+/// "up", "through": 7}`, `{"direction": "down", "target": ...}`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "direction", rename_all = "lowercase")]
 pub enum Direction {
-    /// Apply every pending step.
-    Up,
+    /// Apply every pending step; with `through`, only the pending steps of
+    /// migrations up to and including that one (the test harness's target,
+    /// ADR-0045). A `through` the directory lacks is refused; one at or
+    /// below the last applied migration plans nothing.
+    Up {
+        /// The last migration to apply (`0007` is `7`), from
+        /// [`parse_through`].
+        #[serde(default)]
+        through: Option<u16>,
+    },
     /// Revert every recorded step above `target`, in reverse order.
     Down {
         /// Where to stop.
@@ -220,6 +232,41 @@ impl ExecMode {
             ExecMode::Transactional | ExecMode::ForeignKeysOff => RecordKind::Ddl,
         }
     }
+}
+
+/// `up`'s `through` as the operator wrote it: a migration number (`"0007"`).
+///
+/// # Errors
+/// [`RunRefusal::NotAMigration`] for anything else, a step address
+/// (`"0007:02"`) included: no snapshot describes the state between two
+/// steps.
+pub fn parse_through(text: &str) -> Result<u16, RunRefusal> {
+    let trimmed = text.trim();
+    let not_a_migration = || RunRefusal::NotAMigration {
+        target: trimmed.to_string(),
+    };
+    if trimmed.len() != 4 || !trimmed.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(not_a_migration());
+    }
+    trimmed.parse().map_err(|_| not_a_migration())
+}
+
+/// One table a SQLite `foreign-keys-off` step rebuilds (ADR-0034), as the
+/// step's own bytes say it does and its migration's two snapshots declare
+/// it: what the executor compares with the live table before the step runs.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RebuildExpectation {
+    /// The table the step rebuilds (`CREATE TABLE "_ferro_new_<table>"`).
+    pub table: String,
+    /// Its name before the step runs: a step that renames a table rebuilds
+    /// it under its new name, after the rename (ADR-0032, ADR-0046).
+    pub starting_name: String,
+    /// The table as the snapshot the file starts from declares it, with
+    /// every column the migration's other snapshot declares added: a later
+    /// step of the migration (a contract after its expand) finds the table
+    /// as an earlier step left it, so a column either side declares is
+    /// never one the rebuild discards unannounced (ADR-0025).
+    pub declared: SchemaModel,
 }
 
 /// A started-but-unfinished step whose file changed since that attempt:
@@ -277,6 +324,18 @@ pub struct PlannedStep {
     /// filled at execution); going down, the standing record its down
     /// removes.
     pub record: StepRecord,
+    /// The ordinal of the migration's first data step, when it has one: the
+    /// backfill a failed contract's recipe re-runs (`down --to` the step
+    /// before it, then `up`).
+    #[serde(default)]
+    pub first_data_step: Option<u8>,
+    /// A SQLite `foreign-keys-off` step's rebuilt tables, read off the step
+    /// file's own bytes by [`HeldDirectory::plan`]. Those bytes are what
+    /// runs, and an unfinished step's file may have been edited (ADR-0030),
+    /// so nothing else is the source. Empty for every other step, and from
+    /// [`plan_run`], which sees no bytes.
+    #[serde(default)]
+    pub rebuilds: Vec<RebuildExpectation>,
 }
 
 /// What a run executes, in order.
@@ -346,6 +405,41 @@ pub enum RunRefusal {
         missing: Vec<String>,
         /// The directory's name, as the operator knows it (`migrations`).
         directory: String,
+        /// Whether `allow_ahead` alone would have let the run through: every
+        /// missing migration sorts above the directory's head, and the run
+        /// meets no other refusal. The application's `up()` raises
+        /// `DatabaseAheadError` on it, from this one answer.
+        ahead_only: bool,
+    },
+    /// `up`'s `through` names a migration the directory does not hold.
+    NoSuchMigration {
+        /// `NNNN`.
+        migration: u16,
+        /// The directory, as configured.
+        directory: String,
+    },
+    /// `up`'s `through` is not a migration number: a step address
+    /// (`0007:02`) or anything else.
+    NotAMigration {
+        /// The target as written.
+        target: String,
+    },
+    /// A SQL step file the run would execute cannot be read as it was
+    /// hashed: it changed while the directory was read, or is not UTF-8.
+    Unreadable {
+        /// `NNNN_<name>/<file>`, or the path when no migration names it.
+        file: String,
+        /// Why.
+        reason: String,
+    },
+    /// A SQLite `foreign-keys-off` step whose rebuilt tables cannot be
+    /// planned: one the snapshot it starts from does not declare, or a
+    /// rename hint the generator refuses (a hand-edited `ir.json`).
+    Rebuild {
+        /// `NNNN_<name>/<file>`.
+        file: String,
+        /// What is wrong, as the end of a sentence about the file.
+        reason: String,
     },
     /// The tracking table's format is newer than this ferro reads.
     NewerFormat {
@@ -513,13 +607,30 @@ impl RunRefusal {
             RunRefusal::NothingToRerecord { .. } => "nothing_to_rerecord",
             RunRefusal::ModeNotApplicable { .. } => "mode_not_applicable",
             RunRefusal::ContinueRefused { .. } => "continue_refused",
+            RunRefusal::NoSuchMigration { .. } => "no_such_migration",
+            RunRefusal::NotAMigration { .. } => "not_a_migration",
+            RunRefusal::Unreadable { .. } => "unreadable",
+            RunRefusal::Rebuild { .. } => "rebuild",
         }
+    }
+
+    /// Whether `allow_ahead` alone would have let the run through
+    /// ([`RunRefusal::AppliedMissing`]'s `ahead_only`).
+    pub fn ahead_only(&self) -> bool {
+        matches!(
+            self,
+            RunRefusal::AppliedMissing {
+                ahead_only: true,
+                ..
+            }
+        )
     }
 
     /// The migration the refusal is about, when it names one.
     pub fn migration(&self) -> Option<u16> {
         match self {
             RunRefusal::EditedApplied { migration, .. }
+            | RunRefusal::NoSuchMigration { migration, .. }
             | RunRefusal::TablesExist { migration, .. }
             | RunRefusal::Irreversible { migration, .. }
             | RunRefusal::BelowBaseline { migration }
@@ -772,7 +883,9 @@ impl std::fmt::Display for RunRefusal {
                  database.\nMigrations apply in order, with no override. Regenerate {pending} \
                  at the head\n(it becomes {next:04}). Nothing was applied."
             ),
-            RunRefusal::AppliedMissing { missing, directory } => {
+            RunRefusal::AppliedMissing {
+                missing, directory, ..
+            } => {
                 let verb = if missing.len() == 1 {
                     "which is"
                 } else {
@@ -865,6 +978,27 @@ impl std::fmt::Display for RunRefusal {
             RunRefusal::Directory { error } => {
                 write!(f, "ferro migrate: {error}. Nothing was applied.")
             }
+            RunRefusal::NoSuchMigration {
+                migration,
+                directory,
+            } => write!(
+                f,
+                "ferro migrate: there is no migration {migration:04} in {directory}. Nothing was \
+                 applied."
+            ),
+            RunRefusal::NotAMigration { target } => write!(
+                f,
+                "ferro migrate: through {target} is not a migration; write a migration number \
+                 (0007). A step (0007:02) is not a target: no snapshot describes the state \
+                 between two steps. Nothing was applied."
+            ),
+            RunRefusal::Unreadable { file, reason } => write!(
+                f,
+                "ferro migrate: cannot read {file} ({reason}). Nothing was applied."
+            ),
+            RunRefusal::Rebuild { file, reason } => {
+                write!(f, "ferro migrate: {file} {reason}. Nothing was applied.")
+            }
         }
     }
 }
@@ -902,6 +1036,244 @@ pub fn read_for_run(path: &Path) -> Result<MigrationsDir, RunRefusal> {
         }
         _ => RunRefusal::Directory { error },
     })
+}
+
+/// One read of the migrations directory for a run (ADR-0028, ADR-0048): the
+/// verified directory and the raw bytes of every SQL step file it holds,
+/// each the bytes its checksum was taken over. A run plans from it and
+/// executes from it, and never goes back to disk: the bytes hashed are the
+/// bytes planned and the bytes run.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HeldDirectory {
+    /// The directory, read and verified.
+    pub dir: MigrationsDir,
+    /// Every SQL step file's bytes, by path.
+    sql: BTreeMap<PathBuf, Arc<[u8]>>,
+}
+
+impl HeldDirectory {
+    /// Read `path` for a run: [`read_for_run`], then every SQL step file's
+    /// bytes, each checked against the checksum the directory read took.
+    ///
+    /// # Errors
+    /// [`read_for_run`]'s refusals; [`RunRefusal::Unreadable`] for a file
+    /// that cannot be read again, or whose bytes changed in between.
+    pub fn read(path: &Path) -> Result<Self, RunRefusal> {
+        let dir = read_for_run(path)?;
+        let mut sql = Vec::new();
+        for (file, _) in sql_files(&dir) {
+            let bytes = std::fs::read(file).map_err(|err| RunRefusal::Unreadable {
+                file: shown_path(&dir, file),
+                reason: err.to_string(),
+            })?;
+            sql.push((file.clone(), bytes));
+        }
+        Self::from_parts(dir, sql)
+    }
+
+    /// `dir` with the given SQL file bytes, each checked against the
+    /// checksum `dir` holds for its path.
+    ///
+    /// # Errors
+    /// [`RunRefusal::Unreadable`] for bytes that are not the hashed ones, or
+    /// a path `dir` holds no SQL step file at.
+    pub fn from_parts(
+        dir: MigrationsDir,
+        files: impl IntoIterator<Item = (PathBuf, Vec<u8>)>,
+    ) -> Result<Self, RunRefusal> {
+        let checksums: BTreeMap<&PathBuf, &[u8; 48]> = sql_files(&dir).collect();
+        let mut sql = BTreeMap::new();
+        for (path, bytes) in files {
+            let reason = match checksums.get(&path) {
+                None => Some("the migrations directory holds no step file there"),
+                Some(checksum) if sha384(&bytes) != **checksum => Some(
+                    "it changed while the migrations directory was read; run the command again",
+                ),
+                Some(_) => None,
+            };
+            if let Some(reason) = reason {
+                return Err(RunRefusal::Unreadable {
+                    file: shown_path(&dir, &path),
+                    reason: reason.to_string(),
+                });
+            }
+            sql.insert(path, Arc::from(bytes));
+        }
+        Ok(Self { dir, sql })
+    }
+
+    /// The held bytes of the SQL step file at `path`.
+    pub fn bytes(&self, path: &Path) -> Option<&Arc<[u8]>> {
+        self.sql.get(path)
+    }
+
+    /// The held text of the SQL step file at `path`.
+    ///
+    /// # Errors
+    /// [`RunRefusal::Unreadable`] when no bytes are held for it, or they are
+    /// not UTF-8.
+    pub fn text(&self, path: &Path) -> Result<&str, RunRefusal> {
+        let unreadable = |reason: &str| RunRefusal::Unreadable {
+            file: shown_path(&self.dir, path),
+            reason: reason.to_string(),
+        };
+        let bytes = self
+            .bytes(path)
+            .ok_or_else(|| unreadable("it was not read with the migrations directory"))?;
+        std::str::from_utf8(bytes).map_err(|err| unreadable(&format!("not UTF-8 text: {err}")))
+    }
+
+    /// Plan a run from the held read: [`plan_run`], then what only the
+    /// steps' own bytes say. Every SQL step that runs statements must read
+    /// as text, and each SQLite `foreign-keys-off` step carries the tables
+    /// its file rebuilds ([`PlannedStep::rebuilds`]), lexed once here.
+    ///
+    /// # Errors
+    /// [`plan_run`]'s refusals; [`RunRefusal::Unreadable`] for a SQL step
+    /// that is not UTF-8; [`RunRefusal::Rebuild`] for a rebuild the
+    /// snapshots cannot describe.
+    pub fn plan(
+        &self,
+        records: &[StepRecord],
+        dialect: Dialect,
+        direction: Direction,
+        allow_ahead: bool,
+        order_keys: Option<&OrderKeys>,
+    ) -> Result<RunPlan, RunRefusal> {
+        let mut plan = plan_run(
+            &self.dir,
+            records,
+            dialect,
+            direction,
+            allow_ahead,
+            order_keys,
+        )?;
+        let down = matches!(direction, Direction::Down { .. });
+        for step in &mut plan.steps {
+            if step.data || (down && step.nothing_to_reverse.is_some()) {
+                continue;
+            }
+            let text = self.text(&step.path)?;
+            if step.mode == ExecMode::ForeignKeysOff {
+                step.rebuilds = rebuild_expectations(&self.dir, step, text, dialect, down)?;
+            }
+        }
+        Ok(plan)
+    }
+}
+
+/// Every SQL step file of `dir` (up and down, every dialect's rendering)
+/// with the checksum the directory read took of it.
+fn sql_files(dir: &MigrationsDir) -> impl Iterator<Item = (&PathBuf, &[u8; 48])> {
+    dir.migrations
+        .iter()
+        .flat_map(|migration| &migration.steps)
+        .filter(|step| step.kind != StepKind::Data)
+        .flat_map(|step| step.files.values())
+        .flat_map(|file| {
+            std::iter::once((&file.up, &file.up_checksum)).chain(
+                file.down
+                    .as_ref()
+                    .zip(file.down_checksum.as_ref())
+                    .into_iter(),
+            )
+        })
+}
+
+/// `NNNN_<name>/<file>` for a step file of `dir`, else the path itself.
+fn shown_path(dir: &MigrationsDir, path: &Path) -> String {
+    dir.migrations
+        .iter()
+        .find(|migration| path.parent() == Some(migration.dir.as_path()))
+        .map_or_else(
+            || path.display().to_string(),
+            |migration| format!("{}/{}", migration.dir_name(), file_name(path)),
+        )
+}
+
+/// The tables `step` (a SQLite `foreign-keys-off` step whose file is
+/// `text`) rebuilds, in the file's order, each with its starting name and
+/// declared columns ([`RebuildExpectation`]). Going up the file starts from
+/// the parent's snapshot and the migration's own is the other side; going
+/// down the other way round, with the migration's rename hints reversed.
+///
+/// # Errors
+/// [`RunRefusal::Rebuild`] for a rebuilt table the starting snapshot does
+/// not declare, or a snapshot carrying a rename hint the generator refuses.
+fn rebuild_expectations(
+    dir: &MigrationsDir,
+    step: &PlannedStep,
+    text: &str,
+    dialect: Dialect,
+    down: bool,
+) -> Result<Vec<RebuildExpectation>, RunRefusal> {
+    let tables = rebuilt_tables(&split_statements(text, dialect));
+    if tables.is_empty() {
+        return Ok(Vec::new());
+    }
+    let shown = format!("{}/{}", step.migration_name, step.file);
+    let refused = |reason: String| RunRefusal::Rebuild {
+        file: shown.clone(),
+        reason,
+    };
+    let Some(migration) = dir.migrations.iter().find(|m| m.number == step.migration) else {
+        return Err(refused(
+            "belongs to no migration of the directory".to_string(),
+        ));
+    };
+    let own = &migration.snapshot.ir.payload;
+    let parent = parent_of(dir, migration).map(|m| &m.snapshot.ir.payload);
+    let empty = SchemaIrPayload {
+        dialect_agnostic: own.dialect_agnostic,
+        models: Vec::new(),
+    };
+    let hints = live_hints(parent.unwrap_or(&empty), own).map_err(|err| {
+        refused(format!(
+            "cannot be checked: its schema snapshot carries a rename hint ferro refuses: {err}"
+        ))
+    })?;
+    let (starts, other, hints) = if down {
+        (Some(own), parent, reverse_hints(&hints))
+    } else {
+        (parent, Some(own), hints)
+    };
+    let mut out = Vec::new();
+    for table in tables {
+        let starting_name = hints
+            .iter()
+            .find_map(|hint| match hint {
+                Hint::Table { old, new } if *new == table => Some(old.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| table.clone());
+        let mut declared = starts
+            .and_then(|ir| ir.models.iter().find(|m| m.table_name == starting_name))
+            .cloned()
+            .ok_or_else(|| {
+                refused(format!(
+                    "rebuilds table \"{}\", which the schema snapshot it starts from does not \
+                     declare",
+                    table.replace('"', "\"\"")
+                ))
+            })?;
+        if let Some(model) = other.and_then(|ir| ir.models.iter().find(|m| m.table_name == table)) {
+            for column in &model.columns {
+                if !declared
+                    .columns
+                    .iter()
+                    .any(|known| known.name == column.name)
+                {
+                    declared.columns.push(column.clone());
+                }
+            }
+        }
+        out.push(RebuildExpectation {
+            table,
+            starting_name,
+            declared,
+        });
+    }
+    Ok(out)
 }
 
 fn dialect_name(dialect: Dialect) -> &'static str {
@@ -1022,9 +1394,12 @@ fn check_records(
         }
     }
     if !missing.is_empty() || (!ahead.is_empty() && !allow_ahead) {
+        // Whether `allow_ahead` alone would let the run through is the
+        // caller's to answer: only it knows what else the run meets.
         return Err(RunRefusal::AppliedMissing {
             missing: ahead.iter().chain(missing.iter()).cloned().collect(),
             directory: directory_label(dir),
+            ahead_only: false,
         });
     }
     Ok(ahead.into_iter().collect())
@@ -1186,7 +1561,11 @@ fn edited_chunked(
 /// head); a snapshot or finished step edited after it was applied; an
 /// edited chunked step with committed batches; a pending migration below an
 /// applied one; a DDL step without this dialect's rendering; headers the
-/// dialect cannot honour. Going down, see [`plan_down`]'s refusals.
+/// dialect cannot honour; a `through` the directory does not hold
+/// ([`RunRefusal::NoSuchMigration`]). Records ahead of the directory refused
+/// without `allow_ahead` say whether it alone would have let the run
+/// through ([`RunRefusal::ahead_only`]). Going down, see [`plan_down`]'s
+/// refusals.
 pub fn plan_run(
     dir: &MigrationsDir,
     records: &[StepRecord],
@@ -1195,17 +1574,51 @@ pub fn plan_run(
     allow_ahead: bool,
     order_keys: Option<&OrderKeys>,
 ) -> Result<RunPlan, RunRefusal> {
-    if let Direction::Down { target } = direction {
-        return plan_down(dir, records, dialect, target);
+    let through = match direction {
+        Direction::Down { target } => return plan_down(dir, records, dialect, target),
+        Direction::Up { through } => through,
+    };
+    match plan_up(dir, records, dialect, through, allow_ahead, order_keys) {
+        Err(RunRefusal::AppliedMissing {
+            missing, directory, ..
+        }) if !allow_ahead => Err(RunRefusal::AppliedMissing {
+            missing,
+            directory,
+            ahead_only: plan_up(dir, records, dialect, through, true, order_keys).is_ok(),
+        }),
+        planned => planned,
     }
+}
+
+/// [`plan_run`] going up.
+fn plan_up(
+    dir: &MigrationsDir,
+    records: &[StepRecord],
+    dialect: Dialect,
+    through: Option<u16>,
+    allow_ahead: bool,
+    order_keys: Option<&OrderKeys>,
+) -> Result<RunPlan, RunRefusal> {
     let ahead = check_records(dir, records, allow_ahead, true)?;
     let by_key: RecordMap = records.iter().map(|r| ((r.migration, r.step), r)).collect();
     check_applied(dir, &by_key, dialect)?;
     check_order(dir, &by_key)?;
+    if let Some(number) = through
+        && !dir.migrations.iter().any(|m| m.number == number)
+    {
+        return Err(RunRefusal::NoSuchMigration {
+            migration: number,
+            directory: dir.path.display().to_string(),
+        });
+    }
 
     let mut steps = Vec::new();
     for migration in &dir.migrations {
+        if through.is_some_and(|last| migration.number > last) {
+            break;
+        }
         let snapshot_checksum = encode_checksum(&migration.snapshot.checksum);
+        let first_data_step = first_data_step(migration);
         for step in &migration.steps {
             let record = by_key.get(&(migration.number, step.ordinal));
             if record.is_some_and(|r| r.is_finished()) {
@@ -1268,10 +1681,28 @@ pub fn plan_run(
                     reverting: false,
                     revert_cursor: None,
                 },
+                first_data_step,
+                rebuilds: Vec::new(),
             });
         }
     }
     Ok(RunPlan { steps, ahead })
+}
+
+/// The ordinal of `migration`'s first data step, when it has one.
+fn first_data_step(migration: &Migration) -> Option<u8> {
+    migration
+        .steps
+        .iter()
+        .filter(|step| step.kind == StepKind::Data)
+        .map(|step| step.ordinal)
+        .min()
+}
+
+/// The migration before `migration` in `dir`.
+fn parent_of<'a>(dir: &'a MigrationsDir, migration: &Migration) -> Option<&'a Migration> {
+    let number = migration.number.checked_sub(1).filter(|n| *n > 0)?;
+    dir.migrations.iter().find(|m| m.number == number)
 }
 
 /// Why an unfinished transactional step's down runs nothing.
@@ -1410,6 +1841,8 @@ fn plan_down(
             nothing_to_reverse,
             data,
             record: (*record).clone(),
+            first_data_step: first_data_step(migration),
+            rebuilds: Vec::new(),
         });
     }
     Ok(RunPlan {
@@ -1857,7 +2290,15 @@ pub fn run_status(
         .filter(|r| r.migration > head)
         .map(|r| r.migration_name.clone())
         .collect();
-    let refusal = plan_run(dir, records, dialect, Direction::Up, false, order_keys).err();
+    let refusal = plan_run(
+        dir,
+        records,
+        dialect,
+        Direction::Up { through: None },
+        false,
+        order_keys,
+    )
+    .err();
     RunStatus {
         migrations,
         ahead: ahead.into_iter().collect(),
@@ -2263,7 +2704,15 @@ mod tests {
 
     /// The finished record `up` would have written for `(migration, step)`.
     fn finished(dir: &MigrationsDir, migration: u16, step: u8) -> StepRecord {
-        let plan = plan_run(dir, &[], Dialect::Sqlite, Direction::Up, false, None).expect("plan");
+        let plan = plan_run(
+            dir,
+            &[],
+            Dialect::Sqlite,
+            Direction::Up { through: None },
+            false,
+            None,
+        )
+        .expect("plan");
         let planned = plan
             .steps
             .into_iter()
@@ -2285,7 +2734,14 @@ mod tests {
     }
 
     fn up(dir: &MigrationsDir, records: &[StepRecord]) -> Result<RunPlan, RunRefusal> {
-        plan_run(dir, records, Dialect::Sqlite, Direction::Up, false, None)
+        plan_run(
+            dir,
+            records,
+            Dialect::Sqlite,
+            Direction::Up { through: None },
+            false,
+            None,
+        )
     }
 
     fn keys(plan: &RunPlan) -> Vec<(u16, u8)> {
@@ -2432,7 +2888,7 @@ mod tests {
             &behind,
             &records,
             Dialect::Sqlite,
-            Direction::Up,
+            Direction::Up { through: None },
             true,
             None,
         )
@@ -2446,8 +2902,15 @@ mod tests {
         let dir = three();
         let mut record = finished(&dir, 1, 1);
         record.migration_name = "0001_other".into();
-        let refusal = plan_run(&dir, &[record], Dialect::Sqlite, Direction::Up, true, None)
-            .expect_err("missing");
+        let refusal = plan_run(
+            &dir,
+            &[record],
+            Dialect::Sqlite,
+            Direction::Up { through: None },
+            true,
+            None,
+        )
+        .expect_err("missing");
         assert_eq!(refusal.kind(), "applied_missing");
         assert!(
             refusal
@@ -2502,7 +2965,7 @@ mod tests {
             dir,
             &records,
             Dialect::Sqlite,
-            Direction::Up,
+            Direction::Up { through: None },
             false,
             Some(&order_keys(&["author.id"])),
         )
@@ -2540,7 +3003,7 @@ mod tests {
                 &dir,
                 &records,
                 Dialect::Sqlite,
-                Direction::Up,
+                Direction::Up { through: None },
                 false,
                 Some(&order_keys(keys)),
             )
@@ -2769,8 +3232,15 @@ mod tests {
         let mut step = ddl(1, "schema", body);
         let applied = |step: &Step| {
             let dir = dir(vec![("a", vec![step.clone()], &["a"])]);
-            let plan =
-                plan_run(&dir, &[], Dialect::Postgres, Direction::Up, false, None).expect("plan");
+            let plan = plan_run(
+                &dir,
+                &[],
+                Dialect::Postgres,
+                Direction::Up { through: None },
+                false,
+                None,
+            )
+            .expect("plan");
             let record = StepRecord {
                 finished_at: Some("2026-10-01T14:02:33.000000Z".into()),
                 ..plan.steps[0].record.clone()
@@ -2790,7 +3260,7 @@ mod tests {
             &dir,
             &[record.clone()],
             Dialect::Postgres,
-            Direction::Up,
+            Direction::Up { through: None },
             false,
             None,
         )
@@ -3087,7 +3557,10 @@ mod tests {
     #[test]
     fn targets_read_and_write_the_json_the_cli_sends() {
         let parse = |json: &str| serde_json::from_str::<Direction>(json).expect(json);
-        assert_eq!(parse(r#"{"direction": "up"}"#), Direction::Up);
+        assert_eq!(
+            parse(r#"{"direction": "up"}"#),
+            Direction::Up { through: None }
+        );
         for (json, target) in [
             (r#""latest""#, Target::Latest),
             (r#""all""#, Target::All),
@@ -3166,8 +3639,15 @@ mod tests {
             ],
             &["t"],
         )]);
-        let plan =
-            plan_run(&dir, &[], Dialect::Postgres, Direction::Up, false, None).expect("plan");
+        let plan = plan_run(
+            &dir,
+            &[],
+            Dialect::Postgres,
+            Direction::Up { through: None },
+            false,
+            None,
+        )
+        .expect("plan");
         assert_eq!(plan.steps[1].mode, ExecMode::NoTransaction);
         assert_eq!(plan.steps[1].record.kind, RecordKind::DdlNoTransaction);
     }
@@ -3343,6 +3823,453 @@ mod tests {
                 .is_some_and(|r| r.contains("rerecord"))
         );
         assert!(status.refusal_needs_attention);
+    }
+
+    // -- up's through (ADR-0045) --------------------------------------------------------
+
+    fn up_through(
+        dir: &MigrationsDir,
+        records: &[StepRecord],
+        through: u16,
+    ) -> Result<RunPlan, RunRefusal> {
+        plan_run(
+            dir,
+            records,
+            Dialect::Sqlite,
+            Direction::Up {
+                through: Some(through),
+            },
+            false,
+            None,
+        )
+    }
+
+    #[test]
+    fn through_is_a_migration_number_and_never_a_step() {
+        assert_eq!(parse_through("0007"), Ok(7));
+        assert_eq!(parse_through(" 0012 "), Ok(12));
+        for written in ["0007:02", "7", "00007", "abcd", ""] {
+            let refusal = parse_through(written).expect_err(written);
+            assert_eq!(refusal.kind(), "not_a_migration");
+            assert_eq!(
+                refusal.to_string(),
+                format!(
+                    "ferro migrate: through {} is not a migration; write a migration number \
+                     (0007). A step (0007:02) is not a target: no snapshot describes the state \
+                     between two steps. Nothing was applied.",
+                    written.trim()
+                )
+            );
+        }
+        let parse = |json: &str| serde_json::from_str::<Direction>(json).expect(json);
+        assert_eq!(
+            parse(r#"{"direction": "up", "through": 7}"#),
+            Direction::Up { through: Some(7) }
+        );
+    }
+
+    #[test]
+    fn through_plans_only_the_migrations_up_to_it() {
+        let dir = three();
+        assert_eq!(
+            keys(&up_through(&dir, &[], 2).expect("plan")),
+            [(1, 1), (2, 1)]
+        );
+        assert_eq!(
+            keys(&up_through(&dir, &[], 3).expect("plan")),
+            keys(&up(&dir, &[]).expect("plan"))
+        );
+    }
+
+    #[test]
+    fn a_through_the_directory_lacks_is_refused_naming_it() {
+        let refusal = up_through(&three(), &[], 9).expect_err("no such");
+        assert_eq!(refusal.kind(), "no_such_migration");
+        assert_eq!(refusal.migration(), Some(9));
+        assert_eq!(
+            refusal.to_string(),
+            "ferro migrate: there is no migration 0009 in /proj/migrations. Nothing was applied."
+        );
+    }
+
+    #[test]
+    fn a_through_at_or_below_the_last_applied_migration_plans_nothing() {
+        let dir = three();
+        let two = [finished(&dir, 1, 1), finished(&dir, 2, 1)];
+        assert!(up_through(&dir, &two, 1).expect("below").steps.is_empty());
+        assert!(up_through(&dir, &two, 2).expect("at").steps.is_empty());
+        assert_eq!(keys(&up_through(&dir, &two, 3).expect("above")), [(3, 1)]);
+    }
+
+    // -- ahead_only ----------------------------------------------------------------------
+
+    #[test]
+    fn records_only_ahead_of_the_directory_say_allow_ahead_would_let_the_run_through() {
+        let full = three();
+        let records = [
+            finished(&full, 1, 1),
+            finished(&full, 2, 1),
+            finished(&full, 3, 1),
+        ];
+        let mut behind = full.clone();
+        behind.migrations.truncate(2);
+        let refusal = up(&behind, &records).expect_err("ahead");
+        assert_eq!(refusal.kind(), "applied_missing");
+        assert!(refusal.ahead_only());
+    }
+
+    #[test]
+    fn records_ahead_and_another_refusal_say_allow_ahead_would_not() {
+        let full = three();
+        let mut records = vec![
+            finished(&full, 1, 1),
+            finished(&full, 2, 1),
+            finished(&full, 3, 1),
+        ];
+        let mut behind = full.clone();
+        behind.migrations.truncate(2);
+        // An applied file edited on disk: allow_ahead lets the ahead
+        // migration through, and the run still refuses.
+        records[0].checksum = OTHER.into();
+        let refusal = up(&behind, &records).expect_err("ahead and edited");
+        assert_eq!(refusal.kind(), "applied_missing");
+        assert!(!refusal.ahead_only());
+
+        // A record the directory lacks below its head is missing, not ahead.
+        let mut renamed = finished(&full, 1, 1);
+        renamed.migration_name = "0001_other".into();
+        assert!(!up(&full, &[renamed]).expect_err("missing").ahead_only());
+        // Going down, allow_ahead lets nothing through.
+        let down = plan_run(
+            &behind,
+            &records[1..],
+            Dialect::Sqlite,
+            Direction::Down {
+                target: Target::Latest,
+            },
+            false,
+            None,
+        )
+        .expect_err("ahead");
+        assert!(!down.ahead_only());
+    }
+
+    // -- what a planned step carries for its execution (ADR-0048) -------------------------
+
+    #[test]
+    fn a_step_carries_its_migrations_first_data_step() {
+        let dir = backfill();
+        let plan = up(&dir, &[]).expect("plan");
+        assert!(plan.steps.iter().all(|s| s.first_data_step == Some(2)));
+        assert!(
+            up(&three(), &[])
+                .expect("plan")
+                .steps
+                .iter()
+                .all(|s| s.first_data_step.is_none())
+        );
+    }
+
+    fn column(name: &str) -> ferro_schema_ir::SchemaColumn {
+        serde_json::from_value(serde_json::json!({
+            "name": name,
+            "logical_type": "integer",
+            "nullable": true,
+            "primary_key": false,
+            "autoincrement": false,
+            "unique": false,
+            "index": false,
+            "default": null,
+            "format": null,
+        }))
+        .expect("column")
+    }
+
+    fn model(table: &str, columns: &[&str], renamed_from: Option<&str>) -> SchemaModel {
+        SchemaModel {
+            renamed_from: renamed_from.map(str::to_string),
+            columns: columns.iter().map(|c| column(c)).collect(),
+            ..ir(&[table]).payload.models.remove(0)
+        }
+    }
+
+    fn snapshot(models: Vec<SchemaModel>, parent: Option<[u8; 48]>) -> Snapshot {
+        let mut envelope = ir(&[]);
+        // Rename hints are schema ir_version 2's.
+        envelope.ir_version = 2;
+        envelope.payload.models = models;
+        let bytes = Snapshot::store(&envelope, parent).expect("store");
+        Snapshot::load(&bytes).expect("load")
+    }
+
+    const REBUILD: &str = "-- ferro: foreign-keys-off\n\
+        CREATE TABLE \"_ferro_new_author\" (\"id\" integer, \"name\" integer, \"slug\" integer);\n\
+        INSERT INTO \"_ferro_new_author\" SELECT \"id\", \"name\", NULL FROM \"author\";\n\
+        DROP TABLE \"author\";\n\
+        ALTER TABLE \"_ferro_new_author\" RENAME TO \"author\";\n\
+        ALTER TABLE \"article\" RENAME TO \"post\";\n\
+        CREATE TABLE \"_ferro_new_post\" (\"id\" integer, \"title\" integer);\n\
+        INSERT INTO \"_ferro_new_post\" SELECT \"id\", \"title\" FROM \"post\";\n\
+        DROP TABLE \"post\";\n\
+        ALTER TABLE \"_ferro_new_post\" RENAME TO \"post\";\n";
+
+    /// `0001` holds `author(id, name)` and `article(id, title)`; `0002`'s one
+    /// SQLite step rebuilds `author` (adding `slug`) and `post`, which
+    /// `0002`'s snapshot renames from `article`.
+    fn two_table_rebuild() -> HeldDirectory {
+        let first = snapshot(
+            vec![
+                model("author", &["id", "name"], None),
+                model("article", &["id", "title"], None),
+            ],
+            None,
+        );
+        let second = snapshot(
+            vec![
+                model("author", &["id", "name", "slug"], None),
+                model("post", &["id", "title"], Some("article")),
+            ],
+            Some(first.checksum),
+        );
+        let path = |m: &str, f: &str| PathBuf::from(format!("/proj/migrations/{m}/{f}"));
+        let file = |m: &str, name: &str, body: &str, down: &str| StepFile {
+            up: path(m, &format!("01_{name}.up.sqlite.sql")),
+            down: Some(path(m, &format!("01_{name}.down.sqlite.sql"))),
+            up_checksum: sha384(body.as_bytes()),
+            headers: Headers::parse(body).expect("headers"),
+            down_checksum: Some(sha384(down.as_bytes())),
+            down_headers: Headers::parse(down).expect("down headers"),
+        };
+        let step = |name: &str, file: StepFile| Step {
+            ordinal: 1,
+            name: name.to_string(),
+            kind: StepKind::Ddl,
+            files: BTreeMap::from([(StepDialect::Sqlite, file)]),
+        };
+        let create = "CREATE TABLE author (id int);\n";
+        let undo =
+            "-- ferro: foreign-keys-off\nCREATE TABLE \"_ferro_new_author\" (\"id\" integer);\n";
+        let migrations = vec![
+            Migration {
+                number: 1,
+                name: "init".into(),
+                dir: PathBuf::from("/proj/migrations/0001_init"),
+                steps: vec![step("schema", file("0001_init", "schema", create, DOWN))],
+                snapshot: first,
+            },
+            Migration {
+                number: 2,
+                name: "slug".into(),
+                dir: PathBuf::from("/proj/migrations/0002_slug"),
+                steps: vec![step("rebuild", file("0002_slug", "rebuild", REBUILD, undo))],
+                snapshot: second,
+            },
+        ];
+        let dir = MigrationsDir {
+            path: PathBuf::from("/proj/migrations"),
+            migrations,
+        };
+        HeldDirectory::from_parts(
+            dir,
+            [
+                (path("0001_init", "01_schema.up.sqlite.sql"), create),
+                (path("0001_init", "01_schema.down.sqlite.sql"), DOWN),
+                (path("0002_slug", "01_rebuild.up.sqlite.sql"), REBUILD),
+                (path("0002_slug", "01_rebuild.down.sqlite.sql"), undo),
+            ]
+            .map(|(path, text)| (path, text.as_bytes().to_vec())),
+        )
+        .expect("held")
+    }
+
+    fn columns(expectation: &RebuildExpectation) -> Vec<&str> {
+        expectation
+            .declared
+            .columns
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn a_two_table_rebuild_step_expects_each_table_as_its_snapshots_declare_it() {
+        let held = two_table_rebuild();
+        let plan = held
+            .plan(
+                &[],
+                Dialect::Sqlite,
+                Direction::Up { through: None },
+                false,
+                None,
+            )
+            .expect("plan");
+        assert_eq!(keys(&plan), [(1, 1), (2, 1)]);
+        assert!(plan.steps[0].rebuilds.is_empty());
+        let step = &plan.steps[1];
+        assert_eq!(step.mode, ExecMode::ForeignKeysOff);
+        let tables: Vec<(&str, &str)> = step
+            .rebuilds
+            .iter()
+            .map(|r| (r.table.as_str(), r.starting_name.as_str()))
+            .collect();
+        // In the file's order; `post` still has its starting name before
+        // the step runs.
+        assert_eq!(tables, [("author", "author"), ("post", "article")]);
+        // `0001`'s columns, with every column `0002` adds.
+        assert_eq!(columns(&step.rebuilds[0]), ["id", "name", "slug"]);
+        assert_eq!(step.rebuilds[1].declared.table_name, "article");
+        assert_eq!(columns(&step.rebuilds[1]), ["id", "title"]);
+        // plan_run sees no bytes, so it reads no rebuild.
+        let unheld = plan_run(
+            &held.dir,
+            &[],
+            Dialect::Sqlite,
+            Direction::Up { through: None },
+            false,
+            None,
+        )
+        .expect("plan");
+        assert!(unheld.steps[1].rebuilds.is_empty());
+    }
+
+    #[test]
+    fn a_reverted_rebuild_starts_from_the_migrations_own_snapshot() {
+        let held = two_table_rebuild();
+        let records: Vec<StepRecord> = held
+            .plan(
+                &[],
+                Dialect::Sqlite,
+                Direction::Up { through: None },
+                false,
+                None,
+            )
+            .expect("plan")
+            .steps
+            .into_iter()
+            .map(|s| StepRecord {
+                finished_at: Some("2026-10-01T14:02:33.000000Z".into()),
+                ..s.record
+            })
+            .collect();
+        let plan = held
+            .plan(
+                &records,
+                Dialect::Sqlite,
+                Direction::Down {
+                    target: Target::Latest,
+                },
+                false,
+                None,
+            )
+            .expect("plan");
+        let rebuild = &plan.steps[0].rebuilds;
+        assert_eq!(rebuild.len(), 1);
+        assert_eq!(rebuild[0].table, "author");
+        assert_eq!(columns(&rebuild[0]), ["id", "name", "slug"]);
+    }
+
+    #[test]
+    fn a_rebuilt_table_its_starting_snapshot_lacks_is_refused_before_anything_runs() {
+        let mut held = two_table_rebuild();
+        held.dir.migrations[0].snapshot = snapshot(vec![model("author", &["id"], None)], None);
+        held.dir.migrations[1].snapshot = snapshot(
+            vec![
+                model("author", &["id", "name", "slug"], None),
+                model("post", &["id", "title"], None),
+            ],
+            Some(held.dir.migrations[0].snapshot.checksum),
+        );
+        let refusal = held
+            .plan(
+                &[],
+                Dialect::Sqlite,
+                Direction::Up { through: None },
+                false,
+                None,
+            )
+            .expect_err("undeclared");
+        assert_eq!(refusal.kind(), "rebuild");
+        assert_eq!(
+            refusal.to_string(),
+            "ferro migrate: 0002_slug/01_rebuild.up.sqlite.sql rebuilds table \"post\", which \
+             the schema snapshot it starts from does not declare. Nothing was applied."
+        );
+    }
+
+    #[test]
+    fn an_edited_unfinished_rebuild_step_expects_what_its_edited_bytes_rebuild() {
+        let held = two_table_rebuild();
+        let planned = held
+            .plan(
+                &[],
+                Dialect::Sqlite,
+                Direction::Up { through: None },
+                false,
+                None,
+            )
+            .expect("plan")
+            .steps;
+        // 0001 applied; 0002's step started under bytes since edited into
+        // the held REBUILD (ADR-0030: an unfinished step may be edited).
+        let records = [
+            StepRecord {
+                finished_at: Some("2026-10-01T14:02:33.000000Z".into()),
+                ..planned[0].record.clone()
+            },
+            StepRecord {
+                checksum: OTHER.into(),
+                started_at: "2026-10-01T14:03:00.000000Z".into(),
+                ..planned[1].record.clone()
+            },
+        ];
+        let plan = held
+            .plan(
+                &records,
+                Dialect::Sqlite,
+                Direction::Up { through: None },
+                false,
+                None,
+            )
+            .expect("plan");
+        let step = &plan.steps[0];
+        assert_eq!(
+            step.edited.as_ref().map(|e| e.recorded.as_str()),
+            Some(OTHER)
+        );
+        let tables: Vec<&str> = step.rebuilds.iter().map(|r| r.table.as_str()).collect();
+        assert_eq!(tables, ["author", "post"]);
+    }
+
+    #[test]
+    fn held_bytes_are_the_hashed_ones() {
+        let held = two_table_rebuild();
+        let path = PathBuf::from("/proj/migrations/0002_slug/01_rebuild.up.sqlite.sql");
+        assert_eq!(held.text(&path), Ok(REBUILD));
+        let refusal = HeldDirectory::from_parts(
+            held.dir.clone(),
+            [(path.clone(), b"DROP TABLE author;\n".to_vec())],
+        )
+        .expect_err("edited");
+        assert_eq!(refusal.kind(), "unreadable");
+        assert_eq!(
+            refusal.to_string(),
+            "ferro migrate: cannot read 0002_slug/01_rebuild.up.sqlite.sql (it changed while the \
+             migrations directory was read; run the command again). Nothing was applied."
+        );
+        let unheld = HeldDirectory::from_parts(held.dir.clone(), []).expect("nothing held");
+        assert_eq!(
+            unheld
+                .plan(
+                    &[],
+                    Dialect::Sqlite,
+                    Direction::Up { through: None },
+                    false,
+                    None
+                )
+                .expect_err("no bytes")
+                .kind(),
+            "unreadable"
+        );
     }
 
     #[test]
