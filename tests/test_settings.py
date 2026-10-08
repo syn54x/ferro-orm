@@ -751,6 +751,18 @@ def test_ddl_lock_timeout_forms(project: Path, value: str, seconds: float):
     assert FerroSettings().database().ddl_lock_timeout_seconds == seconds
 
 
+def test_parse_lock_timeout_accepts_the_bound_and_refuses_beyond_it():
+    # The run lock's ``--lock-timeout`` / ``lock_timeout=`` duration (its
+    # async tests are in test_run_lock.py).
+    from ferro.migrations import runner
+
+    assert runner.parse_lock_timeout(runner.MAX_LOCK_TIMEOUT_S) == (
+        runner.MAX_LOCK_TIMEOUT_S
+    )
+    with pytest.raises(SettingsError, match="at most"):
+        runner.parse_lock_timeout(runner.MAX_LOCK_TIMEOUT_S + 1)
+
+
 def test_a_wrongly_typed_value_is_refused_naming_the_key(project: Path):
     _write(project / "ferro.toml", 'models = "myapp.models"\ndialects = ["sqlite"]\n')
 
