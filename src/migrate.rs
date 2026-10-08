@@ -15,7 +15,7 @@
 //! `ferro_ddl_lowering` functions every migration door uses (AGENTS.md § I-1).
 
 use crate::backend::{EngineBindValue, EngineHandle};
-use crate::ddl_exec::{DdlError, DdlExecutor, DdlFailure};
+use crate::ddl_exec::{DdlError, DdlExecutor, Door, Executed, Failed, Role, Unit};
 use crate::introspect::{
     LiveCheck, LiveColumn, LiveForeignKey, LiveIndex, column_holds_label,
     connected_role_bypasses_row_security, live_table_checks, live_table_columns, quote_ident,
@@ -231,43 +231,11 @@ fn map_drop_column_error(table_lower: &str, col_name: &str, e: sqlx::Error) -> P
     )
 }
 
-/// A reconciliation statement's failure: the database error, the statement,
-/// and the column when the statement drops one (its message differs).
-struct PassFailure {
-    error: sqlx::Error,
-    statement: Option<String>,
-    dropped_column: Option<String>,
-}
-
-impl From<sqlx::Error> for PassFailure {
-    fn from(error: sqlx::Error) -> Self {
-        Self {
-            error,
-            statement: None,
-            dropped_column: None,
-        }
-    }
-}
-
-impl DdlFailure for PassFailure {
-    fn database_error(&self) -> Option<&sqlx::Error> {
-        Some(&self.error)
-    }
-
-    fn statement(&self) -> Option<&str> {
-        self.statement.as_deref()
-    }
-}
-
 /// The warning the create and reconciliation passes raise for each attempt
 /// that timed out waiting for a lock: `migrating 'author': waiting for a lock
 /// on "author" (attempt 1 of 10, retry in 1s)`.
-pub(crate) fn pass_attempt_warning(
-    subject: &str,
-    attempt: &crate::ddl_exec::Attempt,
-    of: u8,
-) -> String {
-    format!("migrating '{subject}': {}", attempt.describe(of))
+pub(crate) fn pass_attempt_warning(subject: &str, attempt: &crate::ddl_exec::Attempt) -> String {
+    format!("migrating '{subject}': {}", attempt.describe())
 }
 
 /// The error for a create or reconciliation unit that timed out on every
@@ -300,6 +268,7 @@ fn map_statement_error(table_lower: &str, sql: &str, e: sqlx::Error) -> PyErr {
 /// triggers, views, inbound foreign keys). `drop_sql` is the op's rendering.
 async fn execute_sqlite_drop_column(
     engine: &EngineHandle,
+    executed: &mut Executed,
     table_lower: &str,
     col_name: &str,
     drop_sql: &str,
@@ -320,22 +289,23 @@ async fn execute_sqlite_drop_column(
     }
     for index in &indexes {
         let sql = format!("DROP INDEX IF EXISTS {}", quote_ident(&index.name));
-        log_reconcile_statement(table_lower, &sql);
-        engine.execute_sql_unprepared(&sql).await.map_err(|e| {
-            crate::errors::map_db_error(
-                &format!(
-                    "Auto-migrate failed dropping index '{}' (required to drop column \
-                     '{}.{}')",
-                    index.name, table_lower, col_name
-                ),
-                e,
-            )
-        })?;
+        executed
+            .send_on(engine, Door::Pass(table_lower), Role::Schema, &sql)
+            .await
+            .map_err(|e| {
+                crate::errors::map_db_error(
+                    &format!(
+                        "Auto-migrate failed dropping index '{}' (required to drop column \
+                         '{}.{}')",
+                        index.name, table_lower, col_name
+                    ),
+                    e,
+                )
+            })?;
     }
 
-    log_reconcile_statement(table_lower, drop_sql);
-    engine
-        .execute_sql_unprepared(drop_sql)
+    executed
+        .send_on(engine, Door::Pass(table_lower), Role::Schema, drop_sql)
         .await
         .map_err(|e| map_drop_column_error(table_lower, col_name, e))?;
     Ok(())
@@ -392,71 +362,77 @@ async fn execute_table_ops(
     }
 
     if backend == Dialect::Sqlite {
-        for op in ops {
-            if let MigrationOp::DropColumn { column, .. } = &op.op {
-                for sql in &op.statements {
-                    execute_sqlite_drop_column(engine, table, column, sql).await?;
-                }
-                continue;
-            }
-            for sql in &op.statements {
-                log_reconcile_statement(table, sql);
-                engine
-                    .execute_sql_unprepared(sql)
-                    .await
-                    .map_err(|e| map_statement_error(table, sql, e))?;
-            }
-        }
+        execute_sqlite_table_ops(engine, table, ops).await?;
         return Ok((statements - drops, drops));
     }
 
     // The executor owns the transaction: BEGIN, `SET LOCAL lock_timeout`,
     // this group, COMMIT; on a failure ROLLBACK, and a connection whose
     // ROLLBACK failed is discarded rather than returned to the pool (#416).
-    let of = ddl.max_attempts;
+    // A failing statement is found by its place in the group, and so is the
+    // op it renders.
+    let ops_statements: Vec<(&RenderedOp, &String)> = ops
+        .iter()
+        .flat_map(|op| op.statements.iter().map(move |sql| (*op, sql)))
+        .collect();
+    let sqls: Vec<&String> = ops_statements.iter().map(|(_, sql)| *sql).collect();
     let result = ddl
-        .transactional(
+        .run(
             engine,
-            |sql| log_lock_timeout_statement(table, sql),
-            |attempt| crate::emit_user_warning_always(&pass_attempt_warning(table, &attempt, of)),
-            |mut conn| async move {
-                let result = async {
-                    for op in ops {
-                        for sql in &op.statements {
-                            log_reconcile_statement(table, sql);
-                            conn.execute_sql_unprepared(sql).await.map_err(|error| {
-                                PassFailure {
-                                    error,
-                                    statement: Some(sql.clone()),
-                                    dropped_column: match &op.op {
-                                        MigrationOp::DropColumn { column, .. } => {
-                                            Some(column.clone())
-                                        }
-                                        _ => None,
-                                    },
-                                }
-                            })?;
-                        }
-                    }
-                    Ok::<(), PassFailure>(())
-                }
-                .await;
-                (conn, result)
-            },
+            Unit::Transactional,
+            Door::Pass(table),
+            &sqls,
+            |attempt| crate::emit_user_warning_always(&pass_attempt_warning(table, &attempt)),
+            None,
         )
         .await;
     match result {
-        Ok(()) => Ok((statements - drops, drops)),
+        Ok(_) => Ok((statements - drops, drops)),
         Err(DdlError::LockTimeout(timeout)) => Err(pass_lock_timeout_error(table, &timeout)),
-        Err(DdlError::Failed(failure)) => Err(match (failure.dropped_column, failure.statement) {
-            (Some(column), _) => map_drop_column_error(table, &column, failure.error),
-            (None, Some(sql)) => map_statement_error(table, &sql, failure.error),
-            (None, None) => crate::errors::map_db_error(
-                &format!("Auto-migrate failed to apply DDL to table '{table}'"),
-                failure.error,
-            ),
-        }),
+        Err(DdlError::Failed(Failed { index, error })) => {
+            Err(match index.and_then(|index| ops_statements.get(index)) {
+                Some((
+                    RenderedOp {
+                        op: MigrationOp::DropColumn { column, .. },
+                        ..
+                    },
+                    _,
+                )) => map_drop_column_error(table, column, error),
+                Some((_, sql)) => map_statement_error(table, sql, error),
+                None => crate::errors::map_db_error(
+                    &format!("Auto-migrate failed to apply DDL to table '{table}'"),
+                    error,
+                ),
+            })
+        }
     }
+}
+
+/// One table's rendered ops on SQLite, outside the executor on purpose:
+/// statement at a time (SQLite sets no lock timeout and retries nothing),
+/// each column drop through its index-dependency path, which reads the
+/// catalog between statements ([`execute_sqlite_drop_column`]).
+async fn execute_sqlite_table_ops(
+    engine: &EngineHandle,
+    table: &str,
+    ops: &[&RenderedOp],
+) -> PyResult<Executed> {
+    let mut executed = Executed::default();
+    for op in ops {
+        if let MigrationOp::DropColumn { column, .. } = &op.op {
+            for sql in &op.statements {
+                execute_sqlite_drop_column(engine, &mut executed, table, column, sql).await?;
+            }
+            continue;
+        }
+        for sql in &op.statements {
+            executed
+                .send_on(engine, Door::Pass(table), Role::Schema, sql)
+                .await
+                .map_err(|e| map_statement_error(table, sql, e))?;
+        }
+    }
+    Ok(executed)
 }
 
 /// How long an auto-migrate pass waits for the run lock. The wait has no
@@ -747,27 +723,15 @@ async fn run_passes(engine: Arc<EngineHandle>, opts: MigrateOptions) -> PyResult
             // `SET lock_timeout` / `RESET lock_timeout` (ADR-0044).
             if !current.statements.is_empty() {
                 let subject = type_name_of(&current.op);
-                let of = ddl.max_attempts;
-                let statements = &current.statements;
-                ddl.unwrapped(
+                ddl.run(
                     &engine,
-                    |sql| log_lock_timeout_statement(subject, sql),
+                    Unit::Unwrapped,
+                    Door::Pass(subject),
+                    &current.statements,
                     |attempt| {
-                        crate::emit_user_warning_always(&pass_attempt_warning(
-                            subject, &attempt, of,
-                        ))
+                        crate::emit_user_warning_always(&pass_attempt_warning(subject, &attempt))
                     },
-                    |mut conn| async move {
-                        let mut result = Ok(());
-                        for sql in statements {
-                            log_reconcile_statement(subject, sql);
-                            if let Err(error) = conn.execute_sql_unprepared(sql).await {
-                                result = Err(crate::ddl_exec::StatementError::at(sql, error));
-                                break;
-                            }
-                        }
-                        (conn, result)
-                    },
+                    None,
                 )
                 .await
                 .map_err(|err| match err {

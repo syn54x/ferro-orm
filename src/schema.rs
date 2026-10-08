@@ -4,8 +4,8 @@
 //! emitted from the Python-compiled SchemaIR modelset via `ferro_migrate`.
 
 use crate::backend::EngineHandle;
-use crate::ddl_exec::{DdlError, DdlExecutor, StatementError};
-use crate::migrate::{log_lock_timeout_statement, pass_attempt_warning, pass_lock_timeout_error};
+use crate::ddl_exec::{DdlError, DdlExecutor, Door, Failed, Unit};
+use crate::migrate::{pass_attempt_warning, pass_lock_timeout_error};
 use crate::state::{Dialect, MODEL_REGISTRY, engine_for_connection};
 use ferro_migrate::plan::{
     hint_refusal_warning, pending_table_rename_warning, refuse_hints, table_rename_hint,
@@ -154,22 +154,15 @@ pub async fn internal_create_tables(
                 .or_insert((model.table_name.as_str(), guard));
         }
     }
-    let of = ddl.max_attempts;
     for (table, guard) in type_guards.values() {
         let (table, guard) = (*table, *guard);
-        ddl.unwrapped(
+        ddl.run(
             &engine,
-            |sql| log_lock_timeout_statement(table, sql),
-            |attempt| crate::emit_user_warning_always(&pass_attempt_warning(table, &attempt, of)),
-            |mut conn| async move {
-                crate::migrate::log_reconcile_statement(table, guard);
-                let result = conn
-                    .execute_sql_unprepared(guard)
-                    .await
-                    .map(|_| ())
-                    .map_err(|error| StatementError::at(guard, error));
-                (conn, result)
-            },
+            Unit::Unwrapped,
+            Door::Pass(table),
+            &[guard],
+            |attempt| crate::emit_user_warning_always(&pass_attempt_warning(table, &attempt)),
+            None,
         )
         .await
         .map_err(|err| match err {
@@ -181,7 +174,7 @@ pub async fn internal_create_tables(
     }
 
     for (model, emission) in &to_create {
-        create_one_table(&engine, model, emission, dialect, ddl).await?;
+        create_one_table(&engine, model, emission, ddl).await?;
 
         for warning in &emission.warnings {
             crate::emit_user_warning(warning);
@@ -300,74 +293,43 @@ fn warn_pending_renames(
 /// leaves the database exactly as it was and the connect fails loudly, naming
 /// the statement.
 ///
-/// SQLite keeps statement-at-a-time execution, matching the reconciliation
-/// pass; it emits no row-security DDL at all, so the lockout shape cannot occur
-/// there.
+/// SQLite runs the same statements unwrapped, one at a time, matching the
+/// reconciliation pass; it emits no row-security DDL at all, so the lockout
+/// shape cannot occur there.
 async fn create_one_table(
     engine: &Arc<EngineHandle>,
     model: &ferro_schema_ir::SchemaModel,
     emission: &ferro_migrate::CreateTableEmission,
-    dialect: Dialect,
     ddl: &DdlExecutor,
 ) -> PyResult<()> {
     let table = model.table_name.as_str();
-    if dialect != Dialect::Postgres {
-        crate::migrate::log_reconcile_statement(table, &emission.create_sql);
-        engine
-            .execute_sql(&emission.create_sql)
-            .await
-            .map_err(|e| create_step_error(table, "table", &emission.create_sql, e))?;
-        for post_sql in &emission.post_create_sqls {
-            crate::migrate::log_reconcile_statement(table, post_sql);
-            engine
-                .execute_sql(post_sql)
-                .await
-                .map_err(|e| create_step_error(table, "artifact", post_sql, e))?;
-        }
-        return Ok(());
-    }
-
-    // The executor owns the transaction: BEGIN, `SET LOCAL lock_timeout`,
-    // the table, COMMIT; on a failure ROLLBACK, and a connection whose
-    // ROLLBACK failed is discarded rather than returned to the pool (#416).
-    let of = ddl.max_attempts;
+    let unit = match engine.backend() {
+        Dialect::Postgres => Unit::Transactional,
+        Dialect::Sqlite => Unit::Unwrapped,
+    };
+    let statements: Vec<&String> = std::iter::once(&emission.create_sql)
+        .chain(&emission.post_create_sqls)
+        .collect();
     let result = ddl
-        .transactional(
+        .run(
             engine,
-            |sql| log_lock_timeout_statement(table, sql),
-            |attempt| crate::emit_user_warning_always(&pass_attempt_warning(table, &attempt, of)),
-            |mut conn| async move {
-                let mut result = Ok(());
-                let statements =
-                    std::iter::once(&emission.create_sql).chain(&emission.post_create_sqls);
-                for sql in statements {
-                    crate::migrate::log_reconcile_statement(table, sql);
-                    if let Err(error) = conn.execute_sql(sql).await {
-                        result = Err(StatementError::at(sql, error));
-                        break;
-                    }
-                }
-                (conn, result)
-            },
+            unit,
+            Door::Pass(table),
+            &statements,
+            |attempt| crate::emit_user_warning_always(&pass_attempt_warning(table, &attempt)),
+            None,
         )
         .await;
-    result.map_err(|err| match err {
+    result.map(|_| ()).map_err(|err| match err {
         DdlError::LockTimeout(timeout) => pass_lock_timeout_error(table, &timeout),
-        DdlError::Failed(StatementError {
-            statement: Some(sql),
+        DdlError::Failed(Failed {
+            index: Some(index),
             error,
         }) => {
-            let step = if sql == emission.create_sql {
-                "table"
-            } else {
-                "artifact"
-            };
-            create_step_error(table, step, &sql, error)
+            let step = if index == 0 { "table" } else { "artifact" };
+            create_step_error(table, step, statements[index], error)
         }
-        DdlError::Failed(StatementError {
-            statement: None,
-            error,
-        }) => crate::errors::map_db_error(
+        DdlError::Failed(Failed { index: None, error }) => crate::errors::map_db_error(
             &format!("Auto-migrate failed to create table '{table}'"),
             error,
         ),
@@ -740,6 +702,97 @@ mod tests {
         let result = db_check_constraint_name("verylongtable", &long_col);
         assert_eq!(result.chars().count(), 63);
         assert!(result.ends_with("_ck"));
+    }
+
+    /// The SQLite twin of `tests/test_ddl_unprepared.py`: the create pass's
+    /// `CREATE TABLE` and `CREATE INDEX` describe a schema the next migration
+    /// may change, so neither may stay prepared on the connection it ran on
+    /// (`docs/solutions/patterns/ddl-on-live-engine.md`).
+    mod unprepared {
+        use super::super::create_one_table;
+        use crate::backend::{EngineConnection, EngineHandle, PoolSpec};
+        use crate::ddl_exec::DdlExecutor;
+        use crate::session_settings::SettingsDelivery;
+        use ferro_ddl_lowering::Dialect;
+        use ferro_schema_ir::{SchemaColumn, SchemaIndex, SchemaModel};
+        use sqlx::Connection;
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicUsize;
+
+        fn column(name: &str, logical_type: &str, primary_key: bool, index: bool) -> SchemaColumn {
+            SchemaColumn {
+                renamed_from: None,
+                name: name.to_string(),
+                logical_type: logical_type.to_string(),
+                db_type: None,
+                db_type_explicit: None,
+                nullable: false,
+                primary_key,
+                autoincrement: primary_key,
+                unique: false,
+                index,
+                default: None,
+                format: None,
+                enum_values: None,
+                enum_type_name: None,
+                postgres_native_enum: false,
+                enum_renamed_labels: Default::default(),
+                default_factory: None,
+            }
+        }
+
+        #[tokio::test]
+        async fn the_create_pass_leaves_no_statement_in_the_connection_cache() {
+            let engine = Arc::new(
+                EngineHandle::connect(PoolSpec {
+                    backend: Dialect::Sqlite,
+                    url: "sqlite::memory:".to_string(),
+                    search_path: None,
+                    max_connections: 1,
+                    min_connections: 0,
+                    settings_delivery: SettingsDelivery::Transaction,
+                    pins: Arc::new(AtomicUsize::new(0)),
+                })
+                .await
+                .expect("in-memory engine"),
+            );
+            let model = SchemaModel {
+                renamed_from: None,
+                model_name: "Widget".to_string(),
+                table_name: "widget".to_string(),
+                columns: vec![
+                    column("id", "integer", true, false),
+                    column("name", "string", false, true),
+                ],
+                foreign_keys: vec![],
+                indexes: vec![SchemaIndex {
+                    name: "idx_widget_name".to_string(),
+                    columns: vec!["name".to_string()],
+                    unique: false,
+                }],
+                uniques: vec![],
+                checks: vec![],
+                table_checks: vec![],
+                row_security: None,
+            };
+            let emission =
+                ferro_migrate::render_create_table(&model, Dialect::Sqlite).expect("emission");
+            assert!(
+                !emission.post_create_sqls.is_empty(),
+                "the index is created too"
+            );
+
+            create_one_table(&engine, &model, &emission, &DdlExecutor::new(None))
+                .await
+                .expect("created");
+
+            let Ok(EngineConnection::Sqlite(conn)) =
+                crate::ddl_exec::pool_connection(&engine).await
+            else {
+                panic!("the engine's one SQLite connection");
+            };
+            assert_eq!(conn.cached_statements_size(), 0);
+        }
     }
 
     mod awaiting_rename {
