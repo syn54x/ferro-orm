@@ -1040,7 +1040,7 @@ async def test_a_freshly_migrated_database_reads_back_as_a_plan_with_nothing_to_
     await ferro.connect(db_url, auto_migrate=True)
     declared = _declared_modelset()
 
-    ir_json, facts_json = await _live_schema_ir()
+    ir_json, facts_json = await _live_schema_ir(None, declared)
     live = json.loads(ir_json)
     assert [model["table_name"] for model in live["payload"]["models"]] == [
         "planauthor",
@@ -1060,7 +1060,9 @@ async def test_a_freshly_migrated_database_reads_back_as_a_plan_with_nothing_to_
 
     # A table the live database lacks is an add; reading only one table
     # makes the other one missing.
-    only_author, author_facts = await _live_schema_ir(None, '["planauthor"]')
+    only_author, author_facts = await _live_schema_ir(
+        None, EMPTY_MODELSET, '["planauthor"]'
+    )
     plan = json.loads(
         _plan_from_ir(
             only_author,
@@ -1083,7 +1085,7 @@ async def test_live_facts_carry_check_bodies_validity_and_row_security(
 
     _declare_library_models()
     await ferro.connect(db_url, auto_migrate=True)
-    _, facts_json = await _live_schema_ir(None, '["planbook"]')
+    _, facts_json = await _live_schema_ir(None, _declared_modelset())
     facts = json.loads(facts_json)
     book = facts["tables"]["planbook"]
     assert [check["name"] for check in book["checks"]] == ["ck_planbook_kind"]

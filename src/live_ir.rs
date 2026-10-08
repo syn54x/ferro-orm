@@ -183,50 +183,81 @@ fn table_facts(table: &LiveTable) -> LiveTableFacts {
     }
 }
 
-/// Whether a live table is the engine's own bookkeeping rather than schema:
-/// SQLite reserves every `sqlite_`-prefixed name (`sqlite_sequence`,
-/// `sqlite_stat1`, …) for internal use, and no model can own one.
-fn is_engine_internal_table(name: &str, dialect: Dialect) -> bool {
-    dialect == Dialect::Sqlite && name.starts_with("sqlite_")
+/// The live tables a read planned against `declared` covers: every declared
+/// table that is live, plus the old table of each live table rename hint
+/// `declared` carries (ADR-0032, decided by the planner's own liveness rule
+/// through [`live_table_renames`], so the plan renames the table instead of
+/// adding an empty one), minus `exclude`, plus every live table in `extra`
+/// — sorted. A live table is what the one reader says
+/// ([`live_table_names`]: a base table, never a view, never SQLite's own
+/// `sqlite_*` tables), so a view named like a model reads as absent.
+///
+/// The reconciliation pass excludes the tables its create pass just built;
+/// the Alembic bridge adds the tables a revision drops; `drift` and
+/// `baseline` read `declared` (the snapshot) alone (ADR-0047).
+///
+/// # Errors
+/// A `PyErr` when the catalog query fails.
+pub async fn tables_to_read(
+    engine: &EngineHandle,
+    declared: &IrEnvelope<SchemaIrPayload>,
+    exclude: &[String],
+    extra: &[String],
+) -> PyResult<Vec<String>> {
+    let live: BTreeSet<String> = live_table_names(engine).await?.into_iter().collect();
+    Ok(select_tables_to_read(
+        &live,
+        &declared.payload,
+        exclude,
+        extra,
+    ))
 }
 
-/// Read the live database behind `engine` into the planner's input: every
-/// table named in `tables` that exists (every live schema table when `None`
-/// — SQLite's internal `sqlite_*` tables are not schema), plus every live
-/// enum type's labels on Postgres.
+/// [`tables_to_read`]'s rule over the live table names. A refused hint
+/// ([`HintError`]) renames nothing, so nothing more is read for it; the
+/// planner states the refusal.
+fn select_tables_to_read(
+    live: &BTreeSet<String>,
+    declared: &SchemaIrPayload,
+    exclude: &[String],
+    extra: &[String],
+) -> Vec<String> {
+    let renamed = live_table_renames(live, declared).unwrap_or_default();
+    let mut read: BTreeSet<String> = declared
+        .models
+        .iter()
+        .map(|model| model.table_name.clone())
+        .filter(|table| live.contains(table))
+        .chain(renamed.into_iter().map(|(old, _)| old))
+        .filter(|table| !exclude.contains(table))
+        .collect();
+    read.extend(extra.iter().filter(|table| live.contains(*table)).cloned());
+    read.into_iter().collect()
+}
+
+/// Read the live tables named in `tables` ([`tables_to_read`]) into the
+/// planner's input, plus every live enum type's labels on Postgres.
 ///
 /// # Errors
 /// A `PyErr` when an introspection query fails.
 pub async fn live_schema_ir(
     engine: &EngineHandle,
-    tables: Option<&[String]>,
+    tables: &[String],
 ) -> PyResult<(IrEnvelope<SchemaIrPayload>, LiveFacts)> {
-    let names: Vec<String> = match tables {
-        Some(names) => names.to_vec(),
-        None => {
-            let mut names: Vec<String> = live_table_names(engine)
-                .await?
-                .into_iter()
-                .filter(|name| !is_engine_internal_table(name, engine.backend()))
-                .collect();
-            names.sort();
-            names
-        }
-    };
-    let mut live = Vec::with_capacity(names.len());
-    for name in names {
-        // A table that does not exist reads as absent, so the planner plans
-        // it as an add.
-        let Some(columns) = live_table_columns(engine, &name).await? else {
+    let mut live = Vec::with_capacity(tables.len());
+    for name in tables {
+        // A table dropped since `tables_to_read` asked reads as absent, so
+        // the planner plans it as an add.
+        let Some(columns) = live_table_columns(engine, name).await? else {
             continue;
         };
         live.push(LiveTable {
             columns,
-            indexes: live_table_indexes(engine, &name).await?,
-            foreign_keys: live_table_foreign_keys(engine, &name).await?,
-            checks: live_table_checks(engine, &name).await?,
-            row_security: live_table_row_security(engine, &name).await?,
-            name,
+            indexes: live_table_indexes(engine, name).await?,
+            foreign_keys: live_table_foreign_keys(engine, name).await?,
+            checks: live_table_checks(engine, name).await?,
+            row_security: live_table_row_security(engine, name).await?,
+            name: name.clone(),
         });
     }
     let dialect = engine.backend();
@@ -240,14 +271,11 @@ pub async fn live_schema_ir(
 
 /// The live table renames `declared` asks of a database whose tables are
 /// `live`, as `(old, new)`: one per live `__ferro_renamed_from__` hint
-/// (ADR-0032), decided by the planner's own rule. A read that plans
-/// `declared` against the live database covers each `old` beside the
-/// declared tables, so the plan renames the table instead of adding an
-/// empty one.
+/// (ADR-0032), decided by the planner's own rule.
 ///
 /// # Errors
 /// The planner's refusal of a hint ([`HintError`]), under which nothing
-/// renames and nothing more is read.
+/// renames.
 pub fn live_table_renames(
     live: &BTreeSet<String>,
     declared: &SchemaIrPayload,
@@ -261,55 +289,40 @@ pub fn live_table_renames(
         .collect())
 }
 
-/// Read the database behind connection `using` into an IR envelope and its
-/// live facts, as JSON: `(ir_json, facts_json)`. `tables_json` is a JSON list
-/// of table names to read; `None` reads every live table. With
-/// `declared_json` (the schema IR envelope the read is planned against), the
-/// old table of every live table rename hint it declares is read too
-/// ([`live_table_renames`]).
+/// Read the database behind connection `using`, planned against
+/// `declared_json` (a schema IR envelope), into an IR envelope and its live
+/// facts, as JSON: `(ir_json, facts_json)`. The tables read are
+/// [`tables_to_read`]'s, with `extra_tables_json` (a JSON list of table
+/// names) as its extra tables.
 ///
 /// # Errors
-/// A `PyErr` when `tables_json` is not a JSON list of strings,
-/// `declared_json` is not a schema IR envelope, the connection is not open,
-/// or introspection fails.
+/// A `PyErr` when `declared_json` is not a schema IR envelope,
+/// `extra_tables_json` is not a JSON list of strings, the connection is not
+/// open, or introspection fails.
 #[pyfunction]
 #[pyo3(name = "_live_schema_ir")]
-#[pyo3(signature = (using=None, tables_json=None, declared_json=None))]
+#[pyo3(signature = (using, declared_json, extra_tables_json=None))]
 pub fn _live_schema_ir(
     py: Python<'_>,
     using: Option<String>,
-    tables_json: Option<String>,
-    declared_json: Option<String>,
+    declared_json: String,
+    extra_tables_json: Option<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
-    let tables: Option<Vec<String>> = tables_json
+    let declared = crate::migrate::parse_schema_envelope(&declared_json, "declared_json")?;
+    let extra: Vec<String> = extra_tables_json
         .map(|json| {
             serde_json::from_str(&json).map_err(|e| {
                 pyo3::exceptions::PyValueError::new_err(format!(
-                    "tables_json must be a JSON list of table names: {e}"
+                    "extra_tables_json must be a JSON list of table names: {e}"
                 ))
             })
         })
-        .transpose()?;
-    let declared = declared_json
-        .map(|json| crate::migrate::parse_schema_envelope(&json, "declared_json"))
-        .transpose()?;
+        .transpose()?
+        .unwrap_or_default();
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let engine = crate::state::engine_for_connection(using)?;
-        let tables = match (tables, declared) {
-            (Some(mut tables), Some(declared)) => {
-                let live: BTreeSet<String> = live_table_names(&engine).await?.into_iter().collect();
-                if let Ok(renames) = live_table_renames(&live, &declared.payload) {
-                    for (old, _) in renames {
-                        if !tables.contains(&old) {
-                            tables.push(old);
-                        }
-                    }
-                }
-                Some(tables)
-            }
-            (tables, _) => tables,
-        };
-        let (envelope, facts) = live_schema_ir(&engine, tables.as_deref()).await?;
+        let tables = tables_to_read(&engine, &declared, &[], &extra).await?;
+        let (envelope, facts) = live_schema_ir(&engine, &tables).await?;
         let to_json = |value: serde_json::Result<String>| {
             value.map_err(|e| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!(
@@ -499,14 +512,64 @@ mod tests {
         assert!(!post.row_security.policies[0].ferro_owned);
     }
 
+    /// A declared modelset of `tables`, each `(table, renamed_from)`.
+    fn declared(tables: &[(&str, Option<&str>)]) -> SchemaIrPayload {
+        let (envelope, _) =
+            live_tables_to_schema_ir(vec![post()], BTreeMap::new(), Dialect::Postgres);
+        let mut payload = envelope.payload;
+        let template = payload.models.remove(0);
+        payload.models = tables
+            .iter()
+            .map(|(table, renamed_from)| SchemaModel {
+                table_name: (*table).to_string(),
+                renamed_from: renamed_from.map(str::to_string),
+                ..template.clone()
+            })
+            .collect();
+        payload
+    }
+
+    fn names(tables: &[&str]) -> BTreeSet<String> {
+        tables.iter().map(|table| (*table).to_string()).collect()
+    }
+
     #[test]
-    fn sqlite_bookkeeping_tables_are_not_schema() {
-        assert!(is_engine_internal_table("sqlite_sequence", Dialect::Sqlite));
-        assert!(!is_engine_internal_table("post", Dialect::Sqlite));
-        assert!(!is_engine_internal_table(
-            "sqlite_sequence",
-            Dialect::Postgres
-        ));
+    fn a_read_covers_the_live_declared_tables_and_each_live_hints_old_table() {
+        let declared = declared(&[("author", None), ("squad", Some("team")), ("tag", None)]);
+        // `tag` is not live; `team` is, under `squad`'s hint; `audit` is an
+        // undeclared live table nobody asked for.
+        let live = names(&["author", "team", "audit"]);
+        assert_eq!(
+            select_tables_to_read(&live, &declared, &[], &[]),
+            ["author", "team"]
+        );
+        // The pass excludes what its create pass built; the bridge adds what a
+        // revision drops — a live table only.
+        assert_eq!(
+            select_tables_to_read(
+                &live,
+                &declared,
+                &["author".to_string()],
+                &["audit".to_string(), "gone".to_string()],
+            ),
+            ["audit", "team"]
+        );
+    }
+
+    #[test]
+    fn a_hint_whose_new_table_is_live_too_reads_no_old_table() {
+        let declared = declared(&[("squad", Some("team"))]);
+        let live = names(&["squad", "team"]);
+        assert_eq!(select_tables_to_read(&live, &declared, &[], &[]), ["squad"]);
+    }
+
+    #[test]
+    fn a_refused_hint_reads_nothing_more() {
+        // Two tables claiming one old table: the planner refuses the hints.
+        let declared = declared(&[("squad", Some("team")), ("crew", Some("team"))]);
+        let live = names(&["team"]);
+        assert!(live_table_renames(&live, &declared).is_err());
+        assert!(select_tables_to_read(&live, &declared, &[], &[]).is_empty());
     }
 
     #[test]

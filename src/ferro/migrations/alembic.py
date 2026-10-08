@@ -74,7 +74,9 @@ class _FerroMetadata:
     @property
     def tables(self) -> list[str]:
         """The models' tables and every table a rename hint names as the old
-        one: the tables the planner reads live and Alembic is kept off."""
+        one: the tables Alembic's own comparator is kept off. Which of them
+        the planner reads live is the live read's own rule
+        (``_live_schema_ir``, ADR-0047)."""
         names = set()
         for model in self.envelope["payload"]["models"]:
             names.add(model["table_name"])
@@ -531,10 +533,13 @@ class _LiveDatabase:
     tracking_tables: list[Any]
 
 
-def _read_live(connection: Any, tables: list[str]) -> _LiveDatabase:
+def _read_live(
+    connection: Any, declared: Dict[str, Any], dropped: list[str]
+) -> _LiveDatabase:
     """The live database behind ``connection`` read into the planner's input
-    (``_live_schema_ir``) and the tracking tables governing its schema, over
-    a private ferro connection closed afterwards."""
+    (``_live_schema_ir``, planned against ``declared``, with the ``dropped``
+    tables beside it) and the tracking tables governing its schema, over a
+    private ferro connection closed afterwards."""
     url = _ferro_url(connection)
 
     async def read() -> _LiveDatabase:
@@ -543,7 +548,9 @@ def _read_live(connection: Any, tables: list[str]) -> _LiveDatabase:
         name = f"_ferro_alembic_{uuid.uuid4().hex}"
         await connect(url, name=name)
         try:
-            schema_ir, facts = await _core._live_schema_ir(name, json.dumps(tables))
+            schema_ir, facts = await _core._live_schema_ir(
+                name, json.dumps(declared), json.dumps(dropped)
+            )
             tracking = json.loads(await _core._tracking_tables_for(name, None))
         finally:
             await _core._disconnect(name)
@@ -791,9 +798,9 @@ if _HAS_ALEMBIC:
                 f"the Alembic bridge plans for Postgres and SQLite; this database is "
                 f"{autogen_context.dialect.name}"
             )
-        tables = sorted({*ferro.tables, *_dropped_tables(autogen_context)})
-        object_filter.hide(tables)
-        live = _read_live(autogen_context.connection, tables)
+        dropped = _dropped_tables(autogen_context)
+        object_filter.hide(sorted({*ferro.tables, *dropped}))
+        live = _read_live(autogen_context.connection, ferro.envelope, dropped)
         if live.tracking_tables:
             raise _refuse(
                 "this database is tracked by ferro migrations (it carries "

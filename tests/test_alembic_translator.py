@@ -75,18 +75,10 @@ async def _drift(db_url: str) -> list[dict]:
     into the registered models: the pass's question, asked on a private
     connection. ``[]`` is "no drift"."""
     envelope = ensure_resolved_modelset()
-    tables = sorted(
-        {m["table_name"] for m in envelope["payload"]["models"]}
-        | {
-            m["renamed_from"]
-            for m in envelope["payload"]["models"]
-            if m.get("renamed_from")
-        }
-    )
     name = f"tr533_{uuid.uuid4().hex}"
     await connect(db_url, name=name)
     try:
-        live, facts = await _core._live_schema_ir(name, json.dumps(tables))
+        live, facts = await _core._live_schema_ir(name, json.dumps(envelope))
         dialect = _core.connection_backend(name)
     finally:
         await _core._disconnect(name)
@@ -244,7 +236,7 @@ async def test_an_auto_migrated_table_plans_nothing_forward_or_back(
     name = f"tr533_{uuid.uuid4().hex}"
     await connect(db_url, name=name)
     try:
-        live, facts = await _core._live_schema_ir(name, json.dumps(["tr533ledger"]))
+        live, facts = await _core._live_schema_ir(name, envelope)
     finally:
         await _core._disconnect(name)
     forward = json.loads(
@@ -527,13 +519,18 @@ def _bra_shop(*, with_order: bool) -> None:
 
 
 DROP_KIND = 'DROP TYPE "braorderkind"'
+_NO_MODELS = {
+    "ir_kind": "schema",
+    "ir_version": 1,
+    "payload": {"dialect_agnostic": True, "models": []},
+}
 
 
 async def _enum_types(db_url: str) -> list[str]:
     name = f"bra_{uuid.uuid4().hex}"
     await connect(db_url, name=name)
     try:
-        _, facts = await _core._live_schema_ir(name, json.dumps([]))
+        _, facts = await _core._live_schema_ir(name, json.dumps(_NO_MODELS))
     finally:
         await _core._disconnect(name)
     return sorted(json.loads(facts)["enum_labels"])

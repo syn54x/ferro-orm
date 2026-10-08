@@ -21,7 +21,9 @@ use crate::introspect::{
     connected_role_bypasses_row_security, live_table_checks, live_table_columns, quote_ident,
     sqlite_indexes_covering_column,
 };
-use crate::live_ir::{LiveTable, live_schema_ir, live_table_renames, live_tables_to_schema_ir};
+use crate::live_ir::{
+    LiveTable, live_schema_ir, live_table_renames, live_tables_to_schema_ir, tables_to_read,
+};
 use crate::run::{
     FORMAT_TABLE, RunLock, TRACKING_TABLE, governed_schema, refused, tracking_tables_for,
 };
@@ -668,20 +670,21 @@ async fn run_passes(engine: Arc<EngineHandle>, opts: MigrateOptions) -> PyResult
     // (ADR-0032) is read too, so the planner renames it; a refused hint
     // renames nothing, reads nothing more, and leaves every table the create
     // pass held back for it uncreated, the planner's refusal saying why.
+    // Which tables are read is the one rule every door reads by
+    // ([`tables_to_read`], ADR-0047).
     let live_names: BTreeSet<String> = tables_before_create.iter().cloned().collect();
     let (renames, adds_after_renames) = match live_table_renames(&live_names, &modelset.payload) {
         Ok(renames) => (renames, created.held_back.clone()),
         Err(_) => (Vec::new(), BTreeSet::new()),
     };
-    let mut existing: Vec<String> = modelset
+    let built: Vec<String> = modelset
         .payload
         .models
         .iter()
         .map(|model| model.table_name.clone())
-        .filter(|table| tables_before_create.contains(table))
-        .chain(renames.iter().map(|(old, _)| old.clone()))
+        .filter(|table| !tables_before_create.contains(table) && !created.held_back.contains(table))
         .collect();
-    existing.sort();
+    let existing = tables_to_read(&engine, &modelset, &built, &[]).await?;
     // The tables this pass reconciles, by their declared names: the renamed
     // ones under their new name.
     let reconciled: HashSet<&str> = modelset
@@ -693,7 +696,7 @@ async fn run_passes(engine: Arc<EngineHandle>, opts: MigrateOptions) -> PyResult
             tables_before_create.contains(*table) || renames.iter().any(|(_, new)| new == table)
         })
         .collect();
-    let (live, facts) = live_schema_ir(&engine, Some(&existing)).await?;
+    let (live, facts) = live_schema_ir(&engine, &existing).await?;
     let plan =
         plan_from_ir(&live, &modelset, backend, &facts, opts.plan_options()).map_err(plan_error)?;
     let rendered = render_plan(&plan, &live, &modelset, backend).map_err(emission_error)?;

@@ -89,7 +89,7 @@ def plan_against(db, parent: dict, child: dict) -> list[dict]:
         await ferro.connect(db.url, name=name)
         try:
             live, facts = await _core._live_schema_ir(
-                name, json.dumps(sorted(tables_of(parent) | tables_of(child)))
+                name, json.dumps(parent), json.dumps(sorted(tables_of(child)))
             )
         finally:
             await _core._disconnect(name)
