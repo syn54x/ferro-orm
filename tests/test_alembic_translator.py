@@ -308,6 +308,45 @@ async def test_rename_hints_render_alembic_renames_and_the_derived_names(
     assert await _drift(db_url) == []
 
 
+@pytest.mark.backend_matrix
+@pytest.mark.asyncio
+async def test_a_live_hints_old_table_is_read_by_the_hint_alone(
+    db_url, postgres_base_url, db_schema_name
+):
+    """The project's ``include_object`` keeps the old table ``tr533card`` out
+    of the tables a revision drops, so only the live read's hint rule
+    (``tables_to_read``) brings it in: the revision renames it, never creates
+    an empty ``tr533deck`` beside it."""
+
+    class Tr533Card(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        label: str
+
+    await connect(db_url, auto_migrate=True)
+    _rewind_registry()
+
+    class Tr533Deck(Model):
+        __ferro_renamed_from__: ClassVar[str] = "tr533card"
+
+        id: int | None = Field(default=None, primary_key=True)
+        label: str
+
+    def project_filter(obj, name, type_, reflected, compare_to):
+        return not (type_ == "table" and name == "tr533card")
+
+    from ferro.migrations import ferro_options
+
+    upgrade, downgrade = autogenerate(
+        db_url,
+        postgres_base_url,
+        db_schema_name,
+        extra_opts=ferro_options(include_object=project_filter),
+    )
+    assert "op.rename_table('tr533card', 'tr533deck')" in upgrade, upgrade
+    assert "create_table" not in upgrade and "drop_table" not in upgrade, upgrade
+    assert "op.rename_table('tr533deck', 'tr533card')" in downgrade, downgrade
+
+
 # ---------------------------------------------------------------------------
 # Live-only repairs: a NOT VALID check, an invalid index
 # ---------------------------------------------------------------------------

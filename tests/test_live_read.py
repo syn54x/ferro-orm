@@ -47,9 +47,14 @@ AUTHOR_VIEW = (
 
 
 def test_a_view_named_like_a_model_is_not_its_table_on_the_pass(project, pkg, db):
-    """The create pass sees no ``author`` table, so it builds one; the
-    database refuses to index a view, and the connect fails naming it,
-    instead of the view standing in for the table in silence."""
+    """The create pass sees no ``author`` table, so it builds one instead of
+    letting the view stand in for the table.
+
+    The connect fails here only because ``Author`` declares a unique
+    (``uq_author_name``): the database refuses to index a view. The
+    ``CREATE TABLE IF NOT EXISTS`` before it is a no-op over a view on both
+    dialects, so a model with no index or unique would connect without its
+    table. That is a known gap in the create emission, fixed separately."""
     configure(project, pkg, db.backend)
     write_models(project, pkg, AUTHOR)
     _, database = settings_and_database()
