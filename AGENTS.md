@@ -90,8 +90,8 @@ For a single model, every emitter must agree on:
     database and scoped to the artifacts the upgrade touched (ADR-0050; a
     check or policy put back with the body the catalog printed through
     `render_check_restore`), both rendered by the one renderer, with every
-    refusal, marker, irreversible reason and Alembic-twin choice decided
-    there. `translate.py` writes that answer and decides nothing: Alembic's
+    refusal, marker, irreversible reason, Alembic-twin choice, autocommit
+    and foreign-key rider decided there. `translate.py` writes that answer and decides nothing: Alembic's
     own op where the core says it has one, `op.execute(sa.DDL(...))` of the
     pass's statement, byte for byte, where it does not. The per-family comparators,
     their slot registrations and the `_plan_check_*` FFI are gone (#533).
