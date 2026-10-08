@@ -2382,24 +2382,42 @@ pub fn ferro_manages_row_security(live: &LiveRowSecurity) -> bool {
     live.policies.iter().any(|policy| policy.ferro_owned)
 }
 
-/// The `ENABLE` / `FORCE ROW LEVEL SECURITY` statements a live table is
-/// missing. One-way by construction: this function can only ever turn a flag
-/// on. Turning row security off is `migrate_destructive` territory.
-pub fn missing_row_security_flag_statements(
+/// One row-security flag change on a table: what the flag deciders return
+/// ([`missing_row_security_flags`], [`excess_row_security_flags`]) and what
+/// the planner turns into one op each. Only the planner's renderer writes the
+/// statement (`ALTER TABLE … ENABLE / FORCE / NO FORCE / DISABLE ROW LEVEL
+/// SECURITY`); nothing maps a statement back to a flag.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RowSecurityFlag {
+    /// `ENABLE ROW LEVEL SECURITY`.
+    Enable,
+    /// `FORCE ROW LEVEL SECURITY`.
+    Force,
+    /// `NO FORCE ROW LEVEL SECURITY`.
+    NoForce,
+    /// `DISABLE ROW LEVEL SECURITY`.
+    Disable,
+}
+
+/// The `ENABLE` / `FORCE ROW LEVEL SECURITY` flags a live table is missing,
+/// in execution order. One-way by construction: this function can only ever
+/// turn a flag on. Turning row security off is `migrate_destructive`
+/// territory ([`excess_row_security_flags`]).
+pub fn missing_row_security_flags(
     model: &ferro_schema_ir::SchemaModel,
     live: &LiveRowSecurity,
-) -> Vec<String> {
+) -> Vec<RowSecurityFlag> {
     let Some(declaration) = model.row_security.as_ref() else {
         return Vec::new();
     };
-    let mut statements = Vec::new();
+    let mut flags = Vec::new();
     if !live.enabled {
-        statements.push(render_enable_row_security(&model.table_name));
+        flags.push(RowSecurityFlag::Enable);
     }
     if declaration.force && !live.forced {
-        statements.push(render_force_row_security(&model.table_name));
+        flags.push(RowSecurityFlag::Force);
     }
-    statements
+    flags
 }
 
 /// The warning for a live table whose row security is on but whose model no
@@ -2442,34 +2460,38 @@ pub fn dropped_row_security_warning(
     ))
 }
 
-/// The flag statements that undo row security a live table carries but the
-/// model no longer asks for. `migrate_destructive` ONLY — this is the one
-/// function in the family that can turn protection off (#413).
-pub fn excess_row_security_flag_statements(
+/// The flags that undo row security a live table carries but the model no
+/// longer asks for, in execution order (`NO FORCE` before `DISABLE`).
+/// `migrate_destructive` ONLY — this is the one function in the family that
+/// can turn protection off (#413).
+///
+/// `installed_by_ferro` is the evidence that ferro put the table's row
+/// security there: without it, a table whose declaration is gone keeps every
+/// flag. A live table proves it with a ferro-named policy
+/// ([`ferro_manages_row_security`]); a declared snapshot that declares row
+/// security is itself the proof (ADR-0033).
+pub fn excess_row_security_flags(
     model: &ferro_schema_ir::SchemaModel,
     live: &LiveRowSecurity,
-) -> Vec<String> {
-    let table = &model.table_name;
+    installed_by_ferro: bool,
+) -> Vec<RowSecurityFlag> {
     match model.row_security.as_ref() {
-        // Teardown reaches exactly as far as ferro's own footprint. Without a
-        // single `rls_*` policy on the table there is nothing saying ferro ever
-        // enabled row security here, and disabling a DBA's hand-managed fence
-        // because an unrelated column was dropped is not a migration — it is a
-        // security incident ([`ferro_manages_row_security`]).
-        None if ferro_manages_row_security(live) => {
-            let mut statements = Vec::new();
+        // Teardown reaches exactly as far as ferro's own footprint. Without
+        // evidence that ferro enabled row security here, disabling a DBA's
+        // hand-managed fence because an unrelated column was dropped is not a
+        // migration — it is a security incident ([`ferro_manages_row_security`]).
+        None if installed_by_ferro => {
+            let mut flags = Vec::new();
             if live.forced {
-                statements.push(render_no_force_row_security(table));
+                flags.push(RowSecurityFlag::NoForce);
             }
             if live.enabled {
-                statements.push(render_disable_row_security(table));
+                flags.push(RowSecurityFlag::Disable);
             }
-            statements
+            flags
         }
         None => Vec::new(),
-        Some(declaration) if !declaration.force && live.forced => {
-            vec![render_no_force_row_security(table)]
-        }
+        Some(declaration) if !declaration.force && live.forced => vec![RowSecurityFlag::NoForce],
         Some(_) => Vec::new(),
     }
 }
@@ -2482,9 +2504,9 @@ pub fn excess_row_security_flag_statements(
 pub fn row_security_teardown_warning(
     table: &str,
     dropped_policies: &[String],
-    flag_statements: &[String],
+    flags: &[RowSecurityFlag],
 ) -> Option<Report> {
-    if dropped_policies.is_empty() && flag_statements.is_empty() {
+    if dropped_policies.is_empty() && flags.is_empty() {
         return None;
     }
     let mut parts = Vec::new();
@@ -2495,11 +2517,11 @@ pub fn row_security_teardown_warning(
             .collect();
         parts.push(format!("dropped row policy/policies {}", listed.join(", ")));
     }
-    for statement in flag_statements {
-        if statement.contains("NO FORCE") {
-            parts.push("cleared FORCE ROW LEVEL SECURITY".to_string());
-        } else if statement.contains("DISABLE") {
-            parts.push("disabled ROW LEVEL SECURITY".to_string());
+    for flag in flags {
+        match flag {
+            RowSecurityFlag::NoForce => parts.push("cleared FORCE ROW LEVEL SECURITY".to_string()),
+            RowSecurityFlag::Disable => parts.push("disabled ROW LEVEL SECURITY".to_string()),
+            RowSecurityFlag::Enable | RowSecurityFlag::Force => {}
         }
     }
     Some(Report::recurring(
@@ -2558,37 +2580,27 @@ pub struct RowSecurityReconcilePlan {
     pub extra: Vec<String>,
     /// Live policies ferro does not own; never touched.
     pub foreign: Vec<String>,
-    /// DDL in execution order: flags, additions, rebuilds, then (only under
-    /// `destructive`) orphan drops.
-    pub statements: Vec<String>,
+    /// The flags the table is missing ([`missing_row_security_flags`]), set
+    /// ahead of every policy.
+    pub missing_flags: Vec<RowSecurityFlag>,
+    /// Only under `destructive`: the flags torn down after the orphan drops
+    /// ([`excess_row_security_flags`], on the live table's own evidence).
+    pub excess_flags: Vec<RowSecurityFlag>,
     /// Reports the caller surfaces, every one recurring.
     pub reports: Vec<Report>,
 }
 
 /// The row-security reconciliation decision for ONE live table — the single
-/// seam the auto-migrate reconciliation pass and the Alembic autogenerate
-/// operation both consume (AGENTS.md § I-1).
+/// seam every migration door reads through the planner (AGENTS.md § I-1).
+/// It decides names and flags only; the planner turns them into ops and only
+/// the plan's renderer writes SQL.
 ///
-/// Order is the execution order: `ENABLE`/`FORCE` first (so a policy is never
-/// created onto an unenforced table), then `CREATE POLICY` for what is
-/// missing, then `DROP`+`CREATE` for what drifted, then — under
-/// `destructive` only — `DROP POLICY` for ferro-owned orphans and, last, the
-/// `NO FORCE` / `DISABLE` teardown (policies go before the flag that made them
-/// matter).
-///
-/// **Invariant callers may rely on**: calling this function twice for the
-/// SAME `(model, live)` pair — once with `destructive: false`, once with
-/// `destructive: true` — the destructive call's `statements` begin with
-/// EXACTLY the non-destructive call's `statements`, in the same order. The
-/// flags/missing/drifted portion of the plan never depends on `destructive`
-/// (only the trailing orphan-drop/flag-teardown portion does), so the
-/// destructive call's statements are always the non-destructive call's as a
-/// strict prefix, plus a destructive-only tail. The Alembic autogenerate
-/// comparator (`src/ferro/migrations/alembic.py`) relies on exactly this to
-/// split an add-op from a drop-op by slicing that tail off, rather than
-/// tracing the decision a second way — pinned by
-/// `plan_row_security_reconcile_destructive_is_the_non_destructive_plan_plus_a_strict_tail`
-/// below, with every drift category present at once.
+/// In execution order: the missing `ENABLE`/`FORCE` flags first (so a policy
+/// is never created onto an unenforced table), then the missing policies,
+/// then the drifted ones, then — under `destructive` only — the ferro-owned
+/// orphans and, last, the `NO FORCE` / `DISABLE` teardown (policies go before
+/// the flag that made them matter). Everything but `extra`'s drops and
+/// `excess_flags` is the same with and without `destructive`.
 ///
 /// Postgres-only (ADR-0014): SQLite has no row-level security, so this returns
 /// an empty plan and the create pass's one warning per table stands alone.
@@ -2624,15 +2636,8 @@ pub fn plan_row_security_reconcile(
         plan.reports.push(warning);
     }
 
-    plan.statements
-        .extend(missing_row_security_flag_statements(model, live));
-
+    plan.missing_flags = missing_row_security_flags(model, live);
     plan.missing = missing_row_policy_names(model, live);
-    for name in &plan.missing {
-        let policy = declared_row_policy(model, name)
-            .ok_or_else(|| format!("row policy '{name}' vanished from table '{table}'"))?;
-        plan.statements.push(render_create_row_policy(model, policy)?);
-    }
 
     for policy in model
         .row_security
@@ -2651,9 +2656,6 @@ pub fn plan_row_security_reconcile(
             RowPolicyDrift::None => {}
             RowPolicyDrift::Rebuild => {
                 plan.drifted.push(policy.name.clone());
-                plan.statements
-                    .push(render_drop_row_policy(table, &policy.name));
-                plan.statements.push(render_create_row_policy(model, policy)?);
                 // A raw policy rebuilt for its metadata carries the DECLARED
                 // body with it. When that body is also one ferro could not
                 // match to the live one, the rebuild overwrites SQL ferro had
@@ -2697,12 +2699,10 @@ pub fn plan_row_security_reconcile(
         .collect();
     plan.extra = extra_row_policy_names(&declared_row_policy_names(model), &live_ferro_owned);
     if destructive {
-        for name in &plan.extra {
-            plan.statements.push(render_drop_row_policy(table, name));
-        }
-        let flag_statements = excess_row_security_flag_statements(model, live);
-        plan.statements.extend(flag_statements.iter().cloned());
-        if let Some(warning) = row_security_teardown_warning(table, &plan.extra, &flag_statements) {
+        plan.excess_flags =
+            excess_row_security_flags(model, live, ferro_manages_row_security(live));
+        if let Some(warning) = row_security_teardown_warning(table, &plan.extra, &plan.excess_flags)
+        {
             plan.reports.push(warning);
         }
     } else if let Some(warning) = extra_row_policy_names_warning(table, &plan.extra) {
@@ -6670,15 +6670,12 @@ mod tests {
             false,
         )
         .unwrap();
-        assert_eq!(plan.missing, vec!["rls_ledgerrow_ledger_id".to_string()]);
         assert_eq!(
-            plan.statements,
-            vec![
-                "ALTER TABLE \"ledgerrow\" ENABLE ROW LEVEL SECURITY".to_string(),
-                "ALTER TABLE \"ledgerrow\" FORCE ROW LEVEL SECURITY".to_string(),
-                render_create_row_policy(&model, &shorthand_policy()).unwrap(),
-            ]
+            plan.missing_flags,
+            vec![RowSecurityFlag::Enable, RowSecurityFlag::Force]
         );
+        assert_eq!(plan.missing, vec!["rls_ledgerrow_ledger_id".to_string()]);
+        assert!(plan.drifted.is_empty() && plan.excess_flags.is_empty());
         assert!(plan.reports.is_empty());
     }
 
@@ -6697,13 +6694,7 @@ mod tests {
         };
         let plan = plan_row_security_reconcile(&model, &live, Dialect::Postgres, false).unwrap();
         assert_eq!(plan.drifted, vec!["rls_ledgerrow_ledger_id".to_string()]);
-        assert_eq!(
-            plan.statements,
-            vec![
-                "DROP POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\"".to_string(),
-                render_create_row_policy(&model, &shorthand_policy()).unwrap(),
-            ]
-        );
+        assert!(plan.missing.is_empty() && plan.missing_flags.is_empty());
     }
 
     #[test]
@@ -6761,7 +6752,10 @@ mod tests {
             }],
         };
         let plan = plan_row_security_reconcile(&model, &live, Dialect::Postgres, false).unwrap();
-        assert!(plan.statements.is_empty(), "{:?}", plan.statements);
+        assert!(
+            plan.drifted.is_empty() && plan.missing.is_empty(),
+            "{plan:?}"
+        );
         assert_eq!(plan.unverifiable, vec!["rls_ledgerrow_invitee".to_string()]);
         assert_eq!(plan.reports.len(), 1);
         assert!(plan.reports[0].text.contains("rls_ledgerrow_invitee"));
@@ -6778,8 +6772,8 @@ mod tests {
             policies: vec![live_shorthand_policy()],
         };
         assert_eq!(
-            missing_row_security_flag_statements(&model, &live),
-            vec!["ALTER TABLE \"ledgerrow\" FORCE ROW LEVEL SECURITY".to_string()]
+            missing_row_security_flags(&model, &live),
+            vec![RowSecurityFlag::Force]
         );
 
         // Declaration removed entirely: nothing is emitted, and the warning
@@ -6793,13 +6787,13 @@ mod tests {
         };
         let plan =
             plan_row_security_reconcile(&undeclared, &live_on, Dialect::Postgres, false).unwrap();
-        assert!(plan.statements.is_empty());
+        assert!(plan.missing_flags.is_empty() && plan.excess_flags.is_empty());
         assert!(
             plan.reports
                 .iter()
                 .any(|warning| warning.text.contains("no longer declares __ferro_rls__"))
         );
-        assert!(missing_row_security_flag_statements(&undeclared, &live_on).is_empty());
+        assert!(missing_row_security_flags(&undeclared, &live_on).is_empty());
 
         // force=False against a live FORCE: still no DDL, still a warning.
         let mut unforced = reconcile_model();
@@ -6807,7 +6801,7 @@ mod tests {
             force: false,
             policies: vec![shorthand_policy()],
         });
-        assert!(missing_row_security_flag_statements(&unforced, &live_on).is_empty());
+        assert!(missing_row_security_flags(&unforced, &live_on).is_empty());
         assert!(
             dropped_row_security_warning(&unforced, &live_on)
                 .unwrap()
@@ -6838,7 +6832,7 @@ mod tests {
         };
         let updates = plan_row_security_reconcile(&model, &live, Dialect::Postgres, false).unwrap();
         assert_eq!(updates.extra, vec!["rls_ledgerrow_gone".to_string()]);
-        assert!(updates.statements.is_empty());
+        assert!(updates.excess_flags.is_empty());
         assert!(updates.reports.iter().any(|warning| {
             warning.text.contains("no longer\n         declares")
                 || warning.text.contains("no longer declares")
@@ -6846,10 +6840,8 @@ mod tests {
 
         let destructive =
             plan_row_security_reconcile(&model, &live, Dialect::Postgres, true).unwrap();
-        assert_eq!(
-            destructive.statements,
-            vec!["DROP POLICY \"rls_ledgerrow_gone\" ON \"ledgerrow\"".to_string()]
-        );
+        assert_eq!(destructive.extra, vec!["rls_ledgerrow_gone".to_string()]);
+        assert!(destructive.excess_flags.is_empty());
     }
 
     #[test]
@@ -6863,13 +6855,10 @@ mod tests {
         };
         let plan =
             plan_row_security_reconcile(&undeclared, &live, Dialect::Postgres, true).unwrap();
+        assert_eq!(plan.extra, vec!["rls_ledgerrow_ledger_id".to_string()]);
         assert_eq!(
-            plan.statements,
-            vec![
-                "DROP POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\"".to_string(),
-                "ALTER TABLE \"ledgerrow\" NO FORCE ROW LEVEL SECURITY".to_string(),
-                "ALTER TABLE \"ledgerrow\" DISABLE ROW LEVEL SECURITY".to_string(),
-            ]
+            plan.excess_flags,
+            vec![RowSecurityFlag::NoForce, RowSecurityFlag::Disable]
         );
         // The run that removes protection says what it removed, and does not
         // also tell the author to run migrate_destructive.
@@ -6892,10 +6881,8 @@ mod tests {
             policies: vec![live_shorthand_policy()],
         };
         let plan = plan_row_security_reconcile(&unforced, &live, Dialect::Postgres, true).unwrap();
-        assert_eq!(
-            plan.statements,
-            vec!["ALTER TABLE \"ledgerrow\" NO FORCE ROW LEVEL SECURITY".to_string()]
-        );
+        assert!(plan.extra.is_empty());
+        assert_eq!(plan.excess_flags, vec![RowSecurityFlag::NoForce]);
     }
 
     #[test]
@@ -6920,7 +6907,14 @@ mod tests {
         let plan = plan_row_security_reconcile(&model, &live, Dialect::Postgres, true).unwrap();
         assert_eq!(plan.foreign, vec!["handwritten_admin".to_string()]);
         assert!(plan.extra.is_empty());
-        assert!(plan.statements.is_empty(), "{:?}", plan.statements);
+        assert_eq!(
+            (plan.missing_flags.as_slice(), plan.excess_flags.as_slice()),
+            (&[][..], &[][..])
+        );
+        assert!(
+            plan.missing.is_empty() && plan.drifted.is_empty(),
+            "{plan:?}"
+        );
         assert!(
             plan.reports
                 .iter()
@@ -7094,7 +7088,11 @@ mod tests {
         .unwrap();
         assert_eq!(plan.drifted, vec!["rls_ledgerrow_ledger_id".to_string()]);
         // The rebuild re-creates it with no TO clause, i.e. back to PUBLIC.
-        assert!(!plan.statements[1].contains(" TO "));
+        assert!(
+            !render_create_row_policy(&model, &shorthand_policy())
+                .unwrap()
+                .contains(" TO ")
+        );
 
         // PUBLIC — and an absent role list — are both the default.
         assert!(is_default_row_policy_roles(&[]));
@@ -7129,13 +7127,23 @@ mod tests {
         };
         assert!(!ferro_manages_row_security(&hand_managed));
         assert!(dropped_row_security_warning(&undeclared, &hand_managed).is_none());
-        assert!(excess_row_security_flag_statements(&undeclared, &hand_managed).is_empty());
+        assert!(
+            excess_row_security_flags(
+                &undeclared,
+                &hand_managed,
+                ferro_manages_row_security(&hand_managed)
+            )
+            .is_empty()
+        );
 
         for destructive in [false, true] {
             let plan =
                 plan_row_security_reconcile(&undeclared, &hand_managed, Dialect::Postgres, destructive)
                     .unwrap();
-            assert!(plan.statements.is_empty(), "{destructive}");
+            assert!(
+                plan.excess_flags.is_empty() && plan.extra.is_empty(),
+                "{destructive}"
+            );
             // The only thing said is the standing report that the table carries
             // policies ferro does not own.
             assert_eq!(plan.reports.len(), 1, "{destructive}");
@@ -7160,18 +7168,28 @@ mod tests {
         assert!(ferro_manages_row_security(&ferro_managed));
         let plan =
             plan_row_security_reconcile(&undeclared, &ferro_managed, Dialect::Postgres, true).unwrap();
+        assert_eq!(plan.extra, vec!["rls_ledgerrow_ledger_id".to_string()]);
         assert_eq!(
-            plan.statements,
-            vec![
-                "DROP POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\"".to_string(),
-                "ALTER TABLE \"ledgerrow\" NO FORCE ROW LEVEL SECURITY".to_string(),
-                "ALTER TABLE \"ledgerrow\" DISABLE ROW LEVEL SECURITY".to_string(),
-            ]
+            plan.excess_flags,
+            vec![RowSecurityFlag::NoForce, RowSecurityFlag::Disable]
+        );
+        // A declared snapshot that declared row security is its own proof
+        // that ferro installed it (ADR-0033): the teardown runs with no
+        // ferro-named policy left to witness it.
+        let bare = LiveRowSecurity {
+            enabled: true,
+            forced: true,
+            policies: Vec::new(),
+        };
+        assert!(excess_row_security_flags(&undeclared, &bare, false).is_empty());
+        assert_eq!(
+            excess_row_security_flags(&undeclared, &bare, true),
+            vec![RowSecurityFlag::NoForce, RowSecurityFlag::Disable]
         );
     }
 
     #[test]
-    fn plan_row_security_reconcile_destructive_is_the_non_destructive_plan_plus_a_strict_tail() {
+    fn plan_row_security_reconcile_destructive_adds_only_the_teardown() {
         // The invariant plan_row_security_reconcile's own doc comment
         // states and the Alembic comparator relies on: with every drift
         // category present at once (a missing policy, a drifted one, an
@@ -7233,17 +7251,23 @@ mod tests {
             vec!["rls_ledgerrow_ledger_id".to_string()]
         );
         assert_eq!(destructive.extra, vec!["rls_ledgerrow_orphan".to_string()]);
-        assert!(!non_destructive.statements.is_empty());
 
-        let prefix_len = non_destructive.statements.len();
+        // Destructive adds the orphan drops and the teardown, and changes
+        // nothing else the decision says.
+        assert!(non_destructive.extra == destructive.extra);
         assert_eq!(
-            destructive.statements[..prefix_len],
-            non_destructive.statements[..]
+            RowSecurityReconcilePlan {
+                excess_flags: Vec::new(),
+                reports: Vec::new(),
+                ..destructive.clone()
+            },
+            RowSecurityReconcilePlan {
+                reports: Vec::new(),
+                ..non_destructive.clone()
+            }
         );
-        assert_eq!(
-            destructive.statements[prefix_len..],
-            vec![render_drop_row_policy("ledgerrow", "rls_ledgerrow_orphan")]
-        );
+        assert_eq!(non_destructive.missing_flags, vec![RowSecurityFlag::Force]);
+        assert!(non_destructive.excess_flags.is_empty());
     }
 
     #[test]
@@ -7943,7 +7967,7 @@ mod tests {
             row_security_teardown_warning(
                 "ledgerrow",
                 &names(&["rls_ledgerrow_gone"]),
-                &[render_disable_row_security("ledgerrow")],
+                &[RowSecurityFlag::Disable],
             ),
             Some(report(
                 ReportKind::RowSecurityTeardown {

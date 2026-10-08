@@ -20,15 +20,14 @@ use crate::{
 use ferro_ddl_lowering::Report;
 pub(crate) use ferro_ddl_lowering::and_list;
 use ferro_ddl_lowering::{
-    EnumTypeProvenance, LiveRowPolicy, LiveRowSecurity, ResolvedStorage, declared_row_policy_names,
-    drifted_check_names, dropped_row_security_warning, enum_label_strings, enum_type_provenance,
-    excess_row_security_flag_statements, extra_check_names, extra_check_names_warning,
-    extra_enum_labels, extra_enum_labels_warning, extra_row_policy_names_warning,
-    fk_action_from_str, fk_action_sql, fk_name, foreign_fk_drift_warning, is_ferro_fk_name,
-    is_ferro_row_policy_name, missing_check_names, missing_enum_labels,
-    missing_row_security_flag_statements, normalize_check_definition, normalize_row_policy_expr,
-    plan_row_security_reconcile, quote_label, render_check_body, render_disable_row_security,
-    render_enable_row_security, render_force_row_security, render_no_force_row_security,
+    EnumTypeProvenance, LiveRowPolicy, LiveRowSecurity, ResolvedStorage, RowSecurityFlag,
+    declared_row_policy_names, drifted_check_names, dropped_row_security_warning,
+    enum_label_strings, enum_type_provenance, excess_row_security_flags, extra_check_names,
+    extra_check_names_warning, extra_enum_labels, extra_enum_labels_warning,
+    extra_row_policy_names_warning, ferro_manages_row_security, fk_action_from_str, fk_action_sql,
+    fk_name, foreign_fk_drift_warning, is_ferro_fk_name, is_ferro_row_policy_name,
+    missing_check_names, missing_enum_labels, normalize_check_definition,
+    normalize_row_policy_expr, plan_row_security_reconcile, quote_label, render_check_body,
     render_table_check_body, resolve_column_storage, row_policy_clauses, row_policy_command_token,
     schema_columns_storage_drift,
 };
@@ -931,7 +930,7 @@ fn plan_existing_table(
 /// both texts are ferro's own copies of a declaration, so it is rebuilt like
 /// a shorthand one; and row security the parent declared was installed by
 /// ferro, so a declaration the target drops is torn down
-/// ([`snapshot_flag_teardown`]) whether or not a ferro-named policy is left
+/// ([`excess_row_security_flags`]) whether or not a ferro-named policy is left
 /// to witness it. Every difference is then an op in a reviewed file, so the
 /// decision's reports of live conditions (unverifiable and replaced bodies,
 /// a teardown done) are not carried; a non-destructive plan still reports
@@ -966,9 +965,10 @@ fn plan_row_security(
         return;
     }
     ops.extend(
-        missing_row_security_flag_statements(model, live)
+        decision
+            .missing_flags
             .iter()
-            .filter_map(|statement| row_security_flag_op(table, statement)),
+            .map(|flag| flag_op(table, *flag)),
     );
     ops.extend(
         decision
@@ -1004,69 +1004,27 @@ fn plan_row_security(
                     name,
                 }),
         );
-        let teardown = match side {
-            OldSide::Live => excess_row_security_flag_statements(model, live),
-            OldSide::Snapshot => snapshot_flag_teardown(model, live),
-        };
+        // A declared parent is itself the proof that ferro installed the
+        // row security it declared (ADR-0033); a live table proves it with a
+        // ferro-named policy.
+        let installed_by_ferro = side == OldSide::Snapshot || ferro_manages_row_security(live);
         ops.extend(
-            teardown
-                .iter()
-                .filter_map(|statement| row_security_flag_op(table, statement)),
+            excess_row_security_flags(model, live, installed_by_ferro)
+                .into_iter()
+                .map(|flag| flag_op(table, flag)),
         );
     }
 }
 
-/// The flag teardown a file between two snapshots owes: the pass's
-/// (`excess_row_security_flag_statements`), except that the parent snapshot
-/// declaring row security is itself the proof ferro installed it (ADR-0033) —
-/// the evidence the pass reads off a ferro-named policy — so a declaration
-/// the target drops clears `FORCE` and `ENABLE` even with no policy left.
-fn snapshot_flag_teardown(model: &SchemaModel, live: &LiveRowSecurity) -> Vec<String> {
-    let table = model.table_name.as_str();
-    match model.row_security {
-        None => [
-            live.forced.then(|| render_no_force_row_security(table)),
-            live.enabled.then(|| render_disable_row_security(table)),
-        ]
-        .into_iter()
-        .flatten()
-        .collect(),
-        Some(_) => excess_row_security_flag_statements(model, live),
+/// The op that sets one row-security flag on `table`.
+fn flag_op(table: &str, flag: RowSecurityFlag) -> MigrationOp {
+    let table = table.to_string();
+    match flag {
+        RowSecurityFlag::Enable => MigrationOp::EnableRowSecurity { table },
+        RowSecurityFlag::Force => MigrationOp::ForceRowSecurity { table },
+        RowSecurityFlag::NoForce => MigrationOp::NoForceRowSecurity { table },
+        RowSecurityFlag::Disable => MigrationOp::DisableRowSecurity { table },
     }
-}
-
-/// The op whose rendering is `statement`, one of the four flag statements the
-/// row-security family decides (`missing_row_security_flag_statements` /
-/// `excess_row_security_flag_statements` return nothing else).
-fn row_security_flag_op(table: &str, statement: &str) -> Option<MigrationOp> {
-    let table_owned = table.to_string();
-    [
-        (
-            render_enable_row_security(table),
-            MigrationOp::EnableRowSecurity {
-                table: table_owned.clone(),
-            },
-        ),
-        (
-            render_force_row_security(table),
-            MigrationOp::ForceRowSecurity {
-                table: table_owned.clone(),
-            },
-        ),
-        (
-            render_no_force_row_security(table),
-            MigrationOp::NoForceRowSecurity {
-                table: table_owned.clone(),
-            },
-        ),
-        (
-            render_disable_row_security(table),
-            MigrationOp::DisableRowSecurity { table: table_owned },
-        ),
-    ]
-    .into_iter()
-    .find(|(rendered, _)| rendered == statement)
-    .map(|(_, op)| op)
 }
 
 /// Every enum the models declare, with the labels of its first declaring

@@ -4065,7 +4065,7 @@ fn foreign_and_unverifiable_policies_plan_no_op_and_warn_as_the_pass_does() {
 }
 
 #[test]
-fn row_security_ops_render_byte_identical_to_the_reconcile_decision() {
+fn row_security_ops_are_the_reconcile_decisions_names_and_flags() {
     // Every category at once: missing ENABLE, a missing policy, a drifted
     // shorthand policy, an orphan, and (destructive) the FORCE teardown.
     let mut declared_model = ledgerrow_model_with_row_security(false);
@@ -4105,8 +4105,6 @@ fn row_security_ops_render_byte_identical_to_the_reconcile_decision() {
     for options in [updates_only(), destructive()] {
         let plan =
             plan_from_ir(&live, &declared, Dialect::Postgres, &facts, options).expect("plan");
-        let rendered = render_plan(&plan, &live, &declared, Dialect::Postgres).unwrap();
-        let statements: Vec<String> = rendered.into_iter().flat_map(|op| op.statements).collect();
         let reconcile = ferro_ddl_lowering::plan_row_security_reconcile(
             &declared_model,
             &live_rs,
@@ -4114,9 +4112,81 @@ fn row_security_ops_render_byte_identical_to_the_reconcile_decision() {
             options.destructive,
         )
         .unwrap();
-        assert!(!reconcile.statements.is_empty());
-        assert_eq!(statements, reconcile.statements, "{options:?}");
+        let table = || "ledgerrow".to_string();
+        let flag = |flag: &ferro_ddl_lowering::RowSecurityFlag| match flag {
+            ferro_ddl_lowering::RowSecurityFlag::Enable => {
+                MigrationOp::EnableRowSecurity { table: table() }
+            }
+            ferro_ddl_lowering::RowSecurityFlag::Force => {
+                MigrationOp::ForceRowSecurity { table: table() }
+            }
+            ferro_ddl_lowering::RowSecurityFlag::NoForce => {
+                MigrationOp::NoForceRowSecurity { table: table() }
+            }
+            ferro_ddl_lowering::RowSecurityFlag::Disable => {
+                MigrationOp::DisableRowSecurity { table: table() }
+            }
+        };
+        // The decision's names and flags, one op each, in its order.
+        let expected: Vec<MigrationOp> = reconcile
+            .missing_flags
+            .iter()
+            .map(flag)
+            .chain(
+                reconcile
+                    .missing
+                    .iter()
+                    .map(|name| MigrationOp::AddRowPolicy {
+                        table: table(),
+                        name: name.clone(),
+                    }),
+            )
+            .chain(
+                reconcile
+                    .drifted
+                    .iter()
+                    .map(|name| MigrationOp::RebuildRowPolicy {
+                        table: table(),
+                        name: name.clone(),
+                    }),
+            )
+            .chain(
+                reconcile
+                    .extra
+                    .iter()
+                    .filter(|_| options.destructive)
+                    .map(|name| MigrationOp::DropRowPolicy {
+                        table: table(),
+                        name: name.clone(),
+                    }),
+            )
+            .chain(reconcile.excess_flags.iter().map(flag))
+            .collect();
+        assert!(!expected.is_empty());
+        assert_eq!(plan.operations, expected, "{options:?}");
         assert_eq!(plan.reports, reconcile.reports, "{options:?}");
+        // Only the plan's renderer writes the statements.
+        let rendered = render_plan(&plan, &live, &declared, Dialect::Postgres).unwrap();
+        let statements: Vec<String> = rendered.into_iter().flat_map(|op| op.statements).collect();
+        let mut wanted = vec![
+            "ALTER TABLE \"ledgerrow\" ENABLE ROW LEVEL SECURITY".to_string(),
+            ferro_ddl_lowering::render_create_row_policy(
+                &declared_model,
+                &declared_model.row_security.as_ref().unwrap().policies[1],
+            )
+            .unwrap(),
+            "DROP POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\"".to_string(),
+            ferro_ddl_lowering::render_create_row_policy(
+                &declared_model,
+                &declared_model.row_security.as_ref().unwrap().policies[0],
+            )
+            .unwrap(),
+        ];
+        if options.destructive {
+            wanted.push("DROP POLICY \"rls_ledgerrow_gone\" ON \"ledgerrow\"".to_string());
+            wanted.push("ALTER TABLE \"ledgerrow\" NO FORCE ROW LEVEL SECURITY".to_string());
+        }
+        assert_eq!(statements, wanted, "{options:?}");
     }
 }
 
