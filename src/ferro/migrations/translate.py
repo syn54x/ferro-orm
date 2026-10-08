@@ -270,12 +270,6 @@ def _using(statements: list[str]) -> str | None:
 # -- the translation --------------------------------------------------------------------
 
 
-_SNAPSHOT_ONLY = {"RemoveEnumLabel"}
-"""Ops a live database never takes (a label removal, #536): going up the
-planner never plans one from it, and going down one toward it is
-irreversible (ADR-0050). Meeting one to write is a bug, refused loudly."""
-
-
 def _executed(
     written: dict[str, Any], statements: list[str]
 ) -> list[ops.MigrateOperation]:
@@ -423,13 +417,6 @@ def translate(
         if item["irreversible"] is not None:
             out.append(FerroIrreversibleOp(item["irreversible"]))
             continue
-        kind = item["op"]["kind"]
-        if kind in _SNAPSHOT_ONLY:
-            raise RuntimeError(
-                f"ferro: the plan carries a {kind} op, which only two declared "
-                "snapshots plan (`ferro migrate new`), never the live database the "
-                "Alembic bridge diffs; this is a ferro bug, please file an issue"
-            )
         alembic_ops = (
             _twin(item, resolved)
             if item["twin"]

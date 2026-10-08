@@ -333,6 +333,38 @@ fn a_primary_key_change_is_refused_with_its_recipe() {
 }
 
 #[test]
+fn a_label_removal_going_up_is_refused_as_a_ferro_bug() {
+    // Only two declared snapshots plan a removal; from a live database the
+    // planner never does, so meeting one is refused loudly, before
+    // anything renders.
+    let removal = PlannedOp {
+        op: MigrationOp::RemoveEnumLabel {
+            type_name: "rmlorderstatus".into(),
+            label: "canceled".into(),
+            columns: Vec::new(),
+        },
+        verdict: crate::plan::OpVerdict::default(),
+    };
+    let refusal = upgrade_refusal(&removal, Dialect::Postgres).expect("refused");
+    assert_eq!(
+        refusal,
+        RevisionRefusal::SnapshotOnly {
+            kind: "RemoveEnumLabel".into()
+        }
+    );
+    assert_eq!(
+        refusal.to_string(),
+        "the plan carries a RemoveEnumLabel op, which only two declared snapshots plan \
+         (`ferro migrate new`), never the live database the Alembic bridge diffs; this is a \
+         ferro bug, please file an issue"
+    );
+    assert_eq!(
+        serde_json::to_value(&refusal).expect("serialises")["kind"],
+        "snapshot_only"
+    );
+}
+
+#[test]
 fn an_empty_upgrade_is_an_empty_revision() {
     let models = vec![card(vec![id(), column("flavor", "text", true)])];
     let revision =

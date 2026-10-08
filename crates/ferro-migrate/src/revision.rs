@@ -133,6 +133,12 @@ pub enum RevisionRefusal {
     /// An op whose rendering blocks ([`Report::blocks`]): it has no statement
     /// to write.
     Blocked(Box<Report>),
+    /// An op only two declared snapshots plan (`ferro migrate new`), planned
+    /// from the live database: a ferro bug, refused loudly.
+    SnapshotOnly {
+        /// The op's kind.
+        kind: String,
+    },
     /// The plan does not render: a declaration that cannot render, or a side
     /// lacking what an op names.
     Render(EmissionError),
@@ -147,6 +153,7 @@ impl RevisionRefusal {
             RevisionRefusal::SqliteRequiredColumn { .. } => "sqlite_required_column",
             RevisionRefusal::Rebuild { .. } => "rebuild",
             RevisionRefusal::Blocked(_) => "blocked",
+            RevisionRefusal::SnapshotOnly { .. } => "snapshot_only",
             RevisionRefusal::Render(_) => "render",
         }
     }
@@ -171,6 +178,12 @@ impl std::fmt::Display for RevisionRefusal {
                  into ON DELETE CASCADE children). Write this change as a migration: \
                  `ferro migrate new`",
                 needs_rebuild(kind, subject)
+            ),
+            RevisionRefusal::SnapshotOnly { kind } => write!(
+                f,
+                "the plan carries a {kind} op, which only two declared snapshots plan \
+                 (`ferro migrate new`), never the live database the Alembic bridge diffs; \
+                 this is a ferro bug, please file an issue"
             ),
             RevisionRefusal::Render(error) => write!(f, "{error}"),
         }
@@ -267,22 +280,12 @@ pub fn plan_revision(
     {
         return Err(RevisionRefusal::HintRefused(Box::new(report.clone())));
     }
-    for planned in &up.operations {
-        if let Execution::Refused(refusal) = &planned.verdict.execution {
-            return Err(RevisionRefusal::Refused(refusal.clone()));
-        }
-        if demands_column_values(planned) && dialect == Dialect::Sqlite {
-            return Err(RevisionRefusal::SqliteRequiredColumn {
-                kind: kind_name(&planned.op),
-                subject: subject(&planned.op),
-            });
-        }
-        if planned.verdict.execution == Execution::Rebuild {
-            return Err(RevisionRefusal::Rebuild {
-                kind: kind_name(&planned.op),
-                subject: subject(&planned.op),
-            });
-        }
+    if let Some(refusal) = up
+        .operations
+        .iter()
+        .find_map(|planned| upgrade_refusal(planned, dialect))
+    {
+        return Err(refusal);
     }
     let mut upgrade = Vec::new();
     for (planned, rendered) in up.operations.iter().zip(rendered(&up)?) {
@@ -306,6 +309,41 @@ pub fn plan_revision(
             .filter(|report| !report.recurs)
             .collect(),
     })
+}
+
+/// Why the upgrade cannot write `planned` on `dialect`, read off its
+/// verdict before anything renders: an op no door runs, a demanding column
+/// SQLite cannot add in place, a SQLite rebuild, or an op only two declared
+/// snapshots plan, which reaching here from a live database is a bug.
+fn upgrade_refusal(planned: &PlannedOp, dialect: Dialect) -> Option<RevisionRefusal> {
+    if snapshot_only(&planned.op) {
+        return Some(RevisionRefusal::SnapshotOnly {
+            kind: kind_name(&planned.op),
+        });
+    }
+    if let Execution::Refused(refusal) = &planned.verdict.execution {
+        return Some(RevisionRefusal::Refused(refusal.clone()));
+    }
+    if demands_column_values(planned) && dialect == Dialect::Sqlite {
+        return Some(RevisionRefusal::SqliteRequiredColumn {
+            kind: kind_name(&planned.op),
+            subject: subject(&planned.op),
+        });
+    }
+    if planned.verdict.execution == Execution::Rebuild {
+        return Some(RevisionRefusal::Rebuild {
+            kind: kind_name(&planned.op),
+            subject: subject(&planned.op),
+        });
+    }
+    None
+}
+
+/// An op a live database never takes as the side planned from (a label
+/// removal, #536): going up the planner never plans one from it, and going
+/// down one toward it is irreversible (ADR-0050).
+fn snapshot_only(op: &MigrationOp) -> bool {
+    matches!(op, MigrationOp::RemoveEnumLabel { .. })
 }
 
 /// One op of the upgrade `plan` as the revision writes it (its verdict's

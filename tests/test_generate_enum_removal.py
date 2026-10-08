@@ -395,32 +395,3 @@ def test_d2_a_text_enums_check_is_rebuilt_to_the_labels_left(project, pkg, db):
     assert clean(db, project, 2, 1)
     assert run("migrate", "down", "--yes", "--url", db.url) == 0
     assert clean(db, project, 1, 2)
-
-
-# -- the Alembic bridge never meets a removal ---------------------------------------
-
-
-def test_the_alembic_translator_refuses_a_removal_naming_the_op():
-    from ferro.migrations.translate import translate
-
-    removal = {
-        "op": {
-            "kind": "RemoveEnumLabel",
-            "type_name": "rmlorderstatus",
-            "label": "canceled",
-            "columns": [],
-        },
-        "statements": [],
-        "row_security_statements": [],
-        "twin": False,
-        "index": None,
-        "marker": None,
-        "irreversible": None,
-    }
-    target = {
-        "ir_kind": "schema",
-        "ir_version": 2,
-        "payload": {"dialect_agnostic": True, "models": []},
-    }
-    with pytest.raises(RuntimeError, match="a RemoveEnumLabel op, which only two"):
-        translate([removal], target=target, dialect="postgres")
