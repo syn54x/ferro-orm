@@ -65,9 +65,6 @@ pub struct SwapColumn {
     pub table: String,
     /// The column.
     pub column: String,
-    /// The column's default label, if it declares one: Postgres cannot cast
-    /// a default to the new type, so it is dropped first and set again after.
-    pub default: Option<String>,
 }
 
 /// The swap-type contract of a label removal on Postgres (D2, ADR-0032's
@@ -75,14 +72,18 @@ pub struct SwapColumn {
 ///
 /// ```sql
 /// CREATE TYPE "orderstatus_new" AS ENUM ('paid', 'refunded');
+/// ALTER TABLE "order" ALTER COLUMN "status" DROP DEFAULT;
 /// ALTER TABLE "order" ALTER COLUMN "status" TYPE "orderstatus_new" USING "status"::text::"orderstatus_new";
 /// DROP TYPE "orderstatus";
 /// ALTER TYPE "orderstatus_new" RENAME TO "orderstatus";
 /// ```
 ///
 /// One `ALTER COLUMN … TYPE` per column of the type, in `columns`' order (a
-/// type two tables share is one swap covering both), each between a
-/// `DROP DEFAULT` and a `SET DEFAULT` when the column has a default. The cast
+/// type two tables share is one swap covering both), each after a `DROP
+/// DEFAULT`: Postgres cannot cast a default to the new type, and ferro
+/// persists no server default (ADR-0027), so the swap drops whatever one the
+/// column holds (a hand-set one, or the label an earlier build of this swap
+/// set from the model's Python-side default) and sets none. The cast
 /// fails on a row still holding a removed label (`invalid input value for
 /// enum`), which the runner counts with the recipe that re-runs the backfill.
 pub fn render_swap_type(
@@ -103,17 +104,12 @@ pub fn render_swap_type(
             quote_ident(&col.table),
             quote_ident(&col.column)
         );
-        if col.default.is_some() {
-            out.push(format!("{alter} DROP DEFAULT"));
-        }
+        out.push(format!("{alter} DROP DEFAULT"));
         out.push(format!(
             "{alter} TYPE {staged_q} USING {col_q}::text::{staged_q}",
             staged_q = quote_ident(&staged),
             col_q = quote_ident(&col.column),
         ));
-        if let Some(label) = &col.default {
-            out.push(format!("{alter} SET DEFAULT {}", quote_label(label)));
-        }
     }
     out.push(format!("DROP TYPE {}", quote_ident(type_name)));
     out.push(format!(
@@ -197,17 +193,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_swap_creates_the_new_type_moves_each_column_then_drops_and_renames() {
+    fn the_swap_creates_the_new_type_moves_each_column_with_no_default_then_drops_and_renames() {
         let columns = [
             SwapColumn {
                 table: "order".into(),
                 column: "status".into(),
-                default: Some("paid".into()),
             },
             SwapColumn {
                 table: "refund".into(),
                 column: "state".into(),
-                default: None,
             },
         ];
         assert_eq!(
@@ -221,7 +215,7 @@ mod tests {
                 "ALTER TABLE \"order\" ALTER COLUMN \"status\" DROP DEFAULT",
                 "ALTER TABLE \"order\" ALTER COLUMN \"status\" TYPE \"orderstatus_new\" USING \
                  \"status\"::text::\"orderstatus_new\"",
-                "ALTER TABLE \"order\" ALTER COLUMN \"status\" SET DEFAULT 'paid'",
+                "ALTER TABLE \"refund\" ALTER COLUMN \"state\" DROP DEFAULT",
                 "ALTER TABLE \"refund\" ALTER COLUMN \"state\" TYPE \"orderstatus_new\" USING \
                  \"state\"::text::\"orderstatus_new\"",
                 "DROP TYPE \"orderstatus\"",

@@ -65,6 +65,7 @@ BOTH = ("postgres", "sqlite")
 ALL = ("paid", "canceled", "refunded")
 KEPT = ("paid", "refunded")
 TODO = "todo(\"the label to use instead of 'canceled'\")"
+PAID_DEFAULT = " = RmlOrderStatus.PAID"
 
 
 @pytest.fixture
@@ -156,6 +157,7 @@ def clean(db, project: Path, number: int, other: int) -> bool:
 
 SWAP = [
     "CREATE TYPE \"rmlorderstatus_new\" AS ENUM ('paid', 'refunded')",
+    'ALTER TABLE "rmlorder" ALTER COLUMN "status" DROP DEFAULT',
     'ALTER TABLE "rmlorder" ALTER COLUMN "status" TYPE "rmlorderstatus_new" '
     'USING "status"::text::"rmlorderstatus_new"',
     'DROP TYPE "rmlorderstatus"',
@@ -265,14 +267,15 @@ def test_d2_a_type_two_tables_share_is_one_swap_over_both_columns(
         ddl_files("03_contract")
         + ["01_backfill_rmlorder.py", "02_backfill_rmlrefund.py", "ir.json"]
     )
-    refund_swap = (
+    refund_swap = [
+        'ALTER TABLE "rmlrefund" ALTER COLUMN "status" DROP DEFAULT',
         'ALTER TABLE "rmlrefund" ALTER COLUMN "status" TYPE "rmlorderstatus_new" '
-        'USING "status"::text::"rmlorderstatus_new"'
-    )
+        'USING "status"::text::"rmlorderstatus_new"',
+    ]
     up = text(migration, "03_contract.up.postgres.sql")
     assert up == (
         "-- ferro: data-dependent\n\n"
-        + "\n\n".join(f"{s};" for s in [*SWAP[:2], refund_swap, *SWAP[2:]])
+        + "\n\n".join(f"{s};" for s in [*SWAP[:3], *refund_swap, *SWAP[3:]])
         + "\n"
     )
     for step in ("01_backfill_rmlorder.py", "02_backfill_rmlrefund.py"):
@@ -286,21 +289,48 @@ def test_d2_a_type_two_tables_share_is_one_swap_over_both_columns(
     assert clean(db, project, 1, 2)
 
 
+def column_default(db, table: str = "rmlorder", column: str = "status") -> str | None:
+    """The server default ``column`` holds (``pg_attrdef``), or ``None``."""
+    [(default,)] = db.rows(
+        "SELECT column_default FROM information_schema.columns "
+        f"WHERE table_schema = current_schema() AND table_name = '{table}' "
+        f"AND column_name = '{column}'"
+    )
+    return default
+
+
 @pytest.mark.postgres_only
-def test_d2_a_column_default_is_dropped_around_the_swap_and_set_again(project, pkg, db):
-    start(project, pkg, db, models(ALL, default=" = RmlOrderStatus.PAID"))
-    seed(db, "rmlorder", ["canceled"])
-    write_models(project, pkg, models(KEPT, default=" = RmlOrderStatus.PAID"))
-    new("drop_canceled")
-    migration = migration_dir(project, 2)
-    alter = 'ALTER TABLE "rmlorder" ALTER COLUMN "status"'
-    up = text(migration, "02_contract.up.postgres.sql")
-    assert f"{alter} DROP DEFAULT;" in up and f"{alter} SET DEFAULT 'paid';" in up
-    write_value(migration, "01_backfill_rmlorder.py", '"paid"')
+def test_d2_a_model_default_is_never_a_server_default_so_a_later_removal_of_it_applies(
+    project, pkg, db
+):
+    """F15: ``status: RmlOrderStatus = RmlOrderStatus.PAID`` is a Python-side
+    default; ferro persists no server ``DEFAULT`` (ADR-0027). The swap drops
+    whatever default the column holds before the cast and sets none after,
+    so a later removal of that very label, with the model default gone,
+    still applies."""
+    start(project, pkg, db, models(ALL, default=PAID_DEFAULT))
+    assert column_default(db) is None
+    write_models(project, pkg, models(KEPT, default=PAID_DEFAULT))
+    new("drop_canceled", "--no-backfill", "rmlorder.status")
+    up = text(migration_dir(project, 2), "02_contract.up.postgres.sql")
+    assert up == (
+        "-- ferro: data-dependent\n\n" + "\n\n".join(f"{s};" for s in SWAP) + "\n"
+    ), up
+    assert "SET DEFAULT" not in up
     assert run("migrate", "up", "--url", db.url) == 0
-    db.execute('INSERT INTO "rmlorder" DEFAULT VALUES')
-    assert statuses(db) == [(1, "paid"), (2, "paid")]
-    assert clean(db, project, 2, 1)
+    assert column_default(db) is None
+
+    write_models(project, pkg, models(("refunded",)))
+    new("drop_paid", "--no-backfill", "rmlorder.status")
+    assert run("migrate", "up", "--url", db.url) == 0
+    assert column_default(db) is None
+    assert labels_of(db) == ["refunded"]
+    assert clean(db, project, 3, 2)
+
+    assert run("migrate", "down", "--yes", "--url", db.url) == 0
+    assert run("migrate", "down", "--yes", "--url", db.url) == 0
+    assert column_default(db) is None
+    assert clean(db, project, 1, 2)
 
 
 @pytest.mark.postgres_only
