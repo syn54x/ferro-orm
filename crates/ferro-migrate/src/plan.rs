@@ -1435,6 +1435,30 @@ fn plan_enum_label_removals(
     }
 }
 
+/// Every `(type, label)` an enum `new` declares adds to the same enum `old`
+/// declares, however each is stored: the labels a generated migration's
+/// `labels` step names on every dialect, also where the dialect keeps labels
+/// as text in the rows and its plan holds no op for them (SQLite). The
+/// planner's own label decider ([`missing_enum_labels`]) over the two
+/// declarations, as [`plan_enum_label_removals`] reads them.
+pub(crate) fn declared_label_additions(
+    old: &IrEnvelope<SchemaIrPayload>,
+    new: &IrEnvelope<SchemaIrPayload>,
+) -> Vec<(String, String)> {
+    let before = declared_enum_labels(&old.payload.models);
+    let after = declared_enum_labels(&new.payload.models);
+    let mut out = Vec::new();
+    for (type_name, labels) in &after.labels {
+        let Some(old_labels) = before.labels.get(type_name) else {
+            continue;
+        };
+        for label in missing_enum_labels(labels, old_labels) {
+            out.push((type_name.clone(), label));
+        }
+    }
+    out
+}
+
 /// Type creation: every declared type the plan introduces
 /// (`enum_type_provenance` over the columns it adds — a new table's, or an
 /// existing table's new column) that `old` does not already hold.
@@ -1741,6 +1765,10 @@ pub enum Rider {
     DroppedColumn,
     /// An index, check or foreign key over a column the same plan adds.
     AddedColumn,
+    /// A change an enum label's removal makes to a column that held it
+    /// (#536): the column's own check rebuilt to the labels left, or its
+    /// storage narrowed to them. It runs once no row holds the label.
+    RemovedLabel,
 }
 
 impl PlannedOp {
@@ -1775,7 +1803,10 @@ fn verdict(op: &MigrationOp, before: &Side, target: &Side, dialect: Dialect) -> 
     let table = op.table();
     let was = table.and_then(|table| before.model(table));
     let now = table.and_then(|table| target.model(table));
-    let goes_with = goes_with(op, was, now);
+    let goes_with = goes_with(op, was, now).or_else(|| {
+        (before.plans_label_removals() && rides_removed_label(op, was, now))
+            .then_some(Rider::RemovedLabel)
+    });
     OpVerdict {
         execution: execution(op, was, now, goes_with, target, dialect),
         demands_values: demands_values(op, was, now),
@@ -1885,6 +1916,47 @@ fn goes_with(
             .any(|riders| riders.foreign_key.is_some_and(|fk| &fk.column == column))
             .then_some(Rider::AddedColumn),
         _ => None,
+    }
+}
+
+/// Whether `op` is a change a removed enum label makes to the column that
+/// held it: its own check rebuilt, or its storage changed, while the
+/// column's enum keeps its type and drops a label `was` declares.
+fn rides_removed_label(
+    op: &MigrationOp,
+    was: Option<&SchemaModel>,
+    now: Option<&SchemaModel>,
+) -> bool {
+    let column = match op {
+        MigrationOp::AlterColumnType { column, .. } => column.as_str(),
+        MigrationOp::RebuildCheck { name, .. } => {
+            match now.and_then(|model| model.checks.iter().find(|check| &check.name == name)) {
+                Some(check) => check.column.as_str(),
+                None => return false,
+            }
+        }
+        _ => return false,
+    };
+    let Some(declared) = find_column(now, column) else {
+        return false;
+    };
+    // A label a declared hint renames away is a rename, never a removal.
+    let renamed_away: Vec<&String> = declared
+        .enum_renamed_labels
+        .as_ref()
+        .map(|hints| hints.labels.values().collect())
+        .unwrap_or_default();
+    match (
+        find_column(was, column).and_then(enum_declaration),
+        enum_declaration(declared),
+    ) {
+        (Some((old_type, old)), Some((new_type, new))) => {
+            old_type == new_type
+                && old
+                    .iter()
+                    .any(|label| !new.contains(label) && !renamed_away.contains(&label))
+        }
+        _ => false,
     }
 }
 
@@ -3250,12 +3322,18 @@ fn diff_model_columns(
         // to another is a type change too: the storage decision reads a live
         // native-enum column as already at any enum target, and only a
         // declared `old` names its type. A move of every column of a type is
-        // its rename, applied before this diff runs (ADR-0032).
+        // its rename, applied before this diff runs (ADR-0032). So is a column
+        // that leaves its native type for a scalar storage, which the storage
+        // decision also reads as no change (a native enum's scalar cascade is
+        // the string's).
         let moved_enum = dialect == Dialect::Postgres
             && matches!(
                 (enum_type_of(old_col), enum_type_of(new_col)),
                 (Some((a, _)), Some((b, _))) if a != b
-            );
+            )
+            || dialect == Dialect::Postgres
+                && enum_type_of(old_col).is_some()
+                && enum_type_of(new_col).is_none();
         if moved_enum || schema_columns_storage_drift(old_col, new_col, dialect) {
             ops.push(MigrationOp::AlterColumnType {
                 table: table.to_string(),

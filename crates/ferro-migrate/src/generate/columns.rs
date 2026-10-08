@@ -19,40 +19,33 @@ use crate::{Dialect, Execution, MigrationOp, PlannedOp, Rider};
 
 /// The phase step an op lands in, in the order a migration's steps run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Phase {
+pub(crate) enum Phase {
     /// Label additions to enum types that already exist (ADR-0011, ADR-0041):
     /// first in the migration, so every later step may write the new label.
     Labels,
-    /// The one atomic DDL step of a migration that needs no data step.
+    /// The one atomic DDL step of a migration that needs no data step, or
+    /// its expand, which adds a demanded column nullable ahead of a backfill
+    /// ([`super::backfill`]).
     Schema,
-    /// Columns added nullable ahead of a backfill ([`super::backfill`]).
-    Expand,
     /// A data step filling values existing rows lack.
     Backfill,
     /// One index built or dropped on an existing table (ticket #527).
     Index,
-    /// Postgres staged `NOT NULL` checks installed `NOT VALID`.
-    AddConstraint,
     /// Validation and `SET NOT NULL` after a backfill, and every op of a
     /// migration with a data step that drops data or goes with a dropped
     /// column: the data steps still read what it removes (ADR-0025).
     Contract,
-    /// Validation of staged constraints with no contract (ticket #527).
-    Validate,
 }
 
 impl Phase {
     /// The step's name after `NN_`.
-    pub fn step_name(self) -> &'static str {
+    pub(crate) fn step_name(self) -> &'static str {
         match self {
             Phase::Labels => "labels",
             Phase::Schema => "schema",
-            Phase::Expand => "expand",
             Phase::Backfill => "backfill",
             Phase::Index => "index",
-            Phase::AddConstraint => "add_constraint",
             Phase::Contract => "contract",
-            Phase::Validate => "validate",
         }
     }
 }
@@ -66,8 +59,9 @@ impl Phase {
 /// | :-- | :-- |
 /// | an enum label added | labels |
 /// | demands values of existing rows | backfill (the migration's expand → backfill → contract) |
+/// | rides a removed label (its column's check, its storage) | contract |
 /// | drops data, or goes with a dropped column, beside a data step | contract |
-/// | an index built, dropped or redefined on its own | index |
+/// | an index built, dropped or redefined on a table that stays, also over a column the migration adds (ADR-0044) | index |
 /// | anything else, natively or by a SQLite rebuild | schema |
 pub(crate) fn phase(op: &PlannedOp, data_steps: bool) -> Option<Phase> {
     let verdict = &op.verdict;
@@ -81,6 +75,9 @@ pub(crate) fn phase(op: &PlannedOp, data_steps: bool) -> Option<Phase> {
         Phase::Labels
     } else if verdict.demands_values {
         Phase::Backfill
+    } else if verdict.goes_with == Some(Rider::RemovedLabel) {
+        // After the backfill has moved every row off the label.
+        Phase::Contract
     } else if data_steps && (verdict.drops_data || verdict.goes_with == Some(Rider::DroppedColumn))
     {
         Phase::Contract
@@ -89,7 +86,7 @@ pub(crate) fn phase(op: &PlannedOp, data_steps: bool) -> Option<Phase> {
         MigrationOp::AddIndex { .. }
             | MigrationOp::DropIndex { .. }
             | MigrationOp::RedefineIndex { .. }
-    ) && verdict.goes_with.is_none()
+    ) && verdict.goes_with != Some(Rider::DroppedColumn)
     {
         Phase::Index
     } else {
@@ -645,18 +642,18 @@ mod tests {
                 assert_eq!(phase(&planned, false), Some(Phase::Index), "{op:?}");
             }
         }
-        // An index over a column the same plan adds rides the column (a down
-        // putting back a column dropped with its index puts it back with it,
-        // in the schema step); one over a column it drops goes with the drop.
+        // An index over a column the same plan adds rides the column's
+        // statement, yet a table that already exists builds it in its own
+        // step (ADR-0044); one over a column it drops goes with the drop.
         let without_bio = author(vec![]);
-        let restore = verdict_between(
+        let added = verdict_between(
             &add_index,
             vec![without_bio.clone()],
             vec![indexed.clone()],
             Dialect::Postgres,
         );
-        assert_eq!(restore.verdict.goes_with, Some(Rider::AddedColumn));
-        assert_eq!(phase(&restore, false), Some(Phase::Schema));
+        assert_eq!(added.verdict.goes_with, Some(Rider::AddedColumn));
+        assert_eq!(phase(&added, false), Some(Phase::Index));
         let dropped = verdict_between(
             &drop_index,
             vec![indexed.clone()],
@@ -745,6 +742,58 @@ mod tests {
             // (the reader's choice), it scans nothing.
             assert_eq!(v.fails_on_rows, RowRisk::WhenValidated);
         }
+    }
+
+    #[test]
+    fn a_removed_labels_check_and_storage_ride_it_into_the_contract() {
+        let status = |labels: &[&str]| {
+            let mut model = author(vec![SchemaColumn {
+                enum_values: Some(labels.iter().map(|l| serde_json::json!(l)).collect()),
+                enum_type_name: Some("status".into()),
+                db_type: Some("text".into()),
+                db_type_explicit: Some(true),
+                ..column("status", "string")
+            }]);
+            model.checks.push(SchemaCheck {
+                name: "ck_author_status".into(),
+                column: "status".into(),
+                values: labels.iter().map(|l| format!("'{l}'")).collect(),
+            });
+            model
+        };
+        let rebuild = MigrationOp::RebuildCheck {
+            table: "author".into(),
+            name: "ck_author_status".into(),
+        };
+        let narrow = MigrationOp::AlterColumnType {
+            table: "author".into(),
+            column: "status".into(),
+        };
+        let (before, after) = (
+            status(&["draft", "canceled", "live"]),
+            status(&["draft", "live"]),
+        );
+        for dialect in DIALECTS {
+            for op in [&rebuild, &narrow] {
+                let planned =
+                    verdict_between(op, vec![before.clone()], vec![after.clone()], dialect);
+                assert_eq!(
+                    planned.verdict.goes_with,
+                    Some(Rider::RemovedLabel),
+                    "{op:?}"
+                );
+                assert_eq!(phase(&planned, true), Some(Phase::Contract), "{op:?}");
+            }
+        }
+        // A label added rides nothing: the check widens where it stands.
+        let widened = verdict_between(
+            &rebuild,
+            vec![after.clone()],
+            vec![before.clone()],
+            Dialect::Postgres,
+        );
+        assert_eq!(widened.verdict.goes_with, None);
+        assert_eq!(phase(&widened, false), Some(Phase::Schema));
     }
 
     #[test]

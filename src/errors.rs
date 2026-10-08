@@ -195,8 +195,8 @@ pub(crate) enum CountedFailure {
 // The staged `NOT NULL` check's and the rebuild table's name prefixes are the
 // generator's own: one constant each, beside the functions that build the
 // names (`backfill::staged_not_null_name`, `rebuild::new_table_name`).
-use ferro_migrate::generate::backfill::STAGED_NOT_NULL_PREFIX;
-use ferro_migrate::generate::rebuild::NEW_TABLE_PREFIX as REBUILD_TABLE_PREFIX;
+use ferro_migrate::NEW_TABLE_PREFIX as REBUILD_TABLE_PREFIX;
+use ferro_migrate::STAGED_NOT_NULL_PREFIX;
 
 /// The counted failure `statement` raised with `sqlstate`, naming `table`
 /// and `constraint` (the database's error fields), or `None` when it is no
@@ -982,8 +982,7 @@ mod counted_failure_tests {
 
     #[test]
     fn a_contract_failure_is_recognised_by_the_names_the_generator_builds() {
-        use ferro_migrate::generate::backfill::staged_not_null_name;
-        use ferro_migrate::generate::rebuild::new_table_name;
+        use ferro_migrate::{new_table_name, staged_not_null_name};
 
         // Whatever the generator names the staging check (63-char guard
         // included), the runner reads its failed VALIDATE as a contract's.

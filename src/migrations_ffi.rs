@@ -22,7 +22,6 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_check_migrations, m)?)?;
     m.add_function(wrap_pyfunction!(_read_migrations_dir, m)?)?;
     m.add_function(wrap_pyfunction!(_load_snapshot, m)?)?;
-    m.add_function(wrap_pyfunction!(_store_snapshot, m)?)?;
     m.add_function(wrap_pyfunction!(_open_tracked, m)?)?;
     m.add_function(wrap_pyfunction!(_tracking_tables_for, m)?)?;
     m.add_class::<TrackedDatabase>()?;
@@ -77,8 +76,11 @@ fn snapshot_json(snapshot: &Snapshot) -> serde_json::Value {
 /// `parent_ir_json` is the head migration's `ir.json` text exactly as stored
 /// (its checksum is the new snapshot's parent link), or `None` before the
 /// first migration. Returns the JSON of the `GeneratedMigration`, or `None`
-/// when nothing renders DDL (no schema change). `options_json` carries
-/// `ferro migrate new`'s options: `{"no_backfill": ["<table>.<column>", ...]}`.
+/// when nothing renders DDL (no schema change) and no hand step is asked for.
+/// `options_json` carries `ferro migrate new`'s options:
+/// `{"no_backfill": ["<table>.<column>", ...], "data_step": "Author" | null,
+/// "sql_step": "audit" | null, "data_only": bool}`; the generator lays out
+/// the hand steps.
 ///
 /// # Errors
 /// `ValueError` naming the refusal: a change this generator does not generate
@@ -98,7 +100,8 @@ pub fn _generate_migration(
     let parent = parent_ir_json
         .map(|json| load_snapshot(json.as_bytes(), "the head snapshot"))
         .transpose()?;
-    // `{"no_backfill": ["author.slug"]}` (`ferro migrate new --no-backfill`).
+    // `ferro migrate new`'s options (`--no-backfill`, `--data-step`,
+    // `--sql-step`, `--data-only`).
     let options: GenerateOptions = options_json
         .map(|json| serde_json::from_str(&json))
         .transpose()
@@ -155,22 +158,6 @@ pub fn _read_migrations_dir(directory: String) -> PyResult<String> {
 pub fn _load_snapshot(ir_json: String) -> PyResult<String> {
     let snapshot = load_snapshot(ir_json.as_bytes(), "the snapshot")?;
     to_json(&snapshot_json(&snapshot))
-}
-
-/// The canonical `ir.json` text of a migration that changes no schema: a
-/// full copy of the parent's modelset, linked to the parent by its checksum
-/// (ADR-0037). `parent_ir_json` is the parent's `ir.json` text as stored.
-///
-/// # Errors
-/// `ValueError` when the parent is not a loadable snapshot.
-#[pyfunction]
-#[pyo3(name = "_store_snapshot")]
-pub fn _store_snapshot(parent_ir_json: String) -> PyResult<String> {
-    let parent = load_snapshot(parent_ir_json.as_bytes(), "the head snapshot")?;
-    let bytes = Snapshot::store(&parent.ir, Some(parent.checksum))
-        .map_err(|err| PyValueError::new_err(format!("the copied snapshot {err}")))?;
-    String::from_utf8(bytes)
-        .map_err(|e| PyRuntimeError::new_err(format!("the stored snapshot is not UTF-8: {e}")))
 }
 
 // -- the run objects (ADR-0048) ------------------------------------------------------

@@ -199,7 +199,11 @@ def _generate_migration(
     generated migration — ``{"steps": [{"ordinal", "name", "kind",
     "renderings": {<dialect>: {"up", "down", "headers", "down_headers"}}}],
     "snapshot": {...}, "snapshot_json", "summary", "warnings"}`` — or ``None``
-    when nothing renders DDL (no schema change). Raises ``ValueError`` naming
+    when nothing renders DDL (no schema change) and no hand step is asked
+    for. ``options_json`` is ``{"no_backfill": [...], "data_step": str | None,
+    "sql_step": str | None, "data_only": bool}``: the generator lays out the
+    hand steps too, and a migration of hand steps alone stores the target
+    snapshot (the parent's with ``data_only``). Raises ``ValueError`` naming
     the refusal (``not generated yet: <op> on <table> (ticket #N)``).
     """
     ...
@@ -237,11 +241,6 @@ def _load_snapshot(ir_json: str) -> str:
 
     Returns JSON ``{"checksum", "parent_checksum", "ir"}`` (checksums in hex).
     """
-    ...
-
-def _store_snapshot(parent_ir_json: str) -> str:
-    """The ``ir.json`` text of a migration that changes no schema: a full copy
-    of the parent's modelset whose ``parent_checksum`` is the parent's."""
     ...
 
 # -- the migration runner (ADR-0048) --------------------------------------------

@@ -31,8 +31,6 @@ from typing import TYPE_CHECKING, Any
 from .._core import (
     _check_migrations,
     _generate_migration,
-    _load_snapshot,
-    _store_snapshot,
 )
 from . import scaffold
 from .errors import MigrationRefused
@@ -147,7 +145,9 @@ def new(
 
     Returns the new migration's directory, or ``None`` when the models
     change nothing that renders DDL (a Python default, a back-reference, a
-    method edit: ADR-0027) and no ``sql_step`` was asked for. ``sql_step``
+    method edit: ADR-0027) and no hand step (``sql_step``, ``data_step``)
+    was asked for; a migration of hand steps alone stores the declared
+    modelset as its snapshot. ``sql_step``
     appends a hand-written portable step (``NN_<sql_step>.up.sql`` /
     ``.down.sql``) holding ``-- write this step``. ``data_step`` (a model's
     class name, ``Author``) adds a Python data step
@@ -155,8 +155,9 @@ def new(
     ``todo("write this step")`` (or the project's ``_templates/data_step.py``),
     after every generated step but the contract: a column or table the
     migration drops is dropped by the contract, after the data step, which
-    can still read it (ADR-0025); with ``data_only`` the migration holds that step alone, whatever the
-    models changed, and a full copy of its parent's snapshot. A change that
+    can still read it (ADR-0025); with ``data_only`` the migration holds that
+    step alone, whatever the models changed, and a full copy of its parent's
+    snapshot. A change that
     asks existing rows for values gets a generated backfill per model
     (``NN_backfill_<model>.py``, ``todo`` where a value is missing);
     ``no_backfill`` (``["author.slug"]``) replaces a model's backfill with a
@@ -206,74 +207,40 @@ def prepare(
     check_name(name, "migration name")
     if sql_step is not None:
         check_name(sql_step, "--sql-step name")
-    if data_only and no_backfill:
-        raise MigrationsDirectoryError(
-            "--no-backfill replaces a generated backfill, and --data-only generates none; "
-            "drop one of them"
-        )
-    if data_only and (data_step is None or sql_step is not None):
-        raise MigrationsDirectoryError(
-            "--data-only writes one data step and nothing else; name its model with "
-            "--data-step <Model> (and drop --sql-step)"
-        )
     directory = database.directory
     migrations = read_migrations(directory)
     parent = _head_snapshot_text(migrations)
     number = len(migrations) + 1
-    raw: str | None = None
-    if not data_only:
-        target = declared_modelset(database)
-        try:
-            # The generator decides the guard (ADR-0037), refusing a
-            # --no-backfill it cannot honour, and places the hand steps: a
-            # --data-step before the contract that drops what the step may
-            # read (ADR-0025), a --sql-step right before it.
-            raw = _generate_migration(
-                parent,
-                json.dumps(target),
-                list(database.dialects),
-                options_json=json.dumps(
-                    {
-                        "no_backfill": list(no_backfill),
-                        "data_step": data_step,
-                        "sql_step": sql_step,
-                    }
-                ),
-            )
-        except ValueError as err:
-            raise MigrationsDirectoryError(str(err)) from None
-
+    try:
+        # The generator plans once, decides the guard (ADR-0037), refusing a
+        # --no-backfill it cannot honour, and lays out every step, the hand
+        # steps too, whether or not the models changed: a --data-step before
+        # the contract that drops what the step may read (ADR-0025), a
+        # --sql-step right before it or last. --data-only is the data step
+        # alone, with no schema plan.
+        raw = _generate_migration(
+            parent,
+            json.dumps(declared_modelset(database)),
+            list(database.dialects),
+            options_json=json.dumps(
+                {
+                    "no_backfill": list(no_backfill),
+                    "data_step": data_step,
+                    "sql_step": sql_step,
+                    "data_only": data_only,
+                }
+            ),
+        )
+    except ValueError as err:
+        raise MigrationsDirectoryError(str(err)) from None
     if raw is None:
-        if sql_step is None and data_step is None:
-            return None
-        if parent is None:
-            raise MigrationsDirectoryError(
-                "a hand-written step needs a migration to follow; there is none"
-            )
-        # No schema change: a full copy of the parent's snapshot, and the hand
-        # steps alone, the SQL step first.
-        migration = GeneratedMigration(
-            number=number, name=name, steps=(), snapshot_json=_store_snapshot(parent)
-        )
-        if sql_step is not None:
-            migration = migration.with_sql_step(sql_step)
-        if data_step is not None:
-            model = _snapshot_model(migration.snapshot_json, data_step)
-            # The record the generator writes for --data-step when models
-            # changed (``hand_data_step``), placed last here.
-            hand = {"name": f"backfill_{model.lower()}", "hand_model": model}
-            migration = migration.with_data_step(
-                hand["name"],
-                scaffold.render(hand, template_dir=directory / TEMPLATES_DIR),
-            )
-    else:
-        generated = json.loads(raw)
-        migration = _with_data_steps(
-            GeneratedMigration.from_generated(generated, number=number, name=name),
-            generated,
-            directory / TEMPLATES_DIR,
-        )
-    return migration
+        return None
+    generated = json.loads(raw)
+    return _with_data_steps(
+        GeneratedMigration.from_generated(generated, number=number, name=name),
+        generated,
+        directory / TEMPLATES_DIR,
+    )
 
 
 def _with_data_steps(
@@ -313,19 +280,6 @@ def _with_data_steps(
             notes.append(note)
     summary = "\n".join(line for line in (migration.summary, *notes) if line)
     return replace(migration, steps=tuple(steps), summary=summary)
-
-
-def _snapshot_model(snapshot_json: str, name: str) -> str:
-    """``name`` when the migration's snapshot has a model of that class name;
-    refused, listing the models it has, otherwise."""
-    models = json.loads(_load_snapshot(snapshot_json))["ir"]["payload"]["models"]
-    names = sorted({str(m["model_name"]).rsplit(".", 1)[-1] for m in models})
-    if name not in names:
-        raise MigrationsDirectoryError(
-            f"--data-step {name}: this migration's snapshot has no model {name!r}; "
-            f"it has: {', '.join(names) or 'none'}"
-        )
-    return name
 
 
 async def check(

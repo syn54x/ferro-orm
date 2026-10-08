@@ -140,31 +140,6 @@ class GeneratedMigration:
             warnings=tuple(raw["warnings"]),
         )
 
-    def with_sql_step(self, name: str) -> GeneratedMigration:
-        """This migration with a hand-written portable step appended."""
-        return GeneratedMigration(
-            number=self.number,
-            name=self.name,
-            steps=(*self.steps, portable_sql_step(len(self.steps) + 1, name)),
-            snapshot_json=self.snapshot_json,
-            summary=self.summary,
-            warnings=self.warnings,
-        )
-
-    def with_data_step(self, name: str, text: str) -> GeneratedMigration:
-        """This migration with a Python data step ``NN_<name>.py`` holding
-        ``text`` appended."""
-        ordinal = len(self.steps) + 1
-        step = GeneratedStep(ordinal, name, "data", {f"{ordinal:02d}_{name}.py": text})
-        return GeneratedMigration(
-            number=self.number,
-            name=self.name,
-            steps=(*self.steps, step),
-            snapshot_json=self.snapshot_json,
-            summary=self.summary,
-            warnings=self.warnings,
-        )
-
     def files(self) -> dict[str, str]:
         """Every file of the migration, by name, ``ir.json`` last."""
         out: dict[str, str] = {}

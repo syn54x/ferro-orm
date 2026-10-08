@@ -159,6 +159,7 @@ pub fn render_labels_step(
         after,
         dialect,
         ferro_ddl_lowering::ConstraintMode::Plain,
+        ferro_ddl_lowering::IndexMode::Plain,
     )?;
     refuse_unrendered(&rendered, dialect)?;
     let statements: Vec<String> = rendered
