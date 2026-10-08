@@ -1590,8 +1590,10 @@ def _run_statements(
 
 def _pass_declines(url: str) -> bool:
     """Whether the reconciliation pass, run for real, declines the change
-    and points at ``ferro migrate new``: it refuses so, or it warns so and
-    leaves the table as it is (ADR-0014's SQLite posture)."""
+    and points at ``ferro migrate new``: it refuses so, or it warns so
+    (ADR-0014's SQLite posture), having made only what SQLite can make in
+    place (a required column comes in nullable and backfilled, its
+    ``NOT NULL`` left to the rebuild the warning names)."""
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         try:
