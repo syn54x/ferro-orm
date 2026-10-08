@@ -74,6 +74,32 @@ def test_an_ungenerated_model_exits_3_naming_it(project, pkg, capsys):
     assert run("migrate", "check") == 0
 
 
+def test_a_label_added_on_a_sqlite_only_project_is_recorded_and_check_is_clean(
+    project, pkg, capsys
+):
+    """SQLite keeps an enum label as text, so it has nothing to run for a
+    new one, but the models changed: ``new`` writes the ``not-applicable``
+    labels step and stores the target snapshot, and ``check`` is clean."""
+    write_config(project, pkg, '["sqlite"]')
+    write_models(project, pkg, AUTHOR)
+    assert run("migrate", "new", "create_author") == 0
+    added = AUTHOR.replace('    LIVE = "live"', '    LIVE = "live"\n    DEAD = "dead"')
+    write_models(project, pkg, added)
+    capsys.readouterr()
+    assert run("migrate", "check") == 3
+    assert "new enum labels: status.dead" in capsys.readouterr().err
+
+    assert run("migrate", "new", "status_dead") == 0
+    migration = next((project / "migrations").glob("0002_*"))
+    for name in ("01_labels.up.sqlite.sql", "01_labels.down.sqlite.sql"):
+        assert (migration / name).read_text() == "-- ferro: not-applicable\n"
+    stored = json.loads((migration / "ir.json").read_text())
+    assert "dead" in json.dumps(stored)
+    capsys.readouterr()
+    assert run("migrate", "check") == 0
+    assert capsys.readouterr().out == "ok: models match 0002_status_dead\n"
+
+
 def test_a_change_new_cannot_generate_yet_is_still_ungenerated(project, pkg, capsys):
     _generated(project, pkg)
     write_models(project, pkg, AUTHOR.replace("    status: Status", "    status: str"))

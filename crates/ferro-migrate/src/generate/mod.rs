@@ -464,9 +464,12 @@ fn short_model_name(model_name: &str) -> &str {
     model_name.rsplit('.').next().unwrap_or(model_name)
 }
 
-/// What the up ops change, in words, over every dialect.
+/// What the up ops change, in words, over every dialect, beside the enum
+/// labels the models add (`type.label`; a dialect that keeps labels as text
+/// has no op for them).
 fn summarize(
     ups: &[Vec<MigrationOp>],
+    labels: &BTreeSet<String>,
     parent: &IrEnvelope<SchemaIrPayload>,
     target: &IrEnvelope<SchemaIrPayload>,
 ) -> String {
@@ -484,7 +487,7 @@ fn summarize(
     let mut types_dropped = BTreeSet::new();
     let mut changed = BTreeSet::new();
     let mut types_renamed = BTreeSet::new();
-    let mut labels_added = BTreeSet::new();
+    let mut labels_added = labels.clone();
     let mut labels_renamed = BTreeSet::new();
     let mut labels_removed = BTreeSet::new();
     for op in ups.iter().flatten() {
@@ -748,17 +751,34 @@ pub fn generate_with(
         .zip(&up_indexes)
         .map(|(up, indexes)| indexes.iter().map(|&i| up.operations[i].clone()).collect())
         .collect();
-    // Every down is its step's up planned back (ADR-0050): a migration whose
-    // ups change nothing on any dialect has nothing to undo either, and is
-    // no migration (a label SQLite stores as text, for one).
-    if ups.iter().all(Vec::is_empty) && index_ops.is_empty() && !contracts {
+    // A label the models add is the `labels` step on every dialect, also
+    // where the dialect keeps labels as text and has nothing to run (SQLite:
+    // the step is `not-applicable` both ways): the models changed, so the
+    // migration must store the target snapshot. The planner says so going
+    // back: from the target, the parent drops the label.
+    let mut labels_added = BTreeSet::new();
+    for &dialect in dialects {
+        for op in plan(target, before, dialect).ops() {
+            if let MigrationOp::RemoveEnumLabel {
+                type_name, label, ..
+            } = op
+            {
+                labels_added.insert(format!("{type_name}.{label}"));
+            }
+        }
+    }
+    let adds_labels = !labels_added.is_empty();
+    if ups.iter().all(Vec::is_empty) && index_ops.is_empty() && !contracts && !adds_labels {
         if !skipped.is_empty() {
             backfill::data_steps(&demands, target, &skipped)?;
         }
         return Ok(None);
     }
 
-    let phases = step_phases(&ups, data_steps)?;
+    let mut phases = step_phases(&ups, data_steps)?;
+    if adds_labels {
+        phases.insert(Phase::Labels);
+    }
     let mut warnings = Vec::new();
     let mut staged = Vec::new();
     for ((&dialect, up), (up_plan, indexes)) in dialects
@@ -858,7 +878,7 @@ pub fn generate_with(
         steps,
         snapshot,
         snapshot_json,
-        summary: std::iter::once(summarize(&changes, parent_ir, target))
+        summary: std::iter::once(summarize(&changes, &labels_added, parent_ir, target))
             .chain(suggestions)
             .filter(|line| !line.is_empty())
             .collect::<Vec<_>>()
@@ -3076,6 +3096,26 @@ mod tests {
             ..status(labels)
         };
         model
+    }
+
+    #[test]
+    fn a_label_added_on_a_sqlite_only_project_is_a_not_applicable_labels_step() {
+        // SQLite keeps the label as text and has nothing to run, but the
+        // models changed: the migration stores the target snapshot, so
+        // `check` and the next `new` see the change recorded.
+        let added = relabelled("status", &["draft", "live", "gone"], &[]);
+        let migration = edit(vec![author()], vec![added.clone()], &[Dialect::Sqlite]);
+        assert_eq!(step_names(&migration), ["01_labels"]);
+        let sqlite = step(&migration, "01_labels", Dialect::Sqlite);
+        assert_eq!(sqlite.up, NOT_APPLICABLE);
+        assert_eq!(sqlite.down, NOT_APPLICABLE);
+        assert_eq!(migration.snapshot.ir, ir(vec![added.clone()]));
+        // Generated again from that snapshot, nothing is left to record.
+        let parent = snapshot_of(&ir(vec![added.clone()]), None);
+        assert_eq!(
+            generate(Some(&parent), &ir(vec![added]), &[Dialect::Sqlite]).expect("ok"),
+            None
+        );
     }
 
     #[test]
