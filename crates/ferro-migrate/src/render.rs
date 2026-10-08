@@ -283,8 +283,16 @@ pub(crate) fn render_from(
             }
             MigrationOp::RenameTable { old, new } => {
                 out.statements.push(render_rename_table(old, new));
+                // Each serial key under the name it has right after the
+                // table rename: a column rename of the same plan runs later
+                // and carries the sequence again under its new name.
                 if dialect == Dialect::Postgres {
-                    for column in serial_columns(&[&old_models, &new_models], &[old, new]) {
+                    let standing: BTreeSet<String> =
+                        serial_columns(&[&old_models, &new_models], &[old, new])
+                            .into_iter()
+                            .map(|column| before_column_renames(ops, new, column))
+                            .collect();
+                    for column in standing {
                         out.statements
                             .push(render_pg_serial_sequence_rename(new, &column));
                     }
@@ -731,6 +739,21 @@ fn serial_columns(
         .filter(|col| is_pg_serial_column(col))
         .map(|col| col.name.clone())
         .collect()
+}
+
+/// `column` of `table` under the name it has before `ops`' column renames:
+/// the old name of the `RenameColumn` that gives it `column`, else `column`.
+fn before_column_renames(ops: &[MigrationOp], table: &str, column: String) -> String {
+    ops.iter()
+        .find_map(|op| match op {
+            MigrationOp::RenameColumn {
+                table: renamed,
+                old,
+                new,
+            } if renamed == table && *new == column => Some(old.clone()),
+            _ => None,
+        })
+        .unwrap_or(column)
 }
 
 /// The report standing in for a check put back as the catalog printed it on

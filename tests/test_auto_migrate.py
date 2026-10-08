@@ -19,15 +19,16 @@ from tests._pass_harness import (
 pytestmark = pytest.mark.backend_matrix
 
 
-def pg_sequence_rename(table: str) -> str:
-    """The pass's statement that gives ``table``'s ``id`` sequence the name a
-    table created as ``table`` owns (``<table>_id_seq``) after a rename:
-    ``ALTER TABLE … RENAME`` alone keeps the old name."""
+def pg_sequence_rename(table: str, column: str = "id") -> str:
+    """The pass's statement that gives ``table``'s ``column`` sequence the
+    name a table created as ``table`` owns (``<table>_<column>_seq``) after a
+    rename: ``ALTER TABLE … RENAME`` alone keeps the old name."""
+    target = f"{table}_{column}_seq"
     return (
-        f"DO $$ DECLARE seq regclass := pg_get_serial_sequence('\"{table}\"', 'id')"
-        "::regclass; BEGIN IF seq IS NOT NULL AND (SELECT relname FROM pg_class "
-        f"WHERE oid = seq) <> '{table}_id_seq' THEN EXECUTE format('ALTER SEQUENCE "
-        f"%s RENAME TO %I', seq, '{table}_id_seq'); END IF; END $$"
+        f"DO $$ DECLARE seq regclass := pg_get_serial_sequence('\"{table}\"', "
+        f"'{column}')::regclass; BEGIN IF seq IS NOT NULL AND (SELECT relname FROM "
+        f"pg_class WHERE oid = seq) <> '{target}' THEN EXECUTE format('ALTER SEQUENCE "
+        f"%s RENAME TO %I', seq, '{target}'); END IF; END $$"
     )
 
 
@@ -3561,6 +3562,58 @@ def _created(report: PassReport) -> list[str]:
 def _touched(report: PassReport, prefix: str) -> set[str]:
     """The tables whose name starts with ``prefix`` that the pass changed."""
     return {subject for subject, _ in schema_steps(report) if subject.startswith(prefix)}
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+async def test_migrate_updates_renames_a_table_and_its_serial_key_with_its_sequence(
+    db_url, clean_registry
+):
+    """``trnwriter`` becomes ``trnauthor`` and its key ``id`` becomes
+    ``author_id`` in one pass. Right after the table rename the key is still
+    ``id``, so the table's sequence rename names ``id``; the column rename
+    then carries the sequence to the name a fresh ``trnauthor`` gives it.
+    A second pass has nothing left to do."""
+    await _trn_writer_with_rows(db_url)
+
+    class TrnAuthor(Model):
+        __ferro_renamed_from__ = "trnwriter"
+        author_id: Annotated[
+            int | None, FerroField(primary_key=True, renamed_from="id")
+        ] = None
+        name: Annotated[str, FerroField(index=True)]
+
+    report = await auto_migrate(db_url, updates=True)
+    steps = [sql for _, sql in schema_steps(report)]
+    assert steps[:4] == [
+        'ALTER TABLE "trnwriter" RENAME TO "trnauthor"',
+        pg_sequence_rename("trnauthor"),
+        'ALTER TABLE "trnauthor" RENAME COLUMN "id" TO "author_id"',
+        pg_sequence_rename("trnauthor", "author_id"),
+    ]
+    assert warning_texts(report) == []
+    async with ferro.engines.session():
+        rows = await fetch_all(
+            "SELECT column_default FROM information_schema.columns WHERE "
+            "table_schema = current_schema() AND table_name = 'trnauthor' "
+            "AND column_name = 'author_id'"
+        )
+        assert rows[0]["column_default"] == (
+            "nextval('trnauthor_author_id_seq'::regclass)"
+        )
+        created = await TrnAuthor.create(name="Cy")
+        assert created.author_id == 3
+    _rewind()
+
+    class TrnAuthor(Model):  # noqa: F811
+        __ferro_renamed_from__ = "trnwriter"
+        author_id: Annotated[
+            int | None, FerroField(primary_key=True, renamed_from="id")
+        ] = None
+        name: Annotated[str, FerroField(index=True)]
+
+    again = await auto_migrate(db_url, updates=True)
+    assert schema_steps(again) == []
 
 
 @pytest.mark.asyncio

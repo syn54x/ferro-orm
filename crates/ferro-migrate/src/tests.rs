@@ -6132,3 +6132,70 @@ fn a_serial_key_column_rename_carries_its_sequence_and_a_plain_table_renames_alo
         vec!["ALTER TABLE \"writer\" RENAME TO \"author\"".to_string()]
     );
 }
+
+/// A table rename and a rename of its serial key in one plan: right after
+/// `ALTER TABLE … RENAME` the key is still `id`, so the table's sequence
+/// rename names `id` (naming `author_id` there, `pg_get_serial_sequence`
+/// would fail on a column that does not exist yet); the column rename then
+/// carries it again, to `author_author_id_seq`. The down undoes both, in
+/// the same shape.
+#[test]
+fn a_table_and_its_serial_key_renamed_together_carry_the_sequence_in_order() {
+    let writer = envelope(vec![schema_model(
+        "writer",
+        vec![pk_col("id", "int"), col("name", "varchar", false)],
+    )]);
+    let author = envelope(vec![SchemaModel {
+        renamed_from: Some("writer".to_string()),
+        ..schema_model(
+            "author",
+            vec![
+                SchemaColumn {
+                    renamed_from: Some("id".to_string()),
+                    ..pk_col("author_id", "int")
+                },
+                col("name", "varchar", false),
+            ],
+        )
+    }]);
+    let rendered =
+        |plan: &Plan, old: &IrEnvelope<SchemaIrPayload>, new: &IrEnvelope<SchemaIrPayload>| {
+            render_plan(plan, old, new, Dialect::Postgres)
+                .unwrap()
+                .into_iter()
+                .flat_map(|op| op.statements)
+                .collect::<Vec<String>>()
+        };
+    let sequence = ferro_ddl_lowering::render_pg_serial_sequence_rename;
+    let up = plan_from_ir(
+        &Side::declared(writer.clone()),
+        &Side::declared(author.clone()),
+        Dialect::Postgres,
+        destructive(),
+    );
+    assert_eq!(
+        rendered(&up, &writer, &author),
+        vec![
+            "ALTER TABLE \"writer\" RENAME TO \"author\"".to_string(),
+            sequence("author", "id"),
+            "ALTER TABLE \"author\" RENAME COLUMN \"id\" TO \"author_id\"".to_string(),
+            sequence("author", "author_id"),
+        ]
+    );
+
+    let down = plan_down(
+        &up.op_list(),
+        &Side::declared(author.clone()),
+        &Side::declared(writer.clone()),
+        Dialect::Postgres,
+    );
+    assert_eq!(
+        rendered(&down, &author, &writer),
+        vec![
+            "ALTER TABLE \"author\" RENAME TO \"writer\"".to_string(),
+            sequence("writer", "author_id"),
+            "ALTER TABLE \"writer\" RENAME COLUMN \"author_id\" TO \"id\"".to_string(),
+            sequence("writer", "id"),
+        ]
+    );
+}
