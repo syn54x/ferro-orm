@@ -19,7 +19,7 @@ connect(migrate_updates)   executes                    ALTER TABLE "author" ADD 
 alembic --autogenerate     upgrade()                   op.add_column('author', sa.Column('bio', ...))
 ```
 
-The migrations door is pinned by six pins over every casebook change
+The doors are pinned by seven pins over every casebook change
 (``tests/_casebook.py``) on both dialects — (a) the generated steps are the
 pass's plan, the online shapes compared by their plain twins
 (:func:`normalize_online_shape`); (b) a rebuild's ``CREATE TABLE`` is the
@@ -27,7 +27,8 @@ create pass's; (c) a concurrent index build is the pass's statement but for
 one token; (d) the validate, label-addition and type-creation statements are
 the pass's; (e) a migrated database equals an ``auto_migrate``'d one and
 Alembic sees nothing to do against either; (f) the bridge's revision runs the
-pass's DDL — at the end of this file.
+pass's DDL; (g) the pass's ``PassReport`` is the plan it renders — at the end
+of this file.
 
 The canonical bridge test in this file is
 ``test_alembic_autogen_against_rust_migrated_db_is_idempotent``: it bootstraps
@@ -505,7 +506,7 @@ def test_enum_type_provenance_parity_pin():
 
 
 # ===========================================================================
-# The migrations door (#538): the six pins over the casebook
+# The migrations door (#538): pins (a)–(f) over the casebook; (g) is the pass's
 # ===========================================================================
 #
 # ``ferro migrate new`` writes a casebook change into step files; the
@@ -1383,7 +1384,7 @@ def test_agents_md_names_the_migrations_door_its_pins_and_the_one_bridge_item():
     emitters = i1[: i1.index("For a single model")]
     assert "`src/ferro/migrations/`" in emitters
     assert "`crates/ferro-migrate/src/generate/`" in emitters
-    for pin in ("(a)", "(b)", "(c)", "(d)", "(e)", "(f)"):
+    for pin in ("(a)", "(b)", "(c)", "(d)", "(e)", "(f)", "(g)"):
         assert f"**{pin}**" in i1, pin
     assert "translates the one planner's ops" in i1
     # Items 11–17 are one item now: no per-family comparator, no slot rule.
