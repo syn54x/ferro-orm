@@ -606,6 +606,7 @@ impl AnsweredBy for Report {
             | ReportKind::RefusedConversion
             | ReportKind::SqliteInPlace { .. }
             | ReportKind::PrimaryKeyKept
+            | ReportKind::EnumTypeMove
             | ReportKind::RowSecuritySkipped
             | ReportKind::PendingTableRename
             | ReportKind::StrandedLabelRename

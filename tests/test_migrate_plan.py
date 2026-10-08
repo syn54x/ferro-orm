@@ -367,14 +367,21 @@ class TestReconcileExisting:
         assert 'ALTER TABLE "invoice" ALTER COLUMN "a" SET NOT NULL' in stmts
         assert 'ALTER TABLE "invoice" ALTER COLUMN "b" DROP NOT NULL' in stmts
 
-    def test_pg_native_enum_columns_are_left_to_alembic(self):
+    def test_pg_native_enum_column_moved_to_a_scalar_reports_the_recipe(self):
+        """A live native-enum column the model now declares ``str``: no
+        statement converts it in place, so the pass runs none and says so
+        in the generator's words (``EnumTypeMove``, ADR-0052)."""
         schema = schema_with({"status": {"type": "string"}})
         live = PK_ONLY_LIVE + [
             {"name": "status", "declared_type": "USER-DEFINED", "is_enum_udt": True}
         ]
         stmts, warns = render(schema, live, "postgres")
         assert stmts == []
-        assert warns == []
+        assert warns == [
+            'changing "invoice"."status" to or from a native enum type is not '
+            "generated: add a column of the new type, copy the values across in a "
+            "data step (ferro migrate new --data-step …), then drop the old column"
+        ]
 
     def test_sqlite_type_drift_warns_and_emits_no_ddl(self):
         schema = schema_with({"count": {"type": "integer"}})

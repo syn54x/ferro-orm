@@ -66,3 +66,4 @@ impl Report {
 ## Amendments
 
 - 2026-10-07: the renderer has a fourth kind, `PrimaryKeyKept` (a declared primary key differs from the live one, and no door changes a key in place), which blocks. A report's wire JSON carries `blocks`, computed by the one `Report::blocks`, and the Alembic bridge reads only that.
+- 2026-10-08: the renderer has a fifth kind, `EnumTypeMove`, which blocks. `mood: Mood` (a native Postgres enum type) becoming `mood: str`, or back, is no statement on any door: the verdict refuses it (`Refusal::EnumTypeMove`), and the renderer, which the reconciliation pass reads, reports it instead of keeping the column silently (from an enum) or warning with an Alembic recipe (to one, the retired `RefusedConversion::VarcharToPgEnum`). Both texts are one constructor's, `enum_type_move_report`, so the pass prints the generator's recipe word for word. SQLite stores an enum as text: there is no type to move.

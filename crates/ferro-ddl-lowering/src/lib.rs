@@ -856,30 +856,6 @@ pub fn render_pg_enum_drop_type(type_name: &str) -> String {
     format!("DROP TYPE {}", quote_ident(type_name))
 }
 
-/// Detect a refused conversion from a live column to a resolved storage
-/// target. Extends [`refused_scalar_conversion`] with the native-enum case:
-/// a live non-enum (varchar/text) column targeted at a native Postgres enum
-/// is refused; a live native-enum column is already at the target (no-op).
-pub fn refused_conversion(
-    old_col: &SchemaColumn,
-    new_storage: &ResolvedStorage,
-    dialect: Dialect,
-) -> Option<RefusedConversion> {
-    match new_storage {
-        ResolvedStorage::PgEnum { .. } => {
-            if old_col.postgres_native_enum {
-                None
-            } else {
-                Some(RefusedConversion::VarcharToPgEnum)
-            }
-        }
-        ResolvedStorage::Scalar(new_c) => {
-            let old_c = canonical_from_schema_column(old_col, dialect).ok()?;
-            refused_scalar_conversion(old_c, *new_c)
-        }
-    }
-}
-
 /// Single-column index name (`idx_<table>_<col>`) with 63-char guard.
 pub fn single_index_name(table_lower: &str, col_name: &str) -> String {
     let raw = format!("idx_{table_lower}_{col_name}");
@@ -3392,21 +3368,19 @@ pub fn timestamp_tz_conversion_warning(
 /// A storage conversion auto-migrate refuses to execute (warn + skip, never a
 /// silent ALTER). Each variant is a cast that can reinterpret or destroy stored
 /// values, so it is left to a reviewed migration. `TimestampTz` is the original
-/// #154 case; the other variants extend the same policy to the FF-B derived-type
-/// changes (varchar-stored enums / times created by the old lowering).
+/// #154 case; `VarcharToTime` extends the same policy to the FF-B derived-type
+/// change (times created by the old lowering as varchar).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RefusedConversion {
     /// `timestamp` ⇄ `timestamptz` (reinterprets under the session TimeZone).
     TimestampTz,
-    /// live `varchar`/`text` → native Postgres enum type.
-    VarcharToPgEnum,
     /// live `varchar`/`text` → `time` (old lowering stored `datetime.time` as varchar).
     VarcharToTime,
 }
 
-/// Detect a refused conversion between two scalar canonical storages.
-/// (`VarcharToPgEnum` involves a non-scalar target and is detected where enum
-/// resolution happens; it has no arm here.)
+/// Detect a refused conversion between two scalar canonical storages. A move
+/// to or from a native enum type is no conversion: it is the planner's
+/// [`ReportKind::EnumTypeMove`] ([`enum_type_move_report`]).
 pub fn refused_scalar_conversion(
     old: CanonicalType,
     new: CanonicalType,
@@ -3437,15 +3411,6 @@ pub fn refused_conversion_warning(
         RefusedConversion::TimestampTz => {
             timestamp_tz_conversion_warning(table, column, old_db_type, new_target, keep_db_type)
         }
-        RefusedConversion::VarcharToPgEnum => format!(
-            "Column '{table}.{column}' is '{old_db_type}' in the database but the model maps \
-             this Enum field to the native Postgres enum type '{new_target}'. Ferro will not \
-             auto-convert it — stored values outside the enum's labels would make the cast \
-             fail mid-migration. To keep the column as-is, annotate the field with \
-             db_type=\"{keep_db_type}\". To convert it intentionally, use a reviewed \
-             migration (Alembic) that creates the type and casts with \
-             USING \"{column}\"::\"{new_target}\"."
-        ),
         RefusedConversion::VarcharToTime => format!(
             "Column '{table}.{column}' is '{old_db_type}' in the database but the model maps \
              `datetime.time` to '{new_target}'. Ferro will not auto-convert it — stored text \
@@ -3661,6 +3626,7 @@ impl Report {
             ReportKind::RefusedConversion
                 | ReportKind::SqliteInPlace { .. }
                 | ReportKind::PrimaryKeyKept
+                | ReportKind::EnumTypeMove
         )
     }
 }
@@ -3804,6 +3770,9 @@ pub enum ReportKind {
     /// A table's declared primary key differs from its live one, and no door
     /// changes a primary key in place.
     PrimaryKeyKept,
+    /// A column moves to or from a native Postgres enum type, which no
+    /// statement converts in place: the recipe a migration follows instead.
+    EnumTypeMove,
     /// Row security a table declares and the database does not apply: SQLite
     /// has none, or the create pass met the table already there.
     RowSecuritySkipped,
@@ -3874,6 +3843,24 @@ pub fn foreign_fk_drift_warning(
              constraint '{}' is not ferro-owned, so it is left untouched. \
              Migrate it manually or with Alembic.",
             table, column, live.0, live.1, declared.0, declared.1, name,
+        ),
+    )
+}
+
+/// [`ReportKind::EnumTypeMove`]: `table.column` moves to or from a native
+/// Postgres enum type (`mood: Mood` becomes `mood: str`, or back). No
+/// statement converts it in place, so no door does: the generator refuses
+/// with this text, and the reconciliation pass and the Alembic bridge report
+/// or refuse with the same words (AGENTS.md § I-6: the refusal names its
+/// recipe).
+pub fn enum_type_move_report(table: &str, column: &str) -> Report {
+    Report::new(
+        ReportKind::EnumTypeMove,
+        Subject::column(table, column),
+        format!(
+            "changing \"{table}\".\"{column}\" to or from a native enum type is not \
+             generated: add a column of the new type, copy the values across in a data step \
+             (ferro migrate new --data-step …), then drop the old column"
         ),
     )
 }
@@ -5913,33 +5900,6 @@ mod tests {
     }
 
     #[test]
-    fn refused_conversion_detects_varchar_to_pg_enum() {
-        let live = col_with_db_type("role", "unknown", None, Some("varchar"));
-        let target = ResolvedStorage::PgEnum {
-            type_name: "role".to_string(),
-            labels: vec!["admin".to_string()],
-        };
-        assert_eq!(
-            refused_conversion(&live, &target, Dialect::Postgres),
-            Some(RefusedConversion::VarcharToPgEnum)
-        );
-        // A live native-enum column is NOT a refusal (same storage; no-op).
-        let mut native = col_with_db_type("role", "unknown", None, Some("varchar"));
-        native.postgres_native_enum = true;
-        assert_eq!(refused_conversion(&native, &target, Dialect::Postgres), None);
-        // Scalar targets delegate to the scalar rail.
-        let live_ts = col_with_db_type("at", "unknown", None, Some("timestamp"));
-        assert_eq!(
-            refused_conversion(
-                &live_ts,
-                &ResolvedStorage::Scalar(CanonicalType::TimestampTz),
-                Dialect::Postgres
-            ),
-            Some(RefusedConversion::TimestampTz)
-        );
-    }
-
-    #[test]
     fn enum_model_drifts_against_live_varchar_but_not_native_enum() {
         let live_varchar = col_with_db_type("role", "unknown", None, Some("varchar"));
         let model = enum_col("role", Some("role"), vec![serde_json::json!("admin")]);
@@ -6005,30 +5965,6 @@ mod tests {
         assert_eq!(via_kind.kind, ReportKind::RefusedConversion);
         assert_eq!(via_kind.subject, Subject::column("event", "occurred_at"));
         assert!(via_kind.blocks() && !via_kind.recurs);
-    }
-
-    #[test]
-    fn refused_conversion_warning_enum_names_column_db_type_and_alembic() {
-        let w = refused_conversion_warning(
-            RefusedConversion::VarcharToPgEnum,
-            "account",
-            "role",
-            "varchar",
-            "role",
-            "varchar",
-        )
-        .text;
-        let col = w.find("account.role").expect("names the column");
-        let dbt = w.find("db_type").expect("names db_type");
-        let alembic = w.find("Alembic").expect("names Alembic");
-        assert!(
-            col < dbt && dbt < alembic,
-            "tokens must appear in order: {w}"
-        );
-        assert!(
-            w.contains("USING"),
-            "enum recipe points at a USING cast: {w}"
-        );
     }
 
     #[test]
@@ -8162,6 +8098,27 @@ mod tests {
         assert!(kept.blocks());
         let leftover = extra_check_names_warning("transfer", &names(&["ck_transfer_orphan"]));
         assert!(!leftover.is_some_and(|report| report.blocks()));
+    }
+
+    #[test]
+    fn an_enum_type_move_report_is_the_recipe_and_blocks() {
+        let moved = enum_type_move_report("author", "mood");
+        assert_eq!(
+            moved,
+            report(
+                ReportKind::EnumTypeMove,
+                Subject::column("author", "mood"),
+                false,
+                "changing \"author\".\"mood\" to or from a native enum type is not generated: \
+                 add a column of the new type, copy the values across in a data step (ferro \
+                 migrate new --data-step …), then drop the old column",
+            )
+        );
+        assert!(moved.blocks());
+        assert_eq!(
+            serde_json::to_value(&moved).unwrap()["kind"],
+            serde_json::json!("EnumTypeMove")
+        );
     }
 
     #[test]

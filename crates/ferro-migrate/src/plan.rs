@@ -1781,12 +1781,9 @@ impl std::fmt::Display for Refusal {
                  table (ferro migrate new --data-step …), a backfill of parent and children, \
                  and a drop; see the Migrations docs § Changing a primary key"
             ),
-            Refusal::EnumTypeMove { table, column } => write!(
-                f,
-                "changing \"{table}\".\"{column}\" to or from a native enum type is not \
-                 generated: add a column of the new type, copy the values across in a data step \
-                 (ferro migrate new --data-step …), then drop the old column"
-            ),
+            Refusal::EnumTypeMove { table, column } => {
+                f.write_str(&ferro_ddl_lowering::enum_type_move_report(table, column).text)
+            }
         }
     }
 }
@@ -1843,7 +1840,18 @@ pub(crate) fn needs_values(col: &ferro_schema_ir::SchemaColumn) -> bool {
 
 /// Whether `col` is stored as a native Postgres enum type.
 fn native_enum(col: &ferro_schema_ir::SchemaColumn) -> bool {
-    enum_type_of(col).is_some()
+    col.postgres_native_enum || enum_type_of(col).is_some()
+}
+
+/// Whether changing a column from `old` to `new` moves it to, from or
+/// between native Postgres enum types, which no statement converts in place
+/// ([`Refusal::EnumTypeMove`]). The verdict refuses it; the renderer reports
+/// it with the same words ([`ferro_ddl_lowering::enum_type_move_report`]).
+pub(crate) fn moves_enum_type(
+    old: &ferro_schema_ir::SchemaColumn,
+    new: &ferro_schema_ir::SchemaColumn,
+) -> bool {
+    native_enum(old) || native_enum(new)
 }
 
 fn find_column<'a>(
@@ -2052,8 +2060,8 @@ fn execution(
         return Execution::Rebuild;
     }
     if let MigrationOp::AlterColumnType { column, .. } = op
-        && (find_column(was, column).is_some_and(native_enum)
-            || find_column(now, column).is_some_and(native_enum))
+        && let (Some(old), Some(new)) = (find_column(was, column), find_column(now, column))
+        && moves_enum_type(old, new)
     {
         // To, from or between native enum types: no statement converts the
         // column in place.

@@ -140,8 +140,13 @@ equality).
 | Refusal              | Trigger                                              | Keep recipe                | Convert recipe                          |
 | -------------------- | ---------------------------------------------------- | -------------------------- | --------------------------------------- |
 | `TimestampTz` (#154) | live `timestamp` ⇄ model `timestamptz`               | `db_type="timestamp"`      | reviewed Alembic + `AT TIME ZONE`       |
-| `VarcharToPgEnum`    | live `varchar`/`text`, model native enum (FF-B)      | `db_type="varchar"`        | reviewed Alembic + `USING col::<enum>`  |
 | `VarcharToTime`      | live `varchar`/`text`, model `time` (FF-B)           | `db_type="varchar"`        | reviewed Alembic + explicit `USING`     |
+
+A column moving to or from a native Postgres enum type (`mood: Mood` ⇄
+`mood: str`) is not a conversion rail: it is the planner's `EnumTypeMove`
+refusal, which every door states in one text (`enum_type_move_report`, the
+generator's recipe: a new column, a data step, a drop). ADR-0052, amended
+2026-10-08.
 
 Additive changes are not refusals: adopting the `uq_` index shape on an
 existing DB emits `CREATE UNIQUE INDEX IF NOT EXISTS` (a redundant second

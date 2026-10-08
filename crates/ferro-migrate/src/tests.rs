@@ -1522,7 +1522,8 @@ fn emit_add_column_enum_postgres_creates_type_then_column() {
 #[test]
 fn emit_alter_refuses_varchar_to_enum_and_varchar_to_time() {
     // Live varchar columns (old lowering) targeted at native enum / time are
-    // REFUSED: warning, no ALTER (the #154 pattern generalized).
+    // REFUSED: warning, no ALTER (the #154 pattern generalized). The enum is
+    // a move to a native enum type: the generator's recipe, word for word.
     let live_enum_col = col("status", "varchar", false);
     let live_time_col = col("wake_time", "varchar", false);
     let model = SchemaModel {
@@ -1556,34 +1557,56 @@ fn emit_alter_refuses_varchar_to_enum_and_varchar_to_time() {
     let result = render_flat(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap();
     assert!(result.statements.is_empty(), "{:?}", result.statements);
     assert_eq!(result.reports.len(), 2, "{:?}", result.reports);
-    assert!(result.reports[0].text.contains("ticket.status"), "{}", result.reports[0].text);
-    assert!(result.reports[0].text.contains("USING"), "{}", result.reports[0].text);
+    assert_eq!(
+        result.reports[0],
+        ferro_ddl_lowering::enum_type_move_report("ticket", "status")
+    );
     assert!(result.reports[1].text.contains("ticket.wake_time"), "{}", result.reports[1].text);
 }
 
+/// `mood: Mood` (a native Postgres enum type) becomes `mood: str`, and back:
+/// no statement converts the column in place. The pass reads the database
+/// and reports the generator's recipe in its words, as a blocking report and
+/// no DDL; the verdict refuses with the same text. SQLite stores an enum as
+/// text, so there is no type to move.
 #[test]
-fn emit_alter_native_enum_live_is_noop() {
-    let live = SchemaColumn {
-        postgres_native_enum: true,
-        enum_renamed_labels: Default::default(),
-        default_factory: None,
-        ..col("status", "varchar", false)
-    };
-    let model_col = SchemaColumn {
-        enum_values: Some(vec![serde_json::json!("draft")]),
-        enum_type_name: Some("status".to_string()),
+fn a_move_to_or_from_a_native_enum_type_reports_the_generators_recipe() {
+    let native = SchemaColumn {
+        enum_values: Some(vec![serde_json::json!("calm")]),
+        enum_type_name: Some("mood".to_string()),
         db_type: None,
-        ..col("status", "text", false)
+        ..col("mood", "text", true)
     };
-    let old_ir = envelope(vec![schema_model("ticket", vec![live])]);
-    let new_ir = envelope(vec![schema_model("ticket", vec![model_col])]);
-    let plan = Plan::unplaced(vec![MigrationOp::AlterColumnType {
-        table: "ticket".to_string(),
-        column: "status".to_string(),
-    }]);
-    let result = render_flat(&plan, &old_ir, &new_ir, Dialect::Postgres).unwrap();
-    assert!(result.statements.is_empty());
-    assert!(result.reports.is_empty());
+    let live_native = SchemaColumn {
+        postgres_native_enum: true,
+        ..native.clone()
+    };
+    let scalar = col("mood", "varchar", true);
+    let author = |mood: SchemaColumn| schema_model("author", vec![pk_col("id", "integer"), mood]);
+    let mut facts = LiveFacts::default();
+    facts
+        .tables
+        .insert("author".into(), LiveTableFacts::default());
+    let recipe = ferro_ddl_lowering::enum_type_move_report("author", "mood");
+    for (live, declared) in [(live_native, scalar.clone()), (scalar, native)] {
+        let plan = plan_from_ir(
+            &Side::live(envelope(vec![author(live)]), facts.clone()).expect("live side"),
+            &Side::declared(envelope(vec![author(declared)])),
+            Dialect::Postgres,
+            PlanOptions::default(),
+        );
+        let [planned] = plan.operations.as_slice() else {
+            panic!("{:?}", plan.op_list());
+        };
+        let Execution::Refused(refusal) = &planned.verdict.execution else {
+            panic!("{:?}", planned.verdict);
+        };
+        assert_eq!(refusal.to_string(), recipe.text);
+        let rendered = plan.render().expect("render");
+        assert!(rendered[0].statements.is_empty());
+        assert_eq!(rendered[0].reports, [recipe.clone()]);
+        assert!(recipe.blocks());
+    }
 }
 
 // Verify the runtime's `CASCADE` default (`unwrap_or("CASCADE")`) is mirrored:

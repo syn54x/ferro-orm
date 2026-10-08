@@ -80,7 +80,8 @@ class Report:
 
     ``kind`` is the kind's name: the planner's (``"LeftoverChecks"``,
     ``"HintRefused"``, ...), the renderer's (``"RefusedConversion"``,
-    ``"SqliteInPlace"``, ``"PrimaryKeyKept"``, ``"RowSecuritySkipped"``) or
+    ``"SqliteInPlace"``, ``"PrimaryKeyKept"``, ``"EnumTypeMove"``,
+    ``"RowSecuritySkipped"``) or
     the pass's (``"PendingTableRename"``, ``"StrandedLabelRename"``,
     ``"RowSecurityUnderMigrator"``, ``"RunLockWait"``, ``"DdlLockRetry"``).
     ``recurs`` says whether it is raised on every pass until someone acts.
