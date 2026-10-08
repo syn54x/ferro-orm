@@ -242,6 +242,141 @@ pub async fn live_table_names(
         .collect())
 }
 
+/// What holds a name in the connected schema when that thing is not a base
+/// table — the only kind of object [`live_table_names`] reports as a table.
+///
+/// `CREATE TABLE IF NOT EXISTS "card"` skips in silence when anything in the
+/// table namespace already answers to `card`: a view on both dialects; on
+/// Postgres any `pg_class` relation (a materialized view, a foreign table, a
+/// sequence, an index, a composite type); on SQLite a virtual table or one of
+/// its shadow tables. The create pass refuses such a name instead of letting
+/// the statement skip ([`live_non_table_holders`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NonTableHolder {
+    View,
+    MaterializedView,
+    ForeignTable,
+    Sequence,
+    Index,
+    CompositeType,
+    VirtualTable,
+    ShadowTable,
+    /// A catalog kind this list does not name — still not a base table.
+    Other,
+}
+
+impl NonTableHolder {
+    /// The holder as a noun without an article: `view`, `virtual table`, …
+    pub fn noun(self) -> &'static str {
+        match self {
+            NonTableHolder::View => "view",
+            NonTableHolder::MaterializedView => "materialized view",
+            NonTableHolder::ForeignTable => "foreign table",
+            NonTableHolder::Sequence => "sequence",
+            NonTableHolder::Index => "index",
+            NonTableHolder::CompositeType => "composite type",
+            NonTableHolder::VirtualTable => "virtual table",
+            NonTableHolder::ShadowTable => "shadow table of a virtual table",
+            NonTableHolder::Other => "object that is not a table",
+        }
+    }
+
+    /// The holder with its indefinite article: `a view`, `an index`, …
+    pub fn with_article(self) -> String {
+        let noun = self.noun();
+        let article = if noun.starts_with(['a', 'e', 'i', 'o', 'u']) {
+            "an"
+        } else {
+            "a"
+        };
+        format!("{article} {noun}")
+    }
+
+    /// Decode a Postgres `pg_class.relkind`. `None` for a base table
+    /// (`r`, or a partitioned table `p` — both `BASE TABLE` in
+    /// `information_schema.tables`).
+    fn from_pg_relkind(relkind: &str) -> Option<Self> {
+        match relkind {
+            "r" | "p" => None,
+            "v" => Some(NonTableHolder::View),
+            "m" => Some(NonTableHolder::MaterializedView),
+            "f" => Some(NonTableHolder::ForeignTable),
+            "S" => Some(NonTableHolder::Sequence),
+            "i" | "I" => Some(NonTableHolder::Index),
+            "c" => Some(NonTableHolder::CompositeType),
+            _ => Some(NonTableHolder::Other),
+        }
+    }
+
+    /// Decode SQLite's `pragma_table_list.type`. `None` for a base table
+    /// (`table`).
+    fn from_sqlite_type(kind: &str) -> Option<Self> {
+        match kind {
+            "table" => None,
+            "view" => Some(NonTableHolder::View),
+            "virtual" => Some(NonTableHolder::VirtualTable),
+            "shadow" => Some(NonTableHolder::ShadowTable),
+            _ => Some(NonTableHolder::Other),
+        }
+    }
+}
+
+/// Of `names`, each one something other than a base table holds in the
+/// connected schema, with what holds it — one catalog read of the names'
+/// kinds (`pg_class.relkind` in `current_schema()`; SQLite's
+/// `pragma_table_list.type` in `main`, which alone tells a virtual table and
+/// its shadow tables from a base table). A name no object holds, or a base
+/// table holds, is absent.
+///
+/// # Errors
+/// A database error reading the catalog.
+pub async fn live_non_table_holders(
+    engine: &EngineHandle,
+    names: &[&str],
+) -> PyResult<std::collections::BTreeMap<String, NonTableHolder>> {
+    let mut held = std::collections::BTreeMap::new();
+    if names.is_empty() {
+        return Ok(held);
+    }
+    let names_json = serde_json::to_string(names).map_err(|e| {
+        pyo3::exceptions::PyRuntimeError::new_err(format!(
+            "Failed to encode table names for the catalog read: {e}"
+        ))
+    })?;
+    let dialect = engine.backend();
+    let (sql, context) = match dialect {
+        Dialect::Sqlite => (
+            "SELECT name, type AS kind FROM pragma_table_list \
+             WHERE schema = 'main' AND name IN (SELECT value FROM json_each(?))",
+            "pragma_table_list",
+        ),
+        Dialect::Postgres => (
+            "SELECT c.relname::text AS name, c.relkind::text AS kind \
+             FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = current_schema() \
+             AND c.relname IN (SELECT json_array_elements_text($1::json))",
+            "pg_class",
+        ),
+    };
+    let rows = engine
+        .fetch_all_sql_unprepared_with_binds(sql, &[EngineBindValue::String(names_json)])
+        .await
+        .map_err(|e| introspection_error(context, "*", e))?;
+    for row in &rows {
+        let (Some(name), Some(kind)) = (row_string(row, "name"), row_string(row, "kind")) else {
+            continue;
+        };
+        let holder = match dialect {
+            Dialect::Sqlite => NonTableHolder::from_sqlite_type(&kind),
+            Dialect::Postgres => NonTableHolder::from_pg_relkind(&kind),
+        };
+        if let Some(holder) = holder {
+            held.insert(name, holder);
+        }
+    }
+    Ok(held)
+}
+
 /// Read every native enum type in the connected schema with its labels in
 /// enum sort order: `type name → labels`. Postgres-only — SQLite has no native
 /// enum types — and taken once per reconciliation run (label addition is
@@ -1175,6 +1310,55 @@ mod tests {
         assert_eq!(fk_action_from_confdeltype("n"), Some("SET NULL"));
         assert_eq!(fk_action_from_confdeltype("d"), Some("SET DEFAULT"));
         assert_eq!(fk_action_from_confdeltype("x"), None);
+    }
+
+    #[tokio::test]
+    async fn live_non_table_holders_names_sqlite_views_and_virtual_tables_only() {
+        let engine = memory_engine().await;
+        for sql in [
+            "CREATE TABLE alpha (id integer)",
+            "CREATE VIEW beta AS SELECT id FROM alpha",
+            "CREATE VIRTUAL TABLE gamma USING fts5(body)",
+        ] {
+            engine.execute_sql(sql).await.unwrap();
+        }
+
+        let held = live_non_table_holders(
+            &engine,
+            &["alpha", "beta", "gamma", "gamma_data", "delta"],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            held.into_iter().collect::<Vec<_>>(),
+            [
+                ("beta".to_string(), NonTableHolder::View),
+                ("gamma".to_string(), NonTableHolder::VirtualTable),
+                ("gamma_data".to_string(), NonTableHolder::ShadowTable),
+            ]
+        );
+        assert!(live_non_table_holders(&engine, &[]).await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_non_table_holder_reads_with_its_article() {
+        assert_eq!(NonTableHolder::View.with_article(), "a view");
+        assert_eq!(NonTableHolder::Index.with_article(), "an index");
+        assert_eq!(
+            NonTableHolder::from_pg_relkind("r"),
+            None,
+            "a base table holds its own name"
+        );
+        assert_eq!(NonTableHolder::from_pg_relkind("p"), None);
+        assert_eq!(
+            NonTableHolder::from_pg_relkind("m"),
+            Some(NonTableHolder::MaterializedView)
+        );
+        assert_eq!(NonTableHolder::from_sqlite_type("table"), None);
+        assert_eq!(
+            NonTableHolder::from_sqlite_type("future"),
+            Some(NonTableHolder::Other)
+        );
     }
 
     #[tokio::test]

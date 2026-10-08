@@ -1,4 +1,11 @@
 {
+  "tests/test_auto_migrate.py::test_a_base_table_named_like_a_model_is_left_to_reconcile_as_before[sqlite]": {
+    "statements": [
+      "'helddeck': CREATE TABLE IF NOT EXISTS \"helddeck\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"name\" varchar NOT NULL )",
+      "'helddeck': CREATE INDEX IF NOT EXISTS \"idx_helddeck_name\" ON \"helddeck\" (\"name\")"
+    ],
+    "warnings": []
+  },
   "tests/test_auto_migrate.py::test_a_checked_column_decides_a_label_hint_from_its_check_alone[sqlite-parent]": {
     "statements": [
       "'pd3order': CREATE TABLE IF NOT EXISTS \"pd3order\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"status\" text NOT NULL CONSTRAINT \"ck_pd3order_status\" CHECK (\"status\" IN ('paid', 'canceled')) )"

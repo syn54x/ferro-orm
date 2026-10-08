@@ -21,7 +21,7 @@ import pytest
 import ferro
 from ferro import _core
 from ferro.ir.compiler import compile_registry_schema_ir
-from ferro.migrations import runner
+from ferro.migrations import MigrationRefused, runner
 from tests.test_migrate_drift import HEAD, applied, drift_api
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     AUTHOR,
@@ -46,27 +46,57 @@ AUTHOR_VIEW = (
 )
 
 
-def test_a_view_named_like_a_model_is_not_its_table_on_the_pass(project, pkg, db):
-    """The create pass sees no ``author`` table, so it builds one instead of
-    letting the view stand in for the table.
+PLAIN_AUTHOR = """
+class Author(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    name: str
+"""
 
-    The connect fails here only because ``Author`` declares a unique
-    (``uq_author_name``): the database refuses to index a view. The
-    ``CREATE TABLE IF NOT EXISTS`` before it is a no-op over a view on both
-    dialects, so a model with no index or unique would connect without its
-    table. That is a known gap in the create emission, fixed separately."""
+
+def _relations(db) -> dict[str, str]:
+    """Every table and view in the schema, with its catalog kind."""
+    if db.backend == "sqlite":
+        rows = db.rows(
+            "SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') "
+            "AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\'"
+        )
+    else:
+        rows = db.rows(
+            "SELECT table_name, table_type FROM information_schema.tables "
+            f"WHERE table_schema = '{db.schema}'"
+        )
+    return {name: kind.lower() for name, kind in rows}
+
+
+@pytest.mark.parametrize(
+    "body", [AUTHOR, PLAIN_AUTHOR], ids=["with_unique", "without_index"]
+)
+def test_a_view_named_like_a_model_is_not_its_table_on_the_pass(
+    project, pkg, db, body
+):
+    """The create pass sees that a view, not a table, holds ``author``, and
+    refuses before any DDL, naming the view. It does not let
+    ``CREATE TABLE IF NOT EXISTS`` skip over the view, with or without an
+    index on the model, and it creates nothing."""
     configure(project, pkg, db.backend)
-    write_models(project, pkg, AUTHOR)
+    write_models(project, pkg, body)
     _, database = settings_and_database()
     database.import_models()
     db.execute(AUTHOR_VIEW)
 
-    with pytest.raises(
-        ferro.exceptions.OperationalError,
-        match=r'CREATE UNIQUE INDEX IF NOT EXISTS "uq_author_name" ON "author"',
-    ):
+    with pytest.raises(MigrationRefused) as raised:
         asyncio.run(ferro.connect(db.url, auto_migrate=True))
     ferro.reset_engine()
+
+    assert str(raised.value) == (
+        "Table creation is refused: a declared table's name is held by something "
+        "that is not a table, so CREATE TABLE would skip it and leave the model "
+        "without one.\n"
+        '  "author" is a view: rename or drop the view, or declare a different '
+        f"__ferro_table__ on {pkg}.models.Author.\n"
+        "Nothing was created."
+    )
+    assert _relations(db) == {"author": "view"}
 
 
 def test_a_view_named_like_a_snapshot_table_is_drift(project, pkg, db, capsys):
