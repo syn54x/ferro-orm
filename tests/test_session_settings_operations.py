@@ -16,7 +16,6 @@ nothing.
 """
 
 import asyncio
-import uuid
 from typing import Annotated
 from urllib.parse import quote, urlparse, urlunparse
 
@@ -104,9 +103,9 @@ async def _drop_tenant_role(role: str) -> None:
 
 
 @pytest.fixture
-def tenant_role() -> str:
-    """A cluster-unique role name; the tests drop it in their own ``finally``."""
-    return f"ferro_op_scope_{uuid.uuid4().hex[:12]}"
+def tenant_role(pg_role) -> str:
+    """A role name of the test's own, dropped with its schema."""
+    return pg_role("op_scope")
 
 
 async def _seed_and_open_tenant_connection(

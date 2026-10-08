@@ -65,6 +65,7 @@ from tests.test_migrate_up import (  # noqa: F401 - fixtures
     db,
     new,
 )
+from tests.db_backends import postgres_test_role_name
 from tests.test_rls_end_to_end import TENANT_PASSWORD, _tenant_url
 from tests.test_row_security_create_pass import created_row_security
 
@@ -173,7 +174,7 @@ def reconcile(project: Path, db) -> list[str]:
 @contextlib.contextmanager
 def tenant_role(db) -> Iterator[str]:
     """A NOSUPERUSER, non-BYPASSRLS login role that may read the table."""
-    role = f"rlsgen_{uuid.uuid4().hex[:12]}"
+    role = postgres_test_role_name(db.schema, "rlsgen")
     try:
         db.execute(
             f'CREATE ROLE "{role}" LOGIN NOSUPERUSER NOBYPASSRLS '

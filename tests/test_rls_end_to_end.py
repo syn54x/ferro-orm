@@ -167,8 +167,8 @@ async def _drop_tenant_role(role: str) -> None:
 
 
 @pytest.fixture
-def tenant_role() -> str:
-    return f"ferro_e2e_{uuid.uuid4().hex[:12]}"
+def tenant_role(pg_role) -> str:
+    return pg_role("e2e")
 
 
 async def _seed_invoice_ledgers(
