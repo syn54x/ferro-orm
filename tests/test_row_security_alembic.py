@@ -34,7 +34,7 @@ from ferro import (
     engines,
     reset_engine,
 )
-from ferro._core import _plan_row_security_reconcile, _render_migration_sql_for_test
+from ferro._core import _render_migration_sql_for_test
 from ferro.ir.compiler import compile_registry_schema_ir
 from ferro.raw import execute, fetch_all, fetch_one
 from tests._alembic_harness import (
@@ -43,6 +43,7 @@ from tests._alembic_harness import (
     autogen_upgrade_code as _autogen_upgrade_code,
     run_generated_code as _run_generated_code,
 )
+from tests.test_row_security_reconcile import ops_of, plan_live_ledgerrow, statements_of
 
 LEDGER_A = uuid.UUID("11111111-1111-4111-8111-111111111111")
 
@@ -134,14 +135,6 @@ def _define_ledger_row_raw(*, using: str) -> type[Model]:
         )
 
     return LedgerRow
-
-
-def _model_ir() -> dict:
-    return next(
-        model
-        for model in compile_registry_schema_ir()["payload"]["models"]
-        if model["table_name"] == "ledgerrow"
-    )
 
 
 LEDGER_LIVE_COLUMNS = [
@@ -521,17 +514,15 @@ async def test_autogenerate_proposes_the_same_teardown_as_the_runtime(
         _assert_statement_in_code(statement, code)
 
 
-def test_the_reconcile_seam_the_comparator_consumes_is_directly_pinned():
-    """Guards the exact seam the comparator relies on, with every drift
-    category present AT ONCE — a missing policy, a drifted one, an orphan,
-    and a ``force`` flag not yet applied — so the non-destructive plan is
-    genuinely non-empty (a fixture where it plans nothing would make the
-    prefix assertion below trivially true regardless of whether the seam
-    actually holds). Calling ``_plan_row_security_reconcile`` non-destructive
-    then destructive for the SAME (model, live) pair must yield the
-    destructive statements as the non-destructive statements plus a strict
-    tail — the slicing the comparator performs to split add-ops from
-    drop-ops without re-deriving anything. Mirrored at the Rust level by
+def test_the_destructive_row_security_plan_extends_the_updates_only_one():
+    """Every drift category present AT ONCE — a missing policy, a drifted one,
+    an orphan, and a ``force`` flag not yet applied — so the updates-only plan
+    is genuinely non-empty (a fixture where it plans nothing would make the
+    prefix assertion below trivially true). The one planner's destructive
+    plan for the SAME (model, live) pair is the updates-only plan plus a
+    strict tail: the destructive ladder only ever adds the orphan drops and
+    teardown after everything an updates-only run does. Mirrored at the Rust
+    level by
     ``plan_row_security_reconcile_destructive_call_extends_the_non_destructive_one_as_a_strict_prefix``."""
 
     class LedgerRow(Model):
@@ -567,26 +558,21 @@ def test_the_reconcile_seam_the_comparator_consumes_is_directly_pinned():
             },
         ],
     }
-    non_destructive = json.loads(
-        _plan_row_security_reconcile(
-            json.dumps(_model_ir()), json.dumps(live), "postgres", False
-        )
-    )
-    destructive = json.loads(
-        _plan_row_security_reconcile(
-            json.dumps(_model_ir()), json.dumps(live), "postgres", True
-        )
-    )
+    non_destructive = plan_live_ledgerrow(live)
+    destructive = plan_live_ledgerrow(live, destructive=True)
     # Every category actually fired, or this pin is not exercising what it
     # claims to.
-    assert non_destructive["missing"] == ["rls_ledgerrow_invitee"]
-    assert non_destructive["drifted"] == [POLICY_NAME]
-    assert destructive["extra"] == [ORPHAN_NAME]
-    assert non_destructive["statements"] != []
+    assert ops_of(non_destructive) == [
+        ("ForceRowSecurity", None),
+        ("AddRowPolicy", "rls_ledgerrow_invitee"),
+        ("RebuildRowPolicy", POLICY_NAME),
+    ]
+    assert ops_of(destructive)[3:] == [("DropRowPolicy", ORPHAN_NAME)]
+    assert statements_of(non_destructive) != []
 
-    prefix_len = len(non_destructive["statements"])
-    assert destructive["statements"][:prefix_len] == non_destructive["statements"]
-    tail = destructive["statements"][prefix_len:]
+    prefix_len = len(statements_of(non_destructive))
+    assert statements_of(destructive)[:prefix_len] == statements_of(non_destructive)
+    tail = statements_of(destructive)[prefix_len:]
     assert tail == [f'DROP POLICY "{ORPHAN_NAME}" ON "ledgerrow"']
 
 

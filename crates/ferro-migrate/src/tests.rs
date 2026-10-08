@@ -1931,13 +1931,54 @@ fn live_transfer_ir() -> IrEnvelope<SchemaIrPayload> {
     envelope(vec![transfer_model_with_table_checks(vec![])])
 }
 
+/// One live table through the one planner: `old` is the live IR the
+/// reconciliation pass reads (CHECK names travel in `table_facts`, beside it),
+/// `new` the declaration, on Postgres.
+fn plan_live_table(
+    old: SchemaModel,
+    new: SchemaModel,
+    table_facts: LiveTableFacts,
+    options: PlanOptions,
+) -> MigrationPlan {
+    let mut facts = LiveFacts::live(Default::default(), Default::default());
+    facts.tables.insert(old.table_name.clone(), table_facts);
+    plan_from_ir(
+        &envelope(vec![old]),
+        &envelope(vec![new]),
+        Dialect::Postgres,
+        &facts,
+        options,
+    )
+    .expect("plan")
+}
+
+/// Live CHECK facts, every one validated.
+fn live_checks(checks: &[(&str, &str)]) -> LiveTableFacts {
+    LiveTableFacts {
+        checks: checks
+            .iter()
+            .map(|(name, definition)| live_check(name, definition))
+            .collect(),
+        ..LiveTableFacts::default()
+    }
+}
+
+/// `ck_transfer_at_most_one_outflow` as `pg_get_constraintdef` prints the
+/// declared body: catalog wrapping only, so no drift.
+const CATALOG_OUTFLOW_CHECK: &str =
+    "CHECK (((outflow_transaction_id IS NULL) OR (outflow_activity_id IS NULL)))";
+
 #[test]
-fn plan_missing_checks_adds_a_declared_table_check_absent_live() {
-    let new_ir = envelope(vec![transfer_model_with_table_checks(vec![
-        transfer_outflow_table_check(),
-    ])]);
+fn a_declared_table_check_absent_live_is_added() {
+    let new = transfer_model_with_table_checks(vec![transfer_outflow_table_check()]);
+    let plan = plan_live_table(
+        transfer_model_with_table_checks(vec![]),
+        new,
+        LiveTableFacts::default(),
+        updates_only(),
+    );
     assert_eq!(
-        plan_missing_checks("transfer", &live_transfer_ir(), &new_ir, &[]),
+        plan.operations,
         vec![MigrationOp::AddCheck {
             table: "transfer".to_string(),
             name: "ck_transfer_at_most_one_outflow".to_string(),
@@ -1946,24 +1987,23 @@ fn plan_missing_checks_adds_a_declared_table_check_absent_live() {
 }
 
 #[test]
-fn plan_missing_checks_is_a_noop_when_the_live_table_already_has_the_name() {
-    let new_ir = envelope(vec![transfer_model_with_table_checks(vec![
-        transfer_outflow_table_check(),
-    ])]);
+fn a_declared_table_check_the_live_table_already_has_is_not_added() {
+    let new = transfer_model_with_table_checks(vec![transfer_outflow_table_check()]);
+    let plan = plan_live_table(
+        transfer_model_with_table_checks(vec![]),
+        new,
+        live_checks(&[("ck_transfer_at_most_one_outflow", CATALOG_OUTFLOW_CHECK)]),
+        updates_only(),
+    );
     assert!(
-        plan_missing_checks(
-            "transfer",
-            &live_transfer_ir(),
-            &new_ir,
-            &["ck_transfer_at_most_one_outflow".to_string()],
-        )
-        .is_empty(),
-        "a reconciled table replans to nothing — no phantom add"
+        plan.operations.is_empty(),
+        "a reconciled table replans to nothing — no phantom add: {:?}",
+        plan.operations
     );
 }
 
 #[test]
-fn plan_missing_checks_skips_a_column_check_riding_its_new_column() {
+fn a_column_check_rides_its_new_column_and_stands_alone_on_an_existing_one() {
     // `emit_add_column` already emits the db_check DO-block for a column it
     // adds; a standalone AddCheck would duplicate it (the same dedup
     // `diff_model_indexes` applies to single-column indexes).
@@ -1973,20 +2013,33 @@ fn plan_missing_checks_skips_a_column_check_riding_its_new_column() {
         column: "role".to_string(),
         values: vec!["'admin'".to_string()],
     }];
-    let new_ir = envelope(vec![model.clone()]);
 
-    let without_column = envelope(vec![schema_model("account", vec![])]);
-    assert!(
-        plan_missing_checks("account", &without_column, &new_ir, &[]).is_empty(),
+    let added = plan_live_table(
+        schema_model("account", vec![]),
+        model.clone(),
+        LiveTableFacts::default(),
+        updates_only(),
+    );
+    assert_eq!(
+        added.operations,
+        vec![MigrationOp::AddColumn {
+            table: "account".to_string(),
+            column: "role".to_string(),
+        }],
         "the check rides the ADD COLUMN emission"
     );
 
-    let with_column = envelope(vec![schema_model(
-        "account",
-        vec![ir_col("role", "string", None, true, false, false)],
-    )]);
+    let existing = plan_live_table(
+        schema_model(
+            "account",
+            vec![ir_col("role", "string", None, true, false, false)],
+        ),
+        model,
+        LiveTableFacts::default(),
+        updates_only(),
+    );
     assert_eq!(
-        plan_missing_checks("account", &with_column, &new_ir, &[]),
+        existing.operations,
         vec![MigrationOp::AddCheck {
             table: "account".to_string(),
             name: "ck_account_role".to_string(),
@@ -2111,17 +2164,19 @@ fn emit_sql_with_ir_add_check_fails_loudly_for_an_undeclared_name() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn plan_check_rebuilds_plans_a_declared_name_whose_body_drifted() {
-    let new_ir = envelope(vec![transfer_model_with_table_checks(vec![
-        transfer_outflow_table_check(),
-    ])]);
-    let live = [(
-        "ck_transfer_at_most_one_outflow".to_string(),
-        "CHECK ((\"outflow_transaction_id\" IS NULL) AND (\"outflow_activity_id\" IS NULL))"
-            .to_string(),
-    )];
+fn a_declared_check_whose_live_body_drifted_is_rebuilt() {
+    let new = transfer_model_with_table_checks(vec![transfer_outflow_table_check()]);
+    let plan = plan_live_table(
+        transfer_model_with_table_checks(vec![]),
+        new,
+        live_checks(&[(
+            "ck_transfer_at_most_one_outflow",
+            "CHECK ((\"outflow_transaction_id\" IS NULL) AND (\"outflow_activity_id\" IS NULL))",
+        )]),
+        updates_only(),
+    );
     assert_eq!(
-        plan_check_rebuilds("transfer", &new_ir, &live),
+        plan.operations,
         vec![MigrationOp::RebuildCheck {
             table: "transfer".to_string(),
             name: "ck_transfer_at_most_one_outflow".to_string(),
@@ -2130,17 +2185,18 @@ fn plan_check_rebuilds_plans_a_declared_name_whose_body_drifted() {
 }
 
 #[test]
-fn plan_check_rebuilds_is_a_noop_when_catalog_wrapping_is_the_only_difference() {
-    let new_ir = envelope(vec![transfer_model_with_table_checks(vec![
-        transfer_outflow_table_check(),
-    ])]);
-    let live = [(
-        "ck_transfer_at_most_one_outflow".to_string(),
-        "CHECK (((outflow_transaction_id IS NULL) OR (outflow_activity_id IS NULL)))".to_string(),
-    )];
+fn catalog_wrapping_alone_is_not_check_drift() {
+    let new = transfer_model_with_table_checks(vec![transfer_outflow_table_check()]);
+    let plan = plan_live_table(
+        transfer_model_with_table_checks(vec![]),
+        new,
+        live_checks(&[("ck_transfer_at_most_one_outflow", CATALOG_OUTFLOW_CHECK)]),
+        updates_only(),
+    );
     assert!(
-        plan_check_rebuilds("transfer", &new_ir, &live).is_empty(),
-        "catalog parens are not drift"
+        plan.operations.is_empty(),
+        "catalog parens are not drift: {:?}",
+        plan.operations
     );
 }
 
@@ -2202,17 +2258,20 @@ fn emit_sql_with_ir_rebuild_check_fails_loudly_for_an_undeclared_name() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn plan_check_drops_plans_live_ferro_owned_names_the_model_does_not_declare() {
-    let new_ir = envelope(vec![transfer_model_with_table_checks(vec![
-        transfer_outflow_table_check(),
-    ])]);
-    let live = vec![
-        "ck_transfer_orphan".to_string(),
-        "ck_transfer_at_most_one_outflow".to_string(),
-        "ck_transfer_old".to_string(),
-    ];
+fn live_ferro_owned_checks_the_model_does_not_declare_drop_in_live_order() {
+    let new = transfer_model_with_table_checks(vec![transfer_outflow_table_check()]);
+    let plan = plan_live_table(
+        transfer_model_with_table_checks(vec![]),
+        new,
+        live_checks(&[
+            ("ck_transfer_orphan", "CHECK ((amount > 0))"),
+            ("ck_transfer_at_most_one_outflow", CATALOG_OUTFLOW_CHECK),
+            ("ck_transfer_old", "CHECK ((amount < 100))"),
+        ]),
+        destructive(),
+    );
     assert_eq!(
-        plan_check_drops("transfer", &new_ir, &live),
+        plan.operations,
         vec![
             MigrationOp::DropCheck {
                 table: "transfer".to_string(),
@@ -2227,12 +2286,15 @@ fn plan_check_drops_plans_live_ferro_owned_names_the_model_does_not_declare() {
 }
 
 #[test]
-fn plan_check_drops_is_a_noop_when_every_live_name_is_declared() {
-    let new_ir = envelope(vec![transfer_model_with_table_checks(vec![
-        transfer_outflow_table_check(),
-    ])]);
-    let live = vec!["ck_transfer_at_most_one_outflow".to_string()];
-    assert!(plan_check_drops("transfer", &new_ir, &live).is_empty());
+fn no_check_drops_when_every_live_name_is_declared() {
+    let new = transfer_model_with_table_checks(vec![transfer_outflow_table_check()]);
+    let plan = plan_live_table(
+        transfer_model_with_table_checks(vec![]),
+        new,
+        live_checks(&[("ck_transfer_at_most_one_outflow", CATALOG_OUTFLOW_CHECK)]),
+        destructive(),
+    );
+    assert!(plan.operations.is_empty(), "{:?}", plan.operations);
 }
 
 #[test]
@@ -2849,6 +2911,54 @@ fn ledgerrow_model_with_row_security(force: bool) -> SchemaModel {
     }
 }
 
+/// Between two declared snapshots the planner tears row security down in a
+/// migration's down exactly when that migration introduced it: the table is
+/// on both sides, the parent declares none and the target declares some
+/// (ADR-0033 — the parent is the proof nobody else set the flags). A table
+/// the migration creates is not one: its down's `DROP TABLE` takes them.
+#[test]
+fn a_snapshot_down_disables_row_security_exactly_when_its_migration_introduced_it() {
+    let declaring = |force: Option<bool>, policies: bool| {
+        let mut model = ledgerrow_model_with_row_security(force.unwrap_or(false));
+        match (&mut model.row_security, force) {
+            (security, None) => *security = None,
+            (Some(security), Some(_)) if !policies => security.policies.clear(),
+            _ => {}
+        }
+        model
+    };
+    let sides = [
+        Some(declaring(None, false)),
+        Some(declaring(Some(true), true)),
+        Some(declaring(Some(false), true)),
+        Some(declaring(Some(true), false)),
+        Some(declaring(Some(false), false)),
+        None,
+    ];
+    let snapshot = |side: &Option<SchemaModel>| envelope(side.iter().cloned().collect());
+    for before in &sides {
+        for after in &sides {
+            let down = plan_from_ir(
+                &snapshot(after),
+                &snapshot(before),
+                Dialect::Postgres,
+                &LiveFacts::declared(),
+                destructive(),
+            )
+            .expect("plan");
+            let disables = down.operations.contains(&MigrationOp::DisableRowSecurity {
+                table: "ledgerrow".into(),
+            });
+            let introduced = matches!(
+                (before, after),
+                (Some(before), Some(after))
+                    if before.row_security.is_none() && after.row_security.is_some()
+            );
+            assert_eq!(disables, introduced, "{before:?} → {after:?}");
+        }
+    }
+}
+
 #[test]
 fn create_pass_emits_row_security_after_the_tables_other_artifacts() {
     let model = ledgerrow_model_with_row_security(true);
@@ -2983,13 +3093,6 @@ fn fk_validity(name: &str, validated: bool) -> LiveFkValidity {
     }
 }
 
-fn check_validity(name: &str, validated: bool) -> LiveCheckValidity {
-    LiveCheckValidity {
-        name: name.to_string(),
-        validated,
-    }
-}
-
 fn index_validity(name: &str, valid: bool) -> LiveIndexValidity {
     LiveIndexValidity {
         name: name.to_string(),
@@ -2997,16 +3100,51 @@ fn index_validity(name: &str, valid: bool) -> LiveIndexValidity {
     }
 }
 
+/// `ck_post_title_set` as `pg_get_constraintdef` prints the declared body.
+const CATALOG_POST_TITLE_CHECK: &str = "CHECK ((title IS NOT NULL))";
+
+/// Live `post` as the pass reads it: the declared FK, indexes and unique in
+/// the IR, the CHECK beside it with its declared body (absent when
+/// `check_validated` is `None`).
+fn live_post(
+    fks: Vec<LiveFkValidity>,
+    check_validated: Option<bool>,
+    indexes: Vec<LiveIndexValidity>,
+) -> MigrationPlan {
+    let new = post_model_with_constraints();
+    let old = SchemaModel {
+        table_checks: vec![],
+        ..new.clone()
+    };
+    let checks = check_validated
+        .map(|validated| LiveCheckFact {
+            validated,
+            ..live_check("ck_post_title_set", CATALOG_POST_TITLE_CHECK)
+        })
+        .into_iter()
+        .collect();
+    plan_live_table(
+        old,
+        new,
+        LiveTableFacts {
+            checks,
+            foreign_keys: fks,
+            indexes,
+            ..LiveTableFacts::default()
+        },
+        updates_only(),
+    )
+}
+
 #[test]
-fn plan_validations_validates_a_declared_fk_and_check_that_exist_not_valid() {
-    let new_ir = envelope(vec![post_model_with_constraints()]);
+fn a_declared_fk_and_check_that_exist_not_valid_are_validated() {
+    let plan = live_post(
+        vec![fk_validity("fk_post_author_id_author", false)],
+        Some(false),
+        vec![],
+    );
     assert_eq!(
-        plan_validations(
-            "post",
-            &new_ir,
-            &[fk_validity("fk_post_author_id_author", false)],
-            &[check_validity("ck_post_title_set", false)],
-        ),
+        plan.operations,
         vec![
             MigrationOp::ValidateConstraint {
                 table: "post".to_string(),
@@ -3021,53 +3159,64 @@ fn plan_validations_validates_a_declared_fk_and_check_that_exist_not_valid() {
 }
 
 #[test]
-fn plan_validations_is_a_noop_for_validated_absent_or_undeclared_constraints() {
-    let new_ir = envelope(vec![post_model_with_constraints()]);
-    assert!(
-        plan_validations(
-            "post",
-            &new_ir,
-            &[fk_validity("fk_post_author_id_author", true)],
-            &[check_validity("ck_post_title_set", true)],
-        )
-        .is_empty(),
-        "a validated constraint replans to nothing"
+fn validated_absent_or_undeclared_constraints_are_never_validated() {
+    let validated = live_post(
+        vec![fk_validity("fk_post_author_id_author", true)],
+        Some(true),
+        vec![],
     );
     assert!(
-        plan_validations("post", &new_ir, &[], &[]).is_empty(),
+        validated.operations.is_empty(),
+        "a validated constraint replans to nothing: {:?}",
+        validated.operations
+    );
+
+    let absent = live_post(vec![], None, vec![]);
+    assert_eq!(
+        absent.operations,
+        vec![MigrationOp::AddCheck {
+            table: "post".to_string(),
+            name: "ck_post_title_set".to_string(),
+        }],
         "a constraint absent live is an add, never a validate"
     );
+
+    let mut undeclared = post_model_with_constraints();
+    undeclared.table_checks.clear();
+    let facts = LiveTableFacts {
+        checks: vec![
+            LiveCheckFact {
+                validated: false,
+                ..live_check("ck_post_orphan", "CHECK ((title <> ''::text))")
+            },
+            LiveCheckFact {
+                validated: false,
+                ..live_check("user_check", "CHECK ((slug <> ''::text))")
+            },
+        ],
+        foreign_keys: vec![fk_validity("post_author_id_fkey", false)],
+        ..LiveTableFacts::default()
+    };
+    let plan = plan_live_table(undeclared.clone(), undeclared, facts, updates_only());
     assert!(
-        plan_validations(
-            "post",
-            &new_ir,
-            &[fk_validity("post_author_id_fkey", false)],
-            &[
-                check_validity("ck_post_orphan", false),
-                check_validity("user_check", false)
-            ],
-        )
-        .is_empty(),
-        "a NOT VALID constraint the model does not declare is never touched"
-    );
-    assert!(
-        plan_validations("missing", &new_ir, &[], &[]).is_empty(),
-        "an undeclared table plans nothing"
+        plan.operations.is_empty(),
+        "a NOT VALID constraint the model does not declare is never touched: {:?}",
+        plan.operations
     );
 }
 
 #[test]
-fn plan_index_rebuilds_rebuilds_a_declared_index_that_exists_invalid() {
-    let new_ir = envelope(vec![post_model_with_constraints()]);
+fn a_declared_index_that_exists_invalid_is_rebuilt() {
+    let plan = live_post(
+        vec![],
+        Some(true),
+        vec![
+            index_validity("idx_post_author_id_title", false),
+            index_validity("uq_post_slug", false),
+        ],
+    );
     assert_eq!(
-        plan_index_rebuilds(
-            "post",
-            &new_ir,
-            &[
-                index_validity("idx_post_author_id_title", false),
-                index_validity("uq_post_slug", false),
-            ],
-        ),
+        plan.operations,
         vec![
             MigrationOp::RebuildIndex {
                 table: "post".to_string(),
@@ -3086,24 +3235,27 @@ fn plan_index_rebuilds_rebuilds_a_declared_index_that_exists_invalid() {
 }
 
 #[test]
-fn plan_index_rebuilds_is_a_noop_for_valid_absent_or_undeclared_indexes() {
-    let new_ir = envelope(vec![post_model_with_constraints()]);
-    assert!(
-        plan_index_rebuilds(
-            "post",
-            &new_ir,
-            &[
-                index_validity("idx_post_author_id_title", true),
-                index_validity("uq_post_slug", true),
-            ],
-        )
-        .is_empty()
+fn valid_absent_or_undeclared_indexes_are_never_rebuilt() {
+    let valid = live_post(
+        vec![],
+        Some(true),
+        vec![
+            index_validity("idx_post_author_id_title", true),
+            index_validity("uq_post_slug", true),
+        ],
     );
-    assert!(plan_index_rebuilds("post", &new_ir, &[]).is_empty());
+    assert!(valid.operations.is_empty(), "{:?}", valid.operations);
+    let absent = live_post(vec![], Some(true), vec![]);
+    assert!(absent.operations.is_empty(), "{:?}", absent.operations);
+    let undeclared = live_post(
+        vec![],
+        Some(true),
+        vec![index_validity("idx_post_legacy", false)],
+    );
     assert!(
-        plan_index_rebuilds("post", &new_ir, &[index_validity("idx_post_legacy", false)])
-            .is_empty(),
-        "an invalid index the model does not declare is leftover handling, not a rebuild"
+        undeclared.operations.is_empty(),
+        "an invalid index the model does not declare is leftover handling, not a rebuild: {:?}",
+        undeclared.operations
     );
 }
 
@@ -3211,27 +3363,47 @@ fn emit_rebuild_index_drops_then_runs_the_add_index_create_statement() {
 
 #[test]
 fn a_not_valid_check_whose_body_drifted_is_a_rebuild_and_an_unchanged_one_is_not() {
-    // The rebuild's bare ADD installs a valid constraint; the caller drops
-    // the validate for any name a rebuild already covers. Pin the rebuild
-    // planner's verdict for both NOT VALID shapes.
-    let new_ir = envelope(vec![post_model_with_constraints()]);
-    let drifted = [(
-        "ck_post_title_set".to_string(),
-        "CHECK ((title IS NULL)) NOT VALID".to_string(),
-    )];
+    // The rebuild's bare ADD installs a valid constraint, so the planner drops
+    // the validate for any name a rebuild already covers. Pin both NOT VALID
+    // shapes through the one planner, dedup included.
+    let new = post_model_with_constraints();
+    let old = SchemaModel {
+        table_checks: vec![],
+        ..new.clone()
+    };
+    let not_valid = |definition: &str| LiveTableFacts {
+        checks: vec![LiveCheckFact {
+            validated: false,
+            ..live_check("ck_post_title_set", definition)
+        }],
+        ..LiveTableFacts::default()
+    };
+    let drifted = plan_live_table(
+        old.clone(),
+        new.clone(),
+        not_valid("CHECK ((title IS NULL)) NOT VALID"),
+        updates_only(),
+    );
     assert_eq!(
-        plan_check_rebuilds("post", &new_ir, &drifted),
+        drifted.operations,
         vec![MigrationOp::RebuildCheck {
             table: "post".to_string(),
             name: "ck_post_title_set".to_string(),
-        }]
+        }],
+        "a drifted NOT VALID check is a rebuild and never also a validate"
     );
-    let unchanged = [(
-        "ck_post_title_set".to_string(),
-        "CHECK ((title IS NOT NULL)) NOT VALID".to_string(),
-    )];
-    assert!(
-        plan_check_rebuilds("post", &new_ir, &unchanged).is_empty(),
+    let unchanged = plan_live_table(
+        old,
+        new,
+        not_valid("CHECK ((title IS NOT NULL)) NOT VALID"),
+        updates_only(),
+    );
+    assert_eq!(
+        unchanged.operations,
+        vec![MigrationOp::ValidateConstraint {
+            table: "post".to_string(),
+            name: "ck_post_title_set".to_string(),
+        }],
         "a NOT VALID check with the declared body is a validate, never a rebuild"
     );
 }

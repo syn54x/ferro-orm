@@ -34,7 +34,6 @@ pub mod downs;
 pub mod enums;
 pub mod rebuild;
 pub mod renames;
-pub mod row_security;
 pub mod staging;
 
 use crate::directory::{DirectoryError, Headers, MigrationsDir, StepDialect, StepKind};

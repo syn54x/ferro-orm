@@ -66,6 +66,7 @@ from tests.test_migrate_up import (  # noqa: F401 - fixtures
     new,
 )
 from tests.test_rls_end_to_end import TENANT_PASSWORD, _tenant_url
+from tests.test_row_security_create_pass import created_row_security
 
 pytestmark = pytest.mark.usefixtures(
     "isolated_imports", "clean_registry", "no_bytecode"
@@ -134,39 +135,38 @@ def generated(project: Path, pkg: str, body: str) -> tuple[list[str], list[str]]
     )
 
 
-def model_ir(project: Path, number: int) -> dict:
-    return next(
-        model
-        for model in snapshot(project, number)["payload"]["models"]
-        if model["table_name"] == TABLE
-    )
-
-
-def live_row_security(db) -> dict:
-    """The table's row security as the runtime pass reads it live."""
-
-    async def read() -> dict:
-        name = f"rls_live_{uuid.uuid4().hex}"
-        await ferro.connect(db.url, name=name)
-        try:
-            _, facts = await _core._live_schema_ir(name, json.dumps([TABLE]))
-        finally:
-            await _core._disconnect(name)
-        return json.loads(facts)["tables"][TABLE]["row_security"]
-
-    return asyncio.run(read())
+def created(project: Path, number: int) -> list[str]:
+    """The create pass's row-security statements for snapshot ``number``'s
+    table: the one planner's ``AddTable``, rendered."""
+    statements, _ = created_row_security(snapshot(project, number), TABLE)
+    return statements
 
 
 def reconcile(project: Path, db) -> list[str]:
     """What the pass executes for ``0002``'s declaration over the live table,
-    ``migrate_destructive`` (the generator plans every drop)."""
-    plan = _core._plan_row_security_reconcile(
-        json.dumps(model_ir(project, 2)),
-        json.dumps(live_row_security(db)),
-        "postgres",
-        True,
-    )
-    return json.loads(plan)["statements"]
+    ``migrate_destructive`` (the generator plans every drop): the one
+    planner's rendered plan from the live schema and its facts."""
+
+    async def read() -> list[str]:
+        name = f"rls_live_{uuid.uuid4().hex}"
+        await ferro.connect(db.url, name=name)
+        try:
+            live, facts = await _core._live_schema_ir(name, json.dumps([TABLE]))
+        finally:
+            await _core._disconnect(name)
+        plan = json.loads(
+            _core._plan_from_ir(
+                live,
+                json.dumps(snapshot(project, 2)),
+                "postgres",
+                '{"destructive": true}',
+                True,
+                facts,
+            )
+        )
+        return [sql for op in plan["operations"] for sql in op["statements"]]
+
+    return asyncio.run(read())
 
 
 @contextlib.contextmanager
@@ -245,8 +245,7 @@ def test_e1_added_row_security_enables_forces_creates_and_its_down_tears_it_down
     up, down = generated(project, pkg, models())
 
     # The create pass's statements for the declaration, byte for byte.
-    create = json.loads(_core._plan_row_security(json.dumps(model_ir(project, 2))))
-    assert up == create["statements"]
+    assert up == created(project, 2)
     assert up[:2] == [enable(), force()]
     assert (
         "USING (\"tenant_id\" = NULLIF(current_setting('app.tenant', true), '')::uuid)"
@@ -279,12 +278,7 @@ def test_b1_a_new_table_creates_its_row_security_after_the_table_and_drops_the_t
     new("create")
     up = statements(step_file(project, 1, "up", "postgres"))
     at = next(i for i, s in enumerate(up) if s.startswith("CREATE TABLE"))
-    assert (
-        up[at + 1 :]
-        == json.loads(_core._plan_row_security(json.dumps(model_ir(project, 1))))[
-            "statements"
-        ]
-    )
+    assert up[at + 1 :] == created(project, 1)
     assert statements(step_file(project, 1, "down", "postgres")) == [
         f'DROP TABLE "{TABLE}"'
     ]
@@ -318,9 +312,7 @@ def test_e2_a_changed_body_is_dropped_and_recreated_and_its_down_restores_the_ol
     )
     up, down = generated(project, pkg, models(setting="app.tenant_id"))
 
-    new_create = json.loads(_core._plan_row_security(json.dumps(model_ir(project, 2))))[
-        "statements"
-    ][-1]
+    new_create = created(project, 2)[-1]
     assert "current_setting('app.tenant_id', true)" in new_create
     assert up == [drop_policy(TENANT_POLICY), new_create]
     assert down == [drop_policy(TENANT_POLICY), old_create]
@@ -372,9 +364,7 @@ def test_a_second_policy_is_its_create_policy_alone_and_its_down_drops_it_alone(
 
     assert len(up) == 1 and up[0].startswith(f'CREATE POLICY "{OWNER_POLICY}"')
     assert up[0] == create_policy(
-        json.loads(_core._plan_row_security(json.dumps(model_ir(project, 2))))[
-            "statements"
-        ],
+        created(project, 2),
         OWNER_POLICY,
     )
     assert down == [drop_policy(OWNER_POLICY)]
@@ -412,9 +402,7 @@ def test_an_edited_raw_body_is_rebuilt_and_its_down_restores_the_parents_body(
     assert "no longer matches" not in err
     up = statements(step_file(project, 2, "up", "postgres"))
     down = statements(step_file(project, 2, "down", "postgres"))
-    new_create = json.loads(_core._plan_row_security(json.dumps(model_ir(project, 2))))[
-        "statements"
-    ][-1]
+    new_create = created(project, 2)[-1]
     assert "'bob'" in new_create
     assert up == [drop_policy("rls_rlsorder_raw"), new_create]
     assert down == [drop_policy("rls_rlsorder_raw"), old_create]

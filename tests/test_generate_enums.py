@@ -153,19 +153,26 @@ def test_d1_an_added_label_is_a_first_labels_step_that_reverses_nothing(
     new("status_labels")
 
     assert step_files(project, 2) == files_of("01_labels")
-    # The pass's label-addition statement, byte for byte (I-1 item 11).
-    addition = json.loads(
-        _core._plan_enum_label_addition(
-            "enmorderstatus", ["paid", "canceled", "refunded"], ["paid", "canceled"]
+    # The one planner's label-addition statement, byte for byte (I-1).
+    plan = json.loads(
+        _core._plan_from_ir(
+            json.dumps(snapshot(project, 1)),
+            json.dumps(snapshot(project, 2)),
+            "postgres",
+            '{"destructive": false}',
+            True,
         )
     )
-    assert addition["statements"] == [
+    addition = [
+        sql
+        for op in plan["operations"]
+        if op["kind"] == "AddEnumLabel"
+        for sql in op["statements"]
+    ]
+    assert addition == [
         "ALTER TYPE \"enmorderstatus\" ADD VALUE IF NOT EXISTS 'refunded'"
     ]
-    assert (
-        statements(step_file(project, "01_labels", "up", "postgres"))
-        == addition["statements"]
-    )
+    assert statements(step_file(project, "01_labels", "up", "postgres")) == addition
     assert step_file(project, "01_labels", "down", "postgres").read_text() == (
         "-- ferro: nothing-to-reverse Postgres cannot drop an enum label; "
         "'refunded' stays\n"

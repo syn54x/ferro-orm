@@ -35,7 +35,7 @@ from ferro import (
 )
 from ferro.rowsecurity import COMMANDS
 from ferro._core import (
-    _plan_row_security,
+    _plan_from_ir,
     _render_create_table_sql_for_test,
     _rls_command_matrix,
 )
@@ -60,6 +60,38 @@ CREATE_POLICY_SQL = (
     f'CREATE POLICY "{POLICY_NAME}" ON "ledgerrow" FOR ALL '
     f"USING ({SHORTHAND_EXPR}) WITH CHECK ({SHORTHAND_EXPR})"
 )
+
+
+def created_row_security(
+    envelope: dict, table: str, dialect: str = "postgres"
+) -> tuple[list[str], list[str]]:
+    """The row-security statements and warnings of the one planner's
+    ``AddTable`` for ``table`` (``_plan_from_ir`` from no tables, rendered):
+    what the create pass executes after the table's other artifacts, from
+    the same function (AGENTS.md § I-1)."""
+    target = {
+        **envelope,
+        "payload": {
+            **envelope["payload"],
+            "models": [
+                model
+                for model in envelope["payload"]["models"]
+                if model["table_name"] == table
+            ],
+        },
+    }
+    empty = {**envelope, "payload": {**envelope["payload"], "models": []}}
+    plan = json.loads(
+        _plan_from_ir(
+            json.dumps(empty),
+            json.dumps(target),
+            dialect,
+            json.dumps({"destructive": False}),
+            True,
+        )
+    )
+    (add_table,) = [op for op in plan["operations"] if op["kind"] == "AddTable"]
+    return add_table["row_security_statements"], add_table["warnings"]
 
 
 def _rewind_registry() -> None:
@@ -235,12 +267,8 @@ def test_declaration_validation_agrees_with_what_the_renderer_emits(command):
             )
         )
 
-    model_ir = next(
-        model
-        for model in compile_registry_schema_ir()["payload"]["models"]
-        if model["table_name"] == "scoped"
-    )
-    rendered = json.loads(_plan_row_security(json.dumps(model_ir)))["statements"][-1]
+    statements, _ = created_row_security(compile_registry_schema_ir(), "scoped")
+    rendered = statements[-1]
     emits_using = " USING (" in rendered
     emits_with_check = " WITH CHECK (" in rendered
 
@@ -420,32 +448,34 @@ def test_a_model_without_a_declaration_keeps_an_unchanged_envelope():
 
 
 def test_row_security_statement_parity_pin():
-    """The FFI the Alembic operation (#414) consumes renders the same bytes
-    the create pass executes. If either side drifts, the two migration doors
-    would police the same model differently."""
+    """The one planner's ``AddTable`` (every migration door's table creation)
+    carries the same row-security bytes the create pass executes. If either
+    side drifts, the doors would police the same model differently."""
     _define_ledger_row()
     model_ir = _ledgerrow_ir()
-    plan = json.loads(_plan_row_security(json.dumps(model_ir)))
-    assert plan["names"] == [POLICY_NAME]
-    assert plan["statements"] == [
+    statements, warnings = created_row_security(
+        compile_registry_schema_ir(), "ledgerrow"
+    )
+    assert statements == [
         'ALTER TABLE "ledgerrow" ENABLE ROW LEVEL SECURITY',
         'ALTER TABLE "ledgerrow" FORCE ROW LEVEL SECURITY',
         CREATE_POLICY_SQL,
     ]
-    assert plan["warning"] is None
+    assert f'CREATE POLICY "{POLICY_NAME}"' in statements[-1]
+    assert warnings == []
 
     _, post_create, _ = _render_create_table_sql_for_test(
         "ledgerrow",
         json.dumps({"dialect_agnostic": True, "models": [model_ir]}),
         "postgres",
     )
-    assert post_create[-3:] == plan["statements"]
+    assert post_create[-3:] == statements
 
 
 def test_force_false_drops_only_the_force_statement():
     _define_ledger_row(force=False)
-    plan = json.loads(_plan_row_security(json.dumps(_ledgerrow_ir())))
-    assert plan["statements"] == [
+    statements, _ = created_row_security(compile_registry_schema_ir(), "ledgerrow")
+    assert statements == [
         'ALTER TABLE "ledgerrow" ENABLE ROW LEVEL SECURITY',
         CREATE_POLICY_SQL,
     ]
@@ -460,13 +490,8 @@ def test_text_columns_render_without_a_cast():
             RowPolicy(column="tenant", setting="pinch.tenant")
         )
 
-    model_ir = next(
-        model
-        for model in compile_registry_schema_ir()["payload"]["models"]
-        if model["table_name"] == "tenanted"
-    )
-    plan = json.loads(_plan_row_security(json.dumps(model_ir)))
-    assert plan["statements"][-1] == (
+    statements, _ = created_row_security(compile_registry_schema_ir(), "tenanted")
+    assert statements[-1] == (
         'CREATE POLICY "rls_tenanted_tenant" ON "tenanted" FOR ALL '
         "USING (\"tenant\" = NULLIF(current_setting('pinch.tenant', true), '')) "
         "WITH CHECK (\"tenant\" = NULLIF(current_setting('pinch.tenant', true), ''))"
