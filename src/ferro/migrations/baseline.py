@@ -18,10 +18,11 @@ the tables ``0001`` creates. ``baseline`` records every step of every
 migration through the target as applied without running it, and only after
 checking: under the run lock, with no step records yet, the live database
 is planned against the target migration's schema snapshot exactly as
-``ferro migrate drift`` plans it against the last applied one (the same two
-FFI doors, the same lines). Any line means nothing is recorded; there is no
-flag that records past one. Live tables the snapshot does not declare
-(``alembic_version``, a later migration's tables) are never drift.
+``ferro migrate drift`` plans it against the last applied one: both call
+:func:`ferro.migrations.drift.against`, so the lines are the same. Any
+line means nothing is recorded; there is no flag that records past one.
+Live tables the snapshot does not declare (``alembic_version``, a later
+migration's tables) are never drift.
 
 ``baseline --remove`` deletes the baseline's records again, refused while a
 run has applied a migration above them; ``down`` never reverts a baselined
@@ -39,7 +40,7 @@ from .. import _core
 from ..settings import SettingsError
 from . import runner
 from .api import _connection, _resolve
-from .drift import _DESTRUCTIVE, DriftReport, _describe, render_op
+from .drift import DriftReport, against
 from .errors import MigrationRefused
 from .report import RunRefused
 from .steps import declared_up_kind
@@ -113,30 +114,6 @@ def _span(names: list[str]) -> str:
     return names[0] if len(names) == 1 else f"{names[0]} … {names[-1]}"
 
 
-async def _against(name: str, target: str, snapshot: dict, dialect: str) -> DriftReport:
-    """``drift``'s check, against ``target``'s snapshot rather than the last
-    applied one: only the snapshot's tables are read, destructive changes
-    count, and each op is one :func:`render_op` line."""
-    tables = [model["table_name"] for model in snapshot["payload"]["models"]]
-    # The old table of a live rename hint is read too (ADR-0032), as the
-    # reconciliation pass reads it.
-    live_json, facts_json = await _core._live_schema_ir(
-        name, json.dumps(tables), json.dumps(snapshot)
-    )
-    plan = json.loads(
-        _core._plan_from_ir(
-            live_json, json.dumps(snapshot), dialect, _DESTRUCTIVE, False, facts_json
-        )
-    )
-    operations = _describe(plan["operations"], json.loads(live_json), snapshot, dialect)
-    return DriftReport(
-        against=target,
-        lines=[render_op(op) for op in operations],
-        operations=operations,
-        warnings=list(plan["warnings"]) + list(plan["always_warnings"]),
-    )
-
-
 async def _locked(
     name: str, database: DatabaseSettings, lock_timeout: str | float
 ) -> tuple[str, str | None, int]:
@@ -183,7 +160,7 @@ async def _record(
             )
         )
         _record_declared_kinds(database.directory, plan["records"])
-        drift = await _against(name, plan["target"], plan["snapshot"], dialect)
+        drift = await against(plan["snapshot"], migration=plan["target"], using=name)
         if not drift.clean:
             return BaselineReport(
                 recorded=[], data_steps_listed=[], drift=drift, warnings=drift.warnings

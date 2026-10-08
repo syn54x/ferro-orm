@@ -16,7 +16,9 @@ compares live and declared state: the live database is read into the planner's
 input (``_core._live_schema_ir``, with the live facts beside it), planned
 against the snapshot (``_core._plan_from_ir``, destructive changes on, so
 extra objects are reported too), and each planned op is printed as one line
-(:func:`render_op`).
+(:func:`render_op`). That comparison of the live database with one snapshot
+is :func:`against`; ``baseline`` makes the same call with its target's
+snapshot, so the two check exactly the same things.
 
 Only the snapshot's tables are read, so a live table the snapshot does not
 declare (``alembic_version``, an extension's tables, the tracking tables) is
@@ -39,16 +41,14 @@ from ..settings import SettingsError
 from . import runner
 from .api import _connection, _resolve
 from .errors import MigrationRefused
-from .report import RunRefused
+from .report import RunRefused, StatusReport
 
 if TYPE_CHECKING:
     from ..settings import DatabaseSettings, FerroSettings
 
-__all__ = ["DriftReport", "drift", "render_op"]
+__all__ = ["DriftReport", "against", "drift", "render_op"]
 
 _DESTRUCTIVE = json.dumps({"destructive": True})
-_APPLIED = {"applied", "applied_different_checksum", "applied_baseline"}
-_UNFINISHED = {"running", "failed", "interrupted", "reverting"}
 
 
 @dataclass(frozen=True)
@@ -198,7 +198,7 @@ def render_op(op: dict[str, Any]) -> str:
 
     ``AlterColumnType`` reads ``live_type`` / ``snapshot_type`` and
     ``AlterColumnNullability`` reads ``live_nullable`` when the op carries
-    them (:func:`drift` adds them); without them the line says only that the
+    them (:func:`against` adds them); without them the line says only that the
     two differ.
     """
     kind = op.get("kind", "unknown op")
@@ -267,23 +267,67 @@ def _describe(
     return described
 
 
-def _unfinished(status: dict[str, Any]) -> str | None:
+def _mid_run(status: StatusReport) -> str | None:
     """The first step a run left unfinished, as ``<migration>/<file> is
     <state>``, or a migration only partly applied."""
-    for migration in status["migrations"]:
-        states = [step["state"] for step in migration["steps"]]
-        for step, state in zip(migration["steps"], states):
-            if state in _UNFINISHED:
-                return f"{migration['name']}/{step['file']} is {state}"
-        if any(s in _APPLIED for s in states) and not all(
-            s in _APPLIED for s in states
-        ):
-            return f"{migration['name']} is partly applied"
-    return None
+    migration = status.unfinished
+    if migration is None:
+        return None
+    step = migration.unfinished_step
+    if step is not None:
+        return f"{migration.name}/{step.file} is {step.state}"
+    return f"{migration.name} is partly applied"
 
 
 def _refused(why: str) -> DriftReport:
     return DriftReport(against=None, refusal=why)
+
+
+async def against(
+    snapshot: dict[str, Any], *, migration: str, using: str
+) -> DriftReport:
+    """Drift of the live database on open connection ``using`` against one
+    schema snapshot (the ``["snapshot"]["ir"]`` of a migration in the
+    directory), reported as against ``migration`` (``NNNN_<name>``).
+
+    The check :func:`drift` makes against the last applied migration and
+    ``baseline`` makes against its target, and nothing else: only the
+    snapshot's tables are read (ADR-0031), destructive changes count, each
+    planned op is one :func:`render_op` line, and nothing is refused, locked
+    or written::
+
+        report = await against(snapshot, migration="0007_nickname", using="default")
+        report.lines   # ["user.nickname column is missing"]
+
+    Raises:
+        MigrationRefused: ``using`` is not an open connection.
+    """
+    dialect = _core.connection_backend(using)
+    if dialect is None:
+        raise MigrationRefused(f"connection `{using}` is not open; connect it first")
+    tables = [model["table_name"] for model in snapshot["payload"]["models"]]
+    # The old table of a live rename hint is read too (ADR-0032), as the
+    # reconciliation pass reads it.
+    live_json, facts_json = await _core._live_schema_ir(
+        using, json.dumps(tables), json.dumps(snapshot)
+    )
+    plan = json.loads(
+        _core._plan_from_ir(
+            live_json,
+            json.dumps(snapshot),
+            dialect,
+            _DESTRUCTIVE,
+            False,
+            facts_json,
+        )
+    )
+    operations = _describe(plan["operations"], json.loads(live_json), snapshot, dialect)
+    return DriftReport(
+        against=migration,
+        lines=[render_op(op) for op in operations],
+        operations=operations,
+        warnings=list(plan["warnings"]) + list(plan["always_warnings"]),
+    )
 
 
 async def _audit(name: str, database: DatabaseSettings) -> DriftReport:
@@ -304,13 +348,20 @@ async def _audit(name: str, database: DatabaseSettings) -> DriftReport:
     held = await _core._run_lock_is_held(name, None)
     directory = str(database.directory)
     try:
-        status = json.loads(
-            _core._run_status(directory, json.dumps(state["records"]), dialect, held)
+        status = StatusReport.from_core(
+            json.loads(
+                _core._run_status(
+                    directory, json.dumps(state["records"]), dialect, held
+                )
+            ),
+            database=database.name,
+            dialect=dialect,
+            table=state["table"],
         )
         contents = json.loads(_core._read_migrations_dir(directory))
     except (ValueError, RunRefused) as err:
         raise MigrationRefused(str(err)) from None
-    mid_run = _unfinished(status) or (
+    mid_run = _mid_run(status) or (
         "a migration run holds the run lock" if held else None
     )
     if mid_run is not None:
@@ -321,51 +372,23 @@ async def _audit(name: str, database: DatabaseSettings) -> DriftReport:
             f"stands; finish the migration with `ferro migrate up` or revert it "
             f"with `ferro migrate down`, then check drift again."
         )
-    if status["ahead"]:
+    if status.ahead:
         return _refused(
             f"ferro migrate drift: this database has applied "
-            f"{', '.join(status['ahead'])}, which this checkout does not have, so "
+            f"{', '.join(status.ahead)}, which this checkout does not have, so "
             f"its last applied snapshot is not here to compare with. Run `ferro "
             f"migrate status` to see them, and check drift from a checkout that "
             f"has them."
         )
-    applied = [
-        migration
-        for migration in status["migrations"]
-        if migration["steps"]
-        and all(step["state"] in _APPLIED for step in migration["steps"])
-    ]
-    if not applied:  # pragma: no cover - records exist, so one is applied or unfinished
+    head = status.head_applied
+    # Records exist, so a migration is applied or unfinished.
+    if head is None:  # pragma: no cover
         return _refused(
             "ferro migrate drift: no migration is fully applied to this database. "
             "Run `ferro migrate status` to see where it stands."
         )
-    head = applied[-1]
     snapshots = {m["number"]: m["snapshot"]["ir"] for m in contents["migrations"]}
-    snapshot = snapshots[head["number"]]
-    tables = [model["table_name"] for model in snapshot["payload"]["models"]]
-    # The old table of a live rename hint is read too (ADR-0032), as the
-    # reconciliation pass reads it.
-    live_json, facts_json = await _core._live_schema_ir(
-        name, json.dumps(tables), json.dumps(snapshot)
-    )
-    plan = json.loads(
-        _core._plan_from_ir(
-            live_json,
-            json.dumps(snapshot),
-            dialect,
-            _DESTRUCTIVE,
-            False,
-            facts_json,
-        )
-    )
-    operations = _describe(plan["operations"], json.loads(live_json), snapshot, dialect)
-    return DriftReport(
-        against=head["name"],
-        lines=[render_op(op) for op in operations],
-        operations=operations,
-        warnings=list(plan["warnings"]) + list(plan["always_warnings"]),
-    )
+    return await against(snapshots[head.number], migration=head.name, using=name)
 
 
 async def audit(

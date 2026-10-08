@@ -26,8 +26,9 @@ import pytest
 
 import ferro
 from ferro import _core
-from ferro.migrations import MigrationRefused, baseline, remove_baseline
-from tests.test_migrate_drift import SQUADS, TEAMS
+from ferro.migrations import DriftReport, MigrationRefused, baseline, remove_baseline
+from ferro.migrations.drift import against
+from tests.test_migrate_drift import SQUADS, TEAMS, snapshot_of
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     AUTHOR,
     pkg,
@@ -255,6 +256,37 @@ def test_drift_is_listed_exits_4_and_records_nothing(project, pkg, db, capsys):
     assert report.drift.lines == ["team.name column is missing"]
     with pytest.raises(MigrationRefused, match="team.name column is missing"):
         report.raise_for_problems()
+    assert no_records(db)
+
+
+def test_baseline_lists_exactly_what_drift_against_its_target_gives(
+    project, pkg, db, capsys
+):
+    """``baseline`` checks with ``drift.against`` the target's snapshot: the
+    report it refuses with is that call's, line for line."""
+    auto_migrated(project, pkg, db)
+    db.execute('ALTER TABLE "team" DROP COLUMN "name"')
+    db.execute('CREATE INDEX "idx_team_name" ON "team" ("size")')
+    capsys.readouterr()
+
+    async def compared() -> DriftReport:
+        await ferro.connect(db.url, name="probe")
+        try:
+            return await against(
+                snapshot_of(project, "0002_add_teams"),
+                migration="0002_add_teams",
+                using="probe",
+            )
+        finally:
+            await _core._disconnect("probe")
+
+    expected = asyncio.run(compared())
+    report = asyncio.run(baseline(url=db.url))
+
+    assert report.drift == expected
+    assert len(expected.lines) == 2
+    code, out, _ = cli(capsys, "baseline", "--url", db.url)
+    assert (code, out) == (4, expected.render() + "\nnothing was recorded\n")
     assert no_records(db)
 
 
