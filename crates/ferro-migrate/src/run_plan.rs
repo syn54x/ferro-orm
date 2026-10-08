@@ -27,7 +27,7 @@ use crate::directory::{
 use crate::generate::rebuild::rebuilt_tables;
 use crate::plan::{Hint, and_list, live_hints, reverse_hints};
 use crate::snapshot::{Snapshot, encode_checksum, sha384};
-use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
+use ferro_schema_ir::{SchemaIrPayload, SchemaModel};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -269,17 +269,6 @@ pub struct RebuildExpectation {
     pub declared: SchemaModel,
 }
 
-/// The two schema snapshots a data step's historical models are built from
-/// (ADR-0035): its migration's parent's (`None` before the first migration)
-/// and its own.
-#[derive(Clone, Debug, PartialEq)]
-pub struct StepSnapshots {
-    /// The parent migration's snapshot.
-    pub parent: Option<IrEnvelope<SchemaIrPayload>>,
-    /// The migration's own snapshot.
-    pub own: IrEnvelope<SchemaIrPayload>,
-}
-
 /// A started-but-unfinished step whose file changed since that attempt:
 /// accepted and re-recorded (ADR-0030); the run's output says so.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -347,10 +336,6 @@ pub struct PlannedStep {
     /// [`plan_run`], which sees no bytes.
     #[serde(default)]
     pub rebuilds: Vec<RebuildExpectation>,
-    /// A data step's two snapshots, which its historical models are built
-    /// from; `None` for a SQL step.
-    #[serde(skip)]
-    pub snapshots: Option<StepSnapshots>,
 }
 
 /// What a run executes, in order.
@@ -1634,8 +1619,6 @@ fn plan_up(
         }
         let snapshot_checksum = encode_checksum(&migration.snapshot.checksum);
         let first_data_step = first_data_step(migration);
-        // Only a data step's historical models are built from them.
-        let snapshots = first_data_step.map(|_| step_snapshots(dir, migration));
         for step in &migration.steps {
             let record = by_key.get(&(migration.number, step.ordinal));
             if record.is_some_and(|r| r.is_finished()) {
@@ -1700,7 +1683,6 @@ fn plan_up(
                 },
                 first_data_step,
                 rebuilds: Vec::new(),
-                snapshots: if data { snapshots.clone() } else { None },
             });
         }
     }
@@ -1715,14 +1697,6 @@ fn first_data_step(migration: &Migration) -> Option<u8> {
         .filter(|step| step.kind == StepKind::Data)
         .map(|step| step.ordinal)
         .min()
-}
-
-/// The snapshots of `migration` and its parent in `dir`.
-fn step_snapshots(dir: &MigrationsDir, migration: &Migration) -> StepSnapshots {
-    StepSnapshots {
-        parent: parent_of(dir, migration).map(|parent| parent.snapshot.ir.clone()),
-        own: migration.snapshot.ir.clone(),
-    }
 }
 
 /// The migration before `migration` in `dir`.
@@ -1869,7 +1843,6 @@ fn plan_down(
             record: (*record).clone(),
             first_data_step: first_data_step(migration),
             rebuilds: Vec::new(),
-            snapshots: data.then(|| step_snapshots(dir, migration)),
         });
     }
     Ok(RunPlan {
@@ -3984,14 +3957,10 @@ mod tests {
     // -- what a planned step carries for its execution (ADR-0048) -------------------------
 
     #[test]
-    fn a_step_carries_its_migrations_first_data_step_and_a_data_step_its_snapshots() {
+    fn a_step_carries_its_migrations_first_data_step() {
         let dir = backfill();
         let plan = up(&dir, &[]).expect("plan");
         assert!(plan.steps.iter().all(|s| s.first_data_step == Some(2)));
-        assert_eq!(plan.steps[0].snapshots, None);
-        let snapshots = plan.steps[1].snapshots.as_ref().expect("a data step's");
-        assert_eq!(snapshots.parent, None);
-        assert_eq!(snapshots.own, dir.migrations[0].snapshot.ir);
         assert!(
             up(&three(), &[])
                 .expect("plan")
@@ -4225,6 +4194,50 @@ mod tests {
             "ferro migrate: 0002_slug/01_rebuild.up.sqlite.sql rebuilds table \"post\", which \
              the schema snapshot it starts from does not declare. Nothing was applied."
         );
+    }
+
+    #[test]
+    fn an_edited_unfinished_rebuild_step_expects_what_its_edited_bytes_rebuild() {
+        let held = two_table_rebuild();
+        let planned = held
+            .plan(
+                &[],
+                Dialect::Sqlite,
+                Direction::Up { through: None },
+                false,
+                None,
+            )
+            .expect("plan")
+            .steps;
+        // 0001 applied; 0002's step started under bytes since edited into
+        // the held REBUILD (ADR-0030: an unfinished step may be edited).
+        let records = [
+            StepRecord {
+                finished_at: Some("2026-10-01T14:02:33.000000Z".into()),
+                ..planned[0].record.clone()
+            },
+            StepRecord {
+                checksum: OTHER.into(),
+                started_at: "2026-10-01T14:03:00.000000Z".into(),
+                ..planned[1].record.clone()
+            },
+        ];
+        let plan = held
+            .plan(
+                &records,
+                Dialect::Sqlite,
+                Direction::Up { through: None },
+                false,
+                None,
+            )
+            .expect("plan");
+        let step = &plan.steps[0];
+        assert_eq!(
+            step.edited.as_ref().map(|e| e.recorded.as_str()),
+            Some(OTHER)
+        );
+        let tables: Vec<&str> = step.rebuilds.iter().map(|r| r.table.as_str()).collect();
+        assert_eq!(tables, ["author", "post"]);
     }
 
     #[test]

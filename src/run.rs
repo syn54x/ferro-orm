@@ -2385,6 +2385,10 @@ impl Locked {
                     }
                     _ => error,
                 };
+                // A lock lost inside the step's transaction (the check before
+                // its record) failed the step; the run stops as a lost lock,
+                // either way, before any record is written.
+                self.verify().await?;
                 // A down that rolled back changed nothing, so its record does
                 // not change either (the tracking table says where the database
                 // stands now): the step stays applied and the error is the
@@ -2401,7 +2405,6 @@ impl Locked {
                         duration_ms: if down { 0 } else { ms },
                         ..started
                     };
-                    self.verify().await?;
                     self.write(&failed, None).await?;
                 }
                 Ok(StepOutcome {

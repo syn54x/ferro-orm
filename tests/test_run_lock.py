@@ -27,6 +27,7 @@ from tests.test_migrate_new import (  # noqa: F401 - fixtures
 from tests.test_migrate_up import (  # noqa: F401 - fixtures
     configure,
     db,
+    migrations,
     new,
     settings_and_database,
     sql_step,
@@ -246,3 +247,90 @@ async def test_the_ffi_refuses_an_unrepresentable_timeout_without_panicking(
     tracked = await _tracked(db, database)
     with pytest.raises(ValueError, match="1e+20"):
         tracked.locked(1e20)
+
+
+async def test_a_lock_lost_before_a_no_transaction_step_starts_runs_nothing(
+    project, pkg, db
+):
+    """A no-transaction step commits statement by statement, so its one
+    check is before it starts (ADR-0029 as amended): a lost lock refuses it
+    there, before its started record and before any statement."""
+    if db.backend != "postgres":
+        pytest.skip("no-transaction is Postgres-only")
+    _, database = _project(project, pkg, db)
+    sql_step(
+        project,
+        "idx",
+        '-- ferro: no-transaction\nCREATE INDEX CONCURRENTLY "idx_lost" ON "author" ("id");\n',
+    )
+    tracked = await _tracked(db, database)
+    async with tracked.locked(5.0) as run:
+        first, index = (await run.plan({"direction": "up"})).steps
+        assert (await run.execute(first))["ok"]
+        await run._close_lock_connection_for_test()
+        with pytest.raises(RunRefused, match="the run lock was lost"):
+            await run.execute(index)
+
+    assert (
+        db.rows("SELECT indexname FROM pg_indexes WHERE indexname = 'idx_lost'") == []
+    )
+    assert [(r[0], r[1]) for r in db.rows(RECORDS)] == [(1, 1)]
+
+
+async def test_a_lock_lost_inside_a_downs_transaction_is_the_lost_lock_refusal(
+    project, pkg, db
+):
+    """A transactional down verifies the lock inside its transaction, before
+    it removes the record: a lock lost while it runs rolls the down back and
+    stops the run as a lost lock, never as a failed step."""
+    if db.backend != "postgres":
+        pytest.skip("only a Postgres lock lives on a connection that can drop")
+    settings, database = _project(project, pkg, db)
+    sql_step(project, "slow", 'CREATE TABLE "slow" ("id" integer);\n')
+    down_file = migrations(project) / "0002_slow" / "01_slow.down.sql"
+    down_file.write_text('SELECT pg_sleep(1);\nDROP TABLE "slow";\n')
+    assert (await runner.up(settings, database, url=db.url)).refusal is None
+    tracked = await _tracked(db, database)
+    async with tracked.locked(5.0) as run:
+        (step,) = (await run.plan({"direction": "down", "target": "latest"})).steps
+        running = asyncio.ensure_future(run.execute(step))
+        await asyncio.sleep(0.4)
+        await run._close_lock_connection_for_test()
+        with pytest.raises(RunRefused, match="the run lock was lost"):
+            await running
+
+    assert "slow" in db.tables()
+    assert [(r[0], r[1]) for r in db.rows(RECORDS)] == [(1, 1), (2, 1)]
+
+
+async def test_a_baseline_planned_by_another_run_is_never_written(project, pkg, db):
+    """A baseline plan is bound to the locked run that read the records it
+    writes over: kept across an ``up``, it is refused rather than turning
+    run records into baseline ones."""
+    settings, database = _project(project, pkg, db)
+    tracked = await _tracked(db, database)
+    async with tracked.locked(5.0) as run:
+        stale = run.plan_baseline(None)
+    assert (await runner.up(settings, database, url=db.url)).refusal is None
+    tracked = await runner.open_tracked("holder", database)
+    async with tracked.locked(5.0) as run:
+        with pytest.raises(ValueError, match="another locked run"):
+            await run.write_baseline(stale, {})
+
+    assert db.rows("SELECT origin FROM _ferro_migrations") == [("run",)]
+
+
+async def test_a_rerecord_planned_by_another_run_is_never_written(project, pkg, db):
+    settings, database = _project(project, pkg, db)
+    assert (await runner.up(settings, database, url=db.url)).refusal is None
+    up_file = migrations(project) / f"0001_create_author/01_schema.up.{db.backend}.sql"
+    up_file.write_bytes(up_file.read_bytes() + b"\n")
+    tracked = await _tracked(db, database)
+    async with tracked.locked(5.0) as run:
+        stale = run.plan_rerecord("0001:01", "record")
+    before = db.rows("SELECT checksum FROM _ferro_migrations")
+    async with tracked.locked(5.0) as run:
+        with pytest.raises(ValueError, match="another locked run"):
+            await run.rerecord(stale)
+
+    assert db.rows("SELECT checksum FROM _ferro_migrations") == before

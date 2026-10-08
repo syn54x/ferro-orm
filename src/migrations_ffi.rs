@@ -776,6 +776,19 @@ fn owned<'a>(
     Ok(&step.step)
 }
 
+/// A baseline or rerecord plan is written only by the locked run that
+/// planned it, against the records that run read under its lock: a plan
+/// kept across runs would write over records it never saw.
+fn planned_here(owner: u64, locked: &crate::run::Locked, verb: &str) -> PyResult<()> {
+    if owner != locked.id() {
+        return Err(PyValueError::new_err(format!(
+            "this {verb} plan was made by another locked run; plan it again on this one, \
+             which read the records it writes over"
+        )));
+    }
+    Ok(())
+}
+
 /// `rows_done`, refused below zero.
 fn rows(rows_done: i64) -> PyResult<i64> {
     if rows_done < 0 {
@@ -1078,6 +1091,7 @@ impl LockedDatabase {
     fn plan_baseline(&self, target: Option<&str>) -> PyResult<BaselinePlan> {
         Ok(BaselinePlan {
             plan: Arc::new(self.inner.plan_baseline(target)?),
+            owner: self.inner.id(),
         })
     }
 
@@ -1095,6 +1109,7 @@ impl LockedDatabase {
             .into_iter()
             .map(|(key, kind)| Ok((key, record_kind(&kind)?)))
             .collect::<PyResult<std::collections::HashMap<_, _>>>()?;
+        planned_here(plan.owner, &self.inner, "baseline")?;
         let plan = Arc::clone(&plan.plan);
         let locked = Arc::clone(&self.inner);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -1129,6 +1144,7 @@ impl LockedDatabase {
         let order_keys = order_keys_arg(order_keys)?.unwrap_or_default();
         Ok(RerecordPlan {
             action: Arc::new(self.inner.plan_rerecord(target, mode, &order_keys)?),
+            owner: self.inner.id(),
         })
     }
 
@@ -1142,6 +1158,7 @@ impl LockedDatabase {
         kind: Option<&str>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let kind = kind.map(record_kind).transpose()?;
+        planned_here(action.owner, &self.inner, "rerecord")?;
         let action = Arc::clone(&action.action);
         let locked = Arc::clone(&self.inner);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -1188,6 +1205,8 @@ impl LockedDatabase {
 #[pyclass(frozen, module = "ferro._core")]
 pub struct BaselinePlan {
     plan: Arc<crate::run::BaselinePlan>,
+    /// The locked run that planned it: only that run writes it.
+    owner: u64,
 }
 
 #[pymethods]
@@ -1239,6 +1258,8 @@ impl BaselinePlan {
 #[pyclass(frozen, module = "ferro._core")]
 pub struct RerecordPlan {
     action: Arc<ferro_migrate::run_plan::RerecordAction>,
+    /// The locked run that planned it: only that run writes it.
+    owner: u64,
 }
 
 #[pymethods]
