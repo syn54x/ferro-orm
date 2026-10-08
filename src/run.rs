@@ -1335,18 +1335,33 @@ fn error_text(err: &sqlx::Error) -> String {
     }
 }
 
-/// A failure inside a step: its text, for the record and the operator, and
+/// A failure inside a step: its text, for the record and the operator;
 /// what a failed validate or unique index step was stopped by, which the
-/// runner counts after the failure (ADR-0043, ADR-0044).
-struct StepFailure(String, Option<crate::errors::CountedFailure>);
+/// runner counts after the failure (ADR-0043, ADR-0044); and what stayed
+/// applied ahead of it, which only a no-transaction step leaves (its
+/// statements before the failing one committed as they ran).
+struct StepFailure {
+    error: String,
+    counted: Option<crate::errors::CountedFailure>,
+    committed: Executed,
+}
 
 impl From<sqlx::Error> for StepFailure {
     fn from(err: sqlx::Error) -> Self {
-        StepFailure(error_text(&err), None)
+        Self::new(error_text(&err))
     }
 }
 
 impl StepFailure {
+    /// A failure that left nothing applied and counts nothing.
+    fn new(error: impl Into<String>) -> Self {
+        StepFailure {
+            error: error.into(),
+            counted: None,
+            committed: Executed::default(),
+        }
+    }
+
     /// `failed` as the step's failure: the statement it names (its place in
     /// the step's `statements`) decides whether it is a counted failure.
     fn of_statement(statements: &[String], failed: Failed) -> Self {
@@ -1355,14 +1370,32 @@ impl StepFailure {
             .and_then(|index| statements.get(index))
             .map(String::as_str);
         let counted = crate::errors::counted_failure_of_error(statement, &failed.error);
-        StepFailure(error_text(&failed.error), counted)
+        StepFailure {
+            error: error_text(&failed.error),
+            counted,
+            committed: failed.committed,
+        }
     }
 
-    fn of_unit(statements: &[String], err: DdlError<Failed>) -> Self {
-        match err {
-            DdlError::LockTimeout(timeout) => StepFailure(timeout.to_string(), None),
+    fn of_unit(statements: &[String], mut err: DdlError<Failed>) -> Self {
+        let committed = err.take_committed();
+        let failure = match err {
+            DdlError::LockTimeout(timeout) => Self::new(timeout.to_string()),
             DdlError::Failed(failed) => Self::of_statement(statements, failed),
+        };
+        StepFailure {
+            committed,
+            ..failure
         }
+    }
+
+    /// Whether the step changed the schema before it failed: a statement of
+    /// its file committed (a lock-timeout `SET` changes nothing).
+    fn changed_schema(&self) -> bool {
+        self.committed
+            .statements
+            .iter()
+            .any(|statement| statement.role == Role::Schema)
     }
 }
 
@@ -1634,9 +1667,8 @@ async fn foreign_keys_off(
         .fetch_all_sql_unprepared_with_binds("PRAGMA foreign_keys", &[])
         .await?;
     if read.first().and_then(|row| int(column(row, 0))) != Some(0) {
-        return Err(StepFailure(
-            "PRAGMA foreign_keys = OFF did not take effect on the step's connection".to_string(),
-            None,
+        return Err(StepFailure::new(
+            "PRAGMA foreign_keys = OFF did not take effect on the step's connection",
         ));
     }
     conn.execute_sql_unprepared("BEGIN IMMEDIATE").await?;
@@ -1648,13 +1680,10 @@ async fn foreign_keys_off(
         .fetch_all_sql_unprepared_with_binds("PRAGMA foreign_key_check", &[])
         .await?;
     if !violations.is_empty() {
-        return Err(StepFailure(
-            format!(
-                "PRAGMA foreign_key_check found rows that violate a foreign key: {}",
-                describe_fk_violations(&violations)
-            ),
-            None,
-        ));
+        return Err(StepFailure::new(format!(
+            "PRAGMA foreign_key_check found rows that violate a foreign key: {}",
+            describe_fk_violations(&violations)
+        )));
     }
     locked
         .check_lock()
@@ -2399,20 +2428,29 @@ impl Locked {
             },
         };
         let ms = elapsed(clock);
+        // The schema epoch (docs/solutions/patterns/ddl-on-live-engine.md):
+        // a step that changed the schema leaves no connection holding
+        // statements prepared against the old one — a no-transaction step
+        // that failed part-way included, its statements before the failing
+        // one committed.
+        let changed_schema = match &outcome {
+            Ok(()) => true,
+            Err(failure) => failure.changed_schema(),
+        };
+        if changed_schema {
+            engine
+                .refresh_pool()
+                .await
+                .map_err(|e| db_error("refreshing the pool after the step", e))?;
+        }
         match outcome {
-            Ok(()) => {
-                engine
-                    .refresh_pool()
-                    .await
-                    .map_err(|e| db_error("refreshing the pool after the step", e))?;
-                Ok(StepOutcome {
-                    ok: true,
-                    ms,
-                    error: None,
-                    message: None,
-                })
-            }
-            Err(StepFailure(error, counted)) => {
+            Ok(()) => Ok(StepOutcome {
+                ok: true,
+                ms,
+                error: None,
+                message: None,
+            }),
+            Err(StepFailure { error, counted, .. }) => {
                 // A failed validate or unique step names its count and where
                 // `up` resumes; counted only now, never on the success path.
                 let error = match counted {
@@ -2702,8 +2740,7 @@ mod tests {
         assert!(outcome.is_ok() && close);
         let (outcome, close) = foreign_keys_off_outcome(Ok(()), Ok(()));
         assert!(outcome.is_ok() && !close);
-        let (outcome, close) =
-            foreign_keys_off_outcome(Err(StepFailure("boom".to_string(), None)), Ok(()));
+        let (outcome, close) = foreign_keys_off_outcome(Err(StepFailure::new("boom")), Ok(()));
         assert!(outcome.is_err() && close);
     }
 

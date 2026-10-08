@@ -748,8 +748,44 @@ pub async fn internal_migrate(
         run_passes(engine.clone(), opts, report).await
     }
     .await;
+    let outcome = match outcome {
+        Err(err) => Err(refresh_after_failed_pass(&engine, report, err).await),
+        ok => ok,
+    };
     let released = lock.release().await;
     outcome.and(released)
+}
+
+/// The schema epoch after a pass that failed
+/// (`docs/solutions/patterns/ddl-on-live-engine.md`): each table's plan and
+/// each enum type statement commits on its own, so a pass that fails at one
+/// leaves the ones before it applied, and the engine (live, under
+/// `ferro.migrate()` or `create_tables()`) refreshes its pool as after a
+/// pass that finished. `err` is the pass's failure, returned as it is
+/// unless the refresh fails too, which says both.
+async fn refresh_after_failed_pass(
+    engine: &EngineHandle,
+    report: &PassReport,
+    err: PyErr,
+) -> PyErr {
+    let changed_schema = report
+        .executed
+        .statements
+        .iter()
+        .any(|statement| statement.role == Role::Schema);
+    if !changed_schema {
+        return err;
+    }
+    match engine.refresh_pool().await {
+        Ok(()) => err,
+        Err(e) => crate::errors::map_db_error(
+            &format!(
+                "Auto-migrate failed after applying DDL ({err}), and refreshing the connection \
+                 pool failed"
+            ),
+            e,
+        ),
+    }
 }
 
 /// [`internal_migrate`] as a Python door returns it: the report's wire form,

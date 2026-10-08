@@ -2067,6 +2067,53 @@ async def test_db_check_reconnect_is_idempotent(db_url):
 
 @pytest.mark.asyncio
 @pytest.mark.postgres_only
+async def test_pg_a_pass_that_fails_after_committing_a_table_refreshes_the_pool(
+    db_url, clean_registry
+):
+    """Each table's plan commits on its own: when the second table's fails,
+    the first's ADD COLUMN stands, so the engine's pool is refreshed as
+    after a pass that finished, and a query prepared before the pass does
+    not run its stale plan against the wider table."""
+
+    class AlphaWiden(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        title: str
+        summary: str | None = None
+
+    class ZuluRetype(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        amount: int | None = None
+
+    await ferro.connect(db_url, name="app")
+    await execute(
+        'CREATE TABLE "alphawiden" ("id" serial PRIMARY KEY, "title" varchar NOT NULL)',
+        using="app",
+    )
+    await execute('INSERT INTO "alphawiden" ("title") VALUES (\'Q1\')', using="app")
+    await execute(
+        'CREATE TABLE "zuluretype" ("id" serial PRIMARY KEY, "amount" varchar)',
+        using="app",
+    )
+    await execute(
+        'INSERT INTO "zuluretype" ("amount") VALUES (\'not-a-number\')', using="app"
+    )
+    # Prepare (and cache) the query on every connection of the pool.
+    for _ in range(20):
+        assert len(await fetch_all('SELECT * FROM "alphawiden"', using="app")) == 1
+
+    with pytest.raises(Exception, match="Auto-migrate DDL failed") as raised:
+        await ferro.migrate(using="app")
+
+    assert schema_steps(raised.value.report) == [
+        ("alphawiden", 'ALTER TABLE "alphawiden" ADD COLUMN "summary" varchar'),
+    ]
+    for _ in range(20):
+        rows = await fetch_all('SELECT * FROM "alphawiden"', using="app")
+        assert [row["summary"] for row in rows] == [None]
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
 async def test_pg_failed_migration_rolls_back_whole_table_plan(db_url, clean_registry):
     """FF-G G3: a mid-plan DDL failure on Postgres leaves the table exactly
     as it was — earlier statements of the same table's plan are rolled back.
