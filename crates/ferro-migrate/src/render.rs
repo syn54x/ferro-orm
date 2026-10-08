@@ -1,4 +1,4 @@
-//! Per-dialect rendering of a [`MigrationPlan`]: each op becomes the exact
+//! Per-dialect rendering of a [`crate::Plan`]: each op becomes the exact
 //! statements every migration door executes for it, through the
 //! `ferro_ddl_lowering` renderers the reconciliation pass has always used.
 
@@ -7,7 +7,7 @@ use crate::emit::{
     find_foreign_key, find_model, render_add_fk_sql, render_index_sql, standalone_indexes,
 };
 use crate::plan::{index_models, planned_before, relabels_rows};
-use crate::{Dialect, EmissionError, MigrationOp, MigrationPlan, Report, render_create_table};
+use crate::{Dialect, EmissionError, MigrationOp, Report, render_create_table};
 use ferro_ddl_lowering::{
     ConstraintMode, InPlaceChange, IndexMode, ResolvedStorage, Subject, fk_action_from_str,
     fk_action_sql, primary_key_kept_warning, quote_ident, render_check_addition, render_check_drop,
@@ -56,8 +56,8 @@ impl RenderedOp {
 /// Reject an envelope whose declarations cannot render: a row policy whose
 /// clauses do not resolve (a shorthand over a column the table lacks, or over
 /// a storage the shorthand does not support). The planner reads such a
-/// policy as absent; [`render_plan`] calls this on both snapshots, so a plan
-/// built from invalid IR never yields a statement.
+/// policy as absent; [`crate::Plan::render`] calls this on both sides, so a
+/// plan built from invalid IR never yields a statement.
 ///
 /// # Errors
 /// An [`EmissionError`] naming the policy and the reason.
@@ -78,34 +78,47 @@ pub fn validate_schema_ir(ir: &IrEnvelope<SchemaIrPayload>) -> Result<(), Emissi
     Ok(())
 }
 
-/// Render every op of `plan` for `dialect`, in plan order. `old` and `new`
-/// are the snapshots the plan was decided from: an op reads the declaration it
-/// creates from `new` and the live shape it changes from `old` as the plan's
-/// renames leave it ([`crate::plan::planned_before`]).
+/// `ops` rendered for `dialect`, as one plan from `old` to `new`, in order:
+/// the generator's own renders, between the stages it builds on either side
+/// of a step, which no single plan holds. Every op of a plan with renames
+/// names its table and columns as the renames leave `old`, so `old` is read
+/// as the planner leaves it ([`crate::plan::planned_before`]). The same
+/// renderers in a mode ([`render_from`]), never a second one (AGENTS.md §
+/// I-1).
+pub(crate) fn render_ops(
+    ops: &[MigrationOp],
+    old: &IrEnvelope<SchemaIrPayload>,
+    new: &IrEnvelope<SchemaIrPayload>,
+    dialect: Dialect,
+    constraints: ConstraintMode,
+) -> Result<Vec<RenderedOp>, EmissionError> {
+    validate_schema_ir(old)?;
+    render_from(
+        ops,
+        planned_before(old, new, dialect).as_ref(),
+        new,
+        dialect,
+        constraints,
+    )
+}
+
+/// `ops` rendered for `dialect` against `old` exactly as given (already the
+/// planned-before side) and `new`, in order, every foreign key and check
+/// added in `constraints` mode: `NOT VALID` is the generator's staged
+/// constraint on an existing Postgres table (ADR-0043). An op reads the
+/// declaration it creates from `new` and the shape it changes from `old`.
 ///
-/// A native enum type a `CreateEnumType` op of this plan creates is created
+/// A native enum type a `CreateEnumType` op among `ops` creates is created
 /// there and only there; an `AddTable` / `AddColumn` of any other native enum
 /// type keeps its idempotent guard.
 ///
 /// # Errors
-/// An [`EmissionError`] when an op cannot be applied safely (adding a NOT NULL
-/// column with no backfill, dropping a primary-key column), when the IR lacks
-/// what an op names, or when the op cannot exist on `dialect`.
-pub fn render_plan(
-    plan: &MigrationPlan,
-    old: &IrEnvelope<SchemaIrPayload>,
-    new: &IrEnvelope<SchemaIrPayload>,
-    dialect: Dialect,
-) -> Result<Vec<RenderedOp>, EmissionError> {
-    render_plan_in(plan, old, new, dialect, ConstraintMode::Plain)
-}
-
-/// [`render_plan`] with every foreign key and check added in `constraints`
-/// mode: `NOT VALID` is the generator's staged constraint on an existing
-/// Postgres table (ADR-0043). The same renderers in a mode, never a second
-/// one (AGENTS.md § I-1).
-pub(crate) fn render_plan_in(
-    plan: &MigrationPlan,
+/// An [`EmissionError`] when a side carries a declaration that cannot render,
+/// when an op cannot be applied safely (adding a NOT NULL column with no
+/// backfill, dropping a primary-key column), when the IR lacks what an op
+/// names, or when the op cannot exist on `dialect`.
+pub(crate) fn render_from(
+    ops: &[MigrationOp],
     old: &IrEnvelope<SchemaIrPayload>,
     new: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
@@ -113,18 +126,13 @@ pub(crate) fn render_plan_in(
 ) -> Result<Vec<RenderedOp>, EmissionError> {
     validate_schema_ir(old)?;
     validate_schema_ir(new)?;
-    // Every op of a plan with renames names its table and columns as the
-    // renames leave them: it reads `old` as the planner left it.
-    let old = planned_before(old, new, dialect);
-    let old = old.as_ref();
     let old_models = index_models(&old.payload.models);
     let new_models = index_models(&new.payload.models);
     // A type this plan creates, or that `old` already declares, needs no
     // guarded `CREATE TYPE` beside a table or column of it (ADR-0021: a reused
     // type is neither created nor dropped). A live `old` declares no enum
     // type — introspection reads none — so the pass keeps every guard.
-    let types_created_by_plan: BTreeSet<String> = plan
-        .operations
+    let types_created_by_plan: BTreeSet<String> = ops
         .iter()
         .filter_map(|op| match op {
             MigrationOp::CreateEnumType { type_name, .. } => Some(type_name.clone()),
@@ -144,8 +152,8 @@ pub(crate) fn render_plan_in(
     // Enum types shared across new tables: each idempotent guard once.
     let mut emitted_type_guards: HashSet<String> = HashSet::new();
 
-    let mut rendered = Vec::with_capacity(plan.operations.len());
-    for op in &plan.operations {
+    let mut rendered = Vec::with_capacity(ops.len());
+    for op in ops {
         let mut out = RenderedOp::new(op);
         match op {
             MigrationOp::AddEnumLabel { type_name, label } => {

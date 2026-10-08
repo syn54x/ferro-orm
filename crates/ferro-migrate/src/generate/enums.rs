@@ -21,7 +21,7 @@
 //! later step can write the label once it is committed (the planner's order,
 //! which the Alembic bridge translates as is; the comparator slot rule is
 //! gone, ADR-0041). Its statement is the reconciliation pass's (`render_pg_enum_add_value`
-//! through [`render_plan`]); its down reverses nothing, because Postgres cannot
+//! through the one renderer); its down reverses nothing, because Postgres cannot
 //! drop an enum label, and says so. SQLite stores labels as text: nothing to do.
 //!
 //! A label rename and a type rename are rename ops of the `schema` step,
@@ -41,7 +41,8 @@
 
 use super::{GenerateError, Rendering, refuse_unrendered, step_text};
 use crate::directory::Headers;
-use crate::{Dialect, MigrationOp, MigrationPlan, render_plan};
+use crate::render::render_ops;
+use crate::{Dialect, MigrationOp};
 use ferro_ddl_lowering::{quote_ident, quote_label};
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload};
 use std::collections::BTreeMap;
@@ -152,11 +153,13 @@ pub fn render_labels_step(
     dialect: Dialect,
 ) -> Result<Rendering, GenerateError> {
     debug_assert!(step_ops.iter().all(is_label_addition), "{step_ops:?}");
-    let plan = MigrationPlan {
-        operations: step_ops.to_vec(),
-        ..MigrationPlan::default()
-    };
-    let rendered = render_plan(&plan, before, after, dialect)?;
+    let rendered = render_ops(
+        step_ops,
+        before,
+        after,
+        dialect,
+        ferro_ddl_lowering::ConstraintMode::Plain,
+    )?;
     refuse_unrendered(&rendered, dialect)?;
     let statements: Vec<String> = rendered
         .into_iter()

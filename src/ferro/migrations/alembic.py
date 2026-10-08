@@ -653,24 +653,28 @@ def _upgrade_plan(
                 f"`ferro migrate new`"
             )
         op["verdict"] = verdict
-    rendered = iter(
-        json.loads(
-            _core._render_plan_ops(
-                live.schema_ir,
-                declared_json,
-                dialect,
-                json.dumps(
-                    [op for op in operations if not _demands_values(op, op["verdict"])]
-                ),
-            )
+    unrendered = [
+        index
+        for index, op in enumerate(operations)
+        if _demands_values(op, op["verdict"])
+    ]
+    rendered = json.loads(
+        _core._plan_from_ir(
+            live.schema_ir,
+            declared_json,
+            dialect,
+            _DESTRUCTIVE,
+            True,
+            live.facts,
+            unrendered,
         )
-    )
+    )["operations"]
     kept = []
-    for op in operations:
-        if _demands_values(op, op["verdict"]):
+    for index, (op, written) in enumerate(zip(operations, rendered)):
+        if index in unrendered:
             kept.append({**op, "statements": [], "reports": []})
             continue
-        written = {**next(rendered), "verdict": op["verdict"]}
+        written = {**written, "verdict": op["verdict"]}
         # An op the pass renders to nothing at all (a SQLite type change
         # whose storage is the same) is one the pass does not run: neither
         # does the revision. One it only warns about has no statement to

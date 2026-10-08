@@ -14,8 +14,8 @@
 //! decides *where* in the plan each verdict lands.
 
 use crate::{
-    Dialect, LiveCheckValidity, LiveFkValidity, LiveIndexValidity, MigrationOp, MigrationPlan,
-    PlanOptions, emit,
+    Dialect, LiveCheckValidity, LiveFkValidity, LiveIndexValidity, MigrationOp, Plan, PlanOptions,
+    emit,
 };
 use ferro_ddl_lowering::Report;
 pub(crate) use ferro_ddl_lowering::and_list;
@@ -304,7 +304,7 @@ fn declared_row_security(model: &SchemaModel) -> LiveRowSecurity {
             .iter()
             .map(|policy| {
                 // A policy whose clauses cannot render is invalid IR, which
-                // `render_plan` rejects before any statement of this plan can
+                // `Plan::render` rejects before any statement of this plan can
                 // run (`validate_schema_ir`).
                 let (using, with_check) = row_policy_clauses(model, policy).unwrap_or_default();
                 LiveRowPolicy {
@@ -359,7 +359,7 @@ fn declared_row_security(model: &SchemaModel) -> LiveRowSecurity {
 /// plan from a declared `old` that already holds the new names, and every
 /// plan over a modelset without hints, is unchanged by them. A refused hint
 /// ([`HintError`]) applies no rename and stands in
-/// [`MigrationPlan::reports`] as [`crate::ReportKind::HintRefused`]; the generator
+/// [`Plan::reports`] as [`crate::ReportKind::HintRefused`]; the generator
 /// refuses it before writing anything.
 ///
 /// # Errors
@@ -371,7 +371,7 @@ pub fn plan_from_ir(
     dialect: Dialect,
     facts: &LiveFacts,
     options: PlanOptions,
-) -> Result<MigrationPlan, PlanError> {
+) -> Result<Plan, PlanError> {
     facts.cover(old)?;
     // The snapshot side reads no fact, whatever the value carries.
     let declared = LiveFacts::declared();
@@ -404,15 +404,16 @@ pub fn plan_from_ir(
 
 /// `old` as the renames [`plan_from_ir`]`(old, new, dialect, …)` plans leave
 /// it: the side every op of that plan but the renames was decided against,
-/// and so the side every consumer reads an op's table from — rendering
-/// ([`crate::render_plan`]), the reverse ([`reverse_live_plan`]) and the
-/// generator's step assignment. A type change of a renamed column names the
-/// column by its new name, which only this side holds.
+/// which the [`Plan`] holds and renders against. The generator's own renders
+/// between stages ([`crate::render::render_ops`]), the reverse
+/// ([`reverse_live_plan`]) and the generator's step assignment read it too. A
+/// type change of a renamed column names the column by its new name, which
+/// only this side holds.
 ///
 /// Borrowed when `new` declares no live hint (or a refused one, which
 /// renames nothing), so a side that already holds the new names — a
 /// generator's renamed parent — is its own.
-pub fn planned_before<'a>(
+pub(crate) fn planned_before<'a>(
     old: &'a IrEnvelope<SchemaIrPayload>,
     new: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
@@ -682,17 +683,18 @@ fn renamed_facts(
 }
 
 /// Every change [`plan_from_ir`] plans once the tables and columns of `old`
-/// and `new` are matched by name.
+/// and `new` are matched by name: `old` is the planned-before side the plan
+/// holds.
 fn plan_named(
     old: &IrEnvelope<SchemaIrPayload>,
     new: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
     facts: &LiveFacts,
     options: PlanOptions,
-) -> Result<MigrationPlan, PlanError> {
+) -> Result<Plan, PlanError> {
     let old_models = index_models(&old.payload.models);
     let new_models = index_models(&new.payload.models);
-    let mut plan = MigrationPlan::default();
+    let mut plan = Plan::between(old, new, dialect);
 
     let added: Vec<&SchemaModel> = new_models
         .iter()
@@ -792,7 +794,7 @@ fn plan_existing_table(
     facts: &LiveTableFacts,
     side: OldSide,
     options: PlanOptions,
-    plan: &mut MigrationPlan,
+    plan: &mut Plan,
 ) {
     let table = new_model.table_name.as_str();
     let mut ops = Vec::new();
@@ -923,7 +925,7 @@ fn plan_row_security(
     reports: &mut Vec<Report>,
 ) {
     // An Err is a declared policy whose clauses cannot render: invalid IR,
-    // which `render_plan` rejects (`validate_schema_ir`) before anything
+    // which `Plan::render` rejects (`validate_schema_ir`) before anything
     // executes.
     let Ok(decision) = plan_row_security_reconcile(model, live, dialect, destructive) else {
         return;
@@ -1139,7 +1141,7 @@ fn plan_enum_label_additions(
     old: &IrEnvelope<SchemaIrPayload>,
     new: &IrEnvelope<SchemaIrPayload>,
     facts: &LiveFacts,
-    plan: &mut MigrationPlan,
+    plan: &mut Plan,
 ) {
     let declared = declared_enum_types(&new.payload.models);
     let before = declared_enum_types(&old.payload.models);
@@ -1178,7 +1180,7 @@ fn plan_enum_label_additions(
 fn plan_enum_label_removals(
     old: &IrEnvelope<SchemaIrPayload>,
     new: &IrEnvelope<SchemaIrPayload>,
-    plan: &mut MigrationPlan,
+    plan: &mut Plan,
 ) {
     let before = declared_enum_labels(&old.payload.models);
     let after = declared_enum_labels(&new.payload.models);
@@ -1213,7 +1215,7 @@ fn plan_enum_type_creation(
     new: &IrEnvelope<SchemaIrPayload>,
     old_models: &BTreeMap<String, &SchemaModel>,
     facts: &LiveFacts,
-    plan: &mut MigrationPlan,
+    plan: &mut Plan,
 ) {
     let declared = declared_enum_types(&new.payload.models);
     let before = declared_enum_types(&old.payload.models);
@@ -1256,7 +1258,7 @@ fn plan_enum_type_drops(
     new: &IrEnvelope<SchemaIrPayload>,
     old_models: &BTreeMap<String, &SchemaModel>,
     new_models: &BTreeMap<String, &SchemaModel>,
-    plan: &mut MigrationPlan,
+    plan: &mut Plan,
 ) {
     let before = declared_enum_types(&old.payload.models);
     let after = declared_enum_types(&new.payload.models);
@@ -2654,7 +2656,7 @@ fn declared_fk_name(
 /// # Errors
 /// [`PlanError::MissingLiveFacts`] when a table of `live` has no facts.
 pub fn reverse_live_plan(
-    forward: &MigrationPlan,
+    forward: &Plan,
     live: &IrEnvelope<SchemaIrPayload>,
     facts: &LiveFacts,
     declared: &IrEnvelope<SchemaIrPayload>,
@@ -2953,7 +2955,7 @@ pub fn reverse_live_plan(
 }
 
 /// Render `plan` ([`reverse_live_plan`]) for `dialect`: each planned step
-/// through [`crate::render_plan`] from `declared` back to the live side, each
+/// through the one renderer from `declared` back to the live side, each
 /// restore through the `ferro_ddl_lowering` renderers, an irreversible step
 /// to no statement.
 ///
@@ -2961,7 +2963,7 @@ pub fn reverse_live_plan(
 /// the renderer leaves at no statement: a re-added column that demands values
 /// of existing rows, which the pass has no statement for and the Alembic
 /// bridge writes as the plain op under `# ferro: data-dependent` — the same
-/// subset its upgrade leaves out of `render_plan` (ADR-0041).
+/// subset its upgrade leaves unrendered (ADR-0041).
 ///
 /// # Errors
 /// An [`crate::EmissionError`] when a planned step cannot render.
@@ -2989,14 +2991,12 @@ pub fn render_reverse_plan(
             _ => None,
         })
         .collect();
-    let mut rendered = crate::render_plan(
-        &MigrationPlan {
-            operations: planned,
-            ..MigrationPlan::default()
-        },
+    let mut rendered = crate::render::render_ops(
+        &planned,
         declared,
         &plan.before,
         dialect,
+        ferro_ddl_lowering::ConstraintMode::Plain,
     )?
     .into_iter();
     let before_models = index_models(&plan.before.payload.models);
@@ -3100,14 +3100,12 @@ fn rename_statements(
             }
         }
     }
-    let rendered = crate::render_plan(
-        &MigrationPlan {
-            operations: vec![op.clone()],
-            ..MigrationPlan::default()
-        },
+    let rendered = crate::render::render_ops(
+        std::slice::from_ref(op),
         before,
         &view,
         dialect,
+        ferro_ddl_lowering::ConstraintMode::Plain,
     )?;
     Ok(rendered
         .into_iter()
@@ -3176,7 +3174,7 @@ mod reverse_tests {
     }
 
     fn statements(
-        forward: &MigrationPlan,
+        forward: &Plan,
         live: &IrEnvelope<SchemaIrPayload>,
         facts: &LiveFacts,
         declared: &IrEnvelope<SchemaIrPayload>,
@@ -3195,7 +3193,7 @@ mod reverse_tests {
         let live = envelope(vec![card(vec![column("id", "int", false)])]);
         let facts = live_facts(LiveTableFacts::default());
         let reverse = reverse_live_plan(
-            &MigrationPlan::default(),
+            &Plan::unplaced(Vec::new()),
             &live,
             &facts,
             &live,
@@ -3209,13 +3207,13 @@ mod reverse_tests {
     fn a_snapshot_only_op_in_a_live_plan_is_refused_naming_it() {
         let live = envelope(vec![card(vec![column("id", "int", false)])]);
         let facts = live_facts(LiveTableFacts::default());
-        let forward = MigrationPlan {
+        let forward = Plan {
             operations: vec![MigrationOp::RemoveEnumLabel {
                 type_name: "status".into(),
                 label: "gone".into(),
                 columns: vec![],
             }],
-            ..MigrationPlan::default()
+            ..Plan::unplaced(Vec::new())
         };
         let err = reverse_live_plan(&forward, &live, &facts, &live, Dialect::Postgres)
             .expect_err("refused");
@@ -3340,12 +3338,12 @@ mod reverse_tests {
             }],
             ..LiveTableFacts::default()
         });
-        let forward = MigrationPlan {
+        let forward = Plan {
             operations: vec![MigrationOp::DropCheck {
                 table: "card".into(),
                 name: "ck_card_legacy".into(),
             }],
-            ..MigrationPlan::default()
+            ..Plan::unplaced(Vec::new())
         };
         assert_eq!(
             statements(&forward, &live, &facts, &declared),
@@ -3354,12 +3352,12 @@ mod reverse_tests {
                     .to_string()
             ]]
         );
-        let rebuild = MigrationPlan {
+        let rebuild = Plan {
             operations: vec![MigrationOp::RebuildCheck {
                 table: "card".into(),
                 name: "ck_card_legacy".into(),
             }],
-            ..MigrationPlan::default()
+            ..Plan::unplaced(Vec::new())
         };
         assert_eq!(
             statements(&rebuild, &live, &facts, &declared),
@@ -3389,12 +3387,12 @@ mod reverse_tests {
             },
             ..LiveTableFacts::default()
         });
-        let forward = MigrationPlan {
+        let forward = Plan {
             operations: vec![MigrationOp::RebuildRowPolicy {
                 table: "card".into(),
                 name: "rls_card_mine".into(),
             }],
-            ..MigrationPlan::default()
+            ..Plan::unplaced(Vec::new())
         };
         assert_eq!(
             statements(&forward, &live, &facts, &live),
@@ -3409,12 +3407,12 @@ mod reverse_tests {
     #[test]
     fn a_label_addition_is_irreversible_and_says_why() {
         let live = envelope(vec![card(vec![column("id", "int", false)])]);
-        let forward = MigrationPlan {
+        let forward = Plan {
             operations: vec![MigrationOp::AddEnumLabel {
                 type_name: "flavor".into(),
                 label: "salty".into(),
             }],
-            ..MigrationPlan::default()
+            ..Plan::unplaced(Vec::new())
         };
         let reverse = reverse_live_plan(
             &forward,

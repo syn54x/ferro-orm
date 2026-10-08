@@ -4,9 +4,10 @@
 //! [`ferro_schema_ir::SchemaIrPayload`] snapshots — declared against declared,
 //! or declared against the live database read into an IR plus its
 //! [`LiveFacts`] — and decides every change for the whole modelset as one
-//! ordered [`MigrationPlan`]. [`render_plan`] lowers each op to executable,
-//! dialect-specific DDL through the `ferro_ddl_lowering` functions every
-//! migration door shares (AGENTS.md § I-1).
+//! ordered [`Plan`], which holds the two sides it was planned between.
+//! [`Plan::render`] lowers each op to executable, dialect-specific DDL through
+//! the `ferro_ddl_lowering` functions every migration door shares (AGENTS.md
+//! § I-1).
 //!
 //! The in-house migration system's offline half lives beside it: the schema
 //! snapshot ([`snapshot`]), the migrations-directory reader ([`directory`]) and
@@ -36,7 +37,7 @@ pub use plan::{
     Hint, HintError, LiveCheckFact, LiveFacts, LiveTableFacts, OldSide, PlanError, live_hints,
     plan_from_ir,
 };
-pub use render::{RenderedOp, render_plan, validate_schema_ir};
+pub use render::{RenderedOp, validate_schema_ir};
 pub use run_plan::{
     Direction, ExecMode, Origin, PlannedStep, RecordKind, RunPlan, RunRefusal, RunStatus,
     StepRecord, Target, plan_run,
@@ -454,9 +455,14 @@ pub struct LiveIndexValidity {
     pub valid: bool,
 }
 
-/// The whole modelset's ordered operations plus the reports planning raised.
-#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
-pub struct MigrationPlan {
+/// The whole modelset's ordered operations plus the reports planning raised,
+/// holding the sides they were decided between: the planned-before side
+/// (the old snapshot as the plan's renames leave it, which every op but the
+/// renames names its tables and columns by), the target and the dialect. An
+/// op is name-only, so it means something only against those sides; the plan
+/// renders itself ([`Plan::render`]) and no caller supplies them again.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Plan {
     /// Operations to apply, in execution order (see [`plan_from_ir`]).
     pub operations: Vec<MigrationOp>,
     /// What planning reports beside its ops (a refused rename hint, leftover
@@ -467,6 +473,12 @@ pub struct MigrationPlan {
     /// fenced the way the model says is still not fenced on the next run.
     /// Reports an op raises while rendering travel on its [`RenderedOp`].
     pub reports: Vec<Report>,
+    /// The old snapshot as the plan's renames leave it.
+    before: ferro_schema_ir::IrEnvelope<ferro_schema_ir::SchemaIrPayload>,
+    /// The snapshot the plan leads to.
+    target: ferro_schema_ir::IrEnvelope<ferro_schema_ir::SchemaIrPayload>,
+    /// The dialect it was planned for.
+    dialect: Dialect,
 }
 
 /// Whether a plan's own ops answer a [`Report`]: the change it reports is
@@ -561,10 +573,108 @@ pub struct PlanOptions {
     pub destructive: bool,
 }
 
-impl MigrationPlan {
+impl Plan {
+    /// A plan with no op and no report yet, between `before` (already the
+    /// planned-before side) and `target` on `dialect`.
+    pub(crate) fn between(
+        before: &ferro_schema_ir::IrEnvelope<ferro_schema_ir::SchemaIrPayload>,
+        target: &ferro_schema_ir::IrEnvelope<ferro_schema_ir::SchemaIrPayload>,
+        dialect: Dialect,
+    ) -> Self {
+        Self {
+            operations: Vec::new(),
+            reports: Vec::new(),
+            before: before.clone(),
+            target: target.clone(),
+            dialect,
+        }
+    }
+
+    /// `operations` as a plan between two empty modelsets on Postgres: a
+    /// test's hand-built op list, for what reads only the ops.
+    #[cfg(test)]
+    pub(crate) fn unplaced(operations: Vec<MigrationOp>) -> Self {
+        let empty = ferro_schema_ir::IrEnvelope {
+            ir_kind: "schema".into(),
+            ir_version: 1,
+            payload: ferro_schema_ir::SchemaIrPayload {
+                dialect_agnostic: true,
+                models: Vec::new(),
+            },
+        };
+        Self {
+            operations,
+            ..Self::between(&empty, &empty, Dialect::Postgres)
+        }
+    }
+
     /// Returns `true` when there are no operations to run.
     pub fn is_empty(&self) -> bool {
         self.operations.is_empty()
+    }
+
+    /// The dialect the plan was decided for.
+    pub fn dialect(&self) -> Dialect {
+        self.dialect
+    }
+
+    /// Every op rendered for the plan's dialect, in plan order: what every
+    /// migration door executes for it (AGENTS.md § I-1). A native enum type a
+    /// `CreateEnumType` op of this plan creates is created there and only
+    /// there; an `AddTable` / `AddColumn` of any other native enum type keeps
+    /// its idempotent guard.
+    ///
+    /// # Errors
+    /// An [`EmissionError`] when a side carries a declaration that cannot
+    /// render ([`validate_schema_ir`]), when an op cannot be applied safely
+    /// (adding a NOT NULL column with no backfill, dropping a primary-key
+    /// column), when a side lacks what an op names, or when the op cannot
+    /// exist on the dialect.
+    pub fn render(&self) -> Result<Vec<RenderedOp>, EmissionError> {
+        let all: Vec<usize> = (0..self.operations.len()).collect();
+        self.render_ops(&all)
+    }
+
+    /// The ops at `ops` (indexes into [`Self::operations`], in the order
+    /// given) rendered as [`Self::render`] renders them, as if they were the
+    /// whole plan: a door that writes some ops its own way (the Alembic
+    /// bridge's demanding column adds) renders the rest.
+    ///
+    /// # Errors
+    /// What [`Self::render`] raises, and an index past the plan's ops.
+    pub fn render_ops(&self, ops: &[usize]) -> Result<Vec<RenderedOp>, EmissionError> {
+        self.render_in(ferro_ddl_lowering::ConstraintMode::Plain, ops)
+    }
+
+    /// [`Self::render_ops`] with every foreign key and check added in
+    /// `constraints` mode: `NOT VALID` is the generator's staged constraint
+    /// on an existing Postgres table (ADR-0043).
+    pub(crate) fn render_in(
+        &self,
+        constraints: ferro_ddl_lowering::ConstraintMode,
+        ops: &[usize],
+    ) -> Result<Vec<RenderedOp>, EmissionError> {
+        let selected = ops
+            .iter()
+            .map(|&index| {
+                self.operations
+                    .get(index)
+                    .cloned()
+                    .ok_or_else(|| EmissionError {
+                        message: format!(
+                            "op {index} is past the plan's {} ops",
+                            self.operations.len()
+                        ),
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        render::render_from(
+            &selected,
+            &self.before,
+            &self.target,
+            self.dialect,
+            constraints,
+        )
     }
 }
 
