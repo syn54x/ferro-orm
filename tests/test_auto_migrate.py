@@ -1,4 +1,3 @@
-import logging
 import re
 from typing import Annotated
 from uuid import UUID, uuid4
@@ -7,8 +6,9 @@ import pytest
 from pydantic import Field
 
 import ferro
-from ferro import BackRef, ManyToMany, Model, Relation
+from ferro import BackRef, ManyToMany, Model, PassReport, Relation
 from ferro.base import FerroField
+from tests._pass_harness import auto_migrate, on, schema_steps, warning_texts
 
 pytestmark = pytest.mark.backend_matrix
 
@@ -26,7 +26,25 @@ async def test_connect_with_auto_migrate(db_url):
 
     # Connect with auto_migrate=True
     # This should internally call the same logic as create_tables()
-    await ferro.connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    # In a full run the registry may hold other modules' models too: this
+    # test's own table is what it asserts.
+    assert [s for s in schema_steps(report) if s[0] == "automigrateduser"] == on(
+        db_url,
+        sqlite=[
+            (
+                "automigrateduser",
+                'CREATE TABLE IF NOT EXISTS "automigrateduser" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "username" varchar NOT NULL )',
+            ),
+        ],
+        postgres=[
+            (
+                "automigrateduser",
+                'CREATE TABLE IF NOT EXISTS "automigrateduser" ( "id" serial PRIMARY KEY NOT NULL, "username" varchar NOT NULL )',
+            ),
+        ],
+    )
+    assert not [w for w in warning_texts(report) if "automigrateduser" in w]
     async with ferro.engines.session():
 
         # We can verify it works by trying to call create_tables again
@@ -44,7 +62,23 @@ async def test_connect_without_auto_migrate(db_url):
     await ferro.connect(db_url, auto_migrate=False)
     async with ferro.engines.session():
         # Manual call still works
-        await ferro.create_tables()
+        report = await ferro.create_tables()
+        assert [s for s in schema_steps(report) if s[0] == "automigrateduser"] == on(
+            db_url,
+            sqlite=[
+                (
+                    "automigrateduser",
+                    'CREATE TABLE IF NOT EXISTS "automigrateduser" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "username" varchar NOT NULL )',
+                ),
+            ],
+            postgres=[
+                (
+                    "automigrateduser",
+                    'CREATE TABLE IF NOT EXISTS "automigrateduser" ( "id" serial PRIMARY KEY NOT NULL, "username" varchar NOT NULL )',
+                ),
+            ],
+        )
+        assert not [w for w in warning_texts(report) if "automigrateduser" in w]
         assert True
 
 
@@ -53,7 +87,7 @@ async def test_m2m_join_table_created_during_auto_migrate(db_url):
     """Verify that the many-to-many join table is created when auto_migrate=True.
     We clear registries, migrate a fresh in-memory DB, then use the M2M API; if the
     join table were not created, .add() would fail. No second connection needed."""
-    from ferro import clear_registry, connect, reset_engine
+    from ferro import clear_registry, reset_engine
     from ferro.registry import REGISTRY
 
     reset_engine()
@@ -70,7 +104,55 @@ async def test_m2m_join_table_created_during_auto_migrate(db_url):
         title: str
         actors: Relation[list["Actor"]] = BackRef()
 
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == on(
+        db_url,
+        sqlite=[
+            (
+                "actor",
+                'CREATE TABLE IF NOT EXISTS "actor" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "name" varchar NOT NULL )',
+            ),
+            (
+                "movie",
+                'CREATE TABLE IF NOT EXISTS "movie" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "title" varchar NOT NULL )',
+            ),
+            (
+                "actor_movies",
+                'CREATE TABLE IF NOT EXISTS "actor_movies" ( "actor_id" integer NOT NULL, "movie_id" integer NOT NULL, CONSTRAINT "fk_actor_movies_actor_id_actor" FOREIGN KEY ("actor_id") REFERENCES "actor" ("id") ON DELETE CASCADE, CONSTRAINT "fk_actor_movies_movie_id_movie" FOREIGN KEY ("movie_id") REFERENCES "movie" ("id") ON DELETE CASCADE )',
+            ),
+            (
+                "actor_movies",
+                'CREATE INDEX IF NOT EXISTS "idx_actor_movies_movie_id_actor_id" ON "actor_movies" ("movie_id", "actor_id")',
+            ),
+            (
+                "actor_movies",
+                'CREATE UNIQUE INDEX IF NOT EXISTS "uq_actor_movies_actor_id_movie_id" ON "actor_movies" ("actor_id", "movie_id")',
+            ),
+        ],
+        postgres=[
+            (
+                "actor",
+                'CREATE TABLE IF NOT EXISTS "actor" ( "id" serial PRIMARY KEY NOT NULL, "name" varchar NOT NULL )',
+            ),
+            (
+                "movie",
+                'CREATE TABLE IF NOT EXISTS "movie" ( "id" serial PRIMARY KEY NOT NULL, "title" varchar NOT NULL )',
+            ),
+            (
+                "actor_movies",
+                'CREATE TABLE IF NOT EXISTS "actor_movies" ( "actor_id" integer NOT NULL, "movie_id" integer NOT NULL, CONSTRAINT "fk_actor_movies_actor_id_actor" FOREIGN KEY ("actor_id") REFERENCES "actor" ("id") ON DELETE CASCADE, CONSTRAINT "fk_actor_movies_movie_id_movie" FOREIGN KEY ("movie_id") REFERENCES "movie" ("id") ON DELETE CASCADE )',
+            ),
+            (
+                "actor_movies",
+                'CREATE INDEX IF NOT EXISTS "idx_actor_movies_movie_id_actor_id" ON "actor_movies" ("movie_id", "actor_id")',
+            ),
+            (
+                "actor_movies",
+                'CREATE UNIQUE INDEX IF NOT EXISTS "uq_actor_movies_actor_id_movie_id" ON "actor_movies" ("actor_id", "movie_id")',
+            ),
+        ],
+    )
+    assert warning_texts(report) == []
     async with ferro.engines.session():
 
         actor = await Actor.create(name="Alice")
@@ -100,7 +182,7 @@ async def test_m2m_join_table_created_during_auto_migrate(db_url):
 @pytest.mark.sqlite_only
 async def test_uuid_m2m_join_table_columns_inherit_pk_type_and_nullability(db_url):
     """Runtime join-table DDL should derive FK column metadata from source PKs."""
-    from ferro import clear_registry, connect, reset_engine
+    from ferro import clear_registry, reset_engine
     from ferro.registry import REGISTRY
 
     reset_engine()
@@ -117,7 +199,30 @@ async def test_uuid_m2m_join_table_columns_inherit_pk_type_and_nullability(db_ur
         title: str
         actors: Relation[list["UuidActor"]] = BackRef()
 
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "uuidactor",
+            'CREATE TABLE IF NOT EXISTS "uuidactor" ( "id" CHAR(32) NOT NULL PRIMARY KEY, "name" varchar NOT NULL )',
+        ),
+        (
+            "uuidmovie",
+            'CREATE TABLE IF NOT EXISTS "uuidmovie" ( "id" CHAR(32) NOT NULL PRIMARY KEY, "title" varchar NOT NULL )',
+        ),
+        (
+            "uuidactor_movies",
+            'CREATE TABLE IF NOT EXISTS "uuidactor_movies" ( "uuidactor_id" CHAR(32) NOT NULL, "uuidmovie_id" CHAR(32) NOT NULL, CONSTRAINT "fk_uuidactor_movies_uuidactor_id_uuidactor" FOREIGN KEY ("uuidactor_id") REFERENCES "uuidactor" ("id") ON DELETE CASCADE, CONSTRAINT "fk_uuidactor_movies_uuidmovie_id_uuidmovie" FOREIGN KEY ("uuidmovie_id") REFERENCES "uuidmovie" ("id") ON DELETE CASCADE )',
+        ),
+        (
+            "uuidactor_movies",
+            'CREATE INDEX IF NOT EXISTS "idx_uuidactor_movies_uuidmovie_id_uuidactor_id" ON "uuidactor_movies" ("uuidmovie_id", "uuidactor_id")',
+        ),
+        (
+            "uuidactor_movies",
+            'CREATE UNIQUE INDEX IF NOT EXISTS "uq_uuidactor_movies_uuidactor_id_uuidmovie_id" ON "uuidactor_movies" ("uuidactor_id", "uuidmovie_id")',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with ferro.engines.session():
 
         import sqlite3
@@ -150,7 +255,7 @@ async def test_uuid_m2m_join_table_columns_inherit_pk_type_and_nullability(db_ur
 async def test_uuid_m2m_relationship_query_serializes_source_id(db_url):
     """UUID source PKs in M2M contexts should serialize for all query operations."""
     from ferro import Field as FerroFieldFn
-    from ferro import clear_registry, connect, reset_engine
+    from ferro import clear_registry, reset_engine
     from ferro.models import transaction
     from ferro.registry import REGISTRY
 
@@ -168,7 +273,55 @@ async def test_uuid_m2m_relationship_query_serializes_source_id(db_url):
         title: str = ""
         tags: Relation[list[UuidTag]] = ManyToMany(related_name="posts")
 
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == on(
+        db_url,
+        sqlite=[
+            (
+                "uuidpost",
+                'CREATE TABLE IF NOT EXISTS "uuidpost" ( "id" CHAR(32) NOT NULL PRIMARY KEY, "title" varchar NOT NULL )',
+            ),
+            (
+                "uuidtag",
+                'CREATE TABLE IF NOT EXISTS "uuidtag" ( "id" CHAR(32) NOT NULL PRIMARY KEY, "name" varchar NOT NULL )',
+            ),
+            (
+                "uuidpost_tags",
+                'CREATE TABLE IF NOT EXISTS "uuidpost_tags" ( "uuidpost_id" CHAR(32) NOT NULL, "uuidtag_id" CHAR(32) NOT NULL, CONSTRAINT "fk_uuidpost_tags_uuidpost_id_uuidpost" FOREIGN KEY ("uuidpost_id") REFERENCES "uuidpost" ("id") ON DELETE CASCADE, CONSTRAINT "fk_uuidpost_tags_uuidtag_id_uuidtag" FOREIGN KEY ("uuidtag_id") REFERENCES "uuidtag" ("id") ON DELETE CASCADE )',
+            ),
+            (
+                "uuidpost_tags",
+                'CREATE INDEX IF NOT EXISTS "idx_uuidpost_tags_uuidtag_id_uuidpost_id" ON "uuidpost_tags" ("uuidtag_id", "uuidpost_id")',
+            ),
+            (
+                "uuidpost_tags",
+                'CREATE UNIQUE INDEX IF NOT EXISTS "uq_uuidpost_tags_uuidpost_id_uuidtag_id" ON "uuidpost_tags" ("uuidpost_id", "uuidtag_id")',
+            ),
+        ],
+        postgres=[
+            (
+                "uuidpost",
+                'CREATE TABLE IF NOT EXISTS "uuidpost" ( "id" uuid PRIMARY KEY NOT NULL, "title" varchar NOT NULL )',
+            ),
+            (
+                "uuidtag",
+                'CREATE TABLE IF NOT EXISTS "uuidtag" ( "id" uuid PRIMARY KEY NOT NULL, "name" varchar NOT NULL )',
+            ),
+            (
+                "uuidpost_tags",
+                'CREATE TABLE IF NOT EXISTS "uuidpost_tags" ( "uuidpost_id" uuid NOT NULL, "uuidtag_id" uuid NOT NULL, CONSTRAINT "fk_uuidpost_tags_uuidpost_id_uuidpost" FOREIGN KEY ("uuidpost_id") REFERENCES "uuidpost" ("id") ON DELETE CASCADE, CONSTRAINT "fk_uuidpost_tags_uuidtag_id_uuidtag" FOREIGN KEY ("uuidtag_id") REFERENCES "uuidtag" ("id") ON DELETE CASCADE )',
+            ),
+            (
+                "uuidpost_tags",
+                'CREATE INDEX IF NOT EXISTS "idx_uuidpost_tags_uuidtag_id_uuidpost_id" ON "uuidpost_tags" ("uuidtag_id", "uuidpost_id")',
+            ),
+            (
+                "uuidpost_tags",
+                'CREATE UNIQUE INDEX IF NOT EXISTS "uq_uuidpost_tags_uuidpost_id_uuidtag_id" ON "uuidpost_tags" ("uuidpost_id", "uuidtag_id")',
+            ),
+        ],
+    )
+    assert warning_texts(report) == []
     async with ferro.engines.session():
 
         post = await UuidPost.create(title="Hello")
@@ -276,7 +429,19 @@ async def test_migrate_updates_adds_missing_columns_and_hydrates(
         await execute('INSERT INTO "miginvoice" ("number") VALUES (\'INV-1\')')
     ferro.reset_engine()
 
-    await ferro.connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == on(
+        db_url,
+        sqlite=[
+            ("miginvoice", 'ALTER TABLE "miginvoice" ADD COLUMN "memo" varchar'),
+            ("miginvoice", 'ALTER TABLE "miginvoice" ADD COLUMN "paid_date" DATE'),
+        ],
+        postgres=[
+            ("miginvoice", 'ALTER TABLE "miginvoice" ADD COLUMN "memo" varchar'),
+            ("miginvoice", 'ALTER TABLE "miginvoice" ADD COLUMN "paid_date" date'),
+        ],
+    )
+    assert warning_texts(report) == []
     async with ferro.engines.session():
 
         rows = await MigInvoice.all()
@@ -325,7 +490,11 @@ async def test_manual_migrate_on_live_pool_refreshes_cached_statements(
         rows_before = await MigReport.all()
         assert len(rows_before) == 1
 
-        await ferro.migrate()
+        report = await ferro.migrate()
+        assert schema_steps(report) == [
+            ("migreport", 'ALTER TABLE "migreport" ADD COLUMN "summary" varchar'),
+        ]
+        assert warning_texts(report) == []
 
         # Same query again: without the pool refresh this panics in the sqlx
         # worker and silently returns zero rows on SQLite.
@@ -356,10 +525,12 @@ async def test_migrate_updates_not_null_without_default_fails_loudly(
         name: str
         created_at: datetime
 
-    with pytest.raises(ValueError, match=r"migstrict\.created_at"):
-        await ferro.connect(db_url, migrate_updates=True)
+    with pytest.raises(ValueError, match=r"migstrict\.created_at") as raised:
+        await auto_migrate(db_url, updates=True)
 
 
+    assert schema_steps(raised.value.report) == []
+    assert warning_texts(raised.value.report) == []
 @pytest.mark.asyncio
 @pytest.mark.sqlite_only
 async def test_sqlite_type_drift_warns_and_leaves_column_untouched(
@@ -378,7 +549,11 @@ async def test_sqlite_type_drift_warns_and_leaves_column_untouched(
         count: int
 
     with pytest.warns(UserWarning, match=r"migdrift\.count.*ferro migrate new"):
-        await ferro.connect(db_url, migrate_updates=True)
+        report = await auto_migrate(db_url, updates=True)
+        assert schema_steps(report) == []
+        assert warning_texts(report) == [
+            "Column 'migdrift.count' is declared 'varchar' in the database but the model expects 'integer'. SQLite cannot change column types in place; generate a reviewed migration with `ferro migrate new` to migrate this column.",
+        ]
 
     columns = _sqlite_columns(db_url, "migdrift")
     assert (
@@ -403,7 +578,14 @@ async def test_sqlite_bytes_field_does_not_false_positive_blob_drift(
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        await ferro.connect(db_url, migrate_updates=True)
+        report = await auto_migrate(db_url, updates=True)
+        assert schema_steps(report) == [
+            (
+                "document",
+                'CREATE TABLE IF NOT EXISTS "document" ( "data" blob NOT NULL, "id" CHAR(32) NOT NULL PRIMARY KEY, "name" varchar NOT NULL )',
+            ),
+        ]
+        assert warning_texts(report) == []
 
     blob_warnings = [
         str(w.message) for w in caught if "blob" in str(w.message).lower()
@@ -435,7 +617,11 @@ async def test_sqlite_genuine_text_to_blob_diff_still_warns(
         payload: bytes = b""
 
     with pytest.warns(UserWarning, match=r"attachment\.payload.*expects 'blob'"):
-        await ferro.connect(db_url, migrate_updates=True)
+        report = await auto_migrate(db_url, updates=True)
+        assert schema_steps(report) == []
+        assert warning_texts(report) == [
+            "Column 'attachment.payload' is declared 'text' in the database but the model expects 'blob'. SQLite cannot change column types in place; generate a reviewed migration with `ferro migrate new` to migrate this column.",
+        ]
 
     # No DDL runs for SQLite type drift — the column is left as declared.
     columns = _sqlite_columns(db_url, "attachment")
@@ -456,12 +642,21 @@ async def test_pg_bytes_field_bytea_no_drift(
         name: str = ""
         data: bytes = b""
 
-    await ferro.connect(db_url, migrate_updates=True)  # creates docpg -> bytea
+    report = await auto_migrate(db_url, updates=True)  # creates docpg -> bytea
+    assert schema_steps(report) == [
+        (
+            "docpg",
+            'CREATE TABLE IF NOT EXISTS "docpg" ( "data" bytea NOT NULL, "id" uuid PRIMARY KEY NOT NULL, "name" varchar NOT NULL )',
+        ),
+    ]
+    assert warning_texts(report) == []
     ferro.reset_engine()
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        await ferro.connect(db_url, migrate_updates=True)  # reconnect: must be quiet
+        report = await auto_migrate(db_url, updates=True)  # reconnect: must be quiet
+        assert schema_steps(report) == []
+        assert warning_texts(report) == []
     blob_warnings = [
         str(w.message) for w in caught if "blob" in str(w.message).lower()
     ]
@@ -506,7 +701,11 @@ async def test_pg_datetime_over_external_naive_timestamp_warns_and_skips(
         occurred_at: dt.datetime
 
     with pytest.warns(UserWarning, match=r"event\.occurred_at.*db_type.*Alembic"):
-        await ferro.connect(db_url, migrate_updates=True)
+        report = await auto_migrate(db_url, updates=True)
+        assert schema_steps(report) == []
+        assert warning_texts(report) == [
+            "Column 'event.occurred_at' is 'timestamp' in the database but the model maps `datetime` to 'timestamptz'. Ferro will not auto-convert it — a timestamp/timestamptz cast reinterprets existing values under the connection's timezone and can silently shift your data. To keep the column as-is, annotate the field with db_type=\"timestamp\". To convert it intentionally, use a reviewed migration (Alembic) with an explicit source timezone.",
+        ]
 
     # The external column is untouched — no silent reinterpretation.
     assert (
@@ -539,7 +738,9 @@ async def test_pg_datetime_db_type_override_keeps_naive_no_drift(
 
     with _warnings.catch_warnings():
         _warnings.simplefilter("error", UserWarning)  # any drift warning -> failure
-        await ferro.connect(db_url, migrate_updates=True)
+        report = await auto_migrate(db_url, updates=True)
+        assert schema_steps(report) == []
+        assert warning_texts(report) == []
 
     assert (
         _pg_live_type(postgres_base_url, db_schema_name, "event2", "occurred_at")
@@ -561,7 +762,14 @@ async def test_pg_ferro_created_timestamptz_no_drift(
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         occurred_at: dt.datetime
 
-    await ferro.connect(db_url, auto_migrate=True)  # Ferro creates it -> timestamptz
+    report = await auto_migrate(db_url)  # Ferro creates it -> timestamptz
+    assert schema_steps(report) == [
+        (
+            "event3",
+            'CREATE TABLE IF NOT EXISTS "event3" ( "id" serial PRIMARY KEY NOT NULL, "occurred_at" timestamp with time zone NOT NULL )',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with ferro.engines.session():
         assert (
             _pg_live_type(postgres_base_url, db_schema_name, "event3", "occurred_at")
@@ -571,7 +779,9 @@ async def test_pg_ferro_created_timestamptz_no_drift(
 
     with _warnings.catch_warnings():
         _warnings.simplefilter("error", UserWarning)
-        await ferro.connect(db_url, migrate_updates=True)
+        report = await auto_migrate(db_url, updates=True)
+        assert schema_steps(report) == []
+        assert warning_texts(report) == []
 
     assert (
         _pg_live_type(postgres_base_url, db_schema_name, "event3", "occurred_at")
@@ -606,13 +816,19 @@ async def test_migrate_destructive_drops_removed_columns(
     ferro.reset_engine()
 
     # Without the flag the extra column is untouched.
-    await ferro.connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == []
+    assert warning_texts(report) == []
     async with ferro.engines.session():
         rows = await fetch_all('SELECT * FROM "migslim"')
         assert "legacy_notes" in rows[0]
     ferro.reset_engine()
 
-    await ferro.connect(db_url, migrate_destructive=True)
+    report = await auto_migrate(db_url, destructive=True)
+    assert schema_steps(report) == [
+        ("migslim", 'ALTER TABLE "migslim" DROP COLUMN "legacy_notes"'),
+    ]
+    assert warning_texts(report) == []
     async with ferro.engines.session():
         rows = await fetch_all('SELECT * FROM "migslim"')
         assert len(rows) == 1
@@ -641,7 +857,12 @@ async def test_destructive_drop_of_indexed_column_drops_index_first(
         )
     ferro.reset_engine()
 
-    await ferro.connect(db_url, migrate_destructive=True)
+    report = await auto_migrate(db_url, destructive=True)
+    assert schema_steps(report) == [
+        ("migidx", 'DROP INDEX IF EXISTS "idx_migidx_old_status"'),
+        ("migidx", 'ALTER TABLE "migidx" DROP COLUMN "old_status"'),
+    ]
+    assert warning_texts(report) == []
     async with ferro.engines.session():
 
         columns = _sqlite_columns(db_url, "migidx")
@@ -668,10 +889,12 @@ async def test_destructive_refuses_unique_constraint_column_on_sqlite(
         )
     ferro.reset_engine()
 
-    with pytest.raises(ValueError, match=r"miguq\.old_code.*UNIQUE.*ferro migrate new"):
-        await ferro.connect(db_url, migrate_destructive=True)
+    with pytest.raises(ValueError, match=r"miguq\.old_code.*UNIQUE.*ferro migrate new") as raised:
+        await auto_migrate(db_url, destructive=True)
 
 
+    assert schema_steps(raised.value.report) == []
+    assert warning_texts(raised.value.report) == []
 @pytest.mark.asyncio
 @pytest.mark.sqlite_only
 async def test_added_indexed_and_unique_columns_get_their_indexes(
@@ -693,7 +916,20 @@ async def test_added_indexed_and_unique_columns_get_their_indexes(
 
     # The uq_ index is the canonical unique shape on both dialects since
     # FF-B B4/D1 — no SQLite-compromise warning is emitted anymore.
-    await ferro.connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == [
+        ("migindexed", 'ALTER TABLE "migindexed" ADD COLUMN "slug" varchar'),
+        (
+            "migindexed",
+            'CREATE UNIQUE INDEX IF NOT EXISTS "uq_migindexed_slug" ON "migindexed" ("slug")',
+        ),
+        ("migindexed", 'ALTER TABLE "migindexed" ADD COLUMN "status" varchar'),
+        (
+            "migindexed",
+            'CREATE INDEX IF NOT EXISTS "idx_migindexed_status" ON "migindexed" ("status")',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with ferro.engines.session():
 
         index_names = _sqlite_index_names(db_url, "migindexed")
@@ -729,7 +965,19 @@ async def test_postgres_type_and_nullability_reconciliation(db_url, clean_regist
         note: str | None = None
         status: str = ferro.Field(default="draft")
 
-    await ferro.connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == [
+        (
+            "migpg",
+            'ALTER TABLE "migpg" ADD COLUMN "status" varchar NOT NULL DEFAULT \'draft\'',
+        ),
+        ("migpg", 'ALTER TABLE "migpg" ALTER COLUMN "status" DROP DEFAULT'),
+        (
+            "migpg",
+            'ALTER TABLE "migpg" ALTER COLUMN "total" TYPE bigint USING "total"::bigint',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with ferro.engines.session():
 
         rows = await fetch_all(
@@ -775,7 +1023,24 @@ async def test_json_factory_default_backfills_existing_rows(
         name: str
         turns: dict[str, dict] = ferro.Field(default_factory=dict)
 
-    await ferro.connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == on(
+        db_url,
+        sqlite=[
+            (
+                "migturns",
+                'ALTER TABLE "migturns" ADD COLUMN "turns" JSON NOT NULL DEFAULT \'{}\'',
+            ),
+        ],
+        postgres=[
+            (
+                "migturns",
+                'ALTER TABLE "migturns" ADD COLUMN "turns" jsonb NOT NULL DEFAULT \'{}\'::jsonb',
+            ),
+            ("migturns", 'ALTER TABLE "migturns" ALTER COLUMN "turns" DROP DEFAULT'),
+        ],
+    )
+    assert warning_texts(report) == []
     async with ferro.engines.session():
         rows = await MigTurns.all()
         assert len(rows) == 1
@@ -821,7 +1086,24 @@ async def test_json_static_object_default_backfills_existing_rows(
         name: str
         flags: dict[str, str] = ferro.Field(default={})
 
-    await ferro.connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == on(
+        db_url,
+        sqlite=[
+            (
+                "migflags",
+                'ALTER TABLE "migflags" ADD COLUMN "flags" JSON NOT NULL DEFAULT \'{}\'',
+            ),
+        ],
+        postgres=[
+            (
+                "migflags",
+                'ALTER TABLE "migflags" ADD COLUMN "flags" jsonb NOT NULL DEFAULT \'{}\'::jsonb',
+            ),
+            ("migflags", 'ALTER TABLE "migflags" ALTER COLUMN "flags" DROP DEFAULT'),
+        ],
+    )
+    assert warning_texts(report) == []
     async with ferro.engines.session():
         rows = await MigFlags.all()
         assert rows[0].flags == {}
@@ -836,7 +1118,14 @@ async def test_json_factory_is_not_a_create_table_server_default(db_url, clean_r
         id: int | None = ferro.Field(primary_key=True, default=None)
         turns: dict[str, dict] = ferro.Field(default_factory=dict)
 
-    await ferro.connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "migfreshturns",
+            'CREATE TABLE IF NOT EXISTS "migfreshturns" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "turns" JSON NOT NULL )',
+        ),
+    ]
+    assert warning_texts(report) == []
     dflt = _sqlite_columns(db_url, "migfreshturns")["turns"][4]
     assert dflt is None
 
@@ -923,7 +1212,14 @@ async def test_index_reconcile_adds_composite_index_to_existing_table(
         col_a: int
         col_b: int
 
-    await ferro.connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == [
+        (
+            "idxcompmodel",
+            'CREATE INDEX IF NOT EXISTS "idx_idxcompmodel_col_a_col_b" ON "idxcompmodel" ("col_a", "col_b")',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with ferro.engines.session():
 
         names = _live_index_names(db_url, db_backend, "idxcompmodel")
@@ -970,7 +1266,14 @@ async def test_index_reconcile_adds_single_column_index_to_existing_column(
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         status: Annotated[str, FerroField(index=True)]
 
-    await ferro.connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == [
+        (
+            "idxsinglemodel",
+            'CREATE INDEX IF NOT EXISTS "idx_idxsinglemodel_status" ON "idxsinglemodel" ("status")',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with ferro.engines.session():
 
         names = _live_index_names(db_url, db_backend, "idxsinglemodel")
@@ -996,7 +1299,23 @@ async def test_migrate_updates_adds_columns_before_composite_unique_referencing_
         account_id: int
 
     # Phase 1: the pre-upgrade release creates and populates the table.
-    await ferro.connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == on(
+        db_url,
+        sqlite=[
+            (
+                "provtxn",
+                'CREATE TABLE IF NOT EXISTS "provtxn" ( "account_id" integer NOT NULL, "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT )',
+            ),
+        ],
+        postgres=[
+            (
+                "provtxn",
+                'CREATE TABLE IF NOT EXISTS "provtxn" ( "account_id" integer NOT NULL, "id" serial PRIMARY KEY NOT NULL )',
+            ),
+        ],
+    )
+    assert warning_texts(report) == []
     async with ferro.engines.session():
         await ProvTxn.create(account_id=1)
     ferro.reset_engine()
@@ -1018,7 +1337,40 @@ async def test_migrate_updates_adds_columns_before_composite_unique_referencing_
         provider_transaction_id: str | None = None
         pending: bool = False
 
-    await ferro.connect(db_url, auto_migrate=True, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == on(
+        db_url,
+        sqlite=[
+            (
+                "provtxn",
+                'ALTER TABLE "provtxn" ADD COLUMN "pending" integer NOT NULL DEFAULT FALSE',
+            ),
+            (
+                "provtxn",
+                'ALTER TABLE "provtxn" ADD COLUMN "provider_transaction_id" varchar',
+            ),
+            (
+                "provtxn",
+                'CREATE UNIQUE INDEX IF NOT EXISTS "uq_provtxn_account_id_provider_transaction_id" ON "provtxn" ("account_id", "provider_transaction_id")',
+            ),
+        ],
+        postgres=[
+            (
+                "provtxn",
+                'ALTER TABLE "provtxn" ADD COLUMN "pending" bool NOT NULL DEFAULT FALSE',
+            ),
+            ("provtxn", 'ALTER TABLE "provtxn" ALTER COLUMN "pending" DROP DEFAULT'),
+            (
+                "provtxn",
+                'ALTER TABLE "provtxn" ADD COLUMN "provider_transaction_id" varchar',
+            ),
+            (
+                "provtxn",
+                'CREATE UNIQUE INDEX IF NOT EXISTS "uq_provtxn_account_id_provider_transaction_id" ON "provtxn" ("account_id", "provider_transaction_id")',
+            ),
+        ],
+    )
+    assert warning_texts(report) == []
     async with ferro.engines.session():
         rows = await ProvTxn.all()
         assert len(rows) == 1
@@ -1065,7 +1417,18 @@ async def test_migrate_updates_rebuilds_fk_on_delete_drift(db_url, clean_registr
 
     # Phase A: the pre-upgrade release creates the schema (default CASCADE)
     # and populates it.
-    await ferro.connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "fkdriftconn",
+            'CREATE TABLE IF NOT EXISTS "fkdriftconn" ( "id" serial PRIMARY KEY NOT NULL, "name" varchar NOT NULL )',
+        ),
+        (
+            "fkdriftaccount",
+            'CREATE TABLE IF NOT EXISTS "fkdriftaccount" ( "connection_id" integer, "id" serial PRIMARY KEY NOT NULL, CONSTRAINT "fk_fkdriftaccount_connection_id_fkdriftconn" FOREIGN KEY ("connection_id") REFERENCES "fkdriftconn" ("id") ON DELETE CASCADE )',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with ferro.engines.session():
         parent = await FkDriftConn.create(name="c1")
         await FkDriftAccount.create(connection=parent)
@@ -1090,7 +1453,18 @@ async def test_migrate_updates_rebuilds_fk_on_delete_drift(db_url, clean_registr
             ForeignKey(related_name="accounts", on_delete="SET NULL"),
         ] = None
 
-    await ferro.connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == [
+        (
+            "fkdriftaccount",
+            'ALTER TABLE "fkdriftaccount" DROP CONSTRAINT "fk_fkdriftaccount_connection_id_fkdriftconn"',
+        ),
+        (
+            "fkdriftaccount",
+            'ALTER TABLE "fkdriftaccount" ADD CONSTRAINT "fk_fkdriftaccount_connection_id_fkdriftconn" FOREIGN KEY ("connection_id") REFERENCES "fkdriftconn" ("id") ON DELETE SET NULL',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with ferro.engines.session():
         parents = await FkDriftConn.all()
         await parents[0].delete()
@@ -1120,7 +1494,18 @@ async def test_sqlite_fk_on_delete_drift_warns_loudly(db_url, clean_registry):
             FkWarnConn | None, ForeignKey(related_name="accounts")
         ] = None
 
-    await ferro.connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "fkwarnconn",
+            'CREATE TABLE IF NOT EXISTS "fkwarnconn" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "name" varchar NOT NULL )',
+        ),
+        (
+            "fkwarnaccount",
+            'CREATE TABLE IF NOT EXISTS "fkwarnaccount" ( "connection_id" integer, "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, CONSTRAINT "fk_fkwarnaccount_connection_id_fkwarnconn" FOREIGN KEY ("connection_id") REFERENCES "fkwarnconn" ("id") ON DELETE CASCADE )',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with ferro.engines.session():
         parent = await FkWarnConn.create(name="c1")
         await FkWarnAccount.create(connection=parent)
@@ -1145,7 +1530,11 @@ async def test_sqlite_fk_on_delete_drift_warns_loudly(db_url, clean_registry):
         ] = None
 
     with pytest.warns(UserWarning, match=r"on_delete|fk_fkwarnaccount"):
-        await ferro.connect(db_url, migrate_updates=True)
+        report = await auto_migrate(db_url, updates=True)
+        assert schema_steps(report) == []
+        assert warning_texts(report) == [
+            "Foreign key on 'fkwarnaccount.connection_id' declares on_delete SET NULL but the live constraint enforces CASCADE; SQLite cannot alter constraints in place, so the live behavior remains. Generate a reviewed migration with `ferro migrate new` to apply the declared action.",
+        ]
 
 
 @pytest.mark.asyncio
@@ -1166,14 +1555,40 @@ async def test_index_reconcile_noop_when_index_already_present(
         y: int
 
     # First connect creates the table + index.
-    await ferro.connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == on(
+        db_url,
+        sqlite=[
+            (
+                "idxnoopmodel",
+                'CREATE TABLE IF NOT EXISTS "idxnoopmodel" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "x" integer NOT NULL, "y" integer NOT NULL )',
+            ),
+            (
+                "idxnoopmodel",
+                'CREATE INDEX IF NOT EXISTS "idx_idxnoopmodel_x_y" ON "idxnoopmodel" ("x", "y")',
+            ),
+        ],
+        postgres=[
+            (
+                "idxnoopmodel",
+                'CREATE TABLE IF NOT EXISTS "idxnoopmodel" ( "id" serial PRIMARY KEY NOT NULL, "x" integer NOT NULL, "y" integer NOT NULL )',
+            ),
+            (
+                "idxnoopmodel",
+                'CREATE INDEX IF NOT EXISTS "idx_idxnoopmodel_x_y" ON "idxnoopmodel" ("x", "y")',
+            ),
+        ],
+    )
+    assert warning_texts(report) == []
     async with ferro.engines.session():
         names_after_first = _live_index_names(db_url, db_backend, "idxnoopmodel")
         assert "idx_idxnoopmodel_x_y" in names_after_first
     ferro.reset_engine()
 
     # Second connect — same model, same index already present.
-    await ferro.connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == []
+    assert warning_texts(report) == []
     async with ferro.engines.session():
 
         names_after_second = _live_index_names(db_url, db_backend, "idxnoopmodel")
@@ -1201,7 +1616,31 @@ async def test_index_reconcile_destructive_drops_removed_composite_index(
         q: int
 
     # Bootstrap with the index present.
-    await ferro.connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == on(
+        db_url,
+        sqlite=[
+            (
+                "idxdropmodel",
+                'CREATE TABLE IF NOT EXISTS "idxdropmodel" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "p" integer NOT NULL, "q" integer NOT NULL )',
+            ),
+            (
+                "idxdropmodel",
+                'CREATE INDEX IF NOT EXISTS "idx_idxdropmodel_p_q" ON "idxdropmodel" ("p", "q")',
+            ),
+        ],
+        postgres=[
+            (
+                "idxdropmodel",
+                'CREATE TABLE IF NOT EXISTS "idxdropmodel" ( "id" serial PRIMARY KEY NOT NULL, "p" integer NOT NULL, "q" integer NOT NULL )',
+            ),
+            (
+                "idxdropmodel",
+                'CREATE INDEX IF NOT EXISTS "idx_idxdropmodel_p_q" ON "idxdropmodel" ("p", "q")',
+            ),
+        ],
+    )
+    assert warning_texts(report) == []
     async with ferro.engines.session():
         names = _live_index_names(db_url, db_backend, "idxdropmodel")
         assert "idx_idxdropmodel_p_q" in names
@@ -1220,7 +1659,9 @@ async def test_index_reconcile_destructive_drops_removed_composite_index(
         q: int
 
     # Non-destructive: index must remain.
-    await ferro.connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == []
+    assert warning_texts(report) == []
     async with ferro.engines.session():
         names_after_updates = _live_index_names(db_url, db_backend, "idxdropmodel")
         assert "idx_idxdropmodel_p_q" in names_after_updates, (
@@ -1229,7 +1670,11 @@ async def test_index_reconcile_destructive_drops_removed_composite_index(
     ferro.reset_engine()
 
     # Destructive: index must be dropped.
-    await ferro.connect(db_url, migrate_destructive=True)
+    report = await auto_migrate(db_url, destructive=True)
+    assert schema_steps(report) == [
+        ("idxdropmodel", 'DROP INDEX IF EXISTS "idx_idxdropmodel_p_q"'),
+    ]
+    assert warning_texts(report) == []
     async with ferro.engines.session():
         names_after_destructive = _live_index_names(db_url, db_backend, "idxdropmodel")
         assert "idx_idxdropmodel_p_q" not in names_after_destructive, (
@@ -1255,7 +1700,31 @@ async def test_index_reconcile_user_index_survives_auto_migrate(
         n: int
 
     # Create table with a Ferro composite index AND a custom user index.
-    await ferro.connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == on(
+        db_url,
+        sqlite=[
+            (
+                "idxusermodel",
+                'CREATE TABLE IF NOT EXISTS "idxusermodel" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "m" integer NOT NULL, "n" integer NOT NULL )',
+            ),
+            (
+                "idxusermodel",
+                'CREATE INDEX IF NOT EXISTS "idx_idxusermodel_m_n" ON "idxusermodel" ("m", "n")',
+            ),
+        ],
+        postgres=[
+            (
+                "idxusermodel",
+                'CREATE TABLE IF NOT EXISTS "idxusermodel" ( "id" serial PRIMARY KEY NOT NULL, "m" integer NOT NULL, "n" integer NOT NULL )',
+            ),
+            (
+                "idxusermodel",
+                'CREATE INDEX IF NOT EXISTS "idx_idxusermodel_m_n" ON "idxusermodel" ("m", "n")',
+            ),
+        ],
+    )
+    assert warning_texts(report) == []
     async with ferro.engines.session():
         await execute('CREATE INDEX "my_custom_idx" ON "idxusermodel" ("m")')
 
@@ -1265,7 +1734,9 @@ async def test_index_reconcile_user_index_survives_auto_migrate(
     ferro.reset_engine()
 
     # Non-destructive pass: both indexes must survive.
-    await ferro.connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == []
+    assert warning_texts(report) == []
     async with ferro.engines.session():
         names_after_updates = _live_index_names(db_url, db_backend, "idxusermodel")
         assert "idx_idxusermodel_m_n" in names_after_updates
@@ -1275,7 +1746,9 @@ async def test_index_reconcile_user_index_survives_auto_migrate(
     ferro.reset_engine()
 
     # Destructive pass: Ferro index still present (model still has it), user index still present.
-    await ferro.connect(db_url, migrate_destructive=True)
+    report = await auto_migrate(db_url, destructive=True)
+    assert schema_steps(report) == []
+    assert warning_texts(report) == []
     async with ferro.engines.session():
         names_after_destructive = _live_index_names(db_url, db_backend, "idxusermodel")
         assert "idx_idxusermodel_m_n" in names_after_destructive
@@ -1304,7 +1777,23 @@ async def test_uuid_pk_derived_second_pass_is_noop(db_url, db_backend, clean_reg
         label: str
 
     # First connect: creates the table (auto_migrate) and runs migrate_updates.
-    await ferro.connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == on(
+        db_url,
+        sqlite=[
+            (
+                "uuidpkitem",
+                'CREATE TABLE IF NOT EXISTS "uuidpkitem" ( "id" CHAR(32) NOT NULL PRIMARY KEY, "label" varchar NOT NULL )',
+            ),
+        ],
+        postgres=[
+            (
+                "uuidpkitem",
+                'CREATE TABLE IF NOT EXISTS "uuidpkitem" ( "id" uuid PRIMARY KEY NOT NULL, "label" varchar NOT NULL )',
+            ),
+        ],
+    )
+    assert warning_texts(report) == []
     ferro.reset_engine()
 
     # Second connect: same model, same schema — must be a complete no-op.
@@ -1320,7 +1809,9 @@ async def test_uuid_pk_derived_second_pass_is_noop(db_url, db_backend, clean_reg
 
     with _warnings.catch_warnings(record=True) as caught:
         _warnings.simplefilter("always")
-        await ferro.connect(db_url, migrate_updates=True)
+        report = await auto_migrate(db_url, updates=True)
+        assert schema_steps(report) == []
+        assert warning_texts(report) == []
 
     ferro_warnings = [
         w for w in caught if issubclass(w.category, UserWarning)
@@ -1355,7 +1846,23 @@ async def test_uuid_pk_derived_drift_is_stable(db_url, db_backend, clean_registr
         name: str
 
     # Bootstrap: create the table.
-    await ferro.connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == on(
+        db_url,
+        sqlite=[
+            (
+                "uuiddriftmodel",
+                'CREATE TABLE IF NOT EXISTS "uuiddriftmodel" ( "id" CHAR(32) NOT NULL PRIMARY KEY, "name" varchar NOT NULL )',
+            ),
+        ],
+        postgres=[
+            (
+                "uuiddriftmodel",
+                'CREATE TABLE IF NOT EXISTS "uuiddriftmodel" ( "id" uuid PRIMARY KEY NOT NULL, "name" varchar NOT NULL )',
+            ),
+        ],
+    )
+    assert warning_texts(report) == []
     ferro.reset_engine()
 
     # First migrate_updates pass — should apply nothing (fresh table).
@@ -1371,7 +1878,9 @@ async def test_uuid_pk_derived_drift_is_stable(db_url, db_backend, clean_registr
 
     with _warnings.catch_warnings(record=True) as caught_first:
         _warnings.simplefilter("always")
-        await ferro.connect(db_url, migrate_updates=True)
+        report = await auto_migrate(db_url, updates=True)
+        assert schema_steps(report) == []
+        assert warning_texts(report) == []
 
     ferro.reset_engine()
 
@@ -1385,7 +1894,9 @@ async def test_uuid_pk_derived_drift_is_stable(db_url, db_backend, clean_registr
 
     with _warnings.catch_warnings(record=True) as caught_second:
         _warnings.simplefilter("always")
-        await ferro.connect(db_url, migrate_updates=True)
+        report = await auto_migrate(db_url, updates=True)
+        assert schema_steps(report) == []
+        assert warning_texts(report) == []
 
     drift_warnings_first = [
         w for w in caught_first
@@ -1433,7 +1944,23 @@ async def test_create_tables_pushes_modelset_for_model_defined_after_connect(
 
         # create_tables() must compile + push the up-to-date registry IR before the
         # Rust create runs, otherwise this table never gets created.
-        await ferro.create_tables()
+        report = await ferro.create_tables()
+        assert schema_steps(report) == on(
+            db_url,
+            sqlite=[
+                (
+                    "latemodel",
+                    'CREATE TABLE IF NOT EXISTS "latemodel" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "label" varchar NOT NULL )',
+                ),
+            ],
+            postgres=[
+                (
+                    "latemodel",
+                    'CREATE TABLE IF NOT EXISTS "latemodel" ( "id" serial PRIMARY KEY NOT NULL, "label" varchar NOT NULL )',
+                ),
+            ],
+        )
+        assert warning_texts(report) == []
 
         # If the table exists, an INSERT + SELECT round-trips cleanly.
         row = await LateModel.create(id=1, label="hello")
@@ -1482,7 +2009,7 @@ async def test_db_check_reconnect_is_idempotent(db_url):
     from enum import StrEnum
 
     from ferro import Field as FerroField
-    from ferro import clear_registry, connect, reset_engine
+    from ferro import clear_registry, reset_engine
     from ferro.raw import fetch_all
     from ferro.registry import REGISTRY
 
@@ -1504,11 +2031,24 @@ async def test_db_check_reconnect_is_idempotent(db_url):
         status: DocStatus = FerroField(db_type="text", db_check=True)
 
     # First connect creates the table + CHECK constraint.
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "reconnectdoc",
+            'CREATE TABLE IF NOT EXISTS "reconnectdoc" ( "id" serial PRIMARY KEY NOT NULL, "status" text NOT NULL )',
+        ),
+        (
+            "reconnectdoc",
+            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_reconnectdoc_status' AND conrelid = '\"reconnectdoc\"'::regclass) THEN ALTER TABLE \"reconnectdoc\" ADD CONSTRAINT \"ck_reconnectdoc_status\" CHECK (\"status\" IN ('pending', 'approved')); END IF; END $$",
+        ),
+    ]
+    assert warning_texts(report) == []
     # Second connect re-runs the create path against the existing schema —
     # this raised OperationalError before the idempotency fix.
     reset_engine()  # G4b: a second unnamed connect() now raises; simulate a fresh process
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == []
+    assert warning_texts(report) == []
     async with ferro.engines.session():
 
         rows = await fetch_all(
@@ -1541,9 +2081,18 @@ async def test_pg_failed_migration_rolls_back_whole_table_plan(db_url, clean_reg
             'INSERT INTO "migtxrollback" ("amount") VALUES (\'not-a-number\')'
         )
 
-        with pytest.raises(Exception, match="Auto-migrate DDL failed"):
+        with pytest.raises(Exception, match="Auto-migrate DDL failed") as raised:
             await ferro.migrate()
 
+        # The table's plan (ADD COLUMN "added", then the failing ALTER COLUMN
+        # "amount" TYPE integer) rolled back whole: the error's report lists
+        # nothing committed, and the error names the failing statement.
+        assert schema_steps(raised.value.report) == []
+        assert warning_texts(raised.value.report) == []
+        assert (
+            'ALTER TABLE "migtxrollback" ALTER COLUMN "amount" TYPE integer '
+            'USING "amount"::integer' in str(raised.value)
+        )
         cols = await fetch_all(
             "SELECT column_name, data_type FROM information_schema.columns "
             "WHERE table_name = 'migtxrollback'"
@@ -1569,12 +2118,21 @@ async def test_pg_jsonb_column_no_phantom_diff_on_reconnect(
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         payload: Annotated[dict, FerroField(db_type="jsonb")]
 
-    await ferro.connect(db_url, migrate_updates=True)  # creates payload -> jsonb
+    report = await auto_migrate(db_url, updates=True)  # creates payload -> jsonb
+    assert schema_steps(report) == [
+        (
+            "jsonbevent",
+            'CREATE TABLE IF NOT EXISTS "jsonbevent" ( "id" serial PRIMARY KEY NOT NULL, "payload" jsonb NOT NULL )',
+        ),
+    ]
+    assert warning_texts(report) == []
     ferro.reset_engine()
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        await ferro.connect(db_url, migrate_updates=True)  # must be quiet
+        report = await auto_migrate(db_url, updates=True)  # must be quiet
+        assert schema_steps(report) == []
+        assert warning_texts(report) == []
     drift = [str(w.message) for w in caught if "json" in str(w.message).lower()]
     assert not drift, f"unexpected jsonb drift warning(s): {drift}"
 
@@ -1607,7 +2165,14 @@ async def test_pg_json_to_jsonb_declaration_edit_alters_in_place(
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         payload: Annotated[dict | None, FerroField(db_type="jsonb")] = None
 
-    await ferro.connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == [
+        (
+            "jsonbmigrated",
+            'ALTER TABLE "jsonbmigrated" ALTER COLUMN "payload" TYPE jsonb USING "payload"::jsonb',
+        ),
+    ]
+    assert warning_texts(report) == []
 
     assert (
         _pg_live_type(postgres_base_url, db_schema_name, "jsonbmigrated", "payload")
@@ -1650,7 +2215,31 @@ async def test_self_fk_does_not_evict_component_from_create_order(
         id: Annotated[UUID, FerroField(primary_key=True)] = Field(default_factory=uuid4)
         node: Annotated[ZOrderedNode, ForeignKey(related_name="refs")]
 
-    await ferro.connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == on(
+        db_url,
+        sqlite=[
+            (
+                "zorderednode",
+                'CREATE TABLE IF NOT EXISTS "zorderednode" ( "id" CHAR(32) NOT NULL PRIMARY KEY, "parent_id" CHAR(32), CONSTRAINT "fk_zorderednode_parent_id_zorderednode" FOREIGN KEY ("parent_id") REFERENCES "zorderednode" ("id") ON DELETE CASCADE )',
+            ),
+            (
+                "aorderedref",
+                'CREATE TABLE IF NOT EXISTS "aorderedref" ( "id" CHAR(32) NOT NULL PRIMARY KEY, "node_id" CHAR(32) NOT NULL, CONSTRAINT "fk_aorderedref_node_id_zorderednode" FOREIGN KEY ("node_id") REFERENCES "zorderednode" ("id") ON DELETE CASCADE )',
+            ),
+        ],
+        postgres=[
+            (
+                "zorderednode",
+                'CREATE TABLE IF NOT EXISTS "zorderednode" ( "id" uuid PRIMARY KEY NOT NULL, "parent_id" uuid, CONSTRAINT "fk_zorderednode_parent_id_zorderednode" FOREIGN KEY ("parent_id") REFERENCES "zorderednode" ("id") ON DELETE CASCADE )',
+            ),
+            (
+                "aorderedref",
+                'CREATE TABLE IF NOT EXISTS "aorderedref" ( "id" uuid PRIMARY KEY NOT NULL, "node_id" uuid NOT NULL, CONSTRAINT "fk_aorderedref_node_id_zorderednode" FOREIGN KEY ("node_id") REFERENCES "zorderednode" ("id") ON DELETE CASCADE )',
+            ),
+        ],
+    )
+    assert warning_texts(report) == []
     async with ferro.engines.session():
         root = await ZOrderedNode.create()
         child = await ZOrderedNode.create(parent=root)
@@ -1710,7 +2299,14 @@ async def test_sqlite_create_carries_the_named_inline_db_check(
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         status: Annotated[OrderStatus, FerroField(db_type="text", db_check=True)]
 
-    await ferro.connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "checkedorder",
+            'CREATE TABLE IF NOT EXISTS "checkedorder" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "status" text NOT NULL CONSTRAINT "ck_checkedorder_status" CHECK ("status" IN (\'open\', \'shipped\')) )',
+        ),
+    ]
+    assert warning_texts(report) == []
 
     assert (
         '"status" text NOT NULL CONSTRAINT "ck_checkedorder_status" '
@@ -1741,7 +2337,14 @@ async def test_sqlite_migrate_updates_adds_a_db_check_column_with_its_inline_che
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         label: str
 
-    await ferro.connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "parcel",
+            'CREATE TABLE IF NOT EXISTS "parcel" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "label" varchar NOT NULL )',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with ferro.engines.session():
         await Parcel.create(label="first")
     _rewind_registry()
@@ -1754,7 +2357,14 @@ async def test_sqlite_migrate_updates_adds_a_db_check_column_with_its_inline_che
         ] = None
 
     recwarn.clear()
-    await ferro.connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == [
+        (
+            "parcel",
+            'ALTER TABLE "parcel" ADD COLUMN "size" text CONSTRAINT "ck_parcel_size" CHECK ("size" IN (\'small\', \'large\'))',
+        ),
+    ]
+    assert warning_texts(report) == []
 
     assert (
         '"size" text CONSTRAINT "ck_parcel_size" '
@@ -1780,7 +2390,9 @@ async def test_sqlite_migrate_updates_adds_a_db_check_column_with_its_inline_che
         ] = None
 
     recwarn.clear()
-    await ferro.connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == []
+    assert warning_texts(report) == []
     assert not [w for w in recwarn if "ck_parcel_size" in str(w.message)]
 
 
@@ -1799,7 +2411,18 @@ async def test_sqlite_migrate_updates_adds_a_nullable_fk_column_with_references(
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         title: str
 
-    await ferro.connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "author",
+            'CREATE TABLE IF NOT EXISTS "author" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "name" varchar NOT NULL )',
+        ),
+        (
+            "book",
+            'CREATE TABLE IF NOT EXISTS "book" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "title" varchar NOT NULL )',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with ferro.engines.session():
         await Book.create(title="untethered")
     _rewind_registry()
@@ -1817,7 +2440,14 @@ async def test_sqlite_migrate_updates_adds_a_nullable_fk_column_with_references(
         ] = None
 
     recwarn.clear()
-    await ferro.connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == [
+        (
+            "book",
+            'ALTER TABLE "book" ADD COLUMN "author_id" integer REFERENCES "author"("id") ON DELETE CASCADE',
+        ),
+    ]
+    assert warning_texts(report) == []
 
     assert (
         '"author_id" integer REFERENCES "author"("id") ON DELETE CASCADE'
@@ -1852,7 +2482,9 @@ async def test_sqlite_migrate_updates_adds_a_nullable_fk_column_with_references(
         ] = None
 
     recwarn.clear()
-    await ferro.connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == []
+    assert warning_texts(report) == []
     assert not [w for w in recwarn if "FOREIGN KEY" in str(w.message)]
 
 
@@ -1890,36 +2522,16 @@ def _define_validity_models():
     return VfAuthor, VfPost
 
 
-class _ReconcileStatements(logging.Handler):
-    """Collect the DDL the reconciliation pass logs for one table, in order."""
-
-    def __init__(self, table: str):
-        super().__init__(level=logging.DEBUG)
-        self.prefix = f"Ferro Engine: auto-migrate executing on '{table}': "
-        self.statements: list[str] = []
-
-    def emit(self, record: logging.LogRecord) -> None:
-        message = record.getMessage()
-        if message.startswith(self.prefix):
-            self.statements.append(message[len(self.prefix) :])
-
-
-async def _connect_capturing(db_url: str, table: str) -> list[str]:
-    """``connect(migrate_updates=True)`` with fresh models; return the
-    statements the pass executed for ``table``."""
+async def _connect_capturing(db_url: str) -> PassReport:
+    """``connect(migrate_updates=True)`` with fresh models; the pass's report."""
     _rewind_registry()
     _define_validity_models()
-    logger = logging.getLogger("ferro")
-    handler = _ReconcileStatements(table)
-    previous_level = logger.level
-    logger.addHandler(handler)
-    logger.setLevel(logging.DEBUG)
-    try:
-        await ferro.connect(db_url, migrate_updates=True)
-    finally:
-        logger.removeHandler(handler)
-        logger.setLevel(previous_level)
-    return handler.statements
+    return await auto_migrate(db_url, updates=True)
+
+
+def _table_sql(report: PassReport, table: str) -> list[str]:
+    """The schema statements the pass executed for ``table``, in order."""
+    return [sql for subject, sql in schema_steps(report) if subject == table]
 
 
 async def _pg_constraint(name: str) -> dict:
@@ -1946,10 +2558,10 @@ async def _pg_reinstall_not_valid(name: str) -> int:
     return reinstalled["oid"]
 
 
-async def _bootstrap_validity_tables(db_url: str) -> None:
+async def _bootstrap_validity_tables(db_url: str) -> PassReport:
     _rewind_registry()
     _define_validity_models()
-    await ferro.connect(db_url, auto_migrate=True)
+    return await auto_migrate(db_url)
 
 
 @pytest.mark.asyncio
@@ -1958,13 +2570,52 @@ async def _bootstrap_validity_tables(db_url: str) -> None:
 async def test_migrate_updates_validates_a_not_valid_constraint_in_place(
     db_url, db_backend, artifact, clean_registry
 ):
-    await _bootstrap_validity_tables(db_url)
+    report = await _bootstrap_validity_tables(db_url)
+    assert schema_steps(report) == on(
+        db_url,
+        sqlite=[
+            (
+                "vfauthor",
+                'CREATE TABLE IF NOT EXISTS "vfauthor" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "name" varchar NOT NULL )',
+            ),
+            (
+                "vfpost",
+                'CREATE TABLE IF NOT EXISTS "vfpost" ( "author_id" integer, "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "slug" varchar, "title" varchar, CONSTRAINT "fk_vfpost_author_id_vfauthor" FOREIGN KEY ("author_id") REFERENCES "vfauthor" ("id") ON DELETE CASCADE, CONSTRAINT "ck_vfpost_title_set" CHECK ("title" IS NOT NULL) )',
+            ),
+            (
+                "vfpost",
+                'CREATE UNIQUE INDEX IF NOT EXISTS "uq_vfpost_slug" ON "vfpost" ("slug")',
+            ),
+        ],
+        postgres=[
+            (
+                "vfauthor",
+                'CREATE TABLE IF NOT EXISTS "vfauthor" ( "id" serial PRIMARY KEY NOT NULL, "name" varchar NOT NULL )',
+            ),
+            (
+                "vfpost",
+                'CREATE TABLE IF NOT EXISTS "vfpost" ( "author_id" integer, "id" serial PRIMARY KEY NOT NULL, "slug" varchar, "title" varchar, CONSTRAINT "fk_vfpost_author_id_vfauthor" FOREIGN KEY ("author_id") REFERENCES "vfauthor" ("id") ON DELETE CASCADE, CONSTRAINT "ck_vfpost_title_set" CHECK ("title" IS NOT NULL) )',
+            ),
+            (
+                "vfpost",
+                'CREATE UNIQUE INDEX IF NOT EXISTS "uq_vfpost_slug" ON "vfpost" ("slug")',
+            ),
+        ],
+    )
+    assert warning_texts(report) == []
     oid = None
     if db_backend == "postgres":
         async with ferro.engines.session():
             oid = await _pg_reinstall_not_valid(artifact)
 
-    executed = await _connect_capturing(db_url, "vfpost")
+    report = await _connect_capturing(db_url)
+    assert schema_steps(report) == on(
+        db_url,
+        sqlite=[],
+        postgres=[("vfpost", f'ALTER TABLE "vfpost" VALIDATE CONSTRAINT "{artifact}"')],
+    )
+    assert warning_texts(report) == []
+    executed = _table_sql(report, "vfpost")
     if db_backend == "postgres":
         assert executed == [f'ALTER TABLE "vfpost" VALIDATE CONSTRAINT "{artifact}"']
         async with ferro.engines.session():
@@ -1975,7 +2626,10 @@ async def test_migrate_updates_validates_a_not_valid_constraint_in_place(
     else:
         assert executed == []
 
-    assert await _connect_capturing(db_url, "vfpost") == []
+    report = await _connect_capturing(db_url)
+    assert schema_steps(report) == []
+    assert warning_texts(report) == []
+    assert _table_sql(report, "vfpost") == []
 
 
 @pytest.mark.asyncio
@@ -1983,7 +2637,39 @@ async def test_migrate_updates_validates_a_not_valid_constraint_in_place(
 async def test_migrate_updates_rebuilds_an_invalid_index(
     db_url, db_backend, clean_registry
 ):
-    await _bootstrap_validity_tables(db_url)
+    report = await _bootstrap_validity_tables(db_url)
+    assert schema_steps(report) == on(
+        db_url,
+        sqlite=[
+            (
+                "vfauthor",
+                'CREATE TABLE IF NOT EXISTS "vfauthor" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "name" varchar NOT NULL )',
+            ),
+            (
+                "vfpost",
+                'CREATE TABLE IF NOT EXISTS "vfpost" ( "author_id" integer, "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "slug" varchar, "title" varchar, CONSTRAINT "fk_vfpost_author_id_vfauthor" FOREIGN KEY ("author_id") REFERENCES "vfauthor" ("id") ON DELETE CASCADE, CONSTRAINT "ck_vfpost_title_set" CHECK ("title" IS NOT NULL) )',
+            ),
+            (
+                "vfpost",
+                'CREATE UNIQUE INDEX IF NOT EXISTS "uq_vfpost_slug" ON "vfpost" ("slug")',
+            ),
+        ],
+        postgres=[
+            (
+                "vfauthor",
+                'CREATE TABLE IF NOT EXISTS "vfauthor" ( "id" serial PRIMARY KEY NOT NULL, "name" varchar NOT NULL )',
+            ),
+            (
+                "vfpost",
+                'CREATE TABLE IF NOT EXISTS "vfpost" ( "author_id" integer, "id" serial PRIMARY KEY NOT NULL, "slug" varchar, "title" varchar, CONSTRAINT "fk_vfpost_author_id_vfauthor" FOREIGN KEY ("author_id") REFERENCES "vfauthor" ("id") ON DELETE CASCADE, CONSTRAINT "ck_vfpost_title_set" CHECK ("title" IS NOT NULL) )',
+            ),
+            (
+                "vfpost",
+                'CREATE UNIQUE INDEX IF NOT EXISTS "uq_vfpost_slug" ON "vfpost" ("slug")',
+            ),
+        ],
+    )
+    assert warning_texts(report) == []
     if db_backend == "postgres":
         async with ferro.engines.session():
             await execute(
@@ -1991,7 +2677,20 @@ async def test_migrate_updates_rebuilds_an_invalid_index(
                 f"WHERE indexrelid = '\"{VF_UNIQUE}\"'::regclass"
             )
 
-    executed = await _connect_capturing(db_url, "vfpost")
+    report = await _connect_capturing(db_url)
+    assert schema_steps(report) == on(
+        db_url,
+        sqlite=[],
+        postgres=[
+            ("vfpost", 'DROP INDEX "uq_vfpost_slug"'),
+            (
+                "vfpost",
+                'CREATE UNIQUE INDEX IF NOT EXISTS "uq_vfpost_slug" ON "vfpost" ("slug")',
+            ),
+        ],
+    )
+    assert warning_texts(report) == []
+    executed = _table_sql(report, "vfpost")
     if db_backend == "postgres":
         assert executed == [
             f'DROP INDEX "{VF_UNIQUE}"',
@@ -2006,7 +2705,10 @@ async def test_migrate_updates_rebuilds_an_invalid_index(
     else:
         assert executed == []
 
-    assert await _connect_capturing(db_url, "vfpost") == []
+    report = await _connect_capturing(db_url)
+    assert schema_steps(report) == []
+    assert warning_texts(report) == []
+    assert _table_sql(report, "vfpost") == []
 
 
 @pytest.mark.asyncio
@@ -2016,7 +2718,22 @@ async def test_validate_of_a_check_with_violating_rows_raises_check_violation(
 ):
     from ferro import CheckViolationError
 
-    await _bootstrap_validity_tables(db_url)
+    report = await _bootstrap_validity_tables(db_url)
+    assert schema_steps(report) == [
+        (
+            "vfauthor",
+            'CREATE TABLE IF NOT EXISTS "vfauthor" ( "id" serial PRIMARY KEY NOT NULL, "name" varchar NOT NULL )',
+        ),
+        (
+            "vfpost",
+            'CREATE TABLE IF NOT EXISTS "vfpost" ( "author_id" integer, "id" serial PRIMARY KEY NOT NULL, "slug" varchar, "title" varchar, CONSTRAINT "fk_vfpost_author_id_vfauthor" FOREIGN KEY ("author_id") REFERENCES "vfauthor" ("id") ON DELETE CASCADE, CONSTRAINT "ck_vfpost_title_set" CHECK ("title" IS NOT NULL) )',
+        ),
+        (
+            "vfpost",
+            'CREATE UNIQUE INDEX IF NOT EXISTS "uq_vfpost_slug" ON "vfpost" ("slug")',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with ferro.engines.session():
         await execute(f'ALTER TABLE "vfpost" DROP CONSTRAINT "{VF_CHECK}"')
         await execute('INSERT INTO "vfpost" ("title") VALUES (NULL)')
@@ -2026,7 +2743,12 @@ async def test_validate_of_a_check_with_violating_rows_raises_check_violation(
         )
 
     with pytest.raises(CheckViolationError) as excinfo:
-        await _connect_capturing(db_url, "vfpost")
+        await _connect_capturing(db_url)
+    # The table's plan ran in one transaction and rolled back whole: the
+    # report carried by the error lists nothing committed, and the error
+    # names the statement that failed.
+    assert excinfo.value.report == PassReport()
+    assert f'ALTER TABLE "vfpost" VALIDATE CONSTRAINT "{VF_CHECK}"' in str(excinfo.value)
     assert excinfo.value.constraint == VF_CHECK
 
     # The failed validate rolled back with its table's plan: still NOT VALID.
@@ -2042,7 +2764,22 @@ async def test_validate_of_an_fk_with_violating_rows_raises_foreign_key_violatio
 ):
     from ferro import ForeignKeyViolationError
 
-    await _bootstrap_validity_tables(db_url)
+    report = await _bootstrap_validity_tables(db_url)
+    assert schema_steps(report) == [
+        (
+            "vfauthor",
+            'CREATE TABLE IF NOT EXISTS "vfauthor" ( "id" serial PRIMARY KEY NOT NULL, "name" varchar NOT NULL )',
+        ),
+        (
+            "vfpost",
+            'CREATE TABLE IF NOT EXISTS "vfpost" ( "author_id" integer, "id" serial PRIMARY KEY NOT NULL, "slug" varchar, "title" varchar, CONSTRAINT "fk_vfpost_author_id_vfauthor" FOREIGN KEY ("author_id") REFERENCES "vfauthor" ("id") ON DELETE CASCADE, CONSTRAINT "ck_vfpost_title_set" CHECK ("title" IS NOT NULL) )',
+        ),
+        (
+            "vfpost",
+            'CREATE UNIQUE INDEX IF NOT EXISTS "uq_vfpost_slug" ON "vfpost" ("slug")',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with ferro.engines.session():
         definition = (await _pg_constraint(VF_FK))["definition"]
         await execute(f'ALTER TABLE "vfpost" DROP CONSTRAINT "{VF_FK}"')
@@ -2052,7 +2789,12 @@ async def test_validate_of_an_fk_with_violating_rows_raises_foreign_key_violatio
         )
 
     with pytest.raises(ForeignKeyViolationError) as excinfo:
-        await _connect_capturing(db_url, "vfpost")
+        await _connect_capturing(db_url)
+    # The table's plan ran in one transaction and rolled back whole: the
+    # report carried by the error lists nothing committed, and the error
+    # names the statement that failed.
+    assert excinfo.value.report == PassReport()
+    assert f'ALTER TABLE "vfpost" VALIDATE CONSTRAINT "{VF_FK}"' in str(excinfo.value)
     assert excinfo.value.constraint == VF_FK
 
     # The failed validate rolled back with its table's plan: still NOT VALID.
@@ -2066,29 +2808,14 @@ async def test_validate_of_an_fk_with_violating_rows_raises_foreign_key_violatio
 # ---------------------------------------------------------------------------
 
 
-class _FerroDebug(logging.Handler):
-    """Every ``ferro`` debug line, for counting the pass's table units."""
-
-    def __init__(self) -> None:
-        super().__init__(logging.DEBUG)
-        self.messages: list[str] = []
-
-    def emit(self, record: logging.LogRecord) -> None:
-        self.messages.append(record.getMessage())
-
-
-async def _connect_logging(db_url: str) -> list[str]:
-    logger = logging.getLogger("ferro")
-    handler = _FerroDebug()
-    previous_level = logger.level
-    logger.addHandler(handler)
-    logger.setLevel(logging.DEBUG)
-    try:
-        await ferro.connect(db_url, migrate_updates=True)
-    finally:
-        logger.removeHandler(handler)
-        logger.setLevel(previous_level)
-    return handler.messages
+def _lock_timeout_units(report: PassReport) -> int:
+    """How many transactional units the pass opened on Postgres: each
+    starts with its own ``SET LOCAL lock_timeout`` (ADR-0044)."""
+    return sum(
+        1
+        for s in report.statements
+        if s.role == "lock_timeout" and s.sql.startswith("SET LOCAL")
+    )
 
 
 def _define_hinted_pass_writer() -> None:
@@ -2134,7 +2861,35 @@ async def test_migrate_updates_renames_a_hinted_column_with_its_index_and_check_
             PassGenre.NOVEL
         )
 
-    await ferro.connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == on(
+        db_url,
+        sqlite=[
+            (
+                "passwriter",
+                'CREATE TABLE IF NOT EXISTS "passwriter" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "kind" text NOT NULL CONSTRAINT "ck_passwriter_kind" CHECK ("kind" IN (\'novel\', \'poem\')), "name" varchar NOT NULL )',
+            ),
+            (
+                "passwriter",
+                'CREATE INDEX IF NOT EXISTS "idx_passwriter_name" ON "passwriter" ("name")',
+            ),
+        ],
+        postgres=[
+            (
+                "passwriter",
+                'CREATE TABLE IF NOT EXISTS "passwriter" ( "id" serial PRIMARY KEY NOT NULL, "kind" text NOT NULL, "name" varchar NOT NULL )',
+            ),
+            (
+                "passwriter",
+                'CREATE INDEX IF NOT EXISTS "idx_passwriter_name" ON "passwriter" ("name")',
+            ),
+            (
+                "passwriter",
+                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_passwriter_kind' AND conrelid = '\"passwriter\"'::regclass) THEN ALTER TABLE \"passwriter\" ADD CONSTRAINT \"ck_passwriter_kind\" CHECK (\"kind\" IN ('novel', 'poem')); END IF; END $$",
+            ),
+        ],
+    )
+    assert warning_texts(report) == []
     async with ferro.engines.session():
         await execute(
             'INSERT INTO "passwriter" ("name", "kind") VALUES (\'Ann\', \'poem\')'
@@ -2146,15 +2901,43 @@ async def test_migrate_updates_renames_a_hinted_column_with_its_index_and_check_
         # SQLite cannot rename a constraint in place; only a generated
         # migration's rebuild can.
         with pytest.warns(UserWarning, match=r"ck_passwriter_kind.*ferro migrate new"):
-            messages = await _connect_logging(db_url)
+            report = await auto_migrate(db_url, updates=True)
+            assert schema_steps(report) == [
+                ("passwriter", 'ALTER TABLE "passwriter" RENAME COLUMN "kind" TO "genre"'),
+                ("passwriter", 'ALTER TABLE "passwriter" RENAME COLUMN "name" TO "full_name"'),
+                ("passwriter", 'DROP INDEX IF EXISTS "idx_passwriter_name"'),
+                (
+                    "passwriter",
+                    'CREATE INDEX IF NOT EXISTS "idx_passwriter_full_name" ON "passwriter" ("full_name")',
+                ),
+            ]
+            assert warning_texts(report) == [
+                "Table 'passwriter' has CHECK constraint(s) 'ck_passwriter_kind' that the model no longer declares. Leftover CHECKs keep rejecting rows the model now allows. They stay in place unless you pass migrate_destructive=True (Postgres) or drop them with a reviewed migration (`ferro migrate new`).",
+                "Constraint 'ck_passwriter_kind' on 'passwriter' is now named 'ck_passwriter_genre', and SQLite cannot rename a table constraint in place; `ferro migrate new` renames it by rebuilding the table.",
+                "Check constraint 'ck_passwriter_genre' on column 'passwriter.genre' is declared but missing from the live table, and SQLite cannot add a constraint to an existing column (it requires a full table rebuild). The invariant is not database-enforced; generate a reviewed migration with `ferro migrate new` to apply it.",
+            ]
     else:
-        messages = await _connect_logging(db_url)
+        report = await auto_migrate(db_url, updates=True)
+        assert schema_steps(report) == [
+            ("passwriter", 'ALTER TABLE "passwriter" RENAME COLUMN "kind" TO "genre"'),
+            ("passwriter", 'ALTER TABLE "passwriter" RENAME COLUMN "name" TO "full_name"'),
+            (
+                "passwriter",
+                'ALTER INDEX "idx_passwriter_name" RENAME TO "idx_passwriter_full_name"',
+            ),
+            (
+                "passwriter",
+                'ALTER TABLE "passwriter" RENAME CONSTRAINT "ck_passwriter_kind" TO "ck_passwriter_genre"',
+            ),
+        ]
+        assert warning_texts(report) == []
 
     # One table, one unit: both column renames, the index rename and (on
-    # Postgres) the check rename ran together.
-    units = [m for m in messages if m.startswith("✅ Ferro Engine: Table 'passwriter'")]
-    assert len(units) == 1, units
-    assert "(4 statement(s)" in units[0], units
+    # Postgres) the check rename ran together, in one transaction there.
+    executed = [sql for subject, sql in schema_steps(report) if subject == "passwriter"]
+    assert len(executed) == 4, executed
+    if db_backend == "postgres":
+        assert _lock_timeout_units(report) == 1, report.statements
     async with ferro.engines.session():
         rows = await fetch_all('SELECT "full_name", "genre" FROM "passwriter"')
         assert [(r["full_name"], r["genre"]) for r in rows] == [("Ann", "poem")]
@@ -2174,8 +2957,17 @@ async def test_migrate_updates_renames_a_hinted_column_with_its_index_and_check_
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        again = await _connect_logging(db_url)
-    assert not [m for m in again if m.startswith("✅ Ferro Engine: Table 'passwriter'")]
+        report = await auto_migrate(db_url, updates=True)
+        assert schema_steps(report) == []
+        assert warning_texts(report) == on(
+            db_url,
+            sqlite=[
+                "Table 'passwriter' has CHECK constraint(s) 'ck_passwriter_kind' that the model no longer declares. Leftover CHECKs keep rejecting rows the model now allows. They stay in place unless you pass migrate_destructive=True (Postgres) or drop them with a reviewed migration (`ferro migrate new`).",
+                "Check constraint 'ck_passwriter_genre' on column 'passwriter.genre' is declared but missing from the live table, and SQLite cannot add a constraint to an existing column (it requires a full table rebuild). The invariant is not database-enforced; generate a reviewed migration with `ferro migrate new` to apply it.",
+            ],
+            postgres=[],
+        )
+    assert not [s for s in schema_steps(report) if s[0] == "passwriter"]
 
 
 @pytest.mark.asyncio
@@ -2191,7 +2983,23 @@ async def test_migrate_updates_renames_a_hinted_column_and_then_changes_its_type
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: int
 
-    await ferro.connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == on(
+        db_url,
+        sqlite=[
+            (
+                "pf2author",
+                'CREATE TABLE IF NOT EXISTS "pf2author" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "name" integer NOT NULL )',
+            ),
+        ],
+        postgres=[
+            (
+                "pf2author",
+                'CREATE TABLE IF NOT EXISTS "pf2author" ( "id" serial PRIMARY KEY NOT NULL, "name" integer NOT NULL )',
+            ),
+        ],
+    )
+    assert warning_texts(report) == []
     async with ferro.engines.session():
         await execute('INSERT INTO "pf2author" ("name") VALUES (42)')
     _rewind()
@@ -2206,9 +3014,23 @@ async def test_migrate_updates_renames_a_hinted_column_and_then_changes_its_type
         with pytest.warns(
             UserWarning, match=r"pf2author\.full_name.*ferro migrate new"
         ):
-            await ferro.connect(db_url, migrate_updates=True)
+            report = await auto_migrate(db_url, updates=True)
+            assert schema_steps(report) == [
+                ("pf2author", 'ALTER TABLE "pf2author" RENAME COLUMN "name" TO "full_name"'),
+            ]
+            assert warning_texts(report) == [
+                "Column 'pf2author.full_name' is declared 'int' in the database but the model expects 'varchar'. SQLite cannot change column types in place; generate a reviewed migration with `ferro migrate new` to migrate this column.",
+            ]
     else:
-        await ferro.connect(db_url, migrate_updates=True)
+        report = await auto_migrate(db_url, updates=True)
+        assert schema_steps(report) == [
+            ("pf2author", 'ALTER TABLE "pf2author" RENAME COLUMN "name" TO "full_name"'),
+            (
+                "pf2author",
+                'ALTER TABLE "pf2author" ALTER COLUMN "full_name" TYPE varchar USING "full_name"::varchar',
+            ),
+        ]
+        assert warning_texts(report) == []
 
     async with ferro.engines.session():
         rows = await fetch_all('SELECT "full_name" FROM "pf2author"')
@@ -2266,28 +3088,57 @@ _PD3_STRANDED = (
     r"model now declares as 'cancelled' .*`ferro migrate new`"
 )
 
+# The pass's warning for a live label rename on SQLite, in full.
+_PD3_STRANDED_TEXT = (
+    "Column 'pd3order.status' still holds the enum label 'canceled', which the "
+    "model now declares as 'cancelled' (__ferro_renamed_labels__). SQLite keeps "
+    "enum labels as text in the rows, and auto-migrate changes the schema, never "
+    "the rows: they keep 'canceled', which the model no longer reads or writes. "
+    "Generate the migration that relabels them with `ferro migrate new`."
+)
 
-async def _pd3_connect(db_url: str, **flags) -> list[str]:
-    """Connect with ``flags``; every warning's text, and the label-rename
-    warnings among them."""
+# The renderer's word on a checked column whose check body the label rename
+# changed: SQLite cannot rebuild the check in place.
+_PD3_CHECK_BODY_TEXT = (
+    "CHECK constraint 'ck_pd3order_status' on table 'pd3order' has a declared "
+    "body that differs from the live constraint, and SQLite cannot alter "
+    "constraints in place (it requires a full table rebuild). The live body "
+    "remains; generate a reviewed migration with `ferro migrate new` to apply the "
+    "declared predicate."
+)
+
+_PD3_SQLITE_PLAIN = (
+    'CREATE TABLE IF NOT EXISTS "pd3order" ( "id" integer NOT NULL PRIMARY KEY '
+    'AUTOINCREMENT, "status" varchar(8) NOT NULL )'
+)
+_PD3_SQLITE_CHECKED = (
+    'CREATE TABLE IF NOT EXISTS "pd3order" ( "id" integer NOT NULL PRIMARY KEY '
+    'AUTOINCREMENT, "status" text NOT NULL CONSTRAINT "ck_pd3order_status" CHECK '
+    "(\"status\" IN ('paid', 'canceled')) )"
+)
+
+
+async def _pd3_connect(db_url: str, *, updates: bool) -> PassReport:
+    """The pass ``connect(auto_migrate=True)`` (or, with ``updates``,
+    ``connect(migrate_updates=True)``) runs; its report."""
     import warnings
 
-    with warnings.catch_warnings(record=True) as caught:
+    with warnings.catch_warnings():
         warnings.simplefilter("always")
-        await ferro.connect(db_url, **flags)
-    return [str(w.message) for w in caught]
+        return await auto_migrate(db_url, updates=updates)
 
 
-def _stranded(messages: list[str]) -> list[str]:
-    return [m for m in messages if re.search(_PD3_STRANDED, m)]
+def _stranded(report: PassReport) -> list[str]:
+    """The label-rename warnings the pass raised."""
+    stranded = [str(w) for w in report.warnings if w.kind == "StrandedLabelRename"]
+    assert all(re.search(_PD3_STRANDED, text) for text in stranded), stranded
+    return stranded
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "flags", [{"migrate_updates": True}, {"auto_migrate": True}], ids=["updates", "plain"]
-)
+@pytest.mark.parametrize("updates", [True, False], ids=["updates", "plain"])
 async def test_a_label_rename_on_sqlite_warns_and_leaves_the_rows(
-    db_url, db_backend, clean_registry, flags
+    db_url, db_backend, clean_registry, updates
 ):
     """SQLite keeps an enum's labels as text in its rows. The pass never
     rewrites rows (ADR-0014), so a live label rename (a row holds the old
@@ -2296,7 +3147,27 @@ async def test_a_label_rename_on_sqlite_warns_and_leaves_the_rows(
     nothing (ADR-0011). The rows stay as they are either way. On Postgres the
     native type renames its label in place, unchanged by this (#538, D3)."""
     _define_pd3_order(renamed=False)
-    await ferro.connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == on(
+        db_url,
+        sqlite=[
+            (
+                "pd3order",
+                'CREATE TABLE IF NOT EXISTS "pd3order" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "status" varchar(8) NOT NULL )',
+            ),
+        ],
+        postgres=[
+            (
+                "pd3status",
+                "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace WHERE t.typname = 'pd3status' AND n.nspname = current_schema()) THEN CREATE TYPE \"pd3status\" AS ENUM ('paid', 'canceled'); END IF; END $$",
+            ),
+            (
+                "pd3order",
+                'CREATE TABLE IF NOT EXISTS "pd3order" ( "id" serial PRIMARY KEY NOT NULL, "status" pd3status NOT NULL )',
+            ),
+        ],
+    )
+    assert warning_texts(report) == []
     async with ferro.engines.session():
         await execute(
             "INSERT INTO \"pd3order\" (\"status\") VALUES ('canceled'), ('paid')"
@@ -2304,7 +3175,16 @@ async def test_a_label_rename_on_sqlite_warns_and_leaves_the_rows(
     _rewind()
     _define_pd3_order(renamed=True)
 
-    messages = await _pd3_connect(db_url, **flags)
+    report = await _pd3_connect(db_url, updates=updates)
+    # Postgres renames the native type's label in place; SQLite changes no
+    # schema and, under migrate_updates, warns about the rows.
+    renames = [("pd3status", "ALTER TYPE \"pd3status\" RENAME VALUE 'canceled' TO 'cancelled'")]
+    assert schema_steps(report) == on(
+        db_url, sqlite=[], postgres=renames if updates else []
+    )
+    assert warning_texts(report) == on(
+        db_url, sqlite=[_PD3_STRANDED_TEXT] if updates else [], postgres=[]
+    )
 
     async with ferro.engines.session():
         rows = await fetch_all('SELECT "status" FROM "pd3order" ORDER BY "id"')
@@ -2317,12 +3197,12 @@ async def test_a_label_rename_on_sqlite_warns_and_leaves_the_rows(
                 "ORDER BY e.enumsortorder"
             )
     if db_backend == "sqlite":
-        stranded = 1 if "migrate_updates" in flags else 0
-        assert len(_stranded(messages)) == stranded, messages
+        stranded = 1 if updates else 0
+        assert len(_stranded(report)) == stranded, report.warnings
         assert statuses == ["canceled", "paid"]
         return
-    assert _stranded(messages) == [], messages
-    if "migrate_updates" in flags:
+    assert _stranded(report) == [], report.warnings
+    if updates:
         assert statuses == ["cancelled", "paid"]
         assert [r["enumlabel"] for r in labels] == ["paid", "cancelled"]
     else:
@@ -2339,16 +3219,25 @@ async def test_a_label_rename_on_sqlite_warns_only_while_the_database_holds_the_
     """The hint is live while a row holds the old label or the column's
     ``db_check`` still lists it (ADR-0032); otherwise it is inert and silent."""
     _define_pd3_order(renamed=False, checked=checked)
-    await ferro.connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        ("pd3order", _PD3_SQLITE_CHECKED if checked else _PD3_SQLITE_PLAIN)
+    ]
+    assert warning_texts(report) == []
     values = "('canceled'), ('paid')" if held else "('paid')"
     async with ferro.engines.session():
         await execute(f'INSERT INTO "pd3order" ("status") VALUES {values}')
     _rewind()
     _define_pd3_order(renamed=True, checked=checked)
 
-    messages = await _pd3_connect(db_url, migrate_updates=True)
+    report = await _pd3_connect(db_url, updates=True)
+    assert schema_steps(report) == []
+    if checked:
+        assert warning_texts(report) == [_PD3_CHECK_BODY_TEXT, _PD3_STRANDED_TEXT]
+    else:
+        assert warning_texts(report) == ([_PD3_STRANDED_TEXT] if held else [])
 
-    assert len(_stranded(messages)) == (1 if held or checked else 0), messages
+    assert len(_stranded(report)) == (1 if held or checked else 0), report.warnings
     async with ferro.engines.session():
         rows = await fetch_all('SELECT "status" FROM "pd3order" ORDER BY "id"')
     assert [r["status"] for r in rows] == (["canceled", "paid"] if held else ["paid"])
@@ -2359,49 +3248,24 @@ async def test_a_label_rename_on_sqlite_warns_only_while_the_database_holds_the_
 # column once nothing matches, so it runs only under ``migrate_updates``, and
 # only for a column with no ``db_check`` (whose listing already answers).
 
-_PD3_PROBE = (
-    "Ferro Engine: auto-migrate reading rows of 'pd3order': "
-    'SELECT 1 FROM "pd3order" WHERE "status" = \'canceled\' LIMIT 1'
-)
+_PD3_PROBE = ("pd3order", 'SELECT 1 FROM "pd3order" WHERE "status" = \'canceled\' LIMIT 1')
 
 
-class _LabelProbes(logging.Handler):
-    """Collect every row probe auto-migrate logs, in order."""
-
-    def __init__(self) -> None:
-        super().__init__(level=logging.DEBUG)
-        self.lines: list[str] = []
-
-    def emit(self, record: logging.LogRecord) -> None:
-        message = record.getMessage()
-        if message.startswith("Ferro Engine: auto-migrate reading rows of "):
-            self.lines.append(message)
+def _probes(report: PassReport) -> list[tuple[str, str]]:
+    """The row probes the pass read, as ``(subject, sql)``, in order."""
+    return [(s.subject, s.sql) for s in report.statements if s.role == "probe"]
 
 
-async def _pd3_connect_probed(db_url: str, **flags) -> tuple[list[str], list[str]]:
-    """``_pd3_connect`` with fresh models; also the row probes it logged."""
-    logger = logging.getLogger("ferro")
-    handler = _LabelProbes()
-    previous_level = logger.level
-    logger.addHandler(handler)
-    logger.setLevel(logging.DEBUG)
-    try:
-        messages = await _pd3_connect(db_url, **flags)
-    finally:
-        logger.removeHandler(handler)
-        logger.setLevel(previous_level)
-    return messages, handler.lines
-
-
-async def _pd3_live_hint(db_url: str, checked: bool, labels: str) -> None:
+async def _pd3_live_hint(db_url: str, checked: bool, labels: str) -> PassReport:
     """A ``pd3order`` built by the parent model holding ``labels`` rows, and
-    the renamed model registered."""
+    the renamed model registered; the report of the pass that built it."""
     _define_pd3_order(renamed=False, checked=checked)
-    await ferro.connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
     async with ferro.engines.session():
         await execute(f'INSERT INTO "pd3order" ("status") VALUES {labels}')
     _rewind()
     _define_pd3_order(renamed=True, checked=checked)
+    return report
 
 
 @pytest.mark.asyncio
@@ -2411,12 +3275,21 @@ async def test_a_plain_auto_migrate_connect_reads_no_rows_for_a_label_hint(
 ):
     """Plain ``auto_migrate`` reconciles nothing, so it neither probes the
     hinted column nor warns, even while a row holds the old label."""
-    await _pd3_live_hint(db_url, checked=False, labels="('canceled'), ('paid')")
+    report = await _pd3_live_hint(db_url, checked=False, labels="('canceled'), ('paid')")
+    assert schema_steps(report) == [
+        (
+            "pd3order",
+            'CREATE TABLE IF NOT EXISTS "pd3order" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "status" varchar(8) NOT NULL )',
+        ),
+    ]
+    assert warning_texts(report) == []
 
-    messages, probes = await _pd3_connect_probed(db_url, auto_migrate=True)
+    report = await _pd3_connect(db_url, updates=False)
+    assert schema_steps(report) == []
+    assert warning_texts(report) == []
 
-    assert probes == []
-    assert _stranded(messages) == [], messages
+    assert _probes(report) == []
+    assert _stranded(report) == [], report.warnings
 
 
 @pytest.mark.asyncio
@@ -2429,19 +3302,37 @@ async def test_a_checked_column_decides_a_label_hint_from_its_check_alone(
     still listing the old label is a live hint (one warning), a check listing
     only the new one an inert hint (silent). Either way no row is read."""
     if built_by == "parent":
-        await _pd3_live_hint(db_url, checked=True, labels="('canceled'), ('paid')")
+        report = await _pd3_live_hint(db_url, checked=True, labels="('canceled'), ('paid')")
+        assert schema_steps(report) == [
+            (
+                "pd3order",
+                'CREATE TABLE IF NOT EXISTS "pd3order" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "status" text NOT NULL CONSTRAINT "ck_pd3order_status" CHECK ("status" IN (\'paid\', \'canceled\')) )',
+            ),
+        ]
+        assert warning_texts(report) == []
     else:
         _define_pd3_order(renamed=True, checked=True)
-        await ferro.connect(db_url, auto_migrate=True)
+        report = await auto_migrate(db_url)
+        assert schema_steps(report) == [
+            (
+                "pd3order",
+                'CREATE TABLE IF NOT EXISTS "pd3order" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "status" text NOT NULL CONSTRAINT "ck_pd3order_status" CHECK ("status" IN (\'paid\', \'cancelled\')) )',
+            ),
+        ]
+        assert warning_texts(report) == []
         async with ferro.engines.session():
             await execute('INSERT INTO "pd3order" ("status") VALUES (\'cancelled\')')
         _rewind()
         _define_pd3_order(renamed=True, checked=True)
 
-    messages, probes = await _pd3_connect_probed(db_url, migrate_updates=True)
+    report = await _pd3_connect(db_url, updates=True)
+    assert schema_steps(report) == []
+    assert warning_texts(report) == (
+        [_PD3_CHECK_BODY_TEXT, _PD3_STRANDED_TEXT] if built_by == "parent" else []
+    )
 
-    assert probes == []
-    assert len(_stranded(messages)) == (1 if built_by == "parent" else 0), messages
+    assert _probes(report) == []
+    assert len(_stranded(report)) == (1 if built_by == "parent" else 0), report.warnings
 
 
 @pytest.mark.asyncio
@@ -2451,12 +3342,23 @@ async def test_an_unchecked_column_probes_its_rows_for_a_label_hint(
 ):
     """With no check to read, ``migrate_updates`` probes the rows: a warning
     while one holds the old label, silence once none does."""
-    await _pd3_live_hint(db_url, checked=False, labels="('canceled'), ('paid')")
+    report = await _pd3_live_hint(db_url, checked=False, labels="('canceled'), ('paid')")
+    assert schema_steps(report) == [
+        (
+            "pd3order",
+            'CREATE TABLE IF NOT EXISTS "pd3order" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "status" varchar(8) NOT NULL )',
+        ),
+    ]
+    assert warning_texts(report) == []
 
-    messages, probes = await _pd3_connect_probed(db_url, migrate_updates=True)
+    report = await _pd3_connect(db_url, updates=True)
+    assert schema_steps(report) == []
+    assert warning_texts(report) == [
+        "Column 'pd3order.status' still holds the enum label 'canceled', which the model now declares as 'cancelled' (__ferro_renamed_labels__). SQLite keeps enum labels as text in the rows, and auto-migrate changes the schema, never the rows: they keep 'canceled', which the model no longer reads or writes. Generate the migration that relabels them with `ferro migrate new`.",
+    ]
 
-    assert probes == [_PD3_PROBE]
-    assert len(_stranded(messages)) == 1, messages
+    assert _probes(report) == [_PD3_PROBE]
+    assert len(_stranded(report)) == 1, report.warnings
 
     async with ferro.engines.session():
         await execute(
@@ -2465,10 +3367,12 @@ async def test_an_unchecked_column_probes_its_rows_for_a_label_hint(
     _rewind()
     _define_pd3_order(renamed=True)
 
-    messages, probes = await _pd3_connect_probed(db_url, migrate_updates=True)
+    report = await _pd3_connect(db_url, updates=True)
+    assert schema_steps(report) == []
+    assert warning_texts(report) == []
 
-    assert probes == [_PD3_PROBE]
-    assert _stranded(messages) == [], messages
+    assert _probes(report) == [_PD3_PROBE]
+    assert _stranded(report) == [], report.warnings
 
 
 # ---------------------------------------------------------------------------
@@ -2495,12 +3399,14 @@ def _define_trn_author() -> None:
         name: Annotated[str, FerroField(index=True)]
 
 
-async def _trn_writer_with_rows(db_url: str) -> None:
+async def _trn_writer_with_rows(db_url: str) -> PassReport:
+    """A populated ``trnwriter``; the report of the pass that built it."""
     _define_trn_writer()
-    await ferro.connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
     async with ferro.engines.session():
         await execute("INSERT INTO \"trnwriter\" (\"name\") VALUES ('Ann'), ('Bo')")
     _rewind()
+    return report
 
 
 async def _trn_tables(db_url: str) -> set[str]:
@@ -2521,18 +3427,18 @@ async def _trn_tables(db_url: str) -> set[str]:
     return {name for name in names if name.startswith("trn")}
 
 
-async def _connect_capturing_logs(db_url: str, **flags) -> list[str]:
-    logger = logging.getLogger("ferro")
-    handler = _FerroDebug()
-    previous_level = logger.level
-    logger.addHandler(handler)
-    logger.setLevel(logging.DEBUG)
-    try:
-        await ferro.connect(db_url, **flags)
-    finally:
-        logger.removeHandler(handler)
-        logger.setLevel(previous_level)
-    return handler.messages
+def _created(report: PassReport) -> list[str]:
+    """The tables the pass created, in order."""
+    return [
+        subject
+        for subject, sql in schema_steps(report)
+        if sql.startswith("CREATE TABLE")
+    ]
+
+
+def _touched(report: PassReport, prefix: str) -> set[str]:
+    """The tables whose name starts with ``prefix`` that the pass changed."""
+    return {subject for subject, _ in schema_steps(report) if subject.startswith(prefix)}
 
 
 @pytest.mark.asyncio
@@ -2542,21 +3448,60 @@ async def test_migrate_updates_renames_a_hinted_table_with_its_rows_and_index(
 ):
     import warnings
 
-    await _trn_writer_with_rows(db_url)
+    report = await _trn_writer_with_rows(db_url)
+    assert schema_steps(report) == on(
+        db_url,
+        sqlite=[
+            (
+                "trnwriter",
+                'CREATE TABLE IF NOT EXISTS "trnwriter" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "name" varchar NOT NULL )',
+            ),
+            (
+                "trnwriter",
+                'CREATE INDEX IF NOT EXISTS "idx_trnwriter_name" ON "trnwriter" ("name")',
+            ),
+        ],
+        postgres=[
+            (
+                "trnwriter",
+                'CREATE TABLE IF NOT EXISTS "trnwriter" ( "id" serial PRIMARY KEY NOT NULL, "name" varchar NOT NULL )',
+            ),
+            (
+                "trnwriter",
+                'CREATE INDEX IF NOT EXISTS "idx_trnwriter_name" ON "trnwriter" ("name")',
+            ),
+        ],
+    )
+    assert warning_texts(report) == []
     _define_trn_author()
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        messages = await _connect_capturing_logs(db_url, migrate_updates=True)
+        report = await auto_migrate(db_url, updates=True)
+        assert schema_steps(report) == on(
+            db_url,
+            sqlite=[
+                ("trnauthor", 'ALTER TABLE "trnwriter" RENAME TO "trnauthor"'),
+                ("trnauthor", 'DROP INDEX IF EXISTS "idx_trnwriter_name"'),
+                (
+                    "trnauthor",
+                    'CREATE INDEX IF NOT EXISTS "idx_trnauthor_name" ON "trnauthor" ("name")',
+                ),
+            ],
+            postgres=[
+                ("trnauthor", 'ALTER TABLE "trnwriter" RENAME TO "trnauthor"'),
+                (
+                    "trnauthor",
+                    'ALTER INDEX "idx_trnwriter_name" RENAME TO "idx_trnauthor_name"',
+                ),
+            ],
+        )
+        assert warning_texts(report) == []
     assert not [str(w.message) for w in caught if "trn" in str(w.message)]
 
     # The create pass created nothing: the table is the old one, renamed.
-    assert not [m for m in messages if m.endswith("Table 'trnauthor' created")]
-    assert [
-        m
-        for m in messages
-        if m.startswith("✅ Ferro Engine: Table 'trnauthor' migrated")
-    ]
+    assert "trnauthor" not in _created(report)
+    assert "trnauthor" in _touched(report, "trn")
     async with ferro.engines.session():
         rows = await fetch_all('SELECT "name" FROM "trnauthor" ORDER BY "id"')
         assert [r["name"] for r in rows] == ["Ann", "Bo"]
@@ -2570,8 +3515,10 @@ async def test_migrate_updates_renames_a_hinted_table_with_its_rows_and_index(
     _define_trn_author()
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        again = await _connect_capturing_logs(db_url, migrate_updates=True)
-    assert not [m for m in again if m.startswith("✅ Ferro Engine: Table 'trnauthor'")]
+        report = await auto_migrate(db_url, updates=True)
+        assert schema_steps(report) == []
+        assert warning_texts(report) == []
+    assert "trnauthor" not in _touched(report, "trn")
     assert not [str(w.message) for w in caught if "trn" in str(w.message)]
 
     # And no drift: the live database read the way `drift` reads it (with
@@ -2601,7 +3548,31 @@ async def test_migrate_updates_renames_a_hinted_table_with_its_rows_and_index(
 async def test_a_hinted_table_without_migrate_updates_is_left_alone_and_warns(
     db_url, clean_registry
 ):
-    await _trn_writer_with_rows(db_url)
+    report = await _trn_writer_with_rows(db_url)
+    assert schema_steps(report) == on(
+        db_url,
+        sqlite=[
+            (
+                "trnwriter",
+                'CREATE TABLE IF NOT EXISTS "trnwriter" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "name" varchar NOT NULL )',
+            ),
+            (
+                "trnwriter",
+                'CREATE INDEX IF NOT EXISTS "idx_trnwriter_name" ON "trnwriter" ("name")',
+            ),
+        ],
+        postgres=[
+            (
+                "trnwriter",
+                'CREATE TABLE IF NOT EXISTS "trnwriter" ( "id" serial PRIMARY KEY NOT NULL, "name" varchar NOT NULL )',
+            ),
+            (
+                "trnwriter",
+                'CREATE INDEX IF NOT EXISTS "idx_trnwriter_name" ON "trnwriter" ("name")',
+            ),
+        ],
+    )
+    assert warning_texts(report) == []
     _define_trn_author()
 
     with pytest.warns(
@@ -2611,8 +3582,13 @@ async def test_a_hinted_table_without_migrate_updates_is_left_alone_and_warns(
             r"migrate_updates=True.*ferro migrate new"
         ),
     ):
-        messages = await _connect_capturing_logs(db_url, auto_migrate=True)
-    assert not [m for m in messages if m.endswith("Table 'trnauthor' created")]
+        report = await auto_migrate(db_url)
+        assert schema_steps(report) == []
+        assert warning_texts(report) == [
+            'table "trnauthor" declares __ferro_renamed_from__ = "trnwriter", and the database holds "trnwriter" and no "trnauthor": "trnauthor" was not created. The rename runs under connect(..., migrate_updates=True) or in a migration from ferro migrate new.',
+        ]
+    assert "trnauthor" not in _created(report)
+    assert [w.kind for w in report.warnings] == ["PendingTableRename"]
     ferro.reset_engine()
     # No empty twin: the old table stands, with its rows.
     assert await _trn_tables(db_url) == {"trnwriter"}
@@ -2629,7 +3605,11 @@ async def test_a_hinted_table_without_migrate_updates_is_left_alone_and_warns(
                 r"migrate_updates=True.*ferro migrate new"
             ),
         ):
-            await ferro.create_tables()
+            report = await ferro.create_tables()
+            assert schema_steps(report) == []
+            assert warning_texts(report) == [
+                'table "trnauthor" declares __ferro_renamed_from__ = "trnwriter", and the database holds "trnwriter" and no "trnauthor": "trnauthor" was not created. The rename runs under connect(..., migrate_updates=True) or in a migration from ferro migrate new.',
+            ]
     ferro.reset_engine()
     assert await _trn_tables(db_url) == {"trnwriter"}
 
@@ -2641,14 +3621,62 @@ async def test_a_hinted_table_whose_new_name_is_also_live_is_inert(
 ):
     import warnings
 
-    await _trn_writer_with_rows(db_url)
+    report = await _trn_writer_with_rows(db_url)
+    assert schema_steps(report) == on(
+        db_url,
+        sqlite=[
+            (
+                "trnwriter",
+                'CREATE TABLE IF NOT EXISTS "trnwriter" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "name" varchar NOT NULL )',
+            ),
+            (
+                "trnwriter",
+                'CREATE INDEX IF NOT EXISTS "idx_trnwriter_name" ON "trnwriter" ("name")',
+            ),
+        ],
+        postgres=[
+            (
+                "trnwriter",
+                'CREATE TABLE IF NOT EXISTS "trnwriter" ( "id" serial PRIMARY KEY NOT NULL, "name" varchar NOT NULL )',
+            ),
+            (
+                "trnwriter",
+                'CREATE INDEX IF NOT EXISTS "idx_trnwriter_name" ON "trnwriter" ("name")',
+            ),
+        ],
+    )
+    assert warning_texts(report) == []
     _define_trn_writer()
 
     class TrnAuthor(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: Annotated[str, FerroField(index=True)]
 
-    await ferro.connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == on(
+        db_url,
+        sqlite=[
+            (
+                "trnauthor",
+                'CREATE TABLE IF NOT EXISTS "trnauthor" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "name" varchar NOT NULL )',
+            ),
+            (
+                "trnauthor",
+                'CREATE INDEX IF NOT EXISTS "idx_trnauthor_name" ON "trnauthor" ("name")',
+            ),
+        ],
+        postgres=[
+            (
+                "trnauthor",
+                'CREATE TABLE IF NOT EXISTS "trnauthor" ( "id" serial PRIMARY KEY NOT NULL, "name" varchar NOT NULL )',
+            ),
+            (
+                "trnauthor",
+                'CREATE INDEX IF NOT EXISTS "idx_trnauthor_name" ON "trnauthor" ("name")',
+            ),
+        ],
+    )
+    assert warning_texts(report) == []
     _rewind()
     _define_trn_author()
 
@@ -2656,11 +3684,11 @@ async def test_a_hinted_table_whose_new_name_is_also_live_is_inert(
     # silent, and the old table is no business of this modelset.
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        messages = await _connect_capturing_logs(
-            db_url, migrate_updates=True, migrate_destructive=True
-        )
+        report = await auto_migrate(db_url, destructive=True)
+        assert schema_steps(report) == []
+        assert warning_texts(report) == []
     assert not [str(w.message) for w in caught if "trn" in str(w.message)]
-    assert not [m for m in messages if m.startswith("✅ Ferro Engine: Table 'trn")]
+    assert _touched(report, "trn") == set()
     ferro.reset_engine()
     assert await _trn_tables(db_url) == {"trnwriter", "trnauthor"}
 
@@ -2670,7 +3698,31 @@ async def test_a_hinted_table_whose_new_name_is_also_live_is_inert(
 async def test_two_tables_claiming_one_live_old_name_refuse_and_change_nothing(
     db_url, clean_registry
 ):
-    await _trn_writer_with_rows(db_url)
+    report = await _trn_writer_with_rows(db_url)
+    assert schema_steps(report) == on(
+        db_url,
+        sqlite=[
+            (
+                "trnwriter",
+                'CREATE TABLE IF NOT EXISTS "trnwriter" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "name" varchar NOT NULL )',
+            ),
+            (
+                "trnwriter",
+                'CREATE INDEX IF NOT EXISTS "idx_trnwriter_name" ON "trnwriter" ("name")',
+            ),
+        ],
+        postgres=[
+            (
+                "trnwriter",
+                'CREATE TABLE IF NOT EXISTS "trnwriter" ( "id" serial PRIMARY KEY NOT NULL, "name" varchar NOT NULL )',
+            ),
+            (
+                "trnwriter",
+                'CREATE INDEX IF NOT EXISTS "idx_trnwriter_name" ON "trnwriter" ("name")',
+            ),
+        ],
+    )
+    assert warning_texts(report) == []
 
     class TrnAuthor(Model):
         __ferro_renamed_from__ = "trnwriter"
@@ -2684,13 +3736,24 @@ async def test_two_tables_claiming_one_live_old_name_refuse_and_change_nothing(
         r'rename hint refused: tables "trnauthor" and "trnpoet" all declare '
         r'__ferro_renamed_from__ = "trnwriter"'
     )
-    for flags in (
-        {"auto_migrate": True},
-        {"migrate_updates": True, "migrate_destructive": True},
-    ):
+    for destructive in (False, True):
         with pytest.warns(UserWarning, match=refusal):
-            messages = await _connect_capturing_logs(db_url, **flags)
-        assert not [m for m in messages if m.startswith("✅ Ferro Engine: Table 'trn")]
+            if destructive:
+                report = await auto_migrate(db_url, destructive=True)
+                assert schema_steps(report) == []
+                assert warning_texts(report) == [
+                    'rename hint refused: tables "trnauthor" and "trnpoet" all declare __ferro_renamed_from__ = "trnwriter": one table becomes one table; keep the hint on the model "trnwriter" became',
+                ]
+            else:
+                report = await auto_migrate(db_url)
+                assert schema_steps(report) == []
+                assert warning_texts(report) == [
+                    'rename hint refused: tables "trnauthor" and "trnpoet" all declare __ferro_renamed_from__ = "trnwriter": one table becomes one table; keep the hint on the model "trnwriter" became',
+                ]
+        # Nothing ran, and the one warning is the refusal.
+        assert schema_steps(report) == []
+        assert [w.kind for w in report.warnings] == ["HintRefused"]
+        assert re.match(refusal, str(report.warnings[0]))
         ferro.reset_engine()
         assert await _trn_tables(db_url) == {"trnwriter"}
 
@@ -2715,7 +3778,31 @@ def _define_trn_author_with_books() -> None:
 async def test_a_new_table_referencing_a_renamed_one_is_created_after_the_rename(
     db_url, clean_registry
 ):
-    await _trn_writer_with_rows(db_url)
+    report = await _trn_writer_with_rows(db_url)
+    assert schema_steps(report) == on(
+        db_url,
+        sqlite=[
+            (
+                "trnwriter",
+                'CREATE TABLE IF NOT EXISTS "trnwriter" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "name" varchar NOT NULL )',
+            ),
+            (
+                "trnwriter",
+                'CREATE INDEX IF NOT EXISTS "idx_trnwriter_name" ON "trnwriter" ("name")',
+            ),
+        ],
+        postgres=[
+            (
+                "trnwriter",
+                'CREATE TABLE IF NOT EXISTS "trnwriter" ( "id" serial PRIMARY KEY NOT NULL, "name" varchar NOT NULL )',
+            ),
+            (
+                "trnwriter",
+                'CREATE INDEX IF NOT EXISTS "idx_trnwriter_name" ON "trnwriter" ("name")',
+            ),
+        ],
+    )
+    assert warning_texts(report) == []
     _define_trn_author_with_books()
 
     # Without migrate_updates neither is created: "trnbook" can only
@@ -2724,14 +3811,46 @@ async def test_a_new_table_referencing_a_renamed_one_is_created_after_the_rename
         UserWarning,
         match=r'"trnauthor" was not created, nor "trnbook", which reference it',
     ):
-        await ferro.connect(db_url, auto_migrate=True)
+        report = await auto_migrate(db_url)
+        assert schema_steps(report) == []
+        assert warning_texts(report) == [
+            'table "trnauthor" declares __ferro_renamed_from__ = "trnwriter", and the database holds "trnwriter" and no "trnauthor": "trnauthor" was not created, nor "trnbook", which reference it. The rename runs under connect(..., migrate_updates=True) or in a migration from ferro migrate new.',
+        ]
     ferro.reset_engine()
     assert await _trn_tables(db_url) == {"trnwriter"}
 
     _rewind()
     _define_trn_author_with_books()
-    messages = await _connect_capturing_logs(db_url, migrate_updates=True)
-    assert not [m for m in messages if m.endswith("' created")]
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == on(
+        db_url,
+        sqlite=[
+            ("trnauthor", 'ALTER TABLE "trnwriter" RENAME TO "trnauthor"'),
+            ("trnauthor", 'DROP INDEX IF EXISTS "idx_trnwriter_name"'),
+            (
+                "trnauthor",
+                'CREATE INDEX IF NOT EXISTS "idx_trnauthor_name" ON "trnauthor" ("name")',
+            ),
+            (
+                "trnbook",
+                'CREATE TABLE IF NOT EXISTS "trnbook" ( "author_id" integer NOT NULL, "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "title" varchar NOT NULL, CONSTRAINT "fk_trnbook_author_id_trnauthor" FOREIGN KEY ("author_id") REFERENCES "trnauthor" ("id") ON DELETE CASCADE )',
+            ),
+        ],
+        postgres=[
+            ("trnauthor", 'ALTER TABLE "trnwriter" RENAME TO "trnauthor"'),
+            (
+                "trnauthor",
+                'ALTER INDEX "idx_trnwriter_name" RENAME TO "idx_trnauthor_name"',
+            ),
+            (
+                "trnbook",
+                'CREATE TABLE IF NOT EXISTS "trnbook" ( "author_id" integer NOT NULL, "id" serial PRIMARY KEY NOT NULL, "title" varchar NOT NULL, CONSTRAINT "fk_trnbook_author_id_trnauthor" FOREIGN KEY ("author_id") REFERENCES "trnauthor" ("id") ON DELETE CASCADE )',
+            ),
+        ],
+    )
+    assert warning_texts(report) == []
+    # The rename runs first, then "trnbook" is created after it, by the
+    # reconciliation pass rather than the create pass.
     async with ferro.engines.session():
         await execute(
             'INSERT INTO "trnbook" ("title", "author_id") VALUES (\'Odes\', 2)'
@@ -2776,7 +3895,31 @@ async def test_a_table_two_references_from_a_renamed_one_waits_for_the_rename_to
     """``trnappendix`` references ``trnbook``, which references the renamed
     ``trnauthor``: it waits on the rename through ``trnbook``, and is created
     after it, once ``trnbook`` exists."""
-    await _trn_writer_with_rows(db_url)
+    report = await _trn_writer_with_rows(db_url)
+    assert schema_steps(report) == on(
+        db_url,
+        sqlite=[
+            (
+                "trnwriter",
+                'CREATE TABLE IF NOT EXISTS "trnwriter" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "name" varchar NOT NULL )',
+            ),
+            (
+                "trnwriter",
+                'CREATE INDEX IF NOT EXISTS "idx_trnwriter_name" ON "trnwriter" ("name")',
+            ),
+        ],
+        postgres=[
+            (
+                "trnwriter",
+                'CREATE TABLE IF NOT EXISTS "trnwriter" ( "id" serial PRIMARY KEY NOT NULL, "name" varchar NOT NULL )',
+            ),
+            (
+                "trnwriter",
+                'CREATE INDEX IF NOT EXISTS "idx_trnwriter_name" ON "trnwriter" ("name")',
+            ),
+        ],
+    )
+    assert warning_texts(report) == []
     _define_trn_author_with_books_and_appendices()
 
     # Without migrate_updates none of the three is created, and the one
@@ -2786,14 +3929,52 @@ async def test_a_table_two_references_from_a_renamed_one_waits_for_the_rename_to
         match=r'"trnauthor" was not created, nor "trnappendix" and "trnbook", '
         r"which reference it",
     ):
-        await ferro.connect(db_url, auto_migrate=True)
+        report = await auto_migrate(db_url)
+        assert schema_steps(report) == []
+        assert warning_texts(report) == [
+            'table "trnauthor" declares __ferro_renamed_from__ = "trnwriter", and the database holds "trnwriter" and no "trnauthor": "trnauthor" was not created, nor "trnappendix" and "trnbook", which reference it. The rename runs under connect(..., migrate_updates=True) or in a migration from ferro migrate new.',
+        ]
     ferro.reset_engine()
     assert await _trn_tables(db_url) == {"trnwriter"}
 
     _rewind()
     _define_trn_author_with_books_and_appendices()
-    messages = await _connect_capturing_logs(db_url, migrate_updates=True)
-    assert not [m for m in messages if m.endswith("' created")]
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == on(
+        db_url,
+        sqlite=[
+            ("trnauthor", 'ALTER TABLE "trnwriter" RENAME TO "trnauthor"'),
+            ("trnauthor", 'DROP INDEX IF EXISTS "idx_trnwriter_name"'),
+            (
+                "trnauthor",
+                'CREATE INDEX IF NOT EXISTS "idx_trnauthor_name" ON "trnauthor" ("name")',
+            ),
+            (
+                "trnbook",
+                'CREATE TABLE IF NOT EXISTS "trnbook" ( "author_id" integer NOT NULL, "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "title" varchar NOT NULL, CONSTRAINT "fk_trnbook_author_id_trnauthor" FOREIGN KEY ("author_id") REFERENCES "trnauthor" ("id") ON DELETE CASCADE )',
+            ),
+            (
+                "trnappendix",
+                'CREATE TABLE IF NOT EXISTS "trnappendix" ( "book_id" integer NOT NULL, "heading" varchar NOT NULL, "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, CONSTRAINT "fk_trnappendix_book_id_trnbook" FOREIGN KEY ("book_id") REFERENCES "trnbook" ("id") ON DELETE CASCADE )',
+            ),
+        ],
+        postgres=[
+            ("trnauthor", 'ALTER TABLE "trnwriter" RENAME TO "trnauthor"'),
+            (
+                "trnauthor",
+                'ALTER INDEX "idx_trnwriter_name" RENAME TO "idx_trnauthor_name"',
+            ),
+            (
+                "trnbook",
+                'CREATE TABLE IF NOT EXISTS "trnbook" ( "author_id" integer NOT NULL, "id" serial PRIMARY KEY NOT NULL, "title" varchar NOT NULL, CONSTRAINT "fk_trnbook_author_id_trnauthor" FOREIGN KEY ("author_id") REFERENCES "trnauthor" ("id") ON DELETE CASCADE )',
+            ),
+            (
+                "trnappendix",
+                'CREATE TABLE IF NOT EXISTS "trnappendix" ( "book_id" integer NOT NULL, "heading" varchar NOT NULL, "id" serial PRIMARY KEY NOT NULL, CONSTRAINT "fk_trnappendix_book_id_trnbook" FOREIGN KEY ("book_id") REFERENCES "trnbook" ("id") ON DELETE CASCADE )',
+            ),
+        ],
+    )
+    assert warning_texts(report) == []
     # Each table is created after the one it references: the appendix's
     # foreign key would fail against a book that did not exist yet.
     async with ferro.engines.session():
@@ -2824,7 +4005,18 @@ async def test_a_live_label_rename_on_postgres_is_only_the_rename(db_url, clean_
     import warnings
 
     _define_pd3_order(renamed=False)
-    await ferro.connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "pd3status",
+            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace WHERE t.typname = 'pd3status' AND n.nspname = current_schema()) THEN CREATE TYPE \"pd3status\" AS ENUM ('paid', 'canceled'); END IF; END $$",
+        ),
+        (
+            "pd3order",
+            'CREATE TABLE IF NOT EXISTS "pd3order" ( "id" serial PRIMARY KEY NOT NULL, "status" pd3status NOT NULL )',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with ferro.engines.session():
         await execute("INSERT INTO \"pd3order\" (\"status\") VALUES ('canceled')")
     _rewind()
@@ -2832,13 +4024,13 @@ async def test_a_live_label_rename_on_postgres_is_only_the_rename(db_url, clean_
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        logs = await _connect_capturing_logs(db_url, migrate_updates=True)
+        report = await auto_migrate(db_url, updates=True)
+        assert schema_steps(report) == [
+            ("pd3status", "ALTER TYPE \"pd3status\" RENAME VALUE 'canceled' TO 'cancelled'"),
+        ]
+        assert warning_texts(report) == []
 
-    executed = [
-        line.split("': ", 1)[1]
-        for line in logs
-        if line.startswith("Ferro Engine: auto-migrate executing on")
-    ]
+    executed = [sql for _, sql in schema_steps(report)]
     assert [sql for sql in executed if "ALTER TYPE" in sql] == [
         "ALTER TYPE \"pd3status\" RENAME VALUE 'canceled' TO 'cancelled'"
     ], executed
@@ -2938,6 +4130,8 @@ async def test_a_view_named_like_a_model_refuses_connect_and_creates_nothing(
         await ferro.connect(db_url, **flags)
 
     assert str(raised.value) == HELD_REFUSAL
+    # Refused before any DDL: the error's report is empty.
+    assert raised.value.report == PassReport()
     # Nothing was created: not the model the view stands in for, not the
     # model beside it.
     ferro.reset_engine()
@@ -2958,6 +4152,8 @@ async def test_create_tables_refuses_a_view_named_like_a_model(
     with pytest.raises(MigrationRefused) as raised:
         await ferro.create_tables()
 
+    assert schema_steps(raised.value.report) == []
+    assert warning_texts(raised.value.report) == []
     assert str(raised.value) == HELD_REFUSAL
     ferro.reset_engine()
     assert await _held_relations(db_url, db_backend) == {"heldcard": "view"}
@@ -2976,7 +4172,31 @@ async def test_a_base_table_named_like_a_model_is_left_to_reconcile_as_before(
     )
     _define_held_models()
 
-    await ferro.connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == on(
+        db_url,
+        sqlite=[
+            (
+                "helddeck",
+                'CREATE TABLE IF NOT EXISTS "helddeck" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "name" varchar NOT NULL )',
+            ),
+            (
+                "helddeck",
+                'CREATE INDEX IF NOT EXISTS "idx_helddeck_name" ON "helddeck" ("name")',
+            ),
+        ],
+        postgres=[
+            (
+                "helddeck",
+                'CREATE TABLE IF NOT EXISTS "helddeck" ( "id" serial PRIMARY KEY NOT NULL, "name" varchar NOT NULL )',
+            ),
+            (
+                "helddeck",
+                'CREATE INDEX IF NOT EXISTS "idx_helddeck_name" ON "helddeck" ("name")',
+            ),
+        ],
+    )
+    assert warning_texts(report) == []
     ferro.reset_engine()
 
     table = "table" if db_backend == "sqlite" else "base table"
@@ -3064,7 +4284,31 @@ async def test_migrate_updates_redefines_an_index_whose_cut_name_now_covers_more
         billing_period_end: int
         customer_id: int
 
-    await ferro.connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == on(
+        db_url,
+        sqlite=[
+            (
+                "subscriptioninvoiceline",
+                'CREATE TABLE IF NOT EXISTS "subscriptioninvoiceline" ( "billing_period_end" integer NOT NULL, "billing_period_start" integer NOT NULL, "customer_id" integer NOT NULL, "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT )',
+            ),
+            (
+                "subscriptioninvoiceline",
+                'CREATE INDEX IF NOT EXISTS "idx_subscriptioninvoiceline_billing_period_start_billing_pe_idx" ON "subscriptioninvoiceline" ("billing_period_start", "billing_period_end")',
+            ),
+        ],
+        postgres=[
+            (
+                "subscriptioninvoiceline",
+                'CREATE TABLE IF NOT EXISTS "subscriptioninvoiceline" ( "billing_period_end" integer NOT NULL, "billing_period_start" integer NOT NULL, "customer_id" integer NOT NULL, "id" serial PRIMARY KEY NOT NULL )',
+            ),
+            (
+                "subscriptioninvoiceline",
+                'CREATE INDEX IF NOT EXISTS "idx_subscriptioninvoiceline_billing_period_start_billing_pe_idx" ON "subscriptioninvoiceline" ("billing_period_start", "billing_period_end")',
+            ),
+        ],
+    )
+    assert warning_texts(report) == []
     assert _index_definition(db_url, db_backend, TRUNCATED) == (
         ["billing_period_start", "billing_period_end"],
         False,
@@ -3080,7 +4324,18 @@ async def test_migrate_updates_redefines_an_index_whose_cut_name_now_covers_more
         billing_period_end: int
         customer_id: int
 
-    await ferro.connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == [
+        (
+            "subscriptioninvoiceline",
+            'DROP INDEX IF EXISTS "idx_subscriptioninvoiceline_billing_period_start_billing_pe_idx"',
+        ),
+        (
+            "subscriptioninvoiceline",
+            'CREATE INDEX IF NOT EXISTS "idx_subscriptioninvoiceline_billing_period_start_billing_pe_idx" ON "subscriptioninvoiceline" ("billing_period_start", "billing_period_end", "customer_id")',
+        ),
+    ]
+    assert warning_texts(report) == []
     assert _index_definition(db_url, db_backend, TRUNCATED) == (
         ["billing_period_start", "billing_period_end", "customer_id"],
         False,
@@ -3100,14 +4355,46 @@ async def test_migrate_updates_redefines_a_ferro_named_index_written_another_way
         code: Annotated[str, FerroField(index=True)]
         label: str
 
-    await ferro.connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == on(
+        db_url,
+        sqlite=[
+            (
+                "redeflive",
+                'CREATE TABLE IF NOT EXISTS "redeflive" ( "code" varchar NOT NULL, "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "label" varchar NOT NULL )',
+            ),
+            (
+                "redeflive",
+                'CREATE INDEX IF NOT EXISTS "idx_redeflive_code" ON "redeflive" ("code")',
+            ),
+        ],
+        postgres=[
+            (
+                "redeflive",
+                'CREATE TABLE IF NOT EXISTS "redeflive" ( "code" varchar NOT NULL, "id" serial PRIMARY KEY NOT NULL, "label" varchar NOT NULL )',
+            ),
+            (
+                "redeflive",
+                'CREATE INDEX IF NOT EXISTS "idx_redeflive_code" ON "redeflive" ("code")',
+            ),
+        ],
+    )
+    assert warning_texts(report) == []
     ferro.reset_engine()
     _by_hand(db_url, db_backend, 'DROP INDEX "idx_redeflive_code"')
     _by_hand(
         db_url, db_backend, 'CREATE INDEX "idx_redeflive_code" ON "redeflive" ("label")'
     )
 
-    await ferro.connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == [
+        ("redeflive", 'DROP INDEX IF EXISTS "idx_redeflive_code"'),
+        (
+            "redeflive",
+            'CREATE INDEX IF NOT EXISTS "idx_redeflive_code" ON "redeflive" ("code")',
+        ),
+    ]
+    assert warning_texts(report) == []
     assert _index_definition(db_url, db_backend, "idx_redeflive_code") == (
         ["code"],
         False,
@@ -3127,7 +4414,23 @@ async def test_a_unique_redefinition_over_duplicates_fails_counted_naming_the_fi
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         code: str
 
-    await ferro.connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == on(
+        db_url,
+        sqlite=[
+            (
+                "redefdupe",
+                'CREATE TABLE IF NOT EXISTS "redefdupe" ( "code" varchar NOT NULL, "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT )',
+            ),
+        ],
+        postgres=[
+            (
+                "redefdupe",
+                'CREATE TABLE IF NOT EXISTS "redefdupe" ( "code" varchar NOT NULL, "id" serial PRIMARY KEY NOT NULL )',
+            ),
+        ],
+    )
+    assert warning_texts(report) == []
     async with ferro.engines.session():
         for code in ("a", "a", "b", "b", "c"):
             await RedefDupe.create(code=code)
@@ -3141,7 +4444,18 @@ async def test_a_unique_redefinition_over_duplicates_fails_counted_naming_the_fi
         code: Annotated[str, FerroField(unique=True)]
 
     with pytest.raises(Exception) as failure:
-        await ferro.connect(db_url, migrate_updates=True)
+        await auto_migrate(db_url, updates=True)
+    # The failing CREATE UNIQUE INDEX is the error's to name. What committed
+    # before it is the report's: on SQLite (statement at a time) the DROP of
+    # the old index stood; on Postgres the table's unit rolled back whole.
+    assert schema_steps(failure.value.report) == on(
+        db_url,
+        sqlite=[
+            ("redefdupe", 'DROP INDEX IF EXISTS "uq_redefdupe_code"'),
+        ],
+        postgres=[],
+    )
+    assert warning_texts(failure.value.report) == []
     message = str(failure.value)
     assert '2 values are duplicated under "uq_redefdupe_code" on "redefdupe"' in message
     assert "fix the rows" in message
@@ -3191,7 +4505,31 @@ async def test_a_foreign_key_removed_from_a_kept_column_is_dropped_only_when_des
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         team: Annotated[DfkTeam | None, ForeignKey(related_name="members")] = None
 
-    await ferro.connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == on(
+        db_url,
+        sqlite=[
+            (
+                "dfkteam",
+                'CREATE TABLE IF NOT EXISTS "dfkteam" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT )',
+            ),
+            (
+                "dfkmember",
+                'CREATE TABLE IF NOT EXISTS "dfkmember" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "team_id" integer, CONSTRAINT "fk_dfkmember_team_id_dfkteam" FOREIGN KEY ("team_id") REFERENCES "dfkteam" ("id") ON DELETE CASCADE )',
+            ),
+        ],
+        postgres=[
+            (
+                "dfkteam",
+                'CREATE TABLE IF NOT EXISTS "dfkteam" ( "id" serial PRIMARY KEY NOT NULL )',
+            ),
+            (
+                "dfkmember",
+                'CREATE TABLE IF NOT EXISTS "dfkmember" ( "id" serial PRIMARY KEY NOT NULL, "team_id" integer, CONSTRAINT "fk_dfkmember_team_id_dfkteam" FOREIGN KEY ("team_id") REFERENCES "dfkteam" ("id") ON DELETE CASCADE )',
+            ),
+        ],
+    )
+    assert warning_texts(report) == []
     assert _live_foreign_keys(db_url, db_backend, "dfkmember") == ["team_id"]
     _rewind()
 
@@ -3202,14 +4540,27 @@ async def test_a_foreign_key_removed_from_a_kept_column_is_dropped_only_when_des
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         team_id: int | None = None
 
-    await ferro.connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == []
+    assert warning_texts(report) == []
     assert _live_foreign_keys(db_url, db_backend, "dfkmember") == ["team_id"]
     ferro.reset_engine()
 
     if db_backend == "postgres":
-        await ferro.connect(db_url, migrate_destructive=True)
+        report = await auto_migrate(db_url, destructive=True)
+        assert schema_steps(report) == [
+            (
+                "dfkmember",
+                'ALTER TABLE "dfkmember" DROP CONSTRAINT "fk_dfkmember_team_id_dfkteam"',
+            ),
+        ]
+        assert warning_texts(report) == []
         assert _live_foreign_keys(db_url, db_backend, "dfkmember") == []
         return
     with pytest.warns(UserWarning, match="fk_dfkmember_team_id_dfkteam"):
-        await ferro.connect(db_url, migrate_destructive=True)
+        report = await auto_migrate(db_url, destructive=True)
+        assert schema_steps(report) == []
+        assert warning_texts(report) == [
+            "Foreign key 'fk_dfkmember_team_id_dfkteam' on 'dfkmember.team_id' is no longer declared, and SQLite cannot drop a table constraint in place, so it stays and keeps enforcing its reference. Generate a reviewed migration with `ferro migrate new` to rebuild the table without it.",
+        ]
     assert _live_foreign_keys(db_url, db_backend, "dfkmember") == ["team_id"]

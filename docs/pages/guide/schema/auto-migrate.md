@@ -177,6 +177,70 @@ await ferro.migrate(using="service")   # against a named connection
 
 `ferro.create_tables()` runs only the create pass. Both are refused on a database that has run a migration, as the flags are.
 
+## What the pass did: `PassReport`
+
+`ferro.migrate()` and `ferro.create_tables()` return a `PassReport`: every statement the pass sent to the database, in order, and every warning it raised. Say `Author` gains a `slug` field:
+
+=== "Assignment"
+
+    ```python
+    import ferro
+    from ferro import Model
+
+
+    class Author(Model):
+        id: int | None = ferro.Field(primary_key=True, default=None)
+        name: str
+        slug: str | None = None  # new
+    ```
+
+=== "Annotated"
+
+    ```python
+    from typing import Annotated
+
+    from ferro import FerroField, Model
+
+
+    class Author(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+        slug: str | None = None  # new
+    ```
+
+```python
+report = await ferro.migrate()
+
+[(s.subject, s.sql) for s in report.statements if s.role == "schema"]
+# [('author', 'ALTER TABLE "author" ADD COLUMN "slug" varchar')]
+
+[(w.kind, str(w)) for w in report.warnings]
+# []
+```
+
+The report is built from what the pass actually executed, never from its plan, so it never lists a statement that did not run.
+
+- **`statements`** is a tuple of `ExecutedStatement(subject, sql, role)`. `subject` is the table or enum type the statement belongs to. `role` is one of:
+    - `"schema"`: the create pass, the enum type statements and the reconciliation;
+    - `"lock_timeout"`: the `SET LOCAL lock_timeout` (or `SET` / `RESET`) the pass wraps each Postgres unit in, so a statement never queues behind a long lock;
+    - `"probe"`: the row read SQLite costs for a [label rename](#evolving-enums-label-addition) on a column with no check.
+- **`warnings`** is a tuple of `Report(kind, subject, text, recurs)`; `str(warning)` is its sentence. Every warning is still raised as a `UserWarning` too. `kind` names it, so code can match on it rather than on the text:
+    - the planner's and renderer's kinds: `LeftoverChecks`, `ExtraEnumLabels`, `ForeignFkDrift`, `HintRefused`, the row-security kinds (`DroppedRowSecurity`, `ForeignPolicies`, `UnverifiablePolicy`, `PolicyBodyReplaced`, `RowSecurityTeardown`, `ExtraPolicies`), `RefusedConversion`, `SqliteInPlace`, `PrimaryKeyKept`, `RowSecuritySkipped`;
+    - the pass's own: `PendingTableRename`, `StrandedLabelRename`, `RowSecurityUnderMigrator`, `RunLockWait` (it waited for the run lock) and `DdlLockRetry` (a statement timed out waiting for a table lock and its unit is retried).
+
+    `recurs` is `True` for a warning raised on every pass until someone acts.
+
+A pass that fails partway raises its usual error with `.report` set to what committed before the failure, the failing statement left out. On Postgres each table is its own transaction, so earlier tables stay changed, and the report says which:
+
+```python
+try:
+    await ferro.migrate()
+except ferro.OperationalError as error:
+    changed = {s.subject for s in error.report.statements if s.role == "schema"}
+```
+
+`connect(..., auto_migrate=True)` runs the same pass and returns nothing; its failure carries the same `.report`. The `ferro` logger's debug lines name each statement as it runs, but they are free text: read the report, not the log.
+
 ## Two processes at once
 
 Every auto-migrate pass takes the same run lock `ferro migrate up` takes, so two processes booting together never collide: the second waits, saying so with a `UserWarning`, and sees the first one's DDL:

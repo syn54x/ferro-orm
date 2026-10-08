@@ -41,6 +41,7 @@ from ferro._core import (
 )
 from ferro.ir.compiler import compile_registry_schema_ir
 from ferro.raw import execute, fetch_all, fetch_one
+from tests._pass_harness import auto_migrate, schema_steps, warning_texts
 
 LEDGER_A = uuid.UUID("11111111-1111-4111-8111-111111111111")
 LEDGER_B = uuid.UUID("22222222-2222-4222-8222-222222222222")
@@ -527,7 +528,20 @@ async def _pg_policies(table: str) -> list[dict]:
 @pytest.mark.asyncio
 async def test_fresh_auto_migrate_creates_the_table_with_its_flags_and_policy(db_url):
     _define_ledger_row()
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "ledgerrow",
+            'CREATE TABLE IF NOT EXISTS "ledgerrow" ( "id" serial PRIMARY KEY NOT NULL, "label" varchar NOT NULL, "ledger_id" uuid NOT NULL )',
+        ),
+        ("ledgerrow", 'ALTER TABLE "ledgerrow" ENABLE ROW LEVEL SECURITY'),
+        ("ledgerrow", 'ALTER TABLE "ledgerrow" FORCE ROW LEVEL SECURITY'),
+        (
+            "ledgerrow",
+            "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)",
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         flags = await _pg_row_security_flags("ledgerrow")
         assert flags["relrowsecurity"] is True
@@ -551,7 +565,19 @@ async def test_fresh_auto_migrate_creates_the_table_with_its_flags_and_policy(db
 @pytest.mark.asyncio
 async def test_force_false_enables_without_forcing(db_url):
     _define_ledger_row(force=False)
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "ledgerrow",
+            'CREATE TABLE IF NOT EXISTS "ledgerrow" ( "id" serial PRIMARY KEY NOT NULL, "label" varchar NOT NULL, "ledger_id" uuid NOT NULL )',
+        ),
+        ("ledgerrow", 'ALTER TABLE "ledgerrow" ENABLE ROW LEVEL SECURITY'),
+        (
+            "ledgerrow",
+            "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)",
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         flags = await _pg_row_security_flags("ledgerrow")
         assert flags["relrowsecurity"] is True
@@ -577,12 +603,23 @@ async def test_create_pass_leaves_an_existing_table_untouched_but_warns(
         ledger_id: uuid.UUID
         label: str
 
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "ledgerrow",
+            'CREATE TABLE IF NOT EXISTS "ledgerrow" ( "id" serial PRIMARY KEY NOT NULL, "label" varchar NOT NULL, "ledger_id" uuid NOT NULL )',
+        ),
+    ]
+    assert warning_texts(report) == []
     _rewind_registry()
 
     _define_ledger_row()
     recwarn.clear()
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == []
+    assert warning_texts(report) == [
+        "Table 'ledgerrow' declares __ferro_rls__, but the table already exists and the create pass never alters an existing table (ADR-0010). Its row-security flags and policies were NOT applied — rows are NOT filtered. Connect with migrate_updates=True to reconcile them, or apply them with a reviewed migration.",
+    ]
 
     unenforced = [w for w in recwarn if "__ferro_rls__" in str(w.message)]
     assert len(unenforced) == 1, [str(w.message) for w in recwarn]
@@ -600,7 +637,11 @@ async def test_create_pass_leaves_an_existing_table_untouched_but_warns(
     # boot, which is the whole point of warning rather than logging once.
     reset_engine()
     recwarn.clear()
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == []
+    assert warning_texts(report) == [
+        "Table 'ledgerrow' declares __ferro_rls__, but the table already exists and the create pass never alters an existing table (ADR-0010). Its row-security flags and policies were NOT applied — rows are NOT filtered. Connect with migrate_updates=True to reconcile them, or apply them with a reviewed migration.",
+    ]
     assert len([w for w in recwarn if "__ferro_rls__" in str(w.message)]) == 1
 
 
@@ -609,7 +650,16 @@ async def test_create_pass_leaves_an_existing_table_untouched_but_warns(
 @pytest.mark.asyncio
 async def test_sqlite_registers_warns_and_skips_the_ddl(db_url, recwarn):
     LedgerRow = _define_ledger_row()
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "ledgerrow",
+            'CREATE TABLE IF NOT EXISTS "ledgerrow" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "label" varchar NOT NULL, "ledger_id" CHAR(32) NOT NULL )',
+        ),
+    ]
+    assert warning_texts(report) == [
+        "Table 'ledgerrow' declares __ferro_rls__, but row-level security is a PostgreSQL-only feature: the table is created without its policies and rows are NOT filtered on SQLite. Run against PostgreSQL for enforcement.",
+    ]
 
     warnings = [w for w in recwarn if "row-level security" in str(w.message)]
     assert len(warnings) == 1, [str(w.message) for w in recwarn]
@@ -674,7 +724,20 @@ async def test_policy_filters_rows_for_a_non_superuser_role(db_url, tenant_role)
     from ferro import transaction
 
     LedgerRow = _define_ledger_row()
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "ledgerrow",
+            'CREATE TABLE IF NOT EXISTS "ledgerrow" ( "id" serial PRIMARY KEY NOT NULL, "label" varchar NOT NULL, "ledger_id" uuid NOT NULL )',
+        ),
+        ("ledgerrow", 'ALTER TABLE "ledgerrow" ENABLE ROW LEVEL SECURITY'),
+        ("ledgerrow", 'ALTER TABLE "ledgerrow" FORCE ROW LEVEL SECURITY'),
+        (
+            "ledgerrow",
+            "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)",
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         # Seeded as the superuser the matrix connects as — RLS does not apply.
         await LedgerRow.create(ledger_id=LEDGER_A, label="a1")
@@ -722,7 +785,20 @@ async def test_with_check_rejects_a_cross_tenant_insert(db_url, tenant_role):
     from ferro import transaction
 
     LedgerRow = _define_ledger_row()
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "ledgerrow",
+            'CREATE TABLE IF NOT EXISTS "ledgerrow" ( "id" serial PRIMARY KEY NOT NULL, "label" varchar NOT NULL, "ledger_id" uuid NOT NULL )',
+        ),
+        ("ledgerrow", 'ALTER TABLE "ledgerrow" ENABLE ROW LEVEL SECURITY'),
+        ("ledgerrow", 'ALTER TABLE "ledgerrow" FORCE ROW LEVEL SECURITY'),
+        (
+            "ledgerrow",
+            "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)",
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         try:
             await _grant(tenant_role, "ledgerrow")
@@ -750,7 +826,20 @@ async def test_force_binds_the_table_owner(db_url, tenant_role):
     from ferro import transaction
 
     LedgerRow = _define_ledger_row(force=True)
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "ledgerrow",
+            'CREATE TABLE IF NOT EXISTS "ledgerrow" ( "id" serial PRIMARY KEY NOT NULL, "label" varchar NOT NULL, "ledger_id" uuid NOT NULL )',
+        ),
+        ("ledgerrow", 'ALTER TABLE "ledgerrow" ENABLE ROW LEVEL SECURITY'),
+        ("ledgerrow", 'ALTER TABLE "ledgerrow" FORCE ROW LEVEL SECURITY'),
+        (
+            "ledgerrow",
+            "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)",
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         await LedgerRow.create(ledger_id=LEDGER_A, label="a1")
         try:
@@ -781,7 +870,28 @@ async def test_command_scoped_and_restrictive_policies_compose(db_url, tenant_ro
         # The invitee policy reads a table ferro does not own; it must exist
         # before CREATE POLICY references it.
         await execute("CREATE TABLE membership (doc_id INTEGER, member TEXT)")
-        await create_tables()
+        report = await create_tables()
+        assert schema_steps(report) == [
+            (
+                "doc",
+                'CREATE TABLE IF NOT EXISTS "doc" ( "id" serial PRIMARY KEY NOT NULL, "ledger_id" uuid NOT NULL, "owner" varchar NOT NULL, "title" varchar NOT NULL )',
+            ),
+            ("doc", 'ALTER TABLE "doc" ENABLE ROW LEVEL SECURITY'),
+            ("doc", 'ALTER TABLE "doc" FORCE ROW LEVEL SECURITY'),
+            (
+                "doc",
+                "CREATE POLICY \"rls_doc_tenant\" ON \"doc\" AS RESTRICTIVE FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)",
+            ),
+            (
+                "doc",
+                "CREATE POLICY \"rls_doc_owner_all\" ON \"doc\" FOR ALL USING (\"owner\" = NULLIF(current_setting('pinch.member', true), '')) WITH CHECK (\"owner\" = NULLIF(current_setting('pinch.member', true), ''))",
+            ),
+            (
+                "doc",
+                'CREATE POLICY "rls_doc_invitee_read" ON "doc" FOR SELECT USING ("id" IN (SELECT doc_id FROM membership WHERE member = NULLIF(current_setting(\'pinch.member\', true), \'\')))',
+            ),
+        ]
+        assert warning_texts(report) == []
 
         doc = await Doc.create(ledger_id=LEDGER_A, owner="alice", title="plan")
         await execute(
@@ -843,7 +953,28 @@ async def test_declared_policies_land_in_the_catalog_as_declared(db_url):
     await connect(db_url)
     async with engines.session():
         await execute("CREATE TABLE membership (doc_id INTEGER, member TEXT)")
-        await create_tables()
+        report = await create_tables()
+        assert schema_steps(report) == [
+            (
+                "doc",
+                'CREATE TABLE IF NOT EXISTS "doc" ( "id" serial PRIMARY KEY NOT NULL, "ledger_id" uuid NOT NULL, "owner" varchar NOT NULL, "title" varchar NOT NULL )',
+            ),
+            ("doc", 'ALTER TABLE "doc" ENABLE ROW LEVEL SECURITY'),
+            ("doc", 'ALTER TABLE "doc" FORCE ROW LEVEL SECURITY'),
+            (
+                "doc",
+                "CREATE POLICY \"rls_doc_tenant\" ON \"doc\" AS RESTRICTIVE FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)",
+            ),
+            (
+                "doc",
+                "CREATE POLICY \"rls_doc_owner_all\" ON \"doc\" FOR ALL USING (\"owner\" = NULLIF(current_setting('pinch.member', true), '')) WITH CHECK (\"owner\" = NULLIF(current_setting('pinch.member', true), ''))",
+            ),
+            (
+                "doc",
+                'CREATE POLICY "rls_doc_invitee_read" ON "doc" FOR SELECT USING ("id" IN (SELECT doc_id FROM membership WHERE member = NULLIF(current_setting(\'pinch.member\', true), \'\')))',
+            ),
+        ]
+        assert warning_texts(report) == []
 
         policies = {p["policyname"]: p for p in await _pg_policies("doc")}
         assert set(policies) == {
@@ -907,6 +1038,11 @@ async def test_a_failed_policy_leaves_no_table_rather_than_a_locked_out_one(db_u
 
     with pytest.raises(Exception) as excinfo:
         await create_tables()
+    # The table, its flags and its first policy ran in one transaction with
+    # the failing policy, and rolled back with it: nothing committed.
+    assert schema_steps(excinfo.value.report) == []
+    assert warning_texts(excinfo.value.report) == []
+    assert 'CREATE POLICY "rls_fragile_broken" ON "fragile"' in str(excinfo.value)
     # The error names the statement, not just "connect failed".
     message = str(excinfo.value)
     assert "fragile" in message
@@ -922,7 +1058,20 @@ async def test_a_failed_policy_leaves_no_table_rather_than_a_locked_out_one(db_u
     # And the fix is just to fix the declaration: nothing needs cleaning up.
     _rewind_registry()
     LedgerRow = _define_ledger_row()
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "ledgerrow",
+            'CREATE TABLE IF NOT EXISTS "ledgerrow" ( "id" serial PRIMARY KEY NOT NULL, "label" varchar NOT NULL, "ledger_id" uuid NOT NULL )',
+        ),
+        ("ledgerrow", 'ALTER TABLE "ledgerrow" ENABLE ROW LEVEL SECURITY'),
+        ("ledgerrow", 'ALTER TABLE "ledgerrow" FORCE ROW LEVEL SECURITY'),
+        (
+            "ledgerrow",
+            "CREATE POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\" FOR ALL USING (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid) WITH CHECK (\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid)",
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         flags = await _pg_row_security_flags("ledgerrow")
         assert flags["relrowsecurity"] is True

@@ -23,7 +23,6 @@ from ferro import (
     Field,
     Model,
     clear_registry,
-    connect,
     engines,
     reset_engine,
 )
@@ -32,6 +31,7 @@ from ferro.ir.compiler import compile_registry_schema_ir
 from ferro.raw import execute, fetch_all
 from tests._alembic_harness import autogen_upgrade_code as _autogen_upgrade_code
 from tests._alembic_harness import planner_statements as _planner_statements
+from tests._pass_harness import auto_migrate, schema_steps, warning_texts
 
 SIDE_CHECK_NAME = "ck_orphan_at_most_one_side"
 SIDE_CHECK_BODY = '("left" IS NULL) OR ("right" IS NULL)'
@@ -155,6 +155,12 @@ def test_leftover_table_check_warns_and_stays_under_migrate_updates():
     live = [_live_check(SIDE_CHECK_NAME, f"CHECK ({SIDE_CHECK_BODY})")]
     for dialect in ("postgres", "sqlite"):
         statements, warnings = _render("orphan", ORPHAN_LIVE_COLUMNS, live, dialect)
+        assert (statements, warnings) == (
+            [],
+            [
+                "Table 'orphan' has CHECK constraint(s) 'ck_orphan_at_most_one_side' that the model no longer declares. Leftover CHECKs keep rejecting rows the model now allows. They stay in place unless you pass migrate_destructive=True (Postgres) or drop them with a reviewed migration (`ferro migrate new`).",
+            ],
+        )
         assert statements == [], dialect
         assert len(warnings) == 1, (dialect, warnings)
         assert SIDE_CHECK_NAME in warnings[0]
@@ -168,6 +174,14 @@ def test_leftover_table_check_drops_under_migrate_destructive_on_postgres():
     statements, warnings = _render(
         "orphan", ORPHAN_LIVE_COLUMNS, live, "postgres", destructive=True
     )
+    assert (statements, warnings) == (
+        [
+            'ALTER TABLE "orphan" DROP CONSTRAINT "ck_orphan_at_most_one_side"',
+        ],
+        [
+            "Table 'orphan' has CHECK constraint(s) 'ck_orphan_at_most_one_side' that the model no longer declares. Leftover CHECKs keep rejecting rows the model now allows. They stay in place unless you pass migrate_destructive=True (Postgres) or drop them with a reviewed migration (`ferro migrate new`).",
+        ],
+    )
     assert statements == [SIDE_CHECK_DROP]
     assert len(warnings) == 1
     assert SIDE_CHECK_NAME in warnings[0]
@@ -178,6 +192,13 @@ def test_leftover_table_check_warns_and_skips_on_sqlite_even_when_destructive():
     live = [_live_check(SIDE_CHECK_NAME, f"CHECK ({SIDE_CHECK_BODY})")]
     statements, warnings = _render(
         "orphan", ORPHAN_LIVE_COLUMNS, live, "sqlite", destructive=True
+    )
+    assert (statements, warnings) == (
+        [],
+        [
+            "Table 'orphan' has CHECK constraint(s) 'ck_orphan_at_most_one_side' that the model no longer declares. Leftover CHECKs keep rejecting rows the model now allows. They stay in place unless you pass migrate_destructive=True (Postgres) or drop them with a reviewed migration (`ferro migrate new`).",
+            "CHECK constraint 'ck_orphan_at_most_one_side' on table 'orphan' is no longer declared, and SQLite cannot drop a table constraint in place (it requires a full table rebuild). The live constraint remains; generate a reviewed migration with `ferro migrate new` to drop it.",
+        ],
     )
     assert statements == []
     assert any(SIDE_CHECK_NAME in warning for warning in warnings)
@@ -197,10 +218,24 @@ def test_clearing_db_check_follows_the_same_warn_and_drop_rule():
     ]
     live = [_live_check(COOKIE_CHECK_NAME, "CHECK (\"flavor\" IN ('sweet', 'salty'))")]
     statements, warnings = _render("cookie", live_columns, live, "postgres")
+    assert (statements, warnings) == (
+        [],
+        [
+            "Table 'cookie' has CHECK constraint(s) 'ck_cookie_flavor' that the model no longer declares. Leftover CHECKs keep rejecting rows the model now allows. They stay in place unless you pass migrate_destructive=True (Postgres) or drop them with a reviewed migration (`ferro migrate new`).",
+        ],
+    )
     assert statements == []
     assert any(COOKIE_CHECK_NAME in warning for warning in warnings)
 
     statements, _ = _render("cookie", live_columns, live, "postgres", destructive=True)
+    assert (statements, _) == (
+        [
+            'ALTER TABLE "cookie" DROP CONSTRAINT "ck_cookie_flavor"',
+        ],
+        [
+            "Table 'cookie' has CHECK constraint(s) 'ck_cookie_flavor' that the model no longer declares. Leftover CHECKs keep rejecting rows the model now allows. They stay in place unless you pass migrate_destructive=True (Postgres) or drop them with a reviewed migration (`ferro migrate new`).",
+        ],
+    )
     assert statements == [COOKIE_CHECK_DROP]
 
 
@@ -222,6 +257,7 @@ def test_user_owned_live_check_is_never_warned_or_dropped():
                 dialect,
                 destructive=destructive,
             )
+            assert (statements, warnings) == ([], [])
             assert statements == [], (dialect, destructive)
             assert warnings == [], (dialect, destructive, warnings)
             assert not any(USER_CHECK_NAME in sql for sql in statements)
@@ -234,6 +270,7 @@ def test_declared_check_is_not_a_leftover():
         statements, warnings = _render(
             "orphan", ORPHAN_LIVE_COLUMNS, live, dialect, destructive=True
         )
+        assert (statements, warnings) == ([], [])
         assert statements == [], dialect
         assert warnings == [], dialect
 
@@ -249,6 +286,7 @@ def test_without_migrate_updates_no_leftover_is_planned():
             dialect,
             updates=False,
         )
+        assert (statements, warnings) == ([], [])
         assert statements == [], dialect
         assert warnings == [], dialect
 
@@ -268,6 +306,14 @@ def test_check_drop_statement_parity_pin():
 
     runtime, _ = _render(
         "orphan", ORPHAN_LIVE_COLUMNS, live, "postgres", destructive=True
+    )
+    assert (runtime, _) == (
+        [
+            'ALTER TABLE "orphan" DROP CONSTRAINT "ck_orphan_at_most_one_side"',
+        ],
+        [
+            "Table 'orphan' has CHECK constraint(s) 'ck_orphan_at_most_one_side' that the model no longer declares. Leftover CHECKs keep rejecting rows the model now allows. They stay in place unless you pass migrate_destructive=True (Postgres) or drop them with a reviewed migration (`ferro migrate new`).",
+        ],
     )
     assert statements == runtime
 
@@ -290,7 +336,14 @@ async def _pg_check_names(table: str) -> set[str]:
 @pytest.mark.asyncio
 async def test_migrate_updates_leaves_a_removed_table_check_and_warns(db_url):
     Orphan = _define_orphan(with_check=True)
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "orphan",
+            'CREATE TABLE IF NOT EXISTS "orphan" ( "id" serial PRIMARY KEY NOT NULL, "left" varchar, "right" varchar, CONSTRAINT "ck_orphan_at_most_one_side" CHECK (("left" IS NULL) OR ("right" IS NULL)) )',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         await Orphan.create(left=None, right=None)
         assert SIDE_CHECK_NAME in await _pg_check_names("orphan")
@@ -298,7 +351,11 @@ async def test_migrate_updates_leaves_a_removed_table_check_and_warns(db_url):
 
     _define_orphan(with_check=False)
     with pytest.warns(UserWarning, match=SIDE_CHECK_NAME) as record:
-        await connect(db_url, migrate_updates=True)
+        report = await auto_migrate(db_url, updates=True)
+        assert schema_steps(report) == []
+        assert warning_texts(report) == [
+            "Table 'orphan' has CHECK constraint(s) 'ck_orphan_at_most_one_side' that the model no longer declares. Leftover CHECKs keep rejecting rows the model now allows. They stay in place unless you pass migrate_destructive=True (Postgres) or drop them with a reviewed migration (`ferro migrate new`).",
+        ]
     named = [w for w in record if SIDE_CHECK_NAME in str(w.message)]
     assert len(named) == 1
     assert "migrate_destructive" in str(named[0].message)
@@ -312,7 +369,14 @@ async def test_migrate_updates_leaves_a_removed_table_check_and_warns(db_url):
 @pytest.mark.asyncio
 async def test_migrate_destructive_drops_the_orphaned_table_check(db_url):
     Orphan = _define_orphan(with_check=True)
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "orphan",
+            'CREATE TABLE IF NOT EXISTS "orphan" ( "id" serial PRIMARY KEY NOT NULL, "left" varchar, "right" varchar, CONSTRAINT "ck_orphan_at_most_one_side" CHECK (("left" IS NULL) OR ("right" IS NULL)) )',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         await Orphan.create(left="a", right=None)
         assert SIDE_CHECK_NAME in await _pg_check_names("orphan")
@@ -320,7 +384,13 @@ async def test_migrate_destructive_drops_the_orphaned_table_check(db_url):
 
     Orphan = _define_orphan(with_check=False)
     with pytest.warns(UserWarning, match=SIDE_CHECK_NAME):
-        await connect(db_url, migrate_destructive=True)
+        report = await auto_migrate(db_url, destructive=True)
+        assert schema_steps(report) == [
+            ("orphan", 'ALTER TABLE "orphan" DROP CONSTRAINT "ck_orphan_at_most_one_side"'),
+        ]
+        assert warning_texts(report) == [
+            "Table 'orphan' has CHECK constraint(s) 'ck_orphan_at_most_one_side' that the model no longer declares. Leftover CHECKs keep rejecting rows the model now allows. They stay in place unless you pass migrate_destructive=True (Postgres) or drop them with a reviewed migration (`ferro migrate new`).",
+        ]
     async with engines.session():
         assert SIDE_CHECK_NAME not in await _pg_check_names("orphan")
         row = await Orphan.create(left="c", right="d")
@@ -332,7 +402,18 @@ async def test_migrate_destructive_drops_the_orphaned_table_check(db_url):
 @pytest.mark.asyncio
 async def test_clearing_db_check_warns_then_drops_on_destructive(db_url):
     Cookie = _define_cookie(db_check=True)
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "cookie",
+            'CREATE TABLE IF NOT EXISTS "cookie" ( "flavor" text NOT NULL, "id" serial PRIMARY KEY NOT NULL )',
+        ),
+        (
+            "cookie",
+            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_cookie_flavor' AND conrelid = '\"cookie\"'::regclass) THEN ALTER TABLE \"cookie\" ADD CONSTRAINT \"ck_cookie_flavor\" CHECK (\"flavor\" IN ('sweet', 'salty')); END IF; END $$",
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         await Cookie.create(flavor=Flavor.SWEET)
         assert COOKIE_CHECK_NAME in await _pg_check_names("cookie")
@@ -340,14 +421,24 @@ async def test_clearing_db_check_warns_then_drops_on_destructive(db_url):
 
     _define_cookie(db_check=False)
     with pytest.warns(UserWarning, match=COOKIE_CHECK_NAME):
-        await connect(db_url, migrate_updates=True)
+        report = await auto_migrate(db_url, updates=True)
+        assert schema_steps(report) == []
+        assert warning_texts(report) == [
+            "Table 'cookie' has CHECK constraint(s) 'ck_cookie_flavor' that the model no longer declares. Leftover CHECKs keep rejecting rows the model now allows. They stay in place unless you pass migrate_destructive=True (Postgres) or drop them with a reviewed migration (`ferro migrate new`).",
+        ]
     async with engines.session():
         assert COOKIE_CHECK_NAME in await _pg_check_names("cookie")
 
     _rewind_registry()
     Cookie = _define_cookie(db_check=False)
     with pytest.warns(UserWarning, match=COOKIE_CHECK_NAME):
-        await connect(db_url, migrate_destructive=True)
+        report = await auto_migrate(db_url, destructive=True)
+        assert schema_steps(report) == [
+            ("cookie", 'ALTER TABLE "cookie" DROP CONSTRAINT "ck_cookie_flavor"'),
+        ]
+        assert warning_texts(report) == [
+            "Table 'cookie' has CHECK constraint(s) 'ck_cookie_flavor' that the model no longer declares. Leftover CHECKs keep rejecting rows the model now allows. They stay in place unless you pass migrate_destructive=True (Postgres) or drop them with a reviewed migration (`ferro migrate new`).",
+        ]
     async with engines.session():
         assert COOKIE_CHECK_NAME not in await _pg_check_names("cookie")
         await execute('INSERT INTO "cookie" ("flavor") VALUES (\'sour\')')
@@ -358,7 +449,14 @@ async def test_clearing_db_check_warns_then_drops_on_destructive(db_url):
 @pytest.mark.asyncio
 async def test_user_created_non_ck_check_survives_both_flags(db_url, recwarn):
     _define_orphan(with_check=True)
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "orphan",
+            'CREATE TABLE IF NOT EXISTS "orphan" ( "id" serial PRIMARY KEY NOT NULL, "left" varchar, "right" varchar, CONSTRAINT "ck_orphan_at_most_one_side" CHECK (("left" IS NULL) OR ("right" IS NULL)) )',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         await execute(
             f'ALTER TABLE "orphan" ADD CONSTRAINT "{USER_CHECK_NAME}" '
@@ -369,7 +467,9 @@ async def test_user_created_non_ck_check_survives_both_flags(db_url, recwarn):
 
     _define_orphan(with_check=True)
     recwarn.clear()
-    await connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == []
+    assert warning_texts(report) == []
     assert not [w for w in recwarn if USER_CHECK_NAME in str(w.message)]
     async with engines.session():
         assert USER_CHECK_NAME in await _pg_check_names("orphan")
@@ -377,7 +477,9 @@ async def test_user_created_non_ck_check_survives_both_flags(db_url, recwarn):
     _rewind_registry()
     recwarn.clear()
     _define_orphan(with_check=True)
-    await connect(db_url, migrate_destructive=True)
+    report = await auto_migrate(db_url, destructive=True)
+    assert schema_steps(report) == []
+    assert warning_texts(report) == []
     assert not [w for w in recwarn if USER_CHECK_NAME in str(w.message)]
     async with engines.session():
         assert USER_CHECK_NAME in await _pg_check_names("orphan")
@@ -389,19 +491,34 @@ async def test_user_created_non_ck_check_survives_both_flags(db_url, recwarn):
 @pytest.mark.asyncio
 async def test_second_updates_boot_does_not_remove_the_leftover(db_url, recwarn):
     Orphan = _define_orphan(with_check=True)
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "orphan",
+            'CREATE TABLE IF NOT EXISTS "orphan" ( "id" serial PRIMARY KEY NOT NULL, "left" varchar, "right" varchar, CONSTRAINT "ck_orphan_at_most_one_side" CHECK (("left" IS NULL) OR ("right" IS NULL)) )',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         await Orphan.create(left=None, right=None)
     _rewind_registry()
 
     _define_orphan(with_check=False)
-    await connect(db_url, migrate_updates=True)
+    report = await auto_migrate(db_url, updates=True)
+    assert schema_steps(report) == []
+    assert warning_texts(report) == [
+        "Table 'orphan' has CHECK constraint(s) 'ck_orphan_at_most_one_side' that the model no longer declares. Leftover CHECKs keep rejecting rows the model now allows. They stay in place unless you pass migrate_destructive=True (Postgres) or drop them with a reviewed migration (`ferro migrate new`).",
+    ]
     recwarn.clear()
 
     _rewind_registry()
     _define_orphan(with_check=False)
     with pytest.warns(UserWarning, match=SIDE_CHECK_NAME):
-        await connect(db_url, migrate_updates=True)
+        report = await auto_migrate(db_url, updates=True)
+        assert schema_steps(report) == []
+        assert warning_texts(report) == [
+            "Table 'orphan' has CHECK constraint(s) 'ck_orphan_at_most_one_side' that the model no longer declares. Leftover CHECKs keep rejecting rows the model now allows. They stay in place unless you pass migrate_destructive=True (Postgres) or drop them with a reviewed migration (`ferro migrate new`).",
+        ]
     async with engines.session():
         assert SIDE_CHECK_NAME in await _pg_check_names("orphan")
 
@@ -411,7 +528,14 @@ async def test_second_updates_boot_does_not_remove_the_leftover(db_url, recwarn)
 @pytest.mark.asyncio
 async def test_sqlite_leftover_warns_and_rewrites_nothing(db_url):
     Orphan = _define_orphan(with_check=True)
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "orphan",
+            'CREATE TABLE IF NOT EXISTS "orphan" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "left" varchar, "right" varchar, CONSTRAINT "ck_orphan_at_most_one_side" CHECK (("left" IS NULL) OR ("right" IS NULL)) )',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         await Orphan.create(left=None, right=None)
         before = (
@@ -423,7 +547,11 @@ async def test_sqlite_leftover_warns_and_rewrites_nothing(db_url):
 
     _define_orphan(with_check=False)
     with pytest.warns(UserWarning, match=SIDE_CHECK_NAME) as record:
-        await connect(db_url, migrate_updates=True)
+        report = await auto_migrate(db_url, updates=True)
+        assert schema_steps(report) == []
+        assert warning_texts(report) == [
+            "Table 'orphan' has CHECK constraint(s) 'ck_orphan_at_most_one_side' that the model no longer declares. Leftover CHECKs keep rejecting rows the model now allows. They stay in place unless you pass migrate_destructive=True (Postgres) or drop them with a reviewed migration (`ferro migrate new`).",
+        ]
     named = [w for w in record if SIDE_CHECK_NAME in str(w.message)]
     assert named, "silence is wrong for leftover CHECKs"
 
@@ -446,7 +574,14 @@ async def test_sqlite_leftover_warns_and_rewrites_nothing(db_url):
 @pytest.mark.asyncio
 async def test_sqlite_destructive_still_skips_the_drop(db_url):
     _define_orphan(with_check=True)
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "orphan",
+            'CREATE TABLE IF NOT EXISTS "orphan" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "left" varchar, "right" varchar, CONSTRAINT "ck_orphan_at_most_one_side" CHECK (("left" IS NULL) OR ("right" IS NULL)) )',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         before = (
             await fetch_all(
@@ -457,7 +592,12 @@ async def test_sqlite_destructive_still_skips_the_drop(db_url):
 
     _define_orphan(with_check=False)
     with pytest.warns(UserWarning, match=SIDE_CHECK_NAME):
-        await connect(db_url, migrate_destructive=True)
+        report = await auto_migrate(db_url, destructive=True)
+        assert schema_steps(report) == []
+        assert warning_texts(report) == [
+            "Table 'orphan' has CHECK constraint(s) 'ck_orphan_at_most_one_side' that the model no longer declares. Leftover CHECKs keep rejecting rows the model now allows. They stay in place unless you pass migrate_destructive=True (Postgres) or drop them with a reviewed migration (`ferro migrate new`).",
+            "CHECK constraint 'ck_orphan_at_most_one_side' on table 'orphan' is no longer declared, and SQLite cannot drop a table constraint in place (it requires a full table rebuild). The live constraint remains; generate a reviewed migration with `ferro migrate new` to drop it.",
+        ]
     async with engines.session():
         after = (
             await fetch_all(
@@ -479,14 +619,25 @@ async def test_autogenerate_proposes_the_runtime_drop_after_a_non_destructive_co
     db_url, postgres_base_url, db_schema_name
 ):
     Orphan = _define_orphan(with_check=True)
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "orphan",
+            'CREATE TABLE IF NOT EXISTS "orphan" ( "id" serial PRIMARY KEY NOT NULL, "left" varchar, "right" varchar, CONSTRAINT "ck_orphan_at_most_one_side" CHECK (("left" IS NULL) OR ("right" IS NULL)) )',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         await Orphan.create(left=None, right=None)
     _rewind_registry()
 
     _define_orphan(with_check=False)
     with pytest.warns(UserWarning, match=SIDE_CHECK_NAME):
-        await connect(db_url, migrate_updates=True)
+        report = await auto_migrate(db_url, updates=True)
+        assert schema_steps(report) == []
+        assert warning_texts(report) == [
+            "Table 'orphan' has CHECK constraint(s) 'ck_orphan_at_most_one_side' that the model no longer declares. Leftover CHECKs keep rejecting rows the model now allows. They stay in place unless you pass migrate_destructive=True (Postgres) or drop them with a reviewed migration (`ferro migrate new`).",
+        ]
 
     code = _autogen_upgrade_code(postgres_base_url, db_schema_name)
     assert SIDE_CHECK_DROP in code, code
@@ -500,14 +651,27 @@ async def test_autogenerate_is_empty_once_the_leftover_is_dropped(
     db_url, postgres_base_url, db_schema_name
 ):
     Orphan = _define_orphan(with_check=True)
-    await connect(db_url, auto_migrate=True)
+    report = await auto_migrate(db_url)
+    assert schema_steps(report) == [
+        (
+            "orphan",
+            'CREATE TABLE IF NOT EXISTS "orphan" ( "id" serial PRIMARY KEY NOT NULL, "left" varchar, "right" varchar, CONSTRAINT "ck_orphan_at_most_one_side" CHECK (("left" IS NULL) OR ("right" IS NULL)) )',
+        ),
+    ]
+    assert warning_texts(report) == []
     async with engines.session():
         await Orphan.create(left=None, right=None)
     _rewind_registry()
 
     _define_orphan(with_check=False)
     with pytest.warns(UserWarning, match=SIDE_CHECK_NAME):
-        await connect(db_url, migrate_destructive=True)
+        report = await auto_migrate(db_url, destructive=True)
+        assert schema_steps(report) == [
+            ("orphan", 'ALTER TABLE "orphan" DROP CONSTRAINT "ck_orphan_at_most_one_side"'),
+        ]
+        assert warning_texts(report) == [
+            "Table 'orphan' has CHECK constraint(s) 'ck_orphan_at_most_one_side' that the model no longer declares. Leftover CHECKs keep rejecting rows the model now allows. They stay in place unless you pass migrate_destructive=True (Postgres) or drop them with a reviewed migration (`ferro migrate new`).",
+        ]
 
     code = _autogen_upgrade_code(postgres_base_url, db_schema_name)
     assert SIDE_CHECK_DROP not in code, code

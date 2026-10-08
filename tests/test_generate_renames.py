@@ -511,7 +511,8 @@ async def test_a_check_that_drifted_is_rebuilt_in_the_same_run_as_a_rename_on_it
     next connect (I-6)."""
     import ferro
     from ferro.raw import execute
-    from tests.test_auto_migrate import _connect_logging, _rewind
+    from tests._pass_harness import auto_migrate
+    from tests.test_auto_migrate import _rewind
 
     _rewind()
     _define_passdrift(hinted=False)
@@ -525,8 +526,10 @@ async def test_a_check_that_drifted_is_rebuilt_in_the_same_run_as_a_rename_on_it
     _rewind()
     _define_passdrift(hinted=True)
 
-    messages = await _connect_logging(db_url)
-    executed = [m for m in messages if "auto-migrate executing on 'passdrift'" in m]
+    report = await auto_migrate(db_url, updates=True)
+    executed = [
+        s.sql for s in report.statements if s.role == "schema" and s.subject == "passdrift"
+    ]
     assert any('RENAME COLUMN "name" TO "full_name"' in m for m in executed), executed
     assert any('DROP CONSTRAINT "ck_passdrift_kind"' in m for m in executed), executed
     async with ferro.engines.session():
@@ -536,5 +539,5 @@ async def test_a_check_that_drifted_is_rebuilt_in_the_same_run_as_a_rename_on_it
 
     _rewind()
     _define_passdrift(hinted=True)
-    again = await _connect_logging(db_url)
-    assert not [m for m in again if m.startswith("✅ Ferro Engine: Table 'passdrift'")]
+    again = await auto_migrate(db_url, updates=True)
+    assert not [s for s in again.statements if s.subject == "passdrift"]

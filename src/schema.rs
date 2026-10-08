@@ -5,8 +5,9 @@
 
 use crate::backend::EngineHandle;
 use crate::ddl_exec::{DdlError, DdlExecutor, Door, Failed, Unit};
-use crate::migrate::{emit_report, pass_attempt_warning, pass_lock_timeout_error};
+use crate::migrate::{PassReport, pass_attempt_warning, pass_lock_timeout_error};
 use crate::state::{Dialect, MODEL_REGISTRY, engine_for_connection};
+use ferro_migrate::Subject;
 use ferro_migrate::plan::{
     hint_refusal_warning, pending_table_rename_warning, refuse_hints, table_rename_hint,
 };
@@ -40,6 +41,8 @@ use std::sync::Arc;
 /// behind the `CREATE TABLE`. A table that times out is rolled back and
 /// created again from the top; an enum type statement re-runs alone.
 ///
+/// What it executes and warns goes into `report` (ADR-0049).
+///
 /// # Errors
 /// Returns a `PyErr` if the SQL execution fails; `OperationalError` naming
 /// `ddl_lock_timeout` after the last attempt.
@@ -47,6 +50,7 @@ pub async fn internal_create_tables(
     engine: Arc<EngineHandle>,
     reconciliation_follows: bool,
     ddl: &DdlExecutor,
+    report: &mut PassReport,
 ) -> PyResult<CreatePass> {
     // The runtime CREATE TABLE path is emitted from the Python-compiled SchemaIR
     // via the shared `ferro_migrate` emitter (issue #153). The modelset must have
@@ -108,7 +112,7 @@ pub async fn internal_create_tables(
         modelset.payload.models.iter().collect();
     let held_back = tables_awaiting_rename(&model_refs, &existing_tables);
     if !reconciliation_follows {
-        warn_pending_renames(&modelset.payload, &existing_tables, &held_back);
+        warn_pending_renames(&modelset.payload, &existing_tables, &held_back, report);
     }
     let mut to_create = Vec::new();
     for model in ferro_migrate::order_models_for_create(&model_refs) {
@@ -133,10 +137,10 @@ pub async fn internal_create_tables(
             // reconciliation pass emits no row-security DDL at all (ADR-0014),
             // so the warning always stands there.
             if (!reconciliation_follows || dialect != Dialect::Postgres)
-                && let Some(report) =
+                && let Some(warning) =
                     ferro_ddl_lowering::row_security_existing_table_warning(model, dialect)
             {
-                emit_report(&report);
+                report.warn(warning);
             }
             continue;
         }
@@ -187,18 +191,26 @@ pub async fn internal_create_tables(
                 .or_insert((model.table_name.as_str(), guard));
         }
     }
-    for (table, guard) in type_guards.values() {
+    // Each type statement is reported under its type, as the
+    // reconciliation pass reports its own (ADR-0049).
+    for (type_name, (table, guard)) in &type_guards {
         let (table, guard) = (*table, *guard);
-        ddl.run(
-            &engine,
-            Unit::Unwrapped,
-            Door::Pass(table),
-            &[guard],
-            |attempt| crate::emit_user_warning_always(&pass_attempt_warning(table, &attempt)),
-            None,
-        )
-        .await
-        .map_err(|err| match err {
+        let result = ddl
+            .run(
+                &engine,
+                Unit::Unwrapped,
+                Door::Pass(type_name),
+                &[guard],
+                |attempt| {
+                    report.warn(pass_attempt_warning(
+                        Subject::enum_type(type_name),
+                        &attempt,
+                    ))
+                },
+                None,
+            )
+            .await;
+        report.unit(result).map_err(|err| match err {
             DdlError::LockTimeout(timeout) => pass_lock_timeout_error(table, &timeout),
             DdlError::Failed(failure) => {
                 create_step_error(table, "enum type", guard, failure.error)
@@ -207,10 +219,10 @@ pub async fn internal_create_tables(
     }
 
     for (model, emission) in &to_create {
-        create_one_table(&engine, model, emission, ddl).await?;
+        create_one_table(&engine, model, emission, ddl, report).await?;
 
-        for report in &emission.reports {
-            emit_report(report);
+        for warning in &emission.reports {
+            report.warn(warning.clone());
         }
 
         crate::log_debug(format!("✅ Ferro Engine: Table '{}' created", model.table_name));
@@ -287,12 +299,13 @@ fn warn_pending_renames(
     declared: &SchemaIrPayload,
     live: &HashSet<String>,
     held_back: &BTreeMap<String, BTreeSet<String>>,
+    report: &mut PassReport,
 ) {
     if held_back.is_empty() {
         return;
     }
     if let Err(refusal) = refuse_hints(declared) {
-        emit_report(&hint_refusal_warning(&refusal));
+        report.warn(hint_refusal_warning(&refusal));
         return;
     }
     for model in &declared.models {
@@ -305,7 +318,7 @@ fn warn_pending_renames(
             .filter(|(table, roots)| *table != new && roots.contains(new))
             .map(|(table, _)| table.clone())
             .collect();
-        emit_report(&pending_table_rename_warning(old, new, &dependents));
+        report.warn(pending_table_rename_warning(old, new, &dependents));
     }
 }
 
@@ -334,6 +347,7 @@ async fn create_one_table(
     model: &ferro_schema_ir::SchemaModel,
     emission: &ferro_migrate::CreateTableEmission,
     ddl: &DdlExecutor,
+    report: &mut PassReport,
 ) -> PyResult<()> {
     let table = model.table_name.as_str();
     let unit = match engine.backend() {
@@ -349,20 +363,23 @@ async fn create_one_table(
             unit,
             Door::Pass(table),
             &statements,
-            |attempt| crate::emit_user_warning_always(&pass_attempt_warning(table, &attempt)),
+            |attempt| report.warn(pass_attempt_warning(Subject::table(table), &attempt)),
             None,
         )
         .await;
-    result.map(|_| ()).map_err(|err| match err {
+    report.unit(result).map_err(|err| match err {
         DdlError::LockTimeout(timeout) => pass_lock_timeout_error(table, &timeout),
         DdlError::Failed(Failed {
             index: Some(index),
             error,
+            ..
         }) => {
             let step = if index == 0 { "table" } else { "artifact" };
             create_step_error(table, step, statements[index], error)
         }
-        DdlError::Failed(Failed { index: None, error }) => crate::errors::map_db_error(
+        DdlError::Failed(Failed {
+            index: None, error, ..
+        }) => crate::errors::map_db_error(
             &format!("Auto-migrate failed to create table '{table}'"),
             error,
         ),
@@ -423,11 +440,13 @@ pub fn register_model_schema(
 /// governed by ferro migrations (ADR-0038); `tracking_schemas` are the
 /// project's configured `tracking_schema`s, and `ddl_lock_timeout_s` its
 /// `ddl_lock_timeout` in seconds, which every `CREATE` waits for locks under
-/// on Postgres (ADR-0044; `0` disables).
+/// on Postgres (ADR-0044; `0` disables). Resolves to the pass's report as
+/// JSON, which `ferro.create_tables` reads into a `PassReport`.
 ///
 /// # Errors
 /// Returns a `PyErr` if the engine is not initialized, the database is
-/// governed by ferro migrations, or SQL execution fails.
+/// governed by ferro migrations, or SQL execution fails; a failure of the
+/// pass carries its report.
 #[pyfunction]
 #[pyo3(signature = (using=None, tracking_schemas=Vec::new(), ddl_lock_timeout_s=5.0))]
 pub fn create_tables(
@@ -443,7 +462,7 @@ pub fn create_tables(
         // `create_tables()` is the create pass on its own (no `updates`):
         // nothing reconciles an existing table afterwards, so a declaration
         // on one is reported. It shares the lock-then-guard path.
-        crate::migrate::internal_migrate(
+        crate::migrate::run_pass_for_python(
             engine,
             opts,
             &tracking_schemas,
@@ -815,9 +834,30 @@ mod tests {
                 "the index is created too"
             );
 
-            create_one_table(&engine, &model, &emission, &DdlExecutor::new(None))
-                .await
-                .expect("created");
+            let mut report = crate::migrate::PassReport::default();
+            create_one_table(
+                &engine,
+                &model,
+                &emission,
+                &DdlExecutor::new(None),
+                &mut report,
+            )
+            .await
+            .expect("created");
+
+            // The report lists what ran, as it ran.
+            let ran: Vec<(&str, &str, crate::ddl_exec::Role)> = report
+                .executed
+                .statements
+                .iter()
+                .map(|s| (s.subject.as_str(), s.sql.as_str(), s.role))
+                .collect();
+            let expected: Vec<(&str, &str, crate::ddl_exec::Role)> =
+                std::iter::once(&emission.create_sql)
+                    .chain(&emission.post_create_sqls)
+                    .map(|sql| ("widget", sql.as_str(), crate::ddl_exec::Role::Schema))
+                    .collect();
+            assert_eq!(ran, expected);
 
             let Ok(EngineConnection::Sqlite(conn)) =
                 crate::ddl_exec::pool_connection(&engine).await

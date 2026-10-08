@@ -42,6 +42,7 @@ from .exceptions import (
 )
 from .fields import BackRef, Field, ManyToMany
 from .models import Model, evict_instance, transaction
+from .pass_report import ExecutedStatement, PassReport, _carrying_report, _run_pass
 from .query import Relation, Row, Rows, now
 from .raw import Transaction, execute, fetch_all, fetch_one
 from .rowsecurity import RowPolicy, RowSecurity
@@ -384,6 +385,10 @@ async def connect(
     ten attempts, each one a ``UserWarning`` naming the attempt, and then
     fails with ``OperationalError`` naming ``ddl_lock_timeout``.
 
+    ``connect()`` returns nothing; the pass's ``PassReport`` (every statement
+    it ran, every warning) is what ``ferro.migrate()`` returns. A pass that
+    fails raises with ``.report`` set to what committed before the failure.
+
     Raises:
         ValueError: A connection with this name (or a default connection,
             when ``name`` is omitted) is already registered. Use ``name=...``
@@ -405,18 +410,20 @@ async def connect(
         else {}
     )
     pool_config = pool or PoolConfig()
-    await _core_connect(
-        url,
-        auto_migrate=auto_migrate,
-        name=name,
-        default=default,
-        max_connections=pool_config.max_connections,
-        min_connections=pool_config.min_connections,
-        settings_delivery=pool_config.settings_delivery,
-        identity_map=identity_map,
-        migrate_updates=migrate_updates,
-        migrate_destructive=migrate_destructive,
-        **guard,
+    await _carrying_report(
+        _core_connect(
+            url,
+            auto_migrate=auto_migrate,
+            name=name,
+            default=default,
+            max_connections=pool_config.max_connections,
+            min_connections=pool_config.min_connections,
+            settings_delivery=pool_config.settings_delivery,
+            identity_map=identity_map,
+            migrate_updates=migrate_updates,
+            migrate_destructive=migrate_destructive,
+            **guard,
+        )
     )
 
 
@@ -469,7 +476,7 @@ def _ddl_lock_timeout_seconds(settings: FerroSettings) -> float:
     )
 
 
-async def create_tables(using=None):
+async def create_tables(using: str | None = None) -> PassReport:
     """
     Manually create the *missing* tables for registered models on a connected
     engine. A table that already exists is left completely untouched; altering
@@ -486,14 +493,20 @@ async def create_tables(using=None):
 
     Args:
         using: Named connection to create tables on, or None for the default.
+
+    Returns:
+        The ``PassReport``: every statement the pass ran and every warning it
+        raised. A failed pass's error carries it as ``.report``.
     """
     _ensure_rust_registration_synced()
-    return await _core_create_tables(
-        using=using, **_auto_migrate_settings()
+    return await _run_pass(
+        _core_create_tables(using=using, **_auto_migrate_settings())
     )
 
 
-async def migrate(using=None, updates=True, destructive=False):
+async def migrate(
+    using: str | None = None, updates: bool = True, destructive: bool = False
+) -> PassReport:
     """
     Manually run the auto-migrate pass against a connected engine.
 
@@ -508,13 +521,22 @@ async def migrate(using=None, updates=True, destructive=False):
 
     Like ``connect()``'s auto-migrate flags, it runs under the run lock and
     refuses a database governed by ferro migrations.
+
+    Returns:
+        The ``PassReport``: every statement the pass sent to the database, in
+        order (``ExecutedStatement(subject, sql, role)``), and every warning
+        it raised (also raised as a ``UserWarning``). A pass that fails
+        partway raises its usual error with ``.report`` set to what committed
+        before the failure.
     """
     _ensure_rust_registration_synced()
-    return await _core_migrate(
-        using=using,
-        updates=updates,
-        destructive=destructive,
-        **_auto_migrate_settings(),
+    return await _run_pass(
+        _core_migrate(
+            using=using,
+            updates=updates,
+            destructive=destructive,
+            **_auto_migrate_settings(),
+        )
     )
 
 
@@ -550,6 +572,8 @@ __all__ = [
     "version",
     "create_tables",
     "migrate",
+    "PassReport",
+    "ExecutedStatement",
     "reset_engine",
     "set_default_connection",
     "clear_registry",

@@ -33,14 +33,18 @@
 //! retries. SQLite has no lock queue of this shape: nothing is set there and
 //! nothing is retried. The executor runs the statements it is given and adds
 //! only the `SET LOCAL` / `SET` / `RESET` (AGENTS.md § I-1), which the
-//! [`Executed`] it returns lists as [`Role::LockTimeout`].
+//! [`Executed`] it returns lists as [`Role::LockTimeout`]. A unit that fails
+//! carries what it committed before the failure ([`Failed::committed`]): an
+//! unwrapped unit's earlier statements stand, a transactional unit's do not.
 //!
 //! Two units stay outside on purpose and return the same [`Executed`]: the
 //! SQLite reconciliation pass (`migrate.rs`: statement at a time, each column
 //! drop through its index-dependency path) and a SQLite `foreign-keys-off`
 //! step (`run.rs`: the pragma, `BEGIN IMMEDIATE`, `foreign_key_check`). They
 //! send each statement through [`Executed::send`] / [`Executed::send_on`],
-//! so they log, run unprepared and record exactly as the executor does.
+//! so they log, run unprepared and record exactly as the executor does. The
+//! pass's SQLite label probe reads rows through [`Executed::probe_on`], which
+//! records it as [`Role::Probe`] (ADR-0049).
 
 use crate::backend::{EngineBindValue, EngineConnection, EngineHandle};
 use ferro_ddl_lowering::Dialect;
@@ -126,6 +130,10 @@ pub struct DdlLockTimeout {
     pub timeout: Duration,
     /// The table the last failing statement targets, when known.
     pub table: Option<String>,
+    /// What the last attempt committed before it timed out: an unwrapped
+    /// unit's statements ahead of the one that waited; nothing for a
+    /// transactional unit, which rolled back.
+    pub committed: Executed,
 }
 
 impl std::fmt::Display for DdlLockTimeout {
@@ -193,31 +201,35 @@ impl Door<'_> {
         }
     }
 
-    /// The line logged before `statement` runs.
+    /// The debug line logged before `statement` runs: free text, one per
+    /// statement. What a pass ran is its [`crate::migrate::PassReport`], never
+    /// this line.
     fn log(self, statement: &Statement) {
         let (subject, sql) = (statement.subject.as_str(), statement.sql.as_str());
-        match (self, statement.role) {
-            (Door::Pass(_), Role::Schema) => crate::migrate::log_reconcile_statement(subject, sql),
-            (Door::Pass(_), Role::LockTimeout) => {
-                crate::migrate::log_lock_timeout_statement(subject, sql)
-            }
-            (Door::Run(_), _) => crate::run::log_step_statement(subject, sql),
+        match self {
+            Door::Pass(_) => crate::log_debug(format!("ferro auto-migrate: {subject}: {sql}")),
+            Door::Run(_) => crate::run::log_step_statement(subject, sql),
         }
     }
 }
 
-/// What a statement the executor sent was for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// What a statement the executor sent was for. On the wire (the pass's
+/// report) it is `"schema"`, `"lock_timeout"` or `"probe"`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Role {
     /// The caller's own statement.
     Schema,
     /// A `SET LOCAL` / `SET` / `RESET lock_timeout` the executor added
     /// (ADR-0044).
     LockTimeout,
+    /// A read whose answer decides what the pass says, never a change: the
+    /// SQLite label row probe (ADR-0047).
+    Probe,
 }
 
 /// One statement sent to the database.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct Statement {
     /// The table, enum type or step file it belongs to.
     pub subject: String,
@@ -271,6 +283,25 @@ impl Executed {
         self.statements.push(statement);
         Ok(affected)
     }
+
+    /// Log the read `sql` as `door`'s, run it unprepared on a connection out
+    /// of `engine`'s pool, and record it as [`Role::Probe`] once it
+    /// succeeded.
+    ///
+    /// # Errors
+    /// The pool's or the database's error; nothing is recorded.
+    pub async fn probe_on(
+        &mut self,
+        engine: &EngineHandle,
+        door: Door<'_>,
+        sql: &str,
+    ) -> Result<Vec<crate::backend::EngineRow>, sqlx::Error> {
+        let statement = door.statement(Role::Probe, sql);
+        door.log(&statement);
+        let rows = engine.fetch_all_sql_unprepared(sql).await?;
+        self.statements.push(statement);
+        Ok(rows)
+    }
 }
 
 /// A unit's failure that is not a lock timeout: the database error and,
@@ -281,11 +312,29 @@ impl Executed {
 pub struct Failed {
     pub index: Option<usize>,
     pub error: sqlx::Error,
+    /// What the unit committed before the failure, the failing statement
+    /// left out: an unwrapped unit's statements that ran ahead of it (its
+    /// lock-timeout statements included); nothing for a transactional unit,
+    /// which rolled back.
+    pub committed: Executed,
 }
 
 impl Failed {
+    /// The caller's statement at `index` failed with `error`.
+    pub fn at(index: usize, error: sqlx::Error) -> Self {
+        Self {
+            index: Some(index),
+            error,
+            committed: Executed::default(),
+        }
+    }
+
     fn outside(error: sqlx::Error) -> Self {
-        Self { index: None, error }
+        Self {
+            index: None,
+            error,
+            committed: Executed::default(),
+        }
     }
 }
 
@@ -345,6 +394,17 @@ pub enum DdlError<E> {
     /// A failure that is not a lock timeout, or any failure with the
     /// timeout disabled.
     Failed(E),
+}
+
+impl DdlError<Failed> {
+    /// What the failed unit committed before its failure, taken out of the
+    /// error (empty for a transactional unit).
+    pub fn take_committed(&mut self) -> Executed {
+        match self {
+            DdlError::LockTimeout(timeout) => std::mem::take(&mut timeout.committed),
+            DdlError::Failed(failed) => std::mem::take(&mut failed.committed),
+        }
+    }
 }
 
 /// Whether `err` is Postgres giving up on a lock (`55P03`).
@@ -662,7 +722,7 @@ impl DdlExecutor {
         result: Result<(), Failed>,
         on_attempt: &mut impl FnMut(Attempt),
     ) -> Judged {
-        let failed = match result {
+        let mut failed = match result {
             Ok(()) => return Judged::Done(Ok(())),
             Err(failed) => failed,
         };
@@ -689,11 +749,13 @@ impl DdlExecutor {
                 Judged::RetryAfter(wait)
             }
             (Next::Fail, Some(timeout)) if timed_out => {
+                let table = table();
                 Judged::Done(Err(DdlError::LockTimeout(DdlLockTimeout {
                     attempts: attempt,
                     setting: SETTING,
                     timeout,
-                    table: table(),
+                    table,
+                    committed: std::mem::take(&mut failed.committed),
                 })))
             }
             (Next::Fail, _) => Judged::Done(Err(DdlError::Failed(failed))),
@@ -735,10 +797,7 @@ impl<S: AsRef<str>> LiveUnit<'_, '_, S> {
             executed
                 .send(conn, self.door, Role::Schema, sql.as_ref())
                 .await
-                .map_err(|error| Failed {
-                    index: Some(index),
-                    error,
-                })?;
+                .map_err(|error| Failed::at(index, error))?;
         }
         if let Some(settle) = &mut self.settle {
             settle.run(conn).await.map_err(Failed::outside)?;
@@ -797,7 +856,12 @@ impl<S: AsRef<str>> AttemptUnit for LiveUnit<'_, '_, S> {
                 {
                     let _ = conn.detach_and_close().await;
                 }
-                result
+                // Autocommit: what ran ahead of a failure stands, so the
+                // failure carries it.
+                result.map_err(|mut failed| {
+                    failed.committed = std::mem::take(executed);
+                    failed
+                })
             }
         }
     }
@@ -936,6 +1000,7 @@ mod tests {
             setting: SETTING,
             timeout: Duration::from_secs(5),
             table: Some("post".to_string()),
+            committed: Executed::default(),
         };
         assert_eq!(
             timeout.to_string(),
@@ -1047,10 +1112,7 @@ mod tests {
                     .push(Door::Pass("author").statement(Role::Schema, sql));
             }
             match failure {
-                Some((index, error)) => Err(Failed {
-                    index: Some(index),
-                    error,
-                }),
+                Some((index, error)) => Err(Failed::at(index, error)),
                 None => Ok(()),
             }
         }
@@ -1260,10 +1322,11 @@ mod tests {
                 )
                 .await
                 .expect_err("the second CREATE fails");
-            assert!(matches!(
-                err,
-                DdlError::Failed(Failed { index: Some(1), .. })
-            ));
+            let DdlError::Failed(failed) = err else {
+                panic!("a statement failure, not {err:?}");
+            };
+            assert_eq!(failed.index, Some(1));
+            assert_eq!(failed.committed, Executed::default(), "nothing committed");
             assert_eq!(count(&engine, "author").await, usize::MAX, "rolled back");
         }
 
@@ -1286,10 +1349,19 @@ mod tests {
                 )
                 .await
                 .expect_err("the second CREATE fails");
-            assert!(matches!(
-                err,
-                DdlError::Failed(Failed { index: Some(1), .. })
-            ));
+            let DdlError::Failed(failed) = err else {
+                panic!("a statement failure, not {err:?}");
+            };
+            assert_eq!(failed.index, Some(1));
+            // The first CREATE committed, and the failure says so.
+            assert_eq!(
+                failed.committed.statements,
+                vec![Statement {
+                    subject: "author".to_string(),
+                    sql: statements[0].to_string(),
+                    role: Role::Schema,
+                }]
+            );
             assert_eq!(count(&engine, "author").await, 0, "the first committed");
         }
     }

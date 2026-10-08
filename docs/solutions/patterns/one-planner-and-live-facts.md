@@ -7,7 +7,8 @@ related_files:
   - crates/ferro-migrate/src/render.rs
   - src/live_ir.rs
   - src/migrate.rs
-  - tests/test_pass_recording.py
+  - src/ferro/pass_report.py
+  - tests/test_cross_emitter_parity.py
 related_issues: [511, 517]
 captured: 2026-10-06
 ---
@@ -51,8 +52,13 @@ the catalog prints them, validity flags, live enum labels. A table absent from
 - **`AddTable` ops in the pass belong to the create pass.** The pass reads
   only tables that existed before the create pass (ADR-0010), so tables it
   just created plan as adds, which the executor skips with their warnings.
-- **The pass is pinned by its recorded output.** `tests/test_pass_recording.py`
-  re-runs the pass's suites under a recorder plugin and compares every
-  executed statement, warning and `_render_migration_sql_for_test` result
-  with `tests/fixtures/pass_recording/`. Re-record only for an intended
-  behaviour change (`FERRO_PASS_RECORD=1`).
+- **The pass is pinned by what it reports executing (ADR-0049).**
+  `ferro.migrate()` / `ferro.create_tables()` return a `PassReport` built
+  from what the DDL executor ran. Pin (g) in
+  `tests/test_cross_emitter_parity.py` holds its `schema` statements against
+  `_plan_from_ir(render=True)` for every casebook case on both dialects
+  (grouped by table, the create pass standing in for each add) and its
+  warnings against the plan's reports by kind and subject; each scenario
+  test asserts its own report. The debug log is free text: never read it in
+  a test. (The recorder that compared logged DDL with JSON fixtures is gone;
+  re-recording was its only answer to a failure.)

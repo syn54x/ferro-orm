@@ -29,6 +29,7 @@ from ferro import Model
 from ferro.base import FerroField
 from ferro.exceptions import OperationalError
 from ferro.migrations import runner
+from tests._pass_harness import auto_migrate
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     AUTHOR,
     pkg,
@@ -354,46 +355,39 @@ def _declare_author() -> None:
     del Author
 
 
-EXECUTING = "Ferro Engine: auto-migrate executing on 'author': "
-LOCK_TIMEOUT = "Ferro Engine: auto-migrate lock timeout on 'author': "
-
-
-def _pass_statements(ferro_log) -> list[str]:
-    """What the pass ran on ``author``, in order: its DDL (the line the pass
-    recording and the parity checks read) and the lock-timeout statements
-    around it (a line of their own, which neither reads)."""
-    return [
-        message.removeprefix(EXECUTING).removeprefix(LOCK_TIMEOUT)
-        for message in ferro_log
-        if message.startswith((EXECUTING, LOCK_TIMEOUT))
-    ]
+def _ran(report: ferro.PassReport) -> list[tuple[str, str, str]]:
+    """Every statement the pass sent, as ``(subject, role, sql)``, in order."""
+    return [(s.subject, s.role, s.sql) for s in report.statements]
 
 
 @pytest.mark.parametrize(
     "extra, ms", [(None, 5000), ('ddl_lock_timeout = "1s"\n', 1000)], ids=["none", "1s"]
 )
 async def test_the_pass_runs_every_table_statement_under_set_local(
-    project, pkg, db, ferro_log, extra, ms
+    project, pkg, db, extra, ms
 ):
     if extra is not None:
         configure(project, pkg, db.backend, extra)
     _live_author(db)
     _declare_author()
 
-    await ferro.connect(db.url, migrate_updates=True)
+    report = await auto_migrate(db.url, updates=True)
 
-    statements = _pass_statements(ferro_log)
     if db.backend == "sqlite":
-        assert statements == ['ALTER TABLE "author" ADD COLUMN "slug" varchar']
-        assert not [m for m in ferro_log if "lock_timeout" in m]
+        assert _ran(report) == [
+            ("author", "schema", 'ALTER TABLE "author" ADD COLUMN "slug" varchar')
+        ]
         return
-    assert statements[0] == f"SET LOCAL lock_timeout = '{ms}ms'"
-    assert statements[1].startswith('ALTER TABLE "author" ADD COLUMN "slug"')
-    # One SET LOCAL, first in the table's one transaction; the pass's own DDL
-    # lines are what they were: the recording of #517 and the I-1 parity
-    # checks read only these.
-    assert [m for m in ferro_log if m.startswith(EXECUTING)] == [
-        EXECUTING + statement for statement in statements[1:]
+    # One SET LOCAL, first in the table's one transaction, reported as the
+    # executor's own statement (role "lock_timeout"), never as schema.
+    assert _ran(report) == [
+        ("author", "lock_timeout", f"SET LOCAL lock_timeout = '{ms}ms'"),
+        ("author", "schema", 'ALTER TABLE "author" ADD COLUMN "slug" varchar'),
+        (
+            "author",
+            "schema",
+            'ALTER TABLE "author" ALTER COLUMN "name" TYPE varchar USING "name"::varchar',
+        ),
     ]
 
 
@@ -406,12 +400,31 @@ async def test_the_pass_retries_behind_a_held_lock_and_warns_each_attempt(
     _declare_author()
 
     with Holder(db, "author", seconds=1.5), pytest.warns(UserWarning) as caught:
-        await ferro.connect(db.url, migrate_updates=True)
+        report = await auto_migrate(db.url, updates=True)
 
     waiting = [str(w.message) for w in caught if "waiting for a lock" in str(w.message)]
     assert waiting == [
         "ferro auto-migrate: migrating 'author': waiting for a lock on \"author\" "
         "(attempt 1 of 10, retry in 1s)"
+    ]
+    # The report lists the retry as a warning, and only the attempt that
+    # succeeded among the statements.
+    assert [(w.kind, w.subject.table, str(w)) for w in report.warnings] == [
+        (
+            "DdlLockRetry",
+            "author",
+            "migrating 'author': waiting for a lock on \"author\" "
+            "(attempt 1 of 10, retry in 1s)",
+        )
+    ]
+    assert _ran(report) == [
+        ("author", "lock_timeout", "SET LOCAL lock_timeout = '1000ms'"),
+        ("author", "schema", 'ALTER TABLE "author" ADD COLUMN "slug" varchar'),
+        (
+            "author",
+            "schema",
+            'ALTER TABLE "author" ALTER COLUMN "name" TYPE varchar USING "name"::varchar',
+        ),
     ]
     assert "slug" in {
         row[0]
@@ -435,6 +448,9 @@ async def test_the_pass_fails_loudly_naming_ddl_lock_timeout(
         with pytest.raises(OperationalError) as exc:
             await ferro.connect(db.url, migrate_updates=True)
 
+    # connect() carries the report too: nine retries said, nothing committed.
+    assert [w.kind for w in exc.value.report.warnings] == ["DdlLockRetry"] * 9
+    assert exc.value.report.statements == ()
     assert "after 10 attempts" in str(exc.value)
     assert "ddl_lock_timeout" in str(exc.value)
     assert exc.value.sqlstate == "55P03"
@@ -515,7 +531,7 @@ OPEN_WRITE = 'INSERT INTO "parent" ("id", "name") VALUES (1, \'held\')'
 
 
 async def test_a_new_table_referencing_a_written_parent_retries_then_is_created(
-    project, pkg, db, ferro_log
+    project, pkg, db
 ):
     _postgres_only(db)
     configure(project, pkg, db.backend, 'ddl_lock_timeout = "1s"\n')
@@ -528,7 +544,7 @@ async def test_a_new_table_referencing_a_written_parent_retries_then_is_created(
         Holder(db, "parent", seconds=1.5, sql=OPEN_WRITE),
         pytest.warns(UserWarning) as caught,
     ):
-        await ferro.connect(db.url, auto_migrate=True)
+        report = await auto_migrate(db.url)
 
     waiting = [str(w.message) for w in caught if "waiting for a lock" in str(w.message)]
     assert waiting == [
@@ -536,17 +552,14 @@ async def test_a_new_table_referencing_a_written_parent_retries_then_is_created(
         "(attempt 1 of 10, retry in 1s)"
     ]
     assert "child" in db.tables()
-    set_lines = [
-        m for m in ferro_log if m.startswith("Ferro Engine: auto-migrate lock")
-    ]
-    assert set_lines[0] == (
-        "Ferro Engine: auto-migrate lock timeout on 'child': "
+    assert [s.sql for s in report.statements if s.role == "lock_timeout"] == [
         "SET LOCAL lock_timeout = '1000ms'"
-    )
+    ]
+    assert [w.kind for w in report.warnings] == ["DdlLockRetry"]
 
 
 async def test_zero_creates_the_new_table_once_the_write_commits_without_a_set(
-    project, pkg, db, ferro_log
+    project, pkg, db
 ):
     _postgres_only(db)
     configure(project, pkg, db.backend, 'ddl_lock_timeout = "0"\n')
@@ -554,10 +567,11 @@ async def test_zero_creates_the_new_table_once_the_write_commits_without_a_set(
     _declare_parent_and_child(project, pkg)
 
     with Holder(db, "parent", seconds=1.5, sql=OPEN_WRITE):
-        await ferro.connect(db.url, auto_migrate=True)
+        report = await auto_migrate(db.url)
 
     assert "child" in db.tables()
-    assert not [m for m in ferro_log if "lock_timeout" in m]
+    assert [s for s in report.statements if s.role == "lock_timeout"] == []
+    assert report.warnings == ()
 
 
 # -- which database's timeout ------------------------------------------------------------
@@ -591,19 +605,15 @@ async def test_databases_that_disagree_on_the_timeout_are_refused_naming_each(
     assert "author" not in db.tables()
 
 
-async def test_databases_that_agree_on_the_timeout_run_under_it(
-    project, pkg, db, ferro_log
-):
+async def test_databases_that_agree_on_the_timeout_run_under_it(project, pkg, db):
     _two_databases(project, pkg, "2s", "2s")
     _live_author(db)
     _declare_author()
 
-    await ferro.connect(db.url, migrate_updates=True)
+    report = await auto_migrate(db.url, updates=True)
 
+    timeouts = [s.sql for s in report.statements if s.role == "lock_timeout"]
     if db.backend == "postgres":
-        assert (
-            "Ferro Engine: auto-migrate lock timeout on 'author': "
-            "SET LOCAL lock_timeout = '2000ms'"
-        ) in ferro_log
+        assert timeouts == ["SET LOCAL lock_timeout = '2000ms'"]
     else:
-        assert not [m for m in ferro_log if "lock_timeout" in m]
+        assert timeouts == []

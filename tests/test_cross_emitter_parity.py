@@ -19,7 +19,7 @@ connect(migrate_updates)   executes                    ALTER TABLE "author" ADD 
 alembic --autogenerate     upgrade()                   op.add_column('author', sa.Column('bio', ...))
 ```
 
-The migrations door is pinned by six pins over every casebook change
+The doors are pinned by seven pins over every casebook change
 (``tests/_casebook.py``) on both dialects — (a) the generated steps are the
 pass's plan, the online shapes compared by their plain twins
 (:func:`normalize_online_shape`); (b) a rebuild's ``CREATE TABLE`` is the
@@ -27,7 +27,8 @@ create pass's; (c) a concurrent index build is the pass's statement but for
 one token; (d) the validate, label-addition and type-creation statements are
 the pass's; (e) a migrated database equals an ``auto_migrate``'d one and
 Alembic sees nothing to do against either; (f) the bridge's revision runs the
-pass's DDL — at the end of this file.
+pass's DDL; (g) the pass's ``PassReport`` is the plan it renders — at the end
+of this file.
 
 The canonical bridge test in this file is
 ``test_alembic_autogen_against_rust_migrated_db_is_idempotent``: it bootstraps
@@ -83,6 +84,8 @@ from ferro import (
     ensure_resolved_modelset,
     reset_engine,
 )
+from ferro import OperationalError, PassReport
+from ferro import migrate as ferro_migrate
 from ferro.migrations import drift as migrations_drift
 from ferro.migrations import get_metadata
 from tests._alembic_harness import autogen_opts, autogenerate, run_revision
@@ -503,7 +506,7 @@ def test_enum_type_provenance_parity_pin():
 
 
 # ===========================================================================
-# The migrations door (#538): the six pins over the casebook
+# The migrations door (#538): pins (a)–(f) over the casebook; (g) is the pass's
 # ===========================================================================
 #
 # ``ferro migrate new`` writes a casebook change into step files; the
@@ -866,7 +869,20 @@ class Finding:
     dialects: frozenset[str] = frozenset(DIALECTS)
 
 
-FINDINGS: dict[str, Finding] = {}
+FINDINGS: dict[str, Finding] = {
+    "C2-drop-a-foreign-key-column": Finding(
+        reason=(
+            "pin (g): on SQLite the planner renders a plain DROP COLUMN for a "
+            "foreign-key column, which SQLite refuses at execution (the column "
+            "is in the table's FOREIGN KEY definition); the pass fails naming "
+            "`ferro migrate new` instead of the renderer refusing the op "
+            "(SqliteInPlace) before anything runs"
+        ),
+        raises=OperationalError,
+        pins=frozenset({"g"}),
+        dialects=frozenset({"sqlite"}),
+    ),
+}
 
 
 def expect_finding(request, case_id: str, dialect: str, pin: str) -> None:
@@ -1368,7 +1384,7 @@ def test_agents_md_names_the_migrations_door_its_pins_and_the_one_bridge_item():
     emitters = i1[: i1.index("For a single model")]
     assert "`src/ferro/migrations/`" in emitters
     assert "`crates/ferro-migrate/src/generate/`" in emitters
-    for pin in ("(a)", "(b)", "(c)", "(d)", "(e)", "(f)"):
+    for pin in ("(a)", "(b)", "(c)", "(d)", "(e)", "(f)", "(g)"):
         assert f"**{pin}**" in i1, pin
     assert "translates the one planner's ops" in i1
     # Items 11–17 are one item now: no per-family comparator, no slot rule.
@@ -1621,3 +1637,142 @@ def test_pin_f_the_bridge_revision_runs_the_pass_ddl(
         second, db_backend, postgres_base_url, second_schema, statements_planned
     )
     assert live_schema(db_url, after, dropped) == live_schema(second, after, dropped)
+
+
+# -- pin (g): the pass executes what the planner renders ------------------------------
+#
+# The recorder that once pinned the pass by its logged DDL is gone (ADR-0049):
+# the pass reports what its DDL executor ran, and this pin holds that report
+# against the one planner's rendering of the same pair.
+
+PASS_ONLY_KINDS = frozenset(
+    {
+        # Raised by the pass from what it meets at run time; never planned.
+        "RunLockWait",
+        "DdlLockRetry",
+        "StrandedLabelRename",
+        "RowSecurityUnderMigrator",
+        "PendingTableRename",
+    }
+)
+
+
+def _op_subject(op: dict) -> str:
+    """The table or enum type the pass reports an op's statements under."""
+    if op.get("table"):
+        return op["table"]
+    if op["kind"] in ("RenameTable", "RenameEnumType"):
+        return op["new"]
+    return op["type_name"]
+
+
+def _by_subject(steps) -> dict[str, list[str]]:
+    grouped: dict[str, list[str]] = {}
+    for subject, sql in steps:
+        grouped.setdefault(subject, []).append(sql)
+    return grouped
+
+
+def _report_key(kind, subject: dict) -> tuple[str, tuple]:
+    """A report as ``(kind name, subject)``: never its sentence."""
+    name = kind if isinstance(kind, str) else next(iter(kind))
+    return name, tuple(sorted((k, v) for k, v in subject.items() if v is not None))
+
+
+async def _run_the_pass(url: str) -> PassReport:
+    await connect(url, name="p_g_pass")
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            return await ferro_migrate(using="p_g_pass", destructive=True)
+    finally:
+        await _core._disconnect("p_g_pass")
+
+
+@pytest.mark.parametrize("case_id", CASE_IDS)
+def test_pin_g_the_pass_executes_the_plan_it_renders(
+    request, project, case_id, db_url
+):
+    """A database at ``case.before``, the models at ``case.after``. The one
+    planner renders the pair from the live read (``_plan_from_ir(render=True)``,
+    destructive changes on); then ``ferro.migrate(destructive=True)`` runs for
+    real. The report's ``schema`` statements are the plan's, grouped by the
+    table (or enum type) they belong to, in order within each group. The
+    pass's documented adjustments are the only difference:
+
+    - an added table is the create pass's: its ``CREATE TABLE`` and
+      follow-on statements stand in for the ``AddTable`` op, which renders
+      the same statements;
+    - the groups run table by table (each table's unit is one transaction on
+      Postgres), so the order is compared within a group, not across groups.
+
+    The report's warnings are the plan's reports (its own and its ops'), by
+    kind and subject, never by sentence; the pass's run-time kinds
+    (``PASS_ONLY_KINDS``) are not planned and are left out."""
+    dialect = "sqlite" if db_url.startswith("sqlite") else "postgres"
+    expect_finding(request, case_id, dialect, "g")
+    case = CASEBOOK[case_id]
+    project.register(case.before)
+    auto_migrate(db_url)
+    after = project.register(case.after)
+    # The pass reads only the tables the models declare (and a live rename's
+    # old table): never a table only the old modelset had.
+    live, facts = asyncio.run(_read_live(db_url, after))
+    try:
+        plan = json.loads(
+            _core._plan_from_ir(
+                live, json.dumps(after), dialect, DESTRUCTIVE, True, facts
+            )
+        )
+    except ValueError as refusal:
+        # A plan the renderer refuses is refused by the pass with the same
+        # words, before its reconciliation executes anything.
+        with pytest.raises(ValueError) as refused:
+            asyncio.run(_run_the_pass(db_url))
+        assert str(refused.value) == str(refusal)
+        return
+    report = asyncio.run(_run_the_pass(db_url))
+
+    planned = _by_subject(
+        (_op_subject(op), sql) for op in plan["operations"] for sql in op["statements"]
+    )
+    executed = _by_subject(
+        (s.subject, s.sql)
+        for s in report.statements
+        if s.role == "schema" and not _create_pass_type_guard(s, planned)
+    )
+    assert executed == planned
+
+    added = {op["table"] for op in plan["operations"] if op["kind"] == "AddTable"}
+    planned_reports = Counter(
+        _report_key(r["kind"], r["subject"])
+        for r in [
+            *plan["reports"],
+            *(r for op in plan["operations"] for r in op["reports"]),
+        ]
+    )
+    reported = Counter(
+        _report_key(w.kind, dataclasses.asdict(w.subject))
+        for w in report.warnings
+        if w.kind not in PASS_ONLY_KINDS
+        and not _create_pass_existing_table_word(w, added)
+    )
+    assert reported == planned_reports
+
+
+def _create_pass_type_guard(statement, planned: dict[str, list[str]]) -> bool:
+    """The create pass's guarded ``CREATE TYPE`` for a type a new table
+    declares that already exists live: a no-op by its own guard
+    (``IF NOT EXISTS``), which the planner, seeing the type live, does not
+    plan."""
+    return statement.subject not in planned and statement.sql.startswith(
+        "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_type"
+    )
+
+
+def _create_pass_existing_table_word(warning, added: set[str]) -> bool:
+    """The create pass's word on a row-security declaration of a table
+    already there, on SQLite (ADR-0014): the create pass says it of every
+    existing table it leaves; the planner, which has no row security on
+    SQLite, reports it only for a table it adds."""
+    return warning.kind == "RowSecuritySkipped" and warning.subject.table not in added
