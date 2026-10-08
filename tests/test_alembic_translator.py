@@ -1116,3 +1116,116 @@ async def test_a_label_rename_downgrade_renames_it_back_once(
     assert await _trl_labels(db_url) == ["paid", "cancelled"]
     run_revision(downgrade, db_url, postgres_base_url, db_schema_name)
     assert await _trl_labels(db_url) == ["paid", "canceled"]
+
+
+# ---------------------------------------------------------------------------
+# A redefined index and a removed foreign key (ADR-0051)
+# ---------------------------------------------------------------------------
+
+
+def _line(indexed: tuple[str, ...]) -> None:
+    class Tr551Line(Model):
+        __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = (indexed,)
+
+        id: int | None = Field(default=None, primary_key=True)
+        order_id: int | None = None
+        kind: str | None = None
+        order: int | None = None
+        id_kind: str | None = None
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.asyncio
+async def test_a_redefined_index_is_alembics_drop_then_create_both_ways(
+    db_url, postgres_base_url, db_schema_name
+):
+    """``("order_id", "kind")`` and ``("order", "id_kind")`` share the name
+    ``idx_tr551line_order_id_kind``: the bridge used to write nothing for
+    the change. Now Alembic's drop and create, and the downgrade builds the
+    live definition back."""
+    _line(("order_id", "kind"))
+    await connect(db_url, auto_migrate=True)
+    _rewind_registry()
+    _line(("order", "id_kind"))
+
+    upgrade, downgrade = autogenerate(db_url, postgres_base_url, db_schema_name)
+    assert "op.drop_index('idx_tr551line_order_id_kind'" in upgrade, upgrade
+    assert (
+        "op.create_index('idx_tr551line_order_id_kind', 'tr551line', "
+        "['order', 'id_kind']"
+    ) in upgrade, upgrade
+    assert (
+        "op.create_index('idx_tr551line_order_id_kind', 'tr551line', "
+        "['order_id', 'kind']"
+    ) in downgrade, downgrade
+
+    run_revision(upgrade, db_url, postgres_base_url, db_schema_name)
+    assert await _drift(db_url) == []
+    run_revision(downgrade, db_url, postgres_base_url, db_schema_name)
+    _rewind_registry()
+    _line(("order_id", "kind"))
+    assert await _drift(db_url) == []
+
+
+def _member(*, linked: bool) -> None:
+    class Tr551Team(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        if linked:
+            members: Relation[list["Tr551Member"]] = BackRef()
+
+    if linked:
+
+        class Tr551Member(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            team: Annotated[Tr551Team | None, ForeignKey(related_name="members")] = None
+
+    else:
+
+        class Tr551Member(Model):  # noqa: F811 — the other shape
+            id: int | None = Field(default=None, primary_key=True)
+            team_id: int | None = None
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_a_foreign_key_removed_from_a_kept_column_is_drop_constraint_both_ways(
+    db_url, postgres_base_url, db_schema_name
+):
+    """The column stays, its foreign key goes: the bridge used to write
+    nothing. Now ``op.drop_constraint``, and the downgrade adds it back."""
+    _member(linked=True)
+    await connect(db_url, auto_migrate=True)
+    _rewind_registry()
+    _member(linked=False)
+
+    upgrade, downgrade = autogenerate(db_url, postgres_base_url, db_schema_name)
+    assert (
+        "op.drop_constraint('fk_tr551member_team_id_tr551team', 'tr551member', "
+        "type_='foreignkey')"
+    ) in upgrade, upgrade
+    assert "fk_tr551member_team_id_tr551team" in downgrade, downgrade
+
+    run_revision(upgrade, db_url, postgres_base_url, db_schema_name)
+    assert await _drift(db_url) == []
+    run_revision(downgrade, db_url, postgres_base_url, db_schema_name)
+    _rewind_registry()
+    _member(linked=True)
+    assert await _drift(db_url) == []
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.sqlite_only
+@pytest.mark.asyncio
+async def test_a_foreign_key_removed_on_sqlite_is_refused_naming_the_rebuild(
+    db_url, postgres_base_url, db_schema_name
+):
+    """SQLite drops a table constraint only by rebuilding the table, which
+    an Alembic revision cannot write: refused with the migration path."""
+    _member(linked=True)
+    await connect(db_url, auto_migrate=True)
+    _rewind_registry()
+    _member(linked=False)
+
+    with pytest.raises(Exception, match=r"DropForeignKey .*ferro migrate new"):
+        autogenerate(db_url, postgres_base_url, db_schema_name)

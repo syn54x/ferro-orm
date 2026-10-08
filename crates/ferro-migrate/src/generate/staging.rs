@@ -28,13 +28,13 @@ use super::columns::{PlanContext, PlanDirection, stages_constraints};
 use super::{GenerateError, GeneratedStep, Rendering, find_model, step_text};
 use crate::directory::{Headers, StepDialect, StepKind};
 use crate::emit::{
-    added_column_indexes, find_foreign_key, fk_constraint_name, render_add_fk_sql,
-    render_index_sql, standalone_indexes,
+    column_riders, find_foreign_key, fk_constraint_name, render_add_fk_sql, render_index_sql,
+    standalone_indexes,
 };
 use crate::{Dialect, MigrationOp};
 use ferro_ddl_lowering::{
-    ConstraintMode, IndexMode, db_check_constraint_name, render_check_addition,
-    render_drop_constraint, render_drop_index_sql, render_validate_constraint,
+    ConstraintMode, IndexMode, render_check_addition, render_drop_constraint,
+    render_drop_index_sql, render_validate_constraint,
 };
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
 use std::collections::BTreeMap;
@@ -129,16 +129,22 @@ pub fn index_ops(
 fn remove_index(model: &mut SchemaModel, name: &str) {
     model.indexes.retain(|index| index.name != name);
     model.uniques.retain(|unique| unique.name != name);
-    let table = model.table_name.clone();
-    for col in &mut model.columns {
-        for (flagged, _, unique) in added_column_indexes(&table, col) {
-            if flagged == name {
-                if unique {
-                    col.unique = false;
-                } else {
-                    col.index = false;
-                }
-            }
+    let flags: Vec<(String, bool, bool)> = model
+        .columns
+        .iter()
+        .map(|col| {
+            let riders = column_riders(model, &col.name);
+            (
+                col.name.clone(),
+                riders.unique.as_deref() == Some(name),
+                riders.index.as_deref() == Some(name),
+            )
+        })
+        .collect();
+    for (column, unique, index) in flags {
+        if let Some(col) = model.columns.iter_mut().find(|col| col.name == column) {
+            col.unique &= !unique;
+            col.index &= !index;
         }
     }
 }
@@ -160,21 +166,14 @@ pub(super) fn restore_index(model: &mut SchemaModel, parent: &SchemaModel, name:
         model.uniques.push(unique.clone());
     }
     for parent_col in &parent.columns {
-        for (flagged, _, unique) in added_column_indexes(&parent.table_name, parent_col) {
-            if flagged != name {
-                continue;
-            }
-            if let Some(col) = model
-                .columns
-                .iter_mut()
-                .find(|col| col.name == parent_col.name)
-            {
-                if unique {
-                    col.unique = true;
-                } else {
-                    col.index = true;
-                }
-            }
+        let riders = column_riders(parent, &parent_col.name);
+        if let Some(col) = model
+            .columns
+            .iter_mut()
+            .find(|col| col.name == parent_col.name)
+        {
+            col.unique |= riders.unique.as_deref() == Some(name);
+            col.index |= riders.index.as_deref() == Some(name);
         }
     }
 }
@@ -239,6 +238,19 @@ fn build(def: &IndexDef, dialect: Dialect) -> Vec<String> {
     }
 }
 
+/// The statements that build `def` over another definition under its name
+/// (ADR-0051): on Postgres [`build`] already drops first; on SQLite the plain
+/// build's `IF NOT EXISTS` would keep the old one, so it is dropped first.
+fn replace(def: &IndexDef, dialect: Dialect) -> Vec<String> {
+    match dialect {
+        Dialect::Postgres => build(def, dialect),
+        Dialect::Sqlite => drop(def, dialect)
+            .into_iter()
+            .chain(build(def, dialect))
+            .collect(),
+    }
+}
+
 fn drop(def: &IndexDef, dialect: Dialect) -> Vec<String> {
     let mode = match dialect {
         Dialect::Postgres => IndexMode::Concurrent,
@@ -282,13 +294,18 @@ pub fn index_step(op: &IndexOp, dialects: &[Dialect]) -> GeneratedStep {
     let renderings = dialects
         .iter()
         .map(|&dialect| match op {
-            IndexOp::Build { def, replaces } => {
-                let down = match replaces {
-                    Some(old) => (build(old, dialect), old.unique),
-                    None => (drop(def, dialect), false),
-                };
-                rendering(dialect, (build(def, dialect), def.unique), down)
-            }
+            IndexOp::Build { def, replaces } => match replaces {
+                Some(old) => rendering(
+                    dialect,
+                    (replace(def, dialect), def.unique),
+                    (replace(old, dialect), old.unique),
+                ),
+                None => rendering(
+                    dialect,
+                    (build(def, dialect), def.unique),
+                    (drop(def, dialect), false),
+                ),
+            },
             IndexOp::Drop(def) => rendering(
                 dialect,
                 (drop(def, dialect), false),
@@ -368,11 +385,11 @@ pub fn staged_constraints(
             MigrationOp::AddForeignKey { column, .. }
             | MigrationOp::RebuildForeignKey { column, .. } => staged.push(foreign_key(column)?),
             MigrationOp::AddColumn { column, .. } => {
-                let own_check = db_check_constraint_name(table, column);
-                if model.checks.iter().any(|c| c.name == own_check) {
-                    staged.push(check(&own_check)?);
+                let riders = column_riders(model, column);
+                if let Some(own) = riders.check {
+                    staged.push(check(&own.name)?);
                 }
-                if model.foreign_keys.iter().any(|fk| &fk.column == column) {
+                if riders.foreign_key.is_some() {
                     staged.push(foreign_key(column)?);
                 }
             }

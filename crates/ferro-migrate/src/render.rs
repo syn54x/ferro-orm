@@ -388,6 +388,28 @@ pub(crate) fn render_from(
                 out.statements
                     .push(render_drop_index_sql(name, IndexMode::Plain));
             }
+            // ADR-0051: the index under the name is another definition, so
+            // `IF NOT EXISTS` would keep it: drop it, then run the exact
+            // create statement the `AddIndex` path renders, from the target.
+            MigrationOp::RedefineIndex { table, name } => {
+                let (columns, unique) =
+                    crate::declared_index(new, table, name).ok_or_else(|| EmissionError {
+                        message: format!(
+                            "Index redefinition '{name}' on table '{table}' has no index \
+                             '{name}' in the declared IR"
+                        ),
+                    })?;
+                out.statements
+                    .push(render_drop_index_sql(name, IndexMode::Plain));
+                out.statements.push(render_index_sql(
+                    table,
+                    name,
+                    &columns,
+                    unique,
+                    dialect,
+                    IndexMode::Plain,
+                ));
+            }
             // ADR-0044: an invalid index is present (so `IF NOT EXISTS` would
             // skip it) but never used. Drop it by name — it is known to exist —
             // then run the exact create statement the `AddIndex` path renders.
@@ -440,6 +462,39 @@ pub(crate) fn render_from(
                             table,
                             column,
                             fk_action_sql(fk_action_from_str(fk.on_delete.as_deref())),
+                        ),
+                    )),
+                }
+            }
+            MigrationOp::DropForeignKey {
+                table,
+                column,
+                name,
+            } => {
+                let declared = find_model(&new_models, table)?
+                    .foreign_keys
+                    .iter()
+                    .any(|fk| fk.column == *column);
+                if declared {
+                    return Err(EmissionError {
+                        message: format!(
+                            "Foreign-key drop for '{name}' on '{table}.{column}' is still \
+                             declared in the model IR"
+                        ),
+                    });
+                }
+                match dialect {
+                    Dialect::Postgres => {
+                        out.statements.push(render_drop_constraint(table, name));
+                    }
+                    Dialect::Sqlite => out.reports.push(sqlite_in_place_report(
+                        InPlaceChange::DropForeignKey,
+                        Subject::column(table, column),
+                        format!(
+                            "Foreign key '{name}' on '{table}.{column}' is no longer declared, \
+                             and SQLite cannot drop a table constraint in place, so it stays \
+                             and keeps enforcing its reference. Generate a reviewed migration \
+                             with `ferro migrate new` to rebuild the table without it."
                         ),
                     )),
                 }

@@ -432,6 +432,57 @@ pub(crate) fn unique_build_failure_message(index: &str, count: i64, resume_at: &
     )
 }
 
+/// The reconciliation pass's counted unique build failure (ADR-0051): `2
+/// values are duplicated under "uq_author_email" on "author"; fix the rows
+/// and connect again`. The pass has no step to resume at: connecting (or
+/// `ferro.migrate()`) runs it again.
+pub(crate) fn pass_unique_build_failure_message(index: &str, table: &str, count: i64) -> String {
+    let values = if count == 1 { "value is" } else { "values are" };
+    format!(
+        "{count} {values} duplicated under \"{index}\" on \"{table}\"; fix the rows and connect \
+         again (or run ferro.migrate())"
+    )
+}
+
+/// Whether `err` is the database refusing a unique index over duplicate
+/// values (`23505` on Postgres, `SQLITE_CONSTRAINT_UNIQUE` on SQLite).
+pub(crate) fn is_unique_violation(err: &sqlx::Error) -> bool {
+    matches!(
+        err,
+        sqlx::Error::Database(db) if db.kind() == sqlx::error::ErrorKind::UniqueViolation
+    )
+}
+
+/// The error for the pass's `CREATE UNIQUE INDEX` of `index` over `columns`
+/// on `table` that duplicates refused (`err`): counted on `engine` now, by
+/// the declared columns (the failed unit rolled back, so whatever index
+/// stands under the name may be another definition). When the count cannot
+/// be read, the database's own error with why the count is missing.
+pub(crate) async fn pass_unique_build_failure(
+    engine: &crate::backend::EngineHandle,
+    table: &str,
+    index: &str,
+    columns: &[String],
+    err: sqlx::Error,
+) -> PyErr {
+    let counted = engine
+        .fetch_all_sql_unprepared(&duplicate_count_sql(table, columns))
+        .await
+        .map(|rows| first_count(&rows));
+    let context = match counted {
+        Ok(Some(count)) => pass_unique_build_failure_message(index, table, count),
+        Ok(None) => format!(
+            "Auto-migrate could not build unique index \"{index}\" on \"{table}\" (the \
+             duplicated values could not be counted); fix the rows and connect again"
+        ),
+        Err(count_err) => format!(
+            "Auto-migrate could not build unique index \"{index}\" on \"{table}\" (counting \
+             the duplicated values failed: {count_err}); fix the rows and connect again"
+        ),
+    };
+    map_db_error(&context, err)
+}
+
 /// `2 rows still have NULL "slug" in "author"; run ferro migrate down --to
 /// 0012:01 then ferro migrate up to re-run the backfill`: a contract that met
 /// rows written behind its migration's backfill (ADR-0040). The recipe
@@ -1020,6 +1071,19 @@ mod counted_failure_tests {
         );
         assert!(
             counted_failure_text(&failure, Ok(Some(1)), message, "0012_x:02").starts_with(message)
+        );
+    }
+
+    #[test]
+    fn the_pass_names_the_duplicates_and_connecting_again() {
+        assert_eq!(
+            pass_unique_build_failure_message("uq_author_email", "author", 2),
+            "2 values are duplicated under \"uq_author_email\" on \"author\"; fix the rows \
+             and connect again (or run ferro.migrate())"
+        );
+        assert!(
+            pass_unique_build_failure_message("uq_author_email", "author", 1)
+                .starts_with("1 value is duplicated")
         );
     }
 

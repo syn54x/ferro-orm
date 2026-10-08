@@ -813,8 +813,30 @@ fn plan_existing_table(
     // Invalid-index rebuilds (#515; ADR-0044) go where `AddIndex` goes: after
     // the column ops, ahead of the foreign-key ops. An invalid index is
     // present live, so the diff above never planned an `AddIndex` for it.
-    ops.extend(index_rebuilds(table, new_model, &facts.indexes));
-    diff_model_foreign_keys(table, old_model, new_model, &mut ops, &mut plan.reports);
+    // A redefinition drops the index and builds it anew, so it stands in for
+    // the rebuild of an invalid one.
+    let redefined: Vec<String> = ops
+        .iter()
+        .filter_map(|op| match op {
+            MigrationOp::RedefineIndex { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    ops.extend(
+        index_rebuilds(table, new_model, &facts.indexes)
+            .into_iter()
+            .filter(|op| {
+                !matches!(op, MigrationOp::RebuildIndex { name, .. } if redefined.contains(name))
+            }),
+    );
+    diff_model_foreign_keys(
+        table,
+        old_model,
+        new_model,
+        options.destructive,
+        &mut ops,
+        &mut plan.reports,
+    );
 
     // Check addition (#343; ADR-0013) lands after the column ops, so a CHECK
     // over a newly added column follows its ADD COLUMN.
@@ -1302,19 +1324,12 @@ fn missing_checks(
     new_model: &SchemaModel,
     live_check_names: &[String],
 ) -> Vec<MigrationOp> {
-    let old_col_names: BTreeSet<&str> = old_model.columns.iter().map(|c| c.name.as_str()).collect();
+    let riders = added_column_riders(old_model, new_model);
     missing_check_names(new_model, live_check_names)
         .into_iter()
-        .filter(|name| {
-            // A column check whose column is newly added rides the AddColumn
-            // emission, the same dedup `diff_model_indexes` applies to
-            // single-column indexes. Table checks always stand alone.
-            new_model
-                .checks
-                .iter()
-                .find(|check| &check.name == name)
-                .is_none_or(|check| old_col_names.contains(check.column.as_str()))
-        })
+        // A column check of an added column rides its `AddColumn`. Table
+        // checks always stand alone.
+        .filter(|name| !riders.iter().any(|riders| riders.has_check(name)))
         .map(|name| MigrationOp::AddCheck {
             table: table.to_string(),
             name,
@@ -2255,6 +2270,21 @@ fn primary_key_change(
     })
 }
 
+/// The riders ([`emit::column_riders`]) of every column `new_model` adds to
+/// `old_model`: what each `AddColumn` creates, which the planner plans no
+/// separate op for.
+fn added_column_riders<'a>(
+    old_model: &SchemaModel,
+    new_model: &'a SchemaModel,
+) -> Vec<emit::Riders<'a>> {
+    new_model
+        .columns
+        .iter()
+        .filter(|col| !old_model.columns.iter().any(|old| old.name == col.name))
+        .map(|col| emit::column_riders(new_model, &col.name))
+        .collect()
+}
+
 fn diff_model_columns(
     table: &str,
     old_model: &SchemaModel,
@@ -2322,9 +2352,7 @@ fn diff_model_indexes(
     destructive: bool,
     ops: &mut Vec<MigrationOp>,
 ) {
-    // Indexes covering only NEW columns are emitted by the AddColumn
-    // rendering, so no redundant standalone AddIndex is planned for them.
-    let old_col_names: BTreeSet<&str> = old_model.columns.iter().map(|c| c.name.as_str()).collect();
+    let riders = added_column_riders(old_model, new_model);
 
     // Both sides through `standalone_indexes`: a declared snapshot carries a
     // unique in `uniques`, a live one in `indexes` (introspection leaves
@@ -2337,20 +2365,30 @@ fn diff_model_indexes(
     let new_names: BTreeSet<&str> = new_set.iter().map(|(n, _, _)| n.as_str()).collect();
 
     for (name, columns, unique) in &new_set {
-        if !old_by_name.contains_key(name) {
-            // Skip AddIndex only for a single-column index whose sole column
-            // is newly added — the AddColumn rendering emits that CREATE
-            // INDEX. Composite indexes are never emitted by AddColumn and must
-            // NOT be skipped, even when every indexed column is new (I-1).
-            if columns.len() == 1 && !old_col_names.contains(columns[0].as_str()) {
-                continue;
+        match old_by_name.get(name) {
+            // The same name over other columns, or with the other uniqueness
+            // (ADR-0051): a name cut to 63 characters, an underscore join, or
+            // a live index written another way. Still declared, so never
+            // gated on `destructive`; it also replaces what an added column's
+            // `CREATE INDEX IF NOT EXISTS` would leave standing under the name.
+            Some((old_columns, old_unique)) => {
+                if old_columns != columns || old_unique != unique {
+                    ops.push(MigrationOp::RedefineIndex {
+                        table: table.to_string(),
+                        name: name.clone(),
+                    });
+                }
             }
-            ops.push(MigrationOp::AddIndex {
+            // A rider of an added column is built by its `AddColumn`.
+            // Composite indexes never ride a column and are planned even
+            // when every indexed column is new (I-1).
+            None if riders.iter().any(|riders| riders.has_index(name)) => {}
+            None => ops.push(MigrationOp::AddIndex {
                 table: table.to_string(),
                 name: name.clone(),
                 columns: columns.clone(),
                 unique: *unique,
-            });
+            }),
         }
     }
     if destructive {
@@ -2369,15 +2407,42 @@ fn diff_model_foreign_keys(
     table: &str,
     old_model: &SchemaModel,
     new_model: &SchemaModel,
+    destructive: bool,
     ops: &mut Vec<MigrationOp>,
     reports: &mut Vec<Report>,
 ) {
-    let old_col_names: BTreeSet<&str> = old_model.columns.iter().map(|c| c.name.as_str()).collect();
+    let riders = added_column_riders(old_model, new_model);
+
+    // A ferro-owned FK on a column both sides keep that the model no longer
+    // declares (ADR-0051): removed under ADR-0013's ladder, like every other
+    // constraint the model stops declaring. A user-owned one is never
+    // touched; one on a dropped column goes with the column. SQLite exposes
+    // no live constraint name, so its FK reads as the canonical one.
+    if destructive {
+        for live in &old_model.foreign_keys {
+            let kept = new_model.columns.iter().any(|col| col.name == live.column);
+            let declared = new_model
+                .foreign_keys
+                .iter()
+                .any(|fk| fk.column == live.column);
+            let name = live
+                .name
+                .clone()
+                .unwrap_or_else(|| fk_name(table, &live.column, &live.to_table));
+            if kept && !declared && is_ferro_fk_name(&name) {
+                ops.push(MigrationOp::DropForeignKey {
+                    table: table.to_string(),
+                    column: live.column.clone(),
+                    name,
+                });
+            }
+        }
+    }
 
     for fk in &new_model.foreign_keys {
-        // An FK on a newly added column rides the AddColumn emission; the
-        // reconcile step only governs FKs whose column already exists live.
-        if !old_col_names.contains(fk.column.as_str()) {
+        // An FK on a newly added column rides its `AddColumn`; the reconcile
+        // step only governs FKs whose column already exists live.
+        if riders.iter().any(|riders| riders.foreign_key == Some(fk)) {
             continue;
         }
 
@@ -2847,6 +2912,23 @@ pub fn reverse_live_plan(
             // Nothing to undo: a rebuilt invalid index and a validated
             // constraint are the live objects, made usable.
             MigrationOp::RebuildIndex { .. } | MigrationOp::ValidateConstraint { .. } => {}
+            // The same op back: rendered against the live side, it builds the
+            // live definition again under the name.
+            MigrationOp::RedefineIndex { .. } => operations.push(planned(op.clone())),
+            // Added back as the live database held it, read from the live side.
+            MigrationOp::DropForeignKey { table, column, .. } => match dialect {
+                Dialect::Postgres => operations.push(planned(MigrationOp::AddForeignKey {
+                    table: table.clone(),
+                    column: column.clone(),
+                })),
+                Dialect::Sqlite => operations.push(irreversible(
+                    op,
+                    format!(
+                        "SQLite cannot put the foreign key on {table}.{column} back in place; \
+                         `ferro migrate new` writes the table rebuild that can"
+                    ),
+                )),
+            },
             MigrationOp::AddForeignKey { table, column } => {
                 match (declared_fk_name(&declared_models, table, column), dialect) {
                     (Some(name), Dialect::Postgres) => {

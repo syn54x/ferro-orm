@@ -20,7 +20,7 @@
 //! [`super::rebuild::render`] (AGENTS.md § I-1).
 
 use super::rebuild;
-use crate::emit::standalone_indexes;
+use crate::emit::{column_riders, standalone_indexes};
 use crate::{Dialect, MigrationOp};
 use ferro_ddl_lowering::{ConstraintMode, ResolvedStorage, resolve_column_storage};
 use ferro_schema_ir::{IrEnvelope, SchemaColumn, SchemaIrPayload, SchemaModel};
@@ -279,19 +279,27 @@ pub fn carried_by_its_column_drop(op: &MigrationOp, ctx: &PlanContext<'_>) -> bo
 
 /// Whether `op` puts back an index, a column check or a foreign key over a
 /// column the same file adds: a down putting back a column the up dropped
-/// together with them, which go back with the column, as they went.
+/// together with them, which go back with the column, as they went. A rider
+/// of the added column ([`column_riders`]) goes with it, and so does a
+/// composite index over it, which a dropped column took with it.
 fn goes_with_an_added_column(op: &MigrationOp, ctx: &PlanContext<'_>) -> bool {
     let (Some(before), Some(after)) = (ctx.before, ctx.after) else {
         return false;
     };
     let added = |name: &str| column(before, name).is_none() && column(after, name).is_some();
+    let riders = || {
+        after
+            .columns
+            .iter()
+            .filter(|col| added(&col.name))
+            .map(|col| column_riders(after, &col.name))
+    };
     match op {
         MigrationOp::AddIndex { columns, .. } => columns.iter().any(|name| added(name)),
-        MigrationOp::AddCheck { name, .. } => after
-            .checks
-            .iter()
-            .any(|check| &check.name == name && added(&check.column)),
-        MigrationOp::AddForeignKey { column, .. } => added(column),
+        MigrationOp::AddCheck { name, .. } => riders().any(|riders| riders.has_check(name)),
+        MigrationOp::AddForeignKey { column, .. } => {
+            riders().any(|riders| riders.foreign_key.is_some_and(|fk| &fk.column == column))
+        }
         _ => false,
     }
 }
@@ -327,7 +335,9 @@ pub fn waits_for_the_data_steps(op: &MigrationOp, ctx: &PlanContext<'_>) -> bool
 pub fn is_index_step(op: &MigrationOp, ctx: &PlanContext<'_>) -> bool {
     matches!(
         op,
-        MigrationOp::AddIndex { .. } | MigrationOp::DropIndex { .. }
+        MigrationOp::AddIndex { .. }
+            | MigrationOp::DropIndex { .. }
+            | MigrationOp::RedefineIndex { .. }
     ) && ctx.on_existing_table()
         && !goes_with_a_dropped_column(op, ctx)
         && !(ctx.direction == PlanDirection::Down && goes_with_an_added_column(op, ctx))
@@ -466,7 +476,10 @@ fn needs(op: &MigrationOp, ctx: &PlanContext<'_>) -> Needs {
         }
         // On an existing table, its own index step ([`is_index_step`]): the
         // plain statement on SQLite, built concurrently on Postgres.
-        MigrationOp::AddIndex { .. } | MigrationOp::DropIndex { .. } => Needs::Native,
+        // A redefinition is the index step's drop then build on both.
+        MigrationOp::AddIndex { .. }
+        | MigrationOp::DropIndex { .. }
+        | MigrationOp::RedefineIndex { .. } => Needs::Native,
         MigrationOp::DropCheck { .. } if goes_with_a_dropped_column(op, ctx) => Needs::Native,
         // On Postgres a foreign key or check added to an existing table is
         // added `NOT VALID` and validated by a later step
@@ -476,6 +489,7 @@ fn needs(op: &MigrationOp, ctx: &PlanContext<'_>) -> Needs {
         | MigrationOp::RebuildCheck { .. }
         | MigrationOp::DropCheck { .. }
         | MigrationOp::AddForeignKey { .. }
+        | MigrationOp::DropForeignKey { .. }
         | MigrationOp::RebuildForeignKey { .. } => native_or_rebuild,
         MigrationOp::ValidateConstraint { .. } | MigrationOp::RebuildIndex { .. } => {
             Needs::Refused(Refusal::LiveOnly)

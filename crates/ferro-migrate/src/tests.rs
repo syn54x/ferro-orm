@@ -5694,3 +5694,336 @@ fn a_live_side_missing_a_tables_facts_is_an_error_naming_it() {
         )
     );
 }
+
+/// What an `ADD COLUMN` also creates is stated once (ADR-0050): the column's
+/// own `uq_` / `idx_` index, its `ck_` check and its foreign key. A composite
+/// index over the column and a table check are never riders.
+#[test]
+fn a_columns_riders_are_its_flags_its_own_check_and_its_foreign_key() {
+    let mut account = schema_model(
+        "account",
+        vec![
+            pk_col("id", "integer"),
+            col_with_flags("email", "varchar", true, true, true, None),
+            col("org_id", "integer", true),
+            col("role", "varchar", true),
+        ],
+    );
+    account.foreign_keys.push(SchemaForeignKey {
+        renamed_from: None,
+        column: "org_id".to_string(),
+        to_table: "organization".to_string(),
+        to_column: "id".to_string(),
+        on_delete: Some("CASCADE".to_string()),
+        name: Some("fk_account_org_id_organization".to_string()),
+    });
+    account.checks.push(SchemaCheck {
+        name: "ck_account_role".to_string(),
+        column: "role".to_string(),
+        values: vec!["'admin'".to_string()],
+    });
+    account.indexes.push(SchemaIndex {
+        name: "idx_account_email_role".to_string(),
+        columns: vec!["email".to_string(), "role".to_string()],
+        unique: false,
+    });
+
+    let email = emit::column_riders(&account, "email");
+    assert_eq!(email.unique.as_deref(), Some("uq_account_email"));
+    assert_eq!(email.index.as_deref(), Some("idx_account_email"));
+    assert!(email.check.is_none() && email.foreign_key.is_none());
+    assert_eq!(
+        email.indexes("email"),
+        vec![
+            (
+                "uq_account_email".to_string(),
+                vec!["email".to_string()],
+                true
+            ),
+            (
+                "idx_account_email".to_string(),
+                vec!["email".to_string()],
+                false
+            ),
+        ]
+    );
+    assert!(!email.has_index("idx_account_email_role"));
+
+    let org = emit::column_riders(&account, "org_id");
+    assert_eq!(
+        org.foreign_key.map(|fk| fk.to_table.as_str()),
+        Some("organization")
+    );
+    assert!(org.indexes("org_id").is_empty());
+
+    let role = emit::column_riders(&account, "role");
+    assert!(role.has_check("ck_account_role"));
+    assert_eq!(
+        emit::column_riders(&account, "missing"),
+        emit::Riders::default()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A redefined index (ADR-0051): a ferro-owned index that keeps its name and
+// changes its columns or its uniqueness is planned `RedefineIndex`, on every
+// side, and rendered as the drop then the declared create.
+// ---------------------------------------------------------------------------
+
+/// `table` with `columns` (every one an optional varchar) and one composite
+/// index over `indexed`, named as the IR compiler names it.
+fn indexed_model(table: &str, columns: &[&str], indexed: &[&str]) -> SchemaModel {
+    let mut cols = vec![pk_col("id", "integer")];
+    cols.extend(columns.iter().map(|name| col(name, "varchar", true)));
+    let mut model = schema_model(table, cols);
+    model.indexes.push(SchemaIndex {
+        name: test_composite_index_name(table, indexed),
+        columns: indexed.iter().map(|c| c.to_string()).collect(),
+        unique: false,
+    });
+    model
+}
+
+fn redefine(table: &str, name: &str) -> MigrationOp {
+    MigrationOp::RedefineIndex {
+        table: table.to_string(),
+        name: name.to_string(),
+    }
+}
+
+/// Truncation: both column groups build a name over 63 characters, cut to the
+/// same 59 characters plus `_idx`.
+#[test]
+fn a_truncated_index_name_over_other_columns_is_redefined() {
+    let table = "subscriptioninvoiceline";
+    let cols = ["billing_period_start", "billing_period_end", "customer_id"];
+    let before = indexed_model(table, &cols, &cols[..2]);
+    let after = indexed_model(table, &cols, &cols);
+    let name = "idx_subscriptioninvoiceline_billing_period_start_billing_pe_idx";
+    assert_eq!(before.indexes[0].name, name);
+    assert_eq!(after.indexes[0].name, name);
+
+    let (old, new) = (envelope(vec![before]), envelope(vec![after]));
+    for dialect in [Dialect::Postgres, Dialect::Sqlite] {
+        let plan = plan_from_ir(&old, &new, dialect, &LiveFacts::declared(), updates_only())
+            .expect("plan");
+        assert_eq!(plan.operations, vec![redefine(table, name)]);
+        let rendered = plan.render().expect("render");
+        assert_eq!(
+            rendered[0].statements,
+            vec![
+                format!("DROP INDEX IF EXISTS \"{name}\""),
+                format!(
+                    "CREATE INDEX IF NOT EXISTS \"{name}\" ON \"{table}\" \
+                     (\"billing_period_start\", \"billing_period_end\", \"customer_id\")"
+                ),
+            ]
+        );
+    }
+}
+
+/// Underscore joins: `("order_id", "kind")` and `("order", "id_kind")` both
+/// join to `idx_<table>_order_id_kind`.
+#[test]
+fn an_underscore_join_collision_is_redefined() {
+    let cols = ["order_id", "kind", "order", "id_kind"];
+    let before = indexed_model("line", &cols, &["order_id", "kind"]);
+    let after = indexed_model("line", &cols, &["order", "id_kind"]);
+    assert_eq!(before.indexes[0].name, "idx_line_order_id_kind");
+    assert_eq!(after.indexes[0].name, before.indexes[0].name);
+
+    let plan = plan_from_ir(
+        &envelope(vec![before]),
+        &envelope(vec![after]),
+        Dialect::Postgres,
+        &LiveFacts::declared(),
+        updates_only(),
+    )
+    .expect("plan");
+    assert_eq!(
+        plan.operations,
+        vec![redefine("line", "idx_line_order_id_kind")]
+    );
+    assert_eq!(
+        plan.render().expect("render")[0].statements[1],
+        "CREATE INDEX IF NOT EXISTS \"idx_line_order_id_kind\" ON \"line\" (\"order\", \"id_kind\")"
+    );
+}
+
+/// A live ferro-named index whose definition differs from the declaration
+/// (written by hand, or by an older build) is redefined without
+/// `migrate_destructive`, columns and uniqueness alike; an invalid one the
+/// redefinition replaces is not rebuilt as well.
+#[test]
+fn a_live_ferro_named_index_with_another_definition_is_redefined_without_destructive() {
+    let mut live = indexed_model("post", &["title", "slug"], &["title"]);
+    live.indexes.push(SchemaIndex {
+        name: "uq_post_slug".to_string(),
+        columns: vec!["slug".to_string()],
+        unique: false,
+    });
+    let mut declared = indexed_model("post", &["title", "slug"], &["title"]);
+    declared.indexes[0].columns = vec!["slug".to_string()];
+    declared.uniques.push(SchemaUnique {
+        name: "uq_post_slug".to_string(),
+        columns: vec!["slug".to_string()],
+    });
+    let facts = LiveTableFacts {
+        indexes: vec![index_validity("idx_post_title", false)],
+        ..LiveTableFacts::default()
+    };
+    let plan = plan_live_table(live, declared, facts, updates_only());
+    assert_eq!(
+        plan.operations,
+        vec![
+            redefine("post", "idx_post_title"),
+            redefine("post", "uq_post_slug")
+        ]
+    );
+    let rendered = plan.render().expect("render");
+    assert_eq!(
+        rendered[1].statements,
+        vec![
+            "DROP INDEX IF EXISTS \"uq_post_slug\"".to_string(),
+            "CREATE UNIQUE INDEX IF NOT EXISTS \"uq_post_slug\" ON \"post\" (\"slug\")".to_string(),
+        ]
+    );
+}
+
+/// The same definition under the same name is no change.
+#[test]
+fn an_index_with_the_same_definition_is_not_redefined() {
+    let model = indexed_model("post", &["title"], &["title"]);
+    let plan = plan_live_table(
+        model.clone(),
+        model,
+        LiveTableFacts::default(),
+        updates_only(),
+    );
+    assert!(plan.operations.is_empty(), "{:?}", plan.operations);
+}
+
+// ---------------------------------------------------------------------------
+// A removed foreign key (ADR-0051): a ferro-owned FK on a column both sides
+// keep, no longer declared, is planned `DropForeignKey` under
+// `migrate_destructive`.
+// ---------------------------------------------------------------------------
+
+/// `member` with an optional `team_id`, a foreign key on it when `fk` names
+/// one.
+fn member(fk: Option<&str>) -> SchemaModel {
+    let mut model = schema_model(
+        "member",
+        vec![pk_col("id", "integer"), col("team_id", "integer", true)],
+    );
+    if let Some(name) = fk {
+        model.foreign_keys.push(SchemaForeignKey {
+            renamed_from: None,
+            column: "team_id".to_string(),
+            to_table: "team".to_string(),
+            to_column: "id".to_string(),
+            on_delete: Some("CASCADE".to_string()),
+            name: Some(name.to_string()),
+        });
+    }
+    model
+}
+
+fn drop_fk(name: &str) -> MigrationOp {
+    MigrationOp::DropForeignKey {
+        table: "member".to_string(),
+        column: "team_id".to_string(),
+        name: name.to_string(),
+    }
+}
+
+#[test]
+fn a_foreign_key_removed_from_a_kept_column_is_dropped_only_when_destructive() {
+    let live = member(Some("fk_member_team_id_team"));
+    let declared = member(None);
+    let kept = plan_live_table(
+        live.clone(),
+        declared.clone(),
+        LiveTableFacts::default(),
+        updates_only(),
+    );
+    assert!(kept.operations.is_empty(), "{:?}", kept.operations);
+
+    let dropped = plan_live_table(live, declared, LiveTableFacts::default(), destructive());
+    assert_eq!(dropped.operations, vec![drop_fk("fk_member_team_id_team")]);
+    let rendered = dropped.render().expect("render");
+    assert_eq!(
+        rendered[0].statements,
+        vec!["ALTER TABLE \"member\" DROP CONSTRAINT \"fk_member_team_id_team\"".to_string()]
+    );
+}
+
+#[test]
+fn a_user_owned_or_a_still_declared_foreign_key_is_never_dropped() {
+    let user_owned = plan_live_table(
+        member(Some("member_team_id_fkey")),
+        member(None),
+        LiveTableFacts::default(),
+        destructive(),
+    );
+    assert!(
+        user_owned.operations.is_empty(),
+        "{:?}",
+        user_owned.operations
+    );
+
+    let declared = member(Some("fk_member_team_id_team"));
+    let same = plan_live_table(
+        declared.clone(),
+        declared,
+        LiveTableFacts::default(),
+        destructive(),
+    );
+    assert!(same.operations.is_empty(), "{:?}", same.operations);
+}
+
+#[test]
+fn a_foreign_key_on_a_dropped_column_goes_with_the_column() {
+    let declared = schema_model("member", vec![pk_col("id", "integer")]);
+    let plan = plan_live_table(
+        member(Some("fk_member_team_id_team")),
+        declared,
+        LiveTableFacts::default(),
+        destructive(),
+    );
+    assert_eq!(
+        plan.operations,
+        vec![MigrationOp::DropColumn {
+            table: "member".to_string(),
+            column: "team_id".to_string(),
+        }]
+    );
+}
+
+/// Between two snapshots (the generator) the drop is planned the same way,
+/// and SQLite answers it with the in-place report a migration's rebuild
+/// replaces.
+#[test]
+fn a_removed_foreign_key_between_snapshots_and_on_sqlite() {
+    let (old, new) = (
+        envelope(vec![member(Some("fk_member_team_id_team"))]),
+        envelope(vec![member(None)]),
+    );
+    for dialect in [Dialect::Postgres, Dialect::Sqlite] {
+        let plan =
+            plan_from_ir(&old, &new, dialect, &LiveFacts::declared(), destructive()).expect("plan");
+        assert_eq!(plan.operations, vec![drop_fk("fk_member_team_id_team")]);
+    }
+    let sqlite = plan_from_ir(
+        &old,
+        &new,
+        Dialect::Sqlite,
+        &LiveFacts::declared(),
+        destructive(),
+    )
+    .expect("plan")
+    .render()
+    .expect("render");
+    assert!(sqlite[0].statements.is_empty());
+    assert!(sqlite[0].reports[0].blocks());
+}

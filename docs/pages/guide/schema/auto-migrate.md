@@ -41,10 +41,12 @@ What it covers depends on what each backend can do in place:
 | Add unique column (`unique=True`) | ✅ via explicit unique index + warning | ✅ inline `UNIQUE` |
 | Add foreign-key column | ✅ column only, no FK constraint + warning | ✅ column + FK constraint |
 | Add missing FK constraint to an existing column | ⚠️ `UserWarning`, no DDL; migrations generate the table rebuild | ✅ `ADD CONSTRAINT` |
+| Drop a ferro foreign key (`fk_*`) from a column the model keeps (`team: Annotated[Team, ForeignKey(...)]` became `team_id: int`) | ⚠️ `UserWarning`, constraint stays; migrations generate the table rebuild | ✅ with `migrate_destructive=True`: `DROP CONSTRAINT` |
 | Change a foreign key's `on_delete` (or target) | ⚠️ `UserWarning`, no DDL; migrations generate the table rebuild | ✅ rebuild: `DROP CONSTRAINT` + `ADD CONSTRAINT` |
 | Change column type | ⚠️ `UserWarning`, no DDL (SQLite type affinity makes drift mostly cosmetic); migrations generate the table rebuild | ✅ `ALTER COLUMN ... TYPE ... USING` cast |
 | Change nullability | ⚠️ `UserWarning`, no DDL; migrations generate the table rebuild | ✅ `SET NOT NULL` / `DROP NOT NULL`. `SET NOT NULL` backfills nothing, whatever the default: it fails the connect if any row holds `NULL`. A [migration](data-steps.md) writes the backfill first |
 | Drop orphaned Ferro-named index (`idx_*` / `uq_*`) | ✅ with `migrate_destructive=True` | ✅ with `migrate_destructive=True` |
+| Redefine an index that keeps its name (a long name cut to 63 characters, two column groups that join to one name, or a live `idx_*` / `uq_*` index written another way) | ✅ `DROP INDEX` + `CREATE INDEX` under `migrate_updates`. A unique one over duplicate values fails the connect, counting them | ✅ same, in the table's transaction |
 | Add a missing enum label (a `StrEnum` grew a member) | ✅ nothing to do — enums store as text | ✅ `ALTER TYPE ... ADD VALUE` *0.18.0+* |
 | Rename an enum label declared with `__ferro_renamed_labels__` | ✅ nothing to do | ✅ `ALTER TYPE ... RENAME VALUE` |
 | Remove an enum label | ✅ nothing to do | ⚠️ `UserWarning`, no DDL. [Migrations](migrations.md) generate it with its [backfill](data-steps.md#removing-an-enum-label) |

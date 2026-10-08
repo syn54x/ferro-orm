@@ -410,30 +410,73 @@ pub fn order_models_for_create<'a>(models: &[&'a SchemaModel]) -> Vec<&'a Schema
     )
 }
 
-/// The single-column index and unique a column's own `unique` / `index` flag
-/// declares, as `(name, columns, unique)`: the standalone named `uq_` unique
-/// index and `idx_` index fresh-create emits (FF-B B4/D1), unique first. What
-/// an `ADD COLUMN` of `col` builds.
-pub(crate) fn added_column_indexes(
-    table: &str,
-    col: &SchemaColumn,
-) -> Vec<(String, Vec<String>, bool)> {
-    let mut out = Vec::new();
-    if col.unique {
-        out.push((
-            single_unique_index_name(table, &col.name),
-            vec![col.name.clone()],
-            true,
-        ));
+/// What an `ADD COLUMN` of one column also creates: the column's riders.
+///
+/// ```text
+/// class Author(Model):
+///     email: str | None = Field(unique=True, index=True)   ADD COLUMN "email" …
+///     team: Annotated[Team, ForeignKey(...)]               + uq_author_email, idx_author_email
+///                                                          + ck_author_email (a db_check)
+///                                                          + fk_author_team_id_team
+/// ```
+///
+/// Read by every place that must agree on it: the planner, which plans no
+/// separate op for a rider of a column it adds; [`emit_add_column`], which
+/// renders them; the generator's staged constraints and its phase table,
+/// which find them on the column's step.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Riders<'a> {
+    /// The `idx_` index the column's own `index` flag declares.
+    pub index: Option<String>,
+    /// The `uq_` unique index the column's own `unique` flag declares.
+    pub unique: Option<String>,
+    /// The column's own check (`ck_<table>_<col>`, a `db_check`).
+    pub check: Option<&'a ferro_schema_ir::SchemaCheck>,
+    /// The foreign key declared on the column.
+    pub foreign_key: Option<&'a ferro_schema_ir::SchemaForeignKey>,
+}
+
+impl Riders<'_> {
+    /// The rider indexes as `(name, columns, unique)`, unique first: the
+    /// standalone `CREATE [UNIQUE] INDEX` statements fresh-create emits for
+    /// the flags (FF-B B4/D1), each over the one column.
+    pub(crate) fn indexes(&self, column: &str) -> Vec<(String, Vec<String>, bool)> {
+        let unique = self
+            .unique
+            .iter()
+            .map(|name| (name.clone(), vec![column.to_string()], true));
+        let index = self
+            .index
+            .iter()
+            .map(|name| (name.clone(), vec![column.to_string()], false));
+        unique.chain(index).collect()
     }
-    if col.index {
-        out.push((
-            single_index_name(table, &col.name),
-            vec![col.name.clone()],
-            false,
-        ));
+
+    /// Whether the index `name` rides the column.
+    pub(crate) fn has_index(&self, name: &str) -> bool {
+        self.unique.as_deref() == Some(name) || self.index.as_deref() == Some(name)
     }
-    out
+
+    /// Whether the check `name` rides the column.
+    pub(crate) fn has_check(&self, name: &str) -> bool {
+        self.check.is_some_and(|check| check.name == name)
+    }
+}
+
+/// The riders of `column` on `model` ([`Riders`]): the one statement of what
+/// an `ADD COLUMN` of it also creates. Empty for a column `model` lacks.
+pub(crate) fn column_riders<'a>(model: &'a SchemaModel, column: &str) -> Riders<'a> {
+    let table = model.table_name.as_str();
+    let Some(col) = model.columns.iter().find(|col| col.name == column) else {
+        return Riders::default();
+    };
+    let own_check = db_check_constraint_name(table, column);
+    Riders {
+        index: col.index.then(|| single_index_name(table, column)),
+        unique: col.unique.then(|| single_unique_index_name(table, column)),
+        check: model.checks.iter().find(|check| check.name == own_check),
+        foreign_key: model.foreign_keys.iter().find(|fk| fk.column == column),
+    }
 }
 
 /// The `ALTER TABLE … ADD COLUMN` emission for one new column of an existing
@@ -509,21 +552,20 @@ pub(crate) fn emit_add_column(
         col_def.default(default_value.clone());
     }
 
+    let riders = column_riders(model, column);
     // The column's db_check: Postgres runs its idempotent ALTER after the add;
     // SQLite carries it inline on the added column (#514).
-    let owned_check = db_check_constraint_name(table, column);
-    let check_emissions: Vec<(&ferro_schema_ir::SchemaCheck, CheckEmission)> = model
-        .checks
+    let check_emissions: Vec<(&ferro_schema_ir::SchemaCheck, CheckEmission)> = riders
+        .check
         .iter()
-        .filter(|check| check.name == owned_check)
-        .map(|check| (check, render_db_check(table, check, dialect, constraints)))
+        .map(|check| (*check, render_db_check(table, check, dialect, constraints)))
         .collect();
     append_inline_checks(&mut col_def, &check_emissions, table, column);
 
     // SQLite's ADD COLUMN accepts a column-level REFERENCES clause only when
     // the added column's default is NULL — a nullable add, which never carries
     // a DEFAULT here. Any other shape keeps its column and warns below.
-    let fk = model.foreign_keys.iter().find(|fk| fk.column == column);
+    let fk = riders.foreign_key;
     let sqlite_inline_fk = dialect == Dialect::Sqlite && col.nullable;
     if let Some(fk) = fk
         && sqlite_inline_fk
@@ -558,7 +600,7 @@ pub(crate) fn emit_add_column(
         ));
     }
 
-    for (name, columns, unique) in added_column_indexes(table, col) {
+    for (name, columns, unique) in riders.indexes(column) {
         result.statements.push(render_index_sql(
             table,
             &name,

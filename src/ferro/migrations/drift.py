@@ -133,6 +133,25 @@ def _constraint_noun(name: str) -> str:
     return "constraint"
 
 
+def _unique(unique: bool) -> str:
+    return "unique" if unique else "not unique"
+
+
+def _redefined(op: dict[str, Any]) -> str:
+    live, declared = op.get("live_index"), op.get("snapshot_index")
+    if live is None or declared is None:
+        return f"{op['name']} index is defined differently than the snapshot"
+    if live["columns"] != declared["columns"]:
+        return (
+            f"{op['name']} index is on ({', '.join(live['columns'])}), "
+            f"snapshot says ({', '.join(declared['columns'])})"
+        )
+    return (
+        f"{op['name']} index is {_unique(live['unique'])}, "
+        f"snapshot says {_unique(declared['unique'])}"
+    )
+
+
 _RENDERERS: dict[str, Callable[[dict[str, Any]], str]] = {
     "AddEnumLabel": lambda op: (
         f"{op['type_name']} enum type is missing label {op['label']}"
@@ -170,8 +189,10 @@ _RENDERERS: dict[str, Callable[[dict[str, Any]], str]] = {
     ),
     "AddIndex": lambda op: f"{op['name']} index is missing",
     "DropIndex": lambda op: f"{op['name']} index is extra",
+    "RedefineIndex": lambda op: _redefined(op),
     "RebuildIndex": lambda op: f"{op['name']} index is invalid",
     "AddForeignKey": lambda op: f"{_column(op)} foreign key is missing",
+    "DropForeignKey": lambda op: f"{op['name']} foreign key is extra",
     "RebuildForeignKey": lambda op: (
         f"{op['old_name']} foreign key differs from the snapshot"
     ),
@@ -240,21 +261,54 @@ def _columns(envelope: dict[str, Any]) -> dict[tuple[str, str], dict[str, Any]]:
     }
 
 
+def _indexes(envelope: dict[str, Any]) -> dict[tuple[str, str], dict[str, Any]]:
+    """Every standalone index of ``envelope`` by ``(table, name)``, as
+    ``{"columns", "unique"}``: a declared unique sits in ``uniques``, a live
+    one in ``indexes``."""
+    out: dict[tuple[str, str], dict[str, Any]] = {}
+    for model in envelope["payload"]["models"]:
+        table = model["table_name"]
+        for index in model.get("indexes") or []:
+            out[(table, index["name"])] = {
+                "columns": list(index["columns"]),
+                "unique": bool(index.get("unique")),
+            }
+        for unique in model.get("uniques") or []:
+            out[(table, unique["name"])] = {
+                "columns": list(unique["columns"]),
+                "unique": True,
+            }
+    return out
+
+
 def _describe(
     operations: list[dict[str, Any]],
     live: dict[str, Any],
     snapshot: dict[str, Any],
     dialect: str,
 ) -> list[dict[str, Any]]:
-    """The planner's ops with the two sides of a column change attached, read
-    from the two envelopes the planner compared."""
+    """The planner's ops with the two sides of a column change or of an index
+    redefinition attached, read from the two envelopes the planner
+    compared."""
     if not any(
-        op["kind"] in ("AlterColumnType", "AlterColumnNullability") for op in operations
+        op["kind"] in ("AlterColumnType", "AlterColumnNullability", "RedefineIndex")
+        for op in operations
     ):
         return operations
     live_columns, snapshot_columns = _columns(live), _columns(snapshot)
+    live_indexes, snapshot_indexes = _indexes(live), _indexes(snapshot)
     described = []
     for op in operations:
+        if op["kind"] == "RedefineIndex":
+            index = (op["table"], op["name"])
+            if index in live_indexes and index in snapshot_indexes:
+                op = {
+                    **op,
+                    "live_index": live_indexes[index],
+                    "snapshot_index": snapshot_indexes[index],
+                }
+            described.append(op)
+            continue
         key = (op.get("table"), op.get("column"))
         before, after = live_columns.get(key), snapshot_columns.get(key)
         if before is not None and after is not None:
