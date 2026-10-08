@@ -2,6 +2,8 @@
 
 Amended by ADR-0046: a rebuild sits inside the `schema`/`expand` or `contract` step whose Postgres twin carries the change, never in its own step; the fold is per phase step, so a table may be copied once in the expand and once in the contract; a rebuild recreates the table and its ferro-owned indexes as they stand after its step; and the down of a rebuild restores the table as it stood before the step.
 
+Amended (2026-10, panel 2 follow-on): a required column with a literal default is a rebuild, not `ADD COLUMN … NOT NULL DEFAULT`. SQLite has no `ALTER COLUMN … DROP DEFAULT`, so the in-place add would keep a server `DEFAULT` that ferro never persists (ADR-0027) and that a table created fresh does not have. The reconciliation pass, which does not rebuild, adds such a column nullable, backfills it with `UPDATE … WHERE col IS NULL`, and reports the `NOT NULL` naming `ferro migrate new`.
+
 Migration `0004` adds a table check to a model:
 
 ```python
@@ -41,8 +43,8 @@ One table in the planner decides, separately for each direction:
 
 | Change | SQLite rendering |
 | :-- | :-- |
-| Add an optional column, or a required one with a literal default | `ADD COLUMN`, with its inline `CHECK` and `REFERENCES` |
-| Add a required foreign-key column, or a column with an expression default | rebuild |
+| Add an optional column | `ADD COLUMN`, with its inline `CHECK` and `REFERENCES` |
+| Add a required column (a literal default is copied in by the rebuild's `SELECT`), or a column with an expression default | rebuild |
 | Drop a plain column | drop its `idx_`/`uq_` indexes, then `DROP COLUMN` |
 | Drop a column that carries a foreign key, appears in a check, or is in the primary key | rebuild |
 | Rename a column or table that carries no `ck_`/`fk_` name built from the old name | `RENAME`, indexes dropped and recreated under the new names |

@@ -172,9 +172,11 @@ on both dialects:
   pass's, through the one renderer;
 - **(e)** a database taken through the migration chain shows no drift, has
   the same live schema (facts included) as one `connect(auto_migrate=True)`
-  built from the same models, and Alembic autogenerate against the
-  auto-migrated one is empty (against the migrated one it refuses: a tracked
-  database is `ferro migrate new`'s);
+  built from the same models, and the same server default on every column
+  (no backfill `DEFAULT` left behind, and a renamed table's serial sequence
+  under the name a fresh table gives it), and Alembic autogenerate against
+  the auto-migrated one is empty (against the migrated one it refuses: a
+  tracked database is `ferro migrate new`'s);
 - **(f)** the bridge's revision runs the pass's DDL for every planner op:
   every statement it runs as written is the pass's, and it leaves the same
   live schema the pass's statements do;

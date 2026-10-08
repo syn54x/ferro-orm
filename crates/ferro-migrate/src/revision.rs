@@ -154,6 +154,16 @@ pub enum RevisionRefusal {
         /// `table.column`.
         subject: String,
     },
+    /// A SQLite column added `NOT NULL` with a literal default: `ADD COLUMN`
+    /// takes it only with a `DEFAULT` it keeps for good, where ferro persists
+    /// none (ADR-0027), so only a table rebuild adds it, which a revision
+    /// cannot write.
+    SqliteKeptDefault {
+        /// The op's kind.
+        kind: String,
+        /// `table.column`.
+        subject: String,
+    },
     /// A change SQLite can only make by rebuilding the table, which a
     /// revision cannot write.
     Rebuild {
@@ -183,6 +193,7 @@ impl RevisionRefusal {
             RevisionRefusal::HintRefused(_) => "hint_refused",
             RevisionRefusal::Refused(_) => "refused",
             RevisionRefusal::SqliteRequiredColumn { .. } => "sqlite_required_column",
+            RevisionRefusal::SqliteKeptDefault { .. } => "sqlite_kept_default",
             RevisionRefusal::Rebuild { .. } => "rebuild",
             RevisionRefusal::Blocked(_) => "blocked",
             RevisionRefusal::SnapshotOnly { .. } => "snapshot_only",
@@ -203,6 +214,14 @@ impl std::fmt::Display for RevisionRefusal {
                 "{}. Give it a default, or write the change as a migration, which \
                  generates the backfill: `ferro migrate new`",
                 cannot_add_required(kind, subject)
+            ),
+            RevisionRefusal::SqliteKeptDefault { kind, subject } => write!(
+                f,
+                "{kind} on {subject} adds a NOT NULL column, which SQLite's ADD COLUMN takes \
+                 only with a DEFAULT it keeps for good, and ferro persists no server default; \
+                 the table must be rebuilt, which an Alembic revision cannot write. Make the \
+                 field optional, or write the change as a migration, which rebuilds the \
+                 table: `ferro migrate new`"
             ),
             RevisionRefusal::Rebuild { kind, subject } => write!(
                 f,
@@ -359,6 +378,15 @@ fn upgrade_refusal(planned: &PlannedOp, dialect: Dialect) -> Option<RevisionRefu
     }
     if demands_column_values(planned) && dialect == Dialect::Sqlite {
         return Some(RevisionRefusal::SqliteRequiredColumn {
+            kind: kind_name(&planned.op),
+            subject: subject(&planned.op),
+        });
+    }
+    if planned.verdict.execution == Execution::Rebuild
+        && matches!(planned.op, MigrationOp::AddColumn { .. })
+        && dialect == Dialect::Sqlite
+    {
+        return Some(RevisionRefusal::SqliteKeptDefault {
             kind: kind_name(&planned.op),
             subject: subject(&planned.op),
         });

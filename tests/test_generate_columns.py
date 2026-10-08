@@ -327,23 +327,21 @@ def test_a1_an_optional_foreign_key_round_trips(project, pkg, db):
     round_trip(project, db)
 
 
-@backend_matrix
+@pytest.mark.postgres_only
 def test_a2_a_required_column_with_a_literal_default_backfills_existing_rows(
     project, pkg, db
 ):
+    # SQLite has no DROP DEFAULT, so there it is a rebuild; round trips:
+    # tests/test_generate_sqlite_rebuild.py.
     start(project, pkg, db, AUTHOR)
     db.execute("INSERT INTO author (name, status) VALUES ('ada', 'draft')")
 
     up, down = edit(project, pkg, db, AUTHOR + '    tier: str = "free"\n', "tier")
 
-    sql = statements(up)
-    assert sql[0] == (
-        'ALTER TABLE "author" ADD COLUMN "tier" varchar NOT NULL DEFAULT \'free\''
-    )
-    if db.backend == "postgres":
-        assert sql[1:] == ['ALTER TABLE "author" ALTER COLUMN "tier" DROP DEFAULT']
-    else:
-        assert sql[1:] == [], "SQLite has no DROP DEFAULT: it lingers, as in the pass"
+    assert statements(up) == [
+        'ALTER TABLE "author" ADD COLUMN "tier" varchar NOT NULL DEFAULT \'free\'',
+        'ALTER TABLE "author" ALTER COLUMN "tier" DROP DEFAULT',
+    ]
     assert not up.read_text().startswith("-- ferro:")
     assert down.read_text() == 'ALTER TABLE "author" DROP COLUMN "tier";\n'
     assert run("migrate", "up", "--url", db.url) == 0
