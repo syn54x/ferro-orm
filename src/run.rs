@@ -7,14 +7,18 @@
 //! 0001_create_author  01_schema  applied (12 ms)
 //! ```
 //!
-//! For that line the runner took the [`RunLock`], created
-//! `_ferro_migrations` and `_ferro_migrations_format` ([`ensure_tracking_tables`]),
-//! read the records ([`read_records`]), and ran
-//! `0001_create_author/01_schema.up.postgres.sql` through
-//! [`execute_sql_step`], whose record committed with the file's statements.
-//! `ferro migrate down` runs the step's `.down` file through the same
-//! executor, and [`remove_record`] deletes the record in the down's own
-//! transaction.
+//! For that line the runner opened a [`Tracked`] database (the records and
+//! one read of the migrations directory, held), took the [`RunLock`] as a
+//! [`Locked`] run (the records re-read under it), and executed
+//! `0001_create_author/01_schema.up.postgres.sql` from the held bytes
+//! ([`Locked::execute`]): the first write created `_ferro_migrations` and
+//! `_ferro_migrations_format` ([`ensure_tracking_tables`]), and the step's
+//! record committed with the file's statements after the lock was verified
+//! inside that transaction. `ferro migrate down` runs the step's `.down` file
+//! through the same executor, which deletes the record in the down's own
+//! transaction. A data step's record moves through the locked run's named
+//! transitions ([`Locked::start`], [`Locked::finish`], ...), so Python builds
+//! no record (ADR-0048).
 //!
 //! I-1: the runner renders no schema DDL. The only DDL built here is the
 //! tracking tables' own (#466); every other statement comes from a step file.
@@ -25,22 +29,22 @@ use crate::backend::{
 use crate::ddl_exec::{
     Attempt, DdlError, DdlExecutor, Door, Executed, Failed, Role, Unit, pool_connection,
 };
+use crate::state::TransactionConnection;
 use ferro_ddl_lowering::Dialect;
-use ferro_migrate::generate::rebuild::rebuilt_tables;
-use ferro_migrate::plan::{Hint, live_hints, reverse_hints};
 use ferro_migrate::run_plan::{
-    Direction, ExecMode, Origin, PlannedStep, RecordKind, StepRecord, TRACKING_FORMAT,
-    check_format, run_lock_key, split_statements,
+    Direction, ExecMode, HeldDirectory, OrderKeys, Origin, PlannedStep, RebuildExpectation,
+    RecordKind, RerecordAction, RerecordMode, RunPlan, RunStatus, StepRecord, TRACKING_FORMAT,
+    check_adoption, check_format, rerecord_plan, run_lock_key, run_status, split_statements,
 };
-use ferro_migrate::snapshot::{encode_checksum, sha384};
+use ferro_migrate::snapshot::encode_checksum;
 use ferro_schema_ir::SchemaModel;
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
 use sqlx::{Connection, Row};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// The step-record table.
@@ -74,9 +78,9 @@ pub fn refused(text: impl Into<String>) -> PyErr {
 }
 
 /// A run planner refusal as `RunRefused(text, kind=..., migration=...,
-/// step=..., reason=...)`, so a caller matches on its kind rather than its
-/// text. Falls back to `RuntimeError` only if the Python module cannot be
-/// imported.
+/// step=..., reason=..., ahead_only=...)`, so a caller matches on its kind
+/// rather than its text. Falls back to `RuntimeError` only if the Python
+/// module cannot be imported.
 pub fn refused_by(refusal: &ferro_migrate::RunRefusal) -> PyErr {
     let text = refusal.to_string();
     Python::attach(|py| {
@@ -86,6 +90,7 @@ pub fn refused_by(refusal: &ferro_migrate::RunRefusal) -> PyErr {
             kwargs.set_item("migration", refusal.migration())?;
             kwargs.set_item("step", refusal.step())?;
             kwargs.set_item("reason", refusal.reason())?;
+            kwargs.set_item("ahead_only", refusal.ahead_only())?;
             py.import("ferro.migrations.report")?
                 .getattr("RunRefused")?
                 .call((text.clone(),), Some(&kwargs))
@@ -157,6 +162,43 @@ pub fn lock_verification_outcome(held: bool, first: bool) -> Result<(), RunLockR
         (true, _) => Ok(()),
         (false, true) => Err(RunLockRefusal::Pooler),
         (false, false) => Err(RunLockRefusal::Dropped),
+    }
+}
+
+/// Why a check of the run lock failed.
+#[derive(Debug)]
+pub enum LockCheckFailed {
+    /// The lock is not this session's ([`RunLockRefusal`]).
+    Refused(RunLockRefusal),
+    /// The database refused the probe itself.
+    Database(sqlx::Error),
+    /// The locked run's block has exited and released the lock.
+    Released,
+}
+
+/// What a write after the locked block names.
+const RELEASED: &str = "ferro migrate: this run's lock was released when its `locked()` block \
+     exited; a locked database writes only inside the block that holds the lock. Nothing \
+     more was applied.";
+
+impl LockCheckFailed {
+    /// The failure as the Python error a caller sees.
+    pub fn into_py(self) -> PyErr {
+        match self {
+            LockCheckFailed::Refused(refusal) => refused(refusal.to_string()),
+            LockCheckFailed::Database(err) => db_error("verifying the run lock", err),
+            LockCheckFailed::Released => refused(RELEASED),
+        }
+    }
+
+    /// The failure as a statement's error, so a transaction it is checked
+    /// inside fails and rolls back like a failed statement.
+    fn into_sqlx(self) -> sqlx::Error {
+        match self {
+            LockCheckFailed::Refused(refusal) => sqlx::Error::Protocol(refusal.to_string()),
+            LockCheckFailed::Database(err) => err,
+            LockCheckFailed::Released => sqlx::Error::Protocol(RELEASED.to_string()),
+        }
     }
 }
 
@@ -399,153 +441,19 @@ pub async fn check_rebuild_preconditions(
     }
 }
 
-/// The schema snapshots on either side of a step's migration, the one its
-/// file starts from first: going up, the parent migration's (`None` before
-/// the first migration) then the migration's own; going down, the other way.
-fn adjacent_snapshots(
-    step: &PlannedStep,
-    down: bool,
-) -> PyResult<[Option<IrEnvelope<SchemaIrPayload>>; 2]> {
-    let shown = format!("{}/{}", step.migration_name, step.file);
-    let directory = step
-        .path
-        .parent()
-        .and_then(std::path::Path::parent)
-        .ok_or_else(|| {
-            refused(format!(
-                "ferro migrate: cannot find the migrations directory of {shown}. Nothing was \
-                 applied."
-            ))
-        })?;
-    let dir = MigrationsDir::read(directory)
-        .map_err(|err| refused(format!("ferro migrate: {err}. Nothing was applied.")))?;
-    let parent = step.migration.checked_sub(1).filter(|n| *n > 0);
-    let snapshot = |number: Option<u16>| {
-        number.and_then(|number| {
-            dir.migrations
-                .iter()
-                .find(|migration| migration.number == number)
-                .map(|migration| migration.snapshot.ir.clone())
-        })
-    };
-    let (own, parent) = (snapshot(Some(step.migration)), snapshot(parent));
-    Ok(if down { [own, parent] } else { [parent, own] })
-}
-
 /// Before a SQLite `foreign-keys-off` step, check every table its file
-/// rebuilds (each `CREATE TABLE "_ferro_new_<table>"` it holds) against the
-/// schema snapshot the file starts from ([`check_rebuild_preconditions`]),
-/// in the file's order. Any other step passes.
+/// rebuilds against what the plan expects of it ([`RebuildExpectation`],
+/// read off the step's own bytes at planning), in the file's order
+/// ([`check_rebuild_preconditions`]).
 ///
 /// # Errors
 /// `RunRefused` naming each undeclared column, foreign index and trigger of
-/// the first table holding one, or a rebuilt table the snapshot does not
-/// declare; a database error.
-pub async fn check_rebuild_step(
-    engine: &EngineHandle,
-    step: &PlannedStep,
-    sql: &str,
-    down: bool,
-) -> PyResult<()> {
-    if step.mode != ExecMode::ForeignKeysOff
-        || engine.backend() != Dialect::Sqlite
-        || (down && step.nothing_to_reverse.is_some())
-    {
-        return Ok(());
-    }
-    let tables = rebuilt_tables(&split_statements(sql, engine.backend()));
-    if tables.is_empty() {
-        return Ok(());
-    }
-    let shown = format!("{}/{}", step.migration_name, step.file);
-    let [snapshot, other] = adjacent_snapshots(step, down)?;
-    let renames = step_table_renames(step, down)?;
-    for table in tables {
-        // A step that renames a table rebuilds it under its new name, after
-        // the rename (ADR-0032, ADR-0046); before the step runs it still has
-        // its starting name.
-        let starting = renames
-            .iter()
-            .find_map(|hint| match hint {
-                Hint::Table { old, new } if *new == table => Some(old.clone()),
-                _ => None,
-            })
-            .unwrap_or_else(|| table.clone());
-        let mut model = snapshot
-            .as_ref()
-            .and_then(|ir| ir.payload.models.iter().find(|m| m.table_name == starting))
-            .cloned()
-            .ok_or_else(|| {
-                refused(format!(
-                    "ferro migrate: {shown} rebuilds table {}, which the schema snapshot it \
-                     starts from does not declare. Nothing was applied.",
-                    quote_ident(&table)
-                ))
-            })?;
-        // A later step of the migration (a contract after its expand) finds
-        // the table as an earlier step left it: every column either side of
-        // the migration declares is a declared column (ADR-0025), never one
-        // the rebuild discards unannounced.
-        if let Some(other) = other
-            .as_ref()
-            .and_then(|ir| ir.payload.models.iter().find(|m| m.table_name == table))
-        {
-            for col in &other.columns {
-                if !model.columns.iter().any(|known| known.name == col.name) {
-                    model.columns.push(col.clone());
-                }
-            }
-        }
-        check_rebuild_preconditions(engine, &starting, &model).await?;
+/// the first table holding one; a database error.
+async fn check_rebuilds(engine: &EngineHandle, rebuilds: &[RebuildExpectation]) -> PyResult<()> {
+    for rebuild in rebuilds {
+        check_rebuild_preconditions(engine, &rebuild.starting_name, &rebuild.declared).await?;
     }
     Ok(())
-}
-
-/// The table renames a step's migration makes, in the direction the file
-/// runs: the live rename hints of its snapshot against its parent's
-/// ([`live_hints`], the generator's own decision), reversed going down.
-///
-/// # Errors
-/// `RunRefused` when the migrations directory cannot be read, or when its
-/// snapshot carries a hint the generator refuses (a hand-edited `ir.json`).
-fn step_table_renames(step: &PlannedStep, down: bool) -> PyResult<Vec<Hint>> {
-    let shown = format!("{}/{}", step.migration_name, step.file);
-    let directory = step
-        .path
-        .parent()
-        .and_then(std::path::Path::parent)
-        .ok_or_else(|| {
-            refused(format!(
-                "ferro migrate: cannot find the migrations directory of {shown}. Nothing was \
-                 applied."
-            ))
-        })?;
-    let dir = MigrationsDir::read(directory)
-        .map_err(|err| refused(format!("ferro migrate: {err}. Nothing was applied.")))?;
-    let snapshot_of = |number: u16| {
-        dir.migrations
-            .iter()
-            .find(|migration| migration.number == number)
-            .map(|migration| migration.snapshot.ir.payload.clone())
-    };
-    let Some(own) = snapshot_of(step.migration) else {
-        return Ok(Vec::new());
-    };
-    let parent = step
-        .migration
-        .checked_sub(1)
-        .and_then(snapshot_of)
-        .unwrap_or(SchemaIrPayload {
-            dialect_agnostic: own.dialect_agnostic,
-            models: Vec::new(),
-        });
-    let hints = live_hints(&parent, &own).map_err(|err| {
-        refused(format!(
-            "ferro migrate: {shown}: its schema snapshot carries a rename hint ferro refuses: \
-             {err}. Nothing was applied."
-        ))
-    })?;
-    Ok(if down { reverse_hints(&hints) } else { hints })
 }
 
 // -- the run lock --------------------------------------------------------------------
@@ -775,6 +683,12 @@ impl RunLock {
     /// held", the dropped-lock refusal when a later one does or its session
     /// is gone; the database's own error when it refuses the probe.
     pub async fn verify(&mut self) -> PyResult<()> {
+        self.check().await.map_err(LockCheckFailed::into_py)
+    }
+
+    /// [`RunLock::verify`], its failure not yet a Python error: a check
+    /// awaited inside a transaction is a step's failure first.
+    async fn check(&mut self) -> Result<(), LockCheckFailed> {
         let LockState::Postgres {
             conn,
             key,
@@ -798,11 +712,11 @@ impl RunLock {
                 match probe {
                     Ok(held) => held,
                     Err(err) if !first && probe_lost_the_session(&err) => false,
-                    Err(err) => return Err(db_error("verifying the run lock", err)),
+                    Err(err) => return Err(LockCheckFailed::Database(err)),
                 }
             }
         };
-        lock_verification_outcome(held, first).map_err(|r| refused(r.to_string()))?;
+        lock_verification_outcome(held, first).map_err(LockCheckFailed::Refused)?;
         *verified = true;
         Ok(())
     }
@@ -917,72 +831,6 @@ impl RunLock {
 
 async fn governed_schema_of(engine: &EngineHandle) -> PyResult<String> {
     governed_schema(engine).await
-}
-
-/// Locks held across FFI calls, by handle.
-static RUN_LOCKS: Lazy<std::sync::Mutex<HashMap<u64, Arc<tokio::sync::Mutex<RunLock>>>>> =
-    Lazy::new(|| std::sync::Mutex::new(HashMap::new()));
-static NEXT_HANDLE: AtomicU64 = AtomicU64::new(1);
-
-/// Keep `lock` across FFI calls; returns its handle.
-pub fn register_lock(lock: RunLock) -> PyResult<u64> {
-    let handle = NEXT_HANDLE.fetch_add(1, Ordering::Relaxed);
-    RUN_LOCKS
-        .lock()
-        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("run lock registry poisoned"))?
-        .insert(handle, Arc::new(tokio::sync::Mutex::new(lock)));
-    Ok(handle)
-}
-
-/// The lock behind `handle`.
-pub fn registered_lock(handle: u64) -> PyResult<Arc<tokio::sync::Mutex<RunLock>>> {
-    RUN_LOCKS
-        .lock()
-        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("run lock registry poisoned"))?
-        .get(&handle)
-        .cloned()
-        .ok_or_else(|| {
-            pyo3::exceptions::PyValueError::new_err(format!("no run lock with handle {handle}"))
-        })
-}
-
-const LOCK_IN_USE: &str =
-    "the run lock is in use by another call; release it after that call returns";
-
-/// Take the lock behind `handle` out of `registry` for release, only once
-/// no other call holds it: a release refused while the lock is in use
-/// leaves the handle registered, so it can be retried.
-///
-/// # Errors
-/// `RuntimeError` while another call holds the lock (the handle stays) or
-/// on a poisoned registry; `ValueError` for an unknown handle.
-fn take_registered_lock(
-    registry: &std::sync::Mutex<HashMap<u64, Arc<tokio::sync::Mutex<RunLock>>>>,
-    handle: u64,
-) -> PyResult<RunLock> {
-    let mut locks = registry
-        .lock()
-        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("run lock registry poisoned"))?;
-    let unknown =
-        || pyo3::exceptions::PyValueError::new_err(format!("no run lock with handle {handle}"));
-    // Every clone is made from the registry under this mutex, so a count of
-    // one cannot rise before the removal below.
-    if Arc::strong_count(locks.get(&handle).ok_or_else(unknown)?) != 1 {
-        return Err(pyo3::exceptions::PyRuntimeError::new_err(LOCK_IN_USE));
-    }
-    let lock = locks.remove(&handle).ok_or_else(unknown)?;
-    Arc::try_unwrap(lock)
-        .map(tokio::sync::Mutex::into_inner)
-        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err(LOCK_IN_USE))
-}
-
-/// Forget `handle` and return its lock for release; while another call
-/// holds the lock, refuse and keep the handle, so the release can be retried.
-///
-/// # Errors
-/// As [`take_registered_lock`].
-pub fn unregister_lock(handle: u64) -> PyResult<RunLock> {
-    take_registered_lock(&RUN_LOCKS, handle)
 }
 
 // -- the tracking tables ------------------------------------------------------------
@@ -1725,13 +1573,14 @@ pub async fn rerecord_checksum(
 
 /// A SQLite `foreign-keys-off` step, outside the DDL executor on purpose:
 /// the pragma read back, `BEGIN IMMEDIATE`, the file, `foreign_key_check`
-/// as a failure, the record settled, `COMMIT`. Its statements are sent as
-/// the executor sends them, and returned the same way.
+/// as a failure, the run lock verified, the record settled, `COMMIT`. Its
+/// statements are sent as the executor sends them, and returned the same
+/// way.
 async fn foreign_keys_off(
     conn: &mut EngineConnection,
     statements: &[String],
     file: &str,
-    tracking_schema: Option<&str>,
+    locked: &Locked,
     finished: impl FnOnce() -> Settle,
 ) -> Result<Executed, StepFailure> {
     conn.execute_sql_unprepared("PRAGMA foreign_keys = OFF")
@@ -1762,7 +1611,11 @@ async fn foreign_keys_off(
             None,
         ));
     }
-    settle(conn, tracking_schema, finished()).await?;
+    locked
+        .check_lock()
+        .await
+        .map_err(LockCheckFailed::into_sqlx)?;
+    settle(conn, locked.tracking_schema(), finished()).await?;
     conn.execute_sql_unprepared("COMMIT").await?;
     Ok(executed)
 }
@@ -1820,237 +1673,867 @@ fn failure_message(step: &PlannedStep, error: &str, down: bool) -> String {
     )
 }
 
-/// Execute one planned SQL step in the step's mode, and settle its record:
-/// going up the record is written, going down it is removed.
+// -- the run objects (ADR-0048) ----------------------------------------------------------
+
+/// The ferro version every step record this ferro writes is stamped with
+/// (`Cargo.toml` and `pyproject.toml` carry one version).
+pub const FERRO_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+static NEXT_LOCKED: AtomicU64 = AtomicU64::new(1);
+
+/// One database's tracking tables and one migrations directory, each read
+/// once (ADR-0048): what `status`, `drift` and `require_applied` answer from,
+/// and what a locked run ([`Locked`]) starts from.
 ///
-/// - **Transactional**: going up, the started record commits first (so
-///   `status` sees the attempt); then one transaction runs the file's
-///   statements and writes the finished mark (up) or removes the record
-///   (down), and commits them together.
-/// - **NoTransaction** (Postgres): (up: the started record, then) each
-///   statement in autocommit (what lets `CREATE INDEX CONCURRENTLY` run),
-///   then the finished mark or the removal.
-/// - **ForeignKeysOff** (SQLite): one dedicated connection —
-///   `PRAGMA foreign_keys = OFF` (read back), `BEGIN IMMEDIATE`, the file,
-///   `PRAGMA foreign_key_check` as a failure, the finished mark or the
-///   removal, `COMMIT`, the pragma restored; the connection is closed on
-///   failure.
-///
-/// The transactional and no-transaction modes run under `ddl`, the DDL lock
-/// timeout (ADR-0044): on Postgres a statement that waits longer than the
-/// timeout for a lock gives up and the step is re-run from its first
-/// statement, `on_attempt` hearing each attempt that timed out; the record
-/// stays started (`running`) across attempts, and the finished record's
-/// `duration_ms` covers every attempt and wait. After the last attempt the
-/// step fails with a message naming `ddl_lock_timeout`.
-///
-/// A failure rolls back what the mode can roll back, then writes `failed_at`
-/// and `error` on the step's record in a separate transaction: going up the
-/// started record; going down the standing one, only when the down ran
-/// without a transaction and so left part of itself applied (a rolled-back
-/// down leaves the record exactly as it was: the step stays applied, see
-/// [`failed_down_marks_record`]). The next run resumes at the step. A down with [`PlannedStep::nothing_to_reverse`] runs
-/// no statement and removes the record. `sql` must be the bytes the planner
-/// hashed (the up file going up, the down file going down).
-///
-/// # Errors
-/// A refusal when `sql` is not the planned file (edited mid-run), when the
-/// record is not the planned step's, or when a down declaring
-/// `nothing-to-reverse` holds statements; a database error writing a
-/// record. A failing statement is not an error: it is the returned
-/// [`StepOutcome`].
-#[allow(clippy::too_many_arguments)]
-pub async fn execute_sql_step(
-    engine: &EngineHandle,
-    tracking_schema: Option<&str>,
-    step: &PlannedStep,
-    sql: &str,
-    record: StepRecord,
-    direction: Direction,
-    ddl: &DdlExecutor,
-    on_attempt: impl FnMut(Attempt),
-) -> PyResult<StepOutcome> {
-    let down = matches!(direction, Direction::Down { .. });
-    let verb = if down { "down" } else { "up" };
-    let shown = format!("{}/{}", step.migration_name, step.file);
-    if encode_checksum(&sha384(sql.as_bytes())) != step.checksum {
-        return Err(refused(format!(
-            "ferro migrate: {shown} changed while this run was in progress; it was planned \
-             with sha384:{}. Run `ferro migrate {verb}` again. Nothing more was {}.",
-            step.checksum,
-            if down { "reverted" } else { "applied" }
-        )));
-    }
-    let planned_record = if down {
-        (record.migration, record.step, &record.checksum)
-            == (step.migration, step.step, &step.record.checksum)
-    } else {
-        (record.migration, record.step, &record.checksum)
-            == (step.migration, step.step, &step.checksum)
-    };
-    if !planned_record {
-        return Err(pyo3::exceptions::PyValueError::new_err(format!(
-            "the record for {}:{} does not describe the planned step {shown}",
-            record.migration, record.step
-        )));
-    }
-    let mut statements = split_statements(sql, engine.backend());
-    if down && step.nothing_to_reverse.is_some() {
-        if step.headers.nothing_to_reverse.is_some() && !statements.is_empty() {
-            return Err(refused(format!(
-                "ferro migrate: {shown} declares nothing-to-reverse but holds statements; keep \
-                 one: delete the statements, or the declaration. Nothing more was reverted."
-            )));
-        }
-        statements.clear();
+/// ```text
+/// Tracked::open(engine, None, "migrations")   the records and one directory read
+/// tracked.status(lock_held, keys)             where the database stands
+/// tracked.plan(Up { through: None }, ..)      a preview: nothing executes it
+/// tracked.lock(timeout, on_wait)              -> Locked, the records re-read
+/// ```
+pub struct Tracked {
+    engine: Arc<EngineHandle>,
+    tracking_schema: Option<String>,
+    state: TrackingState,
+    held: Arc<Result<HeldDirectory, RunRefusal>>,
+}
+
+impl Tracked {
+    /// Read `engine`'s tracking tables (in `tracking_schema` when set) and
+    /// the migrations directory at `directory`. Creates nothing and takes no
+    /// lock. A directory that cannot be read is held as its refusal: `status`
+    /// reports it, and everything that needs the directory raises it.
+    ///
+    /// # Errors
+    /// A database error reading the records.
+    pub async fn open(
+        engine: Arc<EngineHandle>,
+        tracking_schema: Option<String>,
+        directory: &Path,
+    ) -> PyResult<Self> {
+        let state = read_records(&engine, tracking_schema.as_deref()).await?;
+        let held = Arc::new(HeldDirectory::read(directory));
+        Ok(Self {
+            engine,
+            tracking_schema,
+            state,
+            held,
+        })
     }
 
-    let started = if down {
-        record
-    } else {
+    /// The database's dialect.
+    pub fn dialect(&self) -> Dialect {
+        self.engine.backend()
+    }
+
+    /// `<schema>._ferro_migrations`, as `status` names it.
+    pub fn tracking_table(&self) -> &str {
+        &self.state.table
+    }
+
+    /// The step records, by migration and step.
+    pub fn records(&self) -> &[StepRecord] {
+        &self.state.records
+    }
+
+    /// The newer-format refusal every verb stops on, when the tracking
+    /// table's format is newer than this ferro reads (#466).
+    pub fn format_refusal(&self) -> Option<&str> {
+        self.state.refusal.as_deref()
+    }
+
+    /// The held directory read.
+    ///
+    /// # Errors
+    /// `RunRefused` carrying the read's refusal when the directory could not
+    /// be read.
+    pub fn held(&self) -> PyResult<&HeldDirectory> {
+        self.held.as_ref().as_ref().map_err(refused_by)
+    }
+
+    /// Whether any run holds the run lock, asked without taking it.
+    ///
+    /// # Errors
+    /// A database error.
+    pub async fn lock_held(&self) -> PyResult<bool> {
+        RunLock::is_held(&self.engine, None).await
+    }
+
+    /// Where the database stands against the directory (`ferro migrate
+    /// status`, #466): `lock_held` makes the first unfinished step
+    /// `running`; `order_keys` are [`plan_run`]'s. A directory that cannot be
+    /// read is reported as its refusal with no migrations, and the
+    /// newer-format refusal replaces the planner's.
+    pub fn status(&self, lock_held: bool, order_keys: Option<&OrderKeys>) -> RunStatus {
+        let mut status = match self.held.as_ref() {
+            Ok(held) => run_status(
+                &held.dir,
+                &self.state.records,
+                self.dialect(),
+                lock_held,
+                order_keys,
+            ),
+            Err(refusal) => RunStatus {
+                refusal_needs_attention: refusal.needs_attention(),
+                refusal: Some(refusal.to_string()),
+                ..RunStatus::default()
+            },
+        };
+        if let Some(refusal) = &self.state.refusal {
+            status.refusal = Some(refusal.clone());
+            status.refusal_needs_attention = true;
+        }
+        status
+    }
+
+    /// Plan a run over the held directory against these records
+    /// ([`HeldDirectory::plan`]); going up on a database with no records,
+    /// refuse when a table of the first migration already exists
+    /// ([`check_adoption`]).
+    ///
+    /// # Errors
+    /// `RunRefused`: the newer-format refusal, the directory's, the
+    /// planner's (structured: kind, migration, step, reason, ahead_only), the
+    /// adoption refusal; a database error reading the live tables.
+    pub async fn plan(
+        &self,
+        direction: Direction,
+        allow_ahead: bool,
+        order_keys: Option<&OrderKeys>,
+    ) -> PyResult<RunPlan> {
+        if let Some(refusal) = &self.state.refusal {
+            return Err(refused(refusal.clone()));
+        }
+        let held = self.held()?;
+        let records = &self.state.records;
+        let plan = held
+            .plan(records, self.dialect(), direction, allow_ahead, order_keys)
+            .map_err(|refusal| refused_by(&refusal))?;
+        if matches!(direction, Direction::Up { .. }) && records.is_empty() {
+            let live = live_tables(&self.engine).await?;
+            check_adoption(&held.dir, records, &live).map_err(|refusal| refused_by(&refusal))?;
+        }
+        Ok(plan)
+    }
+
+    /// Take the run lock, waiting up to `timeout` (`on_wait` hears
+    /// [`WAITING_TEXT`] once, at once, when another run holds it), and
+    /// re-read the records under it (ADR-0029).
+    ///
+    /// # Errors
+    /// The lock's refusals (timeout, pooler); a database error.
+    pub async fn lock(&self, timeout: Duration, on_wait: impl FnOnce(&str)) -> PyResult<Locked> {
+        let lock = RunLock::acquire(&self.engine, None, timeout, on_wait).await?;
+        self.locked_with(lock).await
+    }
+
+    /// A locked run whose Postgres lock never took the advisory lock and was
+    /// never verified, as a transaction-mode pooler hands back: its first
+    /// write fails the first check. Test-only.
+    ///
+    /// # Errors
+    /// A refusal for a non-Postgres database; a database error.
+    pub async fn lock_unacquired_for_test(&self) -> PyResult<Locked> {
+        let lock = RunLock::unacquired_for_test(&self.engine).await?;
+        self.locked_with(lock).await
+    }
+
+    async fn locked_with(&self, lock: RunLock) -> PyResult<Locked> {
+        let state = match read_records(&self.engine, self.tracking_schema.as_deref()).await {
+            Ok(state) => state,
+            Err(err) => {
+                let _ = lock.release().await;
+                return Err(err);
+            }
+        };
+        Ok(Locked {
+            tracked: Tracked {
+                engine: Arc::clone(&self.engine),
+                tracking_schema: self.tracking_schema.clone(),
+                state,
+                held: Arc::clone(&self.held),
+            },
+            lock: tokio::sync::Mutex::new(Some(lock)),
+            tables_ready: AtomicBool::new(false),
+            started: std::sync::Mutex::new(HashMap::new()),
+            id: NEXT_LOCKED.fetch_add(1, Ordering::Relaxed),
+        })
+    }
+}
+
+/// A run holding the run lock (ADR-0048): the reads of [`Tracked`], its
+/// records re-read under the lock, and every write a run makes. Each write
+/// verifies the lock first; where the write sits inside the transaction that
+/// commits the step's work (a transactional SQL step, an atomic data step, a
+/// chunked batch), nothing commits unless this process held the lock at
+/// commit time (ADR-0029 as amended). The first write outside a step's
+/// transaction creates the tracking tables where they are missing; a write
+/// inside one follows that step's started record, or a record read here.
+pub struct Locked {
+    tracked: Tracked,
+    lock: tokio::sync::Mutex<Option<RunLock>>,
+    tables_ready: AtomicBool,
+    /// Each data step's started record (its kind and cursor), from
+    /// [`Locked::start`] to its finish or failure.
+    started: std::sync::Mutex<HashMap<(u16, u8), StepRecord>>,
+    id: u64,
+}
+
+/// A chunked step's position as a transition records it: the cursor
+/// (`None` before any row) and the rows the walk has committed.
+pub type Position = (Option<String>, i64);
+
+fn poisoned() -> PyErr {
+    pyo3::exceptions::PyRuntimeError::new_err(
+        "ferro migrate: the run's started records are unusable: a thread panicked while \
+         holding them",
+    )
+}
+
+impl Locked {
+    /// The reads, as of the records re-read under the lock.
+    pub fn tracked(&self) -> &Tracked {
+        &self.tracked
+    }
+
+    /// This locked run's identity: a step planned by another run (or by a
+    /// preview) is not executed by this one.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    fn engine(&self) -> &EngineHandle {
+        &self.tracked.engine
+    }
+
+    fn tracking_schema(&self) -> Option<&str> {
+        self.tracked.tracking_schema.as_deref()
+    }
+
+    async fn check_lock(&self) -> Result<(), LockCheckFailed> {
+        match self.lock.lock().await.as_mut() {
+            Some(lock) => lock.check().await,
+            None => Err(LockCheckFailed::Released),
+        }
+    }
+
+    /// Verify that this run still holds the run lock.
+    ///
+    /// # Errors
+    /// `RunRefused`: the pooler refusal (first check), the lost-lock refusal,
+    /// or the lock released with its block; the database's error.
+    pub async fn verify(&self) -> PyResult<()> {
+        self.check_lock().await.map_err(LockCheckFailed::into_py)
+    }
+
+    /// Verify the lock, and create the tracking tables where they are
+    /// missing: what every write outside a step's transaction does first.
+    async fn ready_to_write(&self) -> PyResult<()> {
+        self.verify().await?;
+        if !self.tables_ready.load(Ordering::Acquire) {
+            ensure_tracking_tables(self.engine(), self.tracking_schema()).await?;
+            self.tables_ready.store(true, Ordering::Release);
+        }
+        Ok(())
+    }
+
+    /// Release the run lock. Every write after it refuses.
+    ///
+    /// # Errors
+    /// The poisoned-registry refusal for an in-process lock.
+    pub async fn release(&self) -> PyResult<()> {
+        let lock = self.lock.lock().await.take();
+        match lock {
+            Some(lock) => lock.release().await,
+            None => Ok(()),
+        }
+    }
+
+    /// Close the Postgres lock connection without releasing the lock, as a
+    /// dropped network connection would. Test-only.
+    pub async fn close_lock_connection_for_test(&self) {
+        if let Some(lock) = self.lock.lock().await.as_mut() {
+            lock.close_connection().await;
+        }
+    }
+
+    async fn write(&self, record: &StepRecord, tx: Option<&TransactionConnection>) -> PyResult<()> {
+        match tx {
+            Some(slot) => {
+                let mut guard = slot.lock().await;
+                let conn = guard
+                    .live()
+                    .map_err(|e| db_error("writing the step record", e))?;
+                write_record(self.engine(), self.tracking_schema(), record, Some(conn)).await
+            }
+            None => write_record(self.engine(), self.tracking_schema(), record, None).await,
+        }
+    }
+
+    fn started_record(&self, step: &PlannedStep) -> PyResult<StepRecord> {
+        self.started
+            .lock()
+            .map_err(|_| poisoned())?
+            .get(&(step.migration, step.step))
+            .cloned()
+            .ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!(
+                    "{}/{} was never started on this run; start(step) writes its started \
+                     record first",
+                    step.migration_name, step.file
+                ))
+            })
+    }
+
+    /// A data step's started record (ADR-0024), written on its own before
+    /// the step runs: `kind` is the shape its `up` declares, and a resumed
+    /// chunked step (`standing`, its unfinished record) keeps its cursor and
+    /// `rows_done`.
+    ///
+    /// # Errors
+    /// The lock's refusals; `ValueError` for a SQL step or a kind that is no
+    /// data step's; a database error.
+    pub async fn start(
+        &self,
+        step: &PlannedStep,
+        kind: RecordKind,
+        standing: Option<&StepRecord>,
+    ) -> PyResult<()> {
+        if !step.data || !matches!(kind, RecordKind::Atomic | RecordKind::Chunked) {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "start() records a data step as atomic or chunked; {}/{} as {} is not one",
+                step.migration_name,
+                step.file,
+                kind.as_str()
+            )));
+        }
+        let resumed = standing.filter(|record| record.kind == RecordKind::Chunked);
         let started = StepRecord {
+            kind,
             started_at: now_iso(),
             finished_at: None,
             failed_at: None,
             error: None,
             duration_ms: 0,
-            kind: step.mode.record_kind(),
-            ..record
+            resume_cursor: resumed.and_then(|r| r.resume_cursor.clone()),
+            rows_done: match resumed {
+                Some(record) => record.rows_done,
+                None => (kind == RecordKind::Chunked).then_some(0),
+            },
+            ferro_version: FERRO_VERSION.to_string(),
+            ..step.record.clone()
         };
-        write_record(engine, tracking_schema, &started, None).await?;
-        started
-    };
+        self.ready_to_write().await?;
+        self.write(&started, None).await?;
+        self.started
+            .lock()
+            .map_err(|_| poisoned())?
+            .insert((step.migration, step.step), started);
+        Ok(())
+    }
 
-    let clock = Instant::now();
-    let elapsed = |clock: Instant| i64::try_from(clock.elapsed().as_millis()).unwrap_or(i64::MAX);
-    let finish = |ms: i64| {
-        if down {
-            Settle::Remove {
-                migration: started.migration,
-                step: started.step,
-            }
-        } else {
-            Settle::Write(Box::new(StepRecord {
-                finished_at: Some(now_iso()),
-                duration_ms: ms,
-                ..started.clone()
-            }))
+    /// A data step's finished record, written on `tx` (the step's or its
+    /// last batch's transaction) so it commits with the work, or on its own;
+    /// a chunked step's last `position` with it.
+    ///
+    /// # Errors
+    /// The lock's refusals; `ValueError` for a step never started; a
+    /// database error.
+    pub async fn finish(
+        &self,
+        step: &PlannedStep,
+        ms: i64,
+        tx: Option<&TransactionConnection>,
+        position: Option<Position>,
+    ) -> PyResult<()> {
+        let mut finished = StepRecord {
+            finished_at: Some(now_iso()),
+            failed_at: None,
+            error: None,
+            duration_ms: ms,
+            ..self.started_record(step)?
+        };
+        if let Some((cursor, rows_done)) = position {
+            finished.resume_cursor = cursor;
+            finished.rows_done = Some(rows_done);
         }
-    };
+        self.verify().await?;
+        self.write(&finished, tx).await
+    }
 
-    // A transactional or no-transaction step is one unit of the DDL
-    // executor: the file's statements, then the record settled on the same
-    // connection (inside the transaction, for a transactional step), under
-    // the DDL lock timeout, re-run from the first statement on a timeout.
-    let (statements, shown, finish, elapsed) = (&statements, &shown, &finish, &elapsed);
-    let dialect = engine.backend();
-    let record = || {
-        crate::ddl_exec::Settle::new(move || {
-            finish(elapsed(clock)).statement(dialect, tracking_schema)
-        })
-    };
-    let unit = |unit: Unit| {
-        ddl.run(
-            engine,
-            unit,
-            Door::Run(shown),
-            statements,
-            on_attempt,
-            Some(record()),
+    /// A data step's failure on its started record, written on its own
+    /// after the rollback: `failed_at`, the error and the time spent; a
+    /// chunked step's committed `position` with it, so the next run resumes
+    /// after it.
+    ///
+    /// # Errors
+    /// The lock's refusals; `ValueError` for a step never started; a
+    /// database error.
+    pub async fn fail(
+        &self,
+        step: &PlannedStep,
+        ms: i64,
+        error: String,
+        position: Option<Position>,
+    ) -> PyResult<()> {
+        let mut failed = StepRecord {
+            failed_at: Some(now_iso()),
+            error: Some(error),
+            duration_ms: ms,
+            ..self.started_record(step)?
+        };
+        if let Some((cursor, rows_done)) = position {
+            failed.resume_cursor = cursor;
+            failed.rows_done = Some(rows_done);
+        }
+        self.verify().await?;
+        self.write(&failed, None).await
+    }
+
+    /// One committed batch of a chunked step on its record, on `tx` (the
+    /// batch's transaction): its cursor and `rows_done`, going up in
+    /// `resume_cursor`, going down (`reverting`) in `revert_cursor` with the
+    /// record marked reverting (ADR-0033).
+    ///
+    /// # Errors
+    /// The lock's refusals; a refusal when the step has no record; a
+    /// database error.
+    pub async fn advance(
+        &self,
+        step: &PlannedStep,
+        position: Position,
+        tx: &TransactionConnection,
+        reverting: bool,
+    ) -> PyResult<()> {
+        self.verify().await?;
+        let mut guard = tx.lock().await;
+        let conn = guard
+            .live()
+            .map_err(|e| db_error("writing the chunked step's cursor", e))?;
+        write_cursor(
+            conn,
+            self.tracking_schema(),
+            step.migration,
+            step.step,
+            position.0.as_deref(),
+            position.1,
+            reverting,
         )
-    };
-    let outcome: Result<(), StepFailure> = match step.mode {
-        ExecMode::Transactional => unit(Unit::Transactional)
+        .await
+    }
+
+    /// A chunked down that failed after a committed batch: its standing
+    /// record stays reverting at `position`, carrying the error, written on
+    /// its own after the rollback. A failed down adds nothing to the time
+    /// the step took to apply.
+    ///
+    /// # Errors
+    /// The lock's refusals; a database error.
+    pub async fn fail_revert(
+        &self,
+        step: &PlannedStep,
+        error: String,
+        position: Position,
+    ) -> PyResult<()> {
+        let failed = StepRecord {
+            reverting: true,
+            revert_cursor: position.0,
+            rows_done: Some(position.1),
+            failed_at: Some(now_iso()),
+            error: Some(error),
+            duration_ms: 0,
+            ..step.record.clone()
+        };
+        self.verify().await?;
+        self.write(&failed, None).await
+    }
+
+    /// Remove a reverted step's record on `tx`, the transaction of its down,
+    /// so the record goes exactly when the down commits (ADR-0033).
+    ///
+    /// # Errors
+    /// The lock's refusals; a database error.
+    pub async fn remove(&self, step: &PlannedStep, tx: &TransactionConnection) -> PyResult<()> {
+        self.verify().await?;
+        let mut guard = tx.lock().await;
+        let conn = guard
+            .live()
+            .map_err(|e| db_error("removing the step record", e))?;
+        remove_record(conn, self.tracking_schema(), step.migration, step.step)
             .await
-            .map(|_| ())
-            .map_err(|err| StepFailure::of_unit(statements, err)),
-        ExecMode::NoTransaction => unit(Unit::Unwrapped)
-            .await
-            .map(|_| ())
-            .map_err(|err| StepFailure::of_unit(statements, err)),
-        ExecMode::ForeignKeysOff => match pool_connection(engine).await {
-            Err(err) => Err(err.into()),
-            Ok(mut conn) => {
-                let step = foreign_keys_off(&mut conn, statements, shown, tracking_schema, || {
-                    finish(elapsed(clock))
-                })
-                .await;
-                let restore = if step.is_ok() {
-                    conn.execute_sql_unprepared("PRAGMA foreign_keys = ON")
-                        .await
-                        .map(|_| ())
-                } else {
-                    let _ = conn.execute_sql_unprepared("ROLLBACK").await;
-                    Ok(())
-                };
-                if let Err(err) = &restore {
-                    crate::log_debug(format!(
-                        "ferro migrate: {shown} committed, but restoring PRAGMA foreign_keys = \
-                         ON on its connection failed ({err}); closing the connection"
-                    ));
-                }
-                let (result, close) = foreign_keys_off_outcome(step.map(|_| ()), restore);
-                if close {
-                    let _ = conn.detach_and_close().await;
-                }
-                result
+            .map_err(|e| db_error("removing the step record", e))
+    }
+
+    /// Execute one planned SQL step in its mode from the held bytes, and
+    /// settle its record: going up the record is written, going down
+    /// (`down`) it is removed.
+    ///
+    /// - **Transactional**: going up, the started record commits first (so
+    ///   `status` sees the attempt); then one transaction runs the file's
+    ///   statements, verifies the run lock, and writes the finished mark (up)
+    ///   or removes the record (down), and commits them together.
+    /// - **NoTransaction** (Postgres): (up: the started record, then) each
+    ///   statement in autocommit (what lets `CREATE INDEX CONCURRENTLY` run),
+    ///   then the finished mark or the removal. Its statements commit one at
+    ///   a time, so the lock is verified before the step starts only.
+    /// - **ForeignKeysOff** (SQLite): first each table the file rebuilds is
+    ///   checked against the live catalog ([`PlannedStep::rebuilds`]); then
+    ///   one dedicated connection — `PRAGMA foreign_keys = OFF` (read back),
+    ///   `BEGIN IMMEDIATE`, the file, `PRAGMA foreign_key_check` as a
+    ///   failure, the lock verified, the finished mark or the removal,
+    ///   `COMMIT`, the pragma restored; the connection is closed on failure.
+    ///
+    /// The transactional and no-transaction modes run under `ddl`, the DDL
+    /// lock timeout (ADR-0044): on Postgres a statement that waits longer
+    /// than the timeout for a lock gives up and the step is re-run from its
+    /// first statement, `on_attempt` hearing each attempt that timed out; the
+    /// record stays started (`running`) across attempts, and the finished
+    /// record's `duration_ms` covers every attempt and wait. After the last
+    /// attempt the step fails with a message naming `ddl_lock_timeout`.
+    ///
+    /// A failure rolls back what the mode can roll back, then writes
+    /// `failed_at` and `error` on the step's record in a separate
+    /// transaction: going up the started record; going down the standing
+    /// one, only when the down ran without a transaction and so left part of
+    /// itself applied (see [`failed_down_marks_record`]). The next run
+    /// resumes at the step. A down with [`PlannedStep::nothing_to_reverse`]
+    /// runs no statement and removes the record.
+    ///
+    /// # Errors
+    /// The lock's refusals (before the step starts, and before a failure is
+    /// recorded); the rebuild refusal; a refusal when a down declaring
+    /// `nothing-to-reverse` holds statements; a database error writing a
+    /// record. A failing statement is not an error: it is the returned
+    /// [`StepOutcome`].
+    pub async fn execute(
+        &self,
+        step: &PlannedStep,
+        down: bool,
+        ddl: &DdlExecutor,
+        mut on_attempt: impl FnMut(Attempt),
+    ) -> PyResult<StepOutcome> {
+        if step.data {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "{}/{} is a data step: Python runs it, and its record moves through start and \
+                 finish",
+                step.migration_name, step.file
+            )));
+        }
+        let engine = self.engine();
+        let dialect = engine.backend();
+        let tracking_schema = self.tracking_schema();
+        let shown = format!("{}/{}", step.migration_name, step.file);
+        let held = self.tracked.held()?;
+        let text = |step: &PlannedStep| held.text(&step.path).map_err(|r| refused_by(&r));
+        let statements = if down && step.nothing_to_reverse.is_some() {
+            if step.headers.nothing_to_reverse.is_some()
+                && !split_statements(text(step)?, dialect).is_empty()
+            {
+                return Err(refused(format!(
+                    "ferro migrate: {shown} declares nothing-to-reverse but holds statements; \
+                     keep one: delete the statements, or the declaration. Nothing more was \
+                     reverted."
+                )));
             }
-        },
-    };
-    let ms = elapsed(clock);
-    match outcome {
-        Ok(()) => {
-            engine
-                .refresh_pool()
-                .await
-                .map_err(|e| db_error("refreshing the pool after the step", e))?;
-            Ok(StepOutcome {
-                ok: true,
-                ms,
+            Vec::new()
+        } else {
+            split_statements(text(step)?, dialect)
+        };
+        // The check before the step starts (every mode's), which also creates
+        // the tracking tables at a run's first write.
+        self.ready_to_write().await?;
+        // A SQLite table rebuild refuses a live table holding what its
+        // snapshot does not declare, before the step records anything.
+        if !statements.is_empty() {
+            check_rebuilds(engine, &step.rebuilds).await?;
+        }
+
+        let started = if down {
+            step.record.clone()
+        } else {
+            let started = StepRecord {
+                started_at: now_iso(),
+                finished_at: None,
+                failed_at: None,
                 error: None,
-                message: None,
-            })
-        }
-        Err(StepFailure(error, counted)) => {
-            // A failed validate or unique step names its count and where
-            // `up` resumes; counted only now, never on the success path.
-            let error = match counted {
-                Some(failure) if !down => {
-                    let resume_at = format!("{}:{:02}", step.migration_name, step.step);
-                    // A contract's recipe re-runs its migration's backfill.
-                    let rerun = crate::errors::backfill_rerun_step(&step.path)
-                        .map(|before_backfill| (step.migration, before_backfill));
-                    crate::errors::counted_failure_message(
-                        engine, &failure, &error, &resume_at, rerun,
-                    )
-                    .await
-                }
-                _ => error,
+                duration_ms: 0,
+                kind: step.mode.record_kind(),
+                ferro_version: FERRO_VERSION.to_string(),
+                ..step.record.clone()
             };
-            // A down that rolled back changed nothing, so its record does not
-            // change either (the tracking table says where the database stands
-            // now): the step stays applied and the error is the run's to
-            // report. A no-transaction down left the statements before the
-            // failing one reverted, so its record carries the failure.
-            if failed_down_marks_record(down, step.mode) {
-                let failed = StepRecord {
-                    failed_at: Some(now_iso()),
-                    error: Some(error.clone()),
-                    // The upsert adds this to the time already recorded; a
-                    // failed down adds nothing to the time the step took to
-                    // apply.
-                    duration_ms: if down { 0 } else { ms },
-                    ..started
-                };
-                write_record(engine, tracking_schema, &failed, None).await?;
+            self.write(&started, None).await?;
+            started
+        };
+
+        let clock = Instant::now();
+        let elapsed =
+            |clock: Instant| i64::try_from(clock.elapsed().as_millis()).unwrap_or(i64::MAX);
+        let finish = |ms: i64| {
+            if down {
+                Settle::Remove {
+                    migration: started.migration,
+                    step: started.step,
+                }
+            } else {
+                Settle::Write(Box::new(StepRecord {
+                    finished_at: Some(now_iso()),
+                    duration_ms: ms,
+                    ..started.clone()
+                }))
             }
-            Ok(StepOutcome {
-                ok: false,
-                ms,
-                message: Some(failure_message(step, &error, down)),
-                error: Some(error),
+        };
+
+        // A transactional or no-transaction step is one unit of the DDL
+        // executor: the file's statements, then the record settled on the same
+        // connection (inside the transaction, once the lock is verified there,
+        // for a transactional step), under the DDL lock timeout, re-run from
+        // the first statement on a timeout.
+        let (statements, shown, finish, elapsed) = (&statements, &shown, &finish, &elapsed);
+        let record = || {
+            crate::ddl_exec::Settle::new(move || {
+                finish(elapsed(clock)).statement(dialect, tracking_schema)
             })
+        };
+        let outcome: Result<(), StepFailure> = match step.mode {
+            ExecMode::Transactional => {
+                let checked = record().checked(|| {
+                    Box::pin(async { self.check_lock().await.map_err(LockCheckFailed::into_sqlx) })
+                });
+                ddl.run(
+                    engine,
+                    Unit::Transactional,
+                    Door::Run(shown),
+                    statements,
+                    &mut on_attempt,
+                    Some(checked),
+                )
+                .await
+                .map(|_| ())
+                .map_err(|err| StepFailure::of_unit(statements, err))
+            }
+            ExecMode::NoTransaction => ddl
+                .run(
+                    engine,
+                    Unit::Unwrapped,
+                    Door::Run(shown),
+                    statements,
+                    &mut on_attempt,
+                    Some(record()),
+                )
+                .await
+                .map(|_| ())
+                .map_err(|err| StepFailure::of_unit(statements, err)),
+            ExecMode::ForeignKeysOff => match pool_connection(engine).await {
+                Err(err) => Err(err.into()),
+                Ok(mut conn) => {
+                    let step = foreign_keys_off(&mut conn, statements, shown, self, || {
+                        finish(elapsed(clock))
+                    })
+                    .await;
+                    let restore = if step.is_ok() {
+                        conn.execute_sql_unprepared("PRAGMA foreign_keys = ON")
+                            .await
+                            .map(|_| ())
+                    } else {
+                        let _ = conn.execute_sql_unprepared("ROLLBACK").await;
+                        Ok(())
+                    };
+                    if let Err(err) = &restore {
+                        crate::log_debug(format!(
+                            "ferro migrate: {shown} committed, but restoring PRAGMA \
+                             foreign_keys = ON on its connection failed ({err}); closing the \
+                             connection"
+                        ));
+                    }
+                    let (result, close) = foreign_keys_off_outcome(step.map(|_| ()), restore);
+                    if close {
+                        let _ = conn.detach_and_close().await;
+                    }
+                    result
+                }
+            },
+        };
+        let ms = elapsed(clock);
+        match outcome {
+            Ok(()) => {
+                engine
+                    .refresh_pool()
+                    .await
+                    .map_err(|e| db_error("refreshing the pool after the step", e))?;
+                Ok(StepOutcome {
+                    ok: true,
+                    ms,
+                    error: None,
+                    message: None,
+                })
+            }
+            Err(StepFailure(error, counted)) => {
+                // A failed validate or unique step names its count and where
+                // `up` resumes; counted only now, never on the success path.
+                let error = match counted {
+                    Some(failure) if !down => {
+                        let resume_at = format!("{}:{:02}", step.migration_name, step.step);
+                        // A contract's recipe re-runs its migration's backfill:
+                        // `down --to` the step before its first data step.
+                        let rerun = step
+                            .first_data_step
+                            .map(|first| (step.migration, first.saturating_sub(1)));
+                        crate::errors::counted_failure_message(
+                            engine, &failure, &error, &resume_at, rerun,
+                        )
+                        .await
+                    }
+                    _ => error,
+                };
+                // A down that rolled back changed nothing, so its record does
+                // not change either (the tracking table says where the database
+                // stands now): the step stays applied and the error is the
+                // run's to report. A no-transaction down left the statements
+                // before the failing one reverted, so its record carries the
+                // failure.
+                if failed_down_marks_record(down, step.mode) {
+                    let failed = StepRecord {
+                        failed_at: Some(now_iso()),
+                        error: Some(error.clone()),
+                        // The upsert adds this to the time already recorded; a
+                        // failed down adds nothing to the time the step took
+                        // to apply.
+                        duration_ms: if down { 0 } else { ms },
+                        ..started
+                    };
+                    self.verify().await?;
+                    self.write(&failed, None).await?;
+                }
+                Ok(StepOutcome {
+                    ok: false,
+                    ms,
+                    message: Some(failure_message(step, &error, down)),
+                    error: Some(error),
+                })
+            }
         }
+    }
+
+    /// Plan `ferro migrate baseline` through `target` (`None`: the head)
+    /// against the records read under the lock ([`plan_baseline`]).
+    ///
+    /// # Errors
+    /// `RunRefused`: the newer-format refusal, the directory's, and
+    /// [`plan_baseline`]'s.
+    pub fn plan_baseline(&self, target: Option<&str>) -> PyResult<BaselinePlan> {
+        if let Some(refusal) = self.tracked.format_refusal() {
+            return Err(refused(refusal));
+        }
+        let held = self.tracked.held()?;
+        plan_baseline_now(
+            &held.dir,
+            self.tracked.records(),
+            self.tracked.dialect(),
+            target,
+            FERRO_VERSION,
+        )
+        .map_err(refused)
+    }
+
+    /// Write a baseline's records in one transaction, each data step's with
+    /// the shape its `up` declares (`kinds`, read from its file: a baseline
+    /// never runs one).
+    ///
+    /// # Errors
+    /// The lock's refusals; `ValueError` for a data step with no declared
+    /// kind; [`write_baseline_records`]'s refusals.
+    pub async fn write_baseline(
+        &self,
+        plan: &BaselinePlan,
+        kinds: &HashMap<(u16, u8), RecordKind>,
+    ) -> PyResult<()> {
+        let mut records = plan.records.clone();
+        for (migration, step, path) in &plan.data_files {
+            let kind = kinds
+                .get(&(*migration, *step))
+                .copied()
+                .filter(|kind| matches!(kind, RecordKind::Atomic | RecordKind::Chunked))
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "write_baseline needs the declared kind (atomic or chunked) of data \
+                         step {migration:04}:{step:02} ({})",
+                        path.display()
+                    ))
+                })?;
+            if let Some(record) = records
+                .iter_mut()
+                .find(|r| (r.migration, r.step) == (*migration, *step))
+            {
+                record.kind = kind;
+            }
+        }
+        self.ready_to_write().await?;
+        write_baseline_records(self.engine(), self.tracking_schema(), &records).await
+    }
+
+    /// Delete every baseline-origin record ([`remove_baseline_records`]).
+    ///
+    /// # Errors
+    /// The lock's refusals and [`remove_baseline_records`]'s.
+    pub async fn remove_baseline(&self) -> PyResult<Vec<(u16, u8)>> {
+        self.ready_to_write().await?;
+        remove_baseline_records(self.engine(), self.tracking_schema()).await
+    }
+
+    /// Plan `ferro migrate rerecord <target>` against the records read under
+    /// the lock ([`rerecord_plan`]).
+    ///
+    /// # Errors
+    /// `RunRefused`: the newer-format refusal, the directory's, and every
+    /// refusal [`rerecord_plan`] makes (structured).
+    pub fn plan_rerecord(
+        &self,
+        target: &str,
+        mode: RerecordMode,
+        order_keys: &OrderKeys,
+    ) -> PyResult<RerecordAction> {
+        if let Some(refusal) = self.tracked.format_refusal() {
+            return Err(refused(refusal));
+        }
+        let held = self.tracked.held()?;
+        rerecord_plan(
+            &held.dir,
+            self.tracked.records(),
+            target,
+            mode,
+            self.tracked.dialect(),
+            order_keys,
+        )
+        .map_err(|refusal| refused_by(&refusal))
+    }
+
+    /// Write one planned re-record ([`rerecord_checksum`]); a data step's
+    /// record takes `kind`, the shape its edited `up` declares.
+    ///
+    /// # Errors
+    /// The lock's refusals; `ValueError` for a data step without its kind;
+    /// [`rerecord_checksum`]'s refusals.
+    pub async fn rerecord(
+        &self,
+        action: &RerecordAction,
+        kind: Option<RecordKind>,
+    ) -> PyResult<()> {
+        let action = match (action.data, kind) {
+            (false, _) => action.clone(),
+            (true, Some(kind @ (RecordKind::Atomic | RecordKind::Chunked))) => RerecordAction {
+                kind,
+                ..action.clone()
+            },
+            (true, _) => {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "rerecord needs the declared kind (atomic or chunked) of data step \
+                     {:04}:{:02}",
+                    action.migration, action.step
+                )));
+            }
+        };
+        self.ready_to_write().await?;
+        rerecord_checksum(self.engine(), self.tracking_schema(), &action).await
     }
 }
 
@@ -2114,30 +2597,6 @@ mod tests {
                 assert!(text.contains("run lock registry is unusable"), "{text}");
             }
         });
-    }
-
-    #[test]
-    fn a_release_refused_while_the_lock_is_in_use_keeps_the_handle_for_a_retry() {
-        let registry = std::sync::Mutex::new(HashMap::new());
-        let lock = RunLock {
-            state: LockState::Memory {
-                name: "test".to_string(),
-            },
-        };
-        registry
-            .lock()
-            .map(|mut locks| locks.insert(7, Arc::new(tokio::sync::Mutex::new(lock))))
-            .ok();
-        let in_use = registry
-            .lock()
-            .ok()
-            .and_then(|locks| locks.get(&7).cloned());
-        assert!(take_registered_lock(&registry, 7).is_err());
-        assert!(registry.lock().is_ok_and(|locks| locks.contains_key(&7)));
-        drop(in_use);
-        assert!(take_registered_lock(&registry, 7).is_ok());
-        assert!(registry.lock().is_ok_and(|locks| locks.is_empty()));
-        assert!(take_registered_lock(&registry, 7).is_err());
     }
 
     #[test]
@@ -2278,6 +2737,10 @@ pub struct BaselinePlan {
     pub recorded: Vec<String>,
     /// `NNNN_<name>/<file>` of every data step recorded without running.
     pub data_steps: Vec<String>,
+    /// Each data step's `(migration, step, path)`: the file whose `up`
+    /// declaration gives its record's kind (a baseline never runs it).
+    #[serde(skip)]
+    pub data_files: Vec<(u16, u8, PathBuf)>,
 }
 
 fn baseline_directory_label(dir: &MigrationsDir) -> String {
@@ -2349,6 +2812,7 @@ pub fn plan_baseline(
         records: Vec::new(),
         recorded: Vec::new(),
         data_steps: Vec::new(),
+        data_files: Vec::new(),
     };
     for migration in dir
         .migrations
@@ -2365,6 +2829,8 @@ pub fn plan_baseline(
             let shown = format!("{}/{name}", migration.dir_name());
             let kind = if step.kind == StepKind::Data {
                 plan.data_steps.push(shown);
+                plan.data_files
+                    .push((migration.number, step.ordinal, file.up.clone()));
                 RecordKind::Atomic
             } else {
                 exec_mode(&file.headers, dialect, &shown)
@@ -2452,9 +2918,9 @@ pub fn baseline_removal(records: &[StepRecord]) -> Result<Vec<(u16, u8)>, String
     Ok(baselined().map(|r| (r.migration, r.step)).collect())
 }
 
-/// Write a baseline's records ([`plan_baseline`]) in one transaction,
-/// creating the tracking tables first where they are missing. Called under
-/// the run lock, after the drift check found nothing.
+/// Write a baseline's records ([`plan_baseline`]) in one transaction. Called
+/// under the run lock (which created the tracking tables), after the drift
+/// check found nothing.
 ///
 /// # Errors
 /// A refusal for a record that is not a finished baseline record (nothing is
@@ -2474,7 +2940,6 @@ pub async fn write_baseline_records(
             record.path()
         )));
     }
-    ensure_tracking_tables(engine, tracking_schema).await?;
     let dialect = engine.backend();
     let sql = upsert_sql(dialect, &Tracking::new(dialect, tracking_schema));
     let mut conn = engine
@@ -2539,7 +3004,7 @@ mod baseline_tests {
         Headers, Migration, MigrationsDir, Step, StepDialect, StepFile, StepKind,
     };
     use ferro_migrate::run_plan::{RunRefusal, StepState, plan_run, run_status};
-    use ferro_migrate::snapshot::Snapshot;
+    use ferro_migrate::snapshot::{Snapshot, sha384};
     use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
     use std::collections::BTreeMap;
 

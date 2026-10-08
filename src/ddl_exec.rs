@@ -294,15 +294,43 @@ impl Failed {
 /// rendered only then: a migration step's record write, which carries the
 /// time the step took. It is the record of the work, not the work, so it is
 /// neither logged nor listed in [`Executed`].
-pub struct Settle<'a>(Box<dyn FnMut() -> (String, Vec<EngineBindValue>) + Send + 'a>);
+///
+/// A settle may carry a check ([`Settle::checked`]) awaited just before its
+/// statement: a migration run verifies that it still holds its run lock
+/// there, inside the transaction that commits the step (ADR-0029 as
+/// amended by ADR-0048). A failed check fails the unit like a failed
+/// statement, so the transaction rolls back.
+pub struct Settle<'a> {
+    render: Box<dyn FnMut() -> (String, Vec<EngineBindValue>) + Send + 'a>,
+    check: Option<Box<dyn FnMut() -> SettleCheck<'a> + Send + 'a>>,
+}
+
+/// What a [`Settle`]'s check awaits.
+pub type SettleCheck<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), sqlx::Error>> + Send + 'a>>;
 
 impl<'a> Settle<'a> {
     pub fn new(render: impl FnMut() -> (String, Vec<EngineBindValue>) + Send + 'a) -> Self {
-        Self(Box::new(render))
+        Self {
+            render: Box::new(render),
+            check: None,
+        }
+    }
+
+    /// This settle, with `check` awaited before its statement on every
+    /// attempt.
+    pub fn checked(self, check: impl FnMut() -> SettleCheck<'a> + Send + 'a) -> Self {
+        Self {
+            check: Some(Box::new(check)),
+            ..self
+        }
     }
 
     async fn run(&mut self, conn: &mut EngineConnection) -> Result<(), sqlx::Error> {
-        let (sql, binds) = (self.0)();
+        if let Some(check) = &mut self.check {
+            check().await?;
+        }
+        let (sql, binds) = (self.render)();
         conn.fetch_all_sql_unprepared_with_binds(&sql, &binds)
             .await
             .map(|_| ())
@@ -685,16 +713,18 @@ trait AttemptUnit {
 }
 
 /// A unit against the database: [`DdlExecutor::run`]'s arguments.
-struct LiveUnit<'a, S> {
+/// The settle has a lifetime of its own: one carrying a check
+/// ([`Settle::checked`]) is invariant in it.
+struct LiveUnit<'a, 's, S> {
     engine: &'a EngineHandle,
     unit: Unit,
     door: Door<'a>,
     statements: &'a [S],
     timeout: Option<Duration>,
-    settle: Option<Settle<'a>>,
+    settle: Option<Settle<'s>>,
 }
 
-impl<S: AsRef<str>> LiveUnit<'_, S> {
+impl<S: AsRef<str>> LiveUnit<'_, '_, S> {
     /// The caller's statements, then the settle.
     async fn body(
         &mut self,
@@ -717,7 +747,7 @@ impl<S: AsRef<str>> LiveUnit<'_, S> {
     }
 }
 
-impl<S: AsRef<str>> AttemptUnit for LiveUnit<'_, S> {
+impl<S: AsRef<str>> AttemptUnit for LiveUnit<'_, '_, S> {
     async fn attempt(&mut self, executed: &mut Executed) -> Result<(), Failed> {
         let door = self.door;
         match self.unit {

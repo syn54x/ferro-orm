@@ -223,139 +223,229 @@ def _store_snapshot(parent_ir_json: str) -> str:
     of the parent's modelset whose ``parent_checksum`` is the parent's."""
     ...
 
-# -- the migration runner (#519) -------------------------------------------------
+# -- the migration runner (ADR-0048) --------------------------------------------
 
-def _run_plan(
+async def _open_tracked(
+    using: str | None,
+    tracking_schema: str | None,
     directory: str,
-    records_json: str,
-    dialect: str,
-    direction_json: str,
-    allow_ahead: bool,
-    live_tables_json: str | None = None,
-    order_keys_json: str | None = None,
-) -> str:
-    """Plan a run: the JSON ``RunPlan`` (``{"steps": [...], "ahead": [...]}``).
-
-    Raises ``RunRefused`` with the refusal's text (an edited applied file, a
-    snapshot mismatch, a broken chain, out of order, applied but missing,
-    the database's tables built without migrations when ``live_tables_json``
-    is given and no record exists, ...).
-    """
-    ...
-
-def _run_status(
-    directory: str,
-    records_json: str,
-    dialect: str,
-    lock_held: bool,
-    order_keys_json: str | None = None,
-) -> str:
-    """``ferro migrate status`` read-only, as the JSON ``RunStatus``."""
-    ...
-
-async def _acquire_run_lock(
-    using: str | None,
-    governed_schema: str | None = None,
-    timeout_s: float = 30.0,
-    on_wait: Callable[[str], object] | None = None,
-) -> int:
-    """Take the run lock (waiting up to ``timeout_s``; ``on_wait(text)`` once
-    when another run holds it); returns a handle. Raises ``RunRefused`` on
-    timeout or behind a transaction-mode pooler."""
-    ...
-
-async def _verify_run_lock(handle: int) -> None:
-    """Raise ``RunRefused`` unless the lock behind ``handle`` is still held."""
-    ...
-
-async def _release_run_lock(handle: int) -> None:
-    """Release the lock behind ``handle``. Refused (``RuntimeError``), with
-    the handle kept for a retry, while another call holds the lock."""
-    ...
-
-async def _run_lock_is_held(
-    using: str | None, governed_schema: str | None = None
-) -> bool:
-    """Whether any run holds the run lock, without taking it."""
-    ...
-
-async def _close_run_lock_connection_for_test(handle: int) -> None:
-    """Close the Postgres lock connection without releasing it (tests only)."""
-    ...
-
-async def _unacquired_run_lock_for_test(using: str | None = None) -> int:
-    """Register a never-acquired, never-verified Postgres run lock, as a
-    transaction-mode pooler would hand back; its first ``_verify_run_lock``
-    raises the pooler refusal (tests only)."""
-    ...
-
-async def _ensure_tracking_tables(
-    using: str | None, tracking_schema: str | None = None
-) -> None:
-    """Create ``_ferro_migrations`` and ``_ferro_migrations_format`` where
-    missing. Raises ``RunRefused`` naming ``CREATE SCHEMA`` for a missing
-    ``tracking_schema``."""
-    ...
-
-async def _read_records(using: str | None, tracking_schema: str | None = None) -> str:
-    """JSON ``{"table", "exists", "format", "governed_schema", "records",
-    "refusal"}``; creates nothing."""
-    ...
-
-async def _write_record(
-    using: str | None,
-    record_json: str,
-    tracking_schema: str | None = None,
-    route: RouteHandle | None = None,
-) -> None:
-    """Upsert one step record; with ``route`` (an open ``transaction()``
-    block's), on that transaction's connection, committing with it."""
-    ...
-
-async def _remove_record(
-    route: RouteHandle,
-    migration: int,
-    step: int,
-    tracking_schema: str | None = None,
-) -> None:
-    """Delete the record of ``(migration, step)`` inside the transaction
-    ``route`` names (a data step's down)."""
-    ...
-
-async def _execute_sql_step(
-    using: str | None,
-    planned_step_json: str,
-    sql: str,
-    record_json: str,
-    tracking_schema: str | None = None,
-    lock: int | None = None,
-    direction_json: str | None = None,
     ddl_lock_timeout_s: float = 5.0,
-    on_attempt: Callable[[str], object] | None = None,
-) -> str:
-    """Run one planned SQL step and settle its record; JSON ``{"ok", "ms",
-    "error", "message"}``.
-
-    ``direction_json`` is the plan's direction (``_run_plan``'s; up when
-    omitted). Going up ``sql`` is the up file and the record is written when
-    the step finishes; going down ``sql`` is the down file and the standing
-    record is removed in the down's transaction (kept, with ``failed_at`` and
-    ``error``, when the down fails).
-
-    On Postgres the step waits for table locks under ``ddl_lock_timeout_s``
-    seconds (``0`` disables; ADR-0044); a step that times out is re-run from
-    its first statement, up to ten attempts, and ``on_attempt`` hears each
-    one as ``waiting for a lock on "author" (attempt 1 of 10, retry in
-    1s)``."""
+) -> TrackedDatabase:
+    """Open connection ``using``'s tracking tables (in ``tracking_schema``
+    when set) and the migrations directory at ``directory``: one read of
+    the records and one read of the directory, held. Creates nothing and
+    takes no lock. Every SQL step a locked run executes waits for table
+    locks under ``ddl_lock_timeout_s`` seconds (``0`` disables; ADR-0044)."""
     ...
+
+class StepHandle:
+    """One planned step, opaque: what Python may read of it, and the handle
+    the locked run executes or records it by."""
+
+    @property
+    def migration(self) -> int: ...
+    @property
+    def migration_name(self) -> str: ...
+    @property
+    def step(self) -> int: ...
+    @property
+    def file(self) -> str:
+        """The up file going up, the down file going down (a data step's own
+        file either way)."""
+        ...
+    @property
+    def path(self) -> str: ...
+    @property
+    def checksum(self) -> str:
+        """SHA-384 of the file's bytes (a data step's loaded source is
+        checked against it)."""
+        ...
+    @property
+    def data(self) -> bool: ...
+    @property
+    def nothing_to_reverse(self) -> str | None: ...
+    @property
+    def edited(self) -> dict[str, Any] | None:
+        """``{"recorded", "recorded_file"}`` for an accepted edit of an
+        unfinished step (ADR-0030)."""
+        ...
+    @property
+    def resumes(self) -> bool: ...
+    @property
+    def resume_cursor(self) -> str | None:
+        """The chunked cursor this walk resumes from."""
+        ...
+    @property
+    def rows_done(self) -> int | None: ...
+    @property
+    def standing(self) -> dict[str, Any] | None:
+        """The step's record as it stands: going up its unfinished record,
+        going down the record its down removes."""
+        ...
+
+class Plan:
+    """A run's plan."""
+
+    @property
+    def steps(self) -> list[StepHandle]: ...
+    @property
+    def ahead(self) -> list[str]: ...
+    @property
+    def direction(self) -> str:
+        """``"up"`` or ``"down"``."""
+        ...
+
+class BaselinePlan:
+    """What ``ferro migrate baseline`` would record."""
+
+    @property
+    def target(self) -> str: ...
+    @property
+    def snapshot(self) -> dict[str, Any]: ...
+    @property
+    def recorded(self) -> list[str]: ...
+    @property
+    def data_steps(self) -> list[str]: ...
+    @property
+    def data_step_files(self) -> list[tuple[int, int, str]]: ...
+    @property
+    def steps(self) -> int: ...
+
+class RerecordPlan:
+    """What ``ferro migrate rerecord`` would change."""
+
+    @property
+    def migration(self) -> int: ...
+    @property
+    def step(self) -> int: ...
+    @property
+    def migration_name(self) -> str: ...
+    @property
+    def file(self) -> str: ...
+    @property
+    def path(self) -> str: ...
+    @property
+    def old_checksum(self) -> str: ...
+    @property
+    def new_checksum(self) -> str: ...
+    @property
+    def data(self) -> bool: ...
+
+class TrackedDatabase:
+    """A database's tracking tables and its migrations directory, each read
+    once. Read-only; ``locked(...)`` is the one door to a run's writes."""
+
+    @property
+    def dialect(self) -> str: ...
+    @property
+    def tracking_table(self) -> str: ...
+    @property
+    def records(self) -> list[dict[str, Any]]: ...
+    @property
+    def refusal(self) -> str | None:
+        """The newer-format refusal every verb stops on."""
+        ...
+    @property
+    def migrations(self) -> dict[str, Any]:
+        """The held directory read; raises ``RunRefused`` when unreadable."""
+        ...
+    async def lock_held(self) -> bool: ...
+    def status(
+        self, order_keys: Any = None, *, lock_held: bool = False
+    ) -> dict[str, Any]: ...
+    async def plan(
+        self,
+        direction: dict[str, Any],
+        *,
+        allow_ahead: bool = False,
+        order_keys: Any = None,
+    ) -> Plan:
+        """A preview: its steps cannot be executed."""
+        ...
+    def locked(
+        self, timeout_s: float, on_wait: Callable[[str], object] | None = None
+    ) -> LockScope:
+        """The run lock, held for an ``async with`` block."""
+        ...
+    def _locked_unacquired_for_test(self) -> LockScope: ...
+
+class LockScope:
+    async def __aenter__(self) -> LockedDatabase: ...
+    async def __aexit__(self, *exc: object) -> bool: ...
+
+class LockedDatabase:
+    """A run holding the run lock: every write verifies the lock first."""
+
+    @property
+    def dialect(self) -> str: ...
+    @property
+    def tracking_table(self) -> str: ...
+    @property
+    def records(self) -> list[dict[str, Any]]: ...
+    @property
+    def refusal(self) -> str | None: ...
+    @property
+    def migrations(self) -> dict[str, Any]: ...
+    async def lock_held(self) -> bool: ...
+    def status(
+        self, order_keys: Any = None, *, lock_held: bool = False
+    ) -> dict[str, Any]: ...
+    async def plan(
+        self,
+        direction: dict[str, Any],
+        *,
+        allow_ahead: bool = False,
+        order_keys: Any = None,
+    ) -> Plan: ...
+    async def execute(
+        self, step: StepHandle, on_attempt: Callable[[str], object] | None = None
+    ) -> dict[str, Any]:
+        """Run a SQL step from the held bytes; ``{"ok", "ms", "error",
+        "message"}``."""
+        ...
+    async def start(self, step: StepHandle, kind: str) -> None: ...
+    async def advance(
+        self, step: StepHandle, cursor: str | None, rows_done: int, tx: RouteHandle
+    ) -> None: ...
+    async def finish(
+        self,
+        step: StepHandle,
+        ms: int,
+        tx: RouteHandle | None = None,
+        *,
+        cursor: str | None = None,
+        rows_done: int | None = None,
+    ) -> None: ...
+    async def fail(
+        self,
+        step: StepHandle,
+        ms: int,
+        error: str,
+        cursor: str | None = None,
+        rows_done: int | None = None,
+    ) -> None: ...
+    async def advance_revert(
+        self, step: StepHandle, cursor: str | None, rows_done: int, tx: RouteHandle
+    ) -> None: ...
+    async def fail_revert(
+        self, step: StepHandle, error: str, cursor: str | None, rows_done: int
+    ) -> None: ...
+    async def remove(self, step: StepHandle, tx: RouteHandle) -> None: ...
+    def plan_baseline(self, target: str | None = None) -> BaselinePlan: ...
+    async def write_baseline(
+        self,
+        plan: BaselinePlan,
+        data_kinds: dict[tuple[int, int], str] | None = None,
+    ) -> None: ...
+    async def remove_baseline(self) -> list[tuple[int, int]]: ...
+    def plan_rerecord(
+        self, target: str, mode: str, order_keys: Any = None
+    ) -> RerecordPlan: ...
+    async def rerecord(self, action: RerecordPlan, kind: str | None = None) -> None: ...
+    async def _close_lock_connection_for_test(self) -> None: ...
 
 async def _tracking_tables_for(using: str | None, schema: str | None = None) -> str:
     """JSON list of the tracking tables governing ``schema``."""
-    ...
-
-async def _live_tables(using: str | None = None) -> str:
-    """JSON list of the governed schema's tables, sorted: base tables only,
-    never a view or SQLite's own ``sqlite_*`` tables."""
     ...
 
 async def _disconnect(name: str) -> None:
@@ -634,92 +724,4 @@ def _is_ferro_row_policy_name(name: str) -> bool:
 
 def _default_connection_name() -> str | None:
     """The default connection's name, or ``None`` when there is none."""
-    ...
-
-# --- #537: rerecord ---
-
-def _rerecord_plan(
-    directory: str,
-    records_json: str,
-    target: str,
-    mode: str,
-    dialect: str,
-    order_keys_json: str | None = None,
-) -> str:
-    """Plan ``ferro migrate rerecord <target>`` (``mode`` ``"record"``,
-    ``"continue"`` or ``"restart"``): the JSON ``RerecordAction``
-    (``{"migration", "step", "migration_name", "recorded_file", "file",
-    "path", "old_checksum", "new_checksum", "kind", "data", "finished",
-    "clear_cursor"}``). Raises a structured ``RunRefused`` for every
-    refusal."""
-    ...
-
-async def _rerecord(
-    using: str | None,
-    action_json: str,
-    tracking_schema: str | None = None,
-    lock: int | None = None,
-) -> None:
-    """Write one planned re-record (the record's file, checksum and kind;
-    with ``clear_cursor`` its cursor and rows_done cleared) in one
-    statement, running nothing of the step. Raises ``RunRefused`` when the
-    lock was lost or the record changed since it was planned."""
-    ...
-
-# --- #525: baseline ---
-
-def _plan_baseline(
-    directory: str,
-    records_json: str,
-    dialect: str,
-    target: str | None = None,
-    ferro_version: str = "",
-) -> str:
-    """Plan ``ferro migrate baseline`` (ADR-0031). ``target`` is ``None``
-    (the head), a number (``"0006"``) or a full name (``"0006_add_teams"``).
-    Returns JSON ``{"target", "snapshot", "records", "recorded",
-    "data_steps"}``: the target's snapshot to check the database against, and
-    one finished ``origin='baseline'`` record per step through the target.
-    Raises ``RunRefused`` when records exist, the target is not in the
-    directory, or a step has no rendering for ``dialect``."""
-    ...
-
-async def _write_baseline_records(
-    using: str | None,
-    records_json: str,
-    tracking_schema: str | None = None,
-    lock: int | None = None,
-) -> None:
-    """Write ``_plan_baseline``'s records in one transaction, creating the
-    tracking tables where missing; verifies the run lock behind ``lock``."""
-    ...
-
-async def _remove_baseline_records(
-    using: str | None,
-    tracking_schema: str | None = None,
-    lock: int | None = None,
-) -> str:
-    """Delete every baseline-origin record; JSON ``[[migration, step], ...]``
-    of those removed. Raises ``RunRefused`` naming a run-origin migration
-    applied above the baseline."""
-    ...
-
-# --- #532: chunked ---
-
-async def _write_cursor(
-    using: str | None,
-    migration: int,
-    step: int,
-    cursor_json: str | None,
-    rows_done: int,
-    reverting: bool,
-    tracking_schema: str | None = None,
-    route: RouteHandle | None = None,
-) -> None:
-    """Commit one batch of a chunked step on its record: ``cursor_json``
-    (``{"keys": [...], "rows_done": N}``, ``None`` before any row) into
-    ``resume_cursor``, or with ``reverting`` into ``revert_cursor`` with the
-    record marked reverting, plus ``rows_done``; clears the last failure.
-    With ``route`` (the batch's ``transaction()`` block) it commits with the
-    batch. Raises ``RunRefused`` when the step has no record."""
     ...

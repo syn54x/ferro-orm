@@ -1,16 +1,20 @@
-//! The in-house migration system's offline half over FFI: generating a
-//! migration from two snapshots, reading a migrations directory, and the
-//! offline check. JSON in, JSON out; every failure is a `ValueError` whose
-//! message names the fix (AGENTS.md § I-3: nothing here panics).
+//! The in-house migration system over FFI. The offline half (generating a
+//! migration from two snapshots, reading a migrations directory, the offline
+//! check) is JSON in, JSON out; every failure is a `ValueError` whose message
+//! names the fix. A run is two objects (ADR-0048): `_open_tracked` returns a
+//! `TrackedDatabase` (the records and one read of the directory, held), and
+//! its `locked(...)` block a `LockedDatabase` that alone writes. AGENTS.md §
+//! I-3: nothing here panics.
 
+use crate::migrate::parse_dialect;
 use ferro_migrate::directory::MigrationsDir;
 use ferro_migrate::snapshot::{Snapshot, encode_checksum};
 use ferro_migrate::{Dialect, GenerateOptions, check_migrations, generate_with};
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
-use crate::migrate::parse_dialect;
 use pyo3::prelude::*;
 use std::path::Path;
+use std::sync::Arc;
 
 /// Register every function of this module on the `_core` module.
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -19,27 +23,15 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_read_migrations_dir, m)?)?;
     m.add_function(wrap_pyfunction!(_load_snapshot, m)?)?;
     m.add_function(wrap_pyfunction!(_store_snapshot, m)?)?;
-    m.add_function(wrap_pyfunction!(_run_plan, m)?)?;
-    m.add_function(wrap_pyfunction!(_run_status, m)?)?;
-    m.add_function(wrap_pyfunction!(_acquire_run_lock, m)?)?;
-    m.add_function(wrap_pyfunction!(_verify_run_lock, m)?)?;
-    m.add_function(wrap_pyfunction!(_release_run_lock, m)?)?;
-    m.add_function(wrap_pyfunction!(_run_lock_is_held, m)?)?;
-    m.add_function(wrap_pyfunction!(_close_run_lock_connection_for_test, m)?)?;
-    m.add_function(wrap_pyfunction!(_unacquired_run_lock_for_test, m)?)?;
-    m.add_function(wrap_pyfunction!(_ensure_tracking_tables, m)?)?;
-    m.add_function(wrap_pyfunction!(_read_records, m)?)?;
-    m.add_function(wrap_pyfunction!(_write_record, m)?)?;
-    m.add_function(wrap_pyfunction!(_remove_record, m)?)?;
-    m.add_function(wrap_pyfunction!(_write_cursor, m)?)?;
-    m.add_function(wrap_pyfunction!(_execute_sql_step, m)?)?;
+    m.add_function(wrap_pyfunction!(_open_tracked, m)?)?;
     m.add_function(wrap_pyfunction!(_tracking_tables_for, m)?)?;
-    m.add_function(wrap_pyfunction!(_live_tables, m)?)?;
-    m.add_function(wrap_pyfunction!(_rerecord_plan, m)?)?;
-    m.add_function(wrap_pyfunction!(_rerecord, m)?)?;
-    m.add_function(wrap_pyfunction!(_plan_baseline, m)?)?;
-    m.add_function(wrap_pyfunction!(_write_baseline_records, m)?)?;
-    m.add_function(wrap_pyfunction!(_remove_baseline_records, m)?)?;
+    m.add_class::<TrackedDatabase>()?;
+    m.add_class::<LockScope>()?;
+    m.add_class::<LockedDatabase>()?;
+    m.add_class::<Plan>()?;
+    m.add_class::<StepHandle>()?;
+    m.add_class::<BaselinePlan>()?;
+    m.add_class::<RerecordPlan>()?;
     Ok(())
 }
 
@@ -181,7 +173,7 @@ pub fn _store_snapshot(parent_ir_json: String) -> PyResult<String> {
         .map_err(|e| PyRuntimeError::new_err(format!("the stored snapshot is not UTF-8: {e}")))
 }
 
-// -- the runner (#519): planning, the run lock, records, SQL steps ------------------
+// -- the run objects (ADR-0048) ------------------------------------------------------
 
 fn parse_json<T: serde::de::DeserializeOwned>(json: &str, what: &str) -> PyResult<T> {
     serde_json::from_str(json).map_err(|e| PyValueError::new_err(format!("invalid {what}: {e}")))
@@ -195,262 +187,6 @@ fn parse_order_keys(json: &str) -> PyResult<ferro_migrate::run_plan::OrderKeys> 
         .into_iter()
         .map(|(migration, step, keys)| ((migration, step), keys))
         .collect())
-}
-
-/// Plan a run over the migrations directory against the applied records
-/// (`_read_records`'s `records`). `direction_json` is `{"direction": "up"}`
-/// or `{"direction": "down", "target": {...}}`; `live_tables_json` (the
-/// governed schema's tables, from `_live_tables`) turns on the adoption
-/// refusal for a database with no records; `order_keys_json`
-/// (`[[migration, step, [key, ...]], ...]`, the order keys each edited
-/// chunked step's file pages over) decides whether its refusal offers
-/// `--continue`. Returns the JSON of the `RunPlan`.
-///
-/// # Errors
-/// `RunRefused` carrying the refusal's text, kind, migration, step and
-/// reason; `ValueError` for malformed arguments.
-#[pyfunction]
-#[pyo3(name = "_run_plan")]
-#[pyo3(signature = (directory, records_json, dialect, direction_json, allow_ahead, live_tables_json=None, order_keys_json=None))]
-pub fn _run_plan(
-    directory: String,
-    records_json: String,
-    dialect: String,
-    direction_json: String,
-    allow_ahead: bool,
-    live_tables_json: Option<String>,
-    order_keys_json: Option<String>,
-) -> PyResult<String> {
-    use ferro_migrate::run_plan::{Direction, StepRecord, check_adoption, plan_run, read_for_run};
-    let records: Vec<StepRecord> = parse_json(&records_json, "records_json")?;
-    let direction: Direction = parse_json(&direction_json, "direction_json")?;
-    let dialect = parse_dialect(&dialect)?;
-    let order_keys = order_keys_json
-        .as_deref()
-        .map(parse_order_keys)
-        .transpose()?;
-    let refuse = |r: ferro_migrate::RunRefusal| crate::run::refused_by(&r);
-    let dir = read_for_run(Path::new(&directory)).map_err(refuse)?;
-    let plan = plan_run(
-        &dir,
-        &records,
-        dialect,
-        direction,
-        allow_ahead,
-        order_keys.as_ref(),
-    )
-    .map_err(refuse)?;
-    if let Some(json) = live_tables_json {
-        let live: Vec<String> = parse_json(&json, "live_tables_json")?;
-        check_adoption(&dir, &records, &live).map_err(refuse)?;
-    }
-    to_json(&plan)
-}
-
-/// Answer `ferro migrate status` from the directory and the records,
-/// read-only. Returns the JSON of the `RunStatus`; a directory that cannot be
-/// read is reported as its refusal with no migrations. `order_keys_json` is
-/// `_run_plan`'s.
-///
-/// # Errors
-/// `ValueError` for malformed arguments.
-#[pyfunction]
-#[pyo3(name = "_run_status")]
-#[pyo3(signature = (directory, records_json, dialect, lock_held, order_keys_json=None))]
-pub fn _run_status(
-    directory: String,
-    records_json: String,
-    dialect: String,
-    lock_held: bool,
-    order_keys_json: Option<String>,
-) -> PyResult<String> {
-    use ferro_migrate::run_plan::{RunStatus, StepRecord, read_for_run, run_status};
-    let records: Vec<StepRecord> = parse_json(&records_json, "records_json")?;
-    let dialect = parse_dialect(&dialect)?;
-    let order_keys = order_keys_json
-        .as_deref()
-        .map(parse_order_keys)
-        .transpose()?;
-    match read_for_run(Path::new(&directory)) {
-        Ok(dir) => to_json(&run_status(
-            &dir,
-            &records,
-            dialect,
-            lock_held,
-            order_keys.as_ref(),
-        )),
-        Err(refusal) => to_json(&RunStatus {
-            refusal_needs_attention: refusal.needs_attention(),
-            refusal: Some(refusal.to_string()),
-            ..RunStatus::default()
-        }),
-    }
-}
-
-/// Take the run lock on connection `using` for `governed_schema` (the
-/// connection's current schema when `None`), waiting up to `timeout_s`
-/// seconds (`0` tries once). `on_wait(text)` is called once, at once, when
-/// another run holds it. Returns a handle for the other lock calls.
-///
-/// # Errors
-/// `RunRefused` on timeout or behind a transaction-mode pooler.
-#[pyfunction]
-#[pyo3(name = "_acquire_run_lock")]
-#[pyo3(signature = (using, governed_schema=None, timeout_s=30.0, on_wait=None))]
-pub fn _acquire_run_lock(
-    py: Python<'_>,
-    using: Option<String>,
-    governed_schema: Option<String>,
-    timeout_s: f64,
-    on_wait: Option<Py<PyAny>>,
-) -> PyResult<Bound<'_, PyAny>> {
-    if !(timeout_s.is_finite() && timeout_s >= 0.0) {
-        return Err(PyValueError::new_err(format!(
-            "timeout_s must be a non-negative number of seconds; got {timeout_s}"
-        )));
-    }
-    let timeout = std::time::Duration::try_from_secs_f64(timeout_s).map_err(|_| {
-        PyValueError::new_err(format!(
-            "timeout_s {timeout_s:e} is too large to be a duration of seconds"
-        ))
-    })?;
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let engine = crate::state::engine_for_connection(using)?;
-        let lock =
-            crate::run::RunLock::acquire(&engine, governed_schema.as_deref(), timeout, |text| {
-                if let Some(callback) = &on_wait {
-                    Python::attach(|py| {
-                        if let Err(err) = callback.call1(py, (text,)) {
-                            err.print(py);
-                        }
-                    });
-                }
-            })
-            .await?;
-        crate::run::register_lock(lock)
-    })
-}
-
-/// Check that the lock behind `handle` is still this run's.
-///
-/// # Errors
-/// `RunRefused` with the pooler or the dropped-lock text.
-#[pyfunction]
-#[pyo3(name = "_verify_run_lock")]
-pub fn _verify_run_lock(py: Python<'_>, handle: u64) -> PyResult<Bound<'_, PyAny>> {
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let lock = crate::run::registered_lock(handle)?;
-        lock.lock().await.verify().await
-    })
-}
-
-/// Release the lock behind `handle`. While another call holds the lock the
-/// release is refused and the handle kept, so it can be retried.
-///
-/// # Errors
-/// `ValueError` for an unknown handle; `RuntimeError` while the lock is in
-/// use.
-#[pyfunction]
-#[pyo3(name = "_release_run_lock")]
-pub fn _release_run_lock(py: Python<'_>, handle: u64) -> PyResult<Bound<'_, PyAny>> {
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        crate::run::unregister_lock(handle)?.release().await
-    })
-}
-
-/// Whether any run holds the run lock for `governed_schema` (the current
-/// schema when `None`), without taking it.
-///
-/// # Errors
-/// A database error.
-#[pyfunction]
-#[pyo3(name = "_run_lock_is_held")]
-#[pyo3(signature = (using, governed_schema=None))]
-pub fn _run_lock_is_held(
-    py: Python<'_>,
-    using: Option<String>,
-    governed_schema: Option<String>,
-) -> PyResult<Bound<'_, PyAny>> {
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let engine = crate::state::engine_for_connection(using)?;
-        crate::run::RunLock::is_held(&engine, governed_schema.as_deref()).await
-    })
-}
-
-/// Close the Postgres lock connection behind `handle` without releasing the
-/// lock, as a dropped network connection would. Test-only.
-///
-/// # Errors
-/// `ValueError` for an unknown handle.
-#[pyfunction]
-#[pyo3(name = "_close_run_lock_connection_for_test")]
-pub fn _close_run_lock_connection_for_test(
-    py: Python<'_>,
-    handle: u64,
-) -> PyResult<Bound<'_, PyAny>> {
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let lock = crate::run::registered_lock(handle)?;
-        lock.lock().await.close_connection().await;
-        Ok(())
-    })
-}
-
-/// Register a Postgres run lock on a fresh connection that never took the
-/// advisory lock and was never verified, as a transaction-mode pooler would
-/// hand back; `_verify_run_lock` on its handle takes the first-check branch.
-/// Test-only.
-///
-/// # Errors
-/// `RunRefused` for a non-Postgres connection; a database error.
-#[pyfunction]
-#[pyo3(name = "_unacquired_run_lock_for_test")]
-#[pyo3(signature = (using=None))]
-pub fn _unacquired_run_lock_for_test(
-    py: Python<'_>,
-    using: Option<String>,
-) -> PyResult<Bound<'_, PyAny>> {
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let engine = crate::state::engine_for_connection(using)?;
-        crate::run::register_lock(crate::run::RunLock::unacquired_for_test(&engine).await?)
-    })
-}
-
-/// Create the tracking tables where missing (in `tracking_schema` when set).
-///
-/// # Errors
-/// `RunRefused` naming `CREATE SCHEMA` for a missing `tracking_schema`.
-#[pyfunction]
-#[pyo3(name = "_ensure_tracking_tables")]
-#[pyo3(signature = (using, tracking_schema=None))]
-pub fn _ensure_tracking_tables(
-    py: Python<'_>,
-    using: Option<String>,
-    tracking_schema: Option<String>,
-) -> PyResult<Bound<'_, PyAny>> {
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let engine = crate::state::engine_for_connection(using)?;
-        crate::run::ensure_tracking_tables(&engine, tracking_schema.as_deref()).await
-    })
-}
-
-/// Read the format and the step records, creating nothing. Returns JSON
-/// `{"table", "exists", "format", "governed_schema", "records": [...],
-/// "refusal"}`; `refusal` is the newer-format text, which every verb stops on.
-///
-/// # Errors
-/// A database error.
-#[pyfunction]
-#[pyo3(name = "_read_records")]
-#[pyo3(signature = (using, tracking_schema=None))]
-pub fn _read_records(
-    py: Python<'_>,
-    using: Option<String>,
-    tracking_schema: Option<String>,
-) -> PyResult<Bound<'_, PyAny>> {
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let engine = crate::state::engine_for_connection(using)?;
-        to_json(&crate::run::read_records(&engine, tracking_schema.as_deref()).await?)
-    })
 }
 
 /// The live connection of the transaction `route` names (a
@@ -475,72 +211,6 @@ fn transaction_slot(
             .map(|entry| entry.value().clone()),
     };
     handle.map(|handle| handle.conn).ok_or_else(refused)
-}
-
-/// Write one step record as given (upsert on migration and step). With
-/// `route` (an open `ferro.transaction()` block's), the record is written on
-/// that transaction's connection and commits with it: how a data step's
-/// finished record lands inside the step's own transaction (ADR-0024).
-///
-/// # Errors
-/// `ValueError` for a malformed record; `RuntimeError` for a route with no
-/// open transaction; a database error.
-#[pyfunction]
-#[pyo3(name = "_write_record")]
-#[pyo3(signature = (using, record_json, tracking_schema=None, route=None))]
-pub fn _write_record(
-    py: Python<'_>,
-    using: Option<String>,
-    record_json: String,
-    tracking_schema: Option<String>,
-    route: Option<Py<crate::state::RouteHandle>>,
-) -> PyResult<Bound<'_, PyAny>> {
-    let record: ferro_migrate::StepRecord = parse_json(&record_json, "record_json")?;
-    let slot = route
-        .map(|route| transaction_slot(route.get()))
-        .transpose()?;
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let engine = crate::state::engine_for_connection(using)?;
-        let schema = tracking_schema.as_deref();
-        match slot {
-            Some(slot) => {
-                let mut guard = slot.lock().await;
-                let conn = guard
-                    .live()
-                    .map_err(|e| crate::errors::map_db_error("writing the step record", e))?;
-                crate::run::write_record(&engine, schema, &record, Some(conn)).await
-            }
-            None => crate::run::write_record(&engine, schema, &record, None).await,
-        }
-    })
-}
-
-/// Remove the record of `(migration, step)` inside the transaction `route`
-/// names, so the record goes exactly when that transaction commits: how a
-/// data step's down settles its record (ADR-0033).
-///
-/// # Errors
-/// `RuntimeError` for a route with no open transaction; a database error.
-#[pyfunction]
-#[pyo3(name = "_remove_record")]
-#[pyo3(signature = (route, migration, step, tracking_schema=None))]
-pub fn _remove_record(
-    py: Python<'_>,
-    route: Py<crate::state::RouteHandle>,
-    migration: u16,
-    step: u8,
-    tracking_schema: Option<String>,
-) -> PyResult<Bound<'_, PyAny>> {
-    let slot = transaction_slot(route.get())?;
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let mut guard = slot.lock().await;
-        let conn = guard
-            .live()
-            .map_err(|e| crate::errors::map_db_error("removing the step record", e))?;
-        crate::run::remove_record(conn, tracking_schema.as_deref(), migration, step)
-            .await
-            .map_err(|e| crate::errors::map_db_error("removing the step record", e))
-    })
 }
 
 /// Refuse a cursor that is not `{"keys": [...], "order_by": ["author.id",
@@ -575,158 +245,6 @@ fn check_cursor_json(cursor_json: &str, rows_done: i64) -> PyResult<()> {
     Ok(())
 }
 
-/// Commit one batch of a chunked step on its record (ADR-0024): the batch's
-/// cursor (`{"keys": [...order-key values...], "rows_done": N}`, `None`
-/// before any row) and `rows_done`; `reverting` says the batch belongs to
-/// the step's down, whose cursor is `revert_cursor` and which marks the
-/// record reverting (ADR-0033). With `route` (the batch's
-/// `ferro.transaction()` block), it is written on that transaction's
-/// connection and commits with the batch; without, on its own.
-///
-/// # Errors
-/// `ValueError` for a malformed cursor; `RuntimeError` for a route with no
-/// open transaction; `RunRefused` when the step has no record; a database
-/// error.
-#[pyfunction]
-#[pyo3(name = "_write_cursor")]
-#[pyo3(signature = (using, migration, step, cursor_json, rows_done, reverting, tracking_schema=None, route=None))]
-#[allow(clippy::too_many_arguments)]
-pub fn _write_cursor(
-    py: Python<'_>,
-    using: Option<String>,
-    migration: u16,
-    step: u8,
-    cursor_json: Option<String>,
-    rows_done: i64,
-    reverting: bool,
-    tracking_schema: Option<String>,
-    route: Option<Py<crate::state::RouteHandle>>,
-) -> PyResult<Bound<'_, PyAny>> {
-    if rows_done < 0 {
-        return Err(PyValueError::new_err(format!(
-            "rows_done must be zero or more, not {rows_done}"
-        )));
-    }
-    if let Some(cursor) = &cursor_json {
-        check_cursor_json(cursor, rows_done)?;
-    }
-    let slot = route
-        .map(|route| transaction_slot(route.get()))
-        .transpose()?;
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let schema = tracking_schema.as_deref();
-        let cursor = cursor_json.as_deref();
-        match slot {
-            Some(slot) => {
-                let mut guard = slot.lock().await;
-                let conn = guard.live().map_err(|e| {
-                    crate::errors::map_db_error("writing the chunked step's cursor", e)
-                })?;
-                crate::run::write_cursor(
-                    conn, schema, migration, step, cursor, rows_done, reverting,
-                )
-                .await
-            }
-            None => {
-                let engine = crate::state::engine_for_connection(using)?;
-                let mut conn = crate::ddl_exec::pool_connection(&engine)
-                    .await
-                    .map_err(|e| {
-                        crate::errors::map_db_error("writing the chunked step's cursor", e)
-                    })?;
-                crate::run::write_cursor(
-                    &mut conn, schema, migration, step, cursor, rows_done, reverting,
-                )
-                .await
-            }
-        }
-    })
-}
-
-/// Execute one planned SQL step and settle its record. `direction_json` is
-/// the plan's direction (`{"direction": "up"}` or `{"direction": "down",
-/// "target": ...}`): going up `sql` is the up file's text and `record_json`
-/// the plan's record with `ferro_version` set, written when the step
-/// finishes; going down `sql` is the down file's text and `record_json` the
-/// standing record, removed in the down's transaction. With `lock`, the run
-/// lock behind that handle is verified first.
-///
-/// The step runs under the DDL lock timeout (ADR-0044):
-/// `ddl_lock_timeout_s` seconds per attempt on Postgres (`0` sets none and
-/// never retries), and `on_attempt(text)` hears each attempt that timed
-/// out, as `waiting for a lock on "author" (attempt 1 of 10, retry in 1s)`.
-/// Returns JSON `{"ok", "ms", "error", "message"}`.
-///
-/// # Errors
-/// `RunRefused` when the lock was lost or the file changed since it was
-/// planned; `ValueError` for a negative or non-finite timeout; a database
-/// error writing a record; the first exception `on_attempt` raised, once
-/// the step has settled its record.
-#[pyfunction]
-#[pyo3(name = "_execute_sql_step")]
-#[pyo3(signature = (using, planned_step_json, sql, record_json, tracking_schema=None, lock=None, direction_json=None, ddl_lock_timeout_s=5.0, on_attempt=None))]
-#[allow(clippy::too_many_arguments)]
-pub fn _execute_sql_step(
-    py: Python<'_>,
-    using: Option<String>,
-    planned_step_json: String,
-    sql: String,
-    record_json: String,
-    tracking_schema: Option<String>,
-    lock: Option<u64>,
-    direction_json: Option<String>,
-    ddl_lock_timeout_s: f64,
-    on_attempt: Option<Py<PyAny>>,
-) -> PyResult<Bound<'_, PyAny>> {
-    let ddl = crate::ddl_exec::DdlExecutor::from_seconds(ddl_lock_timeout_s)?;
-    let step: ferro_migrate::PlannedStep = parse_json(&planned_step_json, "planned_step_json")?;
-    let record: ferro_migrate::StepRecord = parse_json(&record_json, "record_json")?;
-    let direction = match direction_json {
-        Some(json) => parse_json(&json, "direction_json")?,
-        None => ferro_migrate::Direction::Up { through: None },
-    };
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let engine = crate::state::engine_for_connection(using)?;
-        if let Some(handle) = lock {
-            crate::run::registered_lock(handle)?
-                .lock()
-                .await
-                .verify()
-                .await?;
-        }
-        // A SQLite table rebuild refuses a live table holding what its
-        // snapshot does not declare, before the step records anything.
-        let down = matches!(direction, ferro_migrate::Direction::Down { .. });
-        crate::run::check_rebuild_step(&engine, &step, &sql, down).await?;
-        // A callback that raises is the caller's bug: its first error is
-        // raised once the step has settled its record (stopping mid-step
-        // would leave the record started with nothing running).
-        let mut callback_error: Option<PyErr> = None;
-        let outcome = crate::run::execute_sql_step(
-            &engine,
-            tracking_schema.as_deref(),
-            &step,
-            &sql,
-            record,
-            direction,
-            &ddl,
-            |attempt| {
-                if let Some(callback) = &on_attempt
-                    && callback_error.is_none()
-                {
-                    let text = attempt.describe();
-                    callback_error = Python::attach(|py| callback.call1(py, (text,)).err());
-                }
-            },
-        )
-        .await?;
-        if let Some(err) = callback_error {
-            return Err(err);
-        }
-        to_json(&outcome)
-    })
-}
-
 /// Every tracking table governing `schema` (the current schema when
 /// `None`). Returns JSON `[{"schema", "governed_schema", "format"}]`.
 ///
@@ -746,184 +264,1030 @@ pub fn _tracking_tables_for(
     })
 }
 
-/// The governed schema's tables, as a JSON list.
-///
-/// # Errors
-/// A database error.
-#[pyfunction]
-#[pyo3(name = "_live_tables")]
-#[pyo3(signature = (using=None))]
-pub fn _live_tables(py: Python<'_>, using: Option<String>) -> PyResult<Bound<'_, PyAny>> {
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let engine = crate::state::engine_for_connection(using)?;
-        to_json(&crate::run::live_tables(&engine).await?)
+/// A value as the Python object its JSON reads as (`dict`, `list`, ...).
+fn to_py<T: serde::Serialize>(py: Python<'_>, value: &T) -> PyResult<Py<PyAny>> {
+    let json = to_json(value)?;
+    Ok(py.import("json")?.call_method1("loads", (json,))?.unbind())
+}
+
+/// [`to_py`] from inside a future, where the GIL is not held.
+fn to_py_attached<T: serde::Serialize>(value: &T) -> PyResult<Py<PyAny>> {
+    Python::attach(|py| to_py(py, value))
+}
+
+/// A Python value as the JSON text it dumps to.
+fn dumps(value: &Bound<'_, PyAny>) -> PyResult<String> {
+    value
+        .py()
+        .import("json")?
+        .call_method1("dumps", (value,))?
+        .extract()
+}
+
+/// A run's direction from Python: `{"direction": "up"}`, `{"direction":
+/// "up", "through": "0007"}`, `{"direction": "down", "target": "latest" |
+/// "all" | {"migration": 5} | {"step": [7, 2]}}`. `through` is read by the
+/// planner's own rule ([`ferro_migrate::run_plan::parse_through`]).
+fn parse_direction(direction: &Bound<'_, PyAny>) -> PyResult<ferro_migrate::Direction> {
+    let mut value: serde_json::Value = parse_json(&dumps(direction)?, "direction")?;
+    if let Some(through) = value.get("through").and_then(serde_json::Value::as_str) {
+        let number = ferro_migrate::run_plan::parse_through(through)
+            .map_err(|refusal| crate::run::refused_by(&refusal))?;
+        value["through"] = number.into();
+    }
+    serde_json::from_value(value)
+        .map_err(|e| PyValueError::new_err(format!("invalid direction: {e}")))
+}
+
+/// `[[migration, step, ["author.id", ...]], ...]` from Python, or `None`.
+fn order_keys_arg(
+    order_keys: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<ferro_migrate::run_plan::OrderKeys>> {
+    order_keys
+        .filter(|keys| !keys.is_none())
+        .map(|keys| parse_order_keys(&dumps(keys)?))
+        .transpose()
+}
+
+/// A run lock's wait from Python seconds.
+fn lock_timeout(timeout_s: f64) -> PyResult<std::time::Duration> {
+    if !(timeout_s.is_finite() && timeout_s >= 0.0) {
+        return Err(PyValueError::new_err(format!(
+            "timeout_s must be a non-negative number of seconds; got {timeout_s}"
+        )));
+    }
+    std::time::Duration::try_from_secs_f64(timeout_s).map_err(|_| {
+        PyValueError::new_err(format!(
+            "timeout_s {timeout_s:e} is too large to be a duration of seconds"
+        ))
     })
 }
 
-// -- rerecord (#537) ----------------------------------------------------------------
-
-/// Plan `ferro migrate rerecord <target> [--continue|--restart]` over the
-/// directory against the records: `target` as the operator wrote it
-/// (`0007:01`), `mode` `"record"`, `"continue"` or `"restart"`,
-/// `order_keys_json` as `_run_plan`'s. Returns the JSON of the
-/// `RerecordAction` (`{"migration", "step", "migration_name",
-/// "recorded_file", "file", "path", "old_checksum", "new_checksum", "kind",
-/// "data", "finished", "clear_cursor"}`).
+/// Open the tracking tables of connection `using` (in `tracking_schema`
+/// when set) and the migrations directory at `directory` (ADR-0048): one
+/// read of the records and one read of the directory, held. Creates nothing
+/// and takes no lock. `ddl_lock_timeout_s` is the database's DDL lock
+/// timeout (ADR-0044), which every SQL step the run executes waits under
+/// (`0` sets none and never retries).
 ///
 /// # Errors
-/// `RunRefused` (structured) for every refusal `rerecord_plan` makes;
-/// `ValueError` for malformed arguments.
+/// `ValueError` for a negative or non-finite timeout; a database error.
 #[pyfunction]
-#[pyo3(name = "_rerecord_plan")]
-#[pyo3(signature = (directory, records_json, target, mode, dialect, order_keys_json=None))]
-pub fn _rerecord_plan(
+#[pyo3(name = "_open_tracked")]
+#[pyo3(signature = (using, tracking_schema, directory, ddl_lock_timeout_s=5.0))]
+pub fn _open_tracked(
+    py: Python<'_>,
+    using: Option<String>,
+    tracking_schema: Option<String>,
     directory: String,
-    records_json: String,
-    target: String,
-    mode: String,
-    dialect: String,
-    order_keys_json: Option<String>,
-) -> PyResult<String> {
-    use ferro_migrate::run_plan::{
-        OrderKeys, RerecordMode, StepRecord, read_for_run, rerecord_plan,
-    };
-    let records: Vec<StepRecord> = parse_json(&records_json, "records_json")?;
-    let mode: RerecordMode = parse_json(&format!("\"{mode}\""), "mode")?;
-    let dialect = parse_dialect(&dialect)?;
-    let order_keys = match order_keys_json {
-        Some(json) => parse_order_keys(&json)?,
-        None => OrderKeys::new(),
-    };
-    let refuse = |r: ferro_migrate::RunRefusal| crate::run::refused_by(&r);
-    let dir = read_for_run(Path::new(&directory)).map_err(refuse)?;
-    let action =
-        rerecord_plan(&dir, &records, &target, mode, dialect, &order_keys).map_err(refuse)?;
-    to_json(&action)
-}
-
-/// Write one planned re-record (`_rerecord_plan`'s action, with a data
-/// step's `kind` read from its file): the record's file, checksum and kind,
-/// and for `--restart` its cursor and rows cleared, in one statement. Runs
-/// nothing of the step. With `lock`, the run lock behind that handle is
-/// verified first.
-///
-/// # Errors
-/// `RunRefused` when the lock was lost or the record changed since it was
-/// planned; `ValueError` for a malformed action; a database error.
-#[pyfunction]
-#[pyo3(name = "_rerecord")]
-#[pyo3(signature = (using, action_json, tracking_schema=None, lock=None))]
-pub fn _rerecord(
-    py: Python<'_>,
-    using: Option<String>,
-    action_json: String,
-    tracking_schema: Option<String>,
-    lock: Option<u64>,
+    ddl_lock_timeout_s: f64,
 ) -> PyResult<Bound<'_, PyAny>> {
-    let action: ferro_migrate::run_plan::RerecordAction = parse_json(&action_json, "action_json")?;
+    let ddl = crate::ddl_exec::DdlExecutor::from_seconds(ddl_lock_timeout_s)?;
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let engine = crate::state::engine_for_connection(using)?;
-        if let Some(handle) = lock {
-            crate::run::registered_lock(handle)?
-                .lock()
-                .await
-                .verify()
-                .await?;
-        }
-        crate::run::rerecord_checksum(&engine, tracking_schema.as_deref(), &action).await
+        let tracked =
+            crate::run::Tracked::open(engine, tracking_schema, Path::new(&directory)).await?;
+        Ok(TrackedDatabase {
+            inner: Arc::new(tracked),
+            ddl: Arc::new(ddl),
+        })
     })
 }
 
-// -- baseline (#525) ----------------------------------------------------------------
-
-/// Plan `ferro migrate baseline` over the migrations directory against the
-/// records `_read_records` found: `target` is `None` (the head), a number
-/// (`"0006"`) or a full name (`"0006_add_teams"`). Returns the JSON of the
-/// `BaselinePlan`: `{"target", "snapshot", "records", "recorded",
-/// "data_steps"}`, the records stamped now with `ferro_version`.
-///
-/// # Errors
-/// `RunRefused`: records already exist (naming `ferro migrate status`), the
-/// target is not in the directory, the directory is unreadable, a step has
-/// no rendering for `dialect`; `ValueError` for malformed arguments.
-#[pyfunction]
-#[pyo3(name = "_plan_baseline")]
-#[pyo3(signature = (directory, records_json, dialect, target=None, ferro_version=String::new()))]
-pub fn _plan_baseline(
-    directory: String,
-    records_json: String,
-    dialect: String,
-    target: Option<String>,
-    ferro_version: String,
-) -> PyResult<String> {
-    use ferro_migrate::run_plan::{StepRecord, read_for_run};
-    let records: Vec<StepRecord> = parse_json(&records_json, "records_json")?;
-    let dialect = parse_dialect(&dialect)?;
-    let dir = read_for_run(Path::new(&directory))
-        .map_err(|refusal| crate::run::refused(refusal.to_string()))?;
-    let plan =
-        crate::run::plan_baseline_now(&dir, &records, dialect, target.as_deref(), &ferro_version)
-            .map_err(crate::run::refused)?;
-    to_json(&plan)
+/// One planned step, opaque to Python: what it may read of it, and the
+/// handle the locked run executes or records it by. Nothing about it crosses
+/// back to be checked.
+#[pyclass(frozen, module = "ferro._core")]
+pub struct StepHandle {
+    step: Arc<ferro_migrate::PlannedStep>,
+    /// Going up, the step's unfinished record (it resumes); going down, the
+    /// record its down removes.
+    standing: Option<ferro_migrate::StepRecord>,
+    down: bool,
+    /// The locked run whose plan holds it; `0` for a preview.
+    owner: u64,
 }
 
-/// Write a baseline's records (`_plan_baseline`'s `records`) in one
-/// transaction, creating the tracking tables where missing. With `lock`,
-/// the run lock behind that handle is verified first.
-///
-/// # Errors
-/// `RunRefused` when the lock was lost or a record is not a finished
-/// baseline record; `ValueError` for malformed records; a database error.
-#[pyfunction]
-#[pyo3(name = "_write_baseline_records")]
-#[pyo3(signature = (using, records_json, tracking_schema=None, lock=None))]
-pub fn _write_baseline_records(
-    py: Python<'_>,
-    using: Option<String>,
-    records_json: String,
-    tracking_schema: Option<String>,
-    lock: Option<u64>,
-) -> PyResult<Bound<'_, PyAny>> {
-    let records: Vec<ferro_migrate::StepRecord> = parse_json(&records_json, "records_json")?;
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let engine = crate::state::engine_for_connection(using)?;
-        if let Some(handle) = lock {
-            crate::run::registered_lock(handle)?
-                .lock()
-                .await
-                .verify()
-                .await?;
+#[pymethods]
+impl StepHandle {
+    /// `NNNN`.
+    #[getter]
+    fn migration(&self) -> u16 {
+        self.step.migration
+    }
+
+    /// `NNNN_<name>`.
+    #[getter]
+    fn migration_name(&self) -> &str {
+        &self.step.migration_name
+    }
+
+    /// `NN`.
+    #[getter]
+    fn step(&self) -> u8 {
+        self.step.step
+    }
+
+    /// The file the run executes: the up file going up, the down file going
+    /// down (a data step's own file either way).
+    #[getter]
+    fn file(&self) -> &str {
+        &self.step.file
+    }
+
+    /// That file's path.
+    #[getter]
+    fn path(&self) -> String {
+        self.step.path.display().to_string()
+    }
+
+    /// SHA-384 of that file's bytes, lowercase hex: what a data step's
+    /// loaded source is checked against.
+    #[getter]
+    fn checksum(&self) -> &str {
+        &self.step.checksum
+    }
+
+    /// A Python data step.
+    #[getter]
+    fn data(&self) -> bool {
+        self.step.data
+    }
+
+    /// Going down: why the step's down runs no statement.
+    #[getter]
+    fn nothing_to_reverse(&self) -> Option<&str> {
+        self.step.nothing_to_reverse.as_deref()
+    }
+
+    /// `{"recorded", "recorded_file"}` when the unfinished attempt ran a
+    /// different file (accepted and re-recorded, ADR-0030), else `None`.
+    #[getter]
+    fn edited(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        self.step.edited.as_ref().map(|e| to_py(py, e)).transpose()
+    }
+
+    /// Whether an unfinished record exists: the run resumes at this step.
+    #[getter]
+    fn resumes(&self) -> bool {
+        self.step.resumes
+    }
+
+    /// The chunked cursor this walk resumes from: going up a chunked
+    /// record's `resume_cursor`, going down a reverting record's
+    /// `revert_cursor`; `None` otherwise.
+    #[getter]
+    fn resume_cursor(&self) -> Option<&str> {
+        let record = self.standing.as_ref()?;
+        if self.down {
+            record.reverting.then_some(record.revert_cursor.as_deref()?)
+        } else {
+            (record.kind == ferro_migrate::RecordKind::Chunked)
+                .then_some(record.resume_cursor.as_deref()?)
         }
-        crate::run::write_baseline_records(&engine, tracking_schema.as_deref(), &records).await
+    }
+
+    /// The rows the walk resumed from has committed, when it resumes one.
+    #[getter]
+    fn rows_done(&self) -> Option<i64> {
+        let record = self.standing.as_ref()?;
+        let resumes = if self.down {
+            record.reverting
+        } else {
+            record.kind == ferro_migrate::RecordKind::Chunked
+        };
+        if resumes { record.rows_done } else { None }
+    }
+
+    /// The step's record as it stands (a dict), or `None` going up for a
+    /// step with no record.
+    #[getter]
+    fn standing(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        self.standing.as_ref().map(|r| to_py(py, r)).transpose()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "<StepHandle {}/{}>",
+            self.step.migration_name, self.step.file
+        )
+    }
+}
+
+/// A run's plan: its step handles in order, the migrations `allow_ahead`
+/// let through, and which way it goes.
+#[pyclass(frozen, module = "ferro._core")]
+pub struct Plan {
+    steps: Vec<Py<StepHandle>>,
+    ahead: Vec<String>,
+    down: bool,
+}
+
+#[pymethods]
+impl Plan {
+    /// The steps, in the order the run takes them.
+    #[getter]
+    fn steps(&self, py: Python<'_>) -> Vec<Py<StepHandle>> {
+        self.steps.iter().map(|s| s.clone_ref(py)).collect()
+    }
+
+    /// Applied migrations the directory lacks, let through by `allow_ahead`.
+    #[getter]
+    fn ahead(&self) -> Vec<String> {
+        self.ahead.clone()
+    }
+
+    /// `"up"` or `"down"`.
+    #[getter]
+    fn direction(&self) -> &'static str {
+        if self.down { "down" } else { "up" }
+    }
+}
+
+/// `plan`'s handles for `owner` (`0`: a preview), each with its standing
+/// record from `records`.
+fn plan_handles(
+    plan: ferro_migrate::RunPlan,
+    records: &[ferro_migrate::StepRecord],
+    direction: ferro_migrate::Direction,
+    owner: u64,
+) -> PyResult<Plan> {
+    let down = matches!(direction, ferro_migrate::Direction::Down { .. });
+    Python::attach(|py| {
+        let steps = plan
+            .steps
+            .into_iter()
+            .map(|step| {
+                let standing = if down {
+                    Some(step.record.clone())
+                } else {
+                    records
+                        .iter()
+                        .find(|r| (r.migration, r.step) == (step.migration, step.step))
+                        .cloned()
+                };
+                Py::new(
+                    py,
+                    StepHandle {
+                        step: Arc::new(step),
+                        standing,
+                        down,
+                        owner,
+                    },
+                )
+            })
+            .collect::<PyResult<_>>()?;
+        Ok(Plan {
+            steps,
+            ahead: plan.ahead,
+            down,
+        })
     })
 }
 
-/// Delete every baseline-origin record. With `lock`, the run lock behind
-/// that handle is verified first. Returns JSON `[[migration, step], ...]`
-/// of the records removed (empty when there was no baseline).
-///
-/// # Errors
-/// `RunRefused` when a run-origin migration stands above the baseline
-/// (naming it), on a newer tracking format, or when the lock was lost; a
-/// database error.
-#[pyfunction]
-#[pyo3(name = "_remove_baseline_records")]
-#[pyo3(signature = (using, tracking_schema=None, lock=None))]
-pub fn _remove_baseline_records(
-    py: Python<'_>,
-    using: Option<String>,
-    tracking_schema: Option<String>,
-    lock: Option<u64>,
-) -> PyResult<Bound<'_, PyAny>> {
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let engine = crate::state::engine_for_connection(using)?;
-        if let Some(handle) = lock {
-            crate::run::registered_lock(handle)?
-                .lock()
-                .await
-                .verify()
+/// The reads both run objects carry, from `tracked`.
+mod reads {
+    use super::*;
+
+    pub fn records(py: Python<'_>, tracked: &crate::run::Tracked) -> PyResult<Py<PyAny>> {
+        to_py(py, &tracked.records())
+    }
+
+    pub fn migrations(py: Python<'_>, tracked: &crate::run::Tracked) -> PyResult<Py<PyAny>> {
+        to_py(py, &tracked.held()?.dir)
+    }
+
+    pub fn status(
+        py: Python<'_>,
+        tracked: &crate::run::Tracked,
+        order_keys: Option<&Bound<'_, PyAny>>,
+        lock_held: bool,
+    ) -> PyResult<Py<PyAny>> {
+        let order_keys = order_keys_arg(order_keys)?;
+        to_py(py, &tracked.status(lock_held, order_keys.as_ref()))
+    }
+}
+
+/// A database's tracking tables and its migrations directory, each read
+/// once (ADR-0048). Read-only: `status`, a preview `plan`, whether the run
+/// lock is held; `locked(...)` is the one door to a run's writes.
+#[pyclass(frozen, module = "ferro._core")]
+pub struct TrackedDatabase {
+    inner: Arc<crate::run::Tracked>,
+    ddl: Arc<crate::ddl_exec::DdlExecutor>,
+}
+
+#[pymethods]
+impl TrackedDatabase {
+    /// `"postgres"` or `"sqlite"`.
+    #[getter]
+    fn dialect(&self) -> &'static str {
+        dialect_name(self.inner.dialect())
+    }
+
+    /// `<schema>._ferro_migrations`.
+    #[getter]
+    fn tracking_table(&self) -> &str {
+        self.inner.tracking_table()
+    }
+
+    /// The step records as read (a list of dicts).
+    #[getter]
+    fn records(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        reads::records(py, &self.inner)
+    }
+
+    /// The newer-format refusal every verb stops on, or `None`.
+    #[getter]
+    fn refusal(&self) -> Option<&str> {
+        self.inner.format_refusal()
+    }
+
+    /// The held directory read, as `_read_migrations_dir` shapes it.
+    ///
+    /// # Errors
+    /// `RunRefused` when the directory could not be read.
+    #[getter]
+    fn migrations(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        reads::migrations(py, &self.inner)
+    }
+
+    /// Whether any run holds the run lock, asked without taking it.
+    fn lock_held<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let tracked = Arc::clone(&self.inner);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move { tracked.lock_held().await })
+    }
+
+    /// `ferro migrate status`'s document: every migration's steps, the
+    /// migrations ahead of the directory, and the refusal `up` would meet.
+    #[pyo3(signature = (order_keys=None, *, lock_held=false))]
+    fn status(
+        &self,
+        py: Python<'_>,
+        order_keys: Option<&Bound<'_, PyAny>>,
+        lock_held: bool,
+    ) -> PyResult<Py<PyAny>> {
+        reads::status(py, &self.inner, order_keys, lock_held)
+    }
+
+    /// A preview of a run's plan: its steps cannot be executed.
+    ///
+    /// # Errors
+    /// `RunRefused` for every refusal the run would meet.
+    #[pyo3(signature = (direction, *, allow_ahead=false, order_keys=None))]
+    fn plan<'py>(
+        &self,
+        py: Python<'py>,
+        direction: &Bound<'py, PyAny>,
+        allow_ahead: bool,
+        order_keys: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let direction = parse_direction(direction)?;
+        let order_keys = order_keys_arg(order_keys)?;
+        let tracked = Arc::clone(&self.inner);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let plan = tracked
+                .plan(direction, allow_ahead, order_keys.as_ref())
                 .await?;
+            plan_handles(plan, tracked.records(), direction, 0)
+        })
+    }
+
+    /// The run lock, as an async context manager whose block holds it: a
+    /// second run waits up to `timeout_s` seconds (`0` tries once), and
+    /// `on_wait(text)` hears at once that it waits. The block's
+    /// [`LockedDatabase`] re-reads the records under the lock.
+    ///
+    /// # Errors
+    /// `ValueError` for a negative, non-finite or unrepresentable timeout.
+    #[pyo3(signature = (timeout_s, on_wait=None))]
+    fn locked(&self, timeout_s: f64, on_wait: Option<Py<PyAny>>) -> PyResult<LockScope> {
+        Ok(LockScope {
+            tracked: Arc::clone(&self.inner),
+            ddl: Arc::clone(&self.ddl),
+            timeout: lock_timeout(timeout_s)?,
+            on_wait,
+            unacquired: false,
+            entered: Arc::new(std::sync::Mutex::new(None)),
+        })
+    }
+
+    /// A `locked()` block whose Postgres lock never took the advisory lock,
+    /// as a transaction-mode pooler hands back: its first write fails the
+    /// first check. Test-only.
+    fn _locked_unacquired_for_test(&self) -> LockScope {
+        LockScope {
+            tracked: Arc::clone(&self.inner),
+            ddl: Arc::clone(&self.ddl),
+            timeout: std::time::Duration::ZERO,
+            on_wait: None,
+            unacquired: true,
+            entered: Arc::new(std::sync::Mutex::new(None)),
         }
-        to_json(&crate::run::remove_baseline_records(&engine, tracking_schema.as_deref()).await?)
+    }
+
+    fn __repr__(&self) -> String {
+        format!("<TrackedDatabase {}>", self.inner.tracking_table())
+    }
+}
+
+fn dialect_name(dialect: Dialect) -> &'static str {
+    match dialect {
+        Dialect::Postgres => "postgres",
+        Dialect::Sqlite => "sqlite",
+    }
+}
+
+/// `async with tracked.locked(...) as run:` — takes the run lock on entry
+/// and releases it on exit, error and cancellation included.
+#[pyclass(frozen, module = "ferro._core")]
+pub struct LockScope {
+    tracked: Arc<crate::run::Tracked>,
+    ddl: Arc<crate::ddl_exec::DdlExecutor>,
+    timeout: std::time::Duration,
+    on_wait: Option<Py<PyAny>>,
+    unacquired: bool,
+    entered: Arc<std::sync::Mutex<Option<Arc<crate::run::Locked>>>>,
+}
+
+fn scope_poisoned() -> PyErr {
+    PyRuntimeError::new_err("ferro migrate: the run lock's block is unusable after a panic")
+}
+
+#[pymethods]
+impl LockScope {
+    fn __aenter__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let tracked = Arc::clone(&self.tracked);
+        let ddl = Arc::clone(&self.ddl);
+        let on_wait = self.on_wait.as_ref().map(|c| c.clone_ref(py));
+        let (timeout, unacquired) = (self.timeout, self.unacquired);
+        let entered = Arc::clone(&self.entered);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let locked = if unacquired {
+                tracked.lock_unacquired_for_test().await?
+            } else {
+                tracked
+                    .lock(timeout, |text| {
+                        if let Some(callback) = &on_wait {
+                            Python::attach(|py| {
+                                if let Err(err) = callback.call1(py, (text,)) {
+                                    err.print(py);
+                                }
+                            });
+                        }
+                    })
+                    .await?
+            };
+            let locked = Arc::new(locked);
+            *entered.lock().map_err(|_| scope_poisoned())? = Some(Arc::clone(&locked));
+            Ok(LockedDatabase { inner: locked, ddl })
+        })
+    }
+
+    #[pyo3(signature = (*_exc))]
+    fn __aexit__<'py>(
+        &self,
+        py: Python<'py>,
+        _exc: &Bound<'py, pyo3::types::PyTuple>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let locked = self.entered.lock().map_err(|_| scope_poisoned())?.take();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            if let Some(locked) = locked {
+                locked.release().await?;
+            }
+            Ok(false)
+        })
+    }
+}
+
+/// What `start`/`finish`/... need of a step: the planned step of this run's
+/// own plan.
+fn owned<'a>(
+    step: &'a StepHandle,
+    locked: &crate::run::Locked,
+) -> PyResult<&'a Arc<ferro_migrate::PlannedStep>> {
+    if step.owner != locked.id() {
+        return Err(PyValueError::new_err(format!(
+            "{}/{} was not planned by this locked run: a preview plan's steps cannot execute, \
+             and another run's are not this one's",
+            step.step.migration_name, step.step.file
+        )));
+    }
+    Ok(&step.step)
+}
+
+/// `rows_done`, refused below zero.
+fn rows(rows_done: i64) -> PyResult<i64> {
+    if rows_done < 0 {
+        return Err(PyValueError::new_err(format!(
+            "rows_done must be zero or more, not {rows_done}"
+        )));
+    }
+    Ok(rows_done)
+}
+
+/// A chunked position from Python: given exactly when `rows_done` is.
+fn position(
+    cursor: Option<String>,
+    rows_done: Option<i64>,
+) -> PyResult<Option<crate::run::Position>> {
+    match (cursor, rows_done) {
+        (cursor, Some(rows_done)) => Ok(Some((cursor, rows(rows_done)?))),
+        (None, None) => Ok(None),
+        (Some(_), None) => Err(PyValueError::new_err(
+            "a cursor is recorded with the rows_done it is a position after",
+        )),
+    }
+}
+
+/// A batch's position from Python, its cursor checked.
+fn batch_position(cursor: Option<String>, rows_done: i64) -> PyResult<crate::run::Position> {
+    let rows_done = rows(rows_done)?;
+    if let Some(cursor) = &cursor {
+        check_cursor_json(cursor, rows_done)?;
+    }
+    Ok((cursor, rows_done))
+}
+
+fn record_kind(kind: &str) -> PyResult<ferro_migrate::RecordKind> {
+    ferro_migrate::RecordKind::parse(kind).ok_or_else(|| {
+        PyValueError::new_err(format!(
+            "{kind:?} is not a step record kind (ddl, ddl-no-transaction, atomic, chunked)"
+        ))
     })
+}
+
+/// A run holding the run lock (ADR-0048), alive inside its `locked()`
+/// block: the reads of [`TrackedDatabase`] with the records re-read under
+/// the lock, its plan, and every write a run makes. Each write verifies the
+/// lock first; the first creates the tracking tables where they are missing.
+#[pyclass(frozen, module = "ferro._core")]
+pub struct LockedDatabase {
+    inner: Arc<crate::run::Locked>,
+    ddl: Arc<crate::ddl_exec::DdlExecutor>,
+}
+
+#[pymethods]
+impl LockedDatabase {
+    /// `"postgres"` or `"sqlite"`.
+    #[getter]
+    fn dialect(&self) -> &'static str {
+        dialect_name(self.inner.tracked().dialect())
+    }
+
+    /// `<schema>._ferro_migrations`.
+    #[getter]
+    fn tracking_table(&self) -> &str {
+        self.inner.tracked().tracking_table()
+    }
+
+    /// The step records, re-read under the lock.
+    #[getter]
+    fn records(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        reads::records(py, self.inner.tracked())
+    }
+
+    /// The newer-format refusal every verb stops on, or `None`.
+    #[getter]
+    fn refusal(&self) -> Option<&str> {
+        self.inner.tracked().format_refusal()
+    }
+
+    /// The held directory read (the tracked database's one read).
+    ///
+    /// # Errors
+    /// `RunRefused` when the directory could not be read.
+    #[getter]
+    fn migrations(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        reads::migrations(py, self.inner.tracked())
+    }
+
+    /// Whether any run holds the run lock (this one does).
+    fn lock_held<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let locked = Arc::clone(&self.inner);
+        pyo3_async_runtimes::tokio::future_into_py(
+            py,
+            async move { locked.tracked().lock_held().await },
+        )
+    }
+
+    /// `ferro migrate status`'s document, as of the records read under the
+    /// lock.
+    #[pyo3(signature = (order_keys=None, *, lock_held=false))]
+    fn status(
+        &self,
+        py: Python<'_>,
+        order_keys: Option<&Bound<'_, PyAny>>,
+        lock_held: bool,
+    ) -> PyResult<Py<PyAny>> {
+        reads::status(py, self.inner.tracked(), order_keys, lock_held)
+    }
+
+    /// The run's plan: step handles this run executes and records.
+    ///
+    /// # Errors
+    /// `RunRefused` for every refusal the run meets.
+    #[pyo3(signature = (direction, *, allow_ahead=false, order_keys=None))]
+    fn plan<'py>(
+        &self,
+        py: Python<'py>,
+        direction: &Bound<'py, PyAny>,
+        allow_ahead: bool,
+        order_keys: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let direction = parse_direction(direction)?;
+        let order_keys = order_keys_arg(order_keys)?;
+        let locked = Arc::clone(&self.inner);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let plan = locked
+                .tracked()
+                .plan(direction, allow_ahead, order_keys.as_ref())
+                .await?;
+            plan_handles(plan, locked.tracked().records(), direction, locked.id())
+        })
+    }
+
+    /// Execute one planned SQL step, up or down, from the held bytes, and
+    /// settle its record. `on_attempt(text)` hears each attempt that timed
+    /// out waiting for a lock (ADR-0044). Returns `{"ok", "ms", "error",
+    /// "message"}`.
+    ///
+    /// # Errors
+    /// `RunRefused` when the run lock was lost or a rebuild is refused;
+    /// `ValueError` for a step of another plan or a data step; a database
+    /// error writing a record; the first exception `on_attempt` raised, once
+    /// the step has settled its record.
+    #[pyo3(signature = (step, on_attempt=None))]
+    fn execute<'py>(
+        &self,
+        py: Python<'py>,
+        step: PyRef<'py, StepHandle>,
+        on_attempt: Option<Py<PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let planned = Arc::clone(owned(&step, &self.inner)?);
+        let down = step.down;
+        let (locked, ddl) = (Arc::clone(&self.inner), Arc::clone(&self.ddl));
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            // A callback that raises is the caller's bug: its first error is
+            // raised once the step has settled its record (stopping mid-step
+            // would leave the record started with nothing running).
+            let mut callback_error: Option<PyErr> = None;
+            let outcome = locked
+                .execute(&planned, down, &ddl, |attempt| {
+                    if let Some(callback) = &on_attempt
+                        && callback_error.is_none()
+                    {
+                        let text = attempt.describe();
+                        callback_error = Python::attach(|py| callback.call1(py, (text,)).err());
+                    }
+                })
+                .await?;
+            if let Some(err) = callback_error {
+                return Err(err);
+            }
+            to_py_attached(&outcome)
+        })
+    }
+
+    /// A data step's started record, written on its own before it runs:
+    /// `kind` is the shape its `up` declares (`"atomic"` / `"chunked"`); a
+    /// resumed chunked step keeps its cursor.
+    fn start<'py>(
+        &self,
+        py: Python<'py>,
+        step: PyRef<'py, StepHandle>,
+        kind: &str,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let planned = Arc::clone(owned(&step, &self.inner)?);
+        let standing = step.standing.clone();
+        let kind = record_kind(kind)?;
+        let locked = Arc::clone(&self.inner);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            locked.start(&planned, kind, standing.as_ref()).await
+        })
+    }
+
+    /// One committed batch of a chunked `up` on its record, inside the
+    /// batch's transaction (`tx`, its route).
+    fn advance<'py>(
+        &self,
+        py: Python<'py>,
+        step: PyRef<'py, StepHandle>,
+        cursor: Option<String>,
+        rows_done: i64,
+        tx: Py<crate::state::RouteHandle>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        self.batch(py, step, cursor, rows_done, tx, false)
+    }
+
+    /// One committed batch of a chunked `down` on its record (reverting),
+    /// inside the batch's transaction.
+    fn advance_revert<'py>(
+        &self,
+        py: Python<'py>,
+        step: PyRef<'py, StepHandle>,
+        cursor: Option<String>,
+        rows_done: i64,
+        tx: Py<crate::state::RouteHandle>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        self.batch(py, step, cursor, rows_done, tx, true)
+    }
+
+    /// A data step's finished record: on `tx` (the step's or its last
+    /// batch's transaction) so it commits with the work, or on its own; a
+    /// chunked step's last `cursor` and `rows_done` with it.
+    #[pyo3(signature = (step, ms, tx=None, *, cursor=None, rows_done=None))]
+    fn finish<'py>(
+        &self,
+        py: Python<'py>,
+        step: PyRef<'py, StepHandle>,
+        ms: i64,
+        tx: Option<Py<crate::state::RouteHandle>>,
+        cursor: Option<String>,
+        rows_done: Option<i64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let planned = Arc::clone(owned(&step, &self.inner)?);
+        let position = position(cursor, rows_done)?;
+        let slot = tx.map(|route| transaction_slot(route.get())).transpose()?;
+        let locked = Arc::clone(&self.inner);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            locked.finish(&planned, ms, slot.as_ref(), position).await
+        })
+    }
+
+    /// A data step's failure on its started record, after the rollback; a
+    /// chunked step's committed `cursor` and `rows_done` with it.
+    #[pyo3(signature = (step, ms, error, cursor=None, rows_done=None))]
+    fn fail<'py>(
+        &self,
+        py: Python<'py>,
+        step: PyRef<'py, StepHandle>,
+        ms: i64,
+        error: String,
+        cursor: Option<String>,
+        rows_done: Option<i64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let planned = Arc::clone(owned(&step, &self.inner)?);
+        let position = position(cursor, rows_done)?;
+        let locked = Arc::clone(&self.inner);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            locked.fail(&planned, ms, error, position).await
+        })
+    }
+
+    /// A chunked down that failed after a committed batch: its record stays
+    /// reverting at `cursor`, carrying the error.
+    fn fail_revert<'py>(
+        &self,
+        py: Python<'py>,
+        step: PyRef<'py, StepHandle>,
+        error: String,
+        cursor: Option<String>,
+        rows_done: i64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let planned = Arc::clone(owned(&step, &self.inner)?);
+        let position = (cursor, rows(rows_done)?);
+        let locked = Arc::clone(&self.inner);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            locked.fail_revert(&planned, error, position).await
+        })
+    }
+
+    /// Remove a reverted step's record inside its down's transaction (`tx`).
+    fn remove<'py>(
+        &self,
+        py: Python<'py>,
+        step: PyRef<'py, StepHandle>,
+        tx: Py<crate::state::RouteHandle>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let planned = Arc::clone(owned(&step, &self.inner)?);
+        let slot = transaction_slot(tx.get())?;
+        let locked = Arc::clone(&self.inner);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            locked.remove(&planned, &slot).await
+        })
+    }
+
+    /// Plan `ferro migrate baseline` through `target` (`None`: the head;
+    /// `"0006"` or `"0006_add_teams"`).
+    ///
+    /// # Errors
+    /// `RunRefused`: records already exist, the target is not in the
+    /// directory, the directory is unreadable, a step has no rendering.
+    #[pyo3(signature = (target=None))]
+    fn plan_baseline(&self, target: Option<&str>) -> PyResult<BaselinePlan> {
+        Ok(BaselinePlan {
+            plan: Arc::new(self.inner.plan_baseline(target)?),
+        })
+    }
+
+    /// Write a baseline's records in one transaction; `data_kinds` maps
+    /// each data step's `(migration, step)` to the shape its `up` declares.
+    #[pyo3(signature = (plan, data_kinds=None))]
+    fn write_baseline<'py>(
+        &self,
+        py: Python<'py>,
+        plan: PyRef<'py, BaselinePlan>,
+        data_kinds: Option<std::collections::HashMap<(u16, u8), String>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let kinds = data_kinds
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(key, kind)| Ok((key, record_kind(&kind)?)))
+            .collect::<PyResult<std::collections::HashMap<_, _>>>()?;
+        let plan = Arc::clone(&plan.plan);
+        let locked = Arc::clone(&self.inner);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            locked.write_baseline(&plan, &kinds).await
+        })
+    }
+
+    /// Delete every baseline-origin record. Returns the `(migration, step)`
+    /// of each record removed (empty when there was no baseline).
+    fn remove_baseline<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let locked = Arc::clone(&self.inner);
+        pyo3_async_runtimes::tokio::future_into_py(
+            py,
+            async move { locked.remove_baseline().await },
+        )
+    }
+
+    /// Plan `ferro migrate rerecord <target>`: `mode` is `"record"`,
+    /// `"continue"` or `"restart"`; `order_keys` the edited chunked files'.
+    ///
+    /// # Errors
+    /// `RunRefused` (structured) for every refusal the planner makes.
+    #[pyo3(signature = (target, mode, order_keys=None))]
+    fn plan_rerecord(
+        &self,
+        target: &str,
+        mode: &str,
+        order_keys: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<RerecordPlan> {
+        let mode: ferro_migrate::run_plan::RerecordMode =
+            parse_json(&format!("\"{mode}\""), "mode")?;
+        let order_keys = order_keys_arg(order_keys)?.unwrap_or_default();
+        Ok(RerecordPlan {
+            action: Arc::new(self.inner.plan_rerecord(target, mode, &order_keys)?),
+        })
+    }
+
+    /// Write one planned re-record; a data step's record takes `kind`, the
+    /// shape its edited `up` declares.
+    #[pyo3(signature = (action, kind=None))]
+    fn rerecord<'py>(
+        &self,
+        py: Python<'py>,
+        action: PyRef<'py, RerecordPlan>,
+        kind: Option<&str>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let kind = kind.map(record_kind).transpose()?;
+        let action = Arc::clone(&action.action);
+        let locked = Arc::clone(&self.inner);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            locked.rerecord(&action, kind).await
+        })
+    }
+
+    /// Close the Postgres lock connection without releasing the lock, as a
+    /// dropped network connection would. Test-only.
+    fn _close_lock_connection_for_test<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let locked = Arc::clone(&self.inner);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            locked.close_lock_connection_for_test().await;
+            Ok(())
+        })
+    }
+
+    fn __repr__(&self) -> String {
+        format!("<LockedDatabase {}>", self.inner.tracked().tracking_table())
+    }
+}
+
+impl LockedDatabase {
+    fn batch<'py>(
+        &self,
+        py: Python<'py>,
+        step: PyRef<'py, StepHandle>,
+        cursor: Option<String>,
+        rows_done: i64,
+        tx: Py<crate::state::RouteHandle>,
+        reverting: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let planned = Arc::clone(owned(&step, &self.inner)?);
+        let position = batch_position(cursor, rows_done)?;
+        let slot = transaction_slot(tx.get())?;
+        let locked = Arc::clone(&self.inner);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            locked.advance(&planned, position, &slot, reverting).await
+        })
+    }
+}
+
+/// What `ferro migrate baseline` would record (`plan_baseline`).
+#[pyclass(frozen, module = "ferro._core")]
+pub struct BaselinePlan {
+    plan: Arc<crate::run::BaselinePlan>,
+}
+
+#[pymethods]
+impl BaselinePlan {
+    /// `NNNN_<name>` of the migration whose snapshot the database is checked
+    /// against.
+    #[getter]
+    fn target(&self) -> &str {
+        &self.plan.target
+    }
+
+    /// The target's schema snapshot (a dict).
+    #[getter]
+    fn snapshot(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        to_py(py, &self.plan.snapshot)
+    }
+
+    /// `NNNN_<name>` of every migration it records, in order.
+    #[getter]
+    fn recorded(&self) -> Vec<String> {
+        self.plan.recorded.clone()
+    }
+
+    /// `NNNN_<name>/<file>` of every data step recorded without running.
+    #[getter]
+    fn data_steps(&self) -> Vec<String> {
+        self.plan.data_steps.clone()
+    }
+
+    /// `(migration, step, path)` of each data step: the file whose `up`
+    /// declaration gives its record's kind.
+    #[getter]
+    fn data_step_files(&self) -> Vec<(u16, u8, String)> {
+        self.plan
+            .data_files
+            .iter()
+            .map(|(m, s, path)| (*m, *s, path.display().to_string()))
+            .collect()
+    }
+
+    /// How many step records it writes.
+    #[getter]
+    fn steps(&self) -> usize {
+        self.plan.records.len()
+    }
+}
+
+/// What `ferro migrate rerecord` would change (`plan_rerecord`).
+#[pyclass(frozen, module = "ferro._core")]
+pub struct RerecordPlan {
+    action: Arc<ferro_migrate::run_plan::RerecordAction>,
+}
+
+#[pymethods]
+impl RerecordPlan {
+    /// `NNNN`.
+    #[getter]
+    fn migration(&self) -> u16 {
+        self.action.migration
+    }
+
+    /// `NN`.
+    #[getter]
+    fn step(&self) -> u8 {
+        self.action.step
+    }
+
+    /// `NNNN_<name>`.
+    #[getter]
+    fn migration_name(&self) -> &str {
+        &self.action.migration_name
+    }
+
+    /// The file the record will name.
+    #[getter]
+    fn file(&self) -> &str {
+        &self.action.file
+    }
+
+    /// That file's path (a data step's declared kind is read from it).
+    #[getter]
+    fn path(&self) -> String {
+        self.action.path.display().to_string()
+    }
+
+    /// The checksum the record holds now.
+    #[getter]
+    fn old_checksum(&self) -> &str {
+        &self.action.old_checksum
+    }
+
+    /// The checksum it will hold.
+    #[getter]
+    fn new_checksum(&self) -> &str {
+        &self.action.new_checksum
+    }
+
+    /// A Python data step: `rerecord` needs the kind its `up` declares.
+    #[getter]
+    fn data(&self) -> bool {
+        self.action.data
+    }
 }
