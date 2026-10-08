@@ -1776,3 +1776,40 @@ def _create_pass_existing_table_word(warning, added: set[str]) -> bool:
     existing table it leaves; the planner, which has no row security on
     SQLite, reports it only for a table it adds."""
     return warning.kind == "RowSecuritySkipped" and warning.subject.table not in added
+
+
+# -- a dropped column's own check rides the drop on every door ------------------------
+
+
+def test_a_dropped_columns_own_check_rides_the_drop_on_every_door(
+    project, doors, db_url, db_backend, postgres_base_url, db_schema_name
+):
+    """``mood: Mood | None = Field(db_type="text", db_check=True)`` deleted.
+    SQLite's ``DROP COLUMN`` takes the ``CHECK`` written inline on the
+    column (it refuses only for a table-level one that reads it), and
+    Postgres drops it explicitly first. Every door writes exactly that: the
+    generator no rebuild, the bridge no refusal, the pass no warning."""
+    case = CASEBOOK["A4-drop-a-checked-column"]
+    expected = ['ALTER TABLE "author" DROP COLUMN "mood"']
+    if db_backend == "postgres":
+        expected.insert(0, 'ALTER TABLE "author" DROP CONSTRAINT "ck_author_mood"')
+
+    door = doors(case.id)
+    assert [
+        statement
+        for stem in door.stems
+        if not door.is_data(stem)
+        for statement in door.statements(stem, "up", db_backend)
+    ] == expected
+
+    write_config(project.root, project.pkg, f'["{db_backend}"]')
+    project.register(case.before)
+    auto_migrate(db_url)
+    project.register(case.after)
+    upgrade, _ = autogenerate(db_url, postgres_base_url, db_schema_name)
+    assert "op.drop_column('author', 'mood')" in upgrade, upgrade
+    assert _executed_literals(upgrade) == expected[:-1], upgrade
+
+    report = asyncio.run(_run_the_pass(db_url))
+    assert [s.sql for s in report.statements if s.role == "schema"] == expected
+    assert report.warnings == ()

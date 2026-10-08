@@ -396,10 +396,7 @@ fn render_warnings(
     dialect: Dialect,
     warnings: &mut Vec<String>,
 ) -> Result<(), GenerateError> {
-    let decided: Vec<PlannedOp> = downs::decided(ops, before, after, dialect)
-        .into_iter()
-        .filter(|planned| !columns::omitted(planned, dialect))
-        .collect();
+    let decided: Vec<PlannedOp> = downs::decided(ops, before, after, dialect);
     let rebuilt = rebuild::tables_to_rebuild(&decided);
     let native: Vec<MigrationOp> = decided
         .into_iter()

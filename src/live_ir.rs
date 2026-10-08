@@ -162,6 +162,7 @@ fn table_facts(table: &LiveTable) -> LiveTableFacts {
                 definition: check.definition.clone(),
                 ferro_owned: check.ferro_owned,
                 validated: check.validated,
+                column: check.column.clone(),
             })
             .collect(),
         foreign_keys: table
@@ -384,6 +385,7 @@ mod tests {
                 definition: "CHECK ((title IS NOT NULL)) NOT VALID".to_string(),
                 ferro_owned: true,
                 validated: false,
+                column: Some("title".to_string()),
             }],
             row_security: LiveRowSecurity {
                 enabled: true,
@@ -495,6 +497,7 @@ mod tests {
                 definition: "CHECK ((title IS NOT NULL)) NOT VALID".to_string(),
                 ferro_owned: true,
                 validated: false,
+                column: Some("title".to_string()),
             }]
         );
         assert_eq!(

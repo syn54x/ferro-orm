@@ -474,7 +474,10 @@ pub(crate) fn column_riders<'a>(model: &'a SchemaModel, column: &str) -> Riders<
     Riders {
         index: col.index.then(|| single_index_name(table, column)),
         unique: col.unique.then(|| single_unique_index_name(table, column)),
-        check: model.checks.iter().find(|check| check.name == own_check),
+        check: model
+            .checks
+            .iter()
+            .find(|check| check.name == own_check && check.column == column),
         foreign_key: model.foreign_keys.iter().find(|fk| fk.column == column),
     }
 }

@@ -3683,6 +3683,7 @@ fn live_check(name: &str, definition: &str) -> LiveCheckFact {
         definition: definition.into(),
         ferro_owned: name.starts_with("ck_"),
         validated: true,
+        column: None,
     }
 }
 
@@ -4701,6 +4702,7 @@ mod renames {
                     definition: "CHECK (\"genre\" IN ('novel', 'poem'))".to_string(),
                     ferro_owned: true,
                     validated: true,
+                    column: None,
                 }],
                 ..Default::default()
             },
@@ -4753,6 +4755,7 @@ mod renames {
                     definition: "CHECK (\"genre\" IN ('novel'))".to_string(),
                     ferro_owned: true,
                     validated: true,
+                    column: None,
                 }],
                 ..Default::default()
             },
@@ -5859,6 +5862,79 @@ fn a_foreign_key_on_a_dropped_column_goes_with_the_column() {
             column: "team_id".to_string(),
         }]
     );
+}
+
+/// `mood: Mood | None = Field(db_type="text", db_check=True)` deleted from a
+/// live table: its own check `ck_author_mood` is read on the column (SQLite
+/// writes it inline; Postgres reports it on that column alone), so it rides
+/// the column's drop. SQLite's `DROP COLUMN` takes it; Postgres drops it
+/// explicitly first. It is no leftover: nothing warns.
+#[test]
+fn a_dropped_columns_own_live_check_rides_the_drop_on_both_dialects() {
+    let live_model = schema_model(
+        "author",
+        vec![pk_col("id", "integer"), col("mood", "text", true)],
+    );
+    let declared = schema_model("author", vec![pk_col("id", "integer")]);
+    let drop_check = MigrationOp::DropCheck {
+        table: "author".to_string(),
+        name: "ck_author_mood".to_string(),
+    };
+    let plan_with = |column: Option<&str>, dialect: Dialect| {
+        let mut facts = LiveFacts::default();
+        facts.tables.insert(
+            "author".into(),
+            LiveTableFacts {
+                checks: vec![LiveCheckFact {
+                    column: column.map(str::to_string),
+                    ..live_check("ck_author_mood", "CHECK (\"mood\" IN ('calm', 'loud'))")
+                }],
+                ..LiveTableFacts::default()
+            },
+        );
+        plan_from_ir(
+            &Side::live(envelope(vec![live_model.clone()]), facts).expect("live side"),
+            &Side::declared(envelope(vec![declared.clone()])),
+            dialect,
+            destructive(),
+        )
+    };
+    for dialect in [Dialect::Postgres, Dialect::Sqlite] {
+        let plan = plan_with(Some("mood"), dialect);
+        let check = plan
+            .operations
+            .iter()
+            .find(|planned| planned.op == drop_check)
+            .expect("the check's drop is planned");
+        assert_eq!(check.verdict.goes_with, Some(Rider::DroppedColumn));
+        assert_eq!(check.verdict.execution, Execution::Native, "{dialect:?}");
+        assert!(plan.reports.is_empty(), "{dialect:?}: {:?}", plan.reports);
+        let rendered = plan.render().expect("render");
+        assert!(
+            rendered.iter().all(|op| op.reports.is_empty()),
+            "{dialect:?}: {rendered:?}"
+        );
+        let statements: Vec<&str> = rendered
+            .iter()
+            .flat_map(|op| op.statements.iter().map(String::as_str))
+            .collect();
+        let mut expected = vec!["ALTER TABLE \"author\" DROP COLUMN \"mood\""];
+        if dialect == Dialect::Postgres {
+            expected.insert(0, "ALTER TABLE \"author\" DROP CONSTRAINT \"ck_author_mood\"");
+        }
+        assert_eq!(statements, expected, "{dialect:?}");
+    }
+    // A table-level CHECK of the same name (SQLite reports it on no column)
+    // is the table's: SQLite cannot drop it in place, and it is a leftover.
+    let table_level = plan_with(None, Dialect::Sqlite);
+    let check = table_level
+        .operations
+        .iter()
+        .find(|planned| planned.op == drop_check)
+        .expect("the check's drop is planned");
+    assert_eq!(check.verdict.goes_with, None);
+    assert_eq!(check.verdict.execution, Execution::Rebuild);
+    assert_eq!(table_level.reports.len(), 1);
 }
 
 /// Between two snapshots (the generator) the drop is planned the same way,

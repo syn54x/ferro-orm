@@ -612,9 +612,17 @@ pub(crate) fn render_from(
                         ),
                     });
                 }
-                let emission = render_check_drop(table, name, dialect);
-                out.statements.extend(emission.statement);
-                out.reports.extend(emission.warning);
+                // A dropped column's own check goes with the column: SQLite's
+                // `DROP COLUMN` takes the CHECK written inline on it, so the
+                // check has no statement of its own there. Postgres drops it
+                // explicitly, ahead of the column.
+                let rides_drop = crate::plan::goes_with(op, old_side, new_side)
+                    == Some(crate::Rider::DroppedColumn);
+                if !(rides_drop && dialect == Dialect::Sqlite) {
+                    let emission = render_check_drop(table, name, dialect);
+                    out.statements.extend(emission.statement);
+                    out.reports.extend(emission.warning);
+                }
             }
             MigrationOp::AddRowPolicy { table, name } => {
                 require_postgres(op, dialect)?;
