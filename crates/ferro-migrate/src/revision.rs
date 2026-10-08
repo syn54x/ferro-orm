@@ -68,6 +68,11 @@ pub struct RevisionOp {
     /// and nullability, an index, a foreign key, a table or column rename),
     /// or, when `false`, as `op.execute` of each of `statements`.
     pub twin: bool,
+    /// Its statements run committed, outside the revision's transaction
+    /// (`op.get_context().autocommit_block()`): an enum label addition, which
+    /// Postgres lets no later statement of the same transaction use. The
+    /// generator's `labels` step is the same fact on the other door.
+    pub autocommit: bool,
     /// For a `RedefineIndex`, the definition its create builds, read from the
     /// side the revision leads to: `(columns, unique)`.
     pub index: Option<(Vec<String>, bool)>,
@@ -197,11 +202,12 @@ impl serde::Serialize for RevisionOp {
             kind: &'static str,
             comment: &'a str,
         }
-        let mut out = serializer.serialize_struct("RevisionOp", 7)?;
+        let mut out = serializer.serialize_struct("RevisionOp", 8)?;
         out.serialize_field("op", &self.op)?;
         out.serialize_field("statements", &self.statements)?;
         out.serialize_field("row_security_statements", &self.row_security_statements)?;
         out.serialize_field("twin", &self.twin)?;
+        out.serialize_field("autocommit", &self.autocommit)?;
         out.serialize_field(
             "index",
             &self.index.as_ref().map(|(columns, unique)| Index {
@@ -445,10 +451,18 @@ fn written(
         statements,
         row_security_statements,
         twin,
+        autocommit: commits_alone(&planned.op),
         index,
         marker,
         irreversible: None,
     })
+}
+
+/// Whether `op`'s statements must be committed before a later statement of
+/// the same revision runs: a label added to an enum type, which Postgres
+/// lets no statement of the transaction that added it use.
+fn commits_alone(op: &MigrationOp) -> bool {
+    matches!(op, MigrationOp::AddEnumLabel { .. })
 }
 
 /// Whether Alembic's own op writes `op` (ADR-0041's list). A column add the

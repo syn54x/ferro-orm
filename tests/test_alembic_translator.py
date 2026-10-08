@@ -1326,6 +1326,7 @@ def _written(op: dict, **fields) -> dict:
         "statements": [],
         "row_security_statements": [],
         "twin": False,
+        "autocommit": False,
         "index": None,
         "marker": None,
         "irreversible": None,
@@ -1365,6 +1366,7 @@ def test_the_translator_writes_each_revision_op_the_way_the_core_says():
             _written(
                 {"kind": "AddEnumLabel", "type_name": "status", "label": "y"},
                 statements=[label],
+                autocommit=True,
             ),
             _written(
                 {"kind": "RedefineIndex", "table": "card", "name": "idx_card_a"},

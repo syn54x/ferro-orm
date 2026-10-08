@@ -270,20 +270,21 @@ def _using(statements: list[str]) -> str | None:
 # -- the translation --------------------------------------------------------------------
 
 
-_AUTOCOMMIT = {"AddEnumLabel"}
-"""Ops whose statement runs in ``op.get_context().autocommit_block()``: a
-label addition must be committed before a later statement of the revision
-can use the label."""
-
 _SNAPSHOT_ONLY = {"RemoveEnumLabel"}
 """Ops a live database never takes (a label removal, #536): going up the
 planner never plans one from it, and going down one toward it is
 irreversible (ADR-0050). Meeting one to write is a bug, refused loudly."""
 
 
-def _executed(kind: str, statements: list[str]) -> list[ops.MigrateOperation]:
+def _executed(
+    written: dict[str, Any], statements: list[str]
+) -> list[ops.MigrateOperation]:
+    """``statements`` of the revision op ``written`` run as written, inside
+    ``op.get_context().autocommit_block()`` when the core says so."""
     return [
-        FerroExecuteOp(statement, kind, autocommit=kind in _AUTOCOMMIT)
+        FerroExecuteOp(
+            statement, written["op"]["kind"], autocommit=written["autocommit"]
+        )
         for statement in statements
     ]
 
@@ -321,7 +322,7 @@ def _twin(written: dict[str, Any], target: _Target) -> list[ops.MigrateOperation
     statements: list[str] = written["statements"]
     if kind == "AddTable":
         return _create_table(target, op["table"]) + _executed(
-            kind, written["row_security_statements"]
+            written, written["row_security_statements"]
         )
     if kind == "DropTable":
         return [ops.DropTableOp(op["table"])]
@@ -340,7 +341,7 @@ def _twin(written: dict[str, Any], target: _Target) -> list[ops.MigrateOperation
             if target.foreign_key(table, column) is not None:
                 added += _foreign_key(target, table, column)
             return added
-        return added + _executed(kind, statements[1:])
+        return added + _executed(written, statements[1:])
     if kind == "DropColumn":
         return [ops.DropColumnOp(op["table"], op["column"])]
     if kind == "AlterColumnNullability":
@@ -352,7 +353,7 @@ def _twin(written: dict[str, Any], target: _Target) -> list[ops.MigrateOperation
                 modify_nullable=bool(target.model_column(table, column)["nullable"]),
                 existing_type=_sa_type(target, table, column),
             )
-        ] + _executed(kind, statements[1:])
+        ] + _executed(written, statements[1:])
     if kind == "AlterColumnType":
         table, column = op["table"], op["column"]
         kw: dict[str, Any] = {}
@@ -367,7 +368,7 @@ def _twin(written: dict[str, Any], target: _Target) -> list[ops.MigrateOperation
                 existing_nullable=bool(target.model_column(table, column)["nullable"]),
                 **kw,
             )
-        ] + _executed(kind, statements[1:])
+        ] + _executed(written, statements[1:])
     if kind == "AddIndex":
         return [
             ops.CreateIndexOp(
@@ -432,7 +433,7 @@ def translate(
         alembic_ops = (
             _twin(item, resolved)
             if item["twin"]
-            else _executed(kind, item["statements"])
+            else _executed(item, item["statements"])
         )
         marker = item["marker"]
         if marker is not None:

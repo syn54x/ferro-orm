@@ -129,9 +129,11 @@ def _plan_revision(
     Returns ``{"upgrade": [op, ...], "downgrade": [op, ...], "reports":
     [report, ...], "refusal": None}``. Each op is ``{"op": {"kind": ...,
     <fields>}, "statements": [...], "row_security_statements": [...],
-    "twin": bool, "index": {"columns", "unique"} | None, "marker": {"kind",
-    "comment"} | None, "irreversible": str | None}``: ``twin`` says Alembic's
-    own op writes it (else ``op.execute`` of each statement), ``index`` is a
+    "twin": bool, "autocommit": bool, "index": {"columns", "unique"} | None,
+    "marker": {"kind", "comment"} | None, "irreversible": str | None}``:
+    ``twin`` says Alembic's own op writes it (else ``op.execute`` of each
+    statement), ``autocommit`` that its statements run committed in
+    ``op.get_context().autocommit_block()`` (a label addition), ``index`` is a
     ``RedefineIndex``'s definition, ``marker`` the ``# ferro:`` comment above
     it and ``irreversible`` the reason a ``raise`` replaces it. ``reports``
     are the planner's one-off reports the upgrade writes as comments, in

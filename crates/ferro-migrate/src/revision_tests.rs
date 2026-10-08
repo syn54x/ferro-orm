@@ -361,7 +361,10 @@ fn a_label_the_upgrade_adds_cannot_come_off_a_live_type() {
     )
     .expect("a revision");
     assert_eq!(kinds(&revision.upgrade), ["AddEnumLabel"]);
+    // The pass's statement, committed before any later statement uses the
+    // label.
     assert!(!revision.upgrade[0].twin);
+    assert!(revision.upgrade[0].autocommit);
     assert_eq!(kinds(&revision.downgrade), ["RemoveEnumLabel"]);
     assert_eq!(
         revision.downgrade[0].irreversible.as_deref(),
@@ -633,6 +636,7 @@ fn a_revision_op_serialises_its_marker_with_its_comment() {
             "statements": [],
             "row_security_statements": [],
             "twin": true,
+            "autocommit": false,
             "index": null,
             "marker": {
                 "kind": "data_dependent",
