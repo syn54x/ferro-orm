@@ -260,13 +260,14 @@ class Harness:
         irreversible: tuple[str, str, str] | None = None
         while at >= 0:
             below = chain[at - 1].short if at > 0 else "0000"
-            report = await runner.down(
-                self._settings, self._database, target=below, using=name
-            )
-            if report.refusal is not None:
-                irreversible = _irreversible(report, chain)
+            try:
+                await runner.down(
+                    self._settings, self._database, target=below, using=name
+                )
+            except MigrationRefused as refused:
+                irreversible = _irreversible(refused, chain)
                 if irreversible is None:
-                    raise MigrationRefused(report.refusal)
+                    raise
                 reverted_to = chain[at].name
                 break
             stop = f"reverting {chain[at].name}"
@@ -336,22 +337,16 @@ class Harness:
     ) -> RunReport:
         """``up`` bounded to ``chain[target]``: the runner plans the whole
         directory and runs only the pending steps of migrations through it."""
-        report = await runner.up(
+        return await runner.up(
             self._settings, self._database, using=name, through=chain[target].short
         )
-        if report.refusal is not None:
-            raise MigrationRefused(report.refusal)
-        return report
 
     async def _down(
         self, name: str, *, target: str | None = None, all: bool = False
     ) -> RunReport:
-        report = await runner.down(
+        return await runner.down(
             self._settings, self._database, target=target, all=all, using=name
         )
-        if report.refusal is not None:
-            raise MigrationRefused(report.refusal)
-        return report
 
     async def _walk_up(self, name: str, chain: list[_Migration], at: int) -> int:
         """Apply one migration per stop from ``at`` to the head, checking
@@ -419,12 +414,13 @@ def _stands(chain: list[_Migration], at: int) -> str:
 
 
 def _irreversible(
-    report: RunReport, chain: list[_Migration]
+    raised: MigrationRefused, chain: list[_Migration]
 ) -> tuple[str, str, str] | None:
-    """``(migration, step, reason)`` when ``report`` was refused by an
-    irreversible step (the refusal's ``kind``, from the run planner or the
-    data step loader), else ``None``."""
-    refused = report.refused
+    """``(migration, step, reason)`` when the run ``raised`` reports was
+    refused by an irreversible step (the refusal's ``kind``, from the run
+    planner or the data step loader), else ``None``."""
+    report = raised.report
+    refused = report.refused if isinstance(report, runner.RunReport) else None
     if (
         refused is None
         or refused.kind != "irreversible"

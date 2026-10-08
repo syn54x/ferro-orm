@@ -55,6 +55,7 @@ from tests.test_migrate_up import (  # noqa: F401 - fixtures
     db,
     migrations,
     new,
+    run_report,
     sha384,
     short_time,
     sql_step,
@@ -153,7 +154,9 @@ def test_the_refusal_is_structured(project, pkg, db):
     up_file.write_bytes(up_file.read_bytes() + b"\n")
     settings = FerroSettings()
 
-    report = asyncio.run(runner.up(settings, settings.database(), url=db.url))
+    report = asyncio.run(
+        run_report(runner.up(settings, settings.database(), url=db.url))
+    )
 
     assert isinstance(report.refused, RunRefused)
     assert (report.refused.kind, report.refused.migration, report.refused.step) == (

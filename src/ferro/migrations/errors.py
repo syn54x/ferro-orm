@@ -19,8 +19,13 @@ lacks).
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 from ..exceptions import FerroError
+
+if TYPE_CHECKING:
+    from .generate import CheckReport
+    from .runner import RunReport
 
 __all__ = ["DatabaseAheadError", "MigrationRefused", "PendingMigrationsError"]
 
@@ -31,7 +36,19 @@ class MigrationRefused(FerroError):
     The base of every refusal: a run's (``RunRefused``), ``ferro migrate
     check``'s problems (``MigrationsCheckError``), a configuration that
     names no single database, and the two below.
+
+    ``report`` is the report of the call that refused, when it has one: the
+    :class:`~ferro.migrations.runner.RunReport` of a refused ``up`` or
+    ``down`` (what it did before it stopped, and the refusal itself as
+    ``report.refused``), or the ``CheckReport`` whose problems
+    ``raise_for_problems()`` raised. ``None`` otherwise.
     """
+
+    def __init__(
+        self, message: str, *, report: RunReport | CheckReport | None = None
+    ) -> None:
+        super().__init__(message)
+        self.report = report
 
 
 class PendingMigrationsError(MigrationRefused):
@@ -64,8 +81,11 @@ class DatabaseAheadError(MigrationRefused):
     Pass ``allow_ahead=True`` to run beside them, as a rolling deploy does.
     """
 
-    def __init__(self, ahead: Sequence[str], message: str) -> None:
+    def __init__(
+        self, ahead: Sequence[str], message: str, *, report: RunReport | None = None
+    ) -> None:
         self.ahead = list(ahead)
         super().__init__(
-            f"{message}\nPass allow_ahead=True to run beside them (a rolling deploy)."
+            f"{message}\nPass allow_ahead=True to run beside them (a rolling deploy).",
+            report=report,
         )

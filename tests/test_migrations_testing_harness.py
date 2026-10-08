@@ -284,18 +284,27 @@ async def test_runner_up_through_refuses_a_migration_the_directory_lacks_and_a_s
     settings = FerroSettings()
     database = settings.database()
 
-    report = await runner.up(
-        settings, database, using=_core._default_connection_name(), through="0009"
-    )
+    with pytest.raises(MigrationRefused) as missing:
+        await runner.up(
+            settings, database, using=_core._default_connection_name(), through="0009"
+        )
+    report = missing.value.report
 
+    assert isinstance(report, runner.RunReport)
     assert report.refusal == (
         f"ferro migrate: there is no migration 0009 in {database.directory}. "
         f"Nothing was applied."
     )
     assert report.applied == []
-    step = await runner.up(
-        settings, database, using=_core._default_connection_name(), through="0002:01"
-    )
+    with pytest.raises(MigrationRefused) as not_a_migration:
+        await runner.up(
+            settings,
+            database,
+            using=_core._default_connection_name(),
+            through="0002:01",
+        )
+    step = not_a_migration.value.report
+    assert isinstance(step, runner.RunReport)
     assert step.refusal is not None and "0007:02" in step.refusal
     assert step.refused is not None and step.refused.kind == "not_a_migration"
     assert step.applied == []

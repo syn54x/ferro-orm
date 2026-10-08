@@ -40,6 +40,7 @@ from tests.test_migrate_up import (  # noqa: F401 - fixtures
     configure,
     db,
     new,
+    run_report,
     settings_and_database,
     sql_step,
 )
@@ -150,7 +151,9 @@ def _record(db, migration: int) -> list[tuple]:
 
 async def _up(settings, database, db) -> tuple[Any, list[str]]:
     lines: list[str] = []
-    report = await runner.up(settings, database, url=db.url, progress=lines.append)
+    report = await run_report(
+        runner.up(settings, database, url=db.url, progress=lines.append)
+    )
     return report, lines
 
 
@@ -452,7 +455,7 @@ async def test_a_failed_no_transaction_step_resets_the_timeout_on_its_connection
     # One pooled connection: the step's, read back after it failed.
     await ferro.connect(db.url, name="one", pool=ferro.PoolConfig(max_connections=1))
 
-    report = await runner.up(settings, database, using="one")
+    report = await run_report(runner.up(settings, database, using="one"))
 
     assert report.refusal is not None and '"missing"' in report.refusal
     rows = await fetch_all("SELECT current_setting('lock_timeout') AS v", using="one")

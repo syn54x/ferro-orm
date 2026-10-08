@@ -14,8 +14,8 @@ own functions: ``up()`` is ``ferro migrate up``, ``status()`` is ``ferro
 migrate status``, ``check()`` is ``ferro migrate check``. ``down`` and
 ``rerecord`` stay CLI verbs: they are operator decisions with prompts.
 
-Unlike the CLI, a refusal is raised, never returned: an application that
-called ``up()`` must not go on serving a database the run did not reach.
+A refusal is raised, never returned: an application that called ``up()``
+must not go on serving a database the run did not reach.
 """
 
 from __future__ import annotations
@@ -65,32 +65,6 @@ def _connection(using: str | None) -> str:
     return name
 
 
-async def _ahead_or_behind(
-    name: str, database: DatabaseSettings, allow_ahead: bool
-) -> tuple[list[str], list[str]]:
-    """Read the tracking table without a lock: the migrations still pending
-    and the refusals ``up`` would meet. Raises :class:`DatabaseAheadError`
-    when the database holds migrations the checkout lacks and ``allow_ahead``
-    is off (and that is the only thing in the way: the planner says so)."""
-    tracked = await runner.open_tracked(name, database)
-    report = StatusReport.from_core(
-        tracked.status(),
-        database=database.name,
-        dialect=tracked.dialect,
-        table=tracked.tracking_table,
-    )
-    pending = [m.name for m in report.migrations if any(s.pending for s in m.steps)]
-    if tracked.refusal is not None:
-        return pending, [tracked.refusal]
-    try:
-        await tracked.plan({"direction": "up"}, allow_ahead=allow_ahead)
-    except RunRefused as refused:
-        if refused.ahead_only:
-            raise DatabaseAheadError(report.ahead, str(refused)) from None
-        return pending, [str(refused)]
-    return pending, []
-
-
 async def up(
     settings: FerroSettings | None = None,
     database: str | None = None,
@@ -112,15 +86,13 @@ async def up(
             says why and how to resume.
     """
     settings, db = _resolve(settings, database)
-    name = _connection(using)
-    if not allow_ahead:
-        await _ahead_or_behind(name, db, allow_ahead)
-    report = await runner.up(
-        settings, db, using=name, lock_timeout=lock_timeout, allow_ahead=allow_ahead
+    return await runner.up(
+        settings,
+        db,
+        using=_connection(using),
+        lock_timeout=lock_timeout,
+        allow_ahead=allow_ahead,
     )
-    if report.refusal is not None:
-        raise MigrationRefused(report.refusal)
-    return report
 
 
 async def require_applied(
@@ -141,9 +113,24 @@ async def require_applied(
             checkout lacks (``allow_ahead=True`` lets it through).
     """
     _, db = _resolve(settings, database)
-    pending, refusals = await _ahead_or_behind(_connection(using), db, allow_ahead)
-    if pending or refusals:
-        raise PendingMigrationsError(pending, refusals)
+    tracked = await runner.open_tracked(_connection(using), db)
+    report = StatusReport.from_core(
+        tracked.status(),
+        database=db.name,
+        dialect=tracked.dialect,
+        table=tracked.tracking_table,
+    )
+    pending = [m.name for m in report.migrations if any(s.pending for s in m.steps)]
+    if tracked.refusal is not None:
+        raise PendingMigrationsError(pending, [tracked.refusal])
+    try:
+        await tracked.plan({"direction": "up"}, allow_ahead=allow_ahead)
+    except RunRefused as refused:
+        if refused.ahead_only:
+            raise DatabaseAheadError(report.ahead, str(refused)) from None
+        raise PendingMigrationsError(pending, [str(refused)]) from None
+    if pending:
+        raise PendingMigrationsError(pending)
 
 
 async def status(

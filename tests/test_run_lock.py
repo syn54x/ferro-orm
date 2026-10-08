@@ -29,6 +29,7 @@ from tests.test_migrate_up import (  # noqa: F401 - fixtures
     db,
     migrations,
     new,
+    run_report,
     settings_and_database,
     sql_step,
 )
@@ -85,7 +86,9 @@ async def test_a_lock_timeout_gives_up_naming_it_and_leaves_the_holder_alone(
     settings, database = _project(project, pkg, db)
     tracked = await _tracked(db, database)
     async with tracked.locked(5.0):
-        report = await runner.up(settings, database, url=db.url, lock_timeout="1s")
+        report = await run_report(
+            runner.up(settings, database, url=db.url, lock_timeout="1s")
+        )
 
         assert report.refusal is not None
         assert "lock timeout (1s)" in report.refusal

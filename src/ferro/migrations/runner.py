@@ -68,7 +68,7 @@ from ..state import resolve_operation_scope
 from . import historical
 from .chunked import BatchFailed, order_keys, run_chunked
 from .context import HistoricalModels, StepContext
-from .errors import MigrationRefused
+from .errors import DatabaseAheadError, MigrationRefused
 from .historical import HistoricalModelError
 from .report import RunRefused, StatusReport
 from .steps import (
@@ -135,10 +135,22 @@ class RunReport:
     notes: list[str] = field(default_factory=list)
     """What the run accepted on the way (an edited unfinished step)."""
     ahead: list[str] = field(default_factory=list)
-    """Applied migrations the directory lacks, let through by ``allow_ahead``."""
+    """Applied migrations the directory lacks: let through by
+    ``allow_ahead``, or, when they alone refused the run
+    (``refused.ahead_only``), the ones that did."""
 
     def _refuse(self, refused: RunRefused) -> None:
         self.refusal, self.refused = str(refused), refused
+
+    def _raise_if_refused(self) -> RunReport:
+        """This report, or :class:`MigrationRefused` carrying it when the run
+        refused or a step failed: :class:`DatabaseAheadError` when applied
+        migrations the directory lacks were the only thing in the way."""
+        if self.refusal is None:
+            return self
+        if self.refused is not None and self.refused.ahead_only:
+            raise DatabaseAheadError(self.ahead, self.refusal, report=self)
+        raise MigrationRefused(self.refusal, report=self)
 
 
 MAX_LOCK_TIMEOUT_S = 60.0 * 60 * 24 * 365
@@ -283,8 +295,14 @@ async def up(
     the last applied migration has nothing pending to run: the run applies
     nothing and reverts nothing (going down is :func:`down`'s).
 
-    Returns a :class:`RunReport`; a refusal or a failed step is reported in
-    ``refusal``, not raised.
+    Returns the :class:`RunReport` of what it applied.
+
+    Raises:
+        DatabaseAheadError: the database has applied migrations the
+            directory lacks, and nothing else is in the way
+            (``allow_ahead=True`` runs beside them).
+        MigrationRefused: the run refused or a step failed; the message says
+            why and how to resume, and ``.report`` is the run's report.
     """
     del settings  # the database carries its project; kept for API symmetry
     timeout = parse_lock_timeout(lock_timeout)
@@ -297,13 +315,18 @@ async def up(
         try:
             async with tracked.locked(timeout, say_waiting) as run:
                 keys = _order_keys_for(run, "applied")
-                plan = await run.plan(
-                    direction, allow_ahead=allow_ahead, order_keys=keys
-                )
+                try:
+                    plan = await run.plan(
+                        direction, allow_ahead=allow_ahead, order_keys=keys
+                    )
+                except RunRefused as refused:
+                    if refused.ahead_only:
+                        report.ahead = list(run.status()["ahead"])
+                    raise
                 report = await _walk(run, plan, progress, using=name)
         except RunRefused as refused:
             report._refuse(refused)
-    return report
+    return report._raise_if_refused()
 
 
 async def _walk(
@@ -975,12 +998,16 @@ async def down(
     is made again, and a database that changed in between is refused rather
     than reverted unseen. ``progress`` receives one line per reverted step.
 
-    Returns a :class:`RunReport`; a refusal or a failed down is reported in
-    ``refusal``, not raised. A failed down that rolled back whole leaves its
-    step applied and its record as it was; one that left part of itself
-    applied (a no-transaction SQL down, a chunked down past its first
-    batch) leaves the record carrying the error, a chunked one still
-    ``reverting`` at its cursor. The next ``down`` resumes at it.
+    Returns the :class:`RunReport` of what it reverted (``declined`` when
+    ``confirm`` said no).
+
+    Raises:
+        MigrationRefused: the run refused or a down failed; ``.report`` is
+            the run's report. A failed down that rolled back whole leaves its
+            step applied and its record as it was; one that left part of
+            itself applied (a no-transaction SQL down, a chunked down past its
+            first batch) leaves the record carrying the error, a chunked one
+            still ``reverting`` at its cursor. The next ``down`` resumes at it.
     """
     del settings
     direction = parse_target(target, all=all)
@@ -992,7 +1019,7 @@ async def down(
             seen, shown = await _preview_down(tracked, direction)
         except RunRefused as refused:
             report._refuse(refused)
-            return report
+            return report._raise_if_refused()
         if not seen.steps:
             return report
         if confirm is not None and not confirm(shown):
@@ -1007,8 +1034,8 @@ async def down(
                         "the plan was shown; nothing was reverted. Run `ferro migrate "
                         "down` again to see the plan as it stands now."
                     )
-                    return report
+                    return report._raise_if_refused()
                 report = await _walk(run, plan, progress, using=name)
         except RunRefused as refused:
             report._refuse(refused)
-    return report
+    return report._raise_if_refused()

@@ -27,7 +27,7 @@ import sys
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 from cyclopts import App, Parameter
 
@@ -40,6 +40,9 @@ from ..settings import (
     SettingsError,
 )
 from . import Global, exit_codes
+
+if TYPE_CHECKING:
+    from ..migrations.errors import MigrationRefused
 
 __all__ = ["migrate"]
 
@@ -268,22 +271,23 @@ def up(
     """
     import asyncio
 
+    from ..migrations.errors import MigrationRefused
     from ..migrations.runner import up as run_up
 
     settings = FerroSettings(config=glob.config)
     database = settings.database(glob.database)
-    report = asyncio.run(
-        run_up(
-            settings,
-            database,
-            url=glob.url,
-            lock_timeout=lock_timeout,
-            progress=lambda line: print(line, flush=True),
+    try:
+        report = asyncio.run(
+            run_up(
+                settings,
+                database,
+                url=glob.url,
+                lock_timeout=lock_timeout,
+                progress=lambda line: print(line, flush=True),
+            )
         )
-    )
-    if report.refusal is not None:
-        print(report.refusal, file=sys.stderr)
-        return exit_codes.REFUSED
+    except MigrationRefused as refused:
+        return _render_run_refusal(refused)
     if not report.applied:
         print("nothing to apply: the database is up to date")
     return exit_codes.OK
@@ -336,6 +340,7 @@ def down(
     """
     import asyncio
 
+    from ..migrations.errors import MigrationRefused
     from ..migrations.runner import DownPlan, plan_down
     from ..migrations.runner import down as run_down
 
@@ -359,26 +364,39 @@ def down(
         print(plan.describe(), flush=True)
         return yes or _confirm_revert(plan.question())
 
-    report = asyncio.run(
-        run_down(
-            settings,
-            database,
-            target=to,
-            all=all_,
-            url=glob.url,
-            lock_timeout=lock_timeout,
-            confirm=confirm,
-            progress=lambda line: print(line, flush=True),
+    try:
+        report = asyncio.run(
+            run_down(
+                settings,
+                database,
+                target=to,
+                all=all_,
+                url=glob.url,
+                lock_timeout=lock_timeout,
+                confirm=confirm,
+                progress=lambda line: print(line, flush=True),
+            )
         )
-    )
-    if report.refusal is not None:
-        print(report.refusal, file=sys.stderr)
-        return exit_codes.REFUSED
+    except MigrationRefused as refused:
+        return _render_run_refusal(refused)
     if report.declined:
         print("Nothing was reverted.")
     elif not report.reverted:
         print("nothing to revert")
     return exit_codes.OK
+
+
+def _render_run_refusal(refused: MigrationRefused) -> int:
+    """A refused ``up`` or ``down``: its run report's refusal, as the
+    operator's text (the application's ``allow_ahead=`` hint is not a
+    flag here), and exit 1. A refusal with no run report (the
+    configuration, the connection) prints its own message."""
+    from ..migrations.runner import RunReport
+
+    report = refused.report
+    shown = report.refusal if isinstance(report, RunReport) else None
+    print(refused if shown is None else shown, file=sys.stderr)
+    return exit_codes.REFUSED
 
 
 def _confirm_revert(question: str) -> bool:

@@ -120,9 +120,10 @@ async def test_require_applied_carries_the_edited_file_refusal_and_takes_no_lock
     await ferro.migrations.up()
     up_file = migrations(project) / f"0001_create_author/01_schema.up.{db.backend}.sql"
     up_file.write_bytes(up_file.read_bytes() + b"\n")
-    settings, database = api._resolve(None, None)
-    expected = (await runner.up(settings, database, using="default")).refusal
-    assert expected is not None and "was edited after it was applied" in expected
+    with pytest.raises(MigrationRefused) as refused_up:
+        await ferro.migrations.up()
+    expected = str(refused_up.value)
+    assert "was edited after it was applied" in expected
 
     held_while_reading: list[bool] = []
     open_tracked = _core._open_tracked
@@ -261,6 +262,25 @@ async def test_no_default_connection_is_refused_naming_using(project, pkg, db):
 
     with pytest.raises(MigrationRefused, match="using="):
         await ferro.migrations.up()
+
+
+async def test_up_refused_in_process_carries_its_run_report(project, pkg, db):
+    configure(project, pkg, db.backend)
+    write_models(project, pkg, AUTHOR)
+    new("create_author")
+    await connect(db.url)
+    await ferro.migrations.up()
+    up_file = migrations(project) / f"0001_create_author/01_schema.up.{db.backend}.sql"
+    up_file.write_bytes(up_file.read_bytes() + b"\n")
+
+    with pytest.raises(MigrationRefused) as raised:
+        await ferro.migrations.up()
+
+    report = raised.value.report
+    assert isinstance(report, runner.RunReport)
+    assert report.applied == []
+    assert report.refusal == str(raised.value)
+    assert report.refused is not None and report.refused.kind == "edited_applied"
 
 
 async def test_importing_the_api_does_not_import_alembic():

@@ -69,9 +69,8 @@ class MigrationsCheckError(MigrationRefused):
     """Raised by :meth:`CheckReport.raise_for_problems`; carries the report."""
 
     def __init__(self, report: CheckReport) -> None:
-        self.report = report
         lines = "\n".join(f"  {p.kind}: {p.message}" for p in report.problems)
-        super().__init__(f"ferro migrate check found problems:\n{lines}")
+        super().__init__(f"ferro migrate check found problems:\n{lines}", report=report)
 
 
 @dataclass(frozen=True)

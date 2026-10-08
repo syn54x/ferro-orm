@@ -48,7 +48,13 @@ from tests.test_migrate_new import (  # noqa: F401 - fixtures
     run,
     write_models,
 )
-from tests.test_migrate_up import configure, db, migrations, new  # noqa: F401
+from tests.test_migrate_up import (  # noqa: F401
+    configure,
+    db,
+    migrations,
+    new,
+    run_report,
+)
 
 pytestmark = [
     pytest.mark.usefixtures("isolated_imports", "clean_registry"),
@@ -207,12 +213,12 @@ def slugged(db) -> int:
 
 async def up(**kwargs: Any) -> runner.RunReport:
     settings = FerroSettings()
-    return await runner.up(settings, settings.database(), **kwargs)
+    return await run_report(runner.up(settings, settings.database(), **kwargs))
 
 
 async def down(**kwargs: Any) -> runner.RunReport:
     settings = FerroSettings()
-    return await runner.down(settings, settings.database(), **kwargs)
+    return await run_report(runner.down(settings, settings.database(), **kwargs))
 
 
 async def paused_at(probe: Any, task: asyncio.Task) -> None:

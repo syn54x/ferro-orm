@@ -15,13 +15,14 @@ import shutil
 import sqlite3
 import warnings
 from datetime import UTC, datetime
+from collections.abc import Awaitable
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 import ferro
-from ferro.migrations import runner
+from ferro.migrations import MigrationRefused, runner
 from ferro.settings import FerroSettings
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     AUTHOR,
@@ -132,6 +133,16 @@ def sha384(path: Path) -> str:
 
 def migrations(project: Path) -> Path:
     return project / "migrations"
+
+
+async def run_report(run: Awaitable[runner.RunReport]) -> runner.RunReport:
+    """``run``'s report, whether it finished or refused: a refused ``up`` or
+    ``down`` raises :class:`MigrationRefused` carrying it as ``.report``."""
+    try:
+        return await run
+    except MigrationRefused as refused:
+        assert isinstance(refused.report, runner.RunReport), refused
+        return refused.report
 
 
 def short_time(value: Any) -> str:
@@ -401,7 +412,7 @@ async def test_a_foreign_keys_off_step_that_breaks_a_reference_fails_with_the_ro
     )
     sql_step(project, "orphan", '-- ferro: foreign-keys-off\nDELETE FROM "author";\n')
 
-    report = await runner.up(settings, database, url=db.url)
+    report = await run_report(runner.up(settings, database, url=db.url))
 
     assert report.refusal is not None
     assert "foreign_key_check" in report.refusal
@@ -425,7 +436,7 @@ async def test_up_over_tables_auto_migrate_built_names_baseline_and_creates_noth
     await ferro.connect(db.url, auto_migrate=True)
     ferro.reset_engine()
 
-    report = await runner.up(settings, database, url=db.url)
+    report = await run_report(runner.up(settings, database, url=db.url))
 
     assert report.refusal == (
         'This database has no ferro migration records, but table "author" from 0001 '
