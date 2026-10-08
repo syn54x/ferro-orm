@@ -1089,11 +1089,6 @@ fn label_contract(
                 native.push(enums::SwapColumn {
                     table: table.clone(),
                     column: column.clone(),
-                    default: col
-                        .default
-                        .as_ref()
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_string),
                 });
             }
         }

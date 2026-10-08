@@ -217,6 +217,11 @@ CASES: tuple[Case, ...] = (
         enum_removal.models(enum_removal.ALL),
         enum_removal.models(enum_removal.KEPT),
     ),
+    Case(
+        "D2-remove-a-label-of-a-column-with-a-model-default",
+        enum_removal.models(enum_removal.ALL, default=enum_removal.PAID_DEFAULT),
+        enum_removal.models(enum_removal.KEPT, default=enum_removal.PAID_DEFAULT),
+    ),
     Case("D3-rename-a-label", enums.models(), enums.RENAMED),
     Case("D4-rename-an-enum-class", enums.models(), enums.models(cls="EnmOrderState")),
     # -- E: row security ----------------------------------------------------------

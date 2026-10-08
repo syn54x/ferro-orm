@@ -21,9 +21,9 @@
 
 use super::backfill::{self, Demand};
 use super::columns::Phase;
-use super::staging::{self, IndexOp};
+use super::staging;
 use super::{GenerateError, find_model, phase_of, plan, refuse_unsupported};
-use crate::emit::column_riders;
+use crate::emit::{column_riders, standalone_indexes};
 use crate::plan::declared_label_additions;
 use crate::{Dialect, MigrationOp, Plan, Rider};
 use ferro_ddl_lowering::schema_columns_storage_drift;
@@ -74,8 +74,9 @@ pub(super) struct Layout {
     pub stages: Stages,
     /// One placement per target dialect, in the dialects' order.
     pub placed: Vec<Placed>,
-    /// The index steps, in their order (ADR-0044, ADR-0051).
-    pub index_ops: Vec<IndexOp>,
+    /// The index steps' ops, one per step, in their order (ADR-0044,
+    /// ADR-0051).
+    pub index_ops: Vec<MigrationOp>,
     /// Every column whose existing rows need a value, parents first.
     pub demands: Vec<Demand>,
     /// Whether the migration backfills (a demanded column, a removed label):
@@ -282,18 +283,18 @@ fn widens(
     }
 }
 
-/// The index steps (ADR-0044, ADR-0051): every index op the plans put in
-/// the index phase — an index added, dropped or redefined on a table the
-/// parent holds — and every index an added column of such a table carries
-/// ([`column_riders`]), which a table that already exists builds in its own
-/// step too. Laid out table by table in the target's order, each table's
-/// drops first (as the parent declares them), then its builds (as the target
-/// does).
+/// The index steps' ops (ADR-0044, ADR-0051): every index op the plans put
+/// in the index phase — an index added, dropped or redefined on a table the
+/// parent holds — and an `AddIndex` for every index an added column of such
+/// a table carries ([`column_riders`]), which a table that already exists
+/// builds in its own step too. Laid out table by table in the target's
+/// order, each table's drops first (as the parent declares them), then its
+/// builds (as the target does).
 fn index_ops(
     plans: &[Plan],
     before: &IrEnvelope<SchemaIrPayload>,
     target: &IrEnvelope<SchemaIrPayload>,
-) -> Result<Vec<IndexOp>, GenerateError> {
+) -> Result<Vec<MigrationOp>, GenerateError> {
     let mut builds: BTreeSet<(String, String)> = BTreeSet::new();
     let mut drops: BTreeSet<(String, String)> = BTreeSet::new();
     for planned in plans.iter().flat_map(|plan| &plan.operations) {
@@ -323,20 +324,35 @@ fn index_ops(
         let Some(parent) = find_model(before, &after.table_name) else {
             continue;
         };
-        let key = |name: &str| (after.table_name.clone(), name.to_string());
-        let old = staging::declared_indexes(parent);
-        for def in &old {
-            if drops.contains(&key(&def.name)) {
-                ops.push(IndexOp::Drop(def.clone()));
-            }
-        }
-        for def in staging::declared_indexes(after) {
-            if builds.contains(&key(&def.name)) {
-                ops.push(IndexOp::Build {
-                    replaces: old.iter().find(|index| index.name == def.name).cloned(),
-                    def,
+        let table = &after.table_name;
+        let key = |name: &str| (table.clone(), name.to_string());
+        let old = standalone_indexes(parent);
+        for (name, ..) in &old {
+            if drops.contains(&key(name)) {
+                ops.push(MigrationOp::DropIndex {
+                    table: table.clone(),
+                    name: name.clone(),
                 });
             }
+        }
+        for (name, columns, unique) in standalone_indexes(after) {
+            if !builds.contains(&key(&name)) {
+                continue;
+            }
+            // The parent's index under the name is dropped by the build.
+            ops.push(if old.iter().any(|(declared, ..)| declared == &name) {
+                MigrationOp::RedefineIndex {
+                    table: table.clone(),
+                    name,
+                }
+            } else {
+                MigrationOp::AddIndex {
+                    table: table.clone(),
+                    name,
+                    columns,
+                    unique,
+                }
+            });
         }
     }
     Ok(ops)

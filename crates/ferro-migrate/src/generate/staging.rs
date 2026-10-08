@@ -39,79 +39,15 @@ use ferro_ddl_lowering::{
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
 use std::collections::BTreeMap;
 
-/// One index as a model declares it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct IndexDef {
-    /// Its table.
-    pub table: String,
-    /// Its name, which is also its index step's name.
-    pub name: String,
-    /// Its columns, in order.
-    pub columns: Vec<String>,
-    /// Whether it is unique.
-    pub unique: bool,
-}
-
-/// What one index step does.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum IndexOp {
-    /// Builds `def`; when the parent declared an index of the same name
-    /// another way (`replaces`), the build's first statement drops it.
-    Build {
-        /// The index the target declares.
-        def: IndexDef,
-        /// The parent's index under that name, when there was one.
-        replaces: Option<IndexDef>,
-    },
-    /// Drops `def`, an index the target no longer declares.
-    Drop(IndexDef),
-}
-
-impl IndexOp {
-    /// The index the step names.
-    pub fn name(&self) -> &str {
-        match self {
-            IndexOp::Build { def, .. } | IndexOp::Drop(def) => &def.name,
-        }
+/// The table and the index an index step names: the planner's `AddIndex`,
+/// `RedefineIndex` or `DropIndex`, or `None` for any other op.
+pub(super) fn index_of(op: &MigrationOp) -> Option<(&str, &str)> {
+    match op {
+        MigrationOp::AddIndex { table, name, .. }
+        | MigrationOp::RedefineIndex { table, name }
+        | MigrationOp::DropIndex { table, name } => Some((table, name)),
+        _ => None,
     }
-
-    /// The planner's op this step runs: an `AddIndex` of the target's
-    /// declaration, a `RedefineIndex` over the parent's, or a `DropIndex`.
-    pub(super) fn op(&self) -> MigrationOp {
-        match self {
-            IndexOp::Build {
-                def,
-                replaces: None,
-            } => MigrationOp::AddIndex {
-                table: def.table.clone(),
-                name: def.name.clone(),
-                columns: def.columns.clone(),
-                unique: def.unique,
-            },
-            IndexOp::Build { def, .. } => MigrationOp::RedefineIndex {
-                table: def.table.clone(),
-                name: def.name.clone(),
-            },
-            IndexOp::Drop(def) => MigrationOp::DropIndex {
-                table: def.table.clone(),
-                name: def.name.clone(),
-            },
-        }
-    }
-}
-
-/// Every standalone index `model` declares: its `indexes` and `uniques`
-/// entries, a column flag's index among them.
-pub(super) fn declared_indexes(model: &SchemaModel) -> Vec<IndexDef> {
-    standalone_indexes(model)
-        .into_iter()
-        .map(|(name, columns, unique)| IndexDef {
-            table: model.table_name.clone(),
-            name,
-            columns,
-            unique,
-        })
-        .collect()
 }
 
 /// Remove the index `name` from `model`: its `indexes` / `uniques` entry and
@@ -141,9 +77,9 @@ fn remove_index(model: &mut SchemaModel, name: &str) {
 
 /// Whether `model` declares the index `name`, by an entry or a column flag.
 pub(super) fn declares_index(model: &SchemaModel, name: &str) -> bool {
-    declared_indexes(model)
+    standalone_indexes(model)
         .iter()
-        .any(|index| index.name == name)
+        .any(|(declared, ..)| declared == name)
 }
 
 /// Put `parent`'s declaration of the index `name` back into `model`: its
@@ -169,26 +105,28 @@ pub(super) fn restore_index(model: &mut SchemaModel, parent: &SchemaModel, name:
 }
 
 /// The schema as it stands between the migration's earlier steps and its
-/// index steps: `target` with every one of `ops` undone — an index a step
-/// builds left out, an index a step drops or redefines kept as `parent`
-/// declared it.
+/// index steps: `target` with every one of the index steps' `ops` undone —
+/// an index an `AddIndex` builds left out, an index a `DropIndex` or a
+/// `RedefineIndex` changes kept as `parent` declared it. Every stage of a
+/// migration is built this way, as the target with the later steps' ops
+/// undone (ADR-0050 § "The generator plans once", as built).
 pub fn schema_shape(
     parent: &IrEnvelope<SchemaIrPayload>,
     target: &IrEnvelope<SchemaIrPayload>,
-    ops: &[IndexOp],
+    ops: &[MigrationOp],
 ) -> IrEnvelope<SchemaIrPayload> {
     let mut shape = target.clone();
     for op in ops {
-        let (table, name, restore) = match op {
-            IndexOp::Build { def, replaces } => (&def.table, &def.name, replaces.is_some()),
-            IndexOp::Drop(def) => (&def.table, &def.name, true),
+        let Some((table, name)) = index_of(op) else {
+            continue;
         };
+        let restore = !matches!(op, MigrationOp::AddIndex { .. });
         let (Some(model), Some(before)) = (
             shape
                 .payload
                 .models
                 .iter_mut()
-                .find(|model| &model.table_name == table),
+                .find(|model| model.table_name == table),
             find_model(parent, table),
         ) else {
             continue;
@@ -227,12 +165,17 @@ fn builds_unique(ops: &[MigrationOp], new: &IrEnvelope<SchemaIrPayload>) -> bool
 /// # Errors
 /// An op that cannot render.
 pub(super) fn index_step(
-    op: &IndexOp,
+    op: &MigrationOp,
     before: &IrEnvelope<SchemaIrPayload>,
     after: &IrEnvelope<SchemaIrPayload>,
     dialects: &[Dialect],
 ) -> Result<GeneratedStep, GenerateError> {
-    let up_ops = vec![op.op()];
+    let Some((_, name)) = index_of(op) else {
+        return Err(GenerateError::Render(format!(
+            "an index step runs an index op, not {op:?}"
+        )));
+    };
+    let up_ops = vec![op.clone()];
     let mut renderings = BTreeMap::new();
     for &dialect in dialects {
         let up: Vec<String> = render_ops(
@@ -278,7 +221,7 @@ pub(super) fn index_step(
     }
     Ok(GeneratedStep {
         ordinal: 0,
-        name: op.name().to_string(),
+        name: name.to_string(),
         kind: StepKind::Ddl,
         renderings,
         data: None,

@@ -11,6 +11,8 @@
 //!                               CREATE TEMP TABLE "_ferro_rebuild_guard" ("value", CONSTRAINT "ferro: author.age has a value that cannot become varchar" CHECK (0));
 //!                               INSERT INTO "_ferro_rebuild_guard" ("value") SELECT "age" FROM "_ferro_new_author" WHERE typeof("age") NOT IN ('text', 'null');
 //!                               DROP TABLE "_ferro_rebuild_guard";
+//!                               DELETE FROM sqlite_sequence WHERE name = '_ferro_new_author';
+//!                               INSERT INTO sqlite_sequence (name, seq) SELECT '_ferro_new_author', seq FROM sqlite_sequence WHERE name = 'author';
 //!                               DROP TABLE "author";
 //!                               ALTER TABLE "_ferro_new_author" RENAME TO "author";
 //!                               CREATE UNIQUE INDEX IF NOT EXISTS "uq_author_name" ON "author" ("name");
@@ -273,15 +275,53 @@ fn guard_statements(
     ])
 }
 
+/// Whether the create pass writes `model`'s primary key `INTEGER PRIMARY KEY
+/// AUTOINCREMENT` on SQLite: a primary-key column flagged autoincrement, the
+/// flags [`render_create_table_as`] reads.
+fn is_autoincrement(model: &SchemaModel) -> bool {
+    model
+        .columns
+        .iter()
+        .any(|col| col.primary_key && col.autoincrement)
+}
+
+/// The statements that hand `table`'s `AUTOINCREMENT` high-water mark to
+/// `new_table` before `table` is dropped (dropping it deletes its
+/// `sqlite_sequence` row): without them the new table's sequence would
+/// restart at the largest id copied, and the id of a row deleted from the
+/// end would be handed out again, which `AUTOINCREMENT` exists to prevent.
+/// The copy may or may not have written `new_table` a row, and
+/// `sqlite_sequence` has no key to replace on, so the row is deleted and
+/// written again from `table`'s; `table`'s mark is at least every id it
+/// holds, and with no row for `table` (it was not `AUTOINCREMENT`) SQLite
+/// starts after the largest id, as it would have. `ALTER TABLE … RENAME`
+/// then renames the row with the table.
+fn carry_sequence(table: &str, new_table: &str) -> [String; 2] {
+    let literal = |name: &str| format!("'{}'", name.replace('\'', "''"));
+    [
+        format!(
+            "DELETE FROM sqlite_sequence WHERE name = {}",
+            literal(new_table)
+        ),
+        format!(
+            "INSERT INTO sqlite_sequence (name, seq) SELECT {}, seq FROM sqlite_sequence \
+             WHERE name = {}",
+            literal(new_table),
+            literal(table)
+        ),
+    ]
+}
+
 /// The statements that rebuild `table` from `shape_before` into
 /// `shape_after` on SQLite: `CREATE TABLE "_ferro_new_<table>"` as the create
 /// pass writes `shape_after`; `INSERT … SELECT` of every column both shapes
 /// hold, as it stands, and of each column `casts` names (`(column,
 /// sql_expr)`: the value to copy, such as the backfill literal for a new
 /// `NOT NULL` column); for each column whose type changed, a check that
-/// every copied value became the new type ([`conversion_guard`]); `DROP
-/// TABLE`; the rename; then `shape_after`'s ferro-owned indexes as the create
-/// pass builds them.
+/// every copied value became the new type ([`conversion_guard`]); for an
+/// `AUTOINCREMENT` table, its sequence carried to the new one
+/// ([`carry_sequence`]); `DROP TABLE`; the rename; then `shape_after`'s
+/// ferro-owned indexes as the create pass builds them.
 ///
 /// A column only `shape_after` holds and `casts` does not name gets no
 /// value: `NULL`, which a `NOT NULL` column refuses on a populated table
@@ -338,6 +378,9 @@ pub fn render(
         ));
     }
     out.extend(guards);
+    if is_autoincrement(shape_after) {
+        out.extend(carry_sequence(table, &new_table));
+    }
     out.push(format!("DROP TABLE {}", quote_ident(table)));
     out.push(format!(
         "ALTER TABLE {} RENAME TO {}",
@@ -770,15 +813,15 @@ mod tests {
              SELECT \"id\", \"name\", \"age\", \"email\" FROM \"author\""
         );
         assert_eq!(
-            statements[5..7],
+            statements[7..9],
             [
                 "DROP TABLE \"author\"".to_string(),
                 "ALTER TABLE \"_ferro_new_author\" RENAME TO \"author\"".to_string(),
             ]
         );
-        assert_eq!(statements[7..], create.post_create_sqls[..]);
+        assert_eq!(statements[9..], create.post_create_sqls[..]);
         assert_eq!(
-            statements[7],
+            statements[9],
             "CREATE UNIQUE INDEX IF NOT EXISTS \"uq_author_email\" ON \"author\" (\"email\")"
         );
         assert_eq!(rebuilt_tables(&statements), ["author"]);
@@ -966,7 +1009,7 @@ mod tests {
         let after = author(vec![nullable("age", "integer")]);
         let statements = render("author", &after, &before, &[]).expect("render");
         assert_eq!(
-            statements[1..7],
+            statements[1..9],
             [
                 "INSERT INTO \"_ferro_new_author\" (\"id\", \"name\", \"age\") \
                  SELECT \"id\", \"name\", \"age\" FROM \"author\""
@@ -978,6 +1021,10 @@ mod tests {
                  \"_ferro_new_author\" WHERE typeof(\"age\") NOT IN ('integer', 'null')"
                     .to_string(),
                 "DROP TABLE \"_ferro_rebuild_guard\"".to_string(),
+                "DELETE FROM sqlite_sequence WHERE name = '_ferro_new_author'".to_string(),
+                "INSERT INTO sqlite_sequence (name, seq) SELECT '_ferro_new_author', seq \
+                 FROM sqlite_sequence WHERE name = 'author'"
+                    .to_string(),
                 "DROP TABLE \"author\"".to_string(),
                 "ALTER TABLE \"_ferro_new_author\" RENAME TO \"author\"".to_string(),
             ]
@@ -996,6 +1043,47 @@ mod tests {
                 .contains("author.x from varchar to DATETIME"),
             "{}",
             refused.message
+        );
+    }
+
+    #[test]
+    fn an_autoincrement_tables_rebuild_carries_its_sequence_and_a_plain_ones_does_not() {
+        // `INTEGER PRIMARY KEY AUTOINCREMENT` never hands out an id again:
+        // the new table takes the old one's high-water mark before the old
+        // table (and its `sqlite_sequence` row) is dropped; the rename then
+        // moves the row to the real name.
+        let before = author(vec![nullable("age", "integer")]);
+        let mut after = before.clone();
+        after.columns[2] = nullable("age", "string");
+        let statements = render("author", &after, &before, &[]).expect("render");
+        let carry = [
+            "DELETE FROM sqlite_sequence WHERE name = '_ferro_new_author'".to_string(),
+            "INSERT INTO sqlite_sequence (name, seq) SELECT '_ferro_new_author', seq \
+             FROM sqlite_sequence WHERE name = 'author'"
+                .to_string(),
+            "DROP TABLE \"author\"".to_string(),
+        ];
+        let drop = statements
+            .iter()
+            .position(|s| s == "DROP TABLE \"author\"")
+            .expect("drop");
+        assert_eq!(statements[drop - 2..=drop], carry);
+        assert!(statements[0].contains("AUTOINCREMENT"), "{}", statements[0]);
+
+        // A plain `INTEGER PRIMARY KEY` has no sequence row to carry.
+        let plain = |mut model: SchemaModel| {
+            model.columns[0].autoincrement = false;
+            model
+        };
+        let statements = render("author", &plain(after), &plain(before), &[]).expect("render");
+        assert!(
+            !statements[0].contains("AUTOINCREMENT"),
+            "{}",
+            statements[0]
+        );
+        assert!(
+            statements.iter().all(|s| !s.contains("sqlite_sequence")),
+            "{statements:?}"
         );
     }
 

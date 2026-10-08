@@ -127,6 +127,8 @@ For each target dialect, the generator plans the parent snapshot to the target o
 
 A phase is assigned once, so the refusals that guarded against a re-plan producing an op in the wrong phase are no longer needed and go. Index steps are built from the planner's own index ops (ADR-0051).
 
+As built (2026-10-08, panel 2 F21): `Stages` does not apply ops forward from the parent. It builds each stage as the target with the later steps' ops undone: an index an index step changes is put back as the parent declared it (`schema_shape`), a demanded column is held nullable, a removed label is kept declared, and what the contract drops is kept. Each undo reads only the ops the plan placed in later phases, so the stages still come from the one plan. Applying the ops forward would take the same edits from the other end; the undo was kept because it starts from the target, which already holds every declaration the later steps build. No stage is planned again.
+
 The generator also lays out the steps a person asks for (`--sql-step`, `--data-step`) on both paths, whether or not the models changed: the SQL step right before the data step, or last. A migration made only of such steps stores the **target** snapshot, as the glossary defines a schema snapshot ("the declared modelset as it was when a migration was generated"). Today Python lays out that case itself and copies the parent's snapshot.
 
 ## One decider, one renderer

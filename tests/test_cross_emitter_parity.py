@@ -882,6 +882,28 @@ FINDINGS: dict[str, Finding] = {
         pins=frozenset({"g"}),
         dialects=frozenset({"sqlite"}),
     ),
+    "A2-required-column-with-a-literal-default": Finding(
+        reason=(
+            "pin (e), server defaults: SQLite has no ALTER COLUMN DROP DEFAULT, "
+            "so the backfill DEFAULT 'free' of `ADD COLUMN \"tier\" varchar NOT "
+            "NULL DEFAULT 'free'` stays in the migrated table; the auto-migrated "
+            "one, created with the column, holds none (ADR-0027)"
+        ),
+        raises=AssertionError,
+        pins=frozenset({"e-defaults"}),
+        dialects=frozenset({"sqlite"}),
+    ),
+    "B3-rename-a-model": Finding(
+        reason=(
+            'pin (e), server defaults: ALTER TABLE "writer" RENAME TO '
+            '"author" keeps the serial\'s sequence, so the migrated '
+            '"author"."id" defaults to nextval(\'writer_id_seq\') where the '
+            "auto-migrated one defaults to nextval('author_id_seq')"
+        ),
+        raises=AssertionError,
+        pins=frozenset({"e-defaults"}),
+        dialects=frozenset({"postgres"}),
+    ),
 }
 
 
@@ -1474,6 +1496,33 @@ def test_pin_d_the_validate_step_is_the_pass_statement(
 # -- pin (e): a migrated database is an auto-migrated one -----------------------------
 
 
+def column_defaults(db: Db) -> dict[tuple[str, str], str | None]:
+    """Every column's server default as the catalog holds it (Postgres
+    ``pg_attrdef`` through ``information_schema.columns``, SQLite's
+    ``dflt_value``), keyed ``(table, column)``, ferro's own ``_ferro_*``
+    tables left out."""
+    if db.backend == "sqlite":
+        tables = db.rows(
+            "SELECT name FROM sqlite_master WHERE type = 'table' "
+            "AND name NOT LIKE 'sqlite%'"
+        )
+        rows = [
+            (table, row[1], row[4])
+            for (table,) in tables
+            for row in db.rows(f'PRAGMA table_info("{table}")')
+        ]
+    else:
+        rows = db.rows(
+            "SELECT table_name, column_name, column_default "
+            f"FROM information_schema.columns WHERE table_schema = '{db.schema}'"
+        )
+    return {
+        (table, column): default
+        for table, column, default in rows
+        if not table.startswith("_ferro_")
+    }
+
+
 @pytest.mark.parametrize("case_id", CASE_IDS)
 def test_pin_e_a_migrated_database_is_the_auto_migrated_one(
     project, second_db, case_id, db_url, db_backend, postgres_base_url, db_schema_name
@@ -1498,6 +1547,33 @@ def test_pin_e_a_migrated_database_is_the_auto_migrated_one(
     _empty_autogenerate(second, postgres_base_url, second_schema)
     with pytest.raises(RuntimeError, match="tracked by ferro migrations"):
         autogenerate(db_url, postgres_base_url, db_schema_name)
+
+
+@pytest.mark.parametrize("case_id", CASE_IDS)
+def test_pin_e_a_migrated_database_holds_the_auto_migrated_server_defaults(
+    request,
+    project,
+    second_db,
+    case_id,
+    db_url,
+    db_backend,
+    postgres_base_url,
+    db_schema_name,
+):
+    """Pin (e) on the one artifact the live read does not carry: every
+    column's server default (AGENTS.md I-1 item 9; ferro persists none,
+    ADR-0027), compared on the catalog itself between the database the
+    chain ``0001`` → ``0002`` migrated and the one ``connect(auto_migrate=
+    True)`` built from the same models. Its own test, so a finding against
+    it (``"e-defaults"``) leaves the rest of pin (e) pinned."""
+    expect_finding(request, case_id, db_backend, "e-defaults")
+    migrate_through(project, CASEBOOK[case_id], db_url, db_backend)
+    second, second_schema = second_db
+    project.register(CASEBOOK[case_id].after)
+    auto_migrate(second)
+    migrated = Db(db_url, db_backend, postgres_base_url, db_schema_name)
+    auto = Db(second, db_backend, postgres_base_url, second_schema)
+    assert column_defaults(migrated) == column_defaults(auto), case_id
 
 
 # -- pin (f): the bridge's revision runs the pass's DDL -------------------------------
