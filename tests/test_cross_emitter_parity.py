@@ -890,7 +890,7 @@ FINDINGS: dict[str, Finding] = {
             "one, created with the column, holds none (ADR-0027)"
         ),
         raises=AssertionError,
-        pins=frozenset({"e"}),
+        pins=frozenset({"e-defaults"}),
         dialects=frozenset({"sqlite"}),
     ),
     "B3-rename-a-model": Finding(
@@ -901,7 +901,7 @@ FINDINGS: dict[str, Finding] = {
             "auto-migrated one defaults to nextval('author_id_seq')"
         ),
         raises=AssertionError,
-        pins=frozenset({"e"}),
+        pins=frozenset({"e-defaults"}),
         dialects=frozenset({"postgres"}),
     ),
 }
@@ -1525,24 +1525,15 @@ def column_defaults(db: Db) -> dict[tuple[str, str], str | None]:
 
 @pytest.mark.parametrize("case_id", CASE_IDS)
 def test_pin_e_a_migrated_database_is_the_auto_migrated_one(
-    request,
-    project,
-    second_db,
-    case_id,
-    db_url,
-    db_backend,
-    postgres_base_url,
-    db_schema_name,
+    project, second_db, case_id, db_url, db_backend, postgres_base_url, db_schema_name
 ):
     """The chain ``0001`` → ``0002`` leaves no drift; a second database
     ``connect(auto_migrate=True)`` builds from the same models has the same
-    live schema, facts included, and the same server default on every column
-    (AGENTS.md I-1 item 9: none, ADR-0027); Alembic autogenerate writes
-    nothing against the auto-migrated one. Against the migrated one it refuses, by design:
+    live schema, facts included; Alembic autogenerate writes nothing against
+    the auto-migrated one. Against the migrated one it refuses, by design:
     a database the tracking table marks is ``ferro migrate new``'s, and the
     bridge reads the very live schema just shown equal, so it has nothing
     to say there either."""
-    expect_finding(request, case_id, db_backend, "e")
     case = CASEBOOK[case_id]
     migrate_through(project, case, db_url, db_backend)
 
@@ -1556,9 +1547,30 @@ def test_pin_e_a_migrated_database_is_the_auto_migrated_one(
     _empty_autogenerate(second, postgres_base_url, second_schema)
     with pytest.raises(RuntimeError, match="tracked by ferro migrations"):
         autogenerate(db_url, postgres_base_url, db_schema_name)
-    # The live read carries no server default (ferro persists none,
-    # ADR-0027), so AGENTS.md I-1 item 9 is compared on the catalog itself,
-    # last: a finding below marks only this comparison.
+
+
+@pytest.mark.parametrize("case_id", CASE_IDS)
+def test_pin_e_a_migrated_database_holds_the_auto_migrated_server_defaults(
+    request,
+    project,
+    second_db,
+    case_id,
+    db_url,
+    db_backend,
+    postgres_base_url,
+    db_schema_name,
+):
+    """Pin (e) on the one artifact the live read does not carry: every
+    column's server default (AGENTS.md I-1 item 9; ferro persists none,
+    ADR-0027), compared on the catalog itself between the database the
+    chain ``0001`` → ``0002`` migrated and the one ``connect(auto_migrate=
+    True)`` built from the same models. Its own test, so a finding against
+    it (``"e-defaults"``) leaves the rest of pin (e) pinned."""
+    expect_finding(request, case_id, db_backend, "e-defaults")
+    migrate_through(project, CASEBOOK[case_id], db_url, db_backend)
+    second, second_schema = second_db
+    project.register(CASEBOOK[case_id].after)
+    auto_migrate(second)
     migrated = Db(db_url, db_backend, postgres_base_url, db_schema_name)
     auto = Db(second, db_backend, postgres_base_url, second_schema)
     assert column_defaults(migrated) == column_defaults(auto), case_id
