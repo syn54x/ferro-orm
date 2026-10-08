@@ -474,6 +474,15 @@ impl MigrationOp {
             | MigrationOp::NoForceRowSecurity { table } => Some(table),
         }
     }
+
+    /// Whether the op is a label added to an enum type, which runs alone:
+    /// Postgres lets no later statement of the transaction that added a
+    /// label use it. The generator writes such ops in their own `labels`
+    /// step, first in the migration; the Alembic bridge runs them in an
+    /// autocommit block.
+    pub(crate) fn commits_alone(&self) -> bool {
+        matches!(self, MigrationOp::AddEnumLabel { .. })
+    }
 }
 
 /// Whether one live FK constraint is validated (`pg_constraint.convalidated`;

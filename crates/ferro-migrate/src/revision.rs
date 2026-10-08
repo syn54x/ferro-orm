@@ -547,19 +547,12 @@ fn written(
         statements,
         row_security_statements,
         twin,
-        autocommit: commits_alone(&planned.op),
+        autocommit: planned.op.commits_alone(),
         foreign_key,
         index,
         marker,
         irreversible: None,
     })
-}
-
-/// Whether `op`'s statements must be committed before a later statement of
-/// the same revision runs: a label added to an enum type, which Postgres
-/// lets no statement of the transaction that added it use.
-fn commits_alone(op: &MigrationOp) -> bool {
-    matches!(op, MigrationOp::AddEnumLabel { .. })
 }
 
 /// Whether Alembic's own op writes `op` (ADR-0041's list). A column add the

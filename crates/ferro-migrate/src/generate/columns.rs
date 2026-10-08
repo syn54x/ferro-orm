@@ -71,7 +71,7 @@ pub(crate) fn phase(op: &PlannedOp, data_steps: bool) -> Option<Phase> {
     ) {
         return None;
     }
-    Some(if matches!(op.op, MigrationOp::AddEnumLabel { .. }) {
+    Some(if op.op.commits_alone() {
         Phase::Labels
     } else if verdict.demands_values {
         Phase::Backfill
