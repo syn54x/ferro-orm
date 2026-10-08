@@ -25,7 +25,7 @@ use super::staging::{self, IndexOp};
 use super::{GenerateError, find_model, phase_of, plan, refuse_unsupported};
 use crate::emit::column_riders;
 use crate::plan::declared_label_additions;
-use crate::{Dialect, MigrationOp, Plan};
+use crate::{Dialect, MigrationOp, Plan, Rider};
 use ferro_ddl_lowering::schema_columns_storage_drift;
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload};
 use std::collections::BTreeSet;
@@ -120,7 +120,7 @@ impl Layout {
 
         let mut placed = Vec::new();
         for (&dialect, planned) in dialects.iter().zip(plans) {
-            placed.push(place(dialect, planned, target, data_steps)?);
+            placed.push(place(dialect, planned, data_steps)?);
         }
         let held: Vec<MigrationOp> = placed.iter().flat_map(|p| p.held.clone()).collect();
         let expanded = backfill::with_drops_kept(
@@ -217,27 +217,10 @@ impl Layout {
 
 /// `planned`'s ops placed by their phase in a migration that has
 /// (`data_steps`) or lacks a data step.
-fn place(
-    dialect: Dialect,
-    planned: Plan,
-    target: &IrEnvelope<SchemaIrPayload>,
-    data_steps: bool,
-) -> Result<Placed, GenerateError> {
-    let relabelled: BTreeSet<(String, String)> = planned
-        .ops()
-        .filter_map(|op| match op {
-            MigrationOp::RemoveEnumLabel { columns, .. } => Some(columns.iter().cloned()),
-            _ => None,
-        })
-        .flatten()
-        .collect();
+fn place(dialect: Dialect, planned: Plan, data_steps: bool) -> Result<Placed, GenerateError> {
     let (mut labels, mut schema, mut held, mut relabel) =
         (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     for op in &planned.operations {
-        if rides_removed_label(&op.op, &relabelled, target) {
-            relabel.push(op.op.clone());
-            continue;
-        }
         match (phase_of(op, data_steps)?, &op.op) {
             (Phase::Labels, _) => labels.push(op.op.clone()),
             // A demanded column is added nullable by the expand; its
@@ -246,6 +229,10 @@ fn place(
                 schema.push(op.op.clone());
             }
             (Phase::Backfill, MigrationOp::RemoveEnumLabel { .. }) => relabel.push(op.op.clone()),
+            // A removed label's change of a column that held it.
+            (Phase::Contract, _) if op.verdict.goes_with == Some(Rider::RemovedLabel) => {
+                relabel.push(op.op.clone());
+            }
             (Phase::Contract, _) => held.push(op.op.clone()),
             // A column made `NOT NULL` is the contract's (its demand), and an
             // index change its own index step ([`index_ops`]).
@@ -260,26 +247,6 @@ fn place(
         held,
         relabel,
     })
-}
-
-/// Whether `op` is a change a removed enum label makes to a column that
-/// held it (`relabelled`): the column's own check rebuilt to the labels
-/// left, or its storage narrowed to them. It runs in the contract, after
-/// the backfill has moved every row off the label.
-fn rides_removed_label(
-    op: &MigrationOp,
-    relabelled: &BTreeSet<(String, String)>,
-    target: &IrEnvelope<SchemaIrPayload>,
-) -> bool {
-    match op {
-        MigrationOp::AlterColumnType { table, column } => {
-            relabelled.contains(&(table.clone(), column.clone()))
-        }
-        MigrationOp::RebuildCheck { table, name } => find_model(target, table)
-            .and_then(|model| model.checks.iter().find(|check| &check.name == name))
-            .is_some_and(|check| relabelled.contains(&(table.clone(), check.column.clone()))),
-        _ => false,
-    }
 }
 
 /// Whether the expand already changes `op`'s artifact (a label removal's

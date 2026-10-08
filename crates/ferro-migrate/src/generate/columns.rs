@@ -59,6 +59,7 @@ impl Phase {
 /// | :-- | :-- |
 /// | an enum label added | labels |
 /// | demands values of existing rows | backfill (the migration's expand → backfill → contract) |
+/// | rides a removed label (its column's check, its storage) | contract |
 /// | drops data, or goes with a dropped column, beside a data step | contract |
 /// | an index built, dropped or redefined on a table that stays, also over a column the migration adds (ADR-0044) | index |
 /// | anything else, natively or by a SQLite rebuild | schema |
@@ -74,6 +75,9 @@ pub(crate) fn phase(op: &PlannedOp, data_steps: bool) -> Option<Phase> {
         Phase::Labels
     } else if verdict.demands_values {
         Phase::Backfill
+    } else if verdict.goes_with == Some(Rider::RemovedLabel) {
+        // After the backfill has moved every row off the label.
+        Phase::Contract
     } else if data_steps && (verdict.drops_data || verdict.goes_with == Some(Rider::DroppedColumn))
     {
         Phase::Contract
@@ -738,6 +742,58 @@ mod tests {
             // (the reader's choice), it scans nothing.
             assert_eq!(v.fails_on_rows, RowRisk::WhenValidated);
         }
+    }
+
+    #[test]
+    fn a_removed_labels_check_and_storage_ride_it_into_the_contract() {
+        let status = |labels: &[&str]| {
+            let mut model = author(vec![SchemaColumn {
+                enum_values: Some(labels.iter().map(|l| serde_json::json!(l)).collect()),
+                enum_type_name: Some("status".into()),
+                db_type: Some("text".into()),
+                db_type_explicit: Some(true),
+                ..column("status", "string")
+            }]);
+            model.checks.push(SchemaCheck {
+                name: "ck_author_status".into(),
+                column: "status".into(),
+                values: labels.iter().map(|l| format!("'{l}'")).collect(),
+            });
+            model
+        };
+        let rebuild = MigrationOp::RebuildCheck {
+            table: "author".into(),
+            name: "ck_author_status".into(),
+        };
+        let narrow = MigrationOp::AlterColumnType {
+            table: "author".into(),
+            column: "status".into(),
+        };
+        let (before, after) = (
+            status(&["draft", "canceled", "live"]),
+            status(&["draft", "live"]),
+        );
+        for dialect in DIALECTS {
+            for op in [&rebuild, &narrow] {
+                let planned =
+                    verdict_between(op, vec![before.clone()], vec![after.clone()], dialect);
+                assert_eq!(
+                    planned.verdict.goes_with,
+                    Some(Rider::RemovedLabel),
+                    "{op:?}"
+                );
+                assert_eq!(phase(&planned, true), Some(Phase::Contract), "{op:?}");
+            }
+        }
+        // A label added rides nothing: the check widens where it stands.
+        let widened = verdict_between(
+            &rebuild,
+            vec![after.clone()],
+            vec![before.clone()],
+            Dialect::Postgres,
+        );
+        assert_eq!(widened.verdict.goes_with, None);
+        assert_eq!(phase(&widened, false), Some(Phase::Schema));
     }
 
     #[test]

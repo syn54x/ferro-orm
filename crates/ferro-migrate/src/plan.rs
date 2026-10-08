@@ -1765,6 +1765,10 @@ pub enum Rider {
     DroppedColumn,
     /// An index, check or foreign key over a column the same plan adds.
     AddedColumn,
+    /// A change an enum label's removal makes to a column that held it
+    /// (#536): the column's own check rebuilt to the labels left, or its
+    /// storage narrowed to them. It runs once no row holds the label.
+    RemovedLabel,
 }
 
 impl PlannedOp {
@@ -1799,7 +1803,10 @@ fn verdict(op: &MigrationOp, before: &Side, target: &Side, dialect: Dialect) -> 
     let table = op.table();
     let was = table.and_then(|table| before.model(table));
     let now = table.and_then(|table| target.model(table));
-    let goes_with = goes_with(op, was, now);
+    let goes_with = goes_with(op, was, now).or_else(|| {
+        (before.plans_label_removals() && rides_removed_label(op, was, now))
+            .then_some(Rider::RemovedLabel)
+    });
     OpVerdict {
         execution: execution(op, was, now, goes_with, target, dialect),
         demands_values: demands_values(op, was, now),
@@ -1909,6 +1916,47 @@ fn goes_with(
             .any(|riders| riders.foreign_key.is_some_and(|fk| &fk.column == column))
             .then_some(Rider::AddedColumn),
         _ => None,
+    }
+}
+
+/// Whether `op` is a change a removed enum label makes to the column that
+/// held it: its own check rebuilt, or its storage changed, while the
+/// column's enum keeps its type and drops a label `was` declares.
+fn rides_removed_label(
+    op: &MigrationOp,
+    was: Option<&SchemaModel>,
+    now: Option<&SchemaModel>,
+) -> bool {
+    let column = match op {
+        MigrationOp::AlterColumnType { column, .. } => column.as_str(),
+        MigrationOp::RebuildCheck { name, .. } => {
+            match now.and_then(|model| model.checks.iter().find(|check| &check.name == name)) {
+                Some(check) => check.column.as_str(),
+                None => return false,
+            }
+        }
+        _ => return false,
+    };
+    let Some(declared) = find_column(now, column) else {
+        return false;
+    };
+    // A label a declared hint renames away is a rename, never a removal.
+    let renamed_away: Vec<&String> = declared
+        .enum_renamed_labels
+        .as_ref()
+        .map(|hints| hints.labels.values().collect())
+        .unwrap_or_default();
+    match (
+        find_column(was, column).and_then(enum_declaration),
+        enum_declaration(declared),
+    ) {
+        (Some((old_type, old)), Some((new_type, new))) => {
+            old_type == new_type
+                && old
+                    .iter()
+                    .any(|label| !new.contains(label) && !renamed_away.contains(&label))
+        }
+        _ => false,
     }
 }
 
