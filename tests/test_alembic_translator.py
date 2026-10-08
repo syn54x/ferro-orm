@@ -44,6 +44,7 @@ from ferro import (
 from ferro.base import FerroField
 from ferro.raw import execute
 from ferro.session import engines
+from tests._pg_sequence import pg_sequence_rename
 from tests._alembic_harness import (
     assert_statement_in_code,
     autogen_opts,
@@ -311,18 +312,6 @@ async def test_rename_hints_render_alembic_renames_and_the_derived_names(
     assert await _drift(db_url) == []
 
 
-def _sequence_rename(table: str, column: str = "id") -> str:
-    """The pass's statement giving ``table``'s ``column`` sequence the name
-    a fresh ``CREATE TABLE`` gives it (``<table>_<column>_seq``)."""
-    target = f"{table}_{column}_seq"
-    return (
-        f"DO $$ DECLARE seq regclass := pg_get_serial_sequence('\"{table}\"', "
-        f"'{column}')::regclass; BEGIN IF seq IS NOT NULL AND (SELECT relname FROM "
-        f"pg_class WHERE oid = seq) <> '{target}' THEN EXECUTE format('ALTER SEQUENCE "
-        f"%s RENAME TO %I', seq, '{target}'); END IF; END $$"
-    )
-
-
 @pytest.mark.backend_matrix
 @pytest.mark.postgres_only
 @pytest.mark.asyncio
@@ -348,10 +337,12 @@ async def test_a_table_rename_carries_its_serial_sequence_as_the_passs_statement
     upgrade, downgrade = autogenerate(db_url, postgres_base_url, db_schema_name)
     assert "op.rename_table('tr533card', 'tr533deck')" in upgrade, upgrade
     # `sa.DDL` reads `%` as a bind marker: the bridge writes it doubled.
-    assert_statement_in_code(_sequence_rename("tr533deck").replace("%", "%%"), upgrade)
+    assert_statement_in_code(
+        pg_sequence_rename("tr533deck").replace("%", "%%"), upgrade
+    )
     assert "op.rename_table('tr533deck', 'tr533card')" in downgrade, downgrade
     assert_statement_in_code(
-        _sequence_rename("tr533card").replace("%", "%%"), downgrade
+        pg_sequence_rename("tr533card").replace("%", "%%"), downgrade
     )
 
     def key_default() -> str:
@@ -406,8 +397,8 @@ async def test_a_table_and_its_serial_key_renamed_together_carry_the_sequence_in
     renamed()
     upgrade, downgrade = autogenerate(db_url, postgres_base_url, db_schema_name)
     code = " ".join(upgrade.split())
-    first = repr(_sequence_rename("tr533deck").replace("%", "%%"))
-    second = repr(_sequence_rename("tr533deck", "card_id").replace("%", "%%"))
+    first = repr(pg_sequence_rename("tr533deck").replace("%", "%%"))
+    second = repr(pg_sequence_rename("tr533deck", "card_id").replace("%", "%%"))
     order = [
         code.index("op.rename_table('tr533card', 'tr533deck')"),
         code.index(first),

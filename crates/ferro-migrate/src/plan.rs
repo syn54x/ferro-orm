@@ -2156,6 +2156,8 @@ fn sqlite_rebuilds(
         // ferro persists no server default (ADR-0027), and SQLite has no
         // `ALTER COLUMN … DROP DEFAULT` to take a backfill `DEFAULT` off
         // again: only a rebuild adds a column `NOT NULL` and default-free.
+        // The pass, which never rebuilds, adds one with a literal default as
+        // `NOT NULL DEFAULT <literal>` (ADR-0034, the SQLite exception).
         MigrationOp::AddColumn { column, .. } => {
             find_column(now, column).is_some_and(|col| !col.nullable)
         }

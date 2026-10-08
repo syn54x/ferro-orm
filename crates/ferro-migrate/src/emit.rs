@@ -5,11 +5,10 @@ use ferro_ddl_lowering::{
     self, CheckEmission, ConstraintMode, IndexMode, ResolvedStorage, apply_canonical_type_for,
     canonical_from_schema_column, canonical_to_db_type_token, db_check_constraint_name,
     fk_action_from_str, fk_action_sql, fk_name, literal_default_value, pg_alter_type_target,
-    quote_ident, refused_conversion_warning, refused_scalar_conversion, render_backfill_update,
-    render_db_check, render_json_backfill_default, render_pg_enum_create_type,
-    render_sqlite_add_column_references, render_table_check_body, resolve_column_storage,
-    row_security_statements, single_index_name, single_unique_index_name, sqlite_declared_type,
-    sqlite_type_storage_drift,
+    quote_ident, refused_conversion_warning, refused_scalar_conversion, render_db_check,
+    render_json_backfill_default, render_pg_enum_create_type, render_sqlite_add_column_references,
+    render_table_check_body, resolve_column_storage, row_security_statements, single_index_name,
+    single_unique_index_name, sqlite_declared_type, sqlite_type_storage_drift,
 };
 use ferro_ddl_lowering::{InPlaceChange, Report, Subject, sqlite_in_place_report};
 use ferro_schema_ir::{SchemaColumn, SchemaModel};
@@ -545,22 +544,15 @@ pub(crate) fn emit_add_column(
         });
     }
 
-    // SQLite has no `ALTER COLUMN … DROP DEFAULT`: a `NOT NULL … DEFAULT`
-    // add would keep its backfill `DEFAULT` for good, where ferro persists
-    // none (ADR-0027). So SQLite adds a required column nullable, backfills
-    // it with an `UPDATE`, and reports the `NOT NULL` it cannot add in place;
-    // a generated migration rebuilds the table instead (the op's
-    // `Execution::Rebuild` verdict, ADR-0046).
-    let sqlite_relaxed = dialect == Dialect::Sqlite && !col.nullable;
     let mut col_def = ColumnDef::new(Alias::new(column));
     apply_resolved_storage(&mut col_def, &storage, ld);
-    if !col.nullable && !sqlite_relaxed {
+    if !col.nullable {
         col_def.not_null();
-        if let Some(expr) = &json_backfill {
-            col_def.default(Expr::cust(expr.clone()));
-        } else if let Some(default_value) = &scalar_backfill {
-            col_def.default(default_value.clone());
-        }
+    }
+    if let Some(expr) = &json_backfill {
+        col_def.default(Expr::cust(expr.clone()));
+    } else if let Some(default_value) = &scalar_backfill {
+        col_def.default(default_value.clone());
     }
 
     let riders = column_riders(model, column);
@@ -574,11 +566,12 @@ pub(crate) fn emit_add_column(
     append_inline_checks(&mut col_def, &check_emissions, table, column);
 
     // SQLite's ADD COLUMN accepts a column-level REFERENCES clause only when
-    // the added column's default is NULL, which every SQLite add is: a
-    // required column is added nullable (above).
+    // the added column's default is NULL — a nullable add, which never carries
+    // a DEFAULT here. Any other shape keeps its column and warns below.
     let fk = riders.foreign_key;
+    let sqlite_inline_fk = dialect == Dialect::Sqlite && col.nullable;
     if let Some(fk) = fk
-        && dialect == Dialect::Sqlite
+        && sqlite_inline_fk
     {
         col_def.extra(render_sqlite_add_column_references(fk));
     }
@@ -602,27 +595,12 @@ pub(crate) fn emit_add_column(
         Dialect::Postgres => stmt.to_string(PostgresQueryBuilder),
     });
 
-    if sqlite_relaxed {
-        let value = backfill_value_sql(col, dialect)?.ok_or_else(|| EmissionError {
-            message: format!(
-                "NOT NULL column '{table}.{column}' has a backfill default that renders no \
-                 SQLite value"
-            ),
-        })?;
-        result
-            .statements
-            .push(render_backfill_update(table, column, &value));
-        result.reports.push(sqlite_in_place_report(
-            InPlaceChange::AlterColumnNullability,
-            Subject::column(table, column),
-            format!(
-                "Column '{table}.{column}' was added nullable and its existing rows set to \
-                 {value}: SQLite adds a NOT NULL column only with a DEFAULT it keeps for good, \
-                 and the model declares no server default. Generate a reviewed migration \
-                 with `ferro migrate new` to rebuild the table with the column NOT NULL."
-            ),
-        ));
-    } else if has_backfill {
+    // SQLite has no `ALTER COLUMN … DROP DEFAULT`, and the pass never rebuilds
+    // a table (ADR-0014): there the column keeps the model's literal as its
+    // `DEFAULT`, so its nullability and type are the model's (ADR-0034, the
+    // SQLite exception). A generated migration rebuilds the table instead,
+    // with no `DEFAULT` (the op's `Execution::Rebuild` verdict, ADR-0046).
+    if has_backfill && dialect == Dialect::Postgres {
         result.statements.push(format!(
             "ALTER TABLE {} ALTER COLUMN {} DROP DEFAULT",
             quote_ident(table),
@@ -648,12 +626,26 @@ pub(crate) fn emit_add_column(
         result.reports.extend(emission.warning);
     }
 
-    if let Some(fk) = fk
-        && dialect == Dialect::Postgres
-    {
-        result
-            .statements
-            .push(render_add_fk_sql(table, fk, constraints));
+    if let Some(fk) = fk {
+        match dialect {
+            Dialect::Postgres => result
+                .statements
+                .push(render_add_fk_sql(table, fk, constraints)),
+            Dialect::Sqlite if sqlite_inline_fk => {}
+            Dialect::Sqlite => result.reports.push(sqlite_in_place_report(
+                InPlaceChange::AddForeignKey,
+                Subject::column(table, column),
+                format!(
+                    "Added foreign-key column '{}.{}' without its FOREIGN KEY constraint: \
+                     SQLite's ADD COLUMN accepts a REFERENCES clause only for a column whose \
+                     default is NULL, and this column is NOT NULL with a backfill default. \
+                     Referential integrity for this column is not database-enforced; generate \
+                     a reviewed migration with `ferro migrate new` to rebuild the table with \
+                     the constraint.",
+                    table, column
+                ),
+            )),
+        }
     }
 
     Ok(result)

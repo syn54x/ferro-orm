@@ -12,11 +12,11 @@ no drift against 0007_nickname
 
 Drift is what the one planner would change to turn the live database into the
 schema snapshot of the last migration applied to it (ADR-0023). Nothing here
-compares live and declared state: the live database is read into the planner's
-input (``_core._live_schema_ir``, with the live facts beside it), planned
-against the snapshot (``_core._plan_from_ir``, destructive changes on, so
-extra objects are reported too), and each planned op is printed as one line
-(:func:`render_op`). That comparison of the live database with one snapshot
+compares live and declared state: one core call, ``_core._plan_drift``, reads
+the live database into the planner's input, the snapshot's tables by the
+pass's own rule (ADR-0047), and plans it against the snapshot with the one
+planner, destructive changes on, so extra objects are reported too; each
+planned op is printed as one line (:func:`render_op`). That comparison of the live database with one snapshot
 is :func:`against`; ``baseline`` makes the same call with its target's
 snapshot, so the two check exactly the same things.
 

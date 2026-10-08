@@ -29,9 +29,8 @@ model), once, at column-spec compile. Store the JSON dump on the same
 `default` fact `Field(default={})` already uses. Scalar factories are never
 called. ADD COLUMN renders `'{}'::jsonb` / `'{}'::json` / SQLite `'{}'` from
 resolved storage, then drops the default on Postgres. SQLite cannot drop a
-DEFAULT, so it adds the column nullable and backfills with `UPDATE … WHERE col
-IS NULL` (the pass warns about the `NOT NULL`; a generated migration rebuilds
-the table instead).
+DEFAULT, so there the pass keeps it, the model's own literal (ADR-0034, the
+SQLite exception); a generated migration rebuilds the table without it.
 CREATE TABLE still does not emit Field defaults as server defaults.
 
 A factory that raises, needs arguments, or cannot JSON-dump leaves `default`
