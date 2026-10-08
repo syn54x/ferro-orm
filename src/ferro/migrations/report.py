@@ -15,8 +15,11 @@ default (postgres) · public._ferro_migrations
 
 A fully applied or fully pending migration is one line; its steps expand
 where something needs attention, or everywhere with ``--steps``. Every state
-is decided in the Rust core (``_core._run_status``); this module only names
-and prints them (a chunked step's ``rows_done`` comes from its record). ``status`` exits 3 when anything is pending and 4 when
+is decided in the Rust core (``_core._run_status``); this module names and
+prints them (a chunked step's ``rows_done`` comes from its record), and is
+the one place that reads them into where the database stands: its last
+fully applied migration, the one a run left unfinished, and whether
+anything is pending. ``status`` exits 3 when anything is pending and 4 when
 anything needs attention (a failed, interrupted or reverting step, an edited
 file, a database ahead of the checkout, or a refusal ``up`` would meet).
 """
@@ -66,19 +69,40 @@ class RunRefused(MigrationRefused):
         self.reason = reason
 
 
-_WORDS = {
-    "applied": "applied",
-    "applied_different_checksum": "applied (different checksum)",
-    "applied_baseline": "applied (baseline)",
-    "pending": "pending",
-    "running": "running",
-    "failed": "failed",
-    "interrupted": "interrupted",
-    "reverting": "reverting",
+@dataclass(frozen=True)
+class _State:
+    """What one step state means to every reader of a status report."""
+
+    shown: str
+    """The word ``status`` prints."""
+    applied: bool = False
+    """The step has a finished step record, so it is not pending."""
+    unfinished: bool = False
+    """A run left the step part-way, or is in it."""
+    attention: bool = False
+    """A person has to look before anything runs (exit 4)."""
+
+
+_STATES = {
+    "applied": _State("applied", applied=True),
+    "applied_different_checksum": _State(
+        "applied (different checksum)", applied=True, attention=True
+    ),
+    "applied_baseline": _State("applied (baseline)", applied=True),
+    "pending": _State("pending"),
+    "running": _State("running", unfinished=True),
+    "failed": _State("failed", unfinished=True, attention=True),
+    "interrupted": _State("interrupted", unfinished=True, attention=True),
+    "reverting": _State("reverting", unfinished=True, attention=True),
 }
-_ATTENTION = {"applied (different checksum)", "failed", "interrupted", "reverting"}
-_NOT_PENDING = {"applied", "applied (different checksum)", "applied (baseline)"}
+"""The one Python reading of the core's step states (``StepState`` in
+``crates/ferro-migrate/src/run_plan.rs``), keyed by the word the core
+serializes. Every question this module answers about where a step, a
+migration or a database stands is read from this table; ``drift`` and the
+test harness ask the report rather than keep their own copy."""
+_SHOWN = {state.shown: state for state in _STATES.values()}
 _WHOLE = {"applied", "applied (baseline)", "pending"}
+"""The migration states ``status`` prints on one line."""
 
 
 @dataclass(frozen=True)
@@ -110,12 +134,25 @@ class StepStatus:
         return self.state
 
     @property
+    def applied(self) -> bool:
+        """The step has a finished step record (``applied``, ``applied
+        (different checksum)`` or ``applied (baseline)``)."""
+        return _SHOWN[self.state].applied
+
+    @property
+    def unfinished(self) -> bool:
+        """A run left this step part-way, or is in it (``running``,
+        ``failed``, ``interrupted`` or ``reverting``)."""
+        return _SHOWN[self.state].unfinished
+
+    @property
     def needs_attention(self) -> bool:
-        return self.state in _ATTENTION
+        return _SHOWN[self.state].attention
 
     @property
     def pending(self) -> bool:
-        return self.state not in _NOT_PENDING
+        """No finished step record: still to apply."""
+        return not self.applied
 
 
 @dataclass(frozen=True)
@@ -128,6 +165,34 @@ class MigrationStatus:
     steps: list[StepStatus]
 
     @property
+    def applied(self) -> bool:
+        """Every step is applied."""
+        return bool(self.steps) and all(step.applied for step in self.steps)
+
+    @property
+    def pending(self) -> bool:
+        """A step is still to apply."""
+        return any(step.pending for step in self.steps)
+
+    @property
+    def unfinished_step(self) -> StepStatus | None:
+        """The first step a run left part-way (or is in), if any."""
+        return next((step for step in self.steps if step.unfinished), None)
+
+    @property
+    def unfinished(self) -> bool:
+        """A run left this migration part-way: a step is unfinished, or only
+        some of its steps are applied. A wholly pending migration is not."""
+        return self.unfinished_step is not None or (
+            any(step.applied for step in self.steps) and not self.applied
+        )
+
+    @property
+    def running(self) -> bool:
+        """A run holding the run lock is in this migration."""
+        return any(step.state == "running" for step in self.steps)
+
+    @property
     def state(self) -> str:
         """``applied`` / ``applied (baseline)`` / ``pending`` when every
         step agrees; ``running`` while a run is in it; ``applied (different
@@ -136,11 +201,11 @@ class MigrationStatus:
         words = {step.state for step in self.steps}
         if len(words) == 1 and next(iter(words)) in _WHOLE:
             return next(iter(words))
-        if "running" in words:
+        if self.running:
             return "running"
-        if words <= _NOT_PENDING:
+        if not self.pending:
             return "applied (different checksum)"
-        done = sum(1 for step in self.steps if not step.pending)
+        done = sum(1 for step in self.steps if step.applied)
         return f"partial, {done} of {len(self.steps)} steps"
 
     @property
@@ -151,7 +216,16 @@ class MigrationStatus:
 
 @dataclass(frozen=True)
 class StatusReport:
-    """What ``ferro migrate status`` prints, and what ``status()`` returns."""
+    """What ``ferro migrate status`` prints, and what ``status()`` returns.
+
+    It also says where the database stands, for every caller that has to
+    know (``drift``, the test harness). For the database the module
+    docstring shows::
+
+        report.head_applied.name   # "0006_add_teams"
+        report.unfinished.name     # "0007_nickname"
+        report.pending             # True
+    """
 
     database: str
     dialect: str
@@ -165,9 +239,23 @@ class StatusReport:
     refusal_needs_attention: bool = False
 
     @property
+    def head_applied(self) -> MigrationStatus | None:
+        """The last migration every step of which is applied: the one whose
+        schema snapshot the database is measured against. ``None`` when no
+        migration is."""
+        applied = [m for m in self.migrations if m.applied]
+        return applied[-1] if applied else None
+
+    @property
+    def unfinished(self) -> MigrationStatus | None:
+        """The first migration a run left part-way (or is in): the database
+        stands at neither its parent's snapshot nor its own."""
+        return next((m for m in self.migrations if m.unfinished), None)
+
+    @property
     def pending(self) -> bool:
         """Anything still to apply."""
-        return any(step.pending for m in self.migrations for step in m.steps)
+        return any(m.pending for m in self.migrations)
 
     @property
     def needs_attention(self) -> bool:
@@ -214,7 +302,7 @@ class StatusReport:
                     StepStatus(
                         step=s["step"],
                         file=s["file"],
-                        state=_WORDS[s["state"]],
+                        state=_STATES[s["state"]].shown,
                         error=s["error"],
                         applied_checksum=s["applied_checksum"],
                         on_disk_checksum=s["on_disk_checksum"],

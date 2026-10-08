@@ -73,7 +73,6 @@ if TYPE_CHECKING:
 __all__ = ["Harness", "RoundTripResult", "harness"]
 
 _MIGRATION = re.compile(r"(\d{4})(_\w+)?")
-_APPLIED = {"applied", "applied (baseline)", "applied (different checksum)"}
 
 
 @dataclass(frozen=True)
@@ -315,25 +314,22 @@ class Harness:
                 f"harness: the database has applied {', '.join(status.ahead)}, which "
                 f"{self._database.directory} does not hold; nothing was changed."
             )
-        at = -1
-        for index, migration in enumerate(status.migrations):
-            state = migration.state
-            if state in _APPLIED and at == index - 1:
-                at = index
-            elif state == "running" and verb is not None:
+        unfinished = status.unfinished
+        if unfinished is not None and verb is not None:
+            if unfinished.running:
                 raise MigrationRefused(
                     f"harness.{verb}: another migration run holds the run lock on "
-                    f"this database and is applying {migration.name}; nothing was "
+                    f"this database and is applying {unfinished.name}; nothing was "
                     f"applied. Let that run finish first."
                 )
-            elif state not in _APPLIED and state != "pending" and verb is not None:
-                raise MigrationRefused(
-                    f"harness.{verb}: {migration.name} is {state}; nothing was "
-                    f"applied. Revert it with revert_to(...) or revert_all() first."
-                )
+            raise MigrationRefused(
+                f"harness.{verb}: {unfinished.name} is {unfinished.state}; nothing "
+                f"was applied. Revert it with revert_to(...) or revert_all() first."
+            )
         if status.refusal is not None and verb is not None:
             raise MigrationRefused(status.refusal)
-        return at
+        head = status.head_applied
+        return -1 if head is None else status.migrations.index(head)
 
     async def _up_through(
         self, name: str, chain: list[_Migration], target: int
