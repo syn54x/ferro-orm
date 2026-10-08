@@ -314,13 +314,13 @@ async fn create_one_table(
     if dialect != Dialect::Postgres {
         crate::migrate::log_reconcile_statement(table, &emission.create_sql);
         engine
-            .execute_sql(&emission.create_sql)
+            .execute_sql_unprepared(&emission.create_sql)
             .await
             .map_err(|e| create_step_error(table, "table", &emission.create_sql, e))?;
         for post_sql in &emission.post_create_sqls {
             crate::migrate::log_reconcile_statement(table, post_sql);
             engine
-                .execute_sql(post_sql)
+                .execute_sql_unprepared(post_sql)
                 .await
                 .map_err(|e| create_step_error(table, "artifact", post_sql, e))?;
         }
@@ -342,7 +342,7 @@ async fn create_one_table(
                     std::iter::once(&emission.create_sql).chain(&emission.post_create_sqls);
                 for sql in statements {
                     crate::migrate::log_reconcile_statement(table, sql);
-                    if let Err(error) = conn.execute_sql(sql).await {
+                    if let Err(error) = conn.execute_sql_unprepared(sql).await {
                         result = Err(StatementError::at(sql, error));
                         break;
                     }
@@ -740,6 +740,103 @@ mod tests {
         let result = db_check_constraint_name("verylongtable", &long_col);
         assert_eq!(result.chars().count(), 63);
         assert!(result.ends_with("_ck"));
+    }
+
+    /// The SQLite twin of `tests/test_ddl_unprepared.py`: the create pass's
+    /// `CREATE TABLE` and `CREATE INDEX` describe a schema the next migration
+    /// may change, so neither may stay prepared on the connection it ran on
+    /// (`docs/solutions/patterns/ddl-on-live-engine.md`).
+    mod unprepared {
+        use super::super::create_one_table;
+        use crate::backend::{EngineConnection, EngineHandle, PoolSpec};
+        use crate::ddl_exec::DdlExecutor;
+        use crate::session_settings::SettingsDelivery;
+        use ferro_ddl_lowering::Dialect;
+        use ferro_schema_ir::{SchemaColumn, SchemaIndex, SchemaModel};
+        use sqlx::Connection;
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicUsize;
+
+        fn column(name: &str, logical_type: &str, primary_key: bool, index: bool) -> SchemaColumn {
+            SchemaColumn {
+                renamed_from: None,
+                name: name.to_string(),
+                logical_type: logical_type.to_string(),
+                db_type: None,
+                db_type_explicit: None,
+                nullable: false,
+                primary_key,
+                autoincrement: primary_key,
+                unique: false,
+                index,
+                default: None,
+                format: None,
+                enum_values: None,
+                enum_type_name: None,
+                postgres_native_enum: false,
+                enum_renamed_labels: Default::default(),
+                default_factory: None,
+            }
+        }
+
+        #[tokio::test]
+        async fn the_create_pass_leaves_no_statement_in_the_connection_cache() {
+            let engine = Arc::new(
+                EngineHandle::connect(PoolSpec {
+                    backend: Dialect::Sqlite,
+                    url: "sqlite::memory:".to_string(),
+                    search_path: None,
+                    max_connections: 1,
+                    min_connections: 0,
+                    settings_delivery: SettingsDelivery::Transaction,
+                    pins: Arc::new(AtomicUsize::new(0)),
+                })
+                .await
+                .expect("in-memory engine"),
+            );
+            let model = SchemaModel {
+                renamed_from: None,
+                model_name: "Widget".to_string(),
+                table_name: "widget".to_string(),
+                columns: vec![
+                    column("id", "integer", true, false),
+                    column("name", "string", false, true),
+                ],
+                foreign_keys: vec![],
+                indexes: vec![SchemaIndex {
+                    name: "idx_widget_name".to_string(),
+                    columns: vec!["name".to_string()],
+                    unique: false,
+                }],
+                uniques: vec![],
+                checks: vec![],
+                table_checks: vec![],
+                row_security: None,
+            };
+            let emission =
+                ferro_migrate::render_create_table(&model, Dialect::Sqlite).expect("emission");
+            assert!(
+                !emission.post_create_sqls.is_empty(),
+                "the index is created too"
+            );
+
+            create_one_table(
+                &engine,
+                &model,
+                &emission,
+                Dialect::Sqlite,
+                &DdlExecutor::new(None),
+            )
+            .await
+            .expect("created");
+
+            let Ok(EngineConnection::Sqlite(conn)) =
+                crate::ddl_exec::pool_connection(&engine).await
+            else {
+                panic!("the engine's one SQLite connection");
+            };
+            assert_eq!(conn.cached_statements_size(), 0);
+        }
     }
 
     mod awaiting_rename {
