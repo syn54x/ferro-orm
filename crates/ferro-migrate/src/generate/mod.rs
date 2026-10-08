@@ -49,7 +49,7 @@ use crate::{
     Refusal, RenderedOp, ReportKind, Side, plan_from_ir,
 };
 use columns::Phase;
-use ferro_ddl_lowering::ConstraintMode;
+use ferro_ddl_lowering::{ConstraintMode, IndexMode};
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -406,7 +406,14 @@ fn render_warnings(
         .map(|planned| planned.op)
         .filter(|op| !op.table().is_some_and(|table| rebuilt.contains(table)))
         .collect();
-    let rendered = render_ops(&native, before, after, dialect, ConstraintMode::Plain)?;
+    let rendered = render_ops(
+        &native,
+        before,
+        after,
+        dialect,
+        ConstraintMode::Plain,
+        IndexMode::Plain,
+    )?;
     refuse_unrendered(&rendered, dialect)?;
     for report in rendered.into_iter().flat_map(|rendered| rendered.reports) {
         if !warnings.contains(&report.text) {
@@ -713,12 +720,15 @@ pub fn generate_with(
         });
     }
     steps.extend(backfill::data_steps(&layout.demands, target, &skipped)?);
-    steps.extend(
-        layout
-            .index_ops
-            .iter()
-            .map(|op| staging::index_step(op, dialects)),
-    );
+    for (at, op) in layout.index_ops.iter().enumerate() {
+        let (step_before, step_after) = layout.index_stages(at, target);
+        steps.push(staging::index_step(
+            op,
+            &step_before,
+            &step_after,
+            dialects,
+        )?);
+    }
     // The steps a person asks for (`--sql-step`, `--data-step`), laid out
     // whether or not the models changed: the SQL step right before the data
     // step, or last; a data step after every generated step but the

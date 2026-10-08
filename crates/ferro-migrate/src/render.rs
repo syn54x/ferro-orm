@@ -92,6 +92,7 @@ pub(crate) fn render_ops(
     new: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
     constraints: ConstraintMode,
+    indexes: IndexMode,
 ) -> Result<Vec<RenderedOp>, EmissionError> {
     validate_schema_ir(old)?;
     render_from(
@@ -100,13 +101,18 @@ pub(crate) fn render_ops(
         &Side::declared(new.clone()),
         dialect,
         constraints,
+        indexes,
     )
 }
 
 /// `ops` rendered for `dialect` against `old` exactly as given (already the
 /// planned-before side) and `new`, in order, every foreign key and check
 /// added in `constraints` mode: `NOT VALID` is the generator's staged
-/// constraint on an existing Postgres table (ADR-0043). An op reads what it
+/// constraint on an existing Postgres table (ADR-0043). Every index added,
+/// dropped or redefined is rendered in `indexes` mode: `CONCURRENTLY` is the
+/// generator's index step on Postgres (ADR-0044), where a build first drops
+/// whatever an earlier failed build left under its name; SQLite has no
+/// concurrent build and always renders the plain statement. An op reads what it
 /// creates from `new` — a table and column from its IR, a check's or policy's
 /// body as `new` holds it (a declaration's canonical expression, or a live
 /// table's catalog text, put back as the catalog printed it) — and the shape
@@ -127,7 +133,12 @@ pub(crate) fn render_from(
     new_side: &Side,
     dialect: Dialect,
     constraints: ConstraintMode,
+    indexes: IndexMode,
 ) -> Result<Vec<RenderedOp>, EmissionError> {
+    let indexes = match dialect {
+        Dialect::Postgres => indexes,
+        Dialect::Sqlite => IndexMode::Plain,
+    };
     let (old, new) = (old_side.ir(), new_side.ir());
     validate_schema_ir(old)?;
     validate_schema_ir(new)?;
@@ -378,20 +389,19 @@ pub(crate) fn render_from(
                 columns,
                 unique,
             } => {
+                // A concurrent build is exact from its first statement: it
+                // drops what an earlier failed build left under the name.
+                if indexes == IndexMode::Concurrent {
+                    out.statements.push(render_drop_index_sql(name, indexes));
+                }
                 out.statements.push(render_index_sql(
-                    table,
-                    name,
-                    columns,
-                    *unique,
-                    dialect,
-                    IndexMode::Plain,
+                    table, name, columns, *unique, dialect, indexes,
                 ));
             }
             // DROP INDEX is schema-scoped (not table-qualified) on both
             // dialects, so only the index name is needed.
             MigrationOp::DropIndex { table: _, name } => {
-                out.statements
-                    .push(render_drop_index_sql(name, IndexMode::Plain));
+                out.statements.push(render_drop_index_sql(name, indexes));
             }
             // ADR-0051: the index under the name is another definition, so
             // `IF NOT EXISTS` would keep it: drop it, then run the exact
@@ -404,15 +414,9 @@ pub(crate) fn render_from(
                              '{name}' in the declared IR"
                         ),
                     })?;
-                out.statements
-                    .push(render_drop_index_sql(name, IndexMode::Plain));
+                out.statements.push(render_drop_index_sql(name, indexes));
                 out.statements.push(render_index_sql(
-                    table,
-                    name,
-                    &columns,
-                    unique,
-                    dialect,
-                    IndexMode::Plain,
+                    table, name, &columns, unique, dialect, indexes,
                 ));
             }
             // ADR-0044: an invalid index is present (so `IF NOT EXISTS` would

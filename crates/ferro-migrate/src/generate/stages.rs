@@ -173,6 +173,21 @@ impl Layout {
         })
     }
 
+    /// The stages on either side of the index step at `at`: the target with
+    /// that step's change and every later one undone, and with only the
+    /// later ones undone.
+    pub(super) fn index_stages(
+        &self,
+        at: usize,
+        target: &IrEnvelope<SchemaIrPayload>,
+    ) -> (IrEnvelope<SchemaIrPayload>, IrEnvelope<SchemaIrPayload>) {
+        let before = &self.stages.before;
+        (
+            staging::schema_shape(before, target, &self.index_ops[at..]),
+            staging::schema_shape(before, target, &self.index_ops[at + 1..]),
+        )
+    }
+
     /// Whether the models change nothing any dialect has a step for.
     pub(super) fn is_empty(&self) -> bool {
         self.labels_added.is_empty() && self.placed.iter().all(|p| p.plan.is_empty())

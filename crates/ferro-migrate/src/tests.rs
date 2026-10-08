@@ -47,6 +47,7 @@ fn render_plan(
         new_ir,
         dialect,
         ferro_ddl_lowering::ConstraintMode::Plain,
+        ferro_ddl_lowering::IndexMode::Plain,
     )
 }
 

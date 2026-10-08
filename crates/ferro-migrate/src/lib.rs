@@ -715,15 +715,21 @@ impl Plan {
     /// # Errors
     /// What [`Self::render`] raises, and an index past the plan's ops.
     pub fn render_ops(&self, ops: &[usize]) -> Result<Vec<RenderedOp>, EmissionError> {
-        self.render_in(ferro_ddl_lowering::ConstraintMode::Plain, ops)
+        self.render_in(
+            ferro_ddl_lowering::ConstraintMode::Plain,
+            ferro_ddl_lowering::IndexMode::Plain,
+            ops,
+        )
     }
 
     /// [`Self::render_ops`] with every foreign key and check added in
-    /// `constraints` mode: `NOT VALID` is the generator's staged constraint
-    /// on an existing Postgres table (ADR-0043).
+    /// `constraints` mode (`NOT VALID` is the generator's staged constraint
+    /// on an existing Postgres table, ADR-0043) and every index in `indexes`
+    /// mode (`CONCURRENTLY` is the generator's index step, ADR-0044).
     pub(crate) fn render_in(
         &self,
         constraints: ferro_ddl_lowering::ConstraintMode,
+        indexes: ferro_ddl_lowering::IndexMode,
         ops: &[usize],
     ) -> Result<Vec<RenderedOp>, EmissionError> {
         let selected = ops
@@ -746,6 +752,7 @@ impl Plan {
             &self.target,
             self.dialect,
             constraints,
+            indexes,
         )
     }
 }

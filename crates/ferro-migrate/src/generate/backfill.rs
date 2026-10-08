@@ -46,8 +46,8 @@ use crate::plan::enum_declaration;
 use crate::render::render_ops;
 use crate::{Dialect, MigrationOp, PlannedOp, Side, plan_down};
 use ferro_ddl_lowering::{
-    ConstraintMode, ResolvedStorage, positioned_missing_enum_labels, quote_ident, quote_label,
-    render_drop_constraint, render_pg_enum_add_value_at, render_validate_constraint,
+    ConstraintMode, IndexMode, ResolvedStorage, positioned_missing_enum_labels, quote_ident,
+    quote_label, render_drop_constraint, render_pg_enum_add_value_at, render_validate_constraint,
     resolve_column_storage,
 };
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
@@ -833,7 +833,14 @@ fn nullability(
         table: demand.table.clone(),
         column: demand.column.clone(),
     };
-    let rendered = render_ops(&[op], old, new, Dialect::Postgres, ConstraintMode::Plain)?;
+    let rendered = render_ops(
+        &[op],
+        old,
+        new,
+        Dialect::Postgres,
+        ConstraintMode::Plain,
+        IndexMode::Plain,
+    )?;
     super::refuse_unrendered(&rendered, Dialect::Postgres)?;
     Ok(rendered.into_iter().flat_map(|op| op.statements).collect())
 }
@@ -1100,6 +1107,7 @@ fn label_contract(
         target,
         Dialect::Postgres,
         ConstraintMode::Plain,
+        IndexMode::Plain,
     )?)?);
     // A removed label of a native type comes back in the down; a text
     // enum's labels live in its rows and its check, which `rest` puts back.

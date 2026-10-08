@@ -19,21 +19,22 @@
 //! index a later step builds is never built twice (ADR-0046); the index steps
 //! turn it into the target.
 //!
-//! Every statement is a pass renderer's in a mode (AGENTS.md § I-1):
-//! `render_index_sql` / `render_drop_index_sql` in [`IndexMode::Concurrent`],
+//! Every statement is a pass renderer's in a mode (AGENTS.md § I-1): an
+//! index step is the planner's index op rendered in
+//! [`IndexMode::Concurrent`], its down [`plan_down`] in the same mode;
 //! `render_add_fk_sql` / `render_check_addition` in
 //! [`ConstraintMode::NotValid`], and `render_validate_constraint`.
 
 use super::{GenerateError, GeneratedStep, Rendering, find_model, step_text};
 use crate::directory::{Headers, StepDialect, StepKind};
 use crate::emit::{
-    column_riders, find_foreign_key, fk_constraint_name, render_add_fk_sql, render_index_sql,
-    standalone_indexes,
+    column_riders, find_foreign_key, fk_constraint_name, render_add_fk_sql, standalone_indexes,
 };
-use crate::{Dialect, MigrationOp};
+use crate::render::render_ops;
+use crate::{Dialect, MigrationOp, Side, declared_index, plan_down};
 use ferro_ddl_lowering::{
     ConstraintMode, IndexMode, render_check_addition, render_drop_constraint,
-    render_drop_index_sql, render_validate_constraint,
+    render_validate_constraint,
 };
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
 use std::collections::BTreeMap;
@@ -71,6 +72,30 @@ impl IndexOp {
     pub fn name(&self) -> &str {
         match self {
             IndexOp::Build { def, .. } | IndexOp::Drop(def) => &def.name,
+        }
+    }
+
+    /// The planner's op this step runs: an `AddIndex` of the target's
+    /// declaration, a `RedefineIndex` over the parent's, or a `DropIndex`.
+    pub(super) fn op(&self) -> MigrationOp {
+        match self {
+            IndexOp::Build {
+                def,
+                replaces: None,
+            } => MigrationOp::AddIndex {
+                table: def.table.clone(),
+                name: def.name.clone(),
+                columns: def.columns.clone(),
+                unique: def.unique,
+            },
+            IndexOp::Build { def, .. } => MigrationOp::RedefineIndex {
+                table: def.table.clone(),
+                name: def.name.clone(),
+            },
+            IndexOp::Drop(def) => MigrationOp::DropIndex {
+                table: def.table.clone(),
+                name: def.name.clone(),
+            },
         }
     }
 }
@@ -175,116 +200,89 @@ pub fn schema_shape(
     shape
 }
 
-/// The two statements that build `def` on `dialect`: on Postgres a drop of
-/// whatever an earlier failed build left under the name, then the concurrent
-/// build; on SQLite the plain build.
-fn build(def: &IndexDef, dialect: Dialect) -> Vec<String> {
-    match dialect {
-        Dialect::Postgres => vec![
-            render_drop_index_sql(&def.name, IndexMode::Concurrent),
-            render_index_sql(
-                &def.table,
-                &def.name,
-                &def.columns,
-                def.unique,
-                dialect,
-                IndexMode::Concurrent,
-            ),
-        ],
-        Dialect::Sqlite => vec![render_index_sql(
-            &def.table,
-            &def.name,
-            &def.columns,
-            def.unique,
-            dialect,
-            IndexMode::Plain,
-        )],
-    }
-}
-
-/// The statements that build `def` over another definition under its name
-/// (ADR-0051): on Postgres [`build`] already drops first; on SQLite the plain
-/// build's `IF NOT EXISTS` would keep the old one, so it is dropped first.
-fn replace(def: &IndexDef, dialect: Dialect) -> Vec<String> {
-    match dialect {
-        Dialect::Postgres => build(def, dialect),
-        Dialect::Sqlite => drop(def, dialect)
-            .into_iter()
-            .chain(build(def, dialect))
-            .collect(),
-    }
-}
-
-fn drop(def: &IndexDef, dialect: Dialect) -> Vec<String> {
-    let mode = match dialect {
-        Dialect::Postgres => IndexMode::Concurrent,
-        Dialect::Sqlite => IndexMode::Plain,
-    };
-    vec![render_drop_index_sql(&def.name, mode)]
-}
-
-fn rendering(
-    dialect: Dialect,
-    up: (Vec<String>, bool),
-    down: (Vec<String>, bool),
-) -> (StepDialect, Rendering) {
-    let headers = |data_dependent| Headers {
-        no_transaction: dialect == Dialect::Postgres,
-        data_dependent,
-        ..Headers::default()
-    };
-    let (up_headers, down_headers) = (headers(up.1), headers(down.1));
-    (
-        dialect.into(),
-        Rendering {
-            up: step_text(&up_headers, &up.0),
-            down: step_text(&down_headers, &down.0),
-            headers: up_headers,
-            down_headers,
-        },
-    )
+/// Whether `ops` build a unique index, as `new` declares it: a duplicate
+/// fails the build, so the file is data-dependent.
+fn builds_unique(ops: &[MigrationOp], new: &IrEnvelope<SchemaIrPayload>) -> bool {
+    ops.iter().any(|op| match op {
+        MigrationOp::AddIndex { unique, .. } => *unique,
+        MigrationOp::RedefineIndex { table, name } => {
+            declared_index(new, table, name).is_some_and(|(_, unique)| unique)
+        }
+        _ => false,
+    })
 }
 
 /// The index step for `op`, rendered for every dialect in `dialects`, named
-/// after its index (ADR-0044). On Postgres it is a no-transaction step, exact
-/// from its first statement: a build drops whatever an earlier failed build
-/// left under the name (`DROP INDEX CONCURRENTLY IF EXISTS`), then builds
-/// `CONCURRENTLY`; a drop is `DROP INDEX CONCURRENTLY IF EXISTS`. On SQLite it
-/// holds the plain statement in a transaction. A unique's build is
-/// data-dependent (a duplicate fails it). Its down is the reverse step: a
-/// build's down drops the index (or rebuilds the one it replaced), a drop's
-/// down builds it back. The ordinal is the caller's to assign.
-pub fn index_step(op: &IndexOp, dialects: &[Dialect]) -> GeneratedStep {
-    let renderings = dialects
-        .iter()
-        .map(|&dialect| match op {
-            IndexOp::Build { def, replaces } => match replaces {
-                Some(old) => rendering(
-                    dialect,
-                    (replace(def, dialect), def.unique),
-                    (replace(old, dialect), old.unique),
-                ),
-                None => rendering(
-                    dialect,
-                    (build(def, dialect), def.unique),
-                    (drop(def, dialect), false),
-                ),
-            },
-            IndexOp::Drop(def) => rendering(
-                dialect,
-                (drop(def, dialect), false),
-                (build(def, dialect), def.unique),
-            ),
-        })
+/// after its index (ADR-0044), between the stages `before` and `after` on
+/// either side of it. Its up is the op rendered by the one renderer in
+/// [`IndexMode::Concurrent`]: on Postgres a no-transaction step, exact from
+/// its first statement (a build drops whatever an earlier failed build left
+/// under the name, then builds `CONCURRENTLY`; a drop is `DROP INDEX
+/// CONCURRENTLY IF EXISTS`); on SQLite the plain statement in a transaction.
+/// Its down is [`plan_down`]`([op], after, before)` rendered in the same
+/// mode. A unique's build is data-dependent (a duplicate fails it). The
+/// ordinal is the caller's to assign.
+///
+/// # Errors
+/// An op that cannot render.
+pub(super) fn index_step(
+    op: &IndexOp,
+    before: &IrEnvelope<SchemaIrPayload>,
+    after: &IrEnvelope<SchemaIrPayload>,
+    dialects: &[Dialect],
+) -> Result<GeneratedStep, GenerateError> {
+    let up_ops = vec![op.op()];
+    let mut renderings = BTreeMap::new();
+    for &dialect in dialects {
+        let up: Vec<String> = render_ops(
+            &up_ops,
+            before,
+            after,
+            dialect,
+            ConstraintMode::Plain,
+            IndexMode::Concurrent,
+        )?
+        .into_iter()
+        .flat_map(|rendered| rendered.statements)
         .collect();
-    GeneratedStep {
+        let back = plan_down(
+            &up_ops,
+            &Side::declared(after.clone()),
+            &Side::declared(before.clone()),
+            dialect,
+        );
+        let all: Vec<usize> = (0..back.operations.len()).collect();
+        let down: Vec<String> = back
+            .render_in(ConstraintMode::Plain, IndexMode::Concurrent, &all)?
+            .into_iter()
+            .flat_map(|rendered| rendered.statements)
+            .collect();
+        let down_ops: Vec<MigrationOp> = back.ops().cloned().collect();
+        let headers = |data_dependent| Headers {
+            no_transaction: dialect == Dialect::Postgres,
+            data_dependent,
+            ..Headers::default()
+        };
+        let up_headers = headers(builds_unique(&up_ops, after));
+        let down_headers = headers(builds_unique(&down_ops, before));
+        renderings.insert(
+            StepDialect::from(dialect),
+            Rendering {
+                up: step_text(&up_headers, &up),
+                down: step_text(&down_headers, &down),
+                headers: up_headers,
+                down_headers,
+            },
+        );
+    }
+    Ok(GeneratedStep {
         ordinal: 0,
         name: op.name().to_string(),
         kind: StepKind::Ddl,
         renderings,
         data: None,
         hand_model: None,
-    }
+    })
 }
 
 /// One foreign key or check a step added `NOT VALID`, which a later step

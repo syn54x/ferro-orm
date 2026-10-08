@@ -39,7 +39,7 @@ use crate::directory::Headers;
 use crate::plan::{self, Hint, renamed_snapshot};
 use crate::render::render_ops;
 use crate::{Dialect, Execution, MigrationOp, PlannedOp, RenderedOp, RowRisk, Side, plan_down};
-use ferro_ddl_lowering::ConstraintMode;
+use ferro_ddl_lowering::{ConstraintMode, IndexMode};
 use ferro_schema_ir::{IrEnvelope, SchemaColumn, SchemaIrPayload};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -131,7 +131,14 @@ fn rendered(
     dialect: Dialect,
     constraints: ConstraintMode,
 ) -> Result<Vec<RenderedOp>, GenerateError> {
-    Ok(render_ops(&ops, old, new, dialect, constraints)?)
+    Ok(render_ops(
+        &ops,
+        old,
+        new,
+        dialect,
+        constraints,
+        IndexMode::Plain,
+    )?)
 }
 
 /// Each of `ops`' statements on `dialect`, planned `old → new`, op by op. A
