@@ -1163,6 +1163,12 @@ impl LockedDatabase {
         })
     }
 
+    /// Make the next pool refresh after a step fail, as a database that
+    /// refuses the new pool's connection would. Test-only.
+    fn _fail_next_refresh_for_test(&self) {
+        self.inner.fail_next_refresh_for_test();
+    }
+
     fn __repr__(&self) -> String {
         format!("<LockedDatabase {}>", self.inner.tracked().tracking_table())
     }

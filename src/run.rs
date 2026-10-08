@@ -1734,6 +1734,22 @@ fn foreign_keys_off_outcome(
     }
 }
 
+/// The error for a failed step whose pool refresh failed too: the step's
+/// own failure (`message`, already on its record) first, then the refresh's,
+/// and the fix for a process whose connections may still hold statements
+/// prepared against the schema before the statements the step committed.
+fn failed_step_refresh_error(message: &str, err: sqlx::Error) -> PyErr {
+    db_error(
+        &format!(
+            "{message}\nRefreshing the connection pool after the statements it committed \
+             failed too, so this process's connections may still hold statements prepared \
+             against the schema before them: reconnect (ferro.reset_engine(), then \
+             ferro.connect()) before serving queries"
+        ),
+        err,
+    )
+}
+
 /// Whether a failed attempt writes `failed_at` and the error on the step's
 /// record: always going up (the started record marks where `up` resumes);
 /// going down only when the failure left part of the down applied, which a
@@ -1954,6 +1970,7 @@ impl Tracked {
             tables_ready: AtomicBool::new(false),
             started: std::sync::Mutex::new(HashMap::new()),
             id: NEXT_LOCKED.fetch_add(1, Ordering::Relaxed),
+            refresh_fault: AtomicBool::new(false),
         })
     }
 }
@@ -1974,6 +1991,9 @@ pub struct Locked {
     /// [`Locked::start`] to its finish or failure.
     started: std::sync::Mutex<HashMap<(u16, u8), StepRecord>>,
     id: u64,
+    /// Test-only: the next pool refresh after a step fails as the database
+    /// refusing a new connection would ([`Locked::fail_next_refresh_for_test`]).
+    refresh_fault: AtomicBool,
 }
 
 /// A chunked step's position as a transition records it: the cursor
@@ -2052,6 +2072,23 @@ impl Locked {
         if let Some(lock) = self.lock.lock().await.as_mut() {
             lock.close_connection().await;
         }
+    }
+
+    /// Make the next pool refresh after a step fail, as a database that
+    /// refuses the new pool's connection would. Test-only.
+    pub fn fail_next_refresh_for_test(&self) {
+        self.refresh_fault.store(true, Ordering::SeqCst);
+    }
+
+    /// The schema epoch after a step that changed the schema
+    /// (`docs/solutions/patterns/ddl-on-live-engine.md`): refresh the
+    /// engine's pool so no connection holds a statement prepared against the
+    /// old schema.
+    async fn refresh_pool(&self) -> Result<(), sqlx::Error> {
+        if self.refresh_fault.swap(false, Ordering::SeqCst) {
+            return Err(sqlx::Error::PoolTimedOut);
+        }
+        self.engine().refresh_pool().await
     }
 
     async fn write(&self, record: &StepRecord, tx: Option<&TransactionConnection>) -> PyResult<()> {
@@ -2455,25 +2492,23 @@ impl Locked {
         // a step that changed the schema leaves no connection holding
         // statements prepared against the old one — a no-transaction step
         // that failed part-way included, its statements before the failing
-        // one committed.
-        let changed_schema = match &outcome {
-            Ok(()) => true,
-            Err(failure) => failure.changed_schema(),
-        };
-        if changed_schema {
-            engine
-                .refresh_pool()
-                .await
-                .map_err(|e| db_error("refreshing the pool after the step", e))?;
-        }
+        // one committed. A failed step refreshes after its failure record is
+        // written, so a refresh that fails too loses neither.
         match outcome {
-            Ok(()) => Ok(StepOutcome {
-                ok: true,
-                ms,
-                error: None,
-                message: None,
-            }),
-            Err(StepFailure { error, counted, .. }) => {
+            Ok(()) => {
+                self.refresh_pool()
+                    .await
+                    .map_err(|e| db_error("refreshing the pool after the step", e))?;
+                Ok(StepOutcome {
+                    ok: true,
+                    ms,
+                    error: None,
+                    message: None,
+                })
+            }
+            Err(failure) => {
+                let changed_schema = failure.changed_schema();
+                let StepFailure { error, counted, .. } = failure;
                 // A failed validate or unique step names its count and where
                 // `up` resumes; counted only now, never on the success path.
                 let error = match counted {
@@ -2493,8 +2528,14 @@ impl Locked {
                 };
                 // A lock lost inside the step's transaction (the check before
                 // its record) failed the step; the run stops as a lost lock,
-                // either way, before any record is written.
-                self.verify().await?;
+                // either way, before any record is written — after the
+                // refresh what the step committed still needs.
+                if let Err(lost) = self.verify().await {
+                    if changed_schema && let Err(e) = self.refresh_pool().await {
+                        return Err(failed_step_refresh_error(&lost.to_string(), e));
+                    }
+                    return Err(lost);
+                }
                 // A down that rolled back changed nothing, so its record does
                 // not change either (the tracking table says where the database
                 // stands now): the step stays applied and the error is the
@@ -2513,10 +2554,14 @@ impl Locked {
                     };
                     self.write(&failed, None).await?;
                 }
+                let message = failure_message(step, &error, down);
+                if changed_schema && let Err(e) = self.refresh_pool().await {
+                    return Err(failed_step_refresh_error(&message, e));
+                }
                 Ok(StepOutcome {
                     ok: false,
                     ms,
-                    message: Some(failure_message(step, &error, down)),
+                    message: Some(message),
                     error: Some(error),
                 })
             }
