@@ -40,7 +40,7 @@ from ferro.migrations import runner
 from ferro.migrations.errors import MigrationRefused
 from ferro.migrations.testing import Harness, RoundTripResult, harness
 from ferro.registry import SwappedOutModelError
-from ferro.settings import FerroSettings
+from ferro.settings import FerroSettings, SettingsError
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     pkg,
     project,
@@ -546,6 +546,30 @@ async def test_todays_classes_are_unreachable_inside_models_at_and_restored_afte
 
     async with ferro.engines.session():
         assert [a.slug for a in await author.all()] == ["ada"]
+
+
+async def test_a_settings_error_inside_models_at_reaches_the_test_unchanged(
+    connected,
+):
+    h = harness()
+    await h.apply_through("0002")
+    raised = SettingsError("the test's own configuration error")
+
+    with pytest.raises(SettingsError) as caught:
+        async with h.models_at("0002"):
+            raise raised
+
+    assert caught.value is raised
+    assert not isinstance(caught.value, MigrationRefused)
+
+
+async def test_a_connection_that_is_not_open_is_refused_before_the_verb_runs(chain):
+    with pytest.raises(MigrationRefused, match="connection `nowhere` is not open"):
+        await ferro.migrations.status(using="nowhere")
+    h = harness(using="nowhere")
+    with pytest.raises(MigrationRefused, match="connection `nowhere` is not open"):
+        async with h.models_at("0001"):
+            pass
 
 
 async def test_the_harness_binds_without_a_connection_and_refuses_without_one(chain):

@@ -94,7 +94,7 @@ from .steps import (
     load_step,
     unwritten,
 )
-from .target import Target
+from .target import Target, connection_dialect
 
 if TYPE_CHECKING:
     from .._core import LockedDatabase, Plan, StepHandle, TrackedDatabase
@@ -209,21 +209,6 @@ def parse_lock_timeout(value: str | float) -> float:
             f"({MAX_LOCK_TIMEOUT_S:.0f} seconds)"
         )
     return seconds
-
-
-def connection_dialect(name: str, database: DatabaseSettings) -> str:
-    """The dialect of open connection ``name``, refused when it is not open
-    or ``database`` does not target it."""
-    dialect = _core.connection_backend(name)
-    if dialect is None:
-        raise SettingsError(f"connection `{name}` is not open; connect it first")
-    if dialect not in database.dialects:
-        raise SettingsError(
-            f"database `{database.name}` targets {', '.join(database.dialects)}, but "
-            f"this connection is {dialect}; add {dialect!r} to its dialects and "
-            f"regenerate, or connect to a {' or '.join(database.dialects)} database"
-        )
-    return dialect
 
 
 def tracking_schema_for(database: DatabaseSettings, dialect: str) -> str | None:

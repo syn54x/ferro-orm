@@ -33,7 +33,26 @@ from .. import _core
 from ..settings import DatabaseSettings, FerroSettings, SettingsError
 from .errors import MigrationRefused
 
-__all__ = ["Target"]
+__all__ = ["Target", "connection_dialect"]
+
+
+def connection_dialect(name: str, database: DatabaseSettings) -> str:
+    """The dialect of open connection ``name``.
+
+    Raises:
+        SettingsError: ``name`` is not open, or ``database`` does not target
+            its dialect.
+    """
+    dialect = _core.connection_backend(name)
+    if dialect is None:
+        raise SettingsError(f"connection `{name}` is not open; connect it first")
+    if dialect not in database.dialects:
+        raise SettingsError(
+            f"database `{database.name}` targets {', '.join(database.dialects)}, but "
+            f"this connection is {dialect}; add {dialect!r} to its dialects and "
+            f"regenerate, or connect to a {' or '.join(database.dialects)} database"
+        )
+    return dialect
 
 
 @dataclass(frozen=True)
@@ -82,33 +101,33 @@ class Target:
     async def open(self) -> AsyncIterator[str]:
         """The name of the connection to work on, for the block: ``using``,
         a private connection to ``url`` (closed when the block ends), or the
-        default connection.
+        default connection. The connection is checked before the block runs:
+        it is open, and its dialect is one the database targets.
 
-        A :class:`~ferro.settings.SettingsError` the block meets while
-        working on the connection (it is not open, or it is a dialect the
-        database does not target) is a :class:`MigrationRefused` with the
-        same text.
+        Only reaching the connection is translated; whatever the block raises
+        reaches the caller unchanged.
 
         Raises:
-            MigrationRefused: there is no default connection, or the block
-                met a configuration refusal.
+            MigrationRefused: there is no default connection, ``using`` names
+                a connection that is not open, or the connection's dialect is
+                not one the database targets.
         """
+        if self.url is None:
+            name = self._existing_connection()
+            self._check(name)
+            yield name
+            return
+        from .. import connect
+
+        name = f"_ferro_migrate_{uuid.uuid4().hex}"
+        await connect(self.url, name=name)
         try:
-            if self.url is None:
-                yield self._open_connection()
-                return
-            from .. import connect
+            self._check(name)
+            yield name
+        finally:
+            await _core._disconnect(name)
 
-            name = f"_ferro_migrate_{uuid.uuid4().hex}"
-            await connect(self.url, name=name)
-            try:
-                yield name
-            finally:
-                await _core._disconnect(name)
-        except SettingsError as err:
-            raise MigrationRefused(str(err)) from None
-
-    def _open_connection(self) -> str:
+    def _existing_connection(self) -> str:
         """``using``, else the default connection's name."""
         if self.using is not None:
             return self.using
@@ -119,3 +138,11 @@ class Target:
                 "`await ferro.connect(url)` first, or pass using=<connection name>"
             )
         return name
+
+    def _check(self, name: str) -> None:
+        """Refuse connection ``name`` unless it is open and of a dialect the
+        database targets."""
+        try:
+            connection_dialect(name, self.database)
+        except SettingsError as err:
+            raise MigrationRefused(str(err)) from None
