@@ -4571,9 +4571,10 @@ async def test_a_foreign_key_removed_from_a_kept_column_is_dropped_only_when_des
 # -- a move to or from a native enum type: the pass reports the generator's recipe --
 
 
-def _enum_move_models(native: bool) -> dict:
+def _enum_move_models(native: bool, kept: bool = False) -> dict:
     """``EnumMove`` with ``mood`` declared as a ``StrEnum`` (a native type on
-    Postgres) or as ``str``; returns the declared modelset."""
+    Postgres), as one kept in a ``text`` column (``kept``), or as ``str``;
+    returns the declared modelset."""
     from enum import StrEnum
 
     from ferro import clear_registry, ensure_resolved_modelset, reset_engine
@@ -4587,9 +4588,15 @@ def _enum_move_models(native: bool) -> dict:
         CALM = "calm"
         LOUD = "loud"
 
-    if native:
+    if kept:
 
         class EnumMove(Model):
+            id: Annotated[int | None, FerroField(primary_key=True)] = None
+            mood: Annotated[MoveMood | None, FerroField(db_type="text")] = None
+
+    elif native:
+
+        class EnumMove(Model):  # noqa: F811 - the same model, edited
             id: Annotated[int | None, FerroField(primary_key=True)] = None
             mood: MoveMood | None = None
 
@@ -4611,8 +4618,9 @@ async def test_a_move_to_or_from_a_native_enum_type_reports_the_generators_recip
     converts a column to or from a native Postgres enum type in place, so the
     pass runs no DDL for it and says so in the generator's own words, the
     recipe ``ferro migrate new`` refuses with (ADR-0052, ``EnumTypeMove``).
-    SQLite stores an enum as text: there is no type to move, and nothing to
-    say."""
+    A move *to* the enum type also names the fix that keeps the values in a
+    text column, ``db_type="text"``, and that fix ends the report. SQLite
+    stores an enum as text: there is no type to move, and nothing to say."""
     import json
 
     from ferro import _core
@@ -4627,11 +4635,32 @@ async def test_a_move_to_or_from_a_native_enum_type_reports_the_generators_recip
         assert warning_texts(report) == []
         return
     recipe = (
-        'changing "enummove"."mood" to or from a native enum type is not generated: '
-        "add a column of the new type, copy the values across in a data step "
-        "(ferro migrate new --data-step …), then drop the old column"
+        '"enummove"."mood" moves to or from a native enum type, which no statement '
+        "converts in place: add a column of the new type, copy the values across in a "
+        "data step (ferro migrate new --data-step …), then drop the old column"
     )
+    if not native_before:
+        recipe += (
+            "; or keep the values in a text column by declaring the field with "
+            'db_type="text"'
+        )
     assert [(w.kind, w.text) for w in report.warnings] == [("EnumTypeMove", recipe)]
     with pytest.raises(Exception) as refused:
         _core._generate_migration(json.dumps(before), json.dumps(after), ["postgres"])
     assert str(refused.value) == recipe
+
+    if not native_before:
+        # The fix the text names keeps the values (varchar widens to text)
+        # and ends the report.
+        _enum_move_models(True, kept=True)
+        kept = await auto_migrate(db_url, updates=True)
+        assert warning_texts(kept) == []
+        assert schema_steps(kept) == [
+            (
+                "enummove",
+                'ALTER TABLE "enummove" ALTER COLUMN "mood" TYPE text USING "mood"::text',
+            )
+        ]
+        ferro.reset_engine()
+        again = await auto_migrate(db_url, updates=True)
+        assert (schema_steps(again), warning_texts(again)) == ([], [])

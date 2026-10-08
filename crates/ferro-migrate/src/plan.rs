@@ -1769,6 +1769,10 @@ pub enum Refusal {
         table: String,
         /// The column.
         column: String,
+        /// On a move to an enum type from a text column, the `db_type` token
+        /// that keeps the values in a text column
+        /// ([`ferro_ddl_lowering::string_storage_token`]).
+        keep: Option<String>,
     },
 }
 
@@ -1781,9 +1785,13 @@ impl std::fmt::Display for Refusal {
                  table (ferro migrate new --data-step …), a backfill of parent and children, \
                  and a drop; see the Migrations docs § Changing a primary key"
             ),
-            Refusal::EnumTypeMove { table, column } => {
-                f.write_str(&ferro_ddl_lowering::enum_type_move_report(table, column).text)
-            }
+            Refusal::EnumTypeMove {
+                table,
+                column,
+                keep,
+            } => f.write_str(
+                &ferro_ddl_lowering::enum_type_move_report(table, column, keep.as_deref()).text,
+            ),
         }
     }
 }
@@ -1843,15 +1851,31 @@ fn native_enum(col: &ferro_schema_ir::SchemaColumn) -> bool {
     col.postgres_native_enum || enum_type_of(col).is_some()
 }
 
-/// Whether changing a column from `old` to `new` moves it to, from or
-/// between native Postgres enum types, which no statement converts in place
-/// ([`Refusal::EnumTypeMove`]). The verdict refuses it; the renderer reports
-/// it with the same words ([`ferro_ddl_lowering::enum_type_move_report`]).
-pub(crate) fn moves_enum_type(
+/// The refusal of changing `table.column` from `old` to `new` when it moves
+/// the column to, from or between native Postgres enum types, which no
+/// statement converts in place ([`Refusal::EnumTypeMove`]); `None` when it
+/// does not. A move to an enum type from a text column carries the token
+/// that keeps the values in a text column. The verdict
+/// refuses with it; the renderer reports it in the same words
+/// ([`ferro_ddl_lowering::enum_type_move_report`]).
+pub(crate) fn enum_type_move(
+    table: &str,
+    column: &str,
     old: &ferro_schema_ir::SchemaColumn,
     new: &ferro_schema_ir::SchemaColumn,
-) -> bool {
-    native_enum(old) || native_enum(new)
+) -> Option<Refusal> {
+    if !(native_enum(old) || native_enum(new)) {
+        return None;
+    }
+    let keep = (!native_enum(old))
+        .then(|| ferro_ddl_lowering::canonical_from_schema_column(old, Dialect::Postgres).ok())
+        .flatten()
+        .and_then(ferro_ddl_lowering::string_storage_token);
+    Some(Refusal::EnumTypeMove {
+        table: table.to_string(),
+        column: column.to_string(),
+        keep,
+    })
 }
 
 fn find_column<'a>(
@@ -2061,14 +2085,11 @@ fn execution(
     }
     if let MigrationOp::AlterColumnType { column, .. } = op
         && let (Some(old), Some(new)) = (find_column(was, column), find_column(now, column))
-        && moves_enum_type(old, new)
+        && let Some(refusal) = enum_type_move(&table(), column, old, new)
     {
         // To, from or between native enum types: no statement converts the
         // column in place.
-        return Execution::Refused(Refusal::EnumTypeMove {
-            table: table(),
-            column: column.clone(),
-        });
+        return Execution::Refused(refusal);
     }
     Execution::Native
 }

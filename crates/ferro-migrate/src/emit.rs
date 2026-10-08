@@ -734,10 +734,19 @@ pub(crate) fn emit_alter_column_type(
             // To, from or between native enum types no statement converts the
             // column in place: no door does, and every door says so in the
             // generator's words, the recipe a migration follows instead.
-            if crate::plan::moves_enum_type(old_col, new_col) {
+            if let Some(crate::Refusal::EnumTypeMove {
+                table,
+                column,
+                keep,
+            }) = crate::plan::enum_type_move(table, column, old_col, new_col)
+            {
                 result
                     .reports
-                    .push(ferro_ddl_lowering::enum_type_move_report(table, column));
+                    .push(ferro_ddl_lowering::enum_type_move_report(
+                        &table,
+                        &column,
+                        keep.as_deref(),
+                    ));
                 return Ok(result);
             }
             let cannot = |message: String| EmissionError {

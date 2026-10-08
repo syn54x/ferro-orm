@@ -534,7 +534,9 @@ mod tests {
             execution(&op, &before, &author(vec![status]), Dialect::Postgres),
             Execution::Refused(Refusal::EnumTypeMove {
                 table: "author".into(),
-                column: "age".into()
+                column: "age".into(),
+                // An integer column has no text token to keep.
+                keep: None,
             })
         );
         // The primary key's type.

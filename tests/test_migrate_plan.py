@@ -378,9 +378,10 @@ class TestReconcileExisting:
         stmts, warns = render(schema, live, "postgres")
         assert stmts == []
         assert warns == [
-            'changing "invoice"."status" to or from a native enum type is not '
-            "generated: add a column of the new type, copy the values across in a "
-            "data step (ferro migrate new --data-step …), then drop the old column"
+            '"invoice"."status" moves to or from a native enum type, which no '
+            "statement converts in place: add a column of the new type, copy the "
+            "values across in a data step (ferro migrate new --data-step …), then "
+            "drop the old column"
         ]
 
     def test_sqlite_type_drift_warns_and_emits_no_ddl(self):

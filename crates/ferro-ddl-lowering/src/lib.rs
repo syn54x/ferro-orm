@@ -3427,6 +3427,20 @@ pub fn refused_conversion_warning(
     )
 }
 
+/// The `db_type` token that stores a string field in a column of the
+/// text family `canonical` already is, or `None` for any other storage: a
+/// `varchar(N)` keeps its own token, and an unbounded `varchar` or `text`
+/// is `text` (the vocabulary has no unbounded `varchar`; widening to `text`
+/// keeps every value). [`enum_type_move_report`] offers it as the way to
+/// keep a column a model moves to a native enum type.
+pub fn string_storage_token(canonical: CanonicalType) -> Option<String> {
+    match canonical {
+        CanonicalType::Varchar(Some(n)) => Some(format!("varchar({n})")),
+        CanonicalType::Varchar(None) | CanonicalType::Text => Some("text".to_string()),
+        _ => None,
+    }
+}
+
 /// SQLite declared-type string for a canonical type (parity-pinned; matches
 /// what [`apply_canonical_type_for`] renders on SQLite — SQLAlchemy-compatible
 /// spellings since FF-B B5).
@@ -3852,16 +3866,30 @@ pub fn foreign_fk_drift_warning(
 /// statement converts it in place, so no door does: the generator refuses
 /// with this text, and the reconciliation pass and the Alembic bridge report
 /// or refuse with the same words (AGENTS.md § I-6: the refusal names its
-/// recipe).
-pub fn enum_type_move_report(table: &str, column: &str) -> Report {
+/// recipe). The sentence holds on every door: it says what no statement
+/// does, and names the migration that does it.
+///
+/// `keep` is a `db_type` token on a move *to* a native enum type from a
+/// text column (`str` → `Mood`, [`string_storage_token`]): the field keeps
+/// its values in a text column by declaring it (`db_type="text"`), and the
+/// text names that fix too. A move from an enum type has no such fix
+/// (`None`).
+pub fn enum_type_move_report(table: &str, column: &str, keep: Option<&str>) -> Report {
+    let mut text = format!(
+        "\"{table}\".\"{column}\" moves to or from a native enum type, which no statement \
+         converts in place: add a column of the new type, copy the values across in a data \
+         step (ferro migrate new --data-step …), then drop the old column"
+    );
+    if let Some(keep) = keep {
+        text.push_str(&format!(
+            "; or keep the values in a text column by declaring the field with \
+             db_type=\"{keep}\""
+        ));
+    }
     Report::new(
         ReportKind::EnumTypeMove,
         Subject::column(table, column),
-        format!(
-            "changing \"{table}\".\"{column}\" to or from a native enum type is not \
-             generated: add a column of the new type, copy the values across in a data step \
-             (ferro migrate new --data-step …), then drop the old column"
-        ),
+        text,
     )
 }
 
@@ -8102,18 +8130,36 @@ mod tests {
 
     #[test]
     fn an_enum_type_move_report_is_the_recipe_and_blocks() {
-        let moved = enum_type_move_report("author", "mood");
+        let moved = enum_type_move_report("author", "mood", None);
         assert_eq!(
             moved,
             report(
                 ReportKind::EnumTypeMove,
                 Subject::column("author", "mood"),
                 false,
-                "changing \"author\".\"mood\" to or from a native enum type is not generated: \
-                 add a column of the new type, copy the values across in a data step (ferro \
-                 migrate new --data-step …), then drop the old column",
+                "\"author\".\"mood\" moves to or from a native enum type, which no statement \
+                 converts in place: add a column of the new type, copy the values across in a \
+                 data step (ferro migrate new --data-step …), then drop the old column",
             )
         );
+        // A move to an enum type can also keep its values in a text column.
+        assert_eq!(
+            enum_type_move_report("author", "mood", Some("text")).text,
+            format!(
+                "{}; or keep the values in a text column by declaring the field with \
+                 db_type=\"text\"",
+                moved.text
+            )
+        );
+        assert_eq!(
+            string_storage_token(CanonicalType::Varchar(None)).as_deref(),
+            Some("text")
+        );
+        assert_eq!(
+            string_storage_token(CanonicalType::Varchar(Some(40))).as_deref(),
+            Some("varchar(40)")
+        );
+        assert_eq!(string_storage_token(CanonicalType::Integer), None);
         assert!(moved.blocks());
         assert_eq!(
             serde_json::to_value(&moved).unwrap()["kind"],

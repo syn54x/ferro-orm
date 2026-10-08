@@ -1559,7 +1559,7 @@ fn emit_alter_refuses_varchar_to_enum_and_varchar_to_time() {
     assert_eq!(result.reports.len(), 2, "{:?}", result.reports);
     assert_eq!(
         result.reports[0],
-        ferro_ddl_lowering::enum_type_move_report("ticket", "status")
+        ferro_ddl_lowering::enum_type_move_report("ticket", "status", Some("text"))
     );
     assert!(result.reports[1].text.contains("ticket.wake_time"), "{}", result.reports[1].text);
 }
@@ -1587,8 +1587,13 @@ fn a_move_to_or_from_a_native_enum_type_reports_the_generators_recipe() {
     facts
         .tables
         .insert("author".into(), LiveTableFacts::default());
-    let recipe = ferro_ddl_lowering::enum_type_move_report("author", "mood");
-    for (live, declared) in [(live_native, scalar.clone()), (scalar, native)] {
+    // From an enum type: the migration only. To one: the migration, or
+    // keeping the values in a text column (`db_type="text"`).
+    for (live, declared, keep) in [
+        (live_native, scalar.clone(), None),
+        (scalar, native, Some("text")),
+    ] {
+        let recipe = ferro_ddl_lowering::enum_type_move_report("author", "mood", keep);
         let plan = plan_from_ir(
             &Side::live(envelope(vec![author(live)]), facts.clone()).expect("live side"),
             &Side::declared(envelope(vec![author(declared)])),

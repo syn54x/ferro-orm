@@ -109,8 +109,8 @@ def test_a_change_new_cannot_generate_yet_is_still_ungenerated(project, pkg, cap
 
     err = capsys.readouterr().err
     assert (
-        'cannot generate it: changing "author"."status" to or from a native enum type '
-        "is not generated"
+        'cannot generate it: "author"."status" moves to or from a native enum type, '
+        "which no statement converts in place"
     ) in err, err
 
 

@@ -144,9 +144,13 @@ equality).
 
 A column moving to or from a native Postgres enum type (`mood: Mood` ⇄
 `mood: str`) is not a conversion rail: it is the planner's `EnumTypeMove`
-refusal, which every door states in one text (`enum_type_move_report`, the
-generator's recipe: a new column, a data step, a drop). ADR-0052, amended
-2026-10-08.
+refusal, which every door states in one text (`enum_type_move_report`).
+ADR-0052, amended 2026-10-08.
+
+| Move                                    | Keep recipe                                   | Convert recipe                                                             |
+| --------------------------------------- | --------------------------------------------- | -------------------------------------------------------------------------- |
+| live `varchar`/`text` → model native enum | `db_type="text"` (or the column's own `varchar(N)`; `string_storage_token`) | `ferro migrate new`: a column of the new type, a data step, a drop |
+| live native enum → model scalar         | —                                             | `ferro migrate new`: a column of the new type, a data step, a drop |
 
 Additive changes are not refusals: adopting the `uq_` index shape on an
 existing DB emits `CREATE UNIQUE INDEX IF NOT EXISTS` (a redundant second
