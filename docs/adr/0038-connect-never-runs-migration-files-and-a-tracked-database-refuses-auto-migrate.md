@@ -46,6 +46,8 @@ Amended by ADR-0045: `drift()` and `check()` join the public calls, each returni
 
 Amended by ADR-0049 (2026-10-07): `ferro.migrate()` and `ferro.create_tables()` return a `PassReport` (every statement the pass executed, and every warning, typed). A failed pass's error carries `.report`. `connect()` with an auto-migrate flag stays `-> None` and logs from the same report.
 
+Amended 2026-10-08 (the pass's lock wait, #577 panel F18): the guard runs once **before** the pass waits for the lock, and again under it. It reads the catalog only, so a tracked database is refused at once instead of after the run holding the lock finishes; the second check closes the race with a `baseline` that adopts the database while the pass waits. The wait is bounded by the project's `ddl_lock_timeout`, the setting every pass statement already waits for a table lock under (ADR-0044) and that every configured database must agree on for the pass: one setting says how long a boot waits on another process's lock of either kind, and `"0"` waits without a limit as it does for table locks. It replaces a one-year wait, under which a boot behind a hung run hung with it. On expiry the pass refuses, naming the call, the governed schema, the setting and `ferro migrate status`. No new setting was added: the CLI's `--lock-timeout` (default `30s`) is a flag of the run verbs, not configuration, so it cannot bound a `connect()`.
+
 **A database ahead of the code is refused by default.** When the tracking table holds records for migrations the directory does not have, `up()` and `require_applied()` raise `DatabaseAheadError` naming them. `allow_ahead=True` on either call turns that off.
 
 ## Considered options

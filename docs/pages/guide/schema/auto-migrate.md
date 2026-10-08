@@ -249,6 +249,14 @@ Every auto-migrate pass takes the same run lock `ferro migrate up` takes, so two
 connect(auto_migrate=…) is waiting: another ferro migration run or auto-migrate pass holds the run lock on this database. It goes on once that one finishes.
 ```
 
+It waits up to `ddl_lock_timeout` (default `5s`, the same bound every pass statement waits for a table lock; `"0"` waits without a limit), then refuses:
+
+```text
+connect(auto_migrate=…) gave up waiting for the run lock on public: another ferro migration run or auto-migrate pass held it longer than ddl_lock_timeout (5s). Nothing was applied. Wait for that run to finish and try again, or raise ddl_lock_timeout; `ferro migrate status` shows a migration run while it holds the lock.
+```
+
+A database ferro migrations govern is refused before the pass waits at all, so a boot never sits behind a `ferro migrate up` only to be refused once it finishes.
+
 On Postgres the lock is a session-level advisory lock, so auto-migrate is refused behind a transaction-mode connection pooler; connect to the database directly to migrate.
 
 ## Safety guidance

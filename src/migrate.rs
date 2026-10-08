@@ -15,7 +15,7 @@
 //! `ferro_ddl_lowering` functions every migration door uses (AGENTS.md § I-1).
 
 use crate::backend::{EngineBindValue, EngineHandle};
-use crate::ddl_exec::{DdlError, DdlExecutor, Door, Executed, Failed, Role, Unit};
+use crate::ddl_exec::{DdlError, DdlExecutor, Door, Executed, Failed, Role, SETTING, Unit};
 use crate::introspect::{
     LiveCheck, LiveColumn, LiveForeignKey, LiveIndex, connected_role_bypasses_row_security,
     live_table_checks, live_table_columns, sqlite_indexes_covering_column,
@@ -24,7 +24,8 @@ use crate::live_ir::{
     LiveTable, live_schema_ir, live_table_renames, live_tables_to_schema_ir, tables_to_read,
 };
 use crate::run::{
-    FORMAT_TABLE, RunLock, TRACKING_TABLE, governed_schema, refused, tracking_tables_for,
+    FORMAT_TABLE, RunLock, TRACKING_TABLE, governed_schema, refused, show_duration,
+    tracking_tables_for,
 };
 use crate::schema::internal_create_tables;
 use crate::state::{MODEL_REGISTRY, engine_for_connection};
@@ -562,13 +563,35 @@ async fn execute_sqlite_table_ops(
     Ok(())
 }
 
-/// How long an auto-migrate pass waits for the run lock. The wait has no
-/// practical bound on purpose: the lock is held only by a live run (the
-/// database or the operating system releases a dead one), and a boot that
-/// gave up while another boot or a `ferro migrate up` was mid-pass would
-/// fail a start that is about to succeed. One year is "until it is free"
-/// while staying far inside `Instant`'s range.
-const AUTO_MIGRATE_LOCK_WAIT: Duration = Duration::from_secs(60 * 60 * 24 * 365);
+/// The auto-migrate pass's wait for the run lock under `ddl_lock_timeout =
+/// "0"`, which waits without a limit for every lock the pass needs: "until
+/// it is free", far inside `Instant`'s range (ADR-0038 as amended
+/// 2026-10-08).
+const UNBOUNDED_LOCK_WAIT: Duration = Duration::from_secs(60 * 60 * 24 * 365);
+
+/// How long an auto-migrate pass waits for the run lock: the project's
+/// `ddl_lock_timeout`, the bound it already waits under for every table
+/// lock (ADR-0044), so one setting says how long a boot waits on another
+/// process's lock of either kind; `"0"` (`None`) waits without a limit.
+fn pass_lock_wait(opts: &MigrateOptions) -> Duration {
+    opts.ddl_lock_timeout.unwrap_or(UNBOUNDED_LOCK_WAIT)
+}
+
+/// The refusal when the pass's wait for the run lock on `schema` outlasts
+/// `ddl_lock_timeout` (`timeout`): `call` names the public call that gave up.
+///
+/// ```text
+/// connect(auto_migrate=…) gave up waiting for the run lock on public: another ferro migration run or auto-migrate pass held it longer than ddl_lock_timeout (5s). Nothing was applied. Wait for that run to finish and try again, or raise ddl_lock_timeout; `ferro migrate status` shows a migration run while it holds the lock.
+/// ```
+pub fn pass_lock_timeout_refusal(call: &str, schema: &str, timeout: Duration) -> String {
+    format!(
+        "{call} gave up waiting for the run lock on {schema}: another ferro migration run or \
+         auto-migrate pass held it longer than {SETTING} ({}). Nothing was applied. Wait for \
+         that run to finish and try again, or raise {SETTING}; `ferro migrate status` shows a \
+         migration run while it holds the lock.",
+        show_duration(timeout)
+    )
+}
 
 /// Which public call is running the auto-migrate passes: the waiting
 /// warning names it.
@@ -718,20 +741,24 @@ pub async fn guard_tracked_schema(
     Ok(())
 }
 
-/// Run the full auto-migrate pass under the run lock (ADR-0038): take the
-/// lock a migration run takes, refuse a schema ferro migrations govern
-/// ([`guard_tracked_schema`]), then create missing tables and (per
-/// `MigrateOptions`) reconcile existing ones. Two processes booting
-/// together serialize here, and the second sees the first's DDL. The lock
-/// is released on every exit path.
+/// Run the full auto-migrate pass under the run lock (ADR-0038): refuse a
+/// schema ferro migrations govern ([`guard_tracked_schema`], a catalog read
+/// that needs no lock), take the lock a migration run takes, waiting up to
+/// `ddl_lock_timeout` ([`pass_lock_wait`]), check the guard again under it
+/// (a `baseline` may have adopted the database while the pass waited), then
+/// create missing tables and (per `MigrateOptions`) reconcile existing
+/// ones. Two processes booting together serialize here, and the second
+/// sees the first's DDL. The lock is released on every exit path.
 ///
 /// `door` names the public call for the waiting warning
-/// ([`run_lock_wait_warning`]). What the passes execute and warn goes into
-/// `report`, failure or not.
+/// ([`run_lock_wait_warning`]) and the lock-wait refusal
+/// ([`pass_lock_timeout_refusal`]). What the passes execute and warn goes
+/// into `report`, failure or not.
 ///
 /// # Errors
-/// The guard's refusal; the pooler refusal behind a transaction-mode
-/// pooler; whatever the passes raise.
+/// The guard's refusal, at once even while a run holds the lock; the
+/// lock-wait refusal; the pooler refusal behind a transaction-mode pooler;
+/// whatever the passes raise.
 pub async fn internal_migrate(
     engine: Arc<EngineHandle>,
     opts: MigrateOptions,
@@ -739,9 +766,16 @@ pub async fn internal_migrate(
     door: AutoMigrateDoor,
     report: &mut PassReport,
 ) -> PyResult<()> {
-    let lock = RunLock::acquire(&engine, None, AUTO_MIGRATE_LOCK_WAIT, |_| {
-        report.warn(run_lock_wait_warning(door.call()));
-    })
+    guard_tracked_schema(&engine, tracking_schemas).await?;
+    let governed = governed_schema(&engine).await?;
+    let wait = pass_lock_wait(&opts);
+    let lock = RunLock::acquire_or(
+        &engine,
+        Some(&governed),
+        wait,
+        |_| report.warn(run_lock_wait_warning(door.call())),
+        || refused(pass_lock_timeout_refusal(door.call(), &governed, wait)),
+    )
     .await?;
     let outcome = async {
         guard_tracked_schema(&engine, tracking_schemas).await?;

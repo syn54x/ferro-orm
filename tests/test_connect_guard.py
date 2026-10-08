@@ -321,3 +321,69 @@ async def test_the_waiting_warning_names_the_call_that_waits(project, db):
         "run or auto-migrate pass holds the run lock on this database. It goes on "
         "once that one finishes."
     ]
+
+
+def lock_wait_refusal(call: str, schema: str, timeout: str) -> str:
+    return (
+        f"{call} gave up waiting for the run lock on {schema}: another ferro "
+        f"migration run or auto-migrate pass held it longer than ddl_lock_timeout "
+        f"({timeout}). Nothing was applied. Wait for that run to finish and try "
+        f"again, or raise ddl_lock_timeout; `ferro migrate status` shows a "
+        f"migration run while it holds the lock."
+    )
+
+
+async def test_a_tracked_database_refuses_at_once_while_a_run_holds_the_lock(
+    project, pkg, db
+):
+    """The guard reads the catalog only, so it runs before the pass waits
+    for the lock: a database ferro migrations govern is refused at once, not
+    after the run holding the lock (a ``ferro migrate up`` mid-deploy)
+    finishes."""
+    await track(project, pkg, db)
+    declare_fresh_model()
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        async with holding(db):
+            with pytest.raises(MigrationRefused) as raised:
+                await asyncio.wait_for(ferro.connect(db.url, migrate_updates=True), 3)
+
+    assert str(raised.value) == guard_text(governed(db), governed(db))
+    assert [str(w.message) for w in caught if "is waiting" in str(w.message)] == []
+    assert "guardfresh" not in db.tables()
+
+
+@pytest.mark.parametrize("door", ["connect", "create_tables"])
+async def test_the_pass_waits_for_the_run_lock_up_to_ddl_lock_timeout(
+    project, pkg, db, door
+):
+    """The pass's wait for the run lock is bounded by the configured
+    ``ddl_lock_timeout`` (ADR-0038 as amended), and its refusal names the
+    call, the schema, the setting and where to see the run."""
+    configure(project, pkg, db.backend, 'ddl_lock_timeout = "1s"\n')
+    declare_fresh_model()
+    if door == "create_tables":
+        await ferro.connect(db.url)
+    call = {"connect": "connect(auto_migrate=…)", "create_tables": "create_tables()"}
+
+    loop = asyncio.get_running_loop()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        async with holding(db):
+            began = loop.time()
+            with pytest.raises(MigrationRefused) as raised:
+                pending = (
+                    ferro.connect(db.url, migrate_updates=True)
+                    if door == "connect"
+                    else ferro.create_tables()
+                )
+                await asyncio.wait_for(pending, 10)
+            waited = loop.time() - began
+
+    assert str(raised.value) == lock_wait_refusal(call[door], governed(db), "1s")
+    assert 1.0 <= waited < 5.0
+    # It said at once that it waits, and the refusal's report carries that.
+    assert len([w for w in caught if "is waiting" in str(w.message)]) == 1
+    assert [w.kind for w in raised.value.report.warnings] == ["RunLockWait"]
+    assert "guardfresh" not in db.tables()

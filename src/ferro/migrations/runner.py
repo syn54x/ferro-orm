@@ -170,7 +170,7 @@ class RunReport:
 
 MAX_LOCK_TIMEOUT_S = 60.0 * 60 * 24 * 365
 """The longest lock timeout accepted: one year, the same "until it is free"
-bound ``connect(auto_migrate=...)`` waits (ADR-0038)."""
+bound an auto-migrate pass waits under ``ddl_lock_timeout = "0"`` (ADR-0038)."""
 
 
 def parse_lock_timeout(value: str | float) -> float:
