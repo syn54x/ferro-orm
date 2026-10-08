@@ -429,26 +429,29 @@ def order_keys_on_disk(
 ) -> list[tuple[int, int, list[str]]]:
     """The order keys each cursor-holding chunked step's file pages over
     today, as the run planner reads them (``[(migration, step, ["author.id",
-    ...]), ...]``; an empty list for a step whose ``up`` is no longer
+    ...]), ...]``; an empty list for a step whose function is no longer
     ``@chunked``).
 
     A fact only Python can read (the query is a function of the migration's
     historical models), read for every record that is an unfinished
-    chunked step holding a cursor: the planner decides whether its file was
-    edited and whether its cursor is still a position in the edited query
-    (ADR-0030). A directory that does not read gives no facts; the planner
-    refuses it with its own text.
+    chunked step holding a cursor: its ``up``'s keys for an up that stopped
+    part-way, its ``down``'s for a record ``reverting`` at a revert cursor.
+    The planner decides whether its file was edited and whether its cursor
+    is still a position in the edited query (ADR-0030). A directory that
+    does not read gives no facts; the planner refuses it with its own text.
 
     Raises:
         MigrationRefused: such a step's file does not load, or its query
             does not build over its historical models.
     """
     wanted = sorted(
-        (record["migration"], record["step"])
+        (record["migration"], record["step"], bool(record["reverting"]))
         for record in tracked.records
         if record["kind"] == "chunked"
-        and record["finished_at"] is None
-        and record["resume_cursor"] is not None
+        and (
+            (record["finished_at"] is None and record["resume_cursor"] is not None)
+            or (record["reverting"] and record["revert_cursor"] is not None)
+        )
     )
     if not wanted:
         return []
@@ -458,7 +461,7 @@ def order_keys_on_disk(
         return []
     by_number = {m["number"]: m for m in migrations["migrations"]}
     facts: list[tuple[int, int, list[str]]] = []
-    for number, ordinal in wanted:
+    for number, ordinal, reverting in wanted:
         migration = by_number.get(number)
         step = next(
             (s for s in (migration or {}).get("steps", []) if s["ordinal"] == ordinal),
@@ -470,7 +473,8 @@ def order_keys_on_disk(
             facts.append((number, ordinal, []))
             continue
         path = Path(step["files"]["portable"]["up"])
-        shape = load_step(path, None).up.shape
+        loaded = load_step(path, None)
+        shape = (loaded.down if reverting else loaded.up).shape
         if not isinstance(shape, Chunked):
             facts.append((number, ordinal, []))
             continue
@@ -984,7 +988,11 @@ async def _preview_down(
     Raises:
         RunRefused: the down would be refused.
     """
-    plan = await tracked.plan(direction)
+    try:
+        keys = order_keys_on_disk(tracked)
+    except MigrationRefused as refused:
+        raise RunRefused(f"{refused}. Nothing was reverted.") from None
+    plan = await tracked.plan(direction, order_keys=keys)
     _, reasons = _load_data_steps(plan.steps, "down")
     shown = DownPlan(
         steps=[
@@ -1077,7 +1085,9 @@ async def down(
             return report
         try:
             async with tracked.locked(timeout, say_waiting) as run:
-                plan = await run.plan(direction)
+                plan = await run.plan(
+                    direction, order_keys=_order_keys_for(run, "reverted")
+                )
                 if [s.standing for s in plan.steps] != [s.standing for s in seen.steps]:
                     report.refusal = (
                         "ferro migrate: the database's migration records changed while "

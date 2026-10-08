@@ -1603,15 +1603,16 @@ pub async fn write_cursor(
 }
 
 /// The statement `rerecord` runs: the record's `file`, `checksum` and
-/// `kind`, and with `restart` its cursor cleared and `rows_done` zeroed,
-/// guarded on the checksum the plan read so a record that moved since is
-/// not rewritten.
-fn rerecord_sql(dialect: Dialect, tracking: &Tracking, restart: bool) -> String {
+/// `kind`, and with `restart` its cursor cleared and `rows_done` zeroed (a
+/// `reverting` record's `revert_cursor`, which keeps it reverting; any
+/// other's `resume_cursor`), guarded on the checksum the plan read so a
+/// record that moved since is not rewritten.
+fn rerecord_sql(dialect: Dialect, tracking: &Tracking, restart: bool, reverting: bool) -> String {
     let p = |n: usize| param(dialect, n);
-    let cursor = if restart {
-        ", resume_cursor = NULL, rows_done = 0"
-    } else {
-        ""
+    let cursor = match (restart, reverting) {
+        (false, _) => "",
+        (true, false) => ", resume_cursor = NULL, rows_done = 0",
+        (true, true) => ", revert_cursor = NULL, rows_done = 0",
     };
     format!(
         "UPDATE {} SET file = {}, checksum = {}, kind = {}{cursor} \
@@ -1628,7 +1629,7 @@ fn rerecord_sql(dialect: Dialect, tracking: &Tracking, restart: bool) -> String 
 
 /// Rewrite one step record as [`ferro_migrate::run_plan::rerecord_plan`]
 /// planned it (ADR-0030): its `file`, `checksum` and `kind`, and with
-/// `action.clear_cursor` (`--restart`) its `resume_cursor` and `rows_done`
+/// `action.clear_cursor` (`--restart`) its cursor and `rows_done`
 /// — one statement, so it lands whole or not at all. Runs nothing of the
 /// step. Called under the run lock.
 ///
@@ -1645,6 +1646,7 @@ pub async fn rerecord_checksum(
         dialect,
         &Tracking::new(dialect, tracking_schema),
         action.clear_cursor,
+        action.reverting,
     );
     let rows = engine
         .fetch_all_sql_unprepared_with_binds(
