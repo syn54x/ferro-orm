@@ -1581,7 +1581,7 @@ mod tests {
         before.indexes.push(index(&["name"]));
         let mut after = author();
         after.indexes.push(index(&["name", "status"]));
-        let migration = edit(vec![before], vec![after], &[Dialect::Postgres]);
+        let migration = edit(vec![before], vec![after], &BOTH);
         assert_eq!(step_names(&migration), ["01_idx_author_lookup"]);
         let pg = step(&migration, "01_idx_author_lookup", Dialect::Postgres);
         assert_eq!(
@@ -1596,6 +1596,84 @@ mod tests {
              DROP INDEX CONCURRENTLY IF EXISTS \"idx_author_lookup\";\n\n\
              CREATE INDEX CONCURRENTLY \"idx_author_lookup\" ON \"author\" (\"name\");\n"
         );
+        // SQLite drops the old definition first too: `IF NOT EXISTS` alone
+        // would keep it under the name (ADR-0051).
+        let sqlite = step(&migration, "01_idx_author_lookup", Dialect::Sqlite);
+        assert_eq!(
+            sqlite.up,
+            "DROP INDEX IF EXISTS \"idx_author_lookup\";\n\n\
+             CREATE INDEX IF NOT EXISTS \"idx_author_lookup\" ON \"author\" (\"name\", \"status\");\n"
+        );
+        assert_eq!(
+            sqlite.down,
+            "DROP INDEX IF EXISTS \"idx_author_lookup\";\n\n\
+             CREATE INDEX IF NOT EXISTS \"idx_author_lookup\" ON \"author\" (\"name\");\n"
+        );
+    }
+
+    /// Until the index steps are built from the planner's ops (ADR-0051),
+    /// the generator's own index diff and the planner name the same
+    /// redefinitions: both causes of a shared name, and a change of
+    /// uniqueness, on both dialects.
+    #[test]
+    fn the_index_steps_redefine_exactly_what_the_planner_redefines() {
+        let with_index = |columns: &[&str], unique: bool| {
+            let mut model = with_columns(vec![
+                optional("order_id", "string"),
+                optional("kind", "string"),
+                optional("order", "string"),
+                optional("id_kind", "string"),
+            ]);
+            let name = ferro_ddl_lowering::composite_index_name("author", columns);
+            model.indexes.push(ferro_schema_ir::SchemaIndex {
+                name,
+                columns: columns.iter().map(|c| c.to_string()).collect(),
+                unique,
+            });
+            model
+        };
+        let cases = [
+            // An underscore join.
+            (
+                with_index(&["order_id", "kind"], false),
+                with_index(&["order", "id_kind"], false),
+            ),
+            // The same columns, made unique.
+            (
+                with_index(&["order_id", "kind"], false),
+                with_index(&["order_id", "kind"], true),
+            ),
+            // An unchanged index is no step and no op.
+            (
+                with_index(&["order_id", "kind"], false),
+                with_index(&["order_id", "kind"], false),
+            ),
+        ];
+        for (before, after) in cases {
+            let (before, after) = (ir(vec![before]), ir(vec![after]));
+            let staged: Vec<String> = staging::index_ops(&before, &after)
+                .iter()
+                .filter_map(|op| match op {
+                    staging::IndexOp::Build {
+                        def,
+                        replaces: Some(_),
+                    } => Some(def.name.clone()),
+                    _ => None,
+                })
+                .collect();
+            for dialect in BOTH {
+                let planned: Vec<String> = plan(&before, &after, dialect)
+                    .expect("plan")
+                    .operations
+                    .into_iter()
+                    .filter_map(|op| match op {
+                        MigrationOp::RedefineIndex { name, .. } => Some(name),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(planned, staged, "{dialect:?}");
+            }
+        }
     }
 
     /// `author` with an optional `email`, unique when `unique`, and the table

@@ -388,6 +388,28 @@ pub(crate) fn render_from(
                 out.statements
                     .push(render_drop_index_sql(name, IndexMode::Plain));
             }
+            // ADR-0051: the index under the name is another definition, so
+            // `IF NOT EXISTS` would keep it: drop it, then run the exact
+            // create statement the `AddIndex` path renders, from the target.
+            MigrationOp::RedefineIndex { table, name } => {
+                let (columns, unique) =
+                    crate::declared_index(new, table, name).ok_or_else(|| EmissionError {
+                        message: format!(
+                            "Index redefinition '{name}' on table '{table}' has no index \
+                             '{name}' in the declared IR"
+                        ),
+                    })?;
+                out.statements
+                    .push(render_drop_index_sql(name, IndexMode::Plain));
+                out.statements.push(render_index_sql(
+                    table,
+                    name,
+                    &columns,
+                    unique,
+                    dialect,
+                    IndexMode::Plain,
+                ));
+            }
             // ADR-0044: an invalid index is present (so `IF NOT EXISTS` would
             // skip it) but never used. Drop it by name — it is known to exist —
             // then run the exact create statement the `AddIndex` path renders.

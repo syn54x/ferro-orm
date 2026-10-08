@@ -813,7 +813,22 @@ fn plan_existing_table(
     // Invalid-index rebuilds (#515; ADR-0044) go where `AddIndex` goes: after
     // the column ops, ahead of the foreign-key ops. An invalid index is
     // present live, so the diff above never planned an `AddIndex` for it.
-    ops.extend(index_rebuilds(table, new_model, &facts.indexes));
+    // A redefinition drops the index and builds it anew, so it stands in for
+    // the rebuild of an invalid one.
+    let redefined: Vec<String> = ops
+        .iter()
+        .filter_map(|op| match op {
+            MigrationOp::RedefineIndex { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    ops.extend(
+        index_rebuilds(table, new_model, &facts.indexes)
+            .into_iter()
+            .filter(|op| {
+                !matches!(op, MigrationOp::RebuildIndex { name, .. } if redefined.contains(name))
+            }),
+    );
     diff_model_foreign_keys(table, old_model, new_model, &mut ops, &mut plan.reports);
 
     // Check addition (#343; ADR-0013) lands after the column ops, so a CHECK
@@ -2343,19 +2358,30 @@ fn diff_model_indexes(
     let new_names: BTreeSet<&str> = new_set.iter().map(|(n, _, _)| n.as_str()).collect();
 
     for (name, columns, unique) in &new_set {
-        if !old_by_name.contains_key(name) {
+        match old_by_name.get(name) {
+            // The same name over other columns, or with the other uniqueness
+            // (ADR-0051): a name cut to 63 characters, an underscore join, or
+            // a live index written another way. Still declared, so never
+            // gated on `destructive`; it also replaces what an added column's
+            // `CREATE INDEX IF NOT EXISTS` would leave standing under the name.
+            Some((old_columns, old_unique)) => {
+                if old_columns != columns || old_unique != unique {
+                    ops.push(MigrationOp::RedefineIndex {
+                        table: table.to_string(),
+                        name: name.clone(),
+                    });
+                }
+            }
             // A rider of an added column is built by its `AddColumn`.
             // Composite indexes never ride a column and are planned even
             // when every indexed column is new (I-1).
-            if riders.iter().any(|riders| riders.has_index(name)) {
-                continue;
-            }
-            ops.push(MigrationOp::AddIndex {
+            None if riders.iter().any(|riders| riders.has_index(name)) => {}
+            None => ops.push(MigrationOp::AddIndex {
                 table: table.to_string(),
                 name: name.clone(),
                 columns: columns.clone(),
                 unique: *unique,
-            });
+            }),
         }
     }
     if destructive {
@@ -2852,6 +2878,9 @@ pub fn reverse_live_plan(
             // Nothing to undo: a rebuilt invalid index and a validated
             // constraint are the live objects, made usable.
             MigrationOp::RebuildIndex { .. } | MigrationOp::ValidateConstraint { .. } => {}
+            // The same op back: rendered against the live side, it builds the
+            // live definition again under the name.
+            MigrationOp::RedefineIndex { .. } => operations.push(planned(op.clone())),
             MigrationOp::AddForeignKey { table, column } => {
                 match (declared_fk_name(&declared_models, table, column), dialect) {
                     (Some(name), Dialect::Postgres) => {

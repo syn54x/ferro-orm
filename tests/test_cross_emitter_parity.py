@@ -552,16 +552,20 @@ def normalize_online_shape(statement: str) -> str:
     )
 
 
-def _plain_twins(statements: list[str]) -> list[str]:
+def _plain_twins(
+    statements: list[str], parent_indexes: frozenset[str] = frozenset()
+) -> list[str]:
     """A step's statements as the pass would run them. A concurrent build's
     leading ``DROP INDEX CONCURRENTLY IF EXISTS`` of the index it builds is
-    the crash-leftover guard (ADR-0044), which no plain build needs."""
+    the crash-leftover guard (ADR-0044), which no plain build needs, unless
+    the parent declares an index of that name (``parent_indexes``): then the
+    build redefines it (ADR-0051), and the drop is the pass's own."""
     out: list[str] = []
     for i, statement in enumerate(statements):
         following = statements[i + 1] if i + 1 < len(statements) else ""
         if statement.startswith("DROP INDEX CONCURRENTLY IF EXISTS "):
             name = statement.removeprefix("DROP INDEX CONCURRENTLY IF EXISTS ")
-            if re.match(
+            if name.strip('"') not in parent_indexes and re.match(
                 rf"^CREATE (UNIQUE )?INDEX CONCURRENTLY {re.escape(name)} ", following
             ):
                 continue
@@ -802,7 +806,12 @@ def door_statements(door: Door, dialect: str) -> list[str]:
     rebuild itself. Data steps hold no DDL."""
     steps = [s for s in door.stems if not door.is_data(s)]
     split = {s: _split_rebuilds(door.statements(s, "up", dialect)) for s in steps}
-    natives = [t for s in steps for t in _plain_twins(split[s][0])]
+    parent_indexes = frozenset(
+        index["name"]
+        for model in door.parent["payload"]["models"]
+        for index in [*(model.get("indexes") or []), *(model.get("uniques") or [])]
+    )
+    natives = [t for s in steps for t in _plain_twins(split[s][0], parent_indexes)]
     ops = [op for plan in door.pass_plans(dialect) for op in plan]
     remaining = Counter(natives)
     out = list(natives)
@@ -991,6 +1000,8 @@ INDEX_STEP_CASES = (
     "A3-required-column-without-a-default",
     "A9-add-a-unique",
     "A9-drop-a-unique",
+    "A11-redefine-an-index-under-a-cut-name",
+    "A11-redefine-an-index-under-a-joined-name",
     "F3-a-type-change-and-a-new-index",
 )
 """Postgres index steps (``CONCURRENTLY``, no transaction)."""

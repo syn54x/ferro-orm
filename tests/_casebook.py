@@ -15,6 +15,7 @@ from tests import test_generate_backfill as backfill
 from tests import test_generate_columns as columns
 from tests import test_generate_enum_removal as enum_removal
 from tests import test_generate_enums as enums
+from tests import test_generate_indexes as indexes
 from tests import test_generate_postgres_staging as staging
 from tests import test_generate_renames as renames
 from tests import test_generate_row_security as row_security
@@ -145,6 +146,16 @@ CASES: tuple[Case, ...] = (
         "A10-drop-a-table-check",
         sqlite_rebuild.checked("author.age > 0"),
         sqlite_rebuild.CHECKS + "    age: int | None = None\n",
+    ),
+    Case(
+        "A11-redefine-an-index-under-a-cut-name",
+        indexes.NARROW,
+        indexes.WIDE,
+    ),
+    Case(
+        "A11-redefine-an-index-under-a-joined-name",
+        indexes.JOINED,
+        indexes.REJOINED,
     ),
     # -- B: whole models ----------------------------------------------------------
     Case(

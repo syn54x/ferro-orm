@@ -1116,3 +1116,52 @@ async def test_a_label_rename_downgrade_renames_it_back_once(
     assert await _trl_labels(db_url) == ["paid", "cancelled"]
     run_revision(downgrade, db_url, postgres_base_url, db_schema_name)
     assert await _trl_labels(db_url) == ["paid", "canceled"]
+
+
+# ---------------------------------------------------------------------------
+# A redefined index and a removed foreign key (ADR-0051)
+# ---------------------------------------------------------------------------
+
+
+def _line(indexed: tuple[str, ...]) -> None:
+    class Tr551Line(Model):
+        __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = (indexed,)
+
+        id: int | None = Field(default=None, primary_key=True)
+        order_id: int | None = None
+        kind: str | None = None
+        order: int | None = None
+        id_kind: str | None = None
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.asyncio
+async def test_a_redefined_index_is_alembics_drop_then_create_both_ways(
+    db_url, postgres_base_url, db_schema_name
+):
+    """``("order_id", "kind")`` and ``("order", "id_kind")`` share the name
+    ``idx_tr551line_order_id_kind``: the bridge used to write nothing for
+    the change. Now Alembic's drop and create, and the downgrade builds the
+    live definition back."""
+    _line(("order_id", "kind"))
+    await connect(db_url, auto_migrate=True)
+    _rewind_registry()
+    _line(("order", "id_kind"))
+
+    upgrade, downgrade = autogenerate(db_url, postgres_base_url, db_schema_name)
+    assert "op.drop_index('idx_tr551line_order_id_kind'" in upgrade, upgrade
+    assert (
+        "op.create_index('idx_tr551line_order_id_kind', 'tr551line', "
+        "['order', 'id_kind']"
+    ) in upgrade, upgrade
+    assert (
+        "op.create_index('idx_tr551line_order_id_kind', 'tr551line', "
+        "['order_id', 'kind']"
+    ) in downgrade, downgrade
+
+    run_revision(upgrade, db_url, postgres_base_url, db_schema_name)
+    assert await _drift(db_url) == []
+    run_revision(downgrade, db_url, postgres_base_url, db_schema_name)
+    _rewind_registry()
+    _line(("order_id", "kind"))
+    assert await _drift(db_url) == []

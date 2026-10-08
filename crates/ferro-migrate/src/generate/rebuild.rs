@@ -60,6 +60,7 @@ fn column<'a>(model: Option<&'a SchemaModel>, name: &str) -> Option<&'a SchemaCo
 /// | Op | Up | Down |
 /// | :-- | :-- | :-- |
 /// | add/drop a table, an enum type or label, an index | native | native |
+/// | redefine an index (drop + create) | native | native |
 /// | rename a table, a column, an index (drop + create), a policy | native | native |
 /// | rename a constraint (a `ck_` / `fk_` name a rename drags) | rebuild | rebuild |
 /// | add an optional column, or a required one with a literal default | native | native |
@@ -93,6 +94,7 @@ pub fn needs_rebuild(op: &MigrationOp, direction: PlanDirection, ctx: &PlanConte
         | MigrationOp::RenameEnumType { .. }
         | MigrationOp::AddIndex { .. }
         | MigrationOp::DropIndex { .. }
+        | MigrationOp::RedefineIndex { .. }
         | MigrationOp::RebuildIndex { .. }
         | MigrationOp::ValidateConstraint { .. }
         | MigrationOp::AddRowPolicy { .. }

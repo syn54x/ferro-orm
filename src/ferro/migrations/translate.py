@@ -215,6 +215,21 @@ class _Target:
             None,
         )
 
+    def index(self, table: str, name: str) -> tuple[list[str], bool]:
+        """The columns and uniqueness of the index ``name`` on ``table``: a
+        declared unique sits in ``uniques``, a live one in ``indexes``."""
+        model = self.models[table]
+        for index in model.get("indexes") or []:
+            if index["name"] == name:
+                return list(index["columns"]), bool(index.get("unique"))
+        for unique in model.get("uniques") or []:
+            if unique["name"] == name:
+                return list(unique["columns"]), True
+        raise RuntimeError(
+            f"ferro: the plan redefines index {name} on {table}, which the target "
+            "does not declare; this is a ferro bug, please file an issue"
+        )
+
     def has_column_check(self, table: str, column: str) -> bool:
         return any(
             check.get("column") == column
@@ -417,6 +432,15 @@ def _twin(op: dict[str, Any], target: _Target) -> list[ops.MigrateOperation]:
         ]
     if kind == "DropIndex":
         return [ops.DropIndexOp(op["name"], table_name=op["table"])]
+    if kind == "RedefineIndex":
+        # The index under the name another way: Alembic's drop, then its
+        # create of the definition the plan leads to (ADR-0051).
+        table, name = op["table"], op["name"]
+        columns, unique = target.index(table, name)
+        return [
+            ops.DropIndexOp(name, table_name=table),
+            ops.CreateIndexOp(name, table, columns, unique=unique),
+        ]
     if kind == "AddForeignKey":
         return _foreign_key(target, op["table"], op["column"])
     if kind == "DropForeignKey":

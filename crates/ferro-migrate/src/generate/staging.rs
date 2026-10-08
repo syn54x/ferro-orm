@@ -238,6 +238,19 @@ fn build(def: &IndexDef, dialect: Dialect) -> Vec<String> {
     }
 }
 
+/// The statements that build `def` over another definition under its name
+/// (ADR-0051): on Postgres [`build`] already drops first; on SQLite the plain
+/// build's `IF NOT EXISTS` would keep the old one, so it is dropped first.
+fn replace(def: &IndexDef, dialect: Dialect) -> Vec<String> {
+    match dialect {
+        Dialect::Postgres => build(def, dialect),
+        Dialect::Sqlite => drop(def, dialect)
+            .into_iter()
+            .chain(build(def, dialect))
+            .collect(),
+    }
+}
+
 fn drop(def: &IndexDef, dialect: Dialect) -> Vec<String> {
     let mode = match dialect {
         Dialect::Postgres => IndexMode::Concurrent,
@@ -281,13 +294,18 @@ pub fn index_step(op: &IndexOp, dialects: &[Dialect]) -> GeneratedStep {
     let renderings = dialects
         .iter()
         .map(|&dialect| match op {
-            IndexOp::Build { def, replaces } => {
-                let down = match replaces {
-                    Some(old) => (build(old, dialect), old.unique),
-                    None => (drop(def, dialect), false),
-                };
-                rendering(dialect, (build(def, dialect), def.unique), down)
-            }
+            IndexOp::Build { def, replaces } => match replaces {
+                Some(old) => rendering(
+                    dialect,
+                    (replace(def, dialect), def.unique),
+                    (replace(old, dialect), old.unique),
+                ),
+                None => rendering(
+                    dialect,
+                    (build(def, dialect), def.unique),
+                    (drop(def, dialect), false),
+                ),
+            },
             IndexOp::Drop(def) => rendering(
                 dialect,
                 (drop(def, dialect), false),

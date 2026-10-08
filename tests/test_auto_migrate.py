@@ -2984,3 +2984,170 @@ async def test_a_base_table_named_like_a_model_is_left_to_reconcile_as_before(
         "heldcard": table,
         "helddeck": table,
     }
+
+
+# -- a redefined index and a removed foreign key (ADR-0051) ------------------------
+
+
+def _by_hand(db_url: str, db_backend: str, sql: str, *, fetch: bool = False):
+    """Run ``sql`` on a plain driver connection, outside ferro."""
+    if db_backend == "sqlite":
+        import sqlite3
+
+        conn = sqlite3.connect(
+            db_url.removeprefix("sqlite:").split("?", 1)[0], isolation_level=None
+        )
+    else:
+        import psycopg
+
+        m = re.search(r"search_path=([^&]+)", db_url)
+        schema = m.group(1) if m else "public"
+        base_url = db_url.replace("postgres://", "postgresql://", 1).split("?")[0]
+        conn = psycopg.connect(
+            base_url, options=f"-c search_path={schema}", autocommit=True
+        )
+    try:
+        cursor = conn.execute(sql)
+        return cursor.fetchall() if fetch else None
+    finally:
+        conn.close()
+
+
+def _index_definition(
+    db_url: str, db_backend: str, index: str
+) -> tuple[list[str], bool]:
+    """The live columns and uniqueness of ``index``."""
+    if db_backend == "sqlite":
+        columns = _by_hand(
+            db_url,
+            db_backend,
+            f"SELECT name FROM pragma_index_info('{index}') ORDER BY seqno",
+            fetch=True,
+        )
+        ((sql,),) = _by_hand(
+            db_url,
+            db_backend,
+            f"SELECT sql FROM sqlite_master WHERE type = 'index' AND name = '{index}'",
+            fetch=True,
+        )
+        return [name for (name,) in columns], sql.startswith("CREATE UNIQUE INDEX")
+    rows = _by_hand(
+        db_url,
+        db_backend,
+        "SELECT a.attname::text, i.indisunique FROM pg_index i JOIN pg_attribute a "
+        "ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) "
+        f"WHERE i.indexrelid = '\"{index}\"'::regclass "
+        "ORDER BY array_position(i.indkey::smallint[], a.attnum)",
+        fetch=True,
+    )
+    return [name for name, _ in rows], bool(rows[0][1])
+
+
+TRUNCATED = "idx_subscriptioninvoiceline_billing_period_start_billing_pe_idx"
+
+
+@pytest.mark.asyncio
+@pytest.mark.backend_matrix
+async def test_migrate_updates_redefines_an_index_whose_cut_name_now_covers_more_columns(
+    db_url, db_backend, clean_registry
+):
+    """Both column groups cut to one 63-character name: the pass used to
+    leave the old index under it. Redefined without migrate_destructive."""
+    from typing import ClassVar
+
+    class SubscriptionInvoiceLine(Model):
+        __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = (
+            ("billing_period_start", "billing_period_end"),
+        )
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        billing_period_start: int
+        billing_period_end: int
+        customer_id: int
+
+    await ferro.connect(db_url, auto_migrate=True)
+    assert _index_definition(db_url, db_backend, TRUNCATED) == (
+        ["billing_period_start", "billing_period_end"],
+        False,
+    )
+    _rewind()
+
+    class SubscriptionInvoiceLine(Model):  # noqa: F811 — intentional redefinition
+        __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = (
+            ("billing_period_start", "billing_period_end", "customer_id"),
+        )
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        billing_period_start: int
+        billing_period_end: int
+        customer_id: int
+
+    await ferro.connect(db_url, migrate_updates=True)
+    assert _index_definition(db_url, db_backend, TRUNCATED) == (
+        ["billing_period_start", "billing_period_end", "customer_id"],
+        False,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.backend_matrix
+async def test_migrate_updates_redefines_a_ferro_named_index_written_another_way(
+    db_url, db_backend, clean_registry
+):
+    """A live ``idx_`` index over other columns (a hand edit, an older
+    build) is replaced by the declared one."""
+
+    class RedefLive(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        code: Annotated[str, FerroField(index=True)]
+        label: str
+
+    await ferro.connect(db_url, auto_migrate=True)
+    ferro.reset_engine()
+    _by_hand(db_url, db_backend, 'DROP INDEX "idx_redeflive_code"')
+    _by_hand(
+        db_url, db_backend, 'CREATE INDEX "idx_redeflive_code" ON "redeflive" ("label")'
+    )
+
+    await ferro.connect(db_url, migrate_updates=True)
+    assert _index_definition(db_url, db_backend, "idx_redeflive_code") == (
+        ["code"],
+        False,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.backend_matrix
+async def test_a_unique_redefinition_over_duplicates_fails_counted_naming_the_fix(
+    db_url, db_backend, clean_registry
+):
+    """A live non-unique ``uq_`` index the model declares unique: the
+    redefinition builds a unique index, which duplicates refuse. The pass
+    fails with the count and the fix."""
+
+    class RedefDupe(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        code: str
+
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        for code in ("a", "a", "b", "b", "c"):
+            await RedefDupe.create(code=code)
+    _rewind()
+    _by_hand(
+        db_url, db_backend, 'CREATE INDEX "uq_redefdupe_code" ON "redefdupe" ("code")'
+    )
+
+    class RedefDupe(Model):  # noqa: F811 — intentional redefinition
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        code: Annotated[str, FerroField(unique=True)]
+
+    with pytest.raises(Exception) as failure:
+        await ferro.connect(db_url, migrate_updates=True)
+    message = str(failure.value)
+    assert '2 values are duplicated under "uq_redefdupe_code" on "redefdupe"' in message
+    assert "fix the rows" in message
+    if db_backend == "postgres":
+        # One transaction per table: the old index is still there.
+        assert _index_definition(db_url, db_backend, "uq_redefdupe_code") == (
+            ["code"],
+            False,
+        )

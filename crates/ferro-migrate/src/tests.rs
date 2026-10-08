@@ -5763,3 +5763,142 @@ fn a_columns_riders_are_its_flags_its_own_check_and_its_foreign_key() {
         emit::Riders::default()
     );
 }
+
+// ---------------------------------------------------------------------------
+// A redefined index (ADR-0051): a ferro-owned index that keeps its name and
+// changes its columns or its uniqueness is planned `RedefineIndex`, on every
+// side, and rendered as the drop then the declared create.
+// ---------------------------------------------------------------------------
+
+/// `table` with `columns` (every one an optional varchar) and one composite
+/// index over `indexed`, named as the IR compiler names it.
+fn indexed_model(table: &str, columns: &[&str], indexed: &[&str]) -> SchemaModel {
+    let mut cols = vec![pk_col("id", "integer")];
+    cols.extend(columns.iter().map(|name| col(name, "varchar", true)));
+    let mut model = schema_model(table, cols);
+    model.indexes.push(SchemaIndex {
+        name: test_composite_index_name(table, indexed),
+        columns: indexed.iter().map(|c| c.to_string()).collect(),
+        unique: false,
+    });
+    model
+}
+
+fn redefine(table: &str, name: &str) -> MigrationOp {
+    MigrationOp::RedefineIndex {
+        table: table.to_string(),
+        name: name.to_string(),
+    }
+}
+
+/// Truncation: both column groups build a name over 63 characters, cut to the
+/// same 59 characters plus `_idx`.
+#[test]
+fn a_truncated_index_name_over_other_columns_is_redefined() {
+    let table = "subscriptioninvoiceline";
+    let cols = ["billing_period_start", "billing_period_end", "customer_id"];
+    let before = indexed_model(table, &cols, &cols[..2]);
+    let after = indexed_model(table, &cols, &cols);
+    let name = "idx_subscriptioninvoiceline_billing_period_start_billing_pe_idx";
+    assert_eq!(before.indexes[0].name, name);
+    assert_eq!(after.indexes[0].name, name);
+
+    let (old, new) = (envelope(vec![before]), envelope(vec![after]));
+    for dialect in [Dialect::Postgres, Dialect::Sqlite] {
+        let plan = plan_from_ir(&old, &new, dialect, &LiveFacts::declared(), updates_only())
+            .expect("plan");
+        assert_eq!(plan.operations, vec![redefine(table, name)]);
+        let rendered = plan.render().expect("render");
+        assert_eq!(
+            rendered[0].statements,
+            vec![
+                format!("DROP INDEX IF EXISTS \"{name}\""),
+                format!(
+                    "CREATE INDEX IF NOT EXISTS \"{name}\" ON \"{table}\" \
+                     (\"billing_period_start\", \"billing_period_end\", \"customer_id\")"
+                ),
+            ]
+        );
+    }
+}
+
+/// Underscore joins: `("order_id", "kind")` and `("order", "id_kind")` both
+/// join to `idx_<table>_order_id_kind`.
+#[test]
+fn an_underscore_join_collision_is_redefined() {
+    let cols = ["order_id", "kind", "order", "id_kind"];
+    let before = indexed_model("line", &cols, &["order_id", "kind"]);
+    let after = indexed_model("line", &cols, &["order", "id_kind"]);
+    assert_eq!(before.indexes[0].name, "idx_line_order_id_kind");
+    assert_eq!(after.indexes[0].name, before.indexes[0].name);
+
+    let plan = plan_from_ir(
+        &envelope(vec![before]),
+        &envelope(vec![after]),
+        Dialect::Postgres,
+        &LiveFacts::declared(),
+        updates_only(),
+    )
+    .expect("plan");
+    assert_eq!(
+        plan.operations,
+        vec![redefine("line", "idx_line_order_id_kind")]
+    );
+    assert_eq!(
+        plan.render().expect("render")[0].statements[1],
+        "CREATE INDEX IF NOT EXISTS \"idx_line_order_id_kind\" ON \"line\" (\"order\", \"id_kind\")"
+    );
+}
+
+/// A live ferro-named index whose definition differs from the declaration
+/// (written by hand, or by an older build) is redefined without
+/// `migrate_destructive`, columns and uniqueness alike; an invalid one the
+/// redefinition replaces is not rebuilt as well.
+#[test]
+fn a_live_ferro_named_index_with_another_definition_is_redefined_without_destructive() {
+    let mut live = indexed_model("post", &["title", "slug"], &["title"]);
+    live.indexes.push(SchemaIndex {
+        name: "uq_post_slug".to_string(),
+        columns: vec!["slug".to_string()],
+        unique: false,
+    });
+    let mut declared = indexed_model("post", &["title", "slug"], &["title"]);
+    declared.indexes[0].columns = vec!["slug".to_string()];
+    declared.uniques.push(SchemaUnique {
+        name: "uq_post_slug".to_string(),
+        columns: vec!["slug".to_string()],
+    });
+    let facts = LiveTableFacts {
+        indexes: vec![index_validity("idx_post_title", false)],
+        ..LiveTableFacts::default()
+    };
+    let plan = plan_live_table(live, declared, facts, updates_only());
+    assert_eq!(
+        plan.operations,
+        vec![
+            redefine("post", "idx_post_title"),
+            redefine("post", "uq_post_slug")
+        ]
+    );
+    let rendered = plan.render().expect("render");
+    assert_eq!(
+        rendered[1].statements,
+        vec![
+            "DROP INDEX IF EXISTS \"uq_post_slug\"".to_string(),
+            "CREATE UNIQUE INDEX IF NOT EXISTS \"uq_post_slug\" ON \"post\" (\"slug\")".to_string(),
+        ]
+    );
+}
+
+/// The same definition under the same name is no change.
+#[test]
+fn an_index_with_the_same_definition_is_not_redefined() {
+    let model = indexed_model("post", &["title"], &["title"]);
+    let plan = plan_live_table(
+        model.clone(),
+        model,
+        LiveTableFacts::default(),
+        updates_only(),
+    );
+    assert!(plan.operations.is_empty(), "{:?}", plan.operations);
+}

@@ -730,3 +730,28 @@ def test_against_a_connection_that_is_not_open_is_refused(project, pkg, db, caps
                 snapshot_of(project, HEAD), migration=HEAD, using="nowhere"
             )
         )
+
+
+# -- a redefined index and a removed foreign key (ADR-0051) ------------------------
+
+
+def test_a_ferro_named_index_over_other_columns_is_drift(project, pkg, db, capsys):
+    """``idx_team_size`` rebuilt by hand over ``name``: the name is the
+    snapshot's, its definition is not."""
+    applied(project, pkg, db, capsys)
+    db.execute('DROP INDEX "idx_team_size"')
+    db.execute('CREATE INDEX "idx_team_size" ON "team" ("name")')
+
+    report = drift_api(db)
+    assert report.lines == ["idx_team_size index is on (name), snapshot says (size)"]
+    assert report.operations[0]["kind"] == "RedefineIndex"
+
+
+def test_a_ferro_named_index_made_unique_is_drift(project, pkg, db, capsys):
+    applied(project, pkg, db, capsys)
+    db.execute('DROP INDEX "idx_team_size"')
+    db.execute('CREATE UNIQUE INDEX "idx_team_size" ON "team" ("size")')
+
+    assert drift_api(db).lines == [
+        "idx_team_size index is unique, snapshot says not unique"
+    ]

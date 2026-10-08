@@ -126,6 +126,14 @@
       "table \"trnauthor\" declares __ferro_renamed_from__ = \"trnwriter\", and the database holds \"trnwriter\" and no \"trnauthor\": \"trnauthor\" was not created, nor \"trnappendix\" and \"trnbook\", which reference it. The rename runs under connect(..., migrate_updates=True) or in a migration from ferro migrate new."
     ]
   },
+  "tests/test_auto_migrate.py::test_a_unique_redefinition_over_duplicates_fails_counted_naming_the_fix[postgres]": {
+    "statements": [
+      "'redefdupe': CREATE TABLE IF NOT EXISTS \"redefdupe\" ( \"code\" varchar NOT NULL, \"id\" serial PRIMARY KEY NOT NULL )",
+      "'redefdupe': DROP INDEX IF EXISTS \"uq_redefdupe_code\"",
+      "'redefdupe': CREATE UNIQUE INDEX IF NOT EXISTS \"uq_redefdupe_code\" ON \"redefdupe\" (\"code\")"
+    ],
+    "warnings": []
+  },
   "tests/test_auto_migrate.py::test_added_indexed_and_unique_columns_get_their_indexes[sqlite]": {
     "statements": [
       "'migindexed': ALTER TABLE \"migindexed\" ADD COLUMN \"slug\" varchar",
@@ -284,6 +292,24 @@
       "'fkdriftaccount': CREATE TABLE IF NOT EXISTS \"fkdriftaccount\" ( \"connection_id\" integer, \"id\" serial PRIMARY KEY NOT NULL, CONSTRAINT \"fk_fkdriftaccount_connection_id_fkdriftconn\" FOREIGN KEY (\"connection_id\") REFERENCES \"fkdriftconn\" (\"id\") ON DELETE CASCADE )",
       "'fkdriftaccount': ALTER TABLE \"fkdriftaccount\" DROP CONSTRAINT \"fk_fkdriftaccount_connection_id_fkdriftconn\"",
       "'fkdriftaccount': ALTER TABLE \"fkdriftaccount\" ADD CONSTRAINT \"fk_fkdriftaccount_connection_id_fkdriftconn\" FOREIGN KEY (\"connection_id\") REFERENCES \"fkdriftconn\" (\"id\") ON DELETE SET NULL"
+    ],
+    "warnings": []
+  },
+  "tests/test_auto_migrate.py::test_migrate_updates_redefines_a_ferro_named_index_written_another_way[postgres]": {
+    "statements": [
+      "'redeflive': CREATE TABLE IF NOT EXISTS \"redeflive\" ( \"code\" varchar NOT NULL, \"id\" serial PRIMARY KEY NOT NULL, \"label\" varchar NOT NULL )",
+      "'redeflive': CREATE INDEX IF NOT EXISTS \"idx_redeflive_code\" ON \"redeflive\" (\"code\")",
+      "'redeflive': DROP INDEX IF EXISTS \"idx_redeflive_code\"",
+      "'redeflive': CREATE INDEX IF NOT EXISTS \"idx_redeflive_code\" ON \"redeflive\" (\"code\")"
+    ],
+    "warnings": []
+  },
+  "tests/test_auto_migrate.py::test_migrate_updates_redefines_an_index_whose_cut_name_now_covers_more_columns[postgres]": {
+    "statements": [
+      "'subscriptioninvoiceline': CREATE TABLE IF NOT EXISTS \"subscriptioninvoiceline\" ( \"billing_period_end\" integer NOT NULL, \"billing_period_start\" integer NOT NULL, \"customer_id\" integer NOT NULL, \"id\" serial PRIMARY KEY NOT NULL )",
+      "'subscriptioninvoiceline': CREATE INDEX IF NOT EXISTS \"idx_subscriptioninvoiceline_billing_period_start_billing_pe_idx\" ON \"subscriptioninvoiceline\" (\"billing_period_start\", \"billing_period_end\")",
+      "'subscriptioninvoiceline': DROP INDEX IF EXISTS \"idx_subscriptioninvoiceline_billing_period_start_billing_pe_idx\"",
+      "'subscriptioninvoiceline': CREATE INDEX IF NOT EXISTS \"idx_subscriptioninvoiceline_billing_period_start_billing_pe_idx\" ON \"subscriptioninvoiceline\" (\"billing_period_start\", \"billing_period_end\", \"customer_id\")"
     ],
     "warnings": []
   },
