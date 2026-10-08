@@ -17,6 +17,7 @@ assert warning_texts(report) == []
 
 from __future__ import annotations
 
+import warnings
 from typing import Any, TypeVar
 
 import ferro
@@ -46,6 +47,27 @@ async def auto_migrate(
     except BaseException:
         reset_engine()
         raise
+
+
+async def warned_auto_migrate(url: str, **kwargs: Any) -> PassReport:
+    """``auto_migrate(url, **kwargs)`` with every ``UserWarning`` the pass
+    raises captured, never escaping to the test run: the captured texts are
+    the report's warnings, in order, each as the pass prints it
+    (``ferro auto-migrate: <text>``). Any other warning category is raised
+    again, as it was."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        report = await auto_migrate(url, **kwargs)
+    raised = []
+    for warning in caught:
+        if issubclass(warning.category, UserWarning):
+            raised.append(str(warning.message))
+        else:
+            warnings.warn_explicit(
+                warning.message, warning.category, warning.filename, warning.lineno
+            )
+    assert raised == [f"ferro auto-migrate: {w}" for w in report.warnings]
+    return report
 
 
 def schema_sql(report: PassReport) -> list[str]:

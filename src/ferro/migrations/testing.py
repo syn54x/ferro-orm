@@ -62,7 +62,7 @@ from .. import _core
 from ..registry import REGISTRY
 from ..session import engines
 from . import historical, runner
-from .drift import drift, render_op
+from ._drift import drift, render_op
 from .errors import MigrationRefused
 from .target import Target
 

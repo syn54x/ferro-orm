@@ -8,7 +8,13 @@ from pydantic import Field
 import ferro
 from ferro import BackRef, ManyToMany, Model, PassReport, Relation
 from ferro.base import FerroField
-from tests._pass_harness import auto_migrate, on, schema_steps, warning_texts
+from tests._pass_harness import (
+    auto_migrate,
+    on,
+    schema_steps,
+    warned_auto_migrate,
+    warning_texts,
+)
 
 pytestmark = pytest.mark.backend_matrix
 
@@ -2902,22 +2908,21 @@ async def test_migrate_updates_renames_a_hinted_column_with_its_index_and_check_
     if db_backend == "sqlite":
         # SQLite cannot rename a constraint in place; only a generated
         # migration's rebuild can.
-        with pytest.warns(UserWarning, match=r"ck_passwriter_kind.*ferro migrate new"):
-            report = await auto_migrate(db_url, updates=True)
-            assert schema_steps(report) == [
-                ("passwriter", 'ALTER TABLE "passwriter" RENAME COLUMN "kind" TO "genre"'),
-                ("passwriter", 'ALTER TABLE "passwriter" RENAME COLUMN "name" TO "full_name"'),
-                ("passwriter", 'DROP INDEX IF EXISTS "idx_passwriter_name"'),
-                (
-                    "passwriter",
-                    'CREATE INDEX IF NOT EXISTS "idx_passwriter_full_name" ON "passwriter" ("full_name")',
-                ),
-            ]
-            assert warning_texts(report) == [
-                "Table 'passwriter' has CHECK constraint(s) 'ck_passwriter_kind' that the model no longer declares. Leftover CHECKs keep rejecting rows the model now allows. They stay in place unless you pass migrate_destructive=True (Postgres) or drop them with a reviewed migration (`ferro migrate new`).",
-                "Constraint 'ck_passwriter_kind' on 'passwriter' is now named 'ck_passwriter_genre', and SQLite cannot rename a table constraint in place; `ferro migrate new` renames it by rebuilding the table.",
-                "Check constraint 'ck_passwriter_genre' on column 'passwriter.genre' is declared but missing from the live table, and SQLite cannot add a constraint to an existing column (it requires a full table rebuild). The invariant is not database-enforced; generate a reviewed migration with `ferro migrate new` to apply it.",
-            ]
+        report = await warned_auto_migrate(db_url, updates=True)
+        assert schema_steps(report) == [
+            ("passwriter", 'ALTER TABLE "passwriter" RENAME COLUMN "kind" TO "genre"'),
+            ("passwriter", 'ALTER TABLE "passwriter" RENAME COLUMN "name" TO "full_name"'),
+            ("passwriter", 'DROP INDEX IF EXISTS "idx_passwriter_name"'),
+            (
+                "passwriter",
+                'CREATE INDEX IF NOT EXISTS "idx_passwriter_full_name" ON "passwriter" ("full_name")',
+            ),
+        ]
+        assert warning_texts(report) == [
+            "Table 'passwriter' has CHECK constraint(s) 'ck_passwriter_kind' that the model no longer declares. Leftover CHECKs keep rejecting rows the model now allows. They stay in place unless you pass migrate_destructive=True (Postgres) or drop them with a reviewed migration (`ferro migrate new`).",
+            "Constraint 'ck_passwriter_kind' on 'passwriter' is now named 'ck_passwriter_genre', and SQLite cannot rename a table constraint in place; `ferro migrate new` renames it by rebuilding the table.",
+            "Check constraint 'ck_passwriter_genre' on column 'passwriter.genre' is declared but missing from the live table, and SQLite cannot add a constraint to an existing column (it requires a full table rebuild). The invariant is not database-enforced; generate a reviewed migration with `ferro migrate new` to apply it.",
+        ]
     else:
         report = await auto_migrate(db_url, updates=True)
         assert schema_steps(report) == [
@@ -3122,12 +3127,9 @@ _PD3_SQLITE_CHECKED = (
 
 async def _pd3_connect(db_url: str, *, updates: bool) -> PassReport:
     """The pass ``connect(auto_migrate=True)`` (or, with ``updates``,
-    ``connect(migrate_updates=True)``) runs; its report."""
-    import warnings
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("always")
-        return await auto_migrate(db_url, updates=updates)
+    ``connect(migrate_updates=True)``) runs; its report, each warning it
+    raised captured as the report's."""
+    return await warned_auto_migrate(db_url, updates=updates)
 
 
 def _stranded(report: PassReport) -> list[str]:
@@ -4628,7 +4630,7 @@ async def test_a_move_to_or_from_a_native_enum_type_reports_the_generators_recip
     before = _enum_move_models(native_before)
     await auto_migrate(db_url)
     after = _enum_move_models(not native_before)
-    report = await auto_migrate(db_url, updates=True)
+    report = await warned_auto_migrate(db_url, updates=True)
 
     assert schema_steps(report) == []
     if db_backend == "sqlite":

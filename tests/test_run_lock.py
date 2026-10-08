@@ -235,14 +235,6 @@ async def test_a_lock_timeout_beyond_the_bound_is_refused_from_the_cli(
     assert "author" not in db.tables()
 
 
-def test_parse_lock_timeout_accepts_the_bound_and_refuses_beyond_it():
-    assert runner.parse_lock_timeout(runner.MAX_LOCK_TIMEOUT_S) == (
-        runner.MAX_LOCK_TIMEOUT_S
-    )
-    with pytest.raises(runner.SettingsError, match="at most"):
-        runner.parse_lock_timeout(runner.MAX_LOCK_TIMEOUT_S + 1)
-
-
 async def test_the_ffi_refuses_an_unrepresentable_timeout_without_panicking(
     project, pkg, db
 ):

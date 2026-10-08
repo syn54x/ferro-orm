@@ -42,7 +42,13 @@ from .exceptions import (
 )
 from .fields import BackRef, Field, ManyToMany
 from .models import Model, evict_instance, transaction
-from .pass_report import ExecutedStatement, PassReport, _carrying_report, _run_pass
+from .pass_report import (
+    ExecutedStatement,
+    PassReport,
+    Report,
+    _carrying_report,
+    _run_pass,
+)
 from .query import Relation, Row, Rows, now
 from .raw import Transaction, execute, fetch_all, fetch_one
 from .rowsecurity import RowPolicy, RowSecurity
@@ -574,6 +580,7 @@ __all__ = [
     "migrate",
     "PassReport",
     "ExecutedStatement",
+    "Report",
     "reset_engine",
     "set_default_connection",
     "clear_registry",
@@ -590,4 +597,5 @@ __all__ = [
     "now",
     "FerroSettings",
     "DatabaseSettings",
+    "SettingsError",
 ]

@@ -480,3 +480,5 @@ class EngineManager:
 
 
 engines = EngineManager()
+"""The connections ``connect()`` registered, by name:
+``ferro.engines.session(name)`` opens a ``Session`` routed to one of them."""

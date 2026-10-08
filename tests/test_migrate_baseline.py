@@ -27,7 +27,7 @@ import pytest
 import ferro
 from ferro import _core
 from ferro.migrations import DriftReport, MigrationRefused, baseline, remove_baseline
-from ferro.migrations.drift import against
+from ferro.migrations._drift import against
 from tests.test_migrate_drift import SQUADS, TEAMS, snapshot_of
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     AUTHOR,
@@ -43,7 +43,7 @@ from tests.test_migrate_up import (  # noqa: F401
     new,
 )
 
-baseline_module = importlib.import_module("ferro.migrations.baseline")
+baseline_module = importlib.import_module("ferro.migrations._baseline")
 
 pytestmark = [
     pytest.mark.usefixtures("isolated_imports", "clean_registry"),
@@ -447,8 +447,8 @@ async def _probe(url: str, name: str) -> bool:
 
 def test_the_module_and_its_function_are_both_reachable():
     # ``ferro.migrations.baseline`` is the function (as ``drift`` is); the
-    # module stays importable by its dotted name.
+    # module is ``ferro.migrations._baseline``, so no attribute shadows it.
     assert callable(ferro.migrations.baseline)
     assert baseline_module.baseline is baseline
     assert baseline_module.remove_baseline is remove_baseline
-    assert Path(baseline_module.__file__).name == "baseline.py"
+    assert Path(baseline_module.__file__).name == "_baseline.py"
