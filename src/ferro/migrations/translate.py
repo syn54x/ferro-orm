@@ -16,22 +16,23 @@ def downgrade():
     op.drop_column('card', 'flavor')
 ```
 
-Every op comes from the planner (``_core._plan_from_ir`` for ``upgrade()``,
-``_core._plan_reverse_from_ir`` for ``downgrade()``), in the planner's order;
-this module only says how each one is written. Where Alembic has an op of its
-own (a table, a column, its type and nullability, an index, a foreign key, a
-table or column rename) the revision uses it, built from the same
-``sa.Column`` the bridge's ``get_metadata()`` builds. Everything else runs the
-statement the reconciliation pass would run, byte for byte, as
-``op.execute(sa.DDL(...))``. A change that needs values of existing rows is
-the plain op under ``# ferro: data-dependent``; one that drops data sits under
-``# ferro: destructive``; a step the planner calls irreversible renders as
+Every op comes from ``_core._plan_revision`` (``plan_revision`` in the core),
+which decides what the revision holds: each op of ``upgrade()`` and
+``downgrade()`` in the planner's order, its statements, whether Alembic's
+own op writes it, its ``# ferro:`` marker and any irreversible reason.
+This module only writes that answer, and decides nothing. Where the core
+says Alembic has a twin (a table, a column, its type and nullability, an
+index, a foreign key, a table or column rename) the revision uses it, built
+from the same ``sa.Column`` the bridge's ``get_metadata()`` builds.
+Everything else runs the statement the reconciliation pass would run, byte
+for byte, as ``op.execute(sa.DDL(...))``. A marked op sits under its
+``# ferro: <marker>`` comment; an irreversible one renders as
 ``raise RuntimeError("<reason>")``.
 """
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any
 
 import sqlalchemy as sa
 from alembic.autogenerate import renderers
@@ -47,8 +48,6 @@ __all__ = [
     "FerroWarningOp",
     "translate",
 ]
-
-Direction = Literal["up", "down"]
 
 
 class FerroExecuteOp(ops.MigrateOperation):
@@ -181,8 +180,9 @@ def _render_revision(autogen_context: Any, op: FerroRevisionOps) -> list[str]:
 
 
 class _Target:
-    """The schema a plan leads to, as the bridge's ``sa.Table`` objects: the
-    models for ``upgrade()``, the live database for ``downgrade()``."""
+    """The schema a revision's ops lead to, as the bridge's ``sa.Table``
+    objects: the models for ``upgrade()``, the live database for
+    ``downgrade()``."""
 
     def __init__(self, envelope: dict[str, Any], dialect: str) -> None:
         from .alembic import _build_sa_table_from_ir, _naming_metadata
@@ -213,27 +213,6 @@ class _Target:
                 if fk["column"] == column
             ),
             None,
-        )
-
-    def index(self, table: str, name: str) -> tuple[list[str], bool]:
-        """The columns and uniqueness of the index ``name`` on ``table``: a
-        declared unique sits in ``uniques``, a live one in ``indexes``."""
-        model = self.models[table]
-        for index in model.get("indexes") or []:
-            if index["name"] == name:
-                return list(index["columns"]), bool(index.get("unique"))
-        for unique in model.get("uniques") or []:
-            if unique["name"] == name:
-                return list(unique["columns"]), True
-        raise RuntimeError(
-            f"ferro: the plan redefines index {name} on {table}, which the target "
-            "does not declare; this is a ferro bug, please file an issue"
-        )
-
-    def has_column_check(self, table: str, column: str) -> bool:
-        return any(
-            check.get("column") == column
-            for check in self.models[table].get("checks") or []
         )
 
 
@@ -291,29 +270,10 @@ def _using(statements: list[str]) -> str | None:
 # -- the translation --------------------------------------------------------------------
 
 
-_EXECUTED = {
-    "CreateEnumType",
-    "DropEnumType",
-    "RenameEnumLabel",
-    "RenameEnumType",
-    "RenameIndex",
-    "RenameConstraint",
-    "RenamePolicy",
-    "AddCheck",
-    "RebuildCheck",
-    "DropCheck",
-    "ValidateConstraint",
-    "RebuildIndex",
-    "RebuildForeignKey",
-    "AddRowPolicy",
-    "RebuildRowPolicy",
-    "DropRowPolicy",
-    "EnableRowSecurity",
-    "ForceRowSecurity",
-    "DisableRowSecurity",
-    "NoForceRowSecurity",
-}
-"""Ops with no Alembic twin: the revision runs the planner's statements."""
+_AUTOCOMMIT = {"AddEnumLabel"}
+"""Ops whose statement runs in ``op.get_context().autocommit_block()``: a
+label addition must be committed before a later statement of the revision
+can use the label."""
 
 _SNAPSHOT_ONLY = {"RemoveEnumLabel"}
 """Ops a live database never takes (a label removal, #536): going up the
@@ -321,24 +281,22 @@ planner never plans one from it, and going down one toward it is
 irreversible (ADR-0050). Meeting one to write is a bug, refused loudly."""
 
 
-def _executed(
-    op: dict[str, Any], statements: list[str] | None = None
-) -> list[ops.MigrateOperation]:
+def _executed(kind: str, statements: list[str]) -> list[ops.MigrateOperation]:
     return [
-        FerroExecuteOp(statement, op["kind"])
-        for statement in (op["statements"] if statements is None else statements)
+        FerroExecuteOp(statement, kind, autocommit=kind in _AUTOCOMMIT)
+        for statement in statements
     ]
 
 
 def _foreign_key(
     target: _Target, table: str, column: str
 ) -> list[ops.MigrateOperation]:
-    """``op.create_foreign_key`` for the declared foreign key on
+    """``op.create_foreign_key`` for the foreign key the target declares on
     ``table.column``."""
     fk = target.foreign_key(table, column)
     if fk is None:
         raise RuntimeError(
-            f"ferro: the plan adds a foreign key on {table}.{column} the models do "
+            f"ferro: the plan adds a foreign key on {table}.{column} the target does "
             "not declare; this is a ferro bug, please file an issue"
         )
     return [
@@ -353,18 +311,17 @@ def _foreign_key(
     ]
 
 
-def _twin(op: dict[str, Any], target: _Target) -> list[ops.MigrateOperation]:
-    """The Alembic op(s) for one planner op."""
+def _twin(written: dict[str, Any], target: _Target) -> list[ops.MigrateOperation]:
+    """Alembic's own op(s) for one revision op the core writes as its twin,
+    built from the side the revision leads to; a statement of the pass's
+    beyond the one the twin stands for (an index riding an added column, a
+    row-security statement after a created table) runs as written."""
+    op = written["op"]
     kind = op["kind"]
-    statements: list[str] = op["statements"]
-    if kind == "AddEnumLabel":
-        return [FerroExecuteOp(s, kind, autocommit=True) for s in statements]
-    if kind in _EXECUTED:
-        return _executed(op)
+    statements: list[str] = written["statements"]
     if kind == "AddTable":
-        table = op["table"]
-        return _create_table(target, table) + _executed(
-            op, op.get("row_security_statements") or []
+        return _create_table(target, op["table"]) + _executed(
+            kind, written["row_security_statements"]
         )
     if kind == "DropTable":
         return [ops.DropTableOp(op["table"])]
@@ -374,28 +331,16 @@ def _twin(op: dict[str, Any], target: _Target) -> list[ops.MigrateOperation]:
         return [ops.AlterColumnOp(op["table"], op["old"], modify_name=op["new"])]
     if kind == "AddColumn":
         table, column = op["table"], op["column"]
-        declared = target.model_column(table, column)
-        # The twin carries the column; it cannot carry the literal default the
-        # pass backfills existing rows with, nor SQLite's inline REFERENCES /
-        # CHECK (Alembic cannot add a constraint on SQLite): those columns run
-        # as the pass writes them.
-        inline_constraints = target.dialect == "sqlite" and (
-            target.foreign_key(table, column) is not None
-            or target.has_column_check(table, column)
-        )
+        added: list[ops.MigrateOperation] = [
+            ops.AddColumnOp(table, target.column(table, column))
+        ]
         if not statements:
-            # No pass statement: a column that demands values of existing
-            # rows, written plain (and marked) with its foreign key.
-            return [ops.AddColumnOp(table, target.column(table, column))] + (
-                _foreign_key(target, table, column)
-                if target.foreign_key(table, column)
-                else []
-            )
-        if declared.get("default") is not None or inline_constraints:
-            return _executed(op)
-        return [ops.AddColumnOp(table, target.column(table, column))] + _executed(
-            op, statements[1:]
-        )
+            # The pass has no statement for it (a column that demands values
+            # of existing rows): the plain op, with its foreign key.
+            if target.foreign_key(table, column) is not None:
+                added += _foreign_key(target, table, column)
+            return added
+        return added + _executed(kind, statements[1:])
     if kind == "DropColumn":
         return [ops.DropColumnOp(op["table"], op["column"])]
     if kind == "AlterColumnNullability":
@@ -407,7 +352,7 @@ def _twin(op: dict[str, Any], target: _Target) -> list[ops.MigrateOperation]:
                 modify_nullable=bool(target.model_column(table, column)["nullable"]),
                 existing_type=_sa_type(target, table, column),
             )
-        ] + _executed(op, statements[1:])
+        ] + _executed(kind, statements[1:])
     if kind == "AlterColumnType":
         table, column = op["table"], op["column"]
         kw: dict[str, Any] = {}
@@ -422,7 +367,7 @@ def _twin(op: dict[str, Any], target: _Target) -> list[ops.MigrateOperation]:
                 existing_nullable=bool(target.model_column(table, column)["nullable"]),
                 **kw,
             )
-        ] + _executed(op, statements[1:])
+        ] + _executed(kind, statements[1:])
     if kind == "AddIndex":
         return [
             ops.CreateIndexOp(
@@ -432,13 +377,14 @@ def _twin(op: dict[str, Any], target: _Target) -> list[ops.MigrateOperation]:
     if kind == "DropIndex":
         return [ops.DropIndexOp(op["name"], table_name=op["table"])]
     if kind == "RedefineIndex":
-        # The index under the name another way: Alembic's drop, then its
-        # create of the definition the plan leads to (ADR-0051).
-        table, name = op["table"], op["name"]
-        columns, unique = target.index(table, name)
+        # Alembic's drop, then its create of the definition the revision
+        # leads to (ADR-0051).
+        table, name, index = op["table"], op["name"], written["index"]
         return [
             ops.DropIndexOp(name, table_name=table),
-            ops.CreateIndexOp(name, table, columns, unique=unique),
+            ops.CreateIndexOp(
+                name, table, list(index["columns"]), unique=bool(index["unique"])
+            ),
         ]
     if kind == "AddForeignKey":
         return _foreign_key(target, op["table"], op["column"])
@@ -450,68 +396,47 @@ def _twin(op: dict[str, Any], target: _Target) -> list[ops.MigrateOperation]:
     )
 
 
-def _marker(
-    op: dict[str, Any], verdict: dict[str, Any] | None, direction: Direction
-) -> str | None:
-    if verdict is None:
-        return None
-    subject = op.get("table") or op.get("type_name") or ""
-    if verdict.get("demands_values"):
-        return (
-            f"data-dependent (fails while {subject} has rows; ferro migrations "
-            f"generate the backfill: `ferro migrate new`)"
-        )
-    if direction == "up" and verdict.get("drops_data"):
-        what = op.get("column") and f"{subject}.{op['column']}" or subject
-        return f"destructive (drops {what} and the data it holds)"
-    return None
-
-
 def translate(
-    plan: dict[str, Any], *, direction: Direction
+    written: list[dict[str, Any]],
+    *,
+    target: dict[str, Any],
+    dialect: str,
+    reports: list[dict[str, Any]] | None = None,
 ) -> list[ops.MigrateOperation]:
-    """The Alembic ops that write ``plan``, in its order.
+    """The Alembic ops that write one side of a revision, in its order.
 
-    ``plan`` is the planner's rendered plan JSON (``_plan_from_ir(...,
-    render=True)`` going up, ``_plan_reverse_from_ir`` going down) as the
-    bridge hands it over: ``plan["target"]`` is the envelope the plan leads
-    to (the models going up, the live database going down) and
-    ``plan["dialect"]`` its dialect; each op carries the planner's
-    ``verdict`` (ADR-0050) for its marker. An op with ``irreversible``
-    becomes ``raise RuntimeError(<reason>)``. Going up, the
-    planner's one-off ``reports`` (no op for them, such as an enum label the
-    model no longer declares) lead the revision as comments, by their text;
-    its recurring ones (a foreign or unverifiable row policy) stay the
-    connect-time warnings they are (ADR-0019).
+    ``written`` is ``_core._plan_revision``'s ``upgrade`` or ``downgrade``
+    list, ``target`` the envelope that side leads to (the models going up,
+    the live database going down) and ``dialect`` its dialect. The core has
+    decided every op: whether Alembic's own op writes it (``twin``) or
+    ``op.execute`` of the pass's statements does, the ``# ferro:`` comment
+    above it (``marker``) and the reason a ``raise RuntimeError(<reason>)``
+    replaces it (``irreversible``). ``reports``, the revision's one-off
+    reports, lead the upgrade as comments.
     """
-    target = _Target(plan["target"], plan["dialect"])
-    out: list[ops.MigrateOperation] = []
-    if direction == "up":
-        out.extend(
-            FerroWarningOp(report["text"])
-            for report in plan.get("reports") or []
-            if not report["recurs"]
-        )
-    for op in plan["operations"]:
-        irreversible = op.get("irreversible")
-        if irreversible is not None:
-            out.append(FerroIrreversibleOp(irreversible["reason"]))
+    resolved = _Target(target, dialect)
+    out: list[ops.MigrateOperation] = [
+        FerroWarningOp(report["text"]) for report in reports or []
+    ]
+    for item in written:
+        if item["irreversible"] is not None:
+            out.append(FerroIrreversibleOp(item["irreversible"]))
             continue
-        if op["kind"] in _SNAPSHOT_ONLY:
+        kind = item["op"]["kind"]
+        if kind in _SNAPSHOT_ONLY:
             raise RuntimeError(
-                f"ferro: the plan carries a {op['kind']} op, which only two declared "
+                f"ferro: the plan carries a {kind} op, which only two declared "
                 "snapshots plan (`ferro migrate new`), never the live database the "
                 "Alembic bridge diffs; this is a ferro bug, please file an issue"
             )
-        verdict = op.get("verdict") or {}
-        if not op["statements"] and not verdict.get("demands_values"):
-            # The pass runs nothing for it on this dialect (row security of
-            # a new SQLite table is its create's warning).
-            continue
-        written = _twin(op, target)
-        marker = _marker(op, op.get("verdict"), direction)
+        alembic_ops = (
+            _twin(item, resolved)
+            if item["twin"]
+            else _executed(kind, item["statements"])
+        )
+        marker = item["marker"]
         if marker is not None:
-            out.append(FerroMarkedOp(marker, written))
+            out.append(FerroMarkedOp(marker["comment"], alembic_ops))
         else:
-            out.extend(written)
+            out.extend(alembic_ops)
     return out

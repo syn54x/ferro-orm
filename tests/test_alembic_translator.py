@@ -242,11 +242,14 @@ async def test_an_auto_migrated_table_plans_nothing_forward_or_back(
     forward = json.loads(
         _core._plan_from_ir(live, envelope, "postgres", DESTRUCTIVE, True, facts)
     )
-    reverse = json.loads(
-        _core._plan_reverse_from_ir(live, envelope, "postgres", DESTRUCTIVE, facts)
-    )
+    revision = _core._plan_revision(live, facts, envelope, "postgres")
     assert forward["operations"] == []
-    assert reverse["operations"] == []
+    assert revision == {
+        "upgrade": [],
+        "downgrade": [],
+        "reports": [],
+        "refusal": None,
+    }
 
     upgrade, downgrade = autogenerate(db_url, postgres_base_url, db_schema_name)
     assert "pass" in upgrade and "op." not in upgrade, upgrade
@@ -1290,3 +1293,123 @@ async def test_a_foreign_key_removed_on_sqlite_is_refused_naming_the_rebuild(
 
     with pytest.raises(Exception, match=r"DropForeignKey .*ferro migrate new"):
         autogenerate(db_url, postgres_base_url, db_schema_name)
+
+
+# ---------------------------------------------------------------------------
+# The translator writes the core's revision and decides nothing
+# ---------------------------------------------------------------------------
+
+_CARD_TARGET = {
+    "ir_kind": "schema",
+    "ir_version": 2,
+    "payload": {
+        "dialect_agnostic": True,
+        "models": [
+            {
+                "model_name": "app.Card",
+                "table_name": "card",
+                "columns": [
+                    {"name": "id", "db_type": "int", "primary_key": True},
+                    {"name": "a", "db_type": "text", "nullable": True},
+                    {"name": "flavor", "db_type": "text", "nullable": False},
+                ],
+            }
+        ],
+    },
+}
+
+
+def _written(op: dict, **fields) -> dict:
+    """One ``_plan_revision`` op, as the core serialises it."""
+    return {
+        "op": op,
+        "statements": [],
+        "row_security_statements": [],
+        "twin": False,
+        "index": None,
+        "marker": None,
+        "irreversible": None,
+        **fields,
+    }
+
+
+def test_the_translator_writes_each_revision_op_the_way_the_core_says():
+    """No ``_core`` call and no decision: the core's ``twin`` picks Alembic's
+    op or ``op.execute``, its ``marker`` is the comment, its ``irreversible``
+    the ``raise``, a redefined index's create reads the op's ``index``, and
+    the revision's reports lead it as comments."""
+    from alembic.operations import ops
+
+    from ferro.migrations.translate import (
+        FerroExecuteOp,
+        FerroIrreversibleOp,
+        FerroMarkedOp,
+        FerroWarningOp,
+        translate,
+    )
+
+    marker = "data-dependent (fails while card has rows; …)"
+    check = 'ALTER TABLE "card" ADD CONSTRAINT "ck_card_a" CHECK ("a" IS NOT NULL)'
+    label = "ALTER TYPE \"status\" ADD VALUE IF NOT EXISTS 'y'"
+    written = translate(
+        [
+            _written(
+                {"kind": "AddColumn", "table": "card", "column": "flavor"},
+                twin=True,
+                marker={"kind": "data_dependent", "comment": marker},
+            ),
+            _written(
+                {"kind": "AddCheck", "table": "card", "name": "ck_card_a"},
+                statements=[check],
+            ),
+            _written(
+                {"kind": "AddEnumLabel", "type_name": "status", "label": "y"},
+                statements=[label],
+            ),
+            _written(
+                {"kind": "RedefineIndex", "table": "card", "name": "idx_card_a"},
+                twin=True,
+                index={"columns": ["a", "flavor"], "unique": True},
+            ),
+            _written(
+                {
+                    "kind": "DropForeignKey",
+                    "table": "card",
+                    "column": "a",
+                    "name": "fk_card_a_team",
+                },
+                twin=True,
+            ),
+            _written(
+                {"kind": "RemoveEnumLabel", "type_name": "status", "label": "y"},
+                irreversible="labels are append-only",
+            ),
+        ],
+        target=_CARD_TARGET,
+        dialect="postgres",
+        reports=[{"text": "enum type status holds x, which no model declares"}],
+    )
+
+    warning, marked, executed, autocommitted, drop, create, fk, raised = written
+    assert isinstance(warning, FerroWarningOp)
+    assert warning.warning == "enum type status holds x, which no model declares"
+    assert isinstance(marked, FerroMarkedOp) and marked.marker == marker
+    [added] = marked.wrapped
+    assert isinstance(added, ops.AddColumnOp)
+    assert (added.table_name, added.column.name, added.column.nullable) == (
+        "card",
+        "flavor",
+        False,
+    )
+    assert isinstance(executed, FerroExecuteOp)
+    assert (executed.statement, executed.autocommit) == (check, False)
+    assert isinstance(autocommitted, FerroExecuteOp)
+    assert (autocommitted.statement, autocommitted.autocommit) == (label, True)
+    assert isinstance(drop, ops.DropIndexOp) and drop.index_name == "idx_card_a"
+    assert isinstance(create, ops.CreateIndexOp)
+    assert (create.index_name, create.unique) == ("idx_card_a", True)
+    assert [getattr(c, "name", c) for c in create.columns] == ["a", "flavor"]
+    assert isinstance(fk, ops.DropConstraintOp)
+    assert (fk.constraint_name, fk.constraint_type) == ("fk_card_a_team", "foreignkey")
+    assert isinstance(raised, FerroIrreversibleOp)
+    assert raised.reason == "labels are append-only"

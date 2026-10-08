@@ -33,8 +33,8 @@ use ferro_ddl_lowering::{
     run_lock_wait_warning,
 };
 use ferro_migrate::{
-    LiveFacts, MigrationOp, Plan, PlanOptions, RenderedOp, Report, ReportKind, Side, Subject,
-    plan_down, plan_from_ir, validate_schema_ir,
+    LiveFacts, MigrationOp, Plan, PlanOptions, RenderedOp, Report, ReportKind, RevisionRefusal,
+    Side, Subject, plan_from_ir, plan_revision, validate_schema_ir,
 };
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload};
 use pyo3::prelude::*;
@@ -1222,57 +1222,62 @@ pub fn _render_migration_sql_for_test(
     ))
 }
 
-/// The down of the live-origin plan over FFI (ADR-0050): what turns the
-/// database `_plan_from_ir(live_json, declared_json, …, facts_json)` leaves
-/// back into the live one — `ferro_migrate::plan_down(up, models, live)`,
-/// the one down every door uses, run back from the models (declared) to the
-/// database (live) and scoped to the artifacts the upgrade touched. It is
-/// the Alembic bridge's `downgrade()`. `facts_json` is the facts
-/// `_live_schema_ir` returned beside `live_json`.
+/// The Alembic bridge's revision over FFI, in one call (ADR-0041 as amended
+/// by ADR-0050..0052): `ferro_migrate::plan_revision` for the live database
+/// `live_ir_json` (with the `facts_json` `_live_schema_ir` returned beside
+/// it) and the models `declared_json` on `dialect`.
 ///
-/// The result has `_plan_from_ir`'s shape: `{"operations": [{"kind": …,
-/// <fields>, "verdict": {…}}], "reports": […]}`. An op the live database
-/// cannot express carries the verdict's `{"execution": {"irreversible":
-/// <reason>}}`. With `render`, each op also carries its `statements` and
-/// `reports` but the ops at the `unrendered` indexes, which carry none:
-/// those the bridge writes itself, a re-added column that demands values of
-/// existing rows (the same subset its upgrade leaves `unrendered` in
-/// `_plan_from_ir`).
+/// The result is a dict: `{"upgrade": [op…], "downgrade": [op…], "reports":
+/// [report…], "refusal": None}`, each op `{"op": {"kind": …, <fields>},
+/// "statements", "row_security_statements", "twin", "index", "marker",
+/// "irreversible"}` ([`ferro_migrate::RevisionOp`]) and each report in the
+/// plan's report shape; or, when no revision is written, the same keys
+/// empty with `"refusal": {"kind", "text"}`, `text` the sentence after
+/// `ferro: autogenerate refused: `.
 ///
 /// # Errors
 /// `ValueError` when a JSON argument is malformed, an envelope is not a
 /// `schema` IR, the dialect is unknown, a live table has no facts entry, or
 /// an op cannot render.
 #[pyfunction]
-#[pyo3(name = "_plan_reverse_from_ir")]
-#[pyo3(signature = (live_json, declared_json, dialect, options_json, facts_json, render=true, unrendered=None))]
-pub fn _plan_reverse_from_ir(
-    live_json: String,
+#[pyo3(name = "_plan_revision")]
+pub fn _plan_revision(
+    py: Python<'_>,
+    live_ir_json: String,
+    facts_json: String,
     declared_json: String,
     dialect: String,
-    options_json: String,
-    facts_json: String,
-    render: bool,
-    unrendered: Option<Vec<usize>>,
-) -> PyResult<String> {
+) -> PyResult<Bound<'_, PyAny>> {
     let backend = parse_dialect(&dialect)?;
-    let live = parse_schema_envelope(&live_json, "live_json")?;
+    let live = parse_schema_envelope(&live_ir_json, "live_ir_json")?;
     let declared = parse_schema_envelope(&declared_json, "declared_json")?;
-    let options: PlanOptions = serde_json::from_str(&options_json).map_err(|e| {
-        pyo3::exceptions::PyValueError::new_err(format!("invalid options_json: {e}"))
-    })?;
     let facts: LiveFacts = serde_json::from_str(&facts_json).map_err(|e| {
         pyo3::exceptions::PyValueError::new_err(format!("invalid facts_json: {e}"))
     })?;
     validate_schema_ir(&declared).map_err(emission_error)?;
     let live = Side::live(live, facts).map_err(plan_error)?;
-    let declared = Side::declared(declared);
-    let up: Vec<MigrationOp> = plan_from_ir(&live, &declared, backend, options)
-        .ops()
-        .cloned()
-        .collect();
-    let down = plan_down(&up, &declared, &live, backend);
-    plan_json(&down, render, unrendered)
+    let wire = match plan_revision(&live, &declared, backend) {
+        Ok(revision) => {
+            let mut value = serde_json::to_value(&revision).map_err(serialize_error)?;
+            if let Some(fields) = value.as_object_mut() {
+                fields.insert("refusal".into(), serde_json::Value::Null);
+            }
+            value
+        }
+        Err(RevisionRefusal::Render(error)) => return Err(emission_error(error)),
+        Err(refusal) => serde_json::json!({
+            "upgrade": [],
+            "downgrade": [],
+            "reports": [],
+            "refusal": serde_json::to_value(&refusal).map_err(serialize_error)?,
+        }),
+    };
+    py.import("json")?
+        .call_method1("loads", (wire.to_string(),))
+}
+
+fn serialize_error(e: serde_json::Error) -> PyErr {
+    pyo3::exceptions::PyRuntimeError::new_err(format!("could not serialize the revision: {e}"))
 }
 
 /// Reports as plan JSON: each `{"kind", "subject", "text", "recurs",
@@ -1327,12 +1332,8 @@ pub(crate) fn parse_schema_envelope(
 /// `{"operations": [{"kind": …, <op fields>, "verdict": {…}}], "reports":
 /// [{"kind", "subject", "text", "recurs", "blocks"}]}` — each op beside its
 /// verdict ([`ferro_migrate::OpVerdict`]); with `render`, each op also carries the
-/// `statements` and `reports` it renders to, but the ops at the `unrendered`
-/// indexes, which carry none and render nothing: the ones a caller writes
-/// its own way (the Alembic bridge's column adds that demand values of
-/// existing rows, which the pass has no statement for and the revision
-/// writes as the plain Alembic op under `# ferro: data-dependent`; ADR-0041).
-/// The rest render as that subset alone (`Plan::render_ops`).
+/// `statements` and `reports` it renders to. The Alembic bridge plans with
+/// `_plan_revision`, never with this.
 ///
 /// # Errors
 /// `ValueError` when a JSON argument is malformed, an envelope is not a
@@ -1340,7 +1341,7 @@ pub(crate) fn parse_schema_envelope(
 /// entry in `facts_json`, or an op cannot render.
 #[pyfunction]
 #[pyo3(name = "_plan_from_ir")]
-#[pyo3(signature = (old_ir_json, new_ir_json, dialect, options_json, render=false, facts_json=None, unrendered=None))]
+#[pyo3(signature = (old_ir_json, new_ir_json, dialect, options_json, render=false, facts_json=None))]
 pub fn _plan_from_ir(
     old_ir_json: String,
     new_ir_json: String,
@@ -1348,7 +1349,6 @@ pub fn _plan_from_ir(
     options_json: String,
     render: bool,
     facts_json: Option<String>,
-    unrendered: Option<Vec<usize>>,
 ) -> PyResult<String> {
     let backend = parse_dialect(&dialect)?;
     let old = parse_schema_envelope(&old_ir_json, "old_ir_json")?;
@@ -1369,45 +1369,30 @@ pub fn _plan_from_ir(
     };
 
     let plan = plan_from_ir(&old, &Side::declared(new), backend, options);
-    plan_json(&plan, render, unrendered)
+    plan_json(&plan, render)
 }
 
 /// `plan` as the FFI's plan JSON: `{"operations": [{"kind": …, <op fields>,
 /// "verdict": {…}}], "reports": […]}` — each op beside its verdict (the one
 /// every door reads, ADR-0050). With `render`, each op also carries the
 /// `statements` and `reports` it renders to (and an `AddTable` its
-/// `row_security_statements`), but the ops at the `unrendered` indexes,
-/// which carry none and render nothing; the rest render as that subset
-/// alone (`Plan::render_ops`).
-fn plan_json(plan: &Plan, render: bool, unrendered: Option<Vec<usize>>) -> PyResult<String> {
+/// `row_security_statements`).
+fn plan_json(plan: &Plan, render: bool) -> PyResult<String> {
     let to_value = |value: serde_json::Result<serde_json::Value>| {
         value.map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("could not serialize the plan: {e}"))
         })
     };
-    let unrendered: BTreeSet<usize> = unrendered.unwrap_or_default().into_iter().collect();
     let mut rendered = if render {
-        let kept: Vec<usize> = (0..plan.operations.len())
-            .filter(|index| !unrendered.contains(index))
-            .collect();
-        Some(plan.render_ops(&kept).map_err(emission_error)?.into_iter())
+        Some(plan.render().map_err(emission_error)?.into_iter())
     } else {
         None
     };
     let operations: Vec<serde_json::Value> = plan
         .operations
         .iter()
-        .enumerate()
-        .map(|(index, planned)| {
+        .map(|planned| {
             let mut value = match rendered.as_mut() {
-                Some(_) if unrendered.contains(&index) => {
-                    let mut value = to_value(serde_json::to_value(&planned.op))?;
-                    if let Some(fields) = value.as_object_mut() {
-                        fields.insert("statements".into(), serde_json::json!([]));
-                        fields.insert("reports".into(), serde_json::json!([]));
-                    }
-                    value
-                }
                 Some(rendered) => rendered_op_json(rendered.next().ok_or_else(|| {
                     pyo3::exceptions::PyRuntimeError::new_err(
                         "the plan rendered fewer ops than it holds",
