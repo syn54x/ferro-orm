@@ -26,10 +26,10 @@ from ferro.migrations import (
     DatabaseAheadError,
     MigrationRefused,
     PendingMigrationsError,
-    api,
     runner,
 )
 from ferro.migrations.report import StatusReport
+from ferro.migrations.target import Target
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     AUTHOR,
     LIBRARY,
@@ -120,9 +120,10 @@ async def test_require_applied_carries_the_edited_file_refusal_and_takes_no_lock
     await ferro.migrations.up()
     up_file = migrations(project) / f"0001_create_author/01_schema.up.{db.backend}.sql"
     up_file.write_bytes(up_file.read_bytes() + b"\n")
-    settings, database = api._resolve(None, None)
-    expected = (await runner.up(settings, database, using="default")).refusal
-    assert expected is not None and "was edited after it was applied" in expected
+    with pytest.raises(MigrationRefused) as refused_up:
+        await ferro.migrations.up()
+    expected = str(refused_up.value)
+    assert "was edited after it was applied" in expected
 
     held_while_reading: list[bool] = []
     open_tracked = _core._open_tracked
@@ -236,9 +237,9 @@ async def test_two_databases_need_a_name(project, pkg, db):
         await ferro.migrations.status()
     assert "`analytics`" in str(raised.value) and "`main`" in str(raised.value)
 
-    settings, database = api._resolve(None, "analytics")
-    assert database.name == "analytics"
-    assert settings.databases["analytics"] is database
+    target = Target.resolve(database="analytics")
+    assert target.database.name == "analytics"
+    assert target.settings.databases["analytics"] is target.database
 
 
 async def test_using_names_the_connection_the_run_happens_on(project, pkg, db):
@@ -261,6 +262,80 @@ async def test_no_default_connection_is_refused_naming_using(project, pkg, db):
 
     with pytest.raises(MigrationRefused, match="using="):
         await ferro.migrations.up()
+
+
+# -- the target: one resolution for every verb --------------------------------------
+
+
+async def test_the_target_refuses_both_using_and_url(project, pkg, db):
+    configure(project, pkg, db.backend)
+
+    with pytest.raises(MigrationRefused) as raised:
+        Target.resolve(using="reporting", url=db.url)
+    assert str(raised.value) == "pass using= or url=, not both"
+    for verb in (ferro.migrations.up, ferro.migrations.status, ferro.migrations.drift):
+        with pytest.raises(MigrationRefused, match=r"^pass using= or url=, not both$"):
+            await verb(using="reporting", url=db.url)
+
+
+async def test_the_target_refuses_an_unknown_database(project, pkg, db):
+    configure_two(project, pkg, db.backend)
+
+    with pytest.raises(MigrationRefused) as raised:
+        Target.resolve(database="billing")
+    assert str(raised.value) == (
+        f"{project / 'ferro.toml'} configures no database `billing`; "
+        f"the configured databases are `main`, `analytics`"
+    )
+    with pytest.raises(MigrationRefused) as from_up:
+        await ferro.migrations.up(database="billing")
+    assert str(from_up.value) == str(raised.value)
+
+
+async def test_the_target_refuses_no_configuration(project):
+    with pytest.raises(MigrationRefused) as raised:
+        Target.resolve()
+    assert str(raised.value).startswith("no ferro config found; searched:\n")
+    with pytest.raises(MigrationRefused) as from_status:
+        await ferro.migrations.status()
+    assert str(from_status.value) == str(raised.value)
+
+
+async def test_the_target_opens_a_private_connection_on_url_and_closes_it(
+    project, pkg, db
+):
+    configure(project, pkg, db.backend)
+    write_models(project, pkg, AUTHOR)
+    new("create_author")
+    target = Target.resolve(url=db.url)
+
+    async with target.open() as name:
+        assert name.startswith("_ferro_migrate_")
+        assert _core.connection_backend(name) == db.backend
+    assert _core.connection_backend(name) is None
+    assert _core._default_connection_name() is None
+
+    report = await ferro.migrations.up(url=db.url)
+    assert [s.migration for s in report.applied] == ["0001_create_author"]
+
+
+async def test_up_refused_in_process_carries_its_run_report(project, pkg, db):
+    configure(project, pkg, db.backend)
+    write_models(project, pkg, AUTHOR)
+    new("create_author")
+    await connect(db.url)
+    await ferro.migrations.up()
+    up_file = migrations(project) / f"0001_create_author/01_schema.up.{db.backend}.sql"
+    up_file.write_bytes(up_file.read_bytes() + b"\n")
+
+    with pytest.raises(MigrationRefused) as raised:
+        await ferro.migrations.up()
+
+    report = raised.value.report
+    assert isinstance(report, runner.RunReport)
+    assert report.applied == []
+    assert report.refusal == str(raised.value)
+    assert report.refused is not None and report.refused.kind == "edited_applied"
 
 
 async def test_importing_the_api_does_not_import_alembic():

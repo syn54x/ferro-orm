@@ -40,6 +40,7 @@ from tests.test_migrate_up import (  # noqa: F401 - fixtures
     configure,
     db,
     new,
+    run_report,
     settings_and_database,
     sql_step,
 )
@@ -137,7 +138,7 @@ async def _project(project, pkg, db, extra: str = ""):
     new("create_author")
     sql_step(project, "attempt_log", 'CREATE TABLE "attempt_log" ("n" integer);\n')
     settings, database = settings_and_database()
-    assert (await runner.up(settings, database, url=db.url)).refusal is None
+    assert (await runner.up(settings, database.name, url=db.url)).refusal is None
     return settings, database
 
 
@@ -150,7 +151,9 @@ def _record(db, migration: int) -> list[tuple]:
 
 async def _up(settings, database, db) -> tuple[Any, list[str]]:
     lines: list[str] = []
-    report = await runner.up(settings, database, url=db.url, progress=lines.append)
+    report = await run_report(
+        runner.up(settings, database.name, url=db.url, progress=lines.append)
+    )
     return report, lines
 
 
@@ -250,7 +253,7 @@ async def test_a_down_waits_under_the_same_timeout(project, pkg, db):
     lines: list[str] = []
     with Holder(db, "author", seconds=1.5):
         report = await runner.down(
-            settings, database, url=db.url, progress=lines.append
+            settings, database.name, url=db.url, progress=lines.append
         )
 
     assert report.refusal is None
@@ -452,7 +455,7 @@ async def test_a_failed_no_transaction_step_resets_the_timeout_on_its_connection
     # One pooled connection: the step's, read back after it failed.
     await ferro.connect(db.url, name="one", pool=ferro.PoolConfig(max_connections=1))
 
-    report = await runner.up(settings, database, using="one")
+    report = await run_report(runner.up(settings, database.name, using="one"))
 
     assert report.refusal is not None and '"missing"' in report.refusal
     rows = await fetch_all("SELECT current_setting('lock_timeout') AS v", using="one")
@@ -471,7 +474,7 @@ async def test_a_progress_callback_that_raises_is_raised_after_the_step_settles(
             raise RuntimeError("the progress sink broke")
 
     with Holder(db, "author", seconds=1.5), pytest.raises(RuntimeError, match="sink"):
-        await runner.up(settings, database, url=db.url, progress=progress)
+        await runner.up(settings, database.name, url=db.url, progress=progress)
 
     [(finished, failed, error, _)] = _record(db, 3)
     assert finished is not None and failed is None and error is None

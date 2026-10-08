@@ -29,6 +29,7 @@ from tests.test_migrate_up import (  # noqa: F401 - fixtures
     db,
     migrations,
     new,
+    run_report,
     settings_and_database,
     sql_step,
 )
@@ -67,7 +68,7 @@ async def test_a_second_run_waits_says_so_and_applies_nothing_after_the_first(
     settings, database = _project(project, pkg, db)
     tracked = await _tracked(db, database)
     async with tracked.locked(5.0) as first:
-        second = asyncio.create_task(runner.up(settings, database, url=db.url))
+        second = asyncio.create_task(runner.up(settings, database.name, url=db.url))
         await asyncio.sleep(0.7)
         assert WAITING in capsys.readouterr().err
         assert not second.done()
@@ -85,7 +86,9 @@ async def test_a_lock_timeout_gives_up_naming_it_and_leaves_the_holder_alone(
     settings, database = _project(project, pkg, db)
     tracked = await _tracked(db, database)
     async with tracked.locked(5.0):
-        report = await runner.up(settings, database, url=db.url, lock_timeout="1s")
+        report = await run_report(
+            runner.up(settings, database.name, url=db.url, lock_timeout="1s")
+        )
 
         assert report.refusal is not None
         assert "lock timeout (1s)" in report.refusal
@@ -99,7 +102,7 @@ async def test_status_shows_running_while_a_run_holds_the_lock(project, pkg, db)
     settings, database = _project(project, pkg, db, "second")
     tracked = await _tracked(db, database)
     async with tracked.locked(5.0):
-        report = await runner.status(settings, database, url=db.url)
+        report = await runner.status(settings, database.name, url=db.url)
 
     assert [m.state for m in report.migrations] == ["running", "pending"]
     assert "  01_schema.up." in report.render(steps=False)
@@ -289,7 +292,7 @@ async def test_a_lock_lost_inside_a_downs_transaction_is_the_lost_lock_refusal(
     sql_step(project, "slow", 'CREATE TABLE "slow" ("id" integer);\n')
     down_file = migrations(project) / "0002_slow" / "01_slow.down.sql"
     down_file.write_text('SELECT pg_sleep(1);\nDROP TABLE "slow";\n')
-    assert (await runner.up(settings, database, url=db.url)).refusal is None
+    assert (await runner.up(settings, database.name, url=db.url)).refusal is None
     tracked = await _tracked(db, database)
     async with tracked.locked(5.0) as run:
         (step,) = (await run.plan({"direction": "down", "target": "latest"})).steps
@@ -311,7 +314,7 @@ async def test_a_baseline_planned_by_another_run_is_never_written(project, pkg, 
     tracked = await _tracked(db, database)
     async with tracked.locked(5.0) as run:
         stale = run.plan_baseline(None)
-    assert (await runner.up(settings, database, url=db.url)).refusal is None
+    assert (await runner.up(settings, database.name, url=db.url)).refusal is None
     tracked = await runner.open_tracked("holder", database)
     async with tracked.locked(5.0) as run:
         with pytest.raises(ValueError, match="another locked run"):
@@ -322,7 +325,7 @@ async def test_a_baseline_planned_by_another_run_is_never_written(project, pkg, 
 
 async def test_a_rerecord_planned_by_another_run_is_never_written(project, pkg, db):
     settings, database = _project(project, pkg, db)
-    assert (await runner.up(settings, database, url=db.url)).refusal is None
+    assert (await runner.up(settings, database.name, url=db.url)).refusal is None
     up_file = migrations(project) / f"0001_create_author/01_schema.up.{db.backend}.sql"
     up_file.write_bytes(up_file.read_bytes() + b"\n")
     tracked = await _tracked(db, database)

@@ -301,13 +301,16 @@ def test_up_and_require_applied_take_no_target():
         "settings",
         "database",
         "using",
+        "url",
         "lock_timeout",
         "allow_ahead",
+        "progress",
     ]
     assert list(inspect.signature(require_applied).parameters) == [
         "settings",
         "database",
         "using",
+        "url",
         "allow_ahead",
     ]
     for call in (up, require_applied):

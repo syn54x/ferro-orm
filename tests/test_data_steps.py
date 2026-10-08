@@ -489,7 +489,7 @@ def test_cancelling_a_running_step_rolls_it_back_and_releases_everything(
     before = dict(REGISTRY.models())
 
     async def cancelled_run() -> None:
-        task = asyncio.create_task(runner.up(settings, database, url=db.url))
+        task = asyncio.create_task(runner.up(settings, database.name, url=db.url))
         await asyncio.wait_for(signal.entered.wait(), 30)
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -501,7 +501,7 @@ def test_cancelling_a_running_step_rolls_it_back_and_releases_everything(
     assert REGISTRY.models() == before
     # The lock is free: a run that refuses to wait for it applies the step.
     step.write_text(BACKFILL)
-    report = asyncio.run(runner.up(settings, database, url=db.url, lock_timeout=0))
+    report = asyncio.run(runner.up(settings, database.name, url=db.url, lock_timeout=0))
     assert report.refusal is None
     assert [s.step for s in report.applied] == ["02_backfill_author"]
     assert db.rows("SELECT slug FROM author ORDER BY id") == [("ann-lee",), ("bo",)]

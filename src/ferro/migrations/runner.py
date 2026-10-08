@@ -6,6 +6,19 @@ $ ferro migrate up
 0002_add_teams      01_schema  applied (9 ms)
 ```
 
+```python
+await ferro.migrations.up()                # the same run, in-process
+await ferro.migrations.require_applied()   # where it stands, raised when behind
+```
+
+Each verb here is one function the CLI and the application both call,
+``(settings=None, database=None, *, using=None, url=None, ...)``: the
+database and connection come from :meth:`Target.resolve
+<ferro.migrations.target.Target.resolve>`. A refused or failed run raises
+:class:`~ferro.migrations.errors.MigrationRefused` carrying its
+:class:`RunReport` as ``.report``, for every caller; the CLI prints the
+report's refusal and exits 1.
+
 Python sequences a run; the Rust core decides and executes it. :func:`up`
 opens the database as one object (``_core._open_tracked``: its records and
 one read of the migrations directory, held), takes the run lock as a block
@@ -44,7 +57,8 @@ A ``@chunked`` step runs one transaction per batch instead, its cursor
 committed with each batch (:mod:`ferro.migrations.chunked`), and its query
 is checked over the historical models before anything runs.
 
-:func:`status` reads the same object with no lock and creates nothing.
+:func:`status` and :func:`require_applied` read the same object with no
+lock and create nothing.
 """
 
 from __future__ import annotations
@@ -53,9 +67,8 @@ import logging
 import re
 import sys
 import time
-import uuid
-from collections.abc import AsyncIterator, Callable
-from contextlib import ExitStack, asynccontextmanager
+from collections.abc import Callable
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -68,7 +81,7 @@ from ..state import resolve_operation_scope
 from . import historical
 from .chunked import BatchFailed, order_keys, run_chunked
 from .context import HistoricalModels, StepContext
-from .errors import MigrationRefused
+from .errors import DatabaseAheadError, MigrationRefused, PendingMigrationsError
 from .historical import HistoricalModelError
 from .report import RunRefused, StatusReport
 from .steps import (
@@ -81,6 +94,7 @@ from .steps import (
     load_step,
     unwritten,
 )
+from .target import Target, connection_dialect
 
 if TYPE_CHECKING:
     from .._core import LockedDatabase, Plan, StepHandle, TrackedDatabase
@@ -96,6 +110,7 @@ __all__ = [
     "parse_lock_timeout",
     "parse_target",
     "plan_down",
+    "require_applied",
     "status",
     "tracking_schema_for",
     "up",
@@ -135,10 +150,22 @@ class RunReport:
     notes: list[str] = field(default_factory=list)
     """What the run accepted on the way (an edited unfinished step)."""
     ahead: list[str] = field(default_factory=list)
-    """Applied migrations the directory lacks, let through by ``allow_ahead``."""
+    """Applied migrations the directory lacks: let through by
+    ``allow_ahead``, or, when they alone refused the run
+    (``refused.ahead_only``), the ones that did."""
 
     def _refuse(self, refused: RunRefused) -> None:
         self.refusal, self.refused = str(refused), refused
+
+    def _raise_if_refused(self) -> RunReport:
+        """This report, or :class:`MigrationRefused` carrying it when the run
+        refused or a step failed: :class:`DatabaseAheadError` when applied
+        migrations the directory lacks were the only thing in the way."""
+        if self.refusal is None:
+            return self
+        if self.refused is not None and self.refused.ahead_only:
+            raise DatabaseAheadError(self.ahead, self.refusal, report=self)
+        raise MigrationRefused(self.refusal, report=self)
 
 
 MAX_LOCK_TIMEOUT_S = 60.0 * 60 * 24 * 365
@@ -184,42 +211,6 @@ def parse_lock_timeout(value: str | float) -> float:
     return seconds
 
 
-@asynccontextmanager
-async def _connection(
-    database: DatabaseSettings, using: str | None, url: str | None
-) -> AsyncIterator[str]:
-    """The connection name to run on: ``using`` as given, or a private
-    connection to ``database``'s URL, closed afterwards."""
-    if using is not None:
-        if url is not None:
-            raise SettingsError("pass using= or url=, not both")
-        yield using
-        return
-    from .. import connect
-
-    name = f"_ferro_migrate_{uuid.uuid4().hex}"
-    await connect(database.url_for(url), name=name)
-    try:
-        yield name
-    finally:
-        await _core._disconnect(name)
-
-
-def connection_dialect(name: str, database: DatabaseSettings) -> str:
-    """The dialect of open connection ``name``, refused when it is not open
-    or ``database`` does not target it."""
-    dialect = _core.connection_backend(name)
-    if dialect is None:
-        raise SettingsError(f"connection `{name}` is not open; connect it first")
-    if dialect not in database.dialects:
-        raise SettingsError(
-            f"database `{database.name}` targets {', '.join(database.dialects)}, but "
-            f"this connection is {dialect}; add {dialect!r} to its dialects and "
-            f"regenerate, or connect to a {' or '.join(database.dialects)} database"
-        )
-    return dialect
-
-
 def tracking_schema_for(database: DatabaseSettings, dialect: str) -> str | None:
     """Where ``database``'s tracking tables live on ``dialect``: its
     ``tracking_schema`` on Postgres, else the governed schema (``None``)."""
@@ -254,56 +245,90 @@ def _stem(file: str) -> str:
 
 
 async def up(
-    settings: FerroSettings,
-    database: DatabaseSettings,
+    settings: FerroSettings | None = None,
+    database: str | None = None,
     *,
     using: str | None = None,
     url: str | None = None,
     lock_timeout: str | float = "30s",
     allow_ahead: bool = False,
     progress: Callable[[str], Any] | None = None,
-    through: str | None = None,
 ) -> RunReport:
     """Apply every pending step of every pending migration, in order, under
-    the run lock.
+    the run lock (``ferro migrate up``).
 
-    ``using`` names an open connection; otherwise ``database``'s URL (or
-    ``url``) is connected for the run and closed after. A second run waits
-    up to ``lock_timeout``, saying so on stderr at once. ``allow_ahead`` lets
-    a database holding migrations the directory lacks through (ADR-0038).
+    Works on ``database`` of ``settings`` over ``using``, a private
+    connection to ``url``, or the default connection
+    (:meth:`~ferro.migrations.target.Target.resolve`). A second run waits up
+    to ``lock_timeout``, saying so on stderr at once. ``allow_ahead`` lets a
+    database holding migrations the directory lacks through (ADR-0038).
     ``progress`` receives each line as the run goes: one per applied step,
     and one per attempt a step makes while it waits for a table lock under
-    ``database.ddl_lock_timeout``.
+    the database's ``ddl_lock_timeout``.
+
+    Returns the :class:`RunReport` of what it applied.
+
+    Raises:
+        DatabaseAheadError: the database has applied migrations the
+            directory lacks, and nothing else is in the way
+            (``allow_ahead=True`` runs beside them).
+        MigrationRefused: the run refused or a step failed; the message says
+            why and how to resume, and ``.report`` is the run's report. Also
+            the configuration naming no single database, and a connection
+            the run cannot work on.
+    """
+    target = Target.resolve(settings, database, using=using, url=url)
+    async with target.open() as name:
+        return await _up(
+            name,
+            target.database,
+            lock_timeout=lock_timeout,
+            allow_ahead=allow_ahead,
+            progress=progress,
+        )
+
+
+async def _up(
+    name: str,
+    database: DatabaseSettings,
+    *,
+    lock_timeout: str | float = "30s",
+    allow_ahead: bool = False,
+    progress: Callable[[str], Any] | None = None,
+    through: str | None = None,
+) -> RunReport:
+    """:func:`up` on open connection ``name``, raising as it does.
 
     ``through`` (``"0007"``, a migration number) stops the run after that
     migration: only pending steps of migrations up to and including it run.
     It is the test harness's target (ADR-0045); the application's ``up()``
-    has none (ADR-0040). A number the directory lacks is refused, and so is
-    a step (``"0007:02"``): neither is a target. A ``through`` at or below
-    the last applied migration has nothing pending to run: the run applies
-    nothing and reverts nothing (going down is :func:`down`'s).
-
-    Returns a :class:`RunReport`; a refusal or a failed step is reported in
-    ``refusal``, not raised.
+    has none (ADR-0040), so it is reachable only here. A number the
+    directory lacks is refused, and so is a step (``"0007:02"``): neither is
+    a target. A ``through`` at or below the last applied migration has
+    nothing pending to run: the run applies nothing and reverts nothing
+    (going down is :func:`down`'s).
     """
-    del settings  # the database carries its project; kept for API symmetry
     timeout = parse_lock_timeout(lock_timeout)
     direction: dict[str, Any] = {"direction": "up"}
     if through is not None:
         direction["through"] = through
     report = RunReport()
-    async with _connection(database, using, url) as name:
-        tracked = await open_tracked(name, database)
-        try:
-            async with tracked.locked(timeout, say_waiting) as run:
-                keys = _order_keys_for(run, "applied")
+    tracked = await open_tracked(name, database)
+    try:
+        async with tracked.locked(timeout, say_waiting) as run:
+            keys = _order_keys_for(run, "applied")
+            try:
                 plan = await run.plan(
                     direction, allow_ahead=allow_ahead, order_keys=keys
                 )
-                report = await _walk(run, plan, progress, using=name)
-        except RunRefused as refused:
-            report._refuse(refused)
-    return report
+            except RunRefused as refused:
+                if refused.ahead_only:
+                    report.ahead = list(run.status()["ahead"])
+                raise
+            report = await _walk(run, plan, progress, using=name)
+    except RunRefused as refused:
+        report._refuse(refused)
+    return report._raise_if_refused()
 
 
 async def _walk(
@@ -817,21 +842,67 @@ async def status_of(
 
 
 async def status(
-    settings: FerroSettings,
-    database: DatabaseSettings,
+    settings: FerroSettings | None = None,
+    database: str | None = None,
     *,
     using: str | None = None,
     url: str | None = None,
 ) -> StatusReport:
-    """Where ``database`` stands against its migrations directory.
+    """Where the database stands against its migrations directory
+    (``ferro migrate status``).
 
     Takes no lock and creates nothing: a database without the tracking
     table reports every migration pending. The refusal ``up`` would meet
     (an edited file, a broken chain, ...) is part of the report.
     """
-    del settings
-    async with _connection(database, using, url) as name:
-        return await status_of(await open_tracked(name, database), database)
+    target = Target.resolve(settings, database, using=using, url=url)
+    async with target.open() as name:
+        return await status_of(
+            await open_tracked(name, target.database), target.database
+        )
+
+
+async def require_applied(
+    settings: FerroSettings | None = None,
+    database: str | None = None,
+    *,
+    using: str | None = None,
+    url: str | None = None,
+    allow_ahead: bool = False,
+) -> None:
+    """Return when the database stands at the head of its migrations; raise
+    otherwise. Takes no lock and changes nothing.
+
+    The answer is the run planner's: the plan ``up`` would make, read with
+    no lock.
+
+    Raises:
+        PendingMigrationsError: a migration is pending (``.pending``), or the
+            tracking table refuses a run (``.refusals``: an interrupted run,
+            an edited applied file, ...).
+        DatabaseAheadError: the database has applied migrations this
+            checkout lacks (``allow_ahead=True`` lets it through).
+    """
+    target = Target.resolve(settings, database, using=using, url=url)
+    async with target.open() as name:
+        tracked = await open_tracked(name, target.database)
+        report = StatusReport.from_core(
+            tracked.status(),
+            database=target.database.name,
+            dialect=tracked.dialect,
+            table=tracked.tracking_table,
+        )
+        pending = [m.name for m in report.migrations if any(s.pending for s in m.steps)]
+        if tracked.refusal is not None:
+            raise PendingMigrationsError(pending, [tracked.refusal])
+        try:
+            await tracked.plan({"direction": "up"}, allow_ahead=allow_ahead)
+        except RunRefused as refused:
+            if refused.ahead_only:
+                raise DatabaseAheadError(report.ahead, str(refused)) from None
+            raise PendingMigrationsError(pending, [str(refused)]) from None
+    if pending:
+        raise PendingMigrationsError(pending)
 
 
 # -- down ------------------------------------------------------------------------
@@ -929,19 +1000,20 @@ async def _preview_down(
 
 
 async def plan_down(
-    settings: FerroSettings,
-    database: DatabaseSettings,
+    settings: FerroSettings | None = None,
+    database: str | None = None,
     *,
-    target: str | None = None,
-    all: bool = False,
     using: str | None = None,
     url: str | None = None,
+    target: str | None = None,
+    all: bool = False,
 ) -> DownPlan:
-    """What :func:`down` would revert, read with no lock, changing nothing."""
-    del settings
+    """What :func:`down` would revert, read with no lock, changing nothing.
+    ``DownPlan.refusal`` says why it would be refused."""
     direction = parse_target(target, all=all)
-    async with _connection(database, using, url) as name:
-        tracked = await open_tracked(name, database)
+    where = Target.resolve(settings, database, using=using, url=url)
+    async with where.open() as name:
+        tracked = await open_tracked(name, where.database)
         try:
             return (await _preview_down(tracked, direction))[1]
         except RunRefused as refused:
@@ -949,19 +1021,20 @@ async def plan_down(
 
 
 async def down(
-    settings: FerroSettings,
-    database: DatabaseSettings,
+    settings: FerroSettings | None = None,
+    database: str | None = None,
     *,
-    target: str | None = None,
-    all: bool = False,
     using: str | None = None,
     url: str | None = None,
+    target: str | None = None,
+    all: bool = False,
     lock_timeout: str | float = "30s",
     confirm: Callable[[DownPlan], bool] | None = None,
     progress: Callable[[str], Any] | None = None,
 ) -> RunReport:
     """Revert every applied step above ``target``, newest first, under the
-    run lock (ADR-0033).
+    run lock (``ferro migrate down``, ADR-0033), on the database and
+    connection :func:`up` would work on.
 
     ``target`` is ``None`` (the latest migration with a record, a partly
     applied one included), ``"0005"`` (leave 0005 fully applied; ``"0000"``
@@ -975,24 +1048,28 @@ async def down(
     is made again, and a database that changed in between is refused rather
     than reverted unseen. ``progress`` receives one line per reverted step.
 
-    Returns a :class:`RunReport`; a refusal or a failed down is reported in
-    ``refusal``, not raised. A failed down that rolled back whole leaves its
-    step applied and its record as it was; one that left part of itself
-    applied (a no-transaction SQL down, a chunked down past its first
-    batch) leaves the record carrying the error, a chunked one still
-    ``reverting`` at its cursor. The next ``down`` resumes at it.
+    Returns the :class:`RunReport` of what it reverted (``declined`` when
+    ``confirm`` said no).
+
+    Raises:
+        MigrationRefused: the run refused or a down failed; ``.report`` is
+            the run's report. A failed down that rolled back whole leaves its
+            step applied and its record as it was; one that left part of
+            itself applied (a no-transaction SQL down, a chunked down past its
+            first batch) leaves the record carrying the error, a chunked one
+            still ``reverting`` at its cursor. The next ``down`` resumes at it.
     """
-    del settings
     direction = parse_target(target, all=all)
     timeout = parse_lock_timeout(lock_timeout)
     report = RunReport()
-    async with _connection(database, using, url) as name:
-        tracked = await open_tracked(name, database)
+    where = Target.resolve(settings, database, using=using, url=url)
+    async with where.open() as name:
+        tracked = await open_tracked(name, where.database)
         try:
             seen, shown = await _preview_down(tracked, direction)
         except RunRefused as refused:
             report._refuse(refused)
-            return report
+            return report._raise_if_refused()
         if not seen.steps:
             return report
         if confirm is not None and not confirm(shown):
@@ -1007,8 +1084,8 @@ async def down(
                         "the plan was shown; nothing was reverted. Run `ferro migrate "
                         "down` again to see the plan as it stands now."
                     )
-                    return report
+                    return report._raise_if_refused()
                 report = await _walk(run, plan, progress, using=name)
         except RunRefused as refused:
             report._refuse(refused)
-    return report
+    return report._raise_if_refused()
