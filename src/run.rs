@@ -612,7 +612,7 @@ impl RunLock {
     /// [`RunLock::acquire`], refusing with `timed_out()` once `timeout` has
     /// passed: a door whose wait is bounded by something other than
     /// `--lock-timeout` names its own bound (the auto-migrate pass's
-    /// `ddl_lock_timeout`, ADR-0038).
+    /// `lock_timeout` setting, ADR-0038).
     ///
     /// # Errors
     /// `timed_out()`; the pooler refusal when the Postgres lock cannot be
