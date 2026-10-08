@@ -35,7 +35,10 @@ from pathlib import Path
 
 import pytest
 
-from ferro.migrations.backfill_scaffold import backfill, guard, prefill_for
+from ferro._core import _generate_migration
+from ferro.migrations import scaffold
+from ferro.migrations.generate import declared_modelset
+from ferro.settings import FerroSettings
 from tests.test_migrate_down import (  # noqa: F401 - fixtures
     keys,
     migration_dir,
@@ -444,45 +447,144 @@ def test_two_columns_share_a_backfill_and_two_models_get_one_each_parent_first(
     assert '"01_expand.down.sql drops the columns"' in source
 
 
-def test_a_model_without_a_primary_key_is_backfilled_atomically():
-    source = backfill(
-        "Tag",
-        ["slug"],
-        driver="atomic",
-        prefill={},
-        template_dir=None,
-        reverse="01_expand.down.sql drops the column",
+# -- the data step's text, from the generator's record ---------------------------------
+
+
+def records(project: Path, pkg: str, body: str, **options: object) -> list[dict]:
+    """The data-step records the generator produces for ``body`` over the
+    head migration: what ``prepare`` hands :func:`scaffold.render`, decoded
+    nowhere on the way. ``options`` are the generator's (``no_backfill``,
+    ``data_step``)."""
+    write_models(project, pkg, body)
+    database = FerroSettings().database()
+    head = sorted((project / "migrations").glob("0*"))[-1]
+    raw = _generate_migration(
+        (head / "ir.json").read_bytes().decode("utf-8"),
+        json.dumps(declared_modelset(database)),
+        list(database.dialects),
+        options_json=json.dumps(
+            {"no_backfill": [], "data_step": None, "sql_step": None, **options}
+        ),
     )
+    assert raw is not None, "the models change nothing"
+    steps = json.loads(raw)["steps"]
+    return [step for step in steps if step.get("data") or step.get("hand_model")]
+
+
+def created(project: Path, pkg: str, body: str) -> None:
+    """``0001`` creates ``body``'s models, offline."""
+    write_config(project, pkg)
+    write_models(project, pkg, body)
+    new("create")
+
+
+KEYLESS = """
+class Tag(Model):
+    label: str
+"""
+
+
+def test_a_model_without_a_primary_key_is_backfilled_atomically(project, pkg):
+    created(project, pkg, KEYLESS)
+    [record] = records(project, pkg, KEYLESS + REQUIRED_SLUG)
+    source = scaffold.render(record, template_dir=None)
+
     assert "@atomic\nasync def up(ctx):\n" in source
     assert (
         "    await ctx.models.Tag.where(lambda tag: tag.slug == None).update(\n"
         '        slug=todo("the slug for an existing tag"),\n'
         "    )\n"
     ) in source
+    assert '@nothing_to_reverse("01_expand.down.sql drops the column")' in source
     compile(source, "02_backfill_tag.py", "exec")
 
 
-def test_prefill_is_the_call_of_a_standard_library_factory_only():
-    assert prefill_for("uuid.uuid4") == "uuid.uuid4()"
-    assert prefill_for("datetime.datetime.now") == "datetime.datetime.now()"
-    assert prefill_for("myapp.models.make_token") is None
-    assert prefill_for("myapp.models.<lambda>") is None
+def test_prefill_is_the_call_of_a_standard_library_factory_only(project, pkg):
+    head = "import datetime\n" + HEAD
+    created(project, pkg, head)
+    [record] = records(
+        project,
+        pkg,
+        head
+        + "    token: UUID = Field(default_factory=uuid.uuid4)\n"
+        + "    seen: datetime.datetime = Field(default_factory=datetime.datetime.now)\n"
+        + "    code: str = Field(default_factory=lambda: 'x')\n",
+    )
+    source = scaffold.render(record, template_dir=None)
+
+    assert "import datetime\nimport uuid\n" in source
+    assert "            author.token = uuid.uuid4()\n" in source
+    assert "            author.seen = datetime.datetime.now()\n" in source
+    assert (
+        f'            author.code = todo("call {pkg}.models.Author.<lambda> for an existing '
+        'author")\n'
+    ) in source
+    # The lambda is unwritten: the summary names the step and the skip.
+    note = scaffold.note(record, dir_name="0002_x", migration_name="x")
+    assert note is not None
+    assert note.startswith(
+        "02_backfill_author.py needs writing where it says todo(...); if no author "
+        "needs a value, delete 0002_x/ and run: ferro migrate new x --no-backfill author."
+    ), note
 
 
-def test_a_project_template_overrides_the_scaffolds(tmp_path):
+def test_a_backfill_prefilled_throughout_adds_no_note(project, pkg):
+    created(project, pkg, HEAD)
+    [record] = records(
+        project, pkg, HEAD + "    token: UUID = Field(default_factory=uuid.uuid4)\n"
+    )
+    assert "todo(" not in scaffold.render(record, template_dir=None)
+    assert scaffold.note(record, dir_name="0002_x", migration_name="x") is None
+
+
+def test_a_removed_label_fills_the_rows_holding_it_not_the_nulls(project, pkg):
+    created(project, pkg, HEAD)
+    [record] = records(project, pkg, HEAD.replace('    LIVE = "live"\n', ""))
+    source = scaffold.render(record, template_dir=None)
+
+    assert (
+        'lambda models: models.Author.where(lambda author: author.status == "live")'
+    ) in source
+    assert (
+        '        author.status = type(author.status)(todo("the label to use instead '
+        "of 'live'\"))\n"
+    ) in source
+    assert "== None" not in source
+
+
+def test_the_guard_and_the_hand_step_render_from_their_records(project, pkg):
+    created(project, pkg, HEAD)
+    [guard] = records(project, pkg, HEAD + REQUIRED_SLUG, no_backfill=["author.slug"])
+    source = scaffold.render(guard, template_dir=None)
+    assert "    missing = await ctx.models.Author.where(\n" in source
+    assert "        lambda author: author.slug == None\n" in source
+    assert scaffold.note(guard, dir_name="0002_x", migration_name="x") is None
+
+    [hand] = records(project, pkg, HEAD + OPTIONAL_SLUG, data_step="Author")
+    assert hand["hand_model"] == "Author"
+    assert scaffold.render(hand, template_dir=None) == (
+        "from ferro.migrations import atomic, todo\n\n\n"
+        "@atomic\nasync def up(ctx):\n"
+        "    # ctx.models.Author is the table as this migration leaves it.\n"
+        '    todo("write this step")\n\n\n'
+        '@atomic\nasync def down(ctx):\n    todo("write this step")\n'
+    )
+
+
+def test_a_project_template_overrides_the_scaffolds(project, pkg, tmp_path):
     (tmp_path / "backfill.py").write_text("# {model}: {columns} over {query}\n")
     (tmp_path / "guard.py").write_text("# guard {model} {columns}\n")
-    assert backfill(
-        "Author",
-        ["slug"],
-        driver="chunked",
-        prefill={},
-        template_dir=tmp_path,
-        key="id",
-    ) == (
+    (tmp_path / "data_step.py").write_text("# by hand over {model}\n")
+    created(project, pkg, HEAD)
+    [backfill] = records(project, pkg, HEAD + REQUIRED_SLUG)
+    [guard] = records(project, pkg, HEAD + REQUIRED_SLUG, no_backfill=["author.slug"])
+    [hand] = records(project, pkg, HEAD + OPTIONAL_SLUG, data_step="Author")
+
+    assert scaffold.render(backfill, template_dir=tmp_path) == (
         "# Author: slug over models.Author.where(lambda author: author.slug == None)\n"
     )
-    assert guard("Author", ["slug"], template_dir=tmp_path) == "# guard Author slug\n"
+    assert scaffold.render(guard, template_dir=tmp_path) == "# guard Author slug\n"
+    assert scaffold.render(hand, template_dir=tmp_path) == "# by hand over Author\n"
 
 
 # -- --no-backfill: the guard step ------------------------------------------------------
