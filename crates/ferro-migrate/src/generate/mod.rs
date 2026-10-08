@@ -25,8 +25,8 @@
 //! is added `NOT VALID` and validated by a last `validate` step. A label added
 //! to an enum type is a first `labels` step whose down reverses nothing, and a
 //! label or type rename is a rename of the `schema` step ([`enums`]).
-//! [`columns::assign`] decides each op's step; every other change is refused
-//! naming the ticket that generates it.
+//! The phase table in [`columns`] reads each op's step off its verdict; an op
+//! no door runs is refused with its recipe.
 
 pub mod backfill;
 pub mod columns;
@@ -40,10 +40,10 @@ use crate::directory::{DirectoryError, Headers, MigrationsDir, StepDialect, Step
 use crate::plan::{HintError, renamed_snapshot};
 use crate::snapshot::{Snapshot, SnapshotError};
 use crate::{
-    AnsweredBy, Dialect, EmissionError, MigrationOp, Plan, PlanOptions, RenderedOp, ReportKind,
-    Side, plan_from_ir,
+    AnsweredBy, Dialect, EmissionError, Execution, MigrationOp, Plan, PlanOptions, PlannedOp,
+    Refusal, RenderedOp, ReportKind, Side, plan_from_ir,
 };
-use columns::{Needs, Phase, PlanContext, PlanDirection, Refusal, StepAssignment};
+use columns::Phase;
 use ferro_ddl_lowering::ConstraintMode;
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
 use std::collections::{BTreeMap, BTreeSet};
@@ -184,18 +184,15 @@ impl std::fmt::Display for GenerateError {
                 subject,
                 ticket,
             } => write!(f, "not generated yet: {op} on {subject} (ticket #{ticket})"),
-            GenerateError::PrimaryKeyChange { table } => write!(
-                f,
-                "changing the primary key of \"{table}\" is not generated: write it as a new \
-                 table (ferro migrate new --data-step …), a backfill of parent and children, \
-                 and a drop; see the Migrations docs § Changing a primary key"
-            ),
-            GenerateError::EnumTypeMove { table, column } => write!(
-                f,
-                "changing \"{table}\".\"{column}\" to or from a native enum type is not \
-                 generated: add a column of the new type, copy the values across in a data step \
-                 (ferro migrate new --data-step …), then drop the old column"
-            ),
+            GenerateError::PrimaryKeyChange { table } => Refusal::PrimaryKeyChange {
+                table: table.clone(),
+            }
+            .fmt(f),
+            GenerateError::EnumTypeMove { table, column } => Refusal::EnumTypeMove {
+                table: table.clone(),
+                column: column.clone(),
+            }
+            .fmt(f),
             GenerateError::Unrenderable {
                 op,
                 table,
@@ -260,63 +257,48 @@ fn op_subject(op: &MigrationOp) -> String {
     }
 }
 
-/// Which step `op` belongs in, in the file that turns `before` into `after`
-/// on `dialect` in a migration that has (`data_steps`) or lacks a data step
-/// after its schema step ([`columns::assign`]), or the refusal naming the
-/// ticket that generates it. An op that demands values of existing rows is
+/// Which step `op` of a migration's up belongs in, in a migration that has
+/// (`data_steps`) or lacks a data step after its schema step: the phase
+/// table over its verdict ([`columns::phase`]), or the refusal its verdict
+/// carries. An op that demands values of existing rows is
 /// [`Phase::Backfill`]: the migration answers it with its expand → backfill →
 /// contract ([`backfill`]), and plans every step against the expanded schema,
 /// where no op demands anything.
-fn phase_of(
-    op: &MigrationOp,
-    before: &IrEnvelope<SchemaIrPayload>,
-    after: &IrEnvelope<SchemaIrPayload>,
-    dialect: Dialect,
-    direction: PlanDirection,
-    data_steps: bool,
-) -> Result<Phase, GenerateError> {
-    let ctx = PlanContext::of(op, before, after, dialect, direction).with_data_steps(data_steps);
-    let StepAssignment { phase, needs } = columns::assign(op, &ctx);
-    let table = op_subject(op);
-    match needs {
-        // A rebuild sits in the phase step its Postgres twin's change does
-        // (ADR-0046).
-        Needs::Native | Needs::Rebuild => Ok(phase),
-        Needs::Backfill => Ok(Phase::Backfill),
-        Needs::Refused(Refusal::Ticket(ticket)) => Err(GenerateError::NotGeneratedYet {
-            op: op_kind(op),
-            subject: table,
-            ticket,
-        }),
-        Needs::Refused(Refusal::PrimaryKeyChange) => Err(GenerateError::PrimaryKeyChange { table }),
-        Needs::Refused(Refusal::EnumTypeMove { column }) => {
-            Err(GenerateError::EnumTypeMove { table, column })
-        }
-        Needs::Refused(Refusal::LiveOnly) => Err(GenerateError::Render(format!(
-            "{} on {table} is planned only against a live database, never between two \
-             schema snapshots",
-            op_kind(op)
-        ))),
+fn phase_of(op: &PlannedOp, data_steps: bool) -> Result<Phase, GenerateError> {
+    if let Some(phase) = columns::phase(op, data_steps) {
+        return Ok(phase);
     }
+    Err(match &op.verdict.execution {
+        Execution::Refused(Refusal::PrimaryKeyChange { table }) => {
+            GenerateError::PrimaryKeyChange {
+                table: table.clone(),
+            }
+        }
+        Execution::Refused(Refusal::EnumTypeMove { table, column }) => {
+            GenerateError::EnumTypeMove {
+                table: table.clone(),
+                column: column.clone(),
+            }
+        }
+        // Between two declared snapshots every op is expressible (ADR-0033):
+        // meeting one that is not is a planner bug, said loudly.
+        other => GenerateError::Render(format!(
+            "{} on {} has no phase step ({other:?}); between two declared snapshots every \
+             op is expressible",
+            op_kind(&op.op),
+            op_subject(&op.op)
+        )),
+    })
 }
 
 /// The indexes of the ops of `plan` the file renders: every op but a SQLite
 /// check drop the same file's `DROP COLUMN` carries
-/// ([`columns::carried_by_its_column_drop`]).
-fn rendered_ops(
-    plan: &Plan,
-    before: &IrEnvelope<SchemaIrPayload>,
-    after: &IrEnvelope<SchemaIrPayload>,
-    dialect: Dialect,
-    direction: PlanDirection,
-) -> Vec<usize> {
+/// ([`columns::omitted`]).
+fn rendered_ops(plan: &Plan) -> Vec<usize> {
     plan.operations
         .iter()
         .enumerate()
-        .filter(|(_, op)| {
-            let ctx = PlanContext::of(op, before, after, dialect, direction);
-            !columns::carried_by_its_column_drop(op, &ctx)
-        })
+        .filter(|(_, op)| !columns::omitted(op, plan.dialect()))
         .map(|(index, _)| index)
         .collect()
 }
@@ -340,43 +322,16 @@ fn refuse_unrendered(rendered: &[RenderedOp], dialect: Dialect) -> Result<(), Ge
     Ok(())
 }
 
-/// The phase steps the schema-step ops `ups` and their reverses `downs` (one
-/// per dialect, planned `before → expanded` and back) land in, in a migration
-/// that has (`data_steps`) or lacks a data step. Refuses a phase the steps
-/// before the data steps must never see: an index change (its own index
-/// step), a demand for values (the expanded schema relaxes every demanded
-/// column), or a drop the data steps wait for (the expanded schema keeps it
-/// until the contract).
-fn step_phases(
-    ups: &[Vec<MigrationOp>],
-    downs: &[Plan],
-    before: &IrEnvelope<SchemaIrPayload>,
-    expanded: &IrEnvelope<SchemaIrPayload>,
-    dialects: &[Dialect],
-    data_steps: bool,
-) -> Result<BTreeSet<Phase>, GenerateError> {
+/// The phase steps the schema-step ops `ups` (one list per dialect, planned
+/// `before → expanded`) land in, in a migration that has (`data_steps`) or
+/// lacks a data step. Refuses a phase the steps before the data steps must
+/// never see: an index change (its own index step), a demand for values (the
+/// expanded schema relaxes every demanded column), or a drop the data steps
+/// wait for (the expanded schema keeps it until the contract).
+fn step_phases(ups: &[Vec<PlannedOp>], data_steps: bool) -> Result<BTreeSet<Phase>, GenerateError> {
     let mut phases = BTreeSet::new();
-    for (&dialect, (up, down)) in dialects.iter().zip(ups.iter().zip(downs)) {
-        for op in up {
-            phases.insert(phase_of(
-                op,
-                before,
-                expanded,
-                dialect,
-                PlanDirection::Up,
-                data_steps,
-            )?);
-        }
-        for op in &down.operations {
-            phases.insert(phase_of(
-                op,
-                expanded,
-                before,
-                dialect,
-                PlanDirection::Down,
-                data_steps,
-            )?);
-        }
+    for op in ups.iter().flatten() {
+        phases.insert(phase_of(op, data_steps)?);
     }
     if phases.contains(&Phase::Index) {
         return Err(GenerateError::Render(
@@ -432,27 +387,19 @@ fn plan(
     )
 }
 
-/// Refuse anything in `plan` (the file turning `before` into `after`) this
-/// generator does not generate: an op with no phase, or a report no op of
-/// the same plan answers ([`AnsweredBy`]) — a leftover CHECK's report is
-/// answered by the plan's drop of it, a refused rename hint by nothing.
-/// Between two declared snapshots every report is the change's own: a
-/// snapshot carries no standing live condition.
-fn refuse_unsupported(
-    plan: &Plan,
-    before: &IrEnvelope<SchemaIrPayload>,
-    after: &IrEnvelope<SchemaIrPayload>,
-    dialect: Dialect,
-    direction: PlanDirection,
-) -> Result<(), GenerateError> {
+/// Refuse anything in `plan` this generator does not generate: an op no
+/// door runs (its verdict's refusal), or a report no op of the same plan
+/// answers ([`AnsweredBy`]) — a leftover CHECK's report is answered by the
+/// plan's drop of it, a refused rename hint by nothing. Between two declared
+/// snapshots every report is the change's own: a snapshot carries no
+/// standing live condition.
+fn refuse_unsupported(plan: &Plan) -> Result<(), GenerateError> {
+    let dialect = plan.dialect();
     for op in &plan.operations {
-        phase_of(op, before, after, dialect, direction, false)?;
+        phase_of(op, false)?;
     }
-    match plan
-        .reports
-        .iter()
-        .find(|report| !report.answered_by(&plan.operations))
-    {
+    let ops: Vec<MigrationOp> = plan.ops().cloned().collect();
+    match plan.reports.iter().find(|report| !report.answered_by(&ops)) {
         None => Ok(()),
         Some(report) => Err(match &report.kind {
             ReportKind::HintRefused(refusal) => GenerateError::Hint(refusal.clone()),
@@ -483,23 +430,21 @@ fn step_text(headers: &Headers, statements: &[String]) -> String {
 /// backend limitation a dialect skips, such as row security on SQLite), each
 /// once, into `warnings`; an op the renderer leaves out with a blocking report
 /// is refused. An op on a table SQLite rebuilds is not rendered alone: its
-/// rebuild carries it. `old` and `new` are the stages the file goes between,
-/// which decide the rebuilds.
+/// rebuild carries it.
 fn render_warnings(
     up: &Plan,
     ops: &[usize],
-    old: &IrEnvelope<SchemaIrPayload>,
-    new: &IrEnvelope<SchemaIrPayload>,
     warnings: &mut Vec<String>,
 ) -> Result<(), GenerateError> {
     let dialect = up.dialect();
-    let listed: Vec<MigrationOp> = ops.iter().map(|&i| up.operations[i].clone()).collect();
-    let rebuilt = rebuild::tables_to_rebuild(&listed, old, new, dialect, PlanDirection::Up);
+    let listed: Vec<PlannedOp> = ops.iter().map(|&i| up.operations[i].clone()).collect();
+    let rebuilt = rebuild::tables_to_rebuild(&listed);
     let native: Vec<usize> = ops
         .iter()
         .copied()
         .filter(|&i| {
             !up.operations[i]
+                .op
                 .table()
                 .is_some_and(|table| rebuilt.contains(table))
         })
@@ -723,20 +668,15 @@ pub fn generate_with(
     let mut suggestions = Vec::new();
     for &dialect in dialects {
         let change = plan(parent_ir, target, dialect);
-        refuse_unsupported(&change, before, target, dialect, PlanDirection::Up)?;
-        refuse_unsupported(
-            &plan(target, before, dialect),
-            target,
-            before,
-            dialect,
-            PlanDirection::Down,
-        )?;
-        for line in renames::suggestions(&change.operations, before, target) {
+        refuse_unsupported(&change)?;
+        refuse_unsupported(&plan(target, before, dialect))?;
+        let ops: Vec<MigrationOp> = change.ops().cloned().collect();
+        for line in renames::suggestions(&ops, before, target) {
             if !suggestions.contains(&line) {
                 suggestions.push(line);
             }
         }
-        changes.push(change.operations);
+        changes.push(ops);
     }
 
     // The index steps come after every other step but the add-constraint,
@@ -755,32 +695,38 @@ pub fn generate_with(
     let demands = backfill::collect(&demand_ops, before, &shape);
     // A removed enum label (D2) stays declared until the contract: the
     // backfill relabels the rows holding it, the contract removes it.
-    let removals = backfill::label_removals(&demand_ops);
+    let removal_ops: Vec<MigrationOp> = demand_ops
+        .iter()
+        .map(|planned| planned.op.clone())
+        .collect();
+    let removals = backfill::label_removals(&removal_ops);
     let backfills = !demands.is_empty() || !removals.is_empty();
     // A migration with a data step after its schema step keeps every table
     // and column it drops until its contract (ADR-0025), so the data step
     // reads what the historical model declares: the phase table decides
-    // which ops wait ([`columns::waits_for_the_data_steps`]), and every step
-    // before the contract sees them still there.
+    // which ops wait ([`columns::phase`]), and every step before the contract
+    // sees them still there.
     let data_steps = backfills || hand.is_some();
     // The ops each dialect holds back for the contract, as the phase table
     // decides them: the contract renders exactly these, and every step before
     // it sees exactly what they remove ([`backfill::with_drops_kept`]).
-    let mut withheld: Vec<Vec<MigrationOp>> = Vec::new();
+    let mut withheld: Vec<Vec<PlannedOp>> = Vec::new();
     for &dialect in dialects {
         let mut held = Vec::new();
         if data_steps {
             for op in plan(parent_ir, &shape, dialect).operations {
-                if phase_of(&op, before, &shape, dialect, PlanDirection::Up, true)?
-                    == Phase::Contract
-                {
+                if phase_of(&op, true)? == Phase::Contract {
                     held.push(op);
                 }
             }
         }
         withheld.push(held);
     }
-    let held: Vec<MigrationOp> = withheld.iter().flatten().cloned().collect();
+    let held: Vec<MigrationOp> = withheld
+        .iter()
+        .flatten()
+        .map(|planned| planned.op.clone())
+        .collect();
     let expanded = backfill::with_drops_kept(
         &backfill::with_removed_labels(&backfill::relaxed(&shape, &demands), before, &removals),
         before,
@@ -792,36 +738,27 @@ pub fn generate_with(
     let contracts = backfills || !held.is_empty();
     let mut up_plans = Vec::new();
     let mut up_indexes = Vec::new();
-    let mut downs = Vec::new();
     for &dialect in dialects {
         let up = plan(parent_ir, &expanded, dialect);
-        up_indexes.push(rendered_ops(
-            &up,
-            before,
-            &expanded,
-            dialect,
-            PlanDirection::Up,
-        ));
+        up_indexes.push(rendered_ops(&up));
         up_plans.push(up);
-        downs.push(plan(&expanded, before, dialect));
     }
-    let ups: Vec<Vec<MigrationOp>> = up_plans
+    let ups: Vec<Vec<PlannedOp>> = up_plans
         .iter()
         .zip(&up_indexes)
         .map(|(up, indexes)| indexes.iter().map(|&i| up.operations[i].clone()).collect())
         .collect();
-    if ups.iter().all(Vec::is_empty)
-        && downs.iter().all(Plan::is_empty)
-        && index_ops.is_empty()
-        && !contracts
-    {
+    // Every down is its step's up planned back (ADR-0050): a migration whose
+    // ups change nothing on any dialect has nothing to undo either, and is
+    // no migration (a label SQLite stores as text, for one).
+    if ups.iter().all(Vec::is_empty) && index_ops.is_empty() && !contracts {
         if !skipped.is_empty() {
             backfill::data_steps(&demands, target, &skipped)?;
         }
         return Ok(None);
     }
 
-    let phases = step_phases(&ups, &downs, before, &expanded, dialects, data_steps)?;
+    let phases = step_phases(&ups, data_steps)?;
     let mut warnings = Vec::new();
     let mut staged = Vec::new();
     for ((&dialect, up), (up_plan, indexes)) in dialects
@@ -829,8 +766,9 @@ pub fn generate_with(
         .zip(&ups)
         .zip(up_plans.iter().zip(&up_indexes))
     {
-        render_warnings(up_plan, indexes, before, &expanded, &mut warnings)?;
-        for constraint in staging::staged_constraints(up, before, &expanded, dialect)? {
+        render_warnings(up_plan, indexes, &mut warnings)?;
+        let up_ops: Vec<MigrationOp> = up.iter().map(|planned| planned.op.clone()).collect();
+        for constraint in staging::staged_constraints(&up_ops, before, &expanded, dialect)? {
             if !staged.contains(&constraint) {
                 staged.push(constraint);
             }
@@ -845,24 +783,16 @@ pub fn generate_with(
         for (&dialect, up) in dialects.iter().zip(&ups) {
             let mut step_ops = Vec::new();
             for op in up {
-                if phase_of(
-                    op,
-                    before,
-                    &expanded,
-                    dialect,
-                    PlanDirection::Up,
-                    data_steps,
-                )? == phase
-                {
+                if phase_of(op, data_steps)? == phase {
                     step_ops.push(op.clone());
                 }
             }
             let rendering = if phase == Phase::Labels {
-                enums::render_labels_step(&step_ops, before, &expanded, dialect)?
+                let ops: Vec<MigrationOp> =
+                    step_ops.iter().map(|planned| planned.op.clone()).collect();
+                enums::render_labels_step(&ops, before, &expanded, dialect)?
             } else {
-                downs::render_down(
-                    &step_ops, parent_ir, &expanded, dialect, phase, &hints, data_steps,
-                )?
+                downs::render_down(&step_ops, parent_ir, &expanded, dialect, &hints)?
             };
             renderings.insert(StepDialect::from(dialect), rendering);
         }
@@ -1665,7 +1595,7 @@ mod tests {
                 .collect();
             for dialect in BOTH {
                 let planned: Vec<String> = plan(&before, &after, dialect)
-                    .operations
+                    .op_list()
                     .into_iter()
                     .filter_map(|op| match op {
                         MigrationOp::RedefineIndex { name, .. } => Some(name),
@@ -2230,19 +2160,16 @@ mod tests {
                         }
                 })
                 .expect("the leftover is reported");
-            assert!(leftover.answered_by(&dropped.operations), "{dialect:?}");
-            assert_eq!(
-                refuse_unsupported(&dropped, &before, &after, dialect, PlanDirection::Up),
-                Ok(())
-            );
+            assert!(leftover.answered_by(&dropped.op_list()), "{dialect:?}");
+            assert_eq!(refuse_unsupported(&dropped), Ok(()));
             // The same report with no drop of it is refused, by its text.
             let unanswered = Plan {
                 reports: vec![leftover.clone()],
-                ..Plan::unplaced(Vec::new())
+                ..plan(&after, &after, dialect)
             };
-            assert!(!leftover.answered_by(&unanswered.operations));
+            assert!(!leftover.answered_by(&unanswered.op_list()));
             assert_eq!(
-                refuse_unsupported(&unanswered, &before, &after, dialect, PlanDirection::Up),
+                refuse_unsupported(&unanswered),
                 Err(GenerateError::Unplanned {
                     dialect: dialect.into(),
                     warning: leftover.text.clone(),
@@ -2273,13 +2200,7 @@ mod tests {
             ..Plan::unplaced(Vec::new())
         };
         assert_eq!(
-            refuse_unsupported(
-                &hinted,
-                &after,
-                &after,
-                Dialect::Postgres,
-                PlanDirection::Up
-            ),
+            refuse_unsupported(&hinted),
             Err(GenerateError::Hint(refusal))
         );
     }
@@ -2870,21 +2791,23 @@ mod tests {
         // reaches the schema step; if one did, the phase table says where it
         // belongs and generation stops rather than drop it early.
         let (before, after) = (ir(vec![author()]), ir(vec![slug_for_name()]));
-        let ups = vec![vec![MigrationOp::DropColumn {
+        let drop = MigrationOp::DropColumn {
             table: "author".into(),
             column: "name".into(),
-        }]];
-        let downs = vec![Plan::unplaced(Vec::new())];
-        let dialect = [Dialect::Postgres];
+        };
+        let ups = vec![vec![PlannedOp::of(
+            drop,
+            &Side::declared(before),
+            &Side::declared(after),
+            Dialect::Postgres,
+        )]];
         assert_eq!(
-            step_phases(&ups, &downs, &before, &after, &dialect, true)
-                .expect_err("refused")
-                .to_string(),
+            step_phases(&ups, true).expect_err("refused").to_string(),
             "a drop the data steps wait for reached a step before them; the expanded schema \
              keeps every table and column the contract drops"
         );
         assert_eq!(
-            step_phases(&ups, &downs, &before, &after, &dialect, false).expect("ok"),
+            step_phases(&ups, false).expect("ok"),
             BTreeSet::from([Phase::Schema])
         );
     }
@@ -2902,20 +2825,18 @@ mod tests {
         // The phase table holds back the column's drop and nothing else on
         // post: no op of its own drops the key.
         for dialect in BOTH {
-            let ops: Vec<MigrationOp> = plan(&parent, &shape, dialect)
+            let ops: Vec<PlannedOp> = plan(&parent, &shape, dialect)
                 .operations
                 .into_iter()
-                .filter(|op| op.table() == Some("post"))
+                .filter(|planned| planned.op.table() == Some("post"))
                 .collect();
             let drop = MigrationOp::DropColumn {
                 table: "post".into(),
                 column: "author_id".into(),
             };
-            assert_eq!(ops, std::slice::from_ref(&drop), "{dialect:?}");
-            assert_eq!(
-                phase_of(&drop, &parent, &shape, dialect, PlanDirection::Up, true),
-                Ok(Phase::Contract)
-            );
+            let held: Vec<MigrationOp> = ops.iter().map(|planned| planned.op.clone()).collect();
+            assert_eq!(held, std::slice::from_ref(&drop), "{dialect:?}");
+            assert_eq!(phase_of(&ops[0], true), Ok(Phase::Contract));
             // What comes back for the data steps is exactly the column and
             // the key it carries.
             let kept = backfill::with_drops_kept(&shape, &parent, &[drop]);
