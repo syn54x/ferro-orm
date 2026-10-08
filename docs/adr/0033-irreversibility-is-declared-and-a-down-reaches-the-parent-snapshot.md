@@ -27,6 +27,8 @@ A generated DDL down is the one planner run backwards, from the migration's sche
 - Row security the migration introduced is torn down: its policies dropped, `FORCE` and `ENABLE` reversed. The reconciliation pass treats those flags as one-way because it cannot know who set them; a migration whose parent snapshot has no row security on the table can.
 - A rename's down is the reverse rename with every owned name (ADR-0032).
 
+Amended by ADR-0050 (2026-10-07): the down is the planner run from the step's after-state to its before-state, keeping only the ops whose artifact the step's up touched, through the one function the Alembic bridge's `downgrade()` uses too. It is planned with destructive changes on (it drops what the up added), and its file still never carries the `destructive` header.
+
 A generated down is never irreversible. Only a person declares that.
 
 ## Considered options
@@ -49,4 +51,3 @@ A generated down is never irreversible. Only a person declares that.
 - Down files carry `data-dependent` where it applies and never `destructive`: nearly every down of an add is a drop.
 - `down` asks for confirmation before executing; `--yes` skips the prompt.
 - A deliberate floor ("never revert below this") is an irreversible step. Baseline is not that mechanism.
-- A step's down is the planner run from the step's after-state to its before-state, keeping only what the step changed, through the same function as the Alembic bridge's `downgrade()` (ADR-0050).

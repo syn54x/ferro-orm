@@ -75,10 +75,29 @@ Rejected: leaving `drop_table` to Alembic and appending only the `DROP TYPE`, wh
 
 **Item 17 folds into item 11.** On every door an enum type is the planner's guarded `CREATE TYPE` and its `DROP TYPE`, and the bridge renders every enum column `create_type=False`; the type decision is the one planner's, made against the live database, not a separate rule decided from the revision alone. ADR-0020..0022 are superseded in part.
 
-## Amended by ADR-0050 and ADR-0051 (2026-10-07, deepening tier B)
+## Amended by ADR-0050, ADR-0051 and ADR-0052 (2026-10-07, deepening tier B)
 
-**`downgrade()` is the planner run backwards, literally.** The #533 ruling gave the bridge a hand-written inverse per op kind, because the planner accepted a live database only as the side it plans from. ADR-0050 makes both sides of a plan adapters. The downgrade is now the one down function every door uses: the planner from the models (declared) to the database (live), keeping only the ops whose artifact the upgrade touched. A dropped or rebuilt check or policy comes back with the body the catalog printed, read from the live side. An op the live side cannot express (removing an enum label, a policy applying `TO` a role list) is the op's irreversible verdict, and the revision renders it as a `raise` carrying the reason. A check or foreign key SQLite cannot restore in place is a table rebuild, which the downgrade makes irreversible as the upgrade refuses it.
+**`downgrade()` is to be the planner run backwards, literally.** The #533 ruling gave the bridge a hand-written inverse per op kind, because the planner accepted a live database only as the side it plans from. ADR-0050 makes both sides of a plan adapters. The downgrade is to be the one down function every door uses, `plan_down(up, after, before, dialect) -> Plan`, planned from the models (declared) to the database (live) and keeping only the ops whose artifact the upgrade touched.
 
-**The revision comes from one planner call.** The upgrade's and the downgrade's ops, each with its statements, its marker (`destructive` or `data-dependent`) and any irreversible reason, and the plan's reports, all come from one core call. The rules that turn verdicts into a revision (refuse a rebuild, write a demanding change plain and marked, drop an op that renders nothing, refuse an op that only warns) are the core's. The translator builds Alembic ops from that answer and decides nothing. A refused rename hint reaches the bridge as a typed report, never matched by its text.
+- A dropped or rebuilt check or policy is to come back with the body the catalog printed, read from the live side.
+- An op the live side cannot express (removing an enum label, a policy applying `TO` a role list) is to be the op's irreversible verdict, and the revision is to render it as a `raise` carrying the reason.
+- A check or foreign key SQLite cannot restore in place is a table rebuild, which the downgrade is to make irreversible, as the upgrade refuses it.
 
-**A redefined index and a removed foreign key are planner ops** (ADR-0051). The bridge writes them as Alembic's drop and create, and as `op.drop_constraint`.
+**The revision is to come from one planner call:**
+
+```rust
+pub fn plan_revision(live: &Side, declared: &IrEnvelope<SchemaIrPayload>, dialect: Dialect) -> Result<Revision, RevisionRefusal>;
+pub struct Revision { pub upgrade: Vec<RevisionOp>, pub downgrade: Vec<RevisionOp>, pub reports: Vec<Report> }
+pub struct RevisionOp { pub op: MigrationOp, pub statements: Vec<String>, pub marker: Option<Marker>, pub irreversible: Option<String> }
+```
+
+That call returns the upgrade's and the downgrade's ops, each with its statements, its marker (`destructive` or `data-dependent`) and any irreversible reason. The rules that turn verdicts into a revision become the core's, tested without a database:
+
+- refuse a rebuild;
+- write a demanding change plain, with its marker;
+- drop an op that renders nothing;
+- refuse an op whose rendering blocks.
+
+The translator is to build Alembic ops from that answer and decide nothing. A refusal keeps today's exact text. A refused rename hint is to reach the bridge as a typed report (ADR-0052), never matched by its text.
+
+**A redefined index and a removed foreign key are to be planner ops** (ADR-0051). The bridge is to write them as Alembic's drop and create, and as `op.drop_constraint`.
