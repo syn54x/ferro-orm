@@ -7,6 +7,7 @@ to provide a seamless, high-performance database experience.
 
 import logging
 import threading
+from collections.abc import Callable
 from typing import Any, Literal
 
 from . import _deprecations as _deprecations  # noqa: F401 — enable deprecation visibility
@@ -57,6 +58,7 @@ from .settings import (
     DatabaseSettings,
     FerroSettings,
     SettingsError,
+    lock_timeout_setting_seconds,
     parse_ddl_lock_timeout,
 )
 
@@ -381,9 +383,17 @@ async def connect(
     carries a ``_ferro_migrations`` tracking table) is refused before any
     DDL, and the passes run under the same run lock ``ferro migrate up``
     takes, so two processes booting together never collide. Only then is the
-    project's ``FerroSettings()`` read (for its ``tracking_schema``s and its
-    ``ddl_lock_timeout``); a plain ``connect(url)`` reads no config and runs
-    no extra query.
+    project's ``FerroSettings()`` read (for its ``tracking_schema``s, its
+    ``ddl_lock_timeout`` and its ``lock_timeout``); a plain ``connect(url)``
+    reads no config and runs no extra query.
+
+    A database ferro migrations govern is refused at once, before the pass
+    waits for the run lock. Otherwise a pass that finds the lock held warns
+    that it waits, and waits up to ``lock_timeout`` (default ``30s``; ``"0"``
+    waits without a limit) for the other run or pass to finish, then refuses
+    with ``MigrationRefused`` naming ``lock_timeout`` and ``ferro migrate
+    status``. When several databases are configured they must all set the
+    same ``lock_timeout`` and the same ``ddl_lock_timeout``.
 
     On Postgres every reconciliation statement waits for a table lock under
     ``ddl_lock_timeout`` (default ``5s``; ``"0"`` waits without a limit): a
@@ -436,14 +446,15 @@ async def connect(
 def _auto_migrate_settings() -> dict[str, Any]:
     """What the auto-migrate passes read from ``FerroSettings()``, as the
     Rust entry points' keyword arguments: every configured
-    ``tracking_schema`` for the guard (ADR-0038), and the
-    ``ddl_lock_timeout`` the create and reconciliation passes wait for table
-    locks under (ADR-0044). No config file is not an error: the guard still
-    reads the catalog, and the timeout is its default.
+    ``tracking_schema`` for the guard (ADR-0038), the ``ddl_lock_timeout``
+    the create and reconciliation passes wait for table locks under
+    (ADR-0044), and the ``lock_timeout`` they wait for the run lock under
+    (ADR-0038 as amended). No config file is not an error: the guard still
+    reads the catalog, and each timeout is its default.
 
     Raises:
         SettingsError: the configured databases set different
-            ``ddl_lock_timeout`` values."""
+            ``ddl_lock_timeout`` or ``lock_timeout`` values."""
     settings = FerroSettings()
     return {
         "tracking_schemas": sorted(
@@ -453,32 +464,41 @@ def _auto_migrate_settings() -> dict[str, Any]:
                 if database.tracking_schema is not None
             }
         ),
-        "ddl_lock_timeout_s": _ddl_lock_timeout_seconds(settings),
+        "ddl_lock_timeout_s": _agreed_seconds(
+            settings,
+            "ddl_lock_timeout",
+            lambda value: parse_ddl_lock_timeout(value).total_seconds(),
+        ),
+        "lock_timeout_s": _agreed_seconds(
+            settings, "lock_timeout", lock_timeout_setting_seconds
+        ),
     }
 
 
-def _ddl_lock_timeout_seconds(settings: FerroSettings) -> float:
-    """The ``ddl_lock_timeout`` an auto-migrate pass runs under: the value
-    every configured database sets, or the default with no config.
+def _agreed_seconds(
+    settings: FerroSettings, key: str, seconds: Callable[[str], float]
+) -> float:
+    """The duration setting ``key`` an auto-migrate pass runs under, read by
+    ``seconds``: the value every configured database sets, or the default
+    with no config.
 
     ``connect()`` names no database (ADR-0036), so databases that set
     different values leave no single answer: that is refused, naming each
     database's value and the fix, never settled by a silent default."""
     databases = settings.databases
     if not databases:
-        default = DatabaseSettings.model_fields["ddl_lock_timeout"].default
-        return parse_ddl_lock_timeout(default).total_seconds()
-    values = {database.ddl_lock_timeout_seconds for database in databases.values()}
+        return seconds(DatabaseSettings.model_fields[key].default)
+    values = {seconds(getattr(database, key)) for database in databases.values()}
     if len(values) == 1:
         return values.pop()
     each = ", ".join(
-        f'`{name}` = "{database.ddl_lock_timeout}"'
+        f'`{name}` = "{getattr(database, key)}"'
         for name, database in sorted(databases.items())
     )
     raise SettingsError(
-        f"{settings.config_path} sets different ddl_lock_timeout values ({each}), "
+        f"{settings.config_path} sets different {key} values ({each}), "
         f"and an auto-migrate pass does not name a database to take one from; set "
-        f"the same ddl_lock_timeout on every database, or configure one database"
+        f"the same {key} on every database, or configure one database"
     )
 
 

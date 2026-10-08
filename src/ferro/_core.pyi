@@ -38,11 +38,13 @@ async def connect(
     settings_delivery: str = "transaction",
     tracking_schemas: list[str] = ...,
     ddl_lock_timeout_s: float = 5.0,
+    lock_timeout_s: float = 30.0,
 ) -> None: ...
 async def create_tables(
     using: Optional[str] = None,
     tracking_schemas: list[str] = ...,
     ddl_lock_timeout_s: float = 5.0,
+    lock_timeout_s: float = 30.0,
 ) -> str:
     """The create pass alone. Resolves to the pass's report as JSON (see
     ``migrate``); a failed pass's error carries it as ``_ferro_pass_report``."""
@@ -54,6 +56,7 @@ async def migrate(
     destructive: bool = False,
     tracking_schemas: list[str] = ...,
     ddl_lock_timeout_s: float = 5.0,
+    lock_timeout_s: float = 30.0,
 ) -> str:
     """Run the auto-migrate pass against a connected engine.
 
@@ -63,7 +66,8 @@ async def migrate(
     model. ``destructive`` implies ``updates``. The pool is refreshed after any
     DDL so no cached statement observes the pre-migration schema. On Postgres
     each reconciliation statement waits for a table lock under
-    ``ddl_lock_timeout_s`` seconds (``0`` disables; ADR-0044).
+    ``ddl_lock_timeout_s`` seconds (``0`` disables; ADR-0044), and the pass
+    waits for the run lock up to ``lock_timeout_s`` seconds (ADR-0038).
 
     Resolves to the pass's report as JSON, ``{"statements": [{"subject",
     "sql", "role"}], "warnings": [{"kind", "subject", "text", "recurs",
@@ -477,6 +481,7 @@ class LockedDatabase:
     ) -> RerecordPlan: ...
     async def rerecord(self, action: RerecordPlan, kind: str | None = None) -> None: ...
     async def _close_lock_connection_for_test(self) -> None: ...
+    def _fail_next_refresh_for_test(self) -> None: ...
 
 async def _tracking_tables_for(using: str | None, schema: str | None = None) -> str:
     """JSON list of the tracking tables governing ``schema``."""

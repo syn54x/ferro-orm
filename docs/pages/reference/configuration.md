@@ -71,12 +71,23 @@ With one database, its name is `default` and its directory `migrations/`.
 | `directory` | path | `migrations` (one database), `migrations/<name>` (several) | Where the migrations live, relative to the config file. |
 | `tracking_schema` | string | none | Postgres only: the schema that holds the tracking tables, when not the connection's current schema. Refused unless `dialects` includes `"postgres"`. |
 | `ddl_lock_timeout` | duration | `"5s"` | See below. |
+| `lock_timeout` | duration | `"30s"` | See below. |
 
 ### `ddl_lock_timeout`
 
-How long a DDL statement Ferro runs on Postgres, in a migration step or in an auto-migrate pass, waits for its table lock before giving up: `"500ms"`, `"5s"`, `"1m"`, or `"0"` to wait without a limit (and without retries). A statement that gives up is retried with its step from the first statement, up to ten attempts, before the step fails naming `ddl_lock_timeout`. It does not apply to data steps, and it is not the wait for the run lock (`--lock-timeout`).
+How long a DDL statement Ferro runs on Postgres, in a migration step or in an auto-migrate pass, waits for its table lock before giving up: `"500ms"`, `"5s"`, `"1m"`, or `"0"` to wait without a limit (and without retries). A statement that gives up is retried with its step from the first statement, up to ten attempts, before the step fails naming `ddl_lock_timeout`. It does not apply to data steps, and it is not the wait for the run lock (`lock_timeout`).
 
 `connect()` with an auto-migrate flag names no database, so when several databases are configured they must all set the same `ddl_lock_timeout`; different values are refused, naming each one.
+
+### `lock_timeout`
+
+How long a run waits for the run lock while another run holds it: `"500ms"`, `"30s"`, `"1m"`, a number of seconds, or `"0"` to wait without a limit. It is the default of `--lock-timeout` on `ferro migrate up`, `down`, `baseline` and `rerecord` (and of `lock_timeout=` on their Python calls); the flag wins. An auto-migrate pass (`connect(auto_migrate=…)`, `ferro.create_tables()`, `ferro.migrate()`) waits for it too, so a replica booting while another one's pass runs waits instead of failing:
+
+```text
+connect(auto_migrate=…) gave up waiting for the run lock on public: another ferro migration run or auto-migrate pass held it longer than lock_timeout (30s). Nothing was applied. Wait for that run to finish and try again, or raise lock_timeout; `ferro migrate status` shows a migration run while it holds the lock.
+```
+
+Unlike the flag, whose `0` refuses at once, the setting's `"0"` waits without a limit. As with `ddl_lock_timeout`, every configured database must set the same `lock_timeout` for an auto-migrate pass.
 
 ### Top level
 
@@ -123,6 +134,8 @@ Every refusal names the file and the fix. The [CLI reference](cli.md#configurati
 | `python_path` inside a database table | to move it to the top level |
 | `tracking_schema` without `"postgres"` in `dialects` | to add `"postgres"` or remove `tracking_schema` |
 | An unparseable `ddl_lock_timeout` | the accepted forms: `"500ms"`, `"5s"`, `"1m"`, or `"0"` |
+| An unparseable `lock_timeout` | the accepted forms: `"500ms"`, `"30s"`, `"1m"`, a number of seconds, or `"0"` |
+| Databases that set different `ddl_lock_timeout` or `lock_timeout` values, for an auto-migrate pass | each database's value, and to set the same one on every database |
 | Several databases and no `--database` | the configured names |
 | Overlapping migration directories | both databases, and to set `directory` so neither is inside the other |
 | A model no database claims | its module, and to add it (or a parent package) to a database's `models` |

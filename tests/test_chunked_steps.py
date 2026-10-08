@@ -484,6 +484,153 @@ def test_a_chunked_down_that_fails_after_a_batch_stays_reverting_with_the_error(
     assert "    RuntimeError: batch 2 gave up\n" in out
 
 
+def reverting_at_batch_two(project: Path, pkg: str, db) -> Any:
+    """The step applied, then its down failed in batch 2: 1,000 rows
+    reverted, the record ``reverting`` at its cursor."""
+    probe = project_with_authors(project, pkg, db)
+    probe.reset()
+    assert asyncio.run(up(url=db.url)).refusal is None
+    probe.reset()
+    probe.fail_on = ("down", 2)
+    report = asyncio.run(down(target="0002:01", url=db.url))
+    assert "RuntimeError: batch 2 gave up" in (report.refusal or "")
+    assert record(db)["reverting"] is True
+    assert slugged(db) == 1500
+    return probe
+
+
+def edit_down(project: Path, order_by: str = "author.id") -> None:
+    """Fix the down the way a developer would after it failed: an edit to
+    its body, paging over ``order_by`` (then the primary key)."""
+    text = step_file(project).read_text()
+    up_part, decorator, down_part = text.rpartition("@chunked(")
+    down_part = down_part.replace(
+        ".order_by(lambda author: author.id)",
+        "".join(f".order_by(lambda author: {key})" for key in (order_by, "author.id"))
+        if order_by != "author.id"
+        else ".order_by(lambda author: author.id)",
+    ).replace("author.slug = None", "author.slug = None  # fixed")
+    step_file(project).write_text(up_part + decorator + down_part)
+
+
+def test_a_chunked_down_that_failed_mid_walk_finishes_after_its_file_is_fixed(
+    project, pkg, db, capsys
+):
+    """ADR-0030: a reverting record is an unfinished attempt, so its edited
+    file is accepted the way ``up`` accepts an unfinished step's, with
+    ``--continue``'s condition: the down still pages over the order keys its
+    cursor was committed under. It finishes from its cursor."""
+    probe = reverting_at_batch_two(project, pkg, db)
+    old = db.rows(
+        "SELECT checksum FROM _ferro_migrations WHERE migration = 2 AND step = 2"
+    )[0][0]
+    edit_down(project)
+
+    probe.reset()
+    report = asyncio.run(down(target="0002:01", url=db.url))
+
+    assert report.refusal is None
+    assert [s.step for s in report.reverted] == ["02_backfill_author"]
+    assert len(report.notes) == 1
+    assert report.notes[0].startswith(
+        f"re-recorded 0002_add_slug/02_backfill_author.py (sha384:{old} → sha384:"
+    )
+    assert probe.writes["down"] == list(range(1001, 2501)), "resumed at its cursor"
+    assert record(db) is None
+    assert slugged(db) == 0
+
+
+def test_a_fixed_down_that_pages_over_other_keys_is_refused_naming_restart(
+    project, pkg, db, capsys
+):
+    """The edited down orders by ``name``: its cursor (``author.id``) is no
+    position in it, so ``down`` refuses before reverting anything and names
+    ``rerecord --restart``, which clears the down's cursor; the next ``down``
+    walks the remaining rows from the first."""
+    probe = reverting_at_batch_two(project, pkg, db)
+    edit_down(project, order_by="author.name")
+
+    probe.reset()
+    report = asyncio.run(down(target="0002:01", url=db.url))
+
+    assert report.refusal == (
+        "ferro migrate: 0002_add_slug/02_backfill_author.py was edited while its "
+        "down was part-way: 1,000 rows were reverted under the order keys "
+        "author.id, and the edited down pages over author.name, author.id, so its "
+        "cursor is no position in it. Revert the remaining rows from the first:\n"
+        "  ferro migrate rerecord 0002:02 --restart\n"
+        "Nothing was reverted."
+    )
+    assert probe.batches == []
+    assert slugged(db) == 1500
+    capsys.readouterr()
+
+    # Plain rerecord and --continue keep the cursor, so they refuse alike.
+    assert run("migrate", "rerecord", "0002:02", "--url", db.url) == 1
+    assert "rerecord 0002:02 --restart" in capsys.readouterr().err
+    assert run("migrate", "rerecord", "0002:02", "--continue", "--url", db.url) == 1
+    assert "rerecord 0002:02 --restart" in capsys.readouterr().err
+
+    assert run("migrate", "rerecord", "0002:02", "--restart", "--url", db.url) == 0
+    cleared = record(db)
+    assert cleared["reverting"] is True and cleared["revert_cursor"] is None
+
+    probe.reset()
+    report = asyncio.run(down(target="0002:01", url=db.url))
+
+    assert report.refusal is None
+    assert report.notes == []
+    assert sorted(probe.writes["down"]) == list(range(1001, 2501))
+    assert record(db) is None
+    assert slugged(db) == 0
+
+
+def test_rerecord_accepts_a_fixed_reverting_down_and_keeps_its_cursor(
+    project, pkg, db, capsys
+):
+    """``rerecord`` (and ``--continue``) on the reverting step take the
+    edited file's checksum and keep the cursor; ``up`` still refuses until
+    the down finishes."""
+    probe = reverting_at_batch_two(project, pkg, db)
+    edit_down(project)
+    capsys.readouterr()
+
+    assert run("migrate", "rerecord", "0002:02", "--url", db.url) == 0
+    kept = record(db)
+    assert kept["reverting"] is True
+    assert kept["revert_cursor"] == {
+        "keys": [1000],
+        "order_by": ["author.id"],
+        "rows_done": 1000,
+    }
+    assert run("migrate", "up", "--url", db.url) == 1
+    assert "Finish the revert with `ferro migrate down`" in capsys.readouterr().err
+
+    probe.reset()
+    report = asyncio.run(down(target="0002:01", url=db.url))
+
+    assert report.refusal is None and report.notes == []
+    assert probe.writes["down"] == list(range(1001, 2501))
+    assert record(db) is None
+
+
+def test_a_down_over_an_edited_applied_step_says_nothing_was_reverted(
+    project, pkg, db, capsys
+):
+    probe = project_with_authors(project, pkg, db)
+    probe.reset()
+    assert asyncio.run(up(url=db.url)).refusal is None
+    edit_down(project)
+
+    report = asyncio.run(down(target="0002:01", url=db.url))
+
+    assert report.refusal is not None
+    assert "was edited after it was applied" in report.refusal
+    assert report.refusal.endswith(
+        "`ferro migrate rerecord 0002:02`. Nothing was reverted."
+    )
+
+
 def test_a_down_that_fails_before_changing_anything_leaves_the_step_installed(
     project, pkg, db, capsys
 ):

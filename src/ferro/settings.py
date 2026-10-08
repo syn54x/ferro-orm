@@ -94,6 +94,7 @@ _DATABASE_KEYS = (
     "directory",
     "tracking_schema",
     "ddl_lock_timeout",
+    "lock_timeout",
 )
 _TOP_LEVEL_KEYS = ("python_path", "databases")
 _RESERVED_KEYS = {
@@ -136,6 +137,69 @@ def parse_ddl_lock_timeout(value: str) -> timedelta:
     return timedelta(**{_DURATION_UNITS[match.group(2)]: float(match.group(1))})
 
 
+MAX_LOCK_TIMEOUT_S = 60.0 * 60 * 24 * 365
+"""The longest lock timeout accepted: one year, "until it is free" while
+staying far inside the runtime's range. A configured ``lock_timeout = "0"``
+waits this long."""
+
+
+def parse_lock_timeout(value: str | float) -> float:
+    """Seconds from ``"30s"``, ``"500ms"``, ``"1m"`` or a plain number of
+    seconds, as ``--lock-timeout`` takes them (``0`` tries the lock once,
+    :data:`MAX_LOCK_TIMEOUT_S` is the most).
+
+    Raises:
+        SettingsError: ``value`` is not a duration, is negative, or is longer
+            than :data:`MAX_LOCK_TIMEOUT_S`.
+    """
+    if isinstance(value, int | float) and not isinstance(value, bool):
+        seconds = float(value)
+    elif isinstance(value, str) and re.fullmatch(r"\d+(\.\d+)?", value.strip()):
+        seconds = float(value)
+    elif isinstance(value, str) and (match := _DURATION.match(value.strip())):
+        unit = _DURATION_UNITS[match.group(2)]
+        seconds = (
+            float(match.group(1))
+            * {
+                "milliseconds": 0.001,
+                "seconds": 1.0,
+                "minutes": 60.0,
+            }[unit]
+        )
+    else:
+        raise SettingsError(
+            f'lock timeout {value!r} is not a duration; write it as "30s", '
+            f'"500ms", "1m" or a number of seconds (0 refuses at once)'
+        )
+    if seconds < 0:
+        raise SettingsError(f"lock timeout {value!r} is negative; use 0 or more")
+    if not seconds <= MAX_LOCK_TIMEOUT_S:  # also refuses nan
+        raise SettingsError(
+            f"lock timeout {value!r} is too long; use at most one year "
+            f"({MAX_LOCK_TIMEOUT_S:.0f} seconds)"
+        )
+    return seconds
+
+
+def lock_timeout_setting_seconds(value: str) -> float:
+    """A configured ``lock_timeout`` in seconds: the forms ``--lock-timeout``
+    takes, except that ``"0"`` waits without a limit
+    (:data:`MAX_LOCK_TIMEOUT_S`): a setting that refused every contended
+    run would be no wait at all.
+
+    Raises:
+        ValueError: ``value`` is not one of those forms.
+    """
+    try:
+        seconds = parse_lock_timeout(value)
+    except SettingsError:
+        raise ValueError(
+            f'lock_timeout must be a duration written as "500ms", "30s", "1m" or a '
+            f'number of seconds, or "0" to wait without a limit; got {value!r}'
+        ) from None
+    return MAX_LOCK_TIMEOUT_S if seconds == 0 else seconds
+
+
 @dataclass(frozen=True)
 class _Project:
     """Where a database's config came from, shared by every database in it.
@@ -166,6 +230,7 @@ class DatabaseSettings(BaseModel):
     directory: Path
     tracking_schema: str | None = Field(default=None, min_length=1)
     ddl_lock_timeout: str = "5s"
+    lock_timeout: str = "30s"
 
     _project: _Project | None = PrivateAttr(default=None)
 
@@ -173,6 +238,12 @@ class DatabaseSettings(BaseModel):
     @classmethod
     def _parseable_duration(cls, value: str) -> str:
         parse_ddl_lock_timeout(value)
+        return value
+
+    @field_validator("lock_timeout")
+    @classmethod
+    def _parseable_lock_timeout(cls, value: str) -> str:
+        lock_timeout_setting_seconds(value)
         return value
 
     @model_validator(mode="after")
@@ -189,6 +260,26 @@ class DatabaseSettings(BaseModel):
     def ddl_lock_timeout_seconds(self) -> float:
         """``ddl_lock_timeout`` in seconds; ``0.0`` when it is off."""
         return parse_ddl_lock_timeout(self.ddl_lock_timeout).total_seconds()
+
+    @property
+    def lock_timeout_seconds(self) -> float:
+        """``lock_timeout`` in seconds: how long a run (``ferro migrate up``,
+        ``down``, ``baseline``, ``rerecord``) or an auto-migrate pass waits
+        for the run lock another one holds; ``"0"`` is
+        :data:`MAX_LOCK_TIMEOUT_S`, no limit."""
+        return lock_timeout_setting_seconds(self.lock_timeout)
+
+    def lock_wait(self, override: str | float | None = None) -> float:
+        """Seconds a run on this database waits for the run lock: ``override``
+        (``--lock-timeout``, or a call's ``lock_timeout=``) when given, else
+        the configured ``lock_timeout``.
+
+        Raises:
+            SettingsError: ``override`` is not a lock timeout.
+        """
+        if override is None:
+            return self.lock_timeout_seconds
+        return parse_lock_timeout(override)
 
     def url_for(self, override: str | None = None) -> str:
         """The database URL: ``override`` (``--url``), else ``$<url_env>``.

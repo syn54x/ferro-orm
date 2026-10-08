@@ -11,6 +11,7 @@ A holder here is the run object itself: ``tracked.locked(...)``.
 from __future__ import annotations
 
 import asyncio
+import gc
 
 import pytest
 
@@ -200,6 +201,36 @@ async def test_lock_timeout_zero_from_the_cli_refuses_at_once_without_waiting(
     assert "author" not in db.tables()
 
 
+async def test_the_cli_waits_up_to_the_configured_lock_timeout_and_the_flag_wins(
+    project, pkg, db, capsys
+):
+    """``--lock-timeout`` defaults from the database's ``lock_timeout``
+    (ADR-0038 as amended); a flag given on the command line wins."""
+    configure(project, pkg, db.backend, 'lock_timeout = "1s"\n')
+    write_models(project, pkg, AUTHOR)
+    new("create_author")
+    _, database = settings_and_database()
+    tracked = await _tracked(db, database)
+    capsys.readouterr()
+    loop = asyncio.get_running_loop()
+    async with tracked.locked(5.0):
+        began = loop.time()
+        configured = await asyncio.to_thread(run, "migrate", "up", "--url", db.url)
+        waited = loop.time() - began
+        configured_err = capsys.readouterr().err
+        flagged = await asyncio.to_thread(
+            run, "migrate", "up", "--url", db.url, "--lock-timeout", "0"
+        )
+        flagged_err = capsys.readouterr().err
+
+    assert configured == 1 and 1.0 <= waited < 5.0
+    assert "longer than the lock timeout (1s)" in configured_err
+    assert WAITING in configured_err
+    assert flagged == 1
+    assert "longer than the lock timeout (0s)" in flagged_err
+    assert "author" not in db.tables()
+
+
 async def test_a_session_that_never_took_the_lock_fails_the_first_check_as_a_pooler(
     project, pkg, db
 ):
@@ -333,3 +364,37 @@ async def test_a_rerecord_planned_by_another_run_is_never_written(project, pkg, 
             await run.rerecord(stale)
 
     assert db.rows("SELECT checksum FROM _ferro_migrations") == before
+
+
+async def test_a_cancelled_up_on_an_in_memory_database_leaves_the_next_up_unblocked(
+    project, pkg, db
+):
+    """An in-memory database's lock lives in the process, so nothing but
+    the run itself frees it: a run cancelled at any point, between taking
+    the lock and the block that releases it included, must not leave it
+    held (ADR-0029: the lock dies with its holder)."""
+    if db.backend != "sqlite":
+        pytest.skip("an in-memory database is SQLite's")
+    settings, database = _project(project, pkg, db)
+    # One name, so every run below contends for one in-process lock (an
+    # anonymous `sqlite::memory:` gets a fresh name per connection pool).
+    memory = f"sqlite:file:{pkg}?mode=memory&cache=shared"
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+    assert (await runner.up(settings, database.name, url=memory)).refusal is None
+    whole = loop.time() - began
+
+    # Cancel at every point of a whole run, its lock's acquisition and
+    # record read among them; each time the next run takes the lock at once.
+    for point in range(1, 40):
+        try:
+            await asyncio.wait_for(
+                runner.up(settings, database.name, url=memory), whole * point / 40
+            )
+        except TimeoutError:
+            pass
+        gc.collect()
+        report = await run_report(
+            runner.up(settings, database.name, url=memory, lock_timeout=0)
+        )
+        assert report.refusal is None, (point, report.refusal)

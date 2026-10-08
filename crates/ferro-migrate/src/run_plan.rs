@@ -369,6 +369,9 @@ pub enum RunRefusal {
         /// The checksum of the file on disk (`None` when the file was renamed
         /// away or deleted).
         on_disk: Option<String>,
+        /// Whether a `down` met it (nothing was reverted) rather than an
+        /// `up` (nothing was applied).
+        down: bool,
     },
     /// A record's snapshot checksum is not the on-disk `ir.json`'s.
     SnapshotMismatch {
@@ -545,6 +548,28 @@ pub enum RunRefusal {
         /// `up` is not `@chunked`, `None` when the caller did not read them.
         keys_on_disk: Option<Vec<String>>,
     },
+    /// A chunked step whose `down` stopped part-way (its record
+    /// `reverting`) was edited so its `down` no longer pages over the order
+    /// keys its revert cursor was committed under (ADR-0030): the cursor is
+    /// no position in the edited query, so only `rerecord --restart` goes on.
+    EditedReverting {
+        /// `NNNN_<name>`.
+        migration_name: String,
+        /// `NNNN`.
+        migration: u16,
+        /// `NN`.
+        step: u8,
+        /// The step's file on disk.
+        file: String,
+        /// The rows the down's committed batches reverted.
+        rows_done: i64,
+        /// The order keys the revert cursor was committed under; empty when
+        /// it does not record them.
+        keys_recorded: Vec<String>,
+        /// The order keys the edited `down` pages over; empty when it is not
+        /// `@chunked`.
+        keys_on_disk: Vec<String>,
+    },
     /// `rerecord <target>` names no single step: a migration alone, the
     /// snapshot, or something that is not `<migration>:<step>`.
     RerecordTarget {
@@ -603,6 +628,7 @@ impl RunRefusal {
             RunRefusal::BadHeaders { .. } => "bad_headers",
             RunRefusal::Directory { .. } => "directory",
             RunRefusal::EditedChunked { .. } => "edited_chunked",
+            RunRefusal::EditedReverting { .. } => "edited_reverting",
             RunRefusal::RerecordTarget { .. } => "rerecord_target",
             RunRefusal::NothingToRerecord { .. } => "nothing_to_rerecord",
             RunRefusal::ModeNotApplicable { .. } => "mode_not_applicable",
@@ -635,7 +661,8 @@ impl RunRefusal {
             | RunRefusal::Irreversible { migration, .. }
             | RunRefusal::BelowBaseline { migration }
             | RunRefusal::MissingRendering { migration, .. }
-            | RunRefusal::EditedChunked { migration, .. } => Some(*migration),
+            | RunRefusal::EditedChunked { migration, .. }
+            | RunRefusal::EditedReverting { migration, .. } => Some(*migration),
             _ => None,
         }
     }
@@ -646,7 +673,8 @@ impl RunRefusal {
             RunRefusal::EditedApplied { step, .. }
             | RunRefusal::Irreversible { step, .. }
             | RunRefusal::MissingRendering { step, .. }
-            | RunRefusal::EditedChunked { step, .. } => Some(*step),
+            | RunRefusal::EditedChunked { step, .. }
+            | RunRefusal::EditedReverting { step, .. } => Some(*step),
             _ => None,
         }
     }
@@ -724,18 +752,20 @@ impl std::fmt::Display for RunRefusal {
                 applied,
                 applied_at,
                 on_disk,
+                down,
             } => {
                 let on_disk = match on_disk {
                     Some(checksum) => format!("sha384:{checksum}"),
                     None => "missing".to_string(),
                 };
+                let nothing = if *down { "reverted" } else { "applied" };
                 write!(
                     f,
                     "ferro migrate: {migration_name}/{file} was edited after it was applied to \
                      this database.\n  applied   sha384:{applied}  ({})\n  on disk   {on_disk}\n\
                      An applied step is never run again. Restore the file, or accept a \
                      deliberate edit with\n`ferro migrate rerecord {migration:04}:{step:02}`. \
-                     Nothing was applied.",
+                     Nothing was {nothing}.",
                     short_time(applied_at)
                 )
             }
@@ -788,6 +818,35 @@ impl std::fmt::Display for RunRefusal {
                     )?,
                 }
                 write!(f, "Nothing was applied.")
+            }
+            RunRefusal::EditedReverting {
+                migration_name,
+                migration,
+                step,
+                file,
+                rows_done,
+                keys_recorded,
+                keys_on_disk,
+            } => {
+                let recorded = if keys_recorded.is_empty() {
+                    "a cursor that does not record its order keys".to_string()
+                } else {
+                    format!("the order keys {}", key_list(keys_recorded))
+                };
+                let edited = if keys_on_disk.is_empty() {
+                    "the edited down is no longer @chunked".to_string()
+                } else {
+                    format!("the edited down pages over {}", key_list(keys_on_disk))
+                };
+                write!(
+                    f,
+                    "ferro migrate: {migration_name}/{file} was edited while its down was \
+                     part-way: {} rows were reverted under {recorded}, and {edited}, so its \
+                     cursor is no position in it. Revert the remaining rows from the first:\n  \
+                     ferro migrate rerecord {migration:04}:{step:02} --restart\nNothing was \
+                     reverted.",
+                    thousands(*rows_done)
+                )
             }
             RunRefusal::RerecordTarget { target } => write!(
                 f,
@@ -1406,11 +1465,15 @@ fn check_records(
 }
 
 /// Every applied step and snapshot against the directory: a snapshot whose
-/// checksum is not the recorded one, a finished step whose file changed.
+/// checksum is not the recorded one, a finished step whose file changed. A
+/// `reverting` record is an unfinished attempt (its `down` stopped
+/// part-way, ADR-0030): its edit is the caller's to judge
+/// ([`edited_reverting`]). `down` says which run met the refusal.
 fn check_applied(
     dir: &MigrationsDir,
     by_key: &RecordMap,
     dialect: Dialect,
+    down: bool,
 ) -> Result<(), RunRefusal> {
     for migration in &dir.migrations {
         let snapshot = encode_checksum(&migration.snapshot.checksum);
@@ -1425,7 +1488,7 @@ fn check_applied(
                     on_disk: snapshot,
                 });
             }
-            if !record.is_finished() {
+            if !record.is_finished() || record.reverting {
                 continue;
             }
             let file = step_file(migration, step, dialect)?;
@@ -1439,6 +1502,7 @@ fn check_applied(
                     applied: record.checksum.clone(),
                     applied_at: record.finished_at.clone().unwrap_or_default(),
                     on_disk: (record.file == file_name(&file.up)).then_some(checksum),
+                    down,
                 });
             }
         }
@@ -1543,6 +1607,44 @@ fn edited_chunked(
     }
 }
 
+/// The judgement on an edited `reverting` record (ADR-0030): an unfinished
+/// attempt, so its edit is accepted on `--continue`'s condition, which the
+/// down's own cursor sets: its `revert_cursor` must record the order keys
+/// it was committed under, and the edited file's `down` (`order_keys`, when
+/// read; [`OrderKeys`] carries a reverting step's `down` keys) must page
+/// over the same ones. A record whose cursor `rerecord --restart` cleared
+/// holds no position, so any edit is accepted. `None` accepts; the refusal
+/// names `rerecord --restart`.
+fn edited_reverting(
+    record: &StepRecord,
+    file: &str,
+    order_keys: Option<&OrderKeys>,
+) -> Option<RunRefusal> {
+    let cursor = record.revert_cursor.as_deref()?;
+    let keys_recorded = cursor_order_keys(cursor);
+    let keys_on_disk = order_keys.map(|keys| {
+        keys.get(&(record.migration, record.step))
+            .cloned()
+            .unwrap_or_default()
+    });
+    let continues = !keys_recorded.is_empty()
+        && keys_on_disk
+            .as_ref()
+            .is_none_or(|keys| *keys == keys_recorded);
+    if continues {
+        return None;
+    }
+    Some(RunRefusal::EditedReverting {
+        migration_name: record.migration_name.clone(),
+        migration: record.migration,
+        step: record.step,
+        file: file.to_string(),
+        rows_done: record.rows_done.unwrap_or(0),
+        keys_recorded,
+        keys_on_disk: keys_on_disk.unwrap_or_default(),
+    })
+}
+
 /// Plan a run: every pending step of every pending migration, in order, or
 /// the refusal that stops it before anything runs.
 ///
@@ -1575,7 +1677,9 @@ pub fn plan_run(
     order_keys: Option<&OrderKeys>,
 ) -> Result<RunPlan, RunRefusal> {
     let through = match direction {
-        Direction::Down { target } => return plan_down(dir, records, dialect, target),
+        Direction::Down { target } => {
+            return plan_down(dir, records, dialect, target, order_keys);
+        }
         Direction::Up { through } => through,
     };
     match plan_up(dir, records, dialect, through, allow_ahead, order_keys) {
@@ -1601,7 +1705,7 @@ fn plan_up(
 ) -> Result<RunPlan, RunRefusal> {
     let ahead = check_records(dir, records, allow_ahead, true)?;
     let by_key: RecordMap = records.iter().map(|r| ((r.migration, r.step), r)).collect();
-    check_applied(dir, &by_key, dialect)?;
+    check_applied(dir, &by_key, dialect, false)?;
     check_order(dir, &by_key)?;
     if let Some(number) = through
         && !dir.migrations.iter().any(|m| m.number == number)
@@ -1751,11 +1855,20 @@ fn down_floor(
 /// record is removed. An unfinished no-transaction step runs its down, since
 /// the statements before its failure stayed applied.
 ///
+/// A chunked step whose down stopped part-way (its record `reverting`) is
+/// an unfinished attempt (ADR-0030): its edited file is accepted, re-recorded
+/// and [`PlannedStep::edited`] says so, when its down still pages over the
+/// order keys its revert cursor was committed under (`order_keys`, the
+/// edited files' `down` keys; `None` accepts and leaves the check to the
+/// run's own cursor decode).
+///
 /// # Errors
 /// Before anything is reverted: a record for a migration or step the
 /// directory lacks (the down files come only from disk, so a database ahead
 /// of the checkout is refused whatever `allow_ahead` says); a snapshot or
-/// finished step edited since it was applied; a `--to` naming nothing;
+/// finished step edited since it was applied; a reverting step edited so
+/// its down pages over other order keys ([`RunRefusal::EditedReverting`],
+/// naming `rerecord --restart`); a `--to` naming nothing;
 /// [`RunRefusal::BelowBaseline`] for a step a baseline recorded;
 /// [`RunRefusal::Irreversible`] for a step whose down declares it so, quoting
 /// the reason; down headers the dialect cannot honour. A data step's down is
@@ -1766,10 +1879,11 @@ fn plan_down(
     records: &[StepRecord],
     dialect: Dialect,
     target: Target,
+    order_keys: Option<&OrderKeys>,
 ) -> Result<RunPlan, RunRefusal> {
     check_records(dir, records, false, false)?;
     let by_key: RecordMap = records.iter().map(|r| ((r.migration, r.step), r)).collect();
-    check_applied(dir, &by_key, dialect)?;
+    check_applied(dir, &by_key, dialect, true)?;
     let floor = down_floor(dir, records, target)?;
     let baseline_floor = records
         .iter()
@@ -1825,6 +1939,24 @@ fn plan_down(
             (!record.is_finished() && matches!(record.kind, RecordKind::Ddl | RecordKind::Atomic))
                 .then(|| UNFINISHED_TRANSACTIONAL.to_string())
         });
+        // A reverting step's file is one file for its up and its down: its
+        // edit is judged against the record's checksum, and once accepted
+        // the record takes the new checksum with its next write.
+        let mut standing = (*record).clone();
+        let mut edited = None;
+        let up_name = file_name(&file.up);
+        let up_checksum = encode_checksum(&file.up_checksum);
+        if record.reverting && (record.checksum != up_checksum || record.file != up_name) {
+            if let Some(refusal) = edited_reverting(record, &up_name, order_keys) {
+                return Err(refusal);
+            }
+            edited = Some(EditedUnfinished {
+                recorded: record.checksum.clone(),
+                recorded_file: record.file.clone(),
+            });
+            standing.checksum = up_checksum;
+            standing.file = up_name;
+        }
         steps.push(PlannedStep {
             migration: number,
             migration_name: migration.dir_name(),
@@ -1837,10 +1969,10 @@ fn plan_down(
             headers: file.down_headers.clone(),
             mode,
             resumes: false,
-            edited: None,
+            edited,
             nothing_to_reverse,
             data,
-            record: (*record).clone(),
+            record: standing,
             first_data_step: first_data_step(migration),
             rebuilds: Vec::new(),
         });
@@ -1973,8 +2105,14 @@ pub struct RerecordAction {
     pub data: bool,
     /// Whether the record finished.
     pub finished: bool,
-    /// `--restart`: clear `resume_cursor` and set `rows_done` to 0.
+    /// `--restart`: clear the cursor (a reverting record's `revert_cursor`,
+    /// any other's `resume_cursor`) and set `rows_done` to 0.
     pub clear_cursor: bool,
+    /// The record is `reverting`: its down stopped part-way, and `--restart`
+    /// clears its `revert_cursor` (it stays reverting, so the next `down`
+    /// walks the rows left from the first).
+    #[serde(default)]
+    pub reverting: bool,
 }
 
 /// `0007:01` → `(7, 1)`; anything else (`0007`, `0007:ir`) is no step.
@@ -2002,11 +2140,18 @@ fn parse_step_target(target: &str) -> Option<(u16, u8)> {
 /// alone, the snapshot: restore it); [`RunRefusal::NothingToRerecord`] for
 /// a step the directory lacks, one with no record (free to edit) or one
 /// whose file matches its record; [`RunRefusal::ModeNotApplicable`] for
-/// `--continue`/`--restart` on anything but an unfinished chunked step with
-/// committed batches; [`RunRefusal::EditedChunked`] for such a step with
+/// `--continue`/`--restart` on anything but a chunked step with committed
+/// batches; [`RunRefusal::EditedChunked`] for an unfinished one with
 /// neither flag; [`RunRefusal::ContinueRefused`] for `--continue` when the
 /// edited file pages over different order keys; and the planner's own
 /// refusals about the records and the migration's snapshot.
+///
+/// A step whose down stopped part-way (its record `reverting`) is an
+/// unfinished attempt too: without a flag or with `--continue` its edit is
+/// accepted and its revert cursor kept while the edited `down` pages over
+/// the cursor's order keys, [`RunRefusal::EditedReverting`] (naming
+/// `--restart`) otherwise; `--restart` clears the revert cursor. Another
+/// step's reverting record refuses as `up` does: finish that revert first.
 pub fn rerecord_plan(
     dir: &MigrationsDir,
     records: &[StepRecord],
@@ -2024,7 +2169,13 @@ pub fn rerecord_plan(
         target: shown.clone(),
         why,
     };
-    check_records(dir, records, true, true)?;
+    check_records(dir, records, true, false)?;
+    if let Some(other) = records
+        .iter()
+        .find(|r| r.reverting && (r.migration, r.step) != (number, ordinal))
+    {
+        return Err(RunRefusal::Reverting { step: other.path() });
+    }
     let (migration, step) = dir
         .migrations
         .get(usize::from(number).wrapping_sub(1))
@@ -2064,6 +2215,24 @@ pub fn rerecord_plan(
         )?
         .record_kind()
     };
+    let action = RerecordAction {
+        migration: number,
+        step: ordinal,
+        migration_name: migration.dir_name(),
+        recorded_file: record.file.clone(),
+        file: name.clone(),
+        path: file.up.clone(),
+        old_checksum: record.checksum.clone(),
+        new_checksum: checksum.clone(),
+        kind,
+        data,
+        finished: record.is_finished(),
+        clear_cursor: mode == RerecordMode::Restart,
+        reverting: record.reverting,
+    };
+    if record.reverting {
+        return rerecord_reverting(record, action, mode, order_keys, shown);
+    }
     let batches = has_committed_batches(record);
     if mode != RerecordMode::Record && !batches {
         let state = if record.is_finished() {
@@ -2104,20 +2273,34 @@ pub fn rerecord_plan(
             _ => {}
         }
     }
-    Ok(RerecordAction {
-        migration: number,
-        step: ordinal,
-        migration_name: migration.dir_name(),
-        recorded_file: record.file.clone(),
-        file: name,
-        path: file.up.clone(),
-        old_checksum: record.checksum.clone(),
-        new_checksum: checksum,
-        kind,
-        data,
-        finished: record.is_finished(),
-        clear_cursor: mode == RerecordMode::Restart,
-    })
+    Ok(action)
+}
+
+/// [`rerecord_plan`] for a step whose down stopped part-way (`record` is
+/// reverting), `action` its re-record: `--restart` clears its revert
+/// cursor; otherwise its edit is accepted on `--continue`'s condition
+/// ([`edited_reverting`]).
+fn rerecord_reverting(
+    record: &StepRecord,
+    action: RerecordAction,
+    mode: RerecordMode,
+    order_keys: &OrderKeys,
+    shown: String,
+) -> Result<RerecordAction, RunRefusal> {
+    let reverted = record.revert_cursor.is_some();
+    if mode != RerecordMode::Record && !reverted {
+        return Err(RunRefusal::ModeNotApplicable {
+            target: shown,
+            flag: mode.flag(),
+            state: "reverting with no reverted batch".to_string(),
+        });
+    }
+    if mode != RerecordMode::Restart
+        && let Some(refusal) = edited_reverting(record, &action.file, Some(order_keys))
+    {
+        return Err(refusal);
+    }
+    Ok(action)
 }
 
 /// One step's state, in `sqlx-cli migrate info`'s vocabulary (#466).
@@ -3056,6 +3239,166 @@ mod tests {
         assert_eq!(cursor_order_keys(CURSOR), ["author.id"]);
         assert!(cursor_order_keys(r#"{"keys": [1], "rows_done": 1}"#).is_empty());
         assert!(cursor_order_keys("not json").is_empty());
+    }
+
+    // -- a chunked down that stopped part-way (F17) ---------------------------------
+
+    /// `0001_backfill:02` finished, then its chunked down reverted 1,000 rows
+    /// and stopped: `reverting` at a revert cursor, under a file whose
+    /// checksum was `OTHER`.
+    fn reverting_edited(dir: &MigrationsDir) -> StepRecord {
+        StepRecord {
+            kind: RecordKind::Chunked,
+            checksum: OTHER.into(),
+            reverting: true,
+            revert_cursor: Some(CURSOR.into()),
+            rows_done: Some(1000),
+            ..finished(dir, 1, 2)
+        }
+    }
+
+    fn down_with_keys(
+        dir: &MigrationsDir,
+        records: &[StepRecord],
+        keys: &[&str],
+    ) -> Result<RunPlan, RunRefusal> {
+        plan_run(
+            dir,
+            records,
+            Dialect::Sqlite,
+            Direction::Down {
+                target: Target::Migration(0),
+            },
+            false,
+            Some(&order_keys(keys)),
+        )
+    }
+
+    #[test]
+    fn a_reverting_step_edited_over_the_same_keys_is_accepted_and_re_recorded() {
+        let dir = backfill();
+        let records = [finished(&dir, 1, 1), reverting_edited(&dir)];
+        let plan = down_with_keys(&dir, &records, &["author.id"]).expect("accepted");
+        let step = &plan.steps[0];
+        assert_eq!((step.migration, step.step), (1, 2));
+        assert_eq!(step.edited.as_ref().expect("edited").recorded, OTHER);
+        // The record takes the edited file's checksum with its next write,
+        // and keeps the cursor the down resumes at.
+        assert_eq!(step.record.checksum, encode_checksum(&sha384(b"# data")));
+        assert_eq!(step.record.revert_cursor.as_deref(), Some(CURSOR));
+        // Keys not read: accepted, the run's own cursor decode decides.
+        assert!(down(&dir, &records, Target::Migration(0)).is_ok());
+    }
+
+    #[test]
+    fn a_reverting_step_edited_over_other_keys_is_refused_naming_restart() {
+        let dir = backfill();
+        let records = [finished(&dir, 1, 1), reverting_edited(&dir)];
+        let refusal =
+            down_with_keys(&dir, &records, &["author.name", "author.id"]).expect_err("refused");
+        assert_eq!(refusal.kind(), "edited_reverting");
+        assert_eq!((refusal.migration(), refusal.step()), (Some(1), Some(2)));
+        assert_eq!(
+            refusal.to_string(),
+            "ferro migrate: 0001_backfill/02_backfill_author.py was edited while its down was \
+             part-way: 1,000 rows were reverted under the order keys author.id, and the edited \
+             down pages over author.name, author.id, so its cursor is no position in it. \
+             Revert the remaining rows from the first:\n  ferro migrate rerecord 0001:02 \
+             --restart\nNothing was reverted."
+        );
+        let not_chunked = down_with_keys(&dir, &records, &[]).expect_err("refused");
+        assert!(
+            not_chunked
+                .to_string()
+                .contains("and the edited down is no longer @chunked, so")
+        );
+    }
+
+    #[test]
+    fn an_edited_applied_step_met_going_down_says_nothing_was_reverted() {
+        let dir = backfill();
+        let edited = StepRecord {
+            checksum: OTHER.into(),
+            ..finished(&dir, 1, 2)
+        };
+        let refusal = down(
+            &dir,
+            &[finished(&dir, 1, 1), edited.clone()],
+            Target::Migration(0),
+        )
+        .expect_err("edited");
+        assert_eq!(refusal.kind(), "edited_applied");
+        assert!(refusal.to_string().ends_with("Nothing was reverted."));
+        let refusal = up(&dir, &[finished(&dir, 1, 1), edited]).expect_err("edited");
+        assert!(refusal.to_string().ends_with("Nothing was applied."));
+    }
+
+    #[test]
+    fn rerecord_accepts_a_reverting_step_over_its_keys_and_restart_clears_its_cursor() {
+        let dir = backfill();
+        let records = [finished(&dir, 1, 1), reverting_edited(&dir)];
+        let plan = |mode, keys: &[&str]| {
+            rerecord_plan(
+                &dir,
+                &records,
+                "0001:02",
+                mode,
+                Dialect::Sqlite,
+                &order_keys(keys),
+            )
+        };
+        for mode in [RerecordMode::Record, RerecordMode::Continue] {
+            let action = plan(mode, &["author.id"]).expect("accepted");
+            assert!(action.reverting && !action.clear_cursor);
+            assert_eq!(
+                plan(mode, &["author.name", "author.id"])
+                    .expect_err("other keys")
+                    .kind(),
+                "edited_reverting"
+            );
+        }
+        let restart = plan(RerecordMode::Restart, &["author.name", "author.id"]).expect("restart");
+        assert!(restart.reverting && restart.clear_cursor);
+        // Once cleared, there is no cursor to continue or restart.
+        let cleared = [
+            finished(&dir, 1, 1),
+            StepRecord {
+                revert_cursor: None,
+                ..reverting_edited(&dir)
+            },
+        ];
+        let refusal = rerecord_plan(
+            &dir,
+            &cleared,
+            "0001:02",
+            RerecordMode::Continue,
+            Dialect::Sqlite,
+            &order_keys(&["author.id"]),
+        )
+        .expect_err("no cursor");
+        assert_eq!(refusal.kind(), "mode_not_applicable");
+    }
+
+    #[test]
+    fn rerecord_of_another_step_still_refuses_while_a_revert_is_part_way() {
+        let dir = backfill();
+        let records = [
+            StepRecord {
+                checksum: OTHER.into(),
+                ..finished(&dir, 1, 1)
+            },
+            reverting_edited(&dir),
+        ];
+        let refusal = rerecord_plan(
+            &dir,
+            &records,
+            "0001:01",
+            RerecordMode::Record,
+            Dialect::Sqlite,
+            &OrderKeys::new(),
+        )
+        .expect_err("reverting");
+        assert_eq!(refusal.kind(), "reverting");
     }
 
     /// The edited record of `kind` at `0001:01` (SQL kinds) or `0001:02`
