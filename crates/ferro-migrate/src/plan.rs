@@ -14,22 +14,25 @@
 //! decides *where* in the plan each verdict lands.
 
 use crate::{
-    Dialect, LiveCheckValidity, LiveFkValidity, LiveIndexValidity, MigrationOp, MigrationPlan,
-    PlanOptions, emit,
+    Dialect, LiveCheckValidity, LiveFkValidity, LiveIndexValidity, MigrationOp, Plan, PlanOptions,
+    emit,
 };
+use ferro_ddl_lowering::Report;
+pub(crate) use ferro_ddl_lowering::and_list;
 use ferro_ddl_lowering::{
     EnumTypeProvenance, LiveRowPolicy, LiveRowSecurity, ResolvedStorage, declared_row_policy_names,
     drifted_check_names, dropped_row_security_warning, enum_label_strings, enum_type_provenance,
     excess_row_security_flag_statements, extra_check_names, extra_check_names_warning,
     extra_enum_labels, extra_enum_labels_warning, extra_row_policy_names_warning,
-    fk_action_from_str, fk_action_sql, fk_name, is_ferro_fk_name, is_ferro_row_policy_name,
-    missing_check_names, missing_enum_labels, missing_row_security_flag_statements,
-    normalize_check_definition, normalize_row_policy_expr, plan_row_security_reconcile,
-    quote_label, render_check_body, render_disable_row_security, render_enable_row_security,
-    render_force_row_security, render_no_force_row_security, render_table_check_body,
-    resolve_column_storage, row_policy_clauses, row_policy_command_token,
+    fk_action_from_str, fk_action_sql, fk_name, foreign_fk_drift_warning, is_ferro_fk_name,
+    is_ferro_row_policy_name, missing_check_names, missing_enum_labels,
+    missing_row_security_flag_statements, normalize_check_definition, normalize_row_policy_expr,
+    plan_row_security_reconcile, quote_label, render_check_body, render_disable_row_security,
+    render_enable_row_security, render_force_row_security, render_no_force_row_security,
+    render_table_check_body, resolve_column_storage, row_policy_clauses, row_policy_command_token,
     schema_columns_storage_drift,
 };
+pub use ferro_ddl_lowering::{HintError, hint_refusal_warning, pending_table_rename_warning};
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -301,7 +304,7 @@ fn declared_row_security(model: &SchemaModel) -> LiveRowSecurity {
             .iter()
             .map(|policy| {
                 // A policy whose clauses cannot render is invalid IR, which
-                // `render_plan` rejects before any statement of this plan can
+                // `Plan::render` rejects before any statement of this plan can
                 // run (`validate_schema_ir`).
                 let (using, with_check) = row_policy_clauses(model, policy).unwrap_or_default();
                 LiveRowPolicy {
@@ -326,7 +329,7 @@ fn declared_row_security(model: &SchemaModel) -> LiveRowSecurity {
 /// The side is the caller's word, never inferred from what the facts lack.
 /// `options`
 /// gates the ops that remove something (ADR-0013's ladder): without
-/// `destructive`, drops are left out and their leftover warnings stand.
+/// `destructive`, drops are left out and their leftover reports stand.
 ///
 /// The plan is in execution order:
 ///
@@ -356,7 +359,7 @@ fn declared_row_security(model: &SchemaModel) -> LiveRowSecurity {
 /// plan from a declared `old` that already holds the new names, and every
 /// plan over a modelset without hints, is unchanged by them. A refused hint
 /// ([`HintError`]) applies no rename and stands in
-/// [`MigrationPlan::always_warnings`] naming both sides; the generator
+/// [`Plan::reports`] as [`crate::ReportKind::HintRefused`]; the generator
 /// refuses it before writing anything.
 ///
 /// # Errors
@@ -368,7 +371,7 @@ pub fn plan_from_ir(
     dialect: Dialect,
     facts: &LiveFacts,
     options: PlanOptions,
-) -> Result<MigrationPlan, PlanError> {
+) -> Result<Plan, PlanError> {
     facts.cover(old)?;
     // The snapshot side reads no fact, whatever the value carries.
     let declared = LiveFacts::declared();
@@ -381,7 +384,7 @@ pub fn plan_from_ir(
         Ok(hints) => hints,
         Err(refusal) => {
             let mut plan = plan_named(old, new, dialect, facts, options)?;
-            plan.always_warnings.push(hint_refusal_warning(&refusal));
+            plan.reports.push(hint_refusal_warning(&refusal));
             return Ok(plan);
         }
     };
@@ -401,15 +404,16 @@ pub fn plan_from_ir(
 
 /// `old` as the renames [`plan_from_ir`]`(old, new, dialect, …)` plans leave
 /// it: the side every op of that plan but the renames was decided against,
-/// and so the side every consumer reads an op's table from — rendering
-/// ([`crate::render_plan`]), the reverse ([`reverse_live_plan`]) and the
-/// generator's step assignment. A type change of a renamed column names the
-/// column by its new name, which only this side holds.
+/// which the [`Plan`] holds and renders against. The generator's own renders
+/// between stages ([`crate::render::render_ops`]), the reverse
+/// ([`reverse_live_plan`]) and the generator's step assignment read it too. A
+/// type change of a renamed column names the column by its new name, which
+/// only this side holds.
 ///
 /// Borrowed when `new` declares no live hint (or a refused one, which
 /// renames nothing), so a side that already holds the new names — a
 /// generator's renamed parent — is its own.
-pub fn planned_before<'a>(
+pub(crate) fn planned_before<'a>(
     old: &'a IrEnvelope<SchemaIrPayload>,
     new: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
@@ -679,17 +683,18 @@ fn renamed_facts(
 }
 
 /// Every change [`plan_from_ir`] plans once the tables and columns of `old`
-/// and `new` are matched by name.
+/// and `new` are matched by name: `old` is the planned-before side the plan
+/// holds.
 fn plan_named(
     old: &IrEnvelope<SchemaIrPayload>,
     new: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
     facts: &LiveFacts,
     options: PlanOptions,
-) -> Result<MigrationPlan, PlanError> {
+) -> Result<Plan, PlanError> {
     let old_models = index_models(&old.payload.models);
     let new_models = index_models(&new.payload.models);
-    let mut plan = MigrationPlan::default();
+    let mut plan = Plan::between(old, new, dialect);
 
     let added: Vec<&SchemaModel> = new_models
         .iter()
@@ -789,7 +794,7 @@ fn plan_existing_table(
     facts: &LiveTableFacts,
     side: OldSide,
     options: PlanOptions,
-    plan: &mut MigrationPlan,
+    plan: &mut Plan,
 ) {
     let table = new_model.table_name.as_str();
     let mut ops = Vec::new();
@@ -809,7 +814,7 @@ fn plan_existing_table(
     // the column ops, ahead of the foreign-key ops. An invalid index is
     // present live, so the diff above never planned an `AddIndex` for it.
     ops.extend(index_rebuilds(table, new_model, &facts.indexes));
-    diff_model_foreign_keys(table, old_model, new_model, &mut ops, &mut plan.warnings);
+    diff_model_foreign_keys(table, old_model, new_model, &mut ops, &mut plan.reports);
 
     // Check addition (#343; ADR-0013) lands after the column ops, so a CHECK
     // over a newly added column follows its ADD COLUMN.
@@ -865,9 +870,8 @@ fn plan_existing_table(
         .map(|(name, _)| name.clone())
         .collect();
     let extras = extra_check_names(&declared_check_names(new_model), &live_ferro_owned_names);
-    if let Some(warning) = extra_check_names_warning(table, &extras) {
-        plan.warnings.push(warning);
-    }
+    plan.reports
+        .extend(extra_check_names_warning(table, &extras));
     if options.destructive {
         ops.extend(check_drops(table, new_model, &live_ferro_owned_names));
     }
@@ -882,7 +886,7 @@ fn plan_existing_table(
         side,
         options.destructive,
         &mut ops,
-        &mut plan.always_warnings,
+        &mut plan.reports,
     );
 
     if options.destructive {
@@ -895,8 +899,8 @@ fn plan_existing_table(
 /// (`plan_row_security_reconcile`, the single seam; AGENTS.md § I-1 item 16)
 /// into ops, in its execution order: missing flags, policy additions,
 /// rebuilds, then (destructive) orphan drops and the flag teardown. Its
-/// warnings — foreign and unverifiable policies, dropped declarations,
-/// teardowns — become the plan's always-warnings; a foreign policy and an
+/// reports — foreign and unverifiable policies, dropped declarations,
+/// teardowns — become the plan's recurring reports; a foreign policy and an
 /// unverifiable raw body are reported and never become an op.
 ///
 /// Between two declared snapshots ([`OldSide::Snapshot`], the generator)
@@ -918,18 +922,18 @@ fn plan_row_security(
     side: OldSide,
     destructive: bool,
     ops: &mut Vec<MigrationOp>,
-    always_warnings: &mut Vec<String>,
+    reports: &mut Vec<Report>,
 ) {
     // An Err is a declared policy whose clauses cannot render: invalid IR,
-    // which `render_plan` rejects (`validate_schema_ir`) before anything
+    // which `Plan::render` rejects (`validate_schema_ir`) before anything
     // executes.
     let Ok(decision) = plan_row_security_reconcile(model, live, dialect, destructive) else {
         return;
     };
     let table = model.table_name.as_str();
     match side {
-        OldSide::Live => always_warnings.extend(decision.warnings),
-        OldSide::Snapshot if !destructive => always_warnings.extend(
+        OldSide::Live => reports.extend(decision.reports),
+        OldSide::Snapshot if !destructive => reports.extend(
             dropped_row_security_warning(model, live)
                 .into_iter()
                 .chain(extra_row_policy_names_warning(table, &decision.extra)),
@@ -1137,7 +1141,7 @@ fn plan_enum_label_additions(
     old: &IrEnvelope<SchemaIrPayload>,
     new: &IrEnvelope<SchemaIrPayload>,
     facts: &LiveFacts,
-    plan: &mut MigrationPlan,
+    plan: &mut Plan,
 ) {
     let declared = declared_enum_types(&new.payload.models);
     let before = declared_enum_types(&old.payload.models);
@@ -1153,9 +1157,9 @@ fn plan_enum_label_additions(
         // answers ([`plan_enum_label_removals`]); live, it only warns.
         let extra = extra_enum_labels(labels, existing);
         if facts.side == OldSide::Live
-            && let Some(warning) = extra_enum_labels_warning(type_name, &extra)
+            && let Some(report) = extra_enum_labels_warning(type_name, &extra)
         {
-            plan.warnings.push(warning);
+            plan.reports.push(report);
         }
         for label in missing_enum_labels(labels, existing) {
             plan.operations.push(MigrationOp::AddEnumLabel {
@@ -1176,7 +1180,7 @@ fn plan_enum_label_additions(
 fn plan_enum_label_removals(
     old: &IrEnvelope<SchemaIrPayload>,
     new: &IrEnvelope<SchemaIrPayload>,
-    plan: &mut MigrationPlan,
+    plan: &mut Plan,
 ) {
     let before = declared_enum_labels(&old.payload.models);
     let after = declared_enum_labels(&new.payload.models);
@@ -1211,7 +1215,7 @@ fn plan_enum_type_creation(
     new: &IrEnvelope<SchemaIrPayload>,
     old_models: &BTreeMap<String, &SchemaModel>,
     facts: &LiveFacts,
-    plan: &mut MigrationPlan,
+    plan: &mut Plan,
 ) {
     let declared = declared_enum_types(&new.payload.models);
     let before = declared_enum_types(&old.payload.models);
@@ -1254,7 +1258,7 @@ fn plan_enum_type_drops(
     new: &IrEnvelope<SchemaIrPayload>,
     old_models: &BTreeMap<String, &SchemaModel>,
     new_models: &BTreeMap<String, &SchemaModel>,
-    plan: &mut MigrationPlan,
+    plan: &mut Plan,
 ) {
     let before = declared_enum_types(&old.payload.models);
     let after = declared_enum_types(&new.payload.models);
@@ -1469,149 +1473,6 @@ pub enum Hint {
     },
 }
 
-/// A declared rename hint `ferro migrate new` refuses (ADR-0032). Every hint
-/// is checked, live or inert: neither shape can be meant.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum HintError {
-    /// The hint's old name is still declared: a field (`field`) or a model
-    /// (`field` is `None`) cannot be renamed from one the models keep.
-    OldStillDeclared {
-        /// The table declaring the hint.
-        table: String,
-        /// The hinted column, or `None` for a table hint.
-        field: Option<String>,
-        /// The name the hint claims.
-        old: String,
-    },
-    /// Two declarations claim one old name: within `table` (two columns), or
-    /// across the modelset (`table` is `None`, two tables).
-    Ambiguous {
-        /// The table whose columns claim it, or `None` for tables.
-        table: Option<String>,
-        /// The name they all claim.
-        old: String,
-        /// Every claimant, in declaration order: columns, or tables.
-        claimants: Vec<String>,
-    },
-    /// A label rename hint whose old label the enum still declares: a label
-    /// cannot be renamed from one the enum keeps.
-    LabelStillDeclared {
-        /// The enum class declaring the hint.
-        enum_class: String,
-        /// Its type name.
-        type_name: String,
-        /// The hinted label.
-        new: String,
-        /// The label the hint claims it was.
-        old: String,
-    },
-    /// Two labels of one enum declare the same old label.
-    AmbiguousLabel {
-        /// The enum class declaring the hints.
-        enum_class: String,
-        /// Its type name.
-        type_name: String,
-        /// The label they all claim.
-        old: String,
-        /// Every claimant, in label order.
-        claimants: Vec<String>,
-    },
-}
-
-/// `"a"`, `"a" and "b"`, `"a", "b" and "c"`: the crate's one list joiner,
-/// for every refusal and warning that names several things.
-pub(crate) fn and_list(names: &[String]) -> String {
-    match names {
-        [] => String::new(),
-        [only] => only.clone(),
-        [init @ .., last] => format!("{} and {last}", init.join(", ")),
-    }
-}
-
-impl std::fmt::Display for HintError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            HintError::OldStillDeclared {
-                table,
-                field: Some(field),
-                old,
-            } => write!(
-                f,
-                "{table}.{field} declares renamed_from=\"{old}\", but {table} still declares \
-                 \"{old}\": a field cannot be renamed from one the model keeps; delete the \
-                 hint or the old field"
-            ),
-            HintError::OldStillDeclared {
-                table,
-                field: None,
-                old,
-            } => write!(
-                f,
-                "table \"{table}\" declares __ferro_renamed_from__ = \"{old}\", but the models \
-                 still declare table \"{old}\": delete the hint or the old model"
-            ),
-            HintError::Ambiguous {
-                table: Some(table),
-                old,
-                claimants,
-            } => {
-                let fields: Vec<String> = claimants
-                    .iter()
-                    .map(|column| format!("{table}.{column}"))
-                    .collect();
-                write!(
-                    f,
-                    "{} all declare renamed_from=\"{old}\": one column becomes one column; \
-                     keep the hint on the field \"{old}\" became",
-                    and_list(&fields)
-                )
-            }
-            HintError::Ambiguous {
-                table: None,
-                old,
-                claimants,
-            } => {
-                let tables: Vec<String> = claimants.iter().map(|t| format!("\"{t}\"")).collect();
-                write!(
-                    f,
-                    "tables {} all declare __ferro_renamed_from__ = \"{old}\": one table becomes \
-                     one table; keep the hint on the model \"{old}\" became",
-                    and_list(&tables)
-                )
-            }
-            HintError::LabelStillDeclared {
-                enum_class,
-                type_name,
-                new,
-                old,
-            } => write!(
-                f,
-                "enum {enum_class} (type \"{type_name}\") declares __ferro_renamed_labels__ \
-                 {{\"{new}\": \"{old}\"}}, but {enum_class} still declares the label \"{old}\": a \
-                 label cannot be renamed from one the enum keeps; delete the hint or the old \
-                 member"
-            ),
-            HintError::AmbiguousLabel {
-                enum_class,
-                type_name,
-                old,
-                claimants,
-            } => {
-                let labels: Vec<String> = claimants.iter().map(|l| format!("\"{l}\"")).collect();
-                write!(
-                    f,
-                    "enum {enum_class} (type \"{type_name}\") declares labels {} all renamed \
-                     from \"{old}\": one label becomes one label; keep the hint on the label \
-                     \"{old}\" became",
-                    and_list(&labels)
-                )
-            }
-        }
-    }
-}
-
-impl std::error::Error for HintError {}
-
 /// Refuse the rename hints `new` declares that cannot be meant (ADR-0032),
 /// live or inert: an old name `new` still declares, and two declarations on
 /// one old name. Checked over the declarations alone, so every door that
@@ -1727,32 +1588,6 @@ pub fn live_table_hints(
             })
         })
         .collect())
-}
-
-/// The warning for a refused rename hint, on every door that plans without
-/// refusing outright (the reconciliation pass, `drift`): the hint renames
-/// nothing.
-pub fn hint_refusal_warning(refusal: &HintError) -> String {
-    format!("rename hint refused: {refusal}")
-}
-
-/// The warning for a live table hint on a pass that does not reconcile
-/// (`connect(auto_migrate=True)`, `create_tables()`): table `new` is neither
-/// renamed nor created beside its old self, nor is any new table in
-/// `waiting` that references it, and the two doors that rename it are named.
-pub fn pending_table_rename_warning(old: &str, new: &str, waiting: &[String]) -> String {
-    let waiting = match waiting {
-        [] => String::new(),
-        tables => {
-            let quoted: Vec<String> = tables.iter().map(|t| format!("\"{t}\"")).collect();
-            format!(", nor {}, which reference it", and_list(&quoted))
-        }
-    };
-    format!(
-        "table \"{new}\" declares __ferro_renamed_from__ = \"{old}\", and the database holds \
-         \"{old}\" and no \"{new}\": \"{new}\" was not created{waiting}. The rename runs \
-         under connect(..., migrate_updates=True) or in a migration from ferro migrate new."
-    )
 }
 
 /// The live rename hints `new` declares against `old` (ADR-0032), tables
@@ -2535,7 +2370,7 @@ fn diff_model_foreign_keys(
     old_model: &SchemaModel,
     new_model: &SchemaModel,
     ops: &mut Vec<MigrationOp>,
-    warnings: &mut Vec<String>,
+    reports: &mut Vec<Report>,
 ) {
     let old_col_names: BTreeSet<&str> = old_model.columns.iter().map(|c| c.name.as_str()).collect();
 
@@ -2574,18 +2409,18 @@ fn diff_model_foreign_keys(
             // A drifting constraint ferro does not own is never altered —
             // but it is never silent either.
             Some(name) if !is_ferro_fk_name(name) => {
-                warnings.push(format!(
-                    "Foreign key on '{}.{}' drifts from the model (live: REFERENCES {} \
-                     ON DELETE {}; declared: REFERENCES {} ON DELETE {}), but the live \
-                     constraint '{}' is not ferro-owned, so it is left untouched. \
-                     Migrate it manually or with Alembic.",
+                reports.push(foreign_fk_drift_warning(
                     table,
-                    fk.column,
-                    live.to_table,
-                    fk_action_sql(fk_action_from_str(live.on_delete.as_deref())),
-                    fk.to_table,
-                    fk_action_sql(fk_action_from_str(fk.on_delete.as_deref())),
+                    &fk.column,
                     name,
+                    (
+                        &live.to_table,
+                        fk_action_sql(fk_action_from_str(live.on_delete.as_deref())),
+                    ),
+                    (
+                        &fk.to_table,
+                        fk_action_sql(fk_action_from_str(fk.on_delete.as_deref())),
+                    ),
                 ));
             }
             _ => {
@@ -2673,8 +2508,8 @@ pub struct RenderedReverseOp {
     pub op: ReverseOp,
     /// Statements to execute, in order.
     pub statements: Vec<String>,
-    /// Warnings rendering raised.
-    pub warnings: Vec<String>,
+    /// What rendering reports.
+    pub reports: Vec<Report>,
 }
 
 impl ReverseOp {
@@ -2821,7 +2656,7 @@ fn declared_fk_name(
 /// # Errors
 /// [`PlanError::MissingLiveFacts`] when a table of `live` has no facts.
 pub fn reverse_live_plan(
-    forward: &MigrationPlan,
+    forward: &Plan,
     live: &IrEnvelope<SchemaIrPayload>,
     facts: &LiveFacts,
     declared: &IrEnvelope<SchemaIrPayload>,
@@ -3120,7 +2955,7 @@ pub fn reverse_live_plan(
 }
 
 /// Render `plan` ([`reverse_live_plan`]) for `dialect`: each planned step
-/// through [`crate::render_plan`] from `declared` back to the live side, each
+/// through the one renderer from `declared` back to the live side, each
 /// restore through the `ferro_ddl_lowering` renderers, an irreversible step
 /// to no statement.
 ///
@@ -3128,7 +2963,7 @@ pub fn reverse_live_plan(
 /// the renderer leaves at no statement: a re-added column that demands values
 /// of existing rows, which the pass has no statement for and the Alembic
 /// bridge writes as the plain op under `# ferro: data-dependent` — the same
-/// subset its upgrade leaves out of `render_plan` (ADR-0041).
+/// subset its upgrade leaves unrendered (ADR-0041).
 ///
 /// # Errors
 /// An [`crate::EmissionError`] when a planned step cannot render.
@@ -3156,21 +2991,19 @@ pub fn render_reverse_plan(
             _ => None,
         })
         .collect();
-    let mut rendered = crate::render_plan(
-        &MigrationPlan {
-            operations: planned,
-            ..MigrationPlan::default()
-        },
+    let mut rendered = crate::render::render_ops(
+        &planned,
         declared,
         &plan.before,
         dialect,
+        ferro_ddl_lowering::ConstraintMode::Plain,
     )?
     .into_iter();
     let before_models = index_models(&plan.before.payload.models);
 
     let mut out = Vec::with_capacity(plan.operations.len());
     for (index, op) in plan.operations.iter().enumerate() {
-        let (statements, warnings) = match op {
+        let (statements, reports) = match op {
             _ if unrendered.contains(&index) => (Vec::new(), Vec::new()),
             ReverseOp::Planned(planned) if is_rename(planned) => {
                 rename_statements(planned, &plan.before, dialect)?
@@ -3179,7 +3012,7 @@ pub fn render_reverse_plan(
                 let next = rendered.next().ok_or_else(|| crate::EmissionError {
                     message: "the reverse plan rendered fewer steps than it planned".into(),
                 })?;
-                (next.statements, next.warnings)
+                (next.statements, next.reports)
             }
             ReverseOp::RestoreCheck {
                 table,
@@ -3240,7 +3073,7 @@ pub fn render_reverse_plan(
         out.push(RenderedReverseOp {
             op: op.clone(),
             statements,
-            warnings,
+            reports,
         });
     }
     Ok(out)
@@ -3253,7 +3086,7 @@ fn rename_statements(
     op: &MigrationOp,
     before: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
-) -> Result<(Vec<String>, Vec<String>), crate::EmissionError> {
+) -> Result<(Vec<String>, Vec<Report>), crate::EmissionError> {
     let mut view = before.clone();
     if let MigrationOp::RenameIndex { table, old, new } = op {
         for model in view
@@ -3267,19 +3100,17 @@ fn rename_statements(
             }
         }
     }
-    let rendered = crate::render_plan(
-        &MigrationPlan {
-            operations: vec![op.clone()],
-            ..MigrationPlan::default()
-        },
+    let rendered = crate::render::render_ops(
+        std::slice::from_ref(op),
         before,
         &view,
         dialect,
+        ferro_ddl_lowering::ConstraintMode::Plain,
     )?;
     Ok(rendered
         .into_iter()
         .next()
-        .map(|op| (op.statements, op.warnings))
+        .map(|op| (op.statements, op.reports))
         .unwrap_or_default())
 }
 
@@ -3343,7 +3174,7 @@ mod reverse_tests {
     }
 
     fn statements(
-        forward: &MigrationPlan,
+        forward: &Plan,
         live: &IrEnvelope<SchemaIrPayload>,
         facts: &LiveFacts,
         declared: &IrEnvelope<SchemaIrPayload>,
@@ -3362,7 +3193,7 @@ mod reverse_tests {
         let live = envelope(vec![card(vec![column("id", "int", false)])]);
         let facts = live_facts(LiveTableFacts::default());
         let reverse = reverse_live_plan(
-            &MigrationPlan::default(),
+            &Plan::unplaced(Vec::new()),
             &live,
             &facts,
             &live,
@@ -3376,13 +3207,13 @@ mod reverse_tests {
     fn a_snapshot_only_op_in_a_live_plan_is_refused_naming_it() {
         let live = envelope(vec![card(vec![column("id", "int", false)])]);
         let facts = live_facts(LiveTableFacts::default());
-        let forward = MigrationPlan {
+        let forward = Plan {
             operations: vec![MigrationOp::RemoveEnumLabel {
                 type_name: "status".into(),
                 label: "gone".into(),
                 columns: vec![],
             }],
-            ..MigrationPlan::default()
+            ..Plan::unplaced(Vec::new())
         };
         let err = reverse_live_plan(&forward, &live, &facts, &live, Dialect::Postgres)
             .expect_err("refused");
@@ -3507,12 +3338,12 @@ mod reverse_tests {
             }],
             ..LiveTableFacts::default()
         });
-        let forward = MigrationPlan {
+        let forward = Plan {
             operations: vec![MigrationOp::DropCheck {
                 table: "card".into(),
                 name: "ck_card_legacy".into(),
             }],
-            ..MigrationPlan::default()
+            ..Plan::unplaced(Vec::new())
         };
         assert_eq!(
             statements(&forward, &live, &facts, &declared),
@@ -3521,12 +3352,12 @@ mod reverse_tests {
                     .to_string()
             ]]
         );
-        let rebuild = MigrationPlan {
+        let rebuild = Plan {
             operations: vec![MigrationOp::RebuildCheck {
                 table: "card".into(),
                 name: "ck_card_legacy".into(),
             }],
-            ..MigrationPlan::default()
+            ..Plan::unplaced(Vec::new())
         };
         assert_eq!(
             statements(&rebuild, &live, &facts, &declared),
@@ -3556,12 +3387,12 @@ mod reverse_tests {
             },
             ..LiveTableFacts::default()
         });
-        let forward = MigrationPlan {
+        let forward = Plan {
             operations: vec![MigrationOp::RebuildRowPolicy {
                 table: "card".into(),
                 name: "rls_card_mine".into(),
             }],
-            ..MigrationPlan::default()
+            ..Plan::unplaced(Vec::new())
         };
         assert_eq!(
             statements(&forward, &live, &facts, &live),
@@ -3576,12 +3407,12 @@ mod reverse_tests {
     #[test]
     fn a_label_addition_is_irreversible_and_says_why() {
         let live = envelope(vec![card(vec![column("id", "int", false)])]);
-        let forward = MigrationPlan {
+        let forward = Plan {
             operations: vec![MigrationOp::AddEnumLabel {
                 type_name: "flavor".into(),
                 label: "salty".into(),
             }],
-            ..MigrationPlan::default()
+            ..Plan::unplaced(Vec::new())
         };
         let reverse = reverse_live_plan(
             &forward,
@@ -3696,9 +3527,15 @@ mod live_table_hint_tests {
         assert_eq!(Err(refusal.clone()), live_hints(&twice, &twice).map(|_| ()));
         assert_eq!(
             hint_refusal_warning(&refusal),
-            "rename hint refused: tables \"author\" and \"poet\" all declare \
-             __ferro_renamed_from__ = \"writer\": one table becomes one table; keep the hint \
-             on the model \"writer\" became"
+            crate::Report {
+                kind: crate::ReportKind::HintRefused(refusal.clone()),
+                subject: crate::Subject::Modelset,
+                text: "rename hint refused: tables \"author\" and \"poet\" all declare \
+                       __ferro_renamed_from__ = \"writer\": one table becomes one table; keep \
+                       the hint on the model \"writer\" became"
+                    .into(),
+                recurs: true,
+            }
         );
     }
 
@@ -3706,10 +3543,16 @@ mod live_table_hint_tests {
     fn the_pending_warning_names_the_tables_waiting_and_both_doors() {
         assert_eq!(
             pending_table_rename_warning("writer", "author", &["book".into()]),
-            "table \"author\" declares __ferro_renamed_from__ = \"writer\", and the database \
-             holds \"writer\" and no \"author\": \"author\" was not created, nor \"book\", which \
-             reference it. The rename runs under connect(..., migrate_updates=True) or in a \
-             migration from ferro migrate new."
+            crate::Report {
+                kind: crate::ReportKind::PendingTableRename,
+                subject: crate::Subject::table("author"),
+                text: "table \"author\" declares __ferro_renamed_from__ = \"writer\", and the \
+                       database holds \"writer\" and no \"author\": \"author\" was not created, \
+                       nor \"book\", which reference it. The rename runs under connect(..., \
+                       migrate_updates=True) or in a migration from ferro migrate new."
+                    .into(),
+                recurs: true,
+            }
         );
     }
 }

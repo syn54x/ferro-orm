@@ -2593,7 +2593,7 @@ async def test_migrate_updates_renames_a_hinted_table_with_its_rows_and_index(
             facts_json,
         )
     )
-    assert plan == {"operations": [], "warnings": [], "always_warnings": []}
+    assert plan == {"operations": [], "reports": []}
 
 
 @pytest.mark.asyncio

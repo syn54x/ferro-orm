@@ -88,7 +88,7 @@ async def _drift(db_url: str) -> list[dict]:
             live, json.dumps(envelope), dialect, DESTRUCTIVE, True, facts
         )
     )
-    return [op for op in plan["operations"] if op["statements"] or op["warnings"]]
+    return [op for op in plan["operations"] if op["statements"] or op["reports"]]
 
 
 class Tr533Flavor(StrEnum):

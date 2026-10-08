@@ -62,3 +62,7 @@ impl Report {
 - `MigrationPlan`'s `warnings` and `always_warnings` become one `reports` list on the wire, and the Python readers (`drift`, `baseline`, the bridge, the translator) read kinds.
 - The pass-recording fixtures stay byte-identical, because the text does not change.
 - The generator's standing re-plans, its warning subtraction, the bridge's prefix match and the pass's second `refuse_hints` call are deleted.
+
+## Amendments
+
+- 2026-10-07: the renderer has a fourth kind, `PrimaryKeyKept` (a declared primary key differs from the live one, and no door changes a key in place), which blocks. A report's wire JSON carries `blocks`, computed by the one `Report::blocks`, and the Alembic bridge reads only that.

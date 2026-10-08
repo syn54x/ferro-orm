@@ -8,7 +8,7 @@
 //!                                                CREATE TYPE "status" …; CREATE TABLE "author" (…)
 //! ```
 //!
-//! Every statement comes from [`render_plan`] over [`crate::plan_from_ir`]`(after,
+//! Every statement comes from the one renderer over [`crate::plan_from_ir`]`(after,
 //! before)`: no statement is built here (AGENTS.md § I-1). The down restores
 //! schema, never data, so a down that recreates a dropped table or `NOT NULL`
 //! column carries `-- ferro: data-dependent`, as does one whose statements
@@ -37,8 +37,8 @@ use crate::directory::Headers;
 use crate::plan::{
     self, Hint, rename_ops, renamed_snapshot, renamed_table, reverse_hints, storage_hints,
 };
-use crate::render::render_plan_in;
-use crate::{Dialect, MigrationOp, MigrationPlan, RenderedOp};
+use crate::render::render_ops;
+use crate::{Dialect, MigrationOp, RenderedOp};
 use ferro_ddl_lowering::ConstraintMode;
 use ferro_schema_ir::{IrEnvelope, SchemaColumn, SchemaIrPayload};
 use std::collections::{BTreeMap, BTreeSet};
@@ -193,11 +193,7 @@ fn rendered(
     dialect: Dialect,
     constraints: ConstraintMode,
 ) -> Result<Vec<RenderedOp>, GenerateError> {
-    let plan = MigrationPlan {
-        operations: ops,
-        ..MigrationPlan::default()
-    };
-    Ok(render_plan_in(&plan, old, new, dialect, constraints)?)
+    Ok(render_ops(&ops, old, new, dialect, constraints)?)
 }
 
 /// Each of `ops`' statements on `dialect`, planned `old → new`, op by op. A
@@ -371,8 +367,8 @@ pub struct StepStatements {
 /// never `irreversible`.
 ///
 /// # Errors
-/// An op that cannot render (an [`crate::EmissionError`] from
-/// [`render_plan`]), or that renders only a warning
+/// An op that cannot render (an [`crate::EmissionError`] from the
+/// renderer), or that renders only a blocking report
 /// ([`GenerateError::Unrenderable`]).
 pub fn render_step(
     step_ops: &[MigrationOp],

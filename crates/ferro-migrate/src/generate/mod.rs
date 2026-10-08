@@ -4,14 +4,14 @@
 //! steps of a new migration — never read from a database.
 //!
 //! ```text
-//! parent snapshot ──plan_from_ir──▶ up ops   ──render_plan──▶ 01_schema.up.<dialect>.sql
-//! target modelset ──plan_from_ir──▶ down ops ──render_plan──▶ 01_schema.down.<dialect>.sql
+//! parent snapshot ──plan_from_ir──▶ up ops   ──render──▶ 01_schema.up.<dialect>.sql
+//! target modelset ──plan_from_ir──▶ down ops ──render──▶ 01_schema.down.<dialect>.sql
 //! ```
 //!
 //! The down is the same planner run backwards (target → parent), restricted
 //! to what each step touches ([`downs::render_down`]), so a dropped model's
 //! down recreates it from the parent snapshot exactly as a new model's up
-//! creates it. Every statement comes from [`render_plan`]: the
+//! creates it. Every statement comes from the one renderer: the
 //! generator decides which step an op lands in and which headers the file
 //! carries, never a statement (AGENTS.md § I-1).
 //!
@@ -40,11 +40,11 @@ use crate::directory::{DirectoryError, Headers, MigrationsDir, StepDialect, Step
 use crate::plan::{HintError, renamed_snapshot};
 use crate::snapshot::{Snapshot, SnapshotError};
 use crate::{
-    Dialect, EmissionError, LiveFacts, MigrationOp, MigrationPlan, PlanOptions, RenderedOp,
-    plan_from_ir, render_plan,
+    AnsweredBy, Dialect, EmissionError, LiveFacts, MigrationOp, Plan, PlanOptions, RenderedOp,
+    ReportKind, plan_from_ir,
 };
 use columns::{Needs, Phase, PlanContext, PlanDirection, Refusal, StepAssignment};
-use ferro_ddl_lowering::extra_check_names_warning;
+use ferro_ddl_lowering::ConstraintMode;
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -300,40 +300,40 @@ fn phase_of(
     }
 }
 
-/// The ops of `plan` the file renders: every op but a SQLite check drop the
-/// same file's `DROP COLUMN` carries ([`columns::carried_by_its_column_drop`]).
+/// The indexes of the ops of `plan` the file renders: every op but a SQLite
+/// check drop the same file's `DROP COLUMN` carries
+/// ([`columns::carried_by_its_column_drop`]).
 fn rendered_ops(
-    plan: &MigrationPlan,
+    plan: &Plan,
     before: &IrEnvelope<SchemaIrPayload>,
     after: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
     direction: PlanDirection,
-) -> Vec<MigrationOp> {
+) -> Vec<usize> {
     plan.operations
         .iter()
-        .filter(|op| {
+        .enumerate()
+        .filter(|(_, op)| {
             let ctx = PlanContext::of(op, before, after, dialect, direction);
             !columns::carried_by_its_column_drop(op, &ctx)
         })
-        .cloned()
+        .map(|(index, _)| index)
         .collect()
 }
 
-/// Refuse an op the renderer answered with a warning and no statement (a
-/// cast the pass refuses): the file would otherwise silently leave it out.
-/// A new table's warnings (row security on SQLite) are reported, not refused:
-/// the table itself is created.
+/// Refuse an op the renderer answered with a report that stands in for its
+/// statement ([`crate::Report::blocks`]: a cast the pass refuses, a change
+/// SQLite cannot make in place): the file would otherwise silently leave it
+/// out. A report that does not block (row security skipped on a new SQLite
+/// table, whose table is created) is reported, not refused.
 fn refuse_unrendered(rendered: &[RenderedOp], dialect: Dialect) -> Result<(), GenerateError> {
     for op in rendered {
-        if matches!(op.op, MigrationOp::AddTable { .. }) {
-            continue;
-        }
-        if let Some(warning) = op.warnings.first() {
+        if let Some(report) = op.reports.iter().find(|report| report.blocks()) {
             return Err(GenerateError::Unrenderable {
                 op: op_kind(&op.op),
                 table: op_subject(&op.op),
                 dialect: dialect.into(),
-                warning: warning.clone(),
+                warning: report.text.clone(),
             });
         }
     }
@@ -349,7 +349,7 @@ fn refuse_unrendered(rendered: &[RenderedOp], dialect: Dialect) -> Result<(), Ge
 /// until the contract).
 fn step_phases(
     ups: &[Vec<MigrationOp>],
-    downs: &[MigrationPlan],
+    downs: &[Plan],
     before: &IrEnvelope<SchemaIrPayload>,
     expanded: &IrEnvelope<SchemaIrPayload>,
     dialects: &[Dialect],
@@ -424,67 +424,41 @@ fn plan(
     old: &IrEnvelope<SchemaIrPayload>,
     new: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
-) -> Result<MigrationPlan, GenerateError> {
+) -> Result<Plan, GenerateError> {
     plan_from_ir(old, new, dialect, &LiveFacts::declared(), DESTRUCTIVE)
         .map_err(|err| GenerateError::Render(err.to_string()))
 }
 
-/// Every warning `plan` raises that planning `standing → standing` does not
-/// and that nothing answers: the reports this change caused, not the ones the
-/// models always raise. A leftover CHECK's report is answered by the plan's
-/// drop of it; `answered` names the rest (a down's report of a label the up
-/// added, which the `labels` step's down already says stays).
-fn change_warnings(
-    plan: &MigrationPlan,
-    standing: &MigrationPlan,
-    answered_elsewhere: &[String],
-) -> Vec<String> {
-    let mut dropped_checks: BTreeMap<&str, Vec<String>> = BTreeMap::new();
-    for op in &plan.operations {
-        if let MigrationOp::DropCheck { table, name } = op {
-            dropped_checks.entry(table).or_default().push(name.clone());
-        }
-    }
-    let answered: BTreeSet<String> = dropped_checks
-        .iter()
-        .filter_map(|(table, names)| extra_check_names_warning(table, names))
-        .chain(answered_elsewhere.iter().cloned())
-        .collect();
-    let already: BTreeSet<&String> = standing
-        .warnings
-        .iter()
-        .chain(&standing.always_warnings)
-        .collect();
-    plan.warnings
-        .iter()
-        .chain(&plan.always_warnings)
-        .filter(|warning| !already.contains(warning) && !answered.contains(*warning))
-        .cloned()
-        .collect()
-}
-
 /// Refuse anything in `plan` (the file turning `before` into `after`) this
-/// generator does not generate: an op with no phase, or a warning the change
-/// caused that no op answers.
+/// generator does not generate: an op with no phase, or a report no op of
+/// the same plan answers ([`AnsweredBy`]) — a leftover CHECK's report is
+/// answered by the plan's drop of it, a refused rename hint by nothing.
+/// Between two declared snapshots every report is the change's own: a
+/// snapshot carries no standing live condition.
 fn refuse_unsupported(
-    plan: &MigrationPlan,
-    standing: &MigrationPlan,
+    plan: &Plan,
     before: &IrEnvelope<SchemaIrPayload>,
     after: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
     direction: PlanDirection,
-    answered: &[String],
 ) -> Result<(), GenerateError> {
     for op in &plan.operations {
         phase_of(op, before, after, dialect, direction, false)?;
     }
-    if let Some(warning) = change_warnings(plan, standing, answered).into_iter().next() {
-        return Err(GenerateError::Unplanned {
-            dialect: dialect.into(),
-            warning,
-        });
+    match plan
+        .reports
+        .iter()
+        .find(|report| !report.answered_by(&plan.operations))
+    {
+        None => Ok(()),
+        Some(report) => Err(match &report.kind {
+            ReportKind::HintRefused(refusal) => GenerateError::Hint(refusal.clone()),
+            _ => GenerateError::Unplanned {
+                dialect: dialect.into(),
+                warning: report.text.clone(),
+            },
+        }),
     }
-    Ok(())
 }
 
 /// The text of one step file: its headers, then each statement terminated by
@@ -502,31 +476,36 @@ fn step_text(headers: &Headers, statements: &[String]) -> String {
     out
 }
 
-/// Every warning rendering `ops` raises on `dialect` (a backend limitation a
-/// dialect skips, such as row security on SQLite), each once, into
-/// `warnings`; an op the renderer leaves out with a warning is refused. An op
-/// on a table SQLite rebuilds is not rendered alone: its rebuild carries it.
+/// The text of every report rendering the ops of `up` at `ops` raises (a
+/// backend limitation a dialect skips, such as row security on SQLite), each
+/// once, into `warnings`; an op the renderer leaves out with a blocking report
+/// is refused. An op on a table SQLite rebuilds is not rendered alone: its
+/// rebuild carries it. `old` and `new` are the stages the file goes between,
+/// which decide the rebuilds.
 fn render_warnings(
-    ops: &[MigrationOp],
+    up: &Plan,
+    ops: &[usize],
     old: &IrEnvelope<SchemaIrPayload>,
     new: &IrEnvelope<SchemaIrPayload>,
-    dialect: Dialect,
     warnings: &mut Vec<String>,
 ) -> Result<(), GenerateError> {
-    let rebuilt = rebuild::tables_to_rebuild(ops, old, new, dialect, PlanDirection::Up);
-    let plan = MigrationPlan {
-        operations: ops
-            .iter()
-            .filter(|op| !op.table().is_some_and(|table| rebuilt.contains(table)))
-            .cloned()
-            .collect(),
-        ..MigrationPlan::default()
-    };
-    let rendered = render_plan(&plan, old, new, dialect)?;
+    let dialect = up.dialect();
+    let listed: Vec<MigrationOp> = ops.iter().map(|&i| up.operations[i].clone()).collect();
+    let rebuilt = rebuild::tables_to_rebuild(&listed, old, new, dialect, PlanDirection::Up);
+    let native: Vec<usize> = ops
+        .iter()
+        .copied()
+        .filter(|&i| {
+            !up.operations[i]
+                .table()
+                .is_some_and(|table| rebuilt.contains(table))
+        })
+        .collect();
+    let rendered = up.render_in(ConstraintMode::Plain, &native)?;
     refuse_unrendered(&rendered, dialect)?;
-    for warning in rendered.into_iter().flat_map(|rendered| rendered.warnings) {
-        if !warnings.contains(&warning) {
-            warnings.push(warning);
+    for report in rendered.into_iter().flat_map(|rendered| rendered.reports) {
+        if !warnings.contains(&report.text) {
+            warnings.push(report.text);
         }
     }
     Ok(())
@@ -741,23 +720,13 @@ pub fn generate_with(
     let mut suggestions = Vec::new();
     for &dialect in dialects {
         let change = plan(parent_ir, target, dialect)?;
-        refuse_unsupported(
-            &change,
-            &plan(target, target, dialect)?,
-            before,
-            target,
-            dialect,
-            PlanDirection::Up,
-            &[],
-        )?;
+        refuse_unsupported(&change, before, target, dialect, PlanDirection::Up)?;
         refuse_unsupported(
             &plan(target, before, dialect)?,
-            &plan(before, before, dialect)?,
             target,
             before,
             dialect,
             PlanDirection::Down,
-            &[],
         )?;
         for line in renames::suggestions(&change.operations, before, target) {
             if !suggestions.contains(&line) {
@@ -818,21 +787,28 @@ pub fn generate_with(
         backfill::with_removed_labels(&backfill::relaxed(target, &demands), before, &removals);
     let kept_target = backfill::with_drops_kept(&loose_target, before, &held);
     let contracts = backfills || !held.is_empty();
-    let mut ups = Vec::new();
+    let mut up_plans = Vec::new();
+    let mut up_indexes = Vec::new();
     let mut downs = Vec::new();
     for &dialect in dialects {
         let up = plan(parent_ir, &expanded, dialect)?;
-        ups.push(rendered_ops(
+        up_indexes.push(rendered_ops(
             &up,
             before,
             &expanded,
             dialect,
             PlanDirection::Up,
         ));
+        up_plans.push(up);
         downs.push(plan(&expanded, before, dialect)?);
     }
+    let ups: Vec<Vec<MigrationOp>> = up_plans
+        .iter()
+        .zip(&up_indexes)
+        .map(|(up, indexes)| indexes.iter().map(|&i| up.operations[i].clone()).collect())
+        .collect();
     if ups.iter().all(Vec::is_empty)
-        && downs.iter().all(MigrationPlan::is_empty)
+        && downs.iter().all(Plan::is_empty)
         && index_ops.is_empty()
         && !contracts
     {
@@ -845,8 +821,12 @@ pub fn generate_with(
     let phases = step_phases(&ups, &downs, before, &expanded, dialects, data_steps)?;
     let mut warnings = Vec::new();
     let mut staged = Vec::new();
-    for (&dialect, up) in dialects.iter().zip(&ups) {
-        render_warnings(up, before, &expanded, dialect, &mut warnings)?;
+    for ((&dialect, up), (up_plan, indexes)) in dialects
+        .iter()
+        .zip(&ups)
+        .zip(up_plans.iter().zip(&up_indexes))
+    {
+        render_warnings(up_plan, indexes, before, &expanded, &mut warnings)?;
         for constraint in staging::staged_constraints(up, before, &expanded, dialect)? {
             if !staged.contains(&constraint) {
                 staged.push(constraint);
@@ -1285,16 +1265,13 @@ mod tests {
         after: &IrEnvelope<SchemaIrPayload>,
         dialect: Dialect,
     ) -> Vec<String> {
-        render_plan(
-            &plan(before, after, dialect).expect("plan"),
-            before,
-            after,
-            dialect,
-        )
-        .expect("render")
-        .into_iter()
-        .flat_map(|rendered| rendered.statements)
-        .collect()
+        plan(before, after, dialect)
+            .expect("plan")
+            .render()
+            .expect("render")
+            .into_iter()
+            .flat_map(|rendered| rendered.statements)
+            .collect()
     }
 
     fn with_columns(extra: Vec<SchemaColumn>) -> SchemaModel {
@@ -2150,6 +2127,85 @@ mod tests {
     }
 
     #[test]
+    fn the_generator_refuses_exactly_the_reports_no_op_of_the_plan_answers() {
+        let mut checked = author();
+        checked
+            .table_checks
+            .push(ferro_schema_ir::SchemaTableCheck {
+                name: "ck_author_named".into(),
+                predicate: ferro_schema_ir::CheckExpr::IsNotNull {
+                    column: "name".into(),
+                },
+            });
+        let (before, after) = (ir(vec![checked]), ir(vec![author()]));
+        for dialect in BOTH {
+            // The dropped check's leftover report is answered by its drop.
+            let dropped = plan(&before, &after, dialect).expect("plan");
+            let leftover = dropped
+                .reports
+                .iter()
+                .find(|report| {
+                    report.kind
+                        == ReportKind::LeftoverChecks {
+                            names: vec!["ck_author_named".into()],
+                        }
+                })
+                .expect("the leftover is reported");
+            assert!(leftover.answered_by(&dropped.operations), "{dialect:?}");
+            assert_eq!(
+                refuse_unsupported(&dropped, &before, &after, dialect, PlanDirection::Up),
+                Ok(())
+            );
+            // The same report with no drop of it is refused, by its text.
+            let unanswered = Plan {
+                reports: vec![leftover.clone()],
+                ..Plan::unplaced(Vec::new())
+            };
+            assert!(!leftover.answered_by(&unanswered.operations));
+            assert_eq!(
+                refuse_unsupported(&unanswered, &before, &after, dialect, PlanDirection::Up),
+                Err(GenerateError::Unplanned {
+                    dialect: dialect.into(),
+                    warning: leftover.text.clone(),
+                })
+            );
+            // A drop of a different check answers nothing, and neither does a
+            // drop of the same name on another table: a report is matched by
+            // its subject.
+            let other = vec![MigrationOp::DropCheck {
+                table: "author".into(),
+                name: "ck_author_other".into(),
+            }];
+            assert!(!leftover.answered_by(&other));
+            let elsewhere = vec![MigrationOp::DropCheck {
+                table: "book".into(),
+                name: "ck_author_named".into(),
+            }];
+            assert!(!leftover.answered_by(&elsewhere));
+        }
+        // A refused hint is answered by no op, and refused as the hint it is.
+        let refusal = HintError::OldStillDeclared {
+            table: "author".into(),
+            field: None,
+            old: "author".into(),
+        };
+        let hinted = Plan {
+            reports: vec![crate::plan::hint_refusal_warning(&refusal)],
+            ..Plan::unplaced(Vec::new())
+        };
+        assert_eq!(
+            refuse_unsupported(
+                &hinted,
+                &after,
+                &after,
+                Dialect::Postgres,
+                PlanDirection::Up
+            ),
+            Err(GenerateError::Hint(refusal))
+        );
+    }
+
+    #[test]
     fn a_column_a_table_check_names_is_dropped_with_its_check_in_one_rebuild() {
         let mut before = with_columns(vec![optional("age", "integer")]);
         before.table_checks.push(ferro_schema_ir::SchemaTableCheck {
@@ -2739,7 +2795,7 @@ mod tests {
             table: "author".into(),
             column: "name".into(),
         }]];
-        let downs = vec![MigrationPlan::default()];
+        let downs = vec![Plan::unplaced(Vec::new())];
         let dialect = [Dialect::Postgres];
         assert_eq!(
             step_phases(&ups, &downs, &before, &after, &dialect, true)
