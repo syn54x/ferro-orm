@@ -1275,6 +1275,66 @@ pub fn _plan_revision(
         .call_method1("loads", (wire.to_string(),))
 }
 
+/// `ferro migrate drift`'s read and plan over FFI, in one call: the database
+/// behind connection `using` read for the snapshot `declared_json` (the
+/// tables [`tables_to_read`] names, the pass's own rule, ADR-0031 and
+/// ADR-0047), planned toward the snapshot by the one planner with
+/// destructive changes on.
+///
+/// Resolves to a dict: `{"dialect": "postgres" | "sqlite", "live": <the live
+/// schema IR envelope>, "operations": [{"kind": …, <op fields>}],
+/// "reports": [report…]}`. Drift reports what would change, never how it
+/// runs, so the ops carry no verdict; reports are in `_plan_from_ir`'s
+/// shape.
+///
+/// # Errors
+/// `ValueError` when `declared_json` is not a schema IR envelope or a side
+/// cannot be planned; the connection's error when it is not open or
+/// introspection fails.
+#[pyfunction]
+#[pyo3(name = "_plan_drift")]
+pub fn _plan_drift(
+    py: Python<'_>,
+    using: Option<String>,
+    declared_json: String,
+) -> PyResult<Bound<'_, PyAny>> {
+    let declared = parse_schema_envelope(&declared_json, "declared_json")?;
+    validate_schema_ir(&declared).map_err(emission_error)?;
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let engine = engine_for_connection(using)?;
+        let tables = tables_to_read(&engine, &declared, &[], &[]).await?;
+        let (live, facts) = live_schema_ir(&engine, &tables).await?;
+        validate_schema_ir(&live).map_err(emission_error)?;
+        let dialect = engine.backend();
+        let live_json = serde_json::to_value(&live).map_err(serialize_error)?;
+        let plan = plan_from_ir(
+            &Side::live(live, facts).map_err(plan_error)?,
+            &Side::declared(declared),
+            dialect,
+            PlanOptions { destructive: true },
+        );
+        let operations = plan
+            .ops()
+            .map(serde_json::to_value)
+            .collect::<serde_json::Result<Vec<_>>>()
+            .map_err(serialize_error)?;
+        let wire = serde_json::json!({
+            "dialect": match dialect {
+                Dialect::Postgres => "postgres",
+                Dialect::Sqlite => "sqlite",
+            },
+            "live": live_json,
+            "operations": operations,
+            "reports": reports_json(&plan.reports)?,
+        });
+        Python::attach(|py| {
+            py.import("json")?
+                .call_method1("loads", (wire.to_string(),))
+                .map(Bound::unbind)
+        })
+    })
+}
+
 fn serialize_error(e: serde_json::Error) -> PyErr {
     pyo3::exceptions::PyRuntimeError::new_err(format!("could not serialize the revision: {e}"))
 }

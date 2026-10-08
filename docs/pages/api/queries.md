@@ -48,3 +48,5 @@ An aggregate-only projection collapses to one record (read with `first()`). Mixi
 ::: ferro.query.RowSelector
 
 ::: ferro.query.AggregateExpr
+
+::: ferro.now

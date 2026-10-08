@@ -446,7 +446,7 @@ def drift(*, glob: Annotated[Global, Parameter(parse=False)]) -> int:
     """
     import asyncio
 
-    from ..migrations.drift import drift as run_drift
+    from ..migrations import drift as run_drift
 
     settings = FerroSettings(config=glob.config)
     report = asyncio.run(run_drift(settings, glob.database, url=_url(settings, glob)))
@@ -504,8 +504,8 @@ def baseline(
     """
     import asyncio
 
-    from ..migrations.baseline import baseline as run_baseline
-    from ..migrations.baseline import remove_baseline, render_removed
+    from ..migrations import baseline as run_baseline
+    from ..migrations._baseline import remove_baseline, render_removed
 
     if remove and target is not None:
         raise SettingsError(

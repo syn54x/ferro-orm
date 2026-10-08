@@ -25,13 +25,13 @@ Each call reads the project configuration (`settings=None` is `FerroSettings()`)
 
 ## Baseline and drift
 
-::: ferro.migrations.baseline.baseline
+::: ferro.migrations.baseline
 
 ::: ferro.migrations.remove_baseline
 
 ::: ferro.migrations.BaselineReport
 
-::: ferro.migrations.drift.drift
+::: ferro.migrations.drift
 
 ::: ferro.migrations.DriftReport
 
