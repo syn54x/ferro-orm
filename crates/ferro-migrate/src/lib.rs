@@ -34,8 +34,7 @@ pub use generate::{
 pub use order::order_by_dependencies;
 pub use plan::{
     Hint, HintError, LiveCheckFact, LiveFacts, LiveTableFacts, OldSide, PlanError, live_hints,
-    plan_check_drops, plan_check_rebuilds, plan_from_ir, plan_index_rebuilds, plan_missing_checks,
-    plan_validations,
+    plan_from_ir,
 };
 pub use render::{RenderedOp, render_plan, validate_schema_ir};
 pub use run_plan::{
@@ -425,7 +424,7 @@ impl MigrationOp {
 }
 
 /// Whether one live FK constraint is validated (`pg_constraint.convalidated`;
-/// always `true` on SQLite). The thin live-state slice [`plan_validations`]
+/// always `true` on SQLite). The thin live-state slice [`plan_from_ir`]
 /// reads — introspection types stay outside this crate.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LiveFkValidity {

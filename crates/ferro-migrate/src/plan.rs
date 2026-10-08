@@ -1292,20 +1292,6 @@ fn plan_enum_type_drops(
 /// ADR-0013): every declared CHECK constraint — table check or column check —
 /// that `live_check_names` does not already cover. The decision is name-based
 /// and single-sourced in `ferro_ddl_lowering::missing_check_names`.
-pub fn plan_missing_checks(
-    table: &str,
-    old_ir: &IrEnvelope<SchemaIrPayload>,
-    new_ir: &IrEnvelope<SchemaIrPayload>,
-    live_check_names: &[String],
-) -> Vec<MigrationOp> {
-    let old_models = index_models(&old_ir.payload.models);
-    let new_models = index_models(&new_ir.payload.models);
-    let (Some(old_model), Some(new_model)) = (old_models.get(table), new_models.get(table)) else {
-        return Vec::new();
-    };
-    missing_checks(table, old_model, new_model, live_check_names)
-}
-
 fn missing_checks(
     table: &str,
     old_model: &SchemaModel,
@@ -1336,18 +1322,6 @@ fn missing_checks(
 /// ADR-0015): every declared CHECK whose live counterpart exists and whose
 /// normalized body differs from the canonical rendering. `live` is
 /// `(name, catalog definition)` pairs of ferro-owned CHECKs.
-pub fn plan_check_rebuilds(
-    table: &str,
-    new_ir: &IrEnvelope<SchemaIrPayload>,
-    live: &[(String, String)],
-) -> Vec<MigrationOp> {
-    let new_models = index_models(&new_ir.payload.models);
-    let Some(new_model) = new_models.get(table) else {
-        return Vec::new();
-    };
-    check_rebuilds(table, new_model, live)
-}
-
 fn check_rebuilds(
     table: &str,
     new_model: &SchemaModel,
@@ -1365,18 +1339,6 @@ fn check_rebuilds(
 /// Plan the [`MigrationOp::DropCheck`] operations for one table (#345;
 /// ADR-0013): every live ferro-owned CHECK name the model no longer declares,
 /// in live order.
-pub fn plan_check_drops(
-    table: &str,
-    new_ir: &IrEnvelope<SchemaIrPayload>,
-    live_ferro_owned_names: &[String],
-) -> Vec<MigrationOp> {
-    let new_models = index_models(&new_ir.payload.models);
-    let Some(new_model) = new_models.get(table) else {
-        return Vec::new();
-    };
-    check_drops(table, new_model, live_ferro_owned_names)
-}
-
 fn check_drops(
     table: &str,
     new_model: &SchemaModel,
@@ -1404,19 +1366,6 @@ fn declared_check_names(model: &SchemaModel) -> Vec<String> {
 /// (#515; ADR-0043): every declared FK, then every declared CHECK (table
 /// checks, then column checks), whose live constraint of the same name exists
 /// `NOT VALID`.
-pub fn plan_validations(
-    table: &str,
-    new_ir: &IrEnvelope<SchemaIrPayload>,
-    live_fks: &[LiveFkValidity],
-    live_checks: &[LiveCheckValidity],
-) -> Vec<MigrationOp> {
-    let new_models = index_models(&new_ir.payload.models);
-    let Some(new_model) = new_models.get(table) else {
-        return Vec::new();
-    };
-    validations(table, new_model, live_fks, live_checks)
-}
-
 fn validations(
     table: &str,
     new_model: &SchemaModel,
@@ -1453,18 +1402,6 @@ fn validations(
 /// Plan the [`MigrationOp::RebuildIndex`] operations for one table (#515;
 /// ADR-0044): every declared standalone index or unique whose live index of
 /// the same name exists but is invalid, in declared order.
-pub fn plan_index_rebuilds(
-    table: &str,
-    new_ir: &IrEnvelope<SchemaIrPayload>,
-    live_indexes: &[LiveIndexValidity],
-) -> Vec<MigrationOp> {
-    let new_models = index_models(&new_ir.payload.models);
-    let Some(new_model) = new_models.get(table) else {
-        return Vec::new();
-    };
-    index_rebuilds(table, new_model, live_indexes)
-}
-
 fn index_rebuilds(
     table: &str,
     new_model: &SchemaModel,

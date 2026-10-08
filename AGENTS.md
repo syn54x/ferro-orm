@@ -127,10 +127,12 @@ For a single model, every emitter must agree on:
       inline-vs-statement provenance of ADR-0020..0022 (ADR-0041).
       Postgres-only (SQLite enums store as text).
 
-    `_core._plan_row_security`, `_core._plan_row_security_reconcile`,
-    `_core._plan_enum_label_addition` and `_core._plan_enum_type_provenance`
-    remain as pass-side parity pins. The item is carried by pins **(e)** and
-    **(f)** below.
+    Every artifact above reaches every door through the one planner,
+    `ferro_migrate::plan_from_ir` (`_core._plan_from_ir` over FFI): its
+    per-family deciders are private to it and pinned through it, never as a
+    second entry point; `_core._plan_enum_type_provenance` remains as a
+    pass-side parity pin. The item is carried by pins **(e)** and **(f)**
+    below.
 
 ### The migrations door's six pins
 

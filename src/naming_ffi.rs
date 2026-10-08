@@ -92,29 +92,6 @@ pub fn _resolve_storage_type(column_ir_json: String, dialect: String) -> PyResul
     Ok(payload.to_string())
 }
 
-/// The label-addition decision over FFI (ADR-0011): given one enum type's
-/// declared and live labels, return the Rust-rendered `ADD VALUE` statements
-/// (in declared order) and the extra warn-never-act labels (in live order).
-/// The Alembic autogenerate comparator consumes this instead of re-deriving
-/// the diff or re-rendering the SQL (AGENTS.md § I-1) — the auto-migrate
-/// planner and the generated revision execute byte-identical statements.
-#[pyfunction]
-pub fn _plan_enum_label_addition(
-    type_name: String,
-    declared: Vec<String>,
-    live: Vec<String>,
-) -> String {
-    let statements: Vec<String> = ferro_ddl_lowering::missing_enum_labels(&declared, &live)
-        .iter()
-        .map(|label| ferro_ddl_lowering::render_pg_enum_add_value(&type_name, label))
-        .collect();
-    serde_json::json!({
-        "statements": statements,
-        "extra_labels": ferro_ddl_lowering::extra_enum_labels(&declared, &live),
-    })
-    .to_string()
-}
-
 /// The type-provenance decision for one generated Alembic revision
 /// (ADR-0020, ADR-0021, ADR-0022; AGENTS.md § I-1 item 17). `declaring_json`
 /// maps each declared native enum type name to the `[table, column]` pairs
@@ -376,110 +353,6 @@ pub fn _rls_shorthand_cast(column_ir_json: String) -> PyResult<String> {
     Ok(payload.to_string())
 }
 
-/// The row-security create decision over FFI (PRD #406): given one model's
-/// compiled SchemaIR, return the Rust-rendered Postgres statements a freshly
-/// created table needs — `ENABLE`, `FORCE` when declared, then one
-/// `CREATE POLICY` per policy in declaration order — plus the policy names.
-///
-/// This is the seam the Alembic autogenerate operation (#414) consumes so its
-/// generated revision executes byte-identical SQL to the auto-migrate create
-/// pass; neither side re-derives the diff or re-renders the SQL. Postgres-only
-/// (ADR-0014): on SQLite the same function returns no statements and one
-/// warning naming the table.
-#[pyfunction]
-#[pyo3(signature = (model_ir_json, dialect="postgres".to_string()))]
-pub fn _plan_row_security(model_ir_json: String, dialect: String) -> PyResult<String> {
-    let dialect = match dialect.as_str() {
-        "postgres" => Dialect::Postgres,
-        "sqlite" => Dialect::Sqlite,
-        other => {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "Unknown dialect {other:?}; expected 'postgres' or 'sqlite'"
-            )));
-        }
-    };
-    let model: ferro_schema_ir::SchemaModel =
-        serde_json::from_str(&model_ir_json).map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!("Invalid SchemaIR model: {e}"))
-        })?;
-    let emission = ferro_ddl_lowering::row_security_statements(&model, dialect)
-        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
-    let names: Vec<String> = model
-        .row_security
-        .as_ref()
-        .map(|declaration| {
-            declaration
-                .policies
-                .iter()
-                .map(|policy| policy.name.clone())
-                .collect()
-        })
-        .unwrap_or_default();
-    Ok(serde_json::json!({
-        "statements": emission.statements,
-        "names": names,
-        "warning": emission.warning,
-    })
-    .to_string())
-}
-
-/// The row-security **reconciliation** decision over FFI (#413): given one
-/// model's compiled SchemaIR and its live table's row-security state, return
-/// the Rust-rendered Postgres statements that bring the live table to the
-/// declaration, plus the names behind each part of the decision and the
-/// warnings ferro would emit.
-///
-/// `live_json` is a `LiveRowSecurity` object:
-/// `{"enabled": bool, "forced": bool, "policies": [{"name", "command",
-/// "restrictive", "using", "with_check", "ferro_owned"}]}` — `using` and
-/// `with_check` being the catalog's own `pg_get_expr` text.
-///
-/// This is the seam the Alembic autogenerate operation (#414) consumes so its
-/// generated revision executes byte-identical SQL to the auto-migrate
-/// reconciliation pass; neither side re-derives the diff or re-renders the SQL
-/// (AGENTS.md § I-1). `destructive` gates only the orphan drops — the
-/// auto-migrate ladder (ADR-0013); autogenerate passes it as the caller sees
-/// fit, since a generated revision is reviewed before it runs.
-#[pyfunction]
-#[pyo3(signature = (model_ir_json, live_json, dialect="postgres".to_string(), destructive=false))]
-pub fn _plan_row_security_reconcile(
-    model_ir_json: String,
-    live_json: String,
-    dialect: String,
-    destructive: bool,
-) -> PyResult<String> {
-    let dialect = match dialect.as_str() {
-        "postgres" => Dialect::Postgres,
-        "sqlite" => Dialect::Sqlite,
-        other => {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "Unknown dialect {other:?}; expected 'postgres' or 'sqlite'"
-            )));
-        }
-    };
-    let model: ferro_schema_ir::SchemaModel =
-        serde_json::from_str(&model_ir_json).map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!("Invalid SchemaIR model: {e}"))
-        })?;
-    let live: ferro_ddl_lowering::LiveRowSecurity =
-        serde_json::from_str(&live_json).map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!("Invalid live row security: {e}"))
-        })?;
-    let plan =
-        ferro_ddl_lowering::plan_row_security_reconcile(&model, &live, dialect, destructive)
-            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
-    Ok(serde_json::json!({
-        "statements": plan.statements,
-        "missing": plan.missing,
-        "drifted": plan.drifted,
-        "unverifiable": plan.unverifiable,
-        "extra": plan.extra,
-        "foreign": plan.foreign,
-        "warnings": plan.warnings,
-    })
-    .to_string())
-}
-
 /// One row-policy expression through ferro's normalizer, over FFI (#413).
 ///
 /// Exposed so the drift comparison can be exercised — and pinned — against
@@ -496,8 +369,8 @@ pub fn _normalize_row_policy_expr(expr: String) -> String {
 ///
 /// The Alembic autogenerate comparator introspects `pg_policy` directly (it
 /// has no `EngineHandle` to call `live_table_row_security` through) and needs
-/// this exact decode to build the `LiveRowPolicy` payload
-/// `_plan_row_security_reconcile` expects — the same table
+/// this exact decode to build the `LiveRowPolicy` payload the planner's
+/// live facts carry — the same table
 /// `src/introspect.rs`'s `live_table_row_security` uses, over FFI, so the two
 /// introspection paths cannot drift apart (AGENTS.md § I-1).
 #[pyfunction]
