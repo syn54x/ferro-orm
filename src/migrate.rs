@@ -488,6 +488,42 @@ pub fn tracked_schema_refusal(governed: &str, home: &str) -> String {
     )
 }
 
+/// The refusal for declared tables whose names something other than a base
+/// table holds live (a view, a virtual table, …): `CREATE TABLE IF NOT
+/// EXISTS` would skip each in silence and leave the model without a table.
+/// `held` is `(model identity, table name, holder)` per table, in create
+/// order; a many-to-many join table's identity is its table name, and its
+/// line says so without naming a `__ferro_table__` it has no class for.
+///
+/// ```text
+/// Table creation is refused: a declared table's name is held by something that is not a table, so CREATE TABLE would skip it and leave the model without one.
+///   "card" is a view: rename or drop the view, or declare a different __ferro_table__ on app.models.Card.
+/// Nothing was created.
+/// ```
+pub fn table_name_held_refusal(
+    held: &[(&str, &str, crate::introspect::NonTableHolder)],
+) -> String {
+    let mut lines = vec![
+        "Table creation is refused: a declared table's name is held by something that is \
+         not a table, so CREATE TABLE would skip it and leave the model without one."
+            .to_string(),
+    ];
+    for (model, table, holder) in held {
+        let rename = if model == table {
+            "or declare the table under a different name".to_string()
+        } else {
+            format!("or declare a different __ferro_table__ on {model}")
+        };
+        lines.push(format!(
+            "  \"{table}\" is {}: rename or drop the {}, {rename}.",
+            holder.with_article(),
+            holder.noun()
+        ));
+    }
+    lines.push("Nothing was created.".to_string());
+    lines.join("\n")
+}
+
 /// Every table named like a tracking table, as `(schema, table)`: SQLite's
 /// are in `main`.
 async fn tracking_named_tables(engine: &EngineHandle) -> PyResult<HashSet<(String, String)>> {
