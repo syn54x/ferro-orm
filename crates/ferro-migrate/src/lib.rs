@@ -34,7 +34,7 @@ pub use generate::{
 };
 pub use order::order_by_dependencies;
 pub use plan::{
-    Hint, HintError, LiveCheckFact, LiveFacts, LiveTableFacts, OldSide, PlanError, live_hints,
+    Hint, HintError, LiveCheckFact, LiveFacts, LiveTableFacts, PlanError, Side, live_hints,
     plan_from_ir,
 };
 pub use render::{RenderedOp, validate_schema_ir};
@@ -504,10 +504,11 @@ pub struct LiveIndexValidity {
 
 /// The whole modelset's ordered operations plus the reports planning raised,
 /// holding the sides they were decided between: the planned-before side
-/// (the old snapshot as the plan's renames leave it, which every op but the
+/// (the old side as the plan's renames leave it, which every op but the
 /// renames names its tables and columns by), the target and the dialect. An
 /// op is name-only, so it means something only against those sides; the plan
-/// renders itself ([`Plan::render`]) and no caller supplies them again.
+/// renders itself ([`Plan::render`]), reading every table, column and body
+/// from them, and no caller supplies them again.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Plan {
     /// Operations to apply, in execution order (see [`plan_from_ir`]).
@@ -520,10 +521,10 @@ pub struct Plan {
     /// fenced the way the model says is still not fenced on the next run.
     /// Reports an op raises while rendering travel on its [`RenderedOp`].
     pub reports: Vec<Report>,
-    /// The old snapshot as the plan's renames leave it.
-    before: ferro_schema_ir::IrEnvelope<ferro_schema_ir::SchemaIrPayload>,
-    /// The snapshot the plan leads to.
-    target: ferro_schema_ir::IrEnvelope<ferro_schema_ir::SchemaIrPayload>,
+    /// The old side as the plan's renames leave it.
+    pub(crate) before: Side,
+    /// The side the plan leads to.
+    pub(crate) target: Side,
     /// The dialect it was planned for.
     dialect: Dialect,
 }
@@ -623,11 +624,7 @@ pub struct PlanOptions {
 impl Plan {
     /// A plan with no op and no report yet, between `before` (already the
     /// planned-before side) and `target` on `dialect`.
-    pub(crate) fn between(
-        before: &ferro_schema_ir::IrEnvelope<ferro_schema_ir::SchemaIrPayload>,
-        target: &ferro_schema_ir::IrEnvelope<ferro_schema_ir::SchemaIrPayload>,
-        dialect: Dialect,
-    ) -> Self {
+    pub(crate) fn between(before: &Side, target: &Side, dialect: Dialect) -> Self {
         Self {
             operations: Vec::new(),
             reports: Vec::new(),
@@ -641,14 +638,14 @@ impl Plan {
     /// test's hand-built op list, for what reads only the ops.
     #[cfg(test)]
     pub(crate) fn unplaced(operations: Vec<MigrationOp>) -> Self {
-        let empty = ferro_schema_ir::IrEnvelope {
+        let empty = Side::declared(ferro_schema_ir::IrEnvelope {
             ir_kind: "schema".into(),
             ir_version: 1,
             payload: ferro_schema_ir::SchemaIrPayload {
                 dialect_agnostic: true,
                 models: Vec::new(),
             },
-        };
+        });
         Self {
             operations,
             ..Self::between(&empty, &empty, Dialect::Postgres)

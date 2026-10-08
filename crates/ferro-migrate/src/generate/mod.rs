@@ -40,8 +40,8 @@ use crate::directory::{DirectoryError, Headers, MigrationsDir, StepDialect, Step
 use crate::plan::{HintError, renamed_snapshot};
 use crate::snapshot::{Snapshot, SnapshotError};
 use crate::{
-    AnsweredBy, Dialect, EmissionError, LiveFacts, MigrationOp, Plan, PlanOptions, RenderedOp,
-    ReportKind, plan_from_ir,
+    AnsweredBy, Dialect, EmissionError, MigrationOp, Plan, PlanOptions, RenderedOp, ReportKind,
+    Side, plan_from_ir,
 };
 use columns::{Needs, Phase, PlanContext, PlanDirection, Refusal, StepAssignment};
 use ferro_ddl_lowering::ConstraintMode;
@@ -418,15 +418,18 @@ const DESTRUCTIVE: PlanOptions = PlanOptions { destructive: true };
 
 /// Plan `old → new` on `dialect` as two declared snapshots: every drop is
 /// planned (a dropped model is always rendered, marked destructive; review is
-/// the gate). The snapshot side reads no live fact, so the planner's one
-/// error, a live table without facts, cannot arise.
+/// the gate).
 fn plan(
     old: &IrEnvelope<SchemaIrPayload>,
     new: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
-) -> Result<Plan, GenerateError> {
-    plan_from_ir(old, new, dialect, &LiveFacts::declared(), DESTRUCTIVE)
-        .map_err(|err| GenerateError::Render(err.to_string()))
+) -> Plan {
+    plan_from_ir(
+        &Side::declared(old.clone()),
+        &Side::declared(new.clone()),
+        dialect,
+        DESTRUCTIVE,
+    )
 }
 
 /// Refuse anything in `plan` (the file turning `before` into `after`) this
@@ -719,10 +722,10 @@ pub fn generate_with(
     let mut changes = Vec::new();
     let mut suggestions = Vec::new();
     for &dialect in dialects {
-        let change = plan(parent_ir, target, dialect)?;
+        let change = plan(parent_ir, target, dialect);
         refuse_unsupported(&change, before, target, dialect, PlanDirection::Up)?;
         refuse_unsupported(
-            &plan(target, before, dialect)?,
+            &plan(target, before, dialect),
             target,
             before,
             dialect,
@@ -747,7 +750,7 @@ pub fn generate_with(
     // the index steps leave — and the contract makes it the target.
     let mut demand_ops = Vec::new();
     for &dialect in dialects {
-        demand_ops.extend(plan(parent_ir, &shape, dialect)?.operations);
+        demand_ops.extend(plan(parent_ir, &shape, dialect).operations);
     }
     let demands = backfill::collect(&demand_ops, before, &shape);
     // A removed enum label (D2) stays declared until the contract: the
@@ -767,7 +770,7 @@ pub fn generate_with(
     for &dialect in dialects {
         let mut held = Vec::new();
         if data_steps {
-            for op in plan(parent_ir, &shape, dialect)?.operations {
+            for op in plan(parent_ir, &shape, dialect).operations {
                 if phase_of(&op, before, &shape, dialect, PlanDirection::Up, true)?
                     == Phase::Contract
                 {
@@ -791,7 +794,7 @@ pub fn generate_with(
     let mut up_indexes = Vec::new();
     let mut downs = Vec::new();
     for &dialect in dialects {
-        let up = plan(parent_ir, &expanded, dialect)?;
+        let up = plan(parent_ir, &expanded, dialect);
         up_indexes.push(rendered_ops(
             &up,
             before,
@@ -800,7 +803,7 @@ pub fn generate_with(
             PlanDirection::Up,
         ));
         up_plans.push(up);
-        downs.push(plan(&expanded, before, dialect)?);
+        downs.push(plan(&expanded, before, dialect));
     }
     let ups: Vec<Vec<MigrationOp>> = up_plans
         .iter()
@@ -1266,7 +1269,6 @@ mod tests {
         dialect: Dialect,
     ) -> Vec<String> {
         plan(before, after, dialect)
-            .expect("plan")
             .render()
             .expect("render")
             .into_iter()
@@ -1663,7 +1665,6 @@ mod tests {
                 .collect();
             for dialect in BOTH {
                 let planned: Vec<String> = plan(&before, &after, dialect)
-                    .expect("plan")
                     .operations
                     .into_iter()
                     .filter_map(|op| match op {
@@ -2218,7 +2219,7 @@ mod tests {
         let (before, after) = (ir(vec![checked]), ir(vec![author()]));
         for dialect in BOTH {
             // The dropped check's leftover report is answered by its drop.
-            let dropped = plan(&before, &after, dialect).expect("plan");
+            let dropped = plan(&before, &after, dialect);
             let leftover = dropped
                 .reports
                 .iter()
@@ -2902,7 +2903,6 @@ mod tests {
         // post: no op of its own drops the key.
         for dialect in BOTH {
             let ops: Vec<MigrationOp> = plan(&parent, &shape, dialect)
-                .expect("plan")
                 .operations
                 .into_iter()
                 .filter(|op| op.table() == Some("post"))

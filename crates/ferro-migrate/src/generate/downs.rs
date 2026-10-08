@@ -412,7 +412,7 @@ pub fn render_step(
             other => other,
         })
         .collect();
-    let inverse: Vec<MigrationOp> = super::plan(&planned_after, before, dialect)?
+    let inverse: Vec<MigrationOp> = super::plan(&planned_after, before, dialect)
         .operations
         .into_iter()
         .filter(|op| subject(op).is_some_and(|s| subjects.contains(&s)))
@@ -496,7 +496,7 @@ pub fn render_step(
 mod tests {
     use super::super::tests::{author, create_pass, file, ir, model, pk, post};
     use super::*;
-    use crate::{LiveFacts, PlanOptions, plan_from_ir};
+    use crate::{PlanOptions, Side, plan_from_ir};
     use ferro_schema_ir::{RowPolicyCommand, RowPolicyExpr, SchemaRowPolicy, SchemaRowSecurity};
 
     fn up_ops(
@@ -505,13 +505,11 @@ mod tests {
         dialect: Dialect,
     ) -> Vec<MigrationOp> {
         plan_from_ir(
-            before,
-            after,
+            &Side::declared(before.clone()),
+            &Side::declared(after.clone()),
             dialect,
-            &LiveFacts::declared(),
             PlanOptions { destructive: true },
         )
-        .expect("plan")
         .operations
     }
 

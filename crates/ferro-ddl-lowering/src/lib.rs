@@ -1254,31 +1254,28 @@ pub fn render_db_check(
     }
 }
 
-/// The check-addition decision (ADR-0013): which declared CHECK constraints —
-/// table checks and column checks alike — have no live constraint of that name,
-/// in declared order (table checks, then column checks).
+/// The check-addition decision (ADR-0013): which of the target's CHECK
+/// constraints (`target_names`, in its order: a declaration's table checks,
+/// then its column checks — [`declared_check_names`]) have no constraint of
+/// that name on the side the plan starts from, in the target's order.
 ///
-/// This is the single decision table for missing CHECKs: the auto-migrate
-/// reconciliation pass consumes it through `ferro-migrate`, and the Alembic
-/// autogenerate comparator consumes it over FFI (AGENTS.md § I-1). Neither side
-/// re-derives it.
+/// This is the single decision table for missing CHECKs: every migration door
+/// reads it through the one planner (AGENTS.md § I-1).
 ///
 /// The comparison is by NAME only. A live constraint whose *body* drifted from
 /// the declared predicate is a constraint rebuild, not an addition (ADR-0015,
 /// #344), and a live name ferro does not own cannot collide with a declared
 /// `ck_*` name — so a user-owned CHECK is never added over.
-pub fn missing_check_names(
-    model: &ferro_schema_ir::SchemaModel,
-    live_names: &[String],
-) -> Vec<String> {
-    declared_check_names(model)
-        .into_iter()
-        .filter(|name| !live_names.iter().any(|live| live == name))
+pub fn missing_check_names(target_names: &[String], live_names: &[String]) -> Vec<String> {
+    target_names
+        .iter()
+        .filter(|name| !live_names.contains(name))
+        .cloned()
         .collect()
 }
 
 /// Every CHECK constraint name the model declares, table checks first.
-fn declared_check_names(model: &ferro_schema_ir::SchemaModel) -> Vec<String> {
+pub fn declared_check_names(model: &ferro_schema_ir::SchemaModel) -> Vec<String> {
     model
         .table_checks
         .iter()
@@ -1449,26 +1446,42 @@ pub fn render_validate_constraint(table: &str, name: &str) -> String {
     )
 }
 
-/// Declared CHECK names whose live counterpart exists and whose normalized
-/// body differs from the model's canonical rendering.
+/// The target's CHECK names whose counterpart on the side the plan starts
+/// from exists and whose normalized body differs, in the target's order.
+/// `target` is `(name, body)` pairs: a declaration's canonical renderings
+/// ([`declared_check_bodies`]), or a live database's catalog text when the
+/// plan leads to one. One normalizer compares them
+/// ([`normalize_check_definition`], ADR-0015).
 ///
 /// Absent-live names are an add (`missing_check_names`, #343), not a rebuild.
-/// Live names the model does not declare are leftover handling (#345).
-pub fn drifted_check_names(
-    model: &ferro_schema_ir::SchemaModel,
-    live: &[(String, String)],
-) -> Vec<String> {
-    declared_check_names(model)
-        .into_iter()
-        .filter(|name| {
-            let Some((_, live_def)) = live.iter().find(|(live_name, _)| live_name == name) else {
-                return false;
-            };
-            let Some(canonical) = declared_check_body(model, name) else {
-                return false;
-            };
-            normalize_check_definition(&canonical) != normalize_check_definition(live_def)
+/// Live names the target does not hold are leftover handling (#345).
+pub fn drifted_check_names(target: &[(String, String)], live: &[(String, String)]) -> Vec<String> {
+    target
+        .iter()
+        .filter(|(name, body)| {
+            live.iter()
+                .find(|(live_name, _)| live_name == name)
+                .is_some_and(|(_, live_def)| {
+                    normalize_check_definition(body) != normalize_check_definition(live_def)
+                })
         })
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
+/// Every CHECK the model declares as `(name, canonical body)`, table checks
+/// first: the bodies [`render_check_addition`] writes.
+pub fn declared_check_bodies(model: &ferro_schema_ir::SchemaModel) -> Vec<(String, String)> {
+    model
+        .table_checks
+        .iter()
+        .map(|check| (check.name.clone(), render_table_check_body(check)))
+        .chain(
+            model
+                .checks
+                .iter()
+                .map(|check| (check.name.clone(), render_check_body(check))),
+        )
         .collect()
 }
 
@@ -4238,13 +4251,16 @@ mod tests {
             vec![account_role_column_check()],
         );
         assert_eq!(
-            missing_check_names(&model, &["ck_transfer_kind".to_string()]),
+            missing_check_names(
+                &declared_check_names(&model),
+                &["ck_transfer_kind".to_string()]
+            ),
             vec!["ck_transfer_at_most_one_outflow".to_string()],
             "table checks come first, and a live name is never re-added"
         );
         assert!(
             missing_check_names(
-                &model,
+                &declared_check_names(&model),
                 &[
                     "ck_transfer_at_most_one_outflow".to_string(),
                     "ck_transfer_kind".to_string(),
@@ -4259,7 +4275,10 @@ mod tests {
     fn missing_check_names_ignores_user_owned_live_constraints() {
         let model = transfer_model_with_checks(vec![transfer_at_most_one_outflow_check()], vec![]);
         assert_eq!(
-            missing_check_names(&model, &["transfer_positive_amount".to_string()]),
+            missing_check_names(
+                &declared_check_names(&model),
+                &["transfer_positive_amount".to_string()]
+            ),
             vec!["ck_transfer_at_most_one_outflow".to_string()],
             "a user-owned live CHECK is not a counterpart for a declared ck_* name"
         );
@@ -4507,7 +4526,7 @@ mod tests {
                 .to_string(),
         )];
         assert!(
-            drifted_check_names(&model, &live).is_empty(),
+            drifted_check_names(&declared_check_bodies(&model), &live).is_empty(),
             "quoting and whitespace are catalog noise, not a rebuild"
         );
     }
@@ -4521,7 +4540,7 @@ mod tests {
                 .to_string(),
         )];
         assert_eq!(
-            drifted_check_names(&model, &live),
+            drifted_check_names(&declared_check_bodies(&model), &live),
             vec!["ck_transfer_at_most_one_outflow".to_string()]
         );
     }
@@ -4530,12 +4549,12 @@ mod tests {
     fn drifted_check_names_skips_absent_live_and_undeclared_live() {
         let model = transfer_model_with_checks(vec![transfer_at_most_one_outflow_check()], vec![]);
         assert!(
-            drifted_check_names(&model, &[]).is_empty(),
+            drifted_check_names(&declared_check_bodies(&model), &[]).is_empty(),
             "a missing name is an add (#343), not a rebuild"
         );
         let leftover = [("ck_transfer_orphan".to_string(), "CHECK (true)".to_string())];
         assert!(
-            drifted_check_names(&model, &leftover).is_empty(),
+            drifted_check_names(&declared_check_bodies(&model), &leftover).is_empty(),
             "an undeclared live name is leftover handling (#345), not a rebuild"
         );
     }
@@ -4557,7 +4576,7 @@ mod tests {
                 .to_string(),
         )];
         assert!(
-            drifted_check_names(&model, &live).is_empty(),
+            drifted_check_names(&declared_check_bodies(&model), &live).is_empty(),
             "an unvalidated check with the declared body is a validate, never a rebuild"
         );
         assert_eq!(
@@ -4580,7 +4599,7 @@ mod tests {
                 .to_string(),
         )];
         assert_eq!(
-            drifted_check_names(&model, &live),
+            drifted_check_names(&declared_check_bodies(&model), &live),
             vec!["ck_transfer_at_most_one_outflow".to_string()]
         );
     }
@@ -4663,7 +4682,7 @@ mod tests {
             "CHECK (\"kind\" IN ('in'))".to_string(),
         )];
         assert_eq!(
-            drifted_check_names(&model, &live),
+            drifted_check_names(&declared_check_bodies(&model), &live),
             vec!["ck_transfer_kind".to_string()]
         );
     }
@@ -7792,7 +7811,7 @@ mod tests {
             "CHECK (((price)::integer > 10))".to_string(),
         )];
         assert_eq!(
-            drifted_check_names(&model, &live),
+            drifted_check_names(&declared_check_bodies(&model), &live),
             vec!["ck_transfer_priced".to_string()]
         );
         // A cast on a compound operand keeps its cast and its grouping; the

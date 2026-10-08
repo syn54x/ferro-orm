@@ -979,7 +979,7 @@ pub fn contract_step(
                 }
                 // A table a removed label reshapes (its check, or a column
                 // narrowed to the longest label left).
-                for op in super::plan(relaxed_target, target, Dialect::Sqlite)?.operations {
+                for op in super::plan(relaxed_target, target, Dialect::Sqlite).operations {
                     if let Some(table) = op.table()
                         && !tables.iter().any(|t| t == table)
                     {
@@ -1075,7 +1075,7 @@ fn label_contract(
         super::refuse_unrendered(&rendered, Dialect::Postgres)?;
         Ok(rendered.into_iter().flat_map(|op| op.statements).collect())
     };
-    let forward = super::plan(relaxed_target, target, Dialect::Postgres)?.operations;
+    let forward = super::plan(relaxed_target, target, Dialect::Postgres).operations;
     let mut up = Vec::new();
     let mut swapped: Vec<&str> = Vec::new();
     for op in &forward {
@@ -1117,7 +1117,7 @@ fn label_contract(
         }
     }
     up.extend(rendered(rest(forward), relaxed_target, target)?);
-    let backward = super::plan(target, relaxed_target, Dialect::Postgres)?.operations;
+    let backward = super::plan(target, relaxed_target, Dialect::Postgres).operations;
     let (restored, backward): (Vec<_>, Vec<_>) = rest(backward)
         .into_iter()
         .partition(|op| matches!(op, MigrationOp::AddEnumLabel { .. }));

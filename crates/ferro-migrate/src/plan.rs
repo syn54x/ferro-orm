@@ -21,12 +21,12 @@ use ferro_ddl_lowering::Report;
 pub(crate) use ferro_ddl_lowering::and_list;
 use ferro_ddl_lowering::{
     EnumTypeProvenance, LiveRowPolicy, LiveRowSecurity, ResolvedStorage, RowSecurityFlag,
-    declared_row_policy_names, drifted_check_names, dropped_row_security_warning,
-    enum_label_strings, enum_type_provenance, excess_row_security_flags, extra_check_names,
-    extra_check_names_warning, extra_enum_labels, extra_enum_labels_warning,
-    extra_row_policy_names_warning, ferro_manages_row_security, fk_action_from_str, fk_action_sql,
-    fk_name, foreign_fk_drift_warning, is_ferro_fk_name, is_ferro_row_policy_name,
-    missing_check_names, missing_enum_labels, normalize_check_definition,
+    declared_check_bodies, declared_check_names, declared_row_policy_names, drifted_check_names,
+    dropped_row_security_warning, enum_label_strings, enum_type_provenance,
+    excess_row_security_flags, extra_check_names, extra_check_names_warning, extra_enum_labels,
+    extra_enum_labels_warning, extra_row_policy_names_warning, ferro_manages_row_security,
+    fk_action_from_str, fk_action_sql, fk_name, foreign_fk_drift_warning, is_ferro_fk_name,
+    is_ferro_row_policy_name, missing_check_names, missing_enum_labels, normalize_check_definition,
     normalize_row_policy_expr, plan_row_security_reconcile, quote_label, render_check_body,
     render_table_check_body, resolve_column_storage, row_policy_clauses, row_policy_command_token,
     schema_columns_storage_drift,
@@ -77,31 +77,11 @@ pub struct LiveTableFacts {
     pub row_security: LiveRowSecurity,
 }
 
-/// What the `old` side of a plan is: the caller says, the planner never
-/// infers it.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum OldSide {
-    /// A live database, read through its facts (the reconciliation pass,
-    /// `drift`, `baseline`): every table of `old` has an entry in
-    /// [`LiveFacts::tables`], and a missing one is a [`PlanError`].
-    #[default]
-    Live,
-    /// A declared snapshot (the generator): every artifact on it is ferro's
-    /// own declaration, read from `old` itself; no fact is read.
-    Snapshot,
-}
-
-/// The facts a live database holds beside its IR, keyed by table — or, for
-/// [`LiveFacts::declared`], the marker that `old` is a declared snapshot.
-///
-/// On the live side ([`LiveFacts::live`], and every facts value read from
-/// JSON) each table of `old` has its entry in [`tables`](Self::tables); a
-/// type absent from [`enum_labels`](Self::enum_labels) reads its labels from
-/// `old`'s columns. On the snapshot side ([`LiveFacts::declared`]) every
-/// table reads as `old` declares it: every declared CHECK present with its
-/// canonical body and valid, every FK and index valid, its row security
-/// exactly as declared, and the parent snapshot is the proof of what ferro
-/// installed (ADR-0033).
+/// The facts a live database holds beside its IR, keyed by table: every live
+/// table's checks, validity flags and row security, and every live native
+/// enum type's labels. A live side ([`Side::live`]) carries an entry for each
+/// table of its IR; a type absent from [`enum_labels`](Self::enum_labels)
+/// reads its labels from the IR's columns.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LiveFacts {
     /// Live facts per table name.
@@ -110,13 +90,9 @@ pub struct LiveFacts {
     /// Every live native enum type's labels in enum sort order (Postgres).
     #[serde(default)]
     pub enum_labels: BTreeMap<String, Vec<String>>,
-    /// Which side `old` is. Never on the wire: facts read from JSON are a
-    /// live database's.
-    #[serde(skip)]
-    side: OldSide,
 }
 
-/// Why [`plan_from_ir`] plans nothing.
+/// Why a [`Side`] cannot be built.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PlanError {
     /// The live side's facts carry no entry for a table its schema holds.
@@ -125,8 +101,7 @@ pub enum PlanError {
         table: String,
     },
     /// A live plan to reverse carries an op only two declared snapshots
-    /// plan ([`MigrationOp::RemoveEnumLabel`]): it was not decided from the
-    /// live database it claims to reverse.
+    /// plan ([`MigrationOp::RemoveEnumLabel`]).
     SnapshotOnlyOp {
         /// The op kind.
         op: String,
@@ -139,8 +114,7 @@ impl std::fmt::Display for PlanError {
             PlanError::SnapshotOnlyOp { op } => write!(
                 f,
                 "the plan to reverse carries {op}, which only two declared snapshots plan \
-                 (`ferro migrate new`), never a live database: reverse the plan \
-                 `plan_from_ir` decided from the live facts"
+                 (`ferro migrate new`), never a live database"
             ),
             PlanError::MissingLiveFacts { table } => write!(
                 f,
@@ -154,51 +128,285 @@ impl std::fmt::Display for PlanError {
 
 impl std::error::Error for PlanError {}
 
-impl LiveFacts {
-    /// The snapshot side: `old` is a declared snapshot and every table and
-    /// type reads as it declares them (the generator).
-    pub fn declared() -> Self {
-        Self {
-            side: OldSide::Snapshot,
-            ..Self::default()
+/// One side of a plan (ADR-0050): a declared modelset, or a live database
+/// read as its IR plus the facts introspection returned beside it. The
+/// planner never asks which one it holds; it asks the side questions
+/// (a table's facts, an enum type's labels, a check's or policy's body,
+/// whether it proves ferro installed a table's row security, …), and each
+/// adapter answers them its own way.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Side(SideKind);
+
+#[derive(Clone, Debug, PartialEq)]
+enum SideKind {
+    /// A modelset: every artifact on it is ferro's own declaration.
+    Declared(IrEnvelope<SchemaIrPayload>),
+    /// A database: its IR, and its facts for every table the IR holds.
+    Live {
+        ir: IrEnvelope<SchemaIrPayload>,
+        facts: LiveFacts,
+    },
+}
+
+/// A check's body as one side holds it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Body {
+    /// The canonical expression, as ferro renders a declaration.
+    Canonical(String),
+    /// The catalog's text (`CHECK (…)`), restored as the catalog printed it.
+    Catalog(String),
+}
+
+impl Body {
+    /// The body's text, for the one normalizer.
+    pub(crate) fn text(&self) -> &str {
+        match self {
+            Body::Canonical(text) | Body::Catalog(text) => text,
         }
     }
+}
 
-    /// The live side: a live database's facts for every table of its schema.
-    pub fn live(
-        tables: BTreeMap<String, LiveTableFacts>,
-        enum_labels: BTreeMap<String, Vec<String>>,
-    ) -> Self {
-        Self {
-            tables,
-            enum_labels,
-            side: OldSide::Live,
-        }
+/// A row policy as one side holds it: its declaration (a live policy as a
+/// raw one, its bodies as the catalog printed them) and the roles it
+/// applies `TO` (none for a declaration, which never writes the clause).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct PolicyBody {
+    /// The policy, as `CREATE POLICY` writes it.
+    pub(crate) policy: ferro_schema_ir::SchemaRowPolicy,
+    /// `pg_policy.polroles` for a live policy.
+    pub(crate) roles: Vec<String>,
+}
+
+impl Side {
+    /// A declared modelset: the models, or a schema snapshot.
+    pub fn declared(ir: IrEnvelope<SchemaIrPayload>) -> Side {
+        Side(SideKind::Declared(ir))
     }
 
-    /// Which side `old` is.
-    pub fn side(&self) -> OldSide {
-        self.side
-    }
-
-    /// Every table of `old` has its facts on the live side; the snapshot side
-    /// reads none.
-    fn cover(&self, old: &IrEnvelope<SchemaIrPayload>) -> Result<(), PlanError> {
-        if self.side == OldSide::Snapshot {
-            return Ok(());
-        }
-        match old
+    /// A live database, read as its IR and the facts introspection returned
+    /// beside it (`_live_schema_ir`).
+    ///
+    /// # Errors
+    /// [`PlanError::MissingLiveFacts`] when `facts` carries no entry for a
+    /// table `ir` holds: the side is refused when it is built, never halfway
+    /// through a plan.
+    pub fn live(ir: IrEnvelope<SchemaIrPayload>, facts: LiveFacts) -> Result<Side, PlanError> {
+        if let Some(model) = ir
             .payload
             .models
             .iter()
-            .find(|model| !self.tables.contains_key(&model.table_name))
+            .find(|model| !facts.tables.contains_key(&model.table_name))
         {
-            Some(model) => Err(PlanError::MissingLiveFacts {
+            return Err(PlanError::MissingLiveFacts {
                 table: model.table_name.clone(),
-            }),
-            None => Ok(()),
+            });
+        }
+        Ok(Side(SideKind::Live { ir, facts }))
+    }
+
+    /// The side's IR.
+    pub fn ir(&self) -> &IrEnvelope<SchemaIrPayload> {
+        match &self.0 {
+            SideKind::Declared(ir) | SideKind::Live { ir, .. } => ir,
         }
     }
+
+    /// The model of `table`, when the side holds one.
+    pub(crate) fn model(&self, table: &str) -> Option<&SchemaModel> {
+        self.ir()
+            .payload
+            .models
+            .iter()
+            .find(|model| model.table_name == table)
+    }
+
+    /// The facts of one of the side's tables: a declaration's are read off
+    /// it (every declared check present with its canonical body and valid,
+    /// every foreign key and index valid, row security exactly as declared);
+    /// a live table's are the introspected facts.
+    pub(crate) fn table_facts(&self, model: &SchemaModel) -> Cow<'_, LiveTableFacts> {
+        match &self.0 {
+            SideKind::Declared(_) => Cow::Owned(declared_table_facts(model)),
+            SideKind::Live { facts, .. } => facts
+                .tables
+                .get(&model.table_name)
+                .map_or_else(|| Cow::Owned(LiveTableFacts::default()), Cow::Borrowed),
+        }
+    }
+
+    /// One of the side's tables as introspection would report it, the shape
+    /// the storage decision compares: a declared Postgres column whose
+    /// storage resolves to a native enum reads back as one.
+    pub(crate) fn table_view<'a>(
+        &self,
+        model: &'a SchemaModel,
+        dialect: Dialect,
+    ) -> Cow<'a, SchemaModel> {
+        match &self.0 {
+            SideKind::Declared(_) => declared_live_view(model, dialect),
+            SideKind::Live { .. } => Cow::Borrowed(model),
+        }
+    }
+
+    /// The labels of the native enum type `type_name`, when the side holds
+    /// it: the declaration's, or the live database's.
+    pub(crate) fn enum_labels(&self, type_name: &str) -> Option<Vec<String>> {
+        let declared = || {
+            declared_enum_types(&self.ir().payload.models)
+                .labels
+                .get(type_name)
+                .cloned()
+        };
+        match &self.0 {
+            SideKind::Declared(_) => declared(),
+            SideKind::Live { facts, .. } => {
+                facts.enum_labels.get(type_name).cloned().or_else(declared)
+            }
+        }
+    }
+
+    /// Every check of `model` as the side holds them, as `(name, body)`, in
+    /// its order: a declaration's table checks then column checks, each with
+    /// its canonical body; a live table's checks with the catalog's text.
+    pub(crate) fn checks(&self, model: &SchemaModel) -> Vec<(String, Body)> {
+        match &self.0 {
+            SideKind::Declared(_) => declared_check_bodies(model)
+                .into_iter()
+                .map(|(name, body)| (name, Body::Canonical(body)))
+                .collect(),
+            SideKind::Live { .. } => self
+                .table_facts(model)
+                .checks
+                .iter()
+                .map(|check| (check.name.clone(), Body::Catalog(check.definition.clone())))
+                .collect(),
+        }
+    }
+
+    /// The body of the check `name` on `table`, as the side holds it.
+    pub(crate) fn check_body(&self, table: &str, name: &str) -> Option<Body> {
+        let model = self.model(table)?;
+        self.checks(model)
+            .into_iter()
+            .find(|(check, _)| check == name)
+            .map(|(_, body)| body)
+    }
+
+    /// `model` with its row security as the side holds it: a declaration's
+    /// own, or a live table's flags and policies as a declaration would state
+    /// them (each policy raw, its bodies as the catalog printed them). A live
+    /// table whose row security is off declares none.
+    pub(crate) fn declaration<'a>(&self, model: &'a SchemaModel) -> Cow<'a, SchemaModel> {
+        if matches!(self.0, SideKind::Declared(_)) {
+            return Cow::Borrowed(model);
+        }
+        let facts = self.table_facts(model);
+        let live = &facts.row_security;
+        let mut view = model.clone();
+        view.row_security = live.enabled.then(|| ferro_schema_ir::SchemaRowSecurity {
+            force: live.forced,
+            policies: live
+                .policies
+                .iter()
+                .filter_map(|policy| live_policy_body(policy).map(|body| body.policy))
+                .collect(),
+        });
+        Cow::Owned(view)
+    }
+
+    /// The row policy `name` on `table`, as the side holds it.
+    pub(crate) fn policy(&self, table: &str, name: &str) -> Option<PolicyBody> {
+        let model = self.model(table)?;
+        match &self.0 {
+            SideKind::Declared(_) => model
+                .row_security
+                .as_ref()?
+                .policies
+                .iter()
+                .find(|policy| policy.name == name)
+                .map(|policy| PolicyBody {
+                    policy: policy.clone(),
+                    roles: Vec::new(),
+                }),
+            SideKind::Live { .. } => self
+                .table_facts(model)
+                .row_security
+                .policies
+                .iter()
+                .find(|policy| policy.name == name)
+                .and_then(live_policy_body),
+        }
+    }
+
+    /// Whether the side is itself the proof that ferro installed a table's
+    /// row security: a declaration is (ferro wrote what it declares); a live
+    /// table proves it only with a ferro-named policy.
+    pub(crate) fn proves_row_security_installed(&self) -> bool {
+        matches!(self.0, SideKind::Declared(_))
+    }
+
+    /// Whether a policy body ferro cannot verify, planned from this side, is
+    /// rebuilt: yes from a declaration (both texts are ferro's own copies of
+    /// a declaration, so a difference is the author's edit); no from a live
+    /// database, which only warns (ADR-0019).
+    pub(crate) fn rebuilds_unverifiable_bodies(&self) -> bool {
+        matches!(self.0, SideKind::Declared(_))
+    }
+
+    /// Whether a label this side's enum type holds and the target's drops is
+    /// planned as its removal: yes from a declaration (#536); a live
+    /// database's extra label is reported, never removed (ADR-0011).
+    pub(crate) fn plans_label_removals(&self) -> bool {
+        matches!(self.0, SideKind::Declared(_))
+    }
+
+    /// Whether a plan from this side reports its standing conditions (a
+    /// foreign policy, an extra label, an unverifiable body): a live database
+    /// does; from a declaration every difference is an op.
+    pub(crate) fn reports_conditions(&self) -> bool {
+        matches!(self.0, SideKind::Live { .. })
+    }
+
+    /// The side as the rename `ops` (planned from it under `hints`) leave
+    /// it: the planned-before side every other op of the plan reads.
+    fn renamed(&self, ops: &[MigrationOp], hints: &[Hint], new: &Side, dialect: Dialect) -> Side {
+        let ir = before_renamed_by(self.ir(), hints, dialect);
+        match &self.0 {
+            SideKind::Declared(_) => Side::declared(ir),
+            SideKind::Live { facts, .. } => Side(SideKind::Live {
+                ir,
+                facts: renamed_facts(facts, ops, new.ir(), dialect),
+            }),
+        }
+    }
+
+    /// The renames of the names only a live database's facts carry — a live
+    /// IR holds no check and no row policy ([`fact_renames`]). A declaration
+    /// carries every name in its IR, so it adds none.
+    fn fact_renames(&self, ops: &mut Vec<MigrationOp>, hints: &[Hint], dialect: Dialect) {
+        if let SideKind::Live { ir, facts } = &self.0 {
+            fact_renames(ops, facts, ir, hints, dialect);
+        }
+    }
+}
+
+/// A live policy as a declaration of it: raw, its bodies as the catalog
+/// printed them, and the roles it applies `TO`. `None` for a command the
+/// vocabulary does not know.
+fn live_policy_body(policy: &LiveRowPolicy) -> Option<PolicyBody> {
+    let command = serde_json::from_value(serde_json::Value::String(policy.command.clone())).ok()?;
+    Some(PolicyBody {
+        policy: ferro_schema_ir::SchemaRowPolicy {
+            name: policy.name.clone(),
+            command,
+            restrictive: policy.restrictive,
+            expr: ferro_schema_ir::RowPolicyExpr::Raw {
+                using: policy.using.clone(),
+                with_check: policy.with_check.clone(),
+            },
+        },
+        roles: policy.roles.clone(),
+    })
 }
 
 /// `LiveRowSecurity` lives in `ferro_ddl_lowering` with `Deserialize` only;
@@ -322,11 +530,8 @@ fn declared_row_security(model: &SchemaModel) -> LiveRowSecurity {
 
 /// Decide every change that turns `old` into `new`, for the whole modelset.
 ///
-/// `facts` says which side `old` is: [`LiveFacts::live`] (or facts read from
-/// JSON) carries what the live database holds beside its IR, one entry per
-/// table of `old`; [`LiveFacts::declared`] says `old` is a declared snapshot.
-/// The side is the caller's word, never inferred from what the facts lack.
-/// `options`
+/// Each side is an adapter ([`Side::declared`], [`Side::live`]); the planner
+/// asks it questions and never which one it holds (ADR-0050). `options`
 /// gates the ops that remove something (ADR-0013's ladder): without
 /// `destructive`, drops are left out and their leftover reports stand.
 ///
@@ -335,7 +540,10 @@ fn declared_row_security(model: &SchemaModel) -> LiveRowSecurity {
 /// 1. On Postgres, label additions to existing enum types (ADR-0011) — first,
 ///    so any later statement may name a new label — then the creation of
 ///    every enum type the plan introduces and that does not yet exist.
-/// 2. New tables, parents before children.
+/// 2. New tables, parents before children, each followed by what its
+///    `CREATE TABLE` cannot carry from the side it is read from (a live
+///    table's checks, row-security flags and policies, which its IR does not
+///    hold).
 /// 3. Every table in both snapshots, ordered by model name and then so a
 ///    table follows the tables its foreign keys reference, each table's ops
 ///    in the reconciliation pass's order: column adds and alters; index adds
@@ -360,45 +568,37 @@ fn declared_row_security(model: &SchemaModel) -> LiveRowSecurity {
 /// ([`HintError`]) applies no rename and stands in
 /// [`Plan::reports`] as [`crate::ReportKind::HintRefused`]; the generator
 /// refuses it before writing anything.
-///
-/// # Errors
-/// [`PlanError::MissingLiveFacts`] when, on the live side, a table of `old`
-/// has no entry in `facts`.
-pub fn plan_from_ir(
-    old: &IrEnvelope<SchemaIrPayload>,
-    new: &IrEnvelope<SchemaIrPayload>,
-    dialect: Dialect,
-    facts: &LiveFacts,
-    options: PlanOptions,
-) -> Result<Plan, PlanError> {
-    facts.cover(old)?;
-    // The snapshot side reads no fact, whatever the value carries.
-    let declared = LiveFacts::declared();
-    let facts = if facts.side == OldSide::Snapshot {
-        &declared
-    } else {
-        facts
-    };
-    let hints = match live_hints(&old.payload, &new.payload) {
-        Ok(hints) => hints,
+pub fn plan_from_ir(old: &Side, new: &Side, dialect: Dialect, options: PlanOptions) -> Plan {
+    match live_hints(&old.ir().payload, &new.ir().payload) {
+        Ok(hints) => plan_with_hints(old, new, &hints, dialect, options),
         Err(refusal) => {
-            let mut plan = plan_named(old, new, dialect, facts, options)?;
+            let mut plan = plan_named(old, new, dialect, options);
             plan.reports.push(hint_refusal_warning(&refusal));
-            return Ok(plan);
+            plan
         }
-    };
-    if hints.is_empty() {
-        return plan_named(old, new, dialect, facts, options);
     }
-    let renamed = renamed_snapshot(old, &hints);
-    let mut operations = rename_ops(old, &renamed, dialect);
-    fact_renames(&mut operations, facts, old, &hints, dialect);
-    let facts = renamed_facts(facts, &operations, new, dialect);
-    let renamed = before_renamed_by(old, &hints, dialect);
-    let mut plan = plan_named(&renamed, new, dialect, &facts, options)?;
+}
+
+/// [`plan_from_ir`] with the renames `hints` declare: their rename ops
+/// first, then everything else planned from `old` as they leave it.
+fn plan_with_hints(
+    old: &Side,
+    new: &Side,
+    hints: &[Hint],
+    dialect: Dialect,
+    options: PlanOptions,
+) -> Plan {
+    if hints.is_empty() {
+        return plan_named(old, new, dialect, options);
+    }
+    let renamed = renamed_snapshot(old.ir(), hints);
+    let mut operations = rename_ops(old.ir(), &renamed, dialect);
+    old.fact_renames(&mut operations, hints, dialect);
+    let before = old.renamed(&operations, hints, new, dialect);
+    let mut plan = plan_named(&before, new, dialect, options);
     operations.append(&mut plan.operations);
     plan.operations = operations;
-    Ok(plan)
+    plan
 }
 
 /// `old` as the renames [`plan_from_ir`]`(old, new, dialect, …)` plans leave
@@ -441,7 +641,7 @@ fn before_renamed_by(
 /// that made it (a column check through `db_check_constraint_name`, a table
 /// check and a policy through their suffix), exactly as [`renamed_snapshot`]
 /// re-derives a declared one; a name an IR rename op already covers is left
-/// alone. With [`LiveFacts::declared`] there is nothing to add.
+/// alone.
 fn fact_renames(
     ops: &mut Vec<MigrationOp>,
     facts: &LiveFacts,
@@ -515,8 +715,7 @@ fn fact_renames(
 /// rebuilds it in this same plan. A rename the dialect
 /// cannot run in place renames no fact: on SQLite a constraint keeps its live
 /// name until a generated migration's rebuild renames it, so the plan reports
-/// the catalog as it is. The facts of [`LiveFacts::declared`] carry no table
-/// and are returned unchanged.
+/// the catalog as it is.
 fn renamed_facts(
     facts: &LiveFacts,
     ops: &[MigrationOp],
@@ -684,15 +883,9 @@ fn renamed_facts(
 /// Every change [`plan_from_ir`] plans once the tables and columns of `old`
 /// and `new` are matched by name: `old` is the planned-before side the plan
 /// holds.
-fn plan_named(
-    old: &IrEnvelope<SchemaIrPayload>,
-    new: &IrEnvelope<SchemaIrPayload>,
-    dialect: Dialect,
-    facts: &LiveFacts,
-    options: PlanOptions,
-) -> Result<Plan, PlanError> {
-    let old_models = index_models(&old.payload.models);
-    let new_models = index_models(&new.payload.models);
+fn plan_named(old: &Side, new: &Side, dialect: Dialect, options: PlanOptions) -> Plan {
+    let old_models = index_models(&old.ir().payload.models);
+    let new_models = index_models(&new.ir().payload.models);
     let mut plan = Plan::between(old, new, dialect);
 
     let added: Vec<&SchemaModel> = new_models
@@ -707,44 +900,23 @@ fn plan_named(
         .collect();
 
     if dialect == Dialect::Postgres {
-        plan_enum_label_additions(old, new, facts, &mut plan);
-        plan_enum_type_creation(old, new, &old_models, facts, &mut plan);
+        plan_enum_label_additions(old, new, &mut plan);
+        plan_enum_type_creation(old, new, &old_models, &mut plan);
     }
-    if facts.side == OldSide::Snapshot {
-        plan_enum_label_removals(old, new, &mut plan);
+    if old.plans_label_removals() {
+        plan_enum_label_removals(old.ir(), new.ir(), &mut plan);
     }
 
     for model in emit::order_models_for_create(&added) {
         plan.operations.push(MigrationOp::AddTable {
             table: model.table_name.clone(),
         });
+        plan.operations
+            .extend(beyond_the_create(new, model, dialect));
     }
 
     for (old_model, new_model) in order_existing_tables(&old_models, &new_models) {
-        let (old_view, table_facts) = match facts.side {
-            OldSide::Snapshot => (
-                declared_live_view(old_model, dialect),
-                Cow::Owned(declared_table_facts(old_model)),
-            ),
-            OldSide::Live => {
-                let live = facts.tables.get(&new_model.table_name).ok_or_else(|| {
-                    PlanError::MissingLiveFacts {
-                        table: new_model.table_name.clone(),
-                    }
-                })?;
-                (Cow::Borrowed(old_model), Cow::Borrowed(live))
-            }
-        };
-        let side = facts.side;
-        plan_existing_table(
-            &old_view,
-            new_model,
-            dialect,
-            &table_facts,
-            side,
-            options,
-            &mut plan,
-        );
+        plan_existing_table(old, new, old_model, new_model, dialect, options, &mut plan);
     }
 
     if options.destructive {
@@ -754,11 +926,53 @@ fn plan_named(
             });
         }
         if dialect == Dialect::Postgres {
-            plan_enum_type_drops(old, new, &old_models, &new_models, &mut plan);
+            plan_enum_type_drops(old.ir(), new.ir(), &old_models, &new_models, &mut plan);
         }
     }
 
-    Ok(plan)
+    plan
+}
+
+/// What a table `side` holds needs beyond its `CREATE TABLE`, which renders
+/// the table's IR: each check, row-security flag and policy its facts hold
+/// that its IR does not declare. A declaration's facts are its IR, so it
+/// needs nothing more; a live table's checks and row security are facts
+/// only, put back after the table as the catalog printed them.
+fn beyond_the_create(side: &Side, model: &SchemaModel, dialect: Dialect) -> Vec<MigrationOp> {
+    let table = model.table_name.as_str();
+    let facts = side.table_facts(model);
+    let declared_checks = declared_check_names(model);
+    let mut ops: Vec<MigrationOp> = facts
+        .checks
+        .iter()
+        .filter(|check| !declared_checks.contains(&check.name))
+        .map(|check| MigrationOp::AddCheck {
+            table: table.to_string(),
+            name: check.name.clone(),
+        })
+        .collect();
+    if dialect != Dialect::Postgres {
+        return ops;
+    }
+    let declared = model.row_security.as_ref();
+    let live = &facts.row_security;
+    if live.enabled && declared.is_none() {
+        ops.push(flag_op(table, RowSecurityFlag::Enable));
+    }
+    if live.forced && !declared.is_some_and(|declaration| declaration.force) {
+        ops.push(flag_op(table, RowSecurityFlag::Force));
+    }
+    let declared_policies = declared_row_policy_names(model);
+    ops.extend(
+        live.policies
+            .iter()
+            .filter(|policy| !declared_policies.contains(&policy.name))
+            .map(|policy| MigrationOp::AddRowPolicy {
+                table: table.to_string(),
+                name: policy.name.clone(),
+            }),
+    );
+    ops
 }
 
 /// Tables present in both snapshots, sorted by model name and then so each
@@ -787,15 +1001,18 @@ fn order_existing_tables<'a>(
 }
 
 fn plan_existing_table(
+    old: &Side,
+    new: &Side,
     old_model: &SchemaModel,
     new_model: &SchemaModel,
     dialect: Dialect,
-    facts: &LiveTableFacts,
-    side: OldSide,
     options: PlanOptions,
     plan: &mut Plan,
 ) {
     let table = new_model.table_name.as_str();
+    let facts = old.table_facts(old_model);
+    let old_view = old.table_view(old_model, dialect);
+    let old_model = old_view.as_ref();
     let mut ops = Vec::new();
     let mut column_drops = Vec::new();
 
@@ -837,6 +1054,14 @@ fn plan_existing_table(
         &mut plan.reports,
     );
 
+    // The checks the target holds, each with its body as the target holds it
+    // (a declaration's canonical rendering, or a live table's catalog text).
+    let target_checks: Vec<(String, String)> = new
+        .checks(new_model)
+        .into_iter()
+        .map(|(name, body)| (name, body.text().to_string()))
+        .collect();
+    let target_names: Vec<String> = target_checks.iter().map(|(name, _)| name.clone()).collect();
     // Check addition (#343; ADR-0013) lands after the column ops, so a CHECK
     // over a newly added column follows its ADD COLUMN.
     let live_check_names: Vec<String> = facts
@@ -848,6 +1073,7 @@ fn plan_existing_table(
         table,
         old_model,
         new_model,
+        &target_names,
         &live_check_names,
     ));
     // Body drift (#344; ADR-0015), after the adds. Only ferro-owned names are
@@ -858,7 +1084,7 @@ fn plan_existing_table(
         .filter(|check| check.ferro_owned)
         .map(|check| (check.name.clone(), check.definition.clone()))
         .collect();
-    ops.extend(check_rebuilds(table, new_model, &live_ferro_owned));
+    ops.extend(check_rebuilds(table, &target_checks, &live_ferro_owned));
     // Validation (#515; ADR-0043): after every add, leaving out any name a
     // rebuild covers — the rebuild's bare ADD installs a valid constraint.
     let rebuilt: Vec<String> = ops
@@ -890,21 +1116,24 @@ fn plan_existing_table(
         .iter()
         .map(|(name, _)| name.clone())
         .collect();
-    let extras = extra_check_names(&declared_check_names(new_model), &live_ferro_owned_names);
+    let extras = extra_check_names(&target_names, &live_ferro_owned_names);
     plan.reports
         .extend(extra_check_names_warning(table, &extras));
     if options.destructive {
-        ops.extend(check_drops(table, new_model, &live_ferro_owned_names));
+        ops.extend(extras.into_iter().map(|name| MigrationOp::DropCheck {
+            table: table.to_string(),
+            name,
+        }));
     }
 
     // Row security lands last for the table (#413; PRD #406 user story 20):
     // every column change and data-shaped step above has run before any
     // policy starts filtering the rows it touches.
     plan_row_security(
-        new_model,
+        old,
+        &new.declaration(new_model),
         &facts.row_security,
         dialect,
-        side,
         options.destructive,
         &mut ops,
         &mut plan.reports,
@@ -916,31 +1145,28 @@ fn plan_existing_table(
     plan.operations.extend(ops);
 }
 
-/// Translate the row-security reconciliation decision for one live table
+/// Translate the row-security reconciliation decision for one table
 /// (`plan_row_security_reconcile`, the single seam; AGENTS.md § I-1 item 16)
 /// into ops, in its execution order: missing flags, policy additions,
-/// rebuilds, then (destructive) orphan drops and the flag teardown. Its
-/// reports — foreign and unverifiable policies, dropped declarations,
-/// teardowns — become the plan's recurring reports; a foreign policy and an
-/// unverifiable raw body are reported and never become an op.
+/// rebuilds, then (destructive) orphan drops and the flag teardown. `model`
+/// is the table as the target declares it ([`Side::declaration`]) and `live`
+/// its row security on the `old` side.
 ///
-/// Between two declared snapshots ([`OldSide::Snapshot`], the generator)
-/// the parent snapshot answers the two questions a live table cannot
-/// (ADR-0019, ADR-0033): a raw body that differs is the author's edit, since
-/// both texts are ferro's own copies of a declaration, so it is rebuilt like
-/// a shorthand one; and row security the parent declared was installed by
-/// ferro, so a declaration the target drops is torn down
-/// ([`excess_row_security_flags`]) whether or not a ferro-named policy is left
-/// to witness it. Every difference is then an op in a reviewed file, so the
-/// decision's reports of live conditions (unverifiable and replaced bodies,
-/// a teardown done) are not carried; a non-destructive plan still reports
-/// the removals it withholds.
-#[allow(clippy::too_many_arguments)]
+/// The `old` side answers what a live table cannot (ADR-0019, ADR-0033):
+/// planned from a declaration, a raw body that differs is the author's edit
+/// ([`Side::rebuilds_unverifiable_bodies`]), so it is rebuilt like a
+/// shorthand one; and row security the declaration declared was installed by
+/// ferro ([`Side::proves_row_security_installed`]), so a declaration the
+/// target drops is torn down whether or not a ferro-named policy is left to
+/// witness it. Every difference is then an op, so the decision's reports of
+/// live conditions (unverifiable and replaced bodies, a teardown done) are
+/// carried only from a live side ([`Side::reports_conditions`]); a
+/// non-destructive plan still reports the removals it withholds.
 fn plan_row_security(
+    old: &Side,
     model: &SchemaModel,
     live: &LiveRowSecurity,
     dialect: Dialect,
-    side: OldSide,
     destructive: bool,
     ops: &mut Vec<MigrationOp>,
     reports: &mut Vec<Report>,
@@ -952,14 +1178,14 @@ fn plan_row_security(
         return;
     };
     let table = model.table_name.as_str();
-    match side {
-        OldSide::Live => reports.extend(decision.reports),
-        OldSide::Snapshot if !destructive => reports.extend(
+    if old.reports_conditions() {
+        reports.extend(decision.reports);
+    } else if !destructive {
+        reports.extend(
             dropped_row_security_warning(model, live)
                 .into_iter()
                 .chain(extra_row_policy_names_warning(table, &decision.extra)),
-        ),
-        OldSide::Snapshot => {}
+        );
     }
     if dialect != Dialect::Postgres {
         return;
@@ -979,11 +1205,11 @@ fn plan_row_security(
                 name,
             }),
     );
-    // Rebuilds in declaration order: drifted bodies, and on a snapshot the
-    // edited raw ones.
+    // Rebuilds in declaration order: drifted bodies, and from a declaration
+    // the edited raw ones.
     let rebuilt = |name: &String| {
         decision.drifted.contains(name)
-            || (side == OldSide::Snapshot && decision.unverifiable.contains(name))
+            || (old.rebuilds_unverifiable_bodies() && decision.unverifiable.contains(name))
     };
     ops.extend(
         declared_row_policy_names(model)
@@ -1004,10 +1230,8 @@ fn plan_row_security(
                     name,
                 }),
         );
-        // A declared parent is itself the proof that ferro installed the
-        // row security it declared (ADR-0033); a live table proves it with a
-        // ferro-named policy.
-        let installed_by_ferro = side == OldSide::Snapshot || ferro_manages_row_security(live);
+        let installed_by_ferro =
+            old.proves_row_security_installed() || ferro_manages_row_security(live);
         ops.extend(
             excess_row_security_flags(model, live, installed_by_ferro)
                 .into_iter()
@@ -1113,35 +1337,24 @@ fn declared_enum_labels(models: &[SchemaModel]) -> DeclaredEnumTypes {
     collect_enums(models, enum_declaration)
 }
 
-/// Label addition (ADR-0011): for every declared type that already exists,
-/// the labels it lacks, and a warning naming the live labels the model no
-/// longer declares (warn-never-act). A type's existing labels are the live
-/// database's when `facts` records it, else the `old` snapshot's.
-fn plan_enum_label_additions(
-    old: &IrEnvelope<SchemaIrPayload>,
-    new: &IrEnvelope<SchemaIrPayload>,
-    facts: &LiveFacts,
-    plan: &mut Plan,
-) {
-    let declared = declared_enum_types(&new.payload.models);
-    let before = declared_enum_types(&old.payload.models);
+/// Label addition (ADR-0011): for every type `new` declares that `old`
+/// already holds, the labels it lacks; from a live database, a report naming
+/// the live labels the model no longer declares (warn-never-act).
+fn plan_enum_label_additions(old: &Side, new: &Side, plan: &mut Plan) {
+    let declared = declared_enum_types(&new.ir().payload.models);
     for (type_name, labels) in &declared.labels {
-        let Some(existing) = facts
-            .enum_labels
-            .get(type_name)
-            .or_else(|| before.labels.get(type_name))
-        else {
+        let Some(existing) = old.enum_labels(type_name) else {
             continue;
         };
-        // Between two snapshots a dropped label is a removal the generator
-        // answers ([`plan_enum_label_removals`]); live, it only warns.
-        let extra = extra_enum_labels(labels, existing);
-        if facts.side == OldSide::Live
+        // From a declaration a dropped label is a removal
+        // ([`plan_enum_label_removals`]); from a live database, it only warns.
+        let extra = extra_enum_labels(labels, &existing);
+        if old.reports_conditions()
             && let Some(report) = extra_enum_labels_warning(type_name, &extra)
         {
             plan.reports.push(report);
         }
-        for label in missing_enum_labels(labels, existing) {
+        for label in missing_enum_labels(labels, &existing) {
             plan.operations.push(MigrationOp::AddEnumLabel {
                 type_name: type_name.clone(),
                 label,
@@ -1150,8 +1363,8 @@ fn plan_enum_label_additions(
     }
 }
 
-/// Label removal between two declared snapshots (#536; never on the live
-/// side, where ADR-0011 warns and never acts): every label an enum of `old`
+/// Label removal from a declared `old` (#536; never from a live database,
+/// where ADR-0011 warns and never acts): every label an enum of `old`
 /// declares that the same enum in `new` drops, how ever it is stored, unless
 /// a declared hint renames it ([`enum_rename_ops`] owns that). One op per
 /// label, over every column of `new` declaring the type. Planned on every
@@ -1188,20 +1401,17 @@ fn plan_enum_label_removals(
 
 /// Type creation: every declared type the plan introduces
 /// (`enum_type_provenance` over the columns it adds — a new table's, or an
-/// existing table's new column) that neither the live database nor the `old`
-/// snapshot already has.
+/// existing table's new column) that `old` does not already hold.
 fn plan_enum_type_creation(
-    old: &IrEnvelope<SchemaIrPayload>,
-    new: &IrEnvelope<SchemaIrPayload>,
+    old: &Side,
+    new: &Side,
     old_models: &BTreeMap<String, &SchemaModel>,
-    facts: &LiveFacts,
     plan: &mut Plan,
 ) {
-    let declared = declared_enum_types(&new.payload.models);
-    let before = declared_enum_types(&old.payload.models);
+    let declared = declared_enum_types(&new.ir().payload.models);
     let mut added_columns = Vec::new();
     let mut inline_created_columns = Vec::new();
-    for model in &new.payload.models {
+    for model in &new.ir().payload.models {
         let old_model = old_models.get(&model.table_name);
         for col in &model.columns {
             let pair = (model.table_name.clone(), col.name.clone());
@@ -1220,9 +1430,9 @@ fn plan_enum_type_creation(
     for (type_name, provenance) in
         enum_type_provenance(&declared.declaring, &added_columns, &inline_created_columns)
     {
-        let exists =
-            facts.enum_labels.contains_key(&type_name) || before.labels.contains_key(&type_name);
-        if matches!(provenance, EnumTypeProvenance::Introduced { .. }) && !exists {
+        if matches!(provenance, EnumTypeProvenance::Introduced { .. })
+            && old.enum_labels(&type_name).is_none()
+        {
             let labels = declared.labels.get(&type_name).cloned().unwrap_or_default();
             plan.operations
                 .push(MigrationOp::CreateEnumType { type_name, labels });
@@ -1273,17 +1483,19 @@ fn plan_enum_type_drops(
 }
 
 /// Plan the [`MigrationOp::AddCheck`] operations for one table (#343;
-/// ADR-0013): every declared CHECK constraint — table check or column check —
-/// that `live_check_names` does not already cover. The decision is name-based
-/// and single-sourced in `ferro_ddl_lowering::missing_check_names`.
+/// ADR-0013): every check the target holds (`target_names`) — table check or
+/// column check — that `live_check_names` does not already cover. The
+/// decision is name-based and single-sourced in
+/// `ferro_ddl_lowering::missing_check_names`.
 fn missing_checks(
     table: &str,
     old_model: &SchemaModel,
     new_model: &SchemaModel,
+    target_names: &[String],
     live_check_names: &[String],
 ) -> Vec<MigrationOp> {
     let riders = added_column_riders(old_model, new_model);
-    missing_check_names(new_model, live_check_names)
+    missing_check_names(target_names, live_check_names)
         .into_iter()
         // A column check of an added column rides its `AddColumn`. Table
         // checks always stand alone.
@@ -1296,46 +1508,20 @@ fn missing_checks(
 }
 
 /// Plan the [`MigrationOp::RebuildCheck`] operations for one table (#344;
-/// ADR-0015): every declared CHECK whose live counterpart exists and whose
-/// normalized body differs from the canonical rendering. `live` is
-/// `(name, catalog definition)` pairs of ferro-owned CHECKs.
+/// ADR-0015): every check the target holds (`target`, `(name, body)`) whose
+/// counterpart on the old side exists and whose normalized body differs.
+/// `live` is `(name, catalog definition)` pairs of ferro-owned CHECKs.
 fn check_rebuilds(
     table: &str,
-    new_model: &SchemaModel,
+    target: &[(String, String)],
     live: &[(String, String)],
 ) -> Vec<MigrationOp> {
-    drifted_check_names(new_model, live)
+    drifted_check_names(target, live)
         .into_iter()
         .map(|name| MigrationOp::RebuildCheck {
             table: table.to_string(),
             name,
         })
-        .collect()
-}
-
-/// Plan the [`MigrationOp::DropCheck`] operations for one table (#345;
-/// ADR-0013): every live ferro-owned CHECK name the model no longer declares,
-/// in live order.
-fn check_drops(
-    table: &str,
-    new_model: &SchemaModel,
-    live_ferro_owned_names: &[String],
-) -> Vec<MigrationOp> {
-    extra_check_names(&declared_check_names(new_model), live_ferro_owned_names)
-        .into_iter()
-        .map(|name| MigrationOp::DropCheck {
-            table: table.to_string(),
-            name,
-        })
-        .collect()
-}
-
-fn declared_check_names(model: &SchemaModel) -> Vec<String> {
-    model
-        .table_checks
-        .iter()
-        .map(|check| check.name.clone())
-        .chain(model.checks.iter().map(|check| check.name.clone()))
         .collect()
 }
 
@@ -2685,7 +2871,6 @@ pub fn reverse_live_plan(
     declared: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
 ) -> Result<ReversePlan, PlanError> {
-    facts.cover(live)?;
     let before = planned_before(live, declared, dialect).into_owned();
     let renames: Vec<MigrationOp> = forward
         .operations
@@ -3210,7 +3395,10 @@ mod reverse_tests {
     fn live_facts(table: LiveTableFacts) -> LiveFacts {
         let mut tables = BTreeMap::new();
         tables.insert("card".to_string(), table);
-        LiveFacts::live(tables, BTreeMap::new())
+        LiveFacts {
+            tables,
+            enum_labels: BTreeMap::new(),
+        }
     }
 
     fn statements(
@@ -3283,13 +3471,11 @@ mod reverse_tests {
         let declared = envelope(vec![declared_card]);
         let facts = live_facts(LiveTableFacts::default());
         let forward = plan_from_ir(
-            &live,
-            &declared,
+            &Side::live(live.clone(), facts.clone()).expect("live side"),
+            &Side::declared(declared.clone()),
             Dialect::Postgres,
-            &facts,
             PlanOptions { destructive: true },
-        )
-        .expect("forward");
+        );
         assert_eq!(
             forward.operations,
             vec![
@@ -3325,13 +3511,11 @@ mod reverse_tests {
         let declared = envelope(vec![card(vec![column("id", "int", false)])]);
         let facts = live_facts(LiveTableFacts::default());
         let forward = plan_from_ir(
-            &live,
-            &declared,
+            &Side::live(live.clone(), facts.clone()).expect("live side"),
+            &Side::declared(declared.clone()),
             Dialect::Postgres,
-            &facts,
             PlanOptions { destructive: true },
-        )
-        .expect("forward");
+        );
         let reverse = reverse_live_plan(&forward, &live, &facts, &declared, Dialect::Postgres)
             .expect("reverse plan");
         let nickname = reverse
@@ -3490,13 +3674,11 @@ mod reverse_tests {
         let declared = envelope(vec![renamed]);
         let facts = live_facts(LiveTableFacts::default());
         let forward = plan_from_ir(
-            &live,
-            &declared,
+            &Side::live(live.clone(), facts.clone()).expect("live side"),
+            &Side::declared(declared.clone()),
             Dialect::Postgres,
-            &facts,
             PlanOptions { destructive: true },
-        )
-        .expect("forward");
+        );
         assert_eq!(
             statements(&forward, &live, &facts, &declared),
             vec![

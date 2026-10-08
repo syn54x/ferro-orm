@@ -33,7 +33,8 @@ use ferro_ddl_lowering::{
     run_lock_wait_warning,
 };
 use ferro_migrate::{
-    LiveFacts, MigrationOp, PlanOptions, RenderedOp, Report, ReportKind, Subject, plan_from_ir,
+    LiveFacts, MigrationOp, PlanOptions, RenderedOp, Report, ReportKind, Side, Subject,
+    plan_from_ir,
     validate_schema_ir,
 };
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload};
@@ -850,8 +851,12 @@ async fn run_passes(
         })
         .collect();
     let (live, facts) = live_schema_ir(&engine, &existing).await?;
-    let plan =
-        plan_from_ir(&live, &modelset, backend, &facts, opts.plan_options()).map_err(plan_error)?;
+    let plan = plan_from_ir(
+        &Side::live(live, facts).map_err(plan_error)?,
+        &Side::declared(modelset.clone()),
+        backend,
+        opts.plan_options(),
+    );
     let rendered = plan.render().map_err(emission_error)?;
 
     if backend == Dialect::Postgres {
@@ -1196,8 +1201,12 @@ pub fn _render_migration_sql_for_test(
         return Ok((Vec::new(), Vec::new()));
     }
     let (live, facts) = live_tables_to_schema_ir(vec![table], Default::default(), backend);
-    let plan =
-        plan_from_ir(&live, &declared, backend, &facts, opts.plan_options()).map_err(plan_error)?;
+    let plan = plan_from_ir(
+        &Side::live(live, facts).map_err(plan_error)?,
+        &Side::declared(declared),
+        backend,
+        opts.plan_options(),
+    );
     let rendered = plan.render().map_err(emission_error)?;
 
     let mut statements = Vec::new();
@@ -1260,7 +1269,12 @@ pub fn _plan_reverse_from_ir(
         pyo3::exceptions::PyValueError::new_err(format!("invalid facts_json: {e}"))
     })?;
     validate_schema_ir(&declared).map_err(emission_error)?;
-    let forward = plan_from_ir(&live, &declared, backend, &facts, options).map_err(plan_error)?;
+    let forward = plan_from_ir(
+        &Side::live(live.clone(), facts.clone()).map_err(plan_error)?,
+        &Side::declared(declared.clone()),
+        backend,
+        options,
+    );
     let reverse =
         reverse_live_plan(&forward, &live, &facts, &declared, backend).map_err(plan_error)?;
     let operations: Vec<serde_json::Value> = if render {
@@ -1339,8 +1353,8 @@ pub(crate) fn parse_schema_envelope(
 ///
 /// `options_json` is `{"destructive": bool}`. `facts_json` says which side
 /// `old_ir_json` is: given (even `"{}"`), a live database whose side-table
-/// `_live_schema_ir` returned beside it, with an entry for every table;
-/// omitted, a declared snapshot (`LiveFacts::declared`). The result is
+/// `_live_schema_ir` returned beside it, with an entry for every table
+/// (`Side::live`); omitted, a declared snapshot (`Side::declared`). The result is
 /// `{"operations": [{"kind": …, <op fields>}], "reports": [{"kind", "subject",
 /// "text", "recurs", "blocks"}]}`; with `render`, each op also carries the
 /// `statements` and `reports` it renders to, but the ops at the `unrendered`
@@ -1372,16 +1386,19 @@ pub fn _plan_from_ir(
     let options: PlanOptions = serde_json::from_str(&options_json).map_err(|e| {
         pyo3::exceptions::PyValueError::new_err(format!("invalid options_json: {e}"))
     })?;
-    let facts: LiveFacts = match facts_json {
-        Some(json) => serde_json::from_str(&json).map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!("invalid facts_json: {e}"))
-        })?,
-        None => LiveFacts::declared(),
-    };
     validate_schema_ir(&old).map_err(emission_error)?;
     validate_schema_ir(&new).map_err(emission_error)?;
+    let old = match facts_json {
+        Some(json) => {
+            let facts: LiveFacts = serde_json::from_str(&json).map_err(|e| {
+                pyo3::exceptions::PyValueError::new_err(format!("invalid facts_json: {e}"))
+            })?;
+            Side::live(old, facts).map_err(plan_error)?
+        }
+        None => Side::declared(old),
+    };
 
-    let plan = plan_from_ir(&old, &new, backend, &facts, options).map_err(plan_error)?;
+    let plan = plan_from_ir(&old, &Side::declared(new), backend, options);
     let to_value = |value: serde_json::Result<serde_json::Value>| {
         value.map_err(|e| {
             pyo3::exceptions::PyRuntimeError::new_err(format!("could not serialize the plan: {e}"))
