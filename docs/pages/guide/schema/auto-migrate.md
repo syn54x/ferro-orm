@@ -225,7 +225,7 @@ The report is built from what the pass actually executed, never from its plan, s
     - `"lock_timeout"`: the `SET LOCAL lock_timeout` (or `SET` / `RESET`) the pass wraps each Postgres unit in, so a statement never queues behind a long lock;
     - `"probe"`: the row read SQLite costs for a [label rename](#evolving-enums-label-addition) on a column with no check.
 - **`warnings`** is a tuple of `Report(kind, subject, text, recurs)`; `str(warning)` is its sentence. Every warning is still raised as a `UserWarning` too. `kind` names it, so code can match on it rather than on the text:
-    - the planner's and renderer's kinds: `LeftoverChecks`, `ExtraEnumLabels`, `ForeignFkDrift`, `HintRefused`, the row-security kinds (`DroppedRowSecurity`, `ForeignPolicies`, `UnverifiablePolicy`, `PolicyBodyReplaced`, `RowSecurityTeardown`, `ExtraPolicies`), `RefusedConversion`, `SqliteInPlace`, `PrimaryKeyKept`, `RowSecuritySkipped`;
+    - the planner's and renderer's kinds: `LeftoverChecks`, `ExtraEnumLabels`, `ForeignFkDrift`, `HintRefused`, the row-security kinds (`DroppedRowSecurity`, `ForeignPolicies`, `UnverifiablePolicy`, `PolicyBodyReplaced`, `RowSecurityTeardown`, `ExtraPolicies`), `RefusedConversion`, `SqliteInPlace`, `PrimaryKeyKept`, `EnumTypeMove` (a column moving to or from a native enum type, reported with the recipe a migration follows), `RowSecuritySkipped`;
     - the pass's own: `PendingTableRename`, `StrandedLabelRename`, `RowSecurityUnderMigrator`, `RunLockWait` (it waited for the run lock) and `DdlLockRetry` (a statement timed out waiting for a table lock and its unit is retried).
 
     `recurs` is `True` for a warning raised on every pass until someone acts.

@@ -144,6 +144,9 @@ pub enum GenerateError {
         table: String,
         /// The column.
         column: String,
+        /// On a move to an enum type from a text column, the `db_type` token
+        /// that keeps the values in a text column.
+        keep: Option<String>,
     },
     /// The renderer has no statement for an op on a dialect, only a warning
     /// saying why (a cast the pass refuses): writing the file without it
@@ -193,9 +196,14 @@ impl std::fmt::Display for GenerateError {
                 table: table.clone(),
             }
             .fmt(f),
-            GenerateError::EnumTypeMove { table, column } => Refusal::EnumTypeMove {
+            GenerateError::EnumTypeMove {
+                table,
+                column,
+                keep,
+            } => Refusal::EnumTypeMove {
                 table: table.clone(),
                 column: column.clone(),
+                keep: keep.clone(),
             }
             .fmt(f),
             GenerateError::Unrenderable {
@@ -279,12 +287,15 @@ fn phase_of(op: &PlannedOp, data_steps: bool) -> Result<Phase, GenerateError> {
                 table: table.clone(),
             }
         }
-        Execution::Refused(Refusal::EnumTypeMove { table, column }) => {
-            GenerateError::EnumTypeMove {
-                table: table.clone(),
-                column: column.clone(),
-            }
-        }
+        Execution::Refused(Refusal::EnumTypeMove {
+            table,
+            column,
+            keep,
+        }) => GenerateError::EnumTypeMove {
+            table: table.clone(),
+            column: column.clone(),
+            keep: keep.clone(),
+        },
         // Between two declared snapshots every op is expressible (ADR-0033):
         // meeting one that is not is a planner bug, said loudly.
         other => GenerateError::Render(format!(
@@ -396,10 +407,7 @@ fn render_warnings(
     dialect: Dialect,
     warnings: &mut Vec<String>,
 ) -> Result<(), GenerateError> {
-    let decided: Vec<PlannedOp> = downs::decided(ops, before, after, dialect)
-        .into_iter()
-        .filter(|planned| !columns::omitted(planned, dialect))
-        .collect();
+    let decided: Vec<PlannedOp> = downs::decided(ops, before, after, dialect);
     let rebuilt = rebuild::tables_to_rebuild(&decided);
     let native: Vec<MigrationOp> = decided
         .into_iter()
@@ -3561,9 +3569,9 @@ mod tests {
         text.columns[2].enum_values = None;
         assert_eq!(
             refusal(vec![author()], vec![text], &BOTH),
-            "changing \"author\".\"status\" to or from a native enum type is not generated: \
-             add a column of the new type, copy the values across in a data step (ferro \
-             migrate new --data-step …), then drop the old column"
+            "\"author\".\"status\" moves to or from a native enum type, which no statement \
+             converts in place: add a column of the new type, copy the values across in a \
+             data step (ferro migrate new --data-step …), then drop the old column"
         );
     }
 
@@ -3580,9 +3588,9 @@ mod tests {
         after.columns[3].enum_type_name = Some("authorstatus".into());
         assert_eq!(
             refusal(vec![before], vec![after], &[Dialect::Postgres]),
-            "changing \"author\".\"previous\" to or from a native enum type is not generated: \
-             add a column of the new type, copy the values across in a data step (ferro \
-             migrate new --data-step …), then drop the old column"
+            "\"author\".\"previous\" moves to or from a native enum type, which no statement \
+             converts in place: add a column of the new type, copy the values across in a \
+             data step (ferro migrate new --data-step …), then drop the old column"
         );
     }
 

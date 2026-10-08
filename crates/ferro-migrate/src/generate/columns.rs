@@ -15,7 +15,7 @@
 //! generator writes it. Every statement still comes from the plan's renderer
 //! or [`super::rebuild::render`] (AGENTS.md § I-1).
 
-use crate::{Dialect, Execution, MigrationOp, PlannedOp, Rider};
+use crate::{Execution, MigrationOp, PlannedOp, Rider};
 
 /// The phase step an op lands in, in the order a migration's steps run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -71,7 +71,7 @@ pub(crate) fn phase(op: &PlannedOp, data_steps: bool) -> Option<Phase> {
     ) {
         return None;
     }
-    Some(if matches!(op.op, MigrationOp::AddEnumLabel { .. }) {
+    Some(if op.op.commits_alone() {
         Phase::Labels
     } else if verdict.demands_values {
         Phase::Backfill
@@ -94,16 +94,6 @@ pub(crate) fn phase(op: &PlannedOp, data_steps: bool) -> Option<Phase> {
     })
 }
 
-/// Whether a file on `dialect` leaves `op` out: on SQLite, the drop of a
-/// dropped column's own inline check, which its `DROP COLUMN` already removes
-/// (the renderer has no statement for it, only a report that would be false
-/// here).
-pub(crate) fn omitted(op: &PlannedOp, dialect: Dialect) -> bool {
-    dialect == Dialect::Sqlite
-        && matches!(op.op, MigrationOp::DropCheck { .. })
-        && op.verdict.goes_with == Some(Rider::DroppedColumn)
-}
-
 #[cfg(test)]
 mod tests {
     //! The verdict table, `(op, sides, dialect) → OpVerdict`, and the up
@@ -111,7 +101,7 @@ mod tests {
     //! by its consumers ([`super::super::downs`]).
     use super::super::tests::{column, ir, model, pk};
     use super::*;
-    use crate::{OpVerdict, Refusal, RowRisk, Side};
+    use crate::{Dialect, OpVerdict, Refusal, RowRisk, Side};
     use ferro_schema_ir::{SchemaCheck, SchemaColumn, SchemaForeignKey, SchemaIndex, SchemaModel};
 
     const DIALECTS: [Dialect; 2] = [Dialect::Postgres, Dialect::Sqlite];
@@ -544,7 +534,9 @@ mod tests {
             execution(&op, &before, &author(vec![status]), Dialect::Postgres),
             Execution::Refused(Refusal::EnumTypeMove {
                 table: "author".into(),
-                column: "age".into()
+                column: "age".into(),
+                // An integer column has no text token to keep.
+                keep: None,
             })
         );
         // The primary key's type.
@@ -662,7 +654,6 @@ mod tests {
         );
         assert_eq!(dropped.verdict.goes_with, Some(Rider::DroppedColumn));
         assert_eq!(dropped.verdict.execution, Execution::Native);
-        assert!(!omitted(&dropped, Dialect::Postgres));
         // A unique index scans the rows.
         let unique = MigrationOp::AddIndex {
             table: "author".into(),
@@ -700,7 +691,27 @@ mod tests {
             );
             assert_eq!(planned.verdict.execution, Execution::Native);
             assert_eq!(planned.verdict.goes_with, Some(Rider::DroppedColumn));
-            assert_eq!(omitted(&planned, dialect), dialect == Dialect::Sqlite);
+            // SQLite's `DROP COLUMN` takes the inline check: no statement and
+            // no report of its own. Postgres drops it explicitly.
+            let rendered = crate::render::render_ops(
+                std::slice::from_ref(&drop_check),
+                &ir(vec![checked.clone()]),
+                &ir(vec![author(vec![])]),
+                dialect,
+                ferro_ddl_lowering::ConstraintMode::Plain,
+                ferro_ddl_lowering::IndexMode::Plain,
+            )
+            .expect("renders");
+            assert!(rendered[0].reports.is_empty(), "{dialect:?}");
+            assert_eq!(
+                rendered[0].statements,
+                match dialect {
+                    Dialect::Sqlite => vec![],
+                    Dialect::Postgres => vec![
+                        "ALTER TABLE \"author\" DROP CONSTRAINT \"ck_author_tier\"".to_string()
+                    ],
+                },
+            );
         }
         // The column stays and only its check goes: an A10 drop.
         let unchecked = author(vec![nullable("tier", "string")]);

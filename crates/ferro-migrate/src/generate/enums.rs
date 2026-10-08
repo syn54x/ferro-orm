@@ -47,11 +47,6 @@ use ferro_ddl_lowering::{quote_ident, quote_label};
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload};
 use std::collections::BTreeMap;
 
-/// Whether `op` belongs in the `labels` step.
-pub fn is_label_addition(op: &MigrationOp) -> bool {
-    matches!(op, MigrationOp::AddEnumLabel { .. })
-}
-
 /// The labels `ops` add, per type, in plan order.
 fn added_labels(ops: &[MigrationOp]) -> BTreeMap<&str, Vec<String>> {
     let mut added: BTreeMap<&str, Vec<String>> = BTreeMap::new();
@@ -152,7 +147,10 @@ pub fn render_labels_step(
     after: &IrEnvelope<SchemaIrPayload>,
     dialect: Dialect,
 ) -> Result<Rendering, GenerateError> {
-    debug_assert!(step_ops.iter().all(is_label_addition), "{step_ops:?}");
+    debug_assert!(
+        step_ops.iter().all(MigrationOp::commits_alone),
+        "{step_ops:?}"
+    );
     let rendered = render_ops(
         step_ops,
         before,

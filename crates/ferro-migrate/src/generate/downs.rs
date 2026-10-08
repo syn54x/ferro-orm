@@ -31,7 +31,6 @@
 //! ```
 
 use super::backfill;
-use super::columns;
 use super::rebuild;
 use super::renames;
 use super::{GenerateError, refuse_unrendered, step_text};
@@ -313,8 +312,7 @@ pub(super) struct StepStatements {
 /// each with its verdict between them ([`decided`]), and the down file
 /// renders [`plan_down`]`(step_ops, after, before)` — the planner run back
 /// between the two declared stages, keeping only the ops whose artifact the
-/// step's up touched. On SQLite the drop of a dropped column's own check is
-/// left out: its `DROP COLUMN` carries it ([`columns::omitted`]).
+/// step's up touched.
 ///
 /// On Postgres the up adds every foreign key and check `NOT VALID`
 /// (ADR-0043); the down restores the step's pre-state with plain statements.
@@ -339,10 +337,7 @@ pub(super) fn render_step(
     dialect: Dialect,
     hints: &[Hint],
 ) -> Result<StepStatements, GenerateError> {
-    let step_ops: Vec<PlannedOp> = decided(step_ops, before, after, dialect)
-        .into_iter()
-        .filter(|planned| !columns::omitted(planned, dialect))
-        .collect();
+    let step_ops: Vec<PlannedOp> = decided(step_ops, before, after, dialect);
     let step_ops = step_ops.as_slice();
     let ops: Vec<MigrationOp> = step_ops.iter().map(|planned| planned.op.clone()).collect();
     // A step holding the migration's renames (ADR-0032) runs its table and
@@ -392,12 +387,7 @@ pub(super) fn render_step(
         &Side::declared(before.clone()),
         dialect,
     );
-    let down_ops: Vec<PlannedOp> = down
-        .operations
-        .iter()
-        .filter(|planned| !columns::omitted(planned, dialect))
-        .cloned()
-        .collect();
+    let down_ops: Vec<PlannedOp> = down.operations.clone();
     if let Some(planned) = down_ops.iter().find(|planned| {
         matches!(
             planned.verdict.execution,

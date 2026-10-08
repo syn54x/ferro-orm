@@ -101,6 +101,7 @@ CASES: tuple[Case, ...] = (
     ),
     Case("A4-drop-an-optional-column", columns.BIO, AUTHOR),
     Case("A4-drop-a-required-column", columns.NICKNAME, AUTHOR),
+    Case("A4-drop-a-checked-column", _CHECKED_MOOD, AUTHOR),
     Case("A5-rename-a-column", renames.A5_BEFORE, renames.A5_AFTER),
     Case(
         "A5-rename-an-indexed-column",
