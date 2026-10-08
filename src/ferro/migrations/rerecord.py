@@ -89,7 +89,7 @@ async def rerecord(
     url: str | None = None,
     target: str,
     mode: Mode = "record",
-    lock_timeout: str | float = "30s",
+    lock_timeout: str | float | None = None,
 ) -> RerecordReport:
     """Accept a deliberate edit of step ``target`` (``"0007:01"``) under the
     run lock: its record takes the file's checksum (and file name and kind),
@@ -99,7 +99,8 @@ async def rerecord(
     step with committed batches, and ``"record"`` for anything else.
     Works on the database and connection
     :meth:`~ferro.migrations.target.Target.resolve` picks. A second run waits
-    up to ``lock_timeout``.
+    up to ``lock_timeout`` (the database's configured ``lock_timeout`` when
+    ``None``).
 
     Raises:
         RunRefused: ``target`` is not one step (a migration alone, the
@@ -112,8 +113,8 @@ async def rerecord(
     """
     if mode not in _MODES:
         raise SettingsError(f"rerecord mode {mode!r} is not one of {', '.join(_MODES)}")
-    timeout = runner.parse_lock_timeout(lock_timeout)
     where = Target.resolve(settings, database, using=using, url=url)
+    timeout = where.database.lock_wait(lock_timeout)
     async with where.open() as name:
         tracked = await runner.open_tracked(name, where.database)
         async with tracked.locked(timeout, runner.say_waiting) as run:

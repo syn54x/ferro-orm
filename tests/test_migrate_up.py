@@ -360,6 +360,90 @@ def test_create_index_concurrently_runs_in_a_no_transaction_step(
     assert db.records()[1][4] == "ddl-no-transaction"
 
 
+@pytest.mark.asyncio
+async def test_a_no_transaction_step_that_fails_after_a_change_refreshes_the_pool(
+    project, pkg, db
+):
+    """A no-transaction step that fails at its second statement has
+    committed its first (ADR-0044): the schema changed, so the engine's
+    pool is refreshed as after a step that succeeded, and a query prepared
+    before the step does not run its stale plan against the wider table."""
+    if db.backend != "postgres":
+        pytest.skip("no-transaction is Postgres-only")
+    configure(project, pkg, "postgres")
+    write_models(project, pkg, AUTHOR)
+    new("create_author")
+    settings, database = settings_and_database()
+    await ferro.connect(db.url, name="app")
+    assert (await runner.up(settings, database.name, using="app")).refusal is None
+    db.execute("INSERT INTO author (id, name, status) VALUES (1, 'a', 'draft')")
+    # Prepare (and cache) the query on every connection of the pool.
+    for _ in range(20):
+        assert (
+            len(await ferro.raw.fetch_all('SELECT * FROM "author"', using="app")) == 1
+        )
+    sql_step(
+        project,
+        "widen",
+        "-- ferro: no-transaction\n"
+        'ALTER TABLE "author" ADD COLUMN "bio" varchar;\n'
+        'ALTER TABLE "author" ADD COLUMN "bio" varchar;\n',
+    )
+
+    report = await run_report(runner.up(settings, database.name, using="app"))
+
+    assert report.refusal is not None and "already exists" in report.refusal
+    for _ in range(20):
+        rows = await ferro.raw.fetch_all('SELECT * FROM "author"', using="app")
+        assert [row["bio"] for row in rows] == [None]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_step_whose_pool_refresh_fails_too_keeps_its_record_and_both_errors(
+    project, pkg, db
+):
+    """The refresh after a failed step that committed DDL runs after the
+    failure record is written: a refresh that fails too raises the step's
+    own failure first, then the refresh's and the reconnect fix, and the
+    record carries the step's error."""
+    if db.backend != "postgres":
+        pytest.skip("no-transaction is Postgres-only")
+    configure(project, pkg, "postgres")
+    write_models(project, pkg, AUTHOR)
+    new("create_author")
+    sql_step(
+        project,
+        "widen",
+        "-- ferro: no-transaction\n"
+        'ALTER TABLE "author" ADD COLUMN "bio" varchar;\n'
+        'ALTER TABLE "author" ADD COLUMN "bio" varchar;\n',
+    )
+    _, database = settings_and_database()
+    await ferro.connect(db.url, name="app")
+    tracked = await runner.open_tracked("app", database)
+    async with tracked.locked(5.0) as run:
+        first, widen = (await run.plan({"direction": "up"})).steps
+        assert (await run.execute(first))["ok"]
+        run._fail_next_refresh_for_test()
+        with pytest.raises(Exception) as raised:
+            await run.execute(widen)
+
+    text = str(raised.value)
+    failed = (
+        'ferro migrate: 0002_widen/01_widen.up.sql failed: column "bio" of '
+        'relation "author" already exists'
+    )
+    assert failed in text
+    assert text.index(failed) < text.index(
+        "Refreshing the connection pool after the statements it committed failed too"
+    )
+    assert "reconnect (ferro.reset_engine(), then ferro.connect())" in text
+    assert db.rows(
+        "SELECT finished_at IS NULL, failed_at IS NOT NULL, error "
+        "FROM _ferro_migrations WHERE migration = 2"
+    ) == [(True, True, 'column "bio" of relation "author" already exists')]
+
+
 REBUILD = """\
 -- ferro: foreign-keys-off
 CREATE TABLE "author_new" ("id" INTEGER PRIMARY KEY, "name" TEXT NOT NULL, "status" TEXT NOT NULL);

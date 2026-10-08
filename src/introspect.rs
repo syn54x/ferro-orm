@@ -8,7 +8,7 @@
 use crate::backend::{EngineBindValue, EngineHandle, EngineRow, EngineValue};
 use crate::state::Dialect;
 use ferro_ddl_lowering::{
-    LiveRowPolicy, LiveRowSecurity, is_ferro_row_policy_name,
+    LiveRowPolicy, LiveRowSecurity, is_ferro_row_policy_name, quote_ident,
     row_policy_command_from_catalog_code,
 };
 use pyo3::prelude::*;
@@ -185,12 +185,6 @@ fn row_opt_i64(row: &EngineRow, column: &str) -> Option<i64> {
         .iter()
         .find(|(name, _)| name == column)
         .and_then(|(_, value)| value.as_i64())
-}
-
-/// Quote an identifier for direct inclusion in SQL (`PRAGMA` arguments cannot
-/// be bound as parameters).
-pub(crate) fn quote_ident(name: &str) -> String {
-    format!("\"{}\"", name.replace('"', "\"\""))
 }
 
 fn introspection_error(context: &str, table: &str, err: sqlx::Error) -> PyErr {

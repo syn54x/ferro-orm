@@ -440,7 +440,8 @@ pub fn register_model_schema(
 /// governed by ferro migrations (ADR-0038); `tracking_schemas` are the
 /// project's configured `tracking_schema`s, and `ddl_lock_timeout_s` its
 /// `ddl_lock_timeout` in seconds, which every `CREATE` waits for locks under
-/// on Postgres (ADR-0044; `0` disables). Resolves to the pass's report as
+/// on Postgres (ADR-0044; `0` disables), and `lock_timeout_s` its
+/// `lock_timeout`, how long it waits for the run lock. Resolves to the pass's report as
 /// JSON, which `ferro.create_tables` reads into a `PassReport`.
 ///
 /// # Errors
@@ -448,15 +449,17 @@ pub fn register_model_schema(
 /// governed by ferro migrations, or SQL execution fails; a failure of the
 /// pass carries its report.
 #[pyfunction]
-#[pyo3(signature = (using=None, tracking_schemas=Vec::new(), ddl_lock_timeout_s=5.0))]
+#[pyo3(signature = (using=None, tracking_schemas=Vec::new(), ddl_lock_timeout_s=5.0, lock_timeout_s=30.0))]
 pub fn create_tables(
     py: Python<'_>,
     using: Option<String>,
     tracking_schemas: Vec<String>,
     ddl_lock_timeout_s: f64,
+    lock_timeout_s: f64,
 ) -> PyResult<Bound<'_, PyAny>> {
     let opts = crate::migrate::MigrateOptions::laddered(false, false)
-        .with_ddl_lock_timeout_seconds(ddl_lock_timeout_s)?;
+        .with_ddl_lock_timeout_seconds(ddl_lock_timeout_s)?
+        .with_lock_timeout_seconds(lock_timeout_s)?;
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let engine = engine_for_connection(using)?;
         // `create_tables()` is the create pass on its own (no `updates`):
