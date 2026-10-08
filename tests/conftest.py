@@ -201,10 +201,10 @@ def pg_role(request: pytest.FixtureRequest, db_url: str | None) -> Callable[[str
     after the test's schema, whether the test's own teardown ran or not.
     """
     schema_name = getattr(request.node, "_ferro_db_schema", None)
-    if schema_name is None:
-        raise RuntimeError("pg_role is for Postgres tests: mark the test postgres_only")
 
     def name(label: str) -> str:
+        if schema_name is None:
+            raise RuntimeError("pg_role names roles for Postgres tests only")
         role = postgres_test_role_name(schema_name, label)
         if role not in request.node._ferro_pg_roles:
             request.node._ferro_pg_roles.append(role)

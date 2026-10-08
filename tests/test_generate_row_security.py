@@ -65,7 +65,6 @@ from tests.test_migrate_up import (  # noqa: F401 - fixtures
     db,
     new,
 )
-from tests.db_backends import postgres_test_role_name
 from tests.test_rls_end_to_end import TENANT_PASSWORD, _tenant_url
 from tests.test_row_security_create_pass import created_row_security
 
@@ -172,9 +171,10 @@ def reconcile(project: Path, db) -> list[str]:
 
 
 @contextlib.contextmanager
-def tenant_role(db) -> Iterator[str]:
-    """A NOSUPERUSER, non-BYPASSRLS login role that may read the table."""
-    role = postgres_test_role_name(db.schema, "rlsgen")
+def tenant_role(db, pg_role) -> Iterator[str]:
+    """A NOSUPERUSER, non-BYPASSRLS login role that may read the table,
+    named by ``pg_role`` so it is dropped with the schema whatever happens."""
+    role = pg_role("rlsgen")
     try:
         db.execute(
             f'CREATE ROLE "{role}" LOGIN NOSUPERUSER NOBYPASSRLS '
@@ -241,7 +241,7 @@ def create_policy(statements_: list[str], name: str) -> str:
 
 @backend_matrix
 def test_e1_added_row_security_enables_forces_creates_and_its_down_tears_it_down(
-    project, pkg, db
+    project, pkg, db, pg_role
 ):
     start(project, pkg, db, models(declared=False))
     up, down = generated(project, pkg, models())
@@ -259,7 +259,7 @@ def test_e1_added_row_security_enables_forces_creates_and_its_down_tears_it_down
 
     round_trip(project, db)
     if db.backend == "postgres":
-        with tenant_role(db) as role:
+        with tenant_role(db, pg_role) as role:
             assert visible(db, role, {"app.tenant": TENANT_A}) == ["ann", "bob"]
             assert visible(db, role, {"app.tenant": TENANT_B}) == ["cyd"]
             assert visible(db, role, {}) == []
@@ -273,7 +273,7 @@ def test_e1_added_row_security_enables_forces_creates_and_its_down_tears_it_down
 
 @backend_matrix
 def test_b1_a_new_table_creates_its_row_security_after_the_table_and_drops_the_table_alone(
-    project, pkg, db
+    project, pkg, db, pg_role
 ):
     write_config(project, pkg)
     write_models(project, pkg, models())
@@ -293,7 +293,7 @@ def test_b1_a_new_table_creates_its_row_security_after_the_table_and_drops_the_t
             f'INSERT INTO "{TABLE}" ("tenant_id", "owner") VALUES '
             f"('{TENANT_A}', 'ann'), ('{TENANT_B}', 'cyd')"
         )
-        with tenant_role(db) as role:
+        with tenant_role(db, pg_role) as role:
             assert visible(db, role, {"app.tenant": TENANT_B}) == ["cyd"]
     assert run("migrate", "down", "--yes", "--url", db.url) == 0
     assert keys(db) == []
@@ -306,7 +306,7 @@ def test_b1_a_new_table_creates_its_row_security_after_the_table_and_drops_the_t
 
 @backend_matrix
 def test_e2_a_changed_body_is_dropped_and_recreated_and_its_down_restores_the_old_one(
-    project, pkg, db
+    project, pkg, db, pg_role
 ):
     start(project, pkg, db, models())
     old_create = create_policy(
@@ -323,7 +323,7 @@ def test_e2_a_changed_body_is_dropped_and_recreated_and_its_down_restores_the_ol
 
     round_trip(project, db)
     if db.backend == "postgres":
-        with tenant_role(db) as role:
+        with tenant_role(db, pg_role) as role:
             assert visible(db, role, {"app.tenant_id": TENANT_B}) == ["cyd"]
             assert visible(db, role, {"app.tenant": TENANT_B}) == []
 
@@ -333,7 +333,7 @@ def test_e2_a_changed_body_is_dropped_and_recreated_and_its_down_restores_the_ol
 
 @backend_matrix
 def test_e3_removed_row_security_is_dropped_and_torn_down_and_its_down_recreates_it(
-    project, pkg, db
+    project, pkg, db, pg_role
 ):
     start(project, pkg, db, models())
     created = statements(step_file(project, 1, "up", "postgres"))
@@ -346,7 +346,7 @@ def test_e3_removed_row_security_is_dropped_and_torn_down_and_its_down_recreates
 
     round_trip(project, db)
     if db.backend == "postgres":
-        with tenant_role(db) as role:
+        with tenant_role(db, pg_role) as role:
             assert visible(db, role, {}) == ["ann", "bob", "cyd"]
             # The down puts the fence back.
             assert run("migrate", "down", "--yes", "--url", db.url) == 0
@@ -358,7 +358,7 @@ def test_e3_removed_row_security_is_dropped_and_torn_down_and_its_down_recreates
 
 @backend_matrix
 def test_a_second_policy_is_its_create_policy_alone_and_its_down_drops_it_alone(
-    project, pkg, db
+    project, pkg, db, pg_role
 ):
     tenant = TENANT.format(setting="app.tenant")
     start(project, pkg, db, models(tenant))
@@ -375,7 +375,7 @@ def test_a_second_policy_is_its_create_policy_alone_and_its_down_drops_it_alone(
 
     round_trip(project, db)
     if db.backend == "postgres":
-        with tenant_role(db) as role:
+        with tenant_role(db, pg_role) as role:
             # Restrictive: both the tenant and the owner must match.
             assert visible(db, role, {"app.tenant": TENANT_A, "app.owner": "bob"}) == [
                 "bob"
@@ -391,7 +391,7 @@ def raw(owner: str) -> str:
 
 @backend_matrix
 def test_an_edited_raw_body_is_rebuilt_and_its_down_restores_the_parents_body(
-    project, pkg, db
+    project, pkg, db, pg_role
 ):
     start(project, pkg, db, models(raw("ann")))
     old_create = create_policy(
@@ -413,7 +413,7 @@ def test_an_edited_raw_body_is_rebuilt_and_its_down_restores_the_parents_body(
 
     round_trip(project, db)
     if db.backend == "postgres":
-        with tenant_role(db) as role:
+        with tenant_role(db, pg_role) as role:
             assert visible(db, role, {}) == ["bob"]
             assert run("migrate", "down", "--yes", "--url", db.url) == 0
             assert visible(db, role, {}) == ["ann"]
