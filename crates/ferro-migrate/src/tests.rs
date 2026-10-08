@@ -5694,3 +5694,72 @@ fn a_live_side_missing_a_tables_facts_is_an_error_naming_it() {
         )
     );
 }
+
+/// What an `ADD COLUMN` also creates is stated once (ADR-0050): the column's
+/// own `uq_` / `idx_` index, its `ck_` check and its foreign key. A composite
+/// index over the column and a table check are never riders.
+#[test]
+fn a_columns_riders_are_its_flags_its_own_check_and_its_foreign_key() {
+    let mut account = schema_model(
+        "account",
+        vec![
+            pk_col("id", "integer"),
+            col_with_flags("email", "varchar", true, true, true, None),
+            col("org_id", "integer", true),
+            col("role", "varchar", true),
+        ],
+    );
+    account.foreign_keys.push(SchemaForeignKey {
+        renamed_from: None,
+        column: "org_id".to_string(),
+        to_table: "organization".to_string(),
+        to_column: "id".to_string(),
+        on_delete: Some("CASCADE".to_string()),
+        name: Some("fk_account_org_id_organization".to_string()),
+    });
+    account.checks.push(SchemaCheck {
+        name: "ck_account_role".to_string(),
+        column: "role".to_string(),
+        values: vec!["'admin'".to_string()],
+    });
+    account.indexes.push(SchemaIndex {
+        name: "idx_account_email_role".to_string(),
+        columns: vec!["email".to_string(), "role".to_string()],
+        unique: false,
+    });
+
+    let email = emit::column_riders(&account, "email");
+    assert_eq!(email.unique.as_deref(), Some("uq_account_email"));
+    assert_eq!(email.index.as_deref(), Some("idx_account_email"));
+    assert!(email.check.is_none() && email.foreign_key.is_none());
+    assert_eq!(
+        email.indexes("email"),
+        vec![
+            (
+                "uq_account_email".to_string(),
+                vec!["email".to_string()],
+                true
+            ),
+            (
+                "idx_account_email".to_string(),
+                vec!["email".to_string()],
+                false
+            ),
+        ]
+    );
+    assert!(!email.has_index("idx_account_email_role"));
+
+    let org = emit::column_riders(&account, "org_id");
+    assert_eq!(
+        org.foreign_key.map(|fk| fk.to_table.as_str()),
+        Some("organization")
+    );
+    assert!(org.indexes("org_id").is_empty());
+
+    let role = emit::column_riders(&account, "role");
+    assert!(role.has_check("ck_account_role"));
+    assert_eq!(
+        emit::column_riders(&account, "missing"),
+        emit::Riders::default()
+    );
+}

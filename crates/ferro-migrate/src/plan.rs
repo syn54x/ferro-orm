@@ -1302,19 +1302,12 @@ fn missing_checks(
     new_model: &SchemaModel,
     live_check_names: &[String],
 ) -> Vec<MigrationOp> {
-    let old_col_names: BTreeSet<&str> = old_model.columns.iter().map(|c| c.name.as_str()).collect();
+    let riders = added_column_riders(old_model, new_model);
     missing_check_names(new_model, live_check_names)
         .into_iter()
-        .filter(|name| {
-            // A column check whose column is newly added rides the AddColumn
-            // emission, the same dedup `diff_model_indexes` applies to
-            // single-column indexes. Table checks always stand alone.
-            new_model
-                .checks
-                .iter()
-                .find(|check| &check.name == name)
-                .is_none_or(|check| old_col_names.contains(check.column.as_str()))
-        })
+        // A column check of an added column rides its `AddColumn`. Table
+        // checks always stand alone.
+        .filter(|name| !riders.iter().any(|riders| riders.has_check(name)))
         .map(|name| MigrationOp::AddCheck {
             table: table.to_string(),
             name,
@@ -2255,6 +2248,21 @@ fn primary_key_change(
     })
 }
 
+/// The riders ([`emit::column_riders`]) of every column `new_model` adds to
+/// `old_model`: what each `AddColumn` creates, which the planner plans no
+/// separate op for.
+fn added_column_riders<'a>(
+    old_model: &SchemaModel,
+    new_model: &'a SchemaModel,
+) -> Vec<emit::Riders<'a>> {
+    new_model
+        .columns
+        .iter()
+        .filter(|col| !old_model.columns.iter().any(|old| old.name == col.name))
+        .map(|col| emit::column_riders(new_model, &col.name))
+        .collect()
+}
+
 fn diff_model_columns(
     table: &str,
     old_model: &SchemaModel,
@@ -2322,9 +2330,7 @@ fn diff_model_indexes(
     destructive: bool,
     ops: &mut Vec<MigrationOp>,
 ) {
-    // Indexes covering only NEW columns are emitted by the AddColumn
-    // rendering, so no redundant standalone AddIndex is planned for them.
-    let old_col_names: BTreeSet<&str> = old_model.columns.iter().map(|c| c.name.as_str()).collect();
+    let riders = added_column_riders(old_model, new_model);
 
     // Both sides through `standalone_indexes`: a declared snapshot carries a
     // unique in `uniques`, a live one in `indexes` (introspection leaves
@@ -2338,11 +2344,10 @@ fn diff_model_indexes(
 
     for (name, columns, unique) in &new_set {
         if !old_by_name.contains_key(name) {
-            // Skip AddIndex only for a single-column index whose sole column
-            // is newly added — the AddColumn rendering emits that CREATE
-            // INDEX. Composite indexes are never emitted by AddColumn and must
-            // NOT be skipped, even when every indexed column is new (I-1).
-            if columns.len() == 1 && !old_col_names.contains(columns[0].as_str()) {
+            // A rider of an added column is built by its `AddColumn`.
+            // Composite indexes never ride a column and are planned even
+            // when every indexed column is new (I-1).
+            if riders.iter().any(|riders| riders.has_index(name)) {
                 continue;
             }
             ops.push(MigrationOp::AddIndex {
@@ -2372,12 +2377,12 @@ fn diff_model_foreign_keys(
     ops: &mut Vec<MigrationOp>,
     reports: &mut Vec<Report>,
 ) {
-    let old_col_names: BTreeSet<&str> = old_model.columns.iter().map(|c| c.name.as_str()).collect();
+    let riders = added_column_riders(old_model, new_model);
 
     for fk in &new_model.foreign_keys {
-        // An FK on a newly added column rides the AddColumn emission; the
-        // reconcile step only governs FKs whose column already exists live.
-        if !old_col_names.contains(fk.column.as_str()) {
+        // An FK on a newly added column rides its `AddColumn`; the reconcile
+        // step only governs FKs whose column already exists live.
+        if riders.iter().any(|riders| riders.foreign_key == Some(fk)) {
             continue;
         }
 
