@@ -39,8 +39,8 @@ pub use plan::{
 };
 pub use render::{RenderedOp, validate_schema_ir};
 pub use run_plan::{
-    Direction, ExecMode, Origin, PlannedStep, RecordKind, RunPlan, RunRefusal, RunStatus,
-    StepRecord, Target, plan_run,
+    Direction, ExecMode, HeldDirectory, Origin, PlannedStep, RebuildExpectation, RecordKind,
+    RunPlan, RunRefusal, RunStatus, StepRecord, Target, plan_run,
 };
 pub use snapshot::{Snapshot, SnapshotError};
 

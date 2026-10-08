@@ -20,7 +20,6 @@ called ``up()`` must not go on serving a database the run did not reach.
 
 from __future__ import annotations
 
-import json
 from typing import TYPE_CHECKING
 
 from .. import _core
@@ -35,8 +34,6 @@ if TYPE_CHECKING:
     from .runner import RunReport
 
 __all__ = ["check", "require_applied", "status", "up"]
-
-_UP = json.dumps({"direction": "up"})
 
 
 def _resolve(
@@ -74,35 +71,24 @@ async def _ahead_or_behind(
     """Read the tracking table without a lock: the migrations still pending
     and the refusals ``up`` would meet. Raises :class:`DatabaseAheadError`
     when the database holds migrations the checkout lacks and ``allow_ahead``
-    is off (and that is the only thing in the way)."""
-    dialect = runner.connection_dialect(name, database)
-    tracking = runner.tracking_schema_for(database, dialect)
-    state = json.loads(await _core._read_records(name, tracking))
-    records = json.dumps(state["records"])
-    directory = str(database.directory)
+    is off (and that is the only thing in the way: the planner says so)."""
+    tracked = await runner.open_tracked(name, database)
     report = StatusReport.from_core(
-        json.loads(_core._run_status(directory, records, dialect, False)),
+        tracked.status(),
         database=database.name,
-        dialect=dialect,
-        table=state["table"],
+        dialect=tracked.dialect,
+        table=tracked.tracking_table,
     )
     pending = [m.name for m in report.migrations if any(s.pending for s in m.steps)]
-    if state["refusal"] is not None:
-        return pending, [state["refusal"]]
-    live = None if state["records"] else await _core._live_tables(name)
-
-    def refusal(allow: bool) -> str | None:
-        try:
-            _core._run_plan(directory, records, dialect, _UP, allow, live)
-        except RunRefused as refused:
-            return str(refused)
-        return None
-
-    refused = refusal(allow_ahead)
-    if refused is not None and report.ahead and not allow_ahead:
-        if refusal(True) is None:
-            raise DatabaseAheadError(report.ahead, refused)
-    return pending, [] if refused is None else [refused]
+    if tracked.refusal is not None:
+        return pending, [tracked.refusal]
+    try:
+        await tracked.plan({"direction": "up"}, allow_ahead=allow_ahead)
+    except RunRefused as refused:
+        if refused.ahead_only:
+            raise DatabaseAheadError(report.ahead, str(refused)) from None
+        return pending, [str(refused)]
+    return pending, []
 
 
 async def up(

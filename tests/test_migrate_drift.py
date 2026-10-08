@@ -456,12 +456,12 @@ def test_a_held_lock_refuses_naming_status(project, pkg, db, capsys):
 
     async def held() -> DriftReport:
         await ferro.connect(db.url, name="holder")
-        handle = await _core._acquire_run_lock("holder", None, 0)
+        tracked = await _core._open_tracked("holder", None, "migrations")
         try:
-            assert await _core._run_lock_is_held("holder") is True
-            report = await ferro.migrations.drift(url=db.url)
+            async with tracked.locked(0):
+                assert await tracked.lock_held() is True
+                report = await ferro.migrations.drift(url=db.url)
         finally:
-            await _core._release_run_lock(handle)
             await _core._disconnect("holder")
         return report
 
@@ -497,11 +497,11 @@ def test_a_held_lock_with_every_record_finished_refuses(project, pkg, db, capsys
 
     async def held() -> DriftReport:
         await ferro.connect(db.url, name="holder")
-        handle = await _core._acquire_run_lock("holder", None, 0)
+        tracked = await _core._open_tracked("holder", None, "migrations")
         try:
-            return await ferro.migrations.drift(url=db.url)
+            async with tracked.locked(0):
+                return await ferro.migrations.drift(url=db.url)
         finally:
-            await _core._release_run_lock(handle)
             await _core._disconnect("holder")
 
     report = asyncio.run(held())
@@ -579,7 +579,8 @@ def test_drift_takes_no_lock_and_creates_nothing(project, pkg, db, capsys, monke
     live_schema_ir = _core._live_schema_ir
 
     async def probing(using, declared_json, extra_tables_json=None):
-        held_while_reading.append(await _core._run_lock_is_held(using))
+        tracked = await _core._open_tracked(using, None, "migrations")
+        held_while_reading.append(await tracked.lock_held())
         return await live_schema_ir(using, declared_json, extra_tables_json)
 
     monkeypatch.setattr(_core, "_live_schema_ir", probing)

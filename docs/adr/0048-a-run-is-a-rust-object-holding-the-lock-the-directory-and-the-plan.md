@@ -73,3 +73,16 @@ The Python loop shrinks to match:
 - A test that needs a held lock opens `tracked.locked(...)`. A test that needs a dropped lock closes the lock's connection through the locked object, never by patching runner globals.
 - `ferro_version` on a record is stamped in Rust (`Cargo.toml` and `pyproject.toml` carry one version).
 - ADR-0028 is amended: its "one Rust function" is this object's one directory read and its plan. ADR-0029 is amended: verification sits in the record writes.
+
+## Amendment (2026-10-08)
+
+The interface as built (#596) carries these additions to the listing above:
+
+- `_open_tracked(using, tracking_schema, directory, ddl_lock_timeout_s=5.0)`: the database's DDL lock timeout (ADR-0044), which every SQL step the locked run executes waits under.
+- `.refusal` on both objects: the tracking table's newer-format refusal, which every verb stops on and `drift` reports.
+- `.status(order_keys, *, lock_held=False)`: `status` stays a read of what was opened; the caller asks `lock_held()` and passes the answer.
+- `Plan.direction` (`"up"` / `"down"`), which `_walk` reads, and `StepHandle.standing`, the step's record as it stands.
+- `start(step, kind)`, `write_baseline(plan, data_kinds)` and `rerecord(action, kind)`: a data step's declared shape is a fact only Python can read from its file, so Python passes it and Rust checks it is `atomic` or `chunked`.
+- A `BaselinePlan` and a `RerecordPlan` are bound to the locked run that planned them, as a `StepHandle` is: another run's plan (or one kept across an `up`) is refused, since it would write over records its run never read.
+
+A planned step does not carry its data step's two snapshots. The historical models of migration N are built in one place, Python's builder over the held directory read (`run.migrations`), for the walk and the order keys alike; a copy on the step would have been a second parent rule.

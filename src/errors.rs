@@ -506,27 +506,6 @@ pub(crate) fn removed_label_count_sql(table: &str, column: &str, label: &str) ->
     )
 }
 
-/// The step a contract's recipe reverts to in the migration whose step file
-/// is `step_path`: the step before its first data step (`NN_<name>.py`),
-/// the backfill the recipe re-runs; `None` when the migration has no data
-/// step.
-pub(crate) fn backfill_rerun_step(step_path: &std::path::Path) -> Option<u8> {
-    let dir = step_path.parent()?;
-    std::fs::read_dir(dir)
-        .ok()?
-        .filter_map(|entry| {
-            let name = entry.ok()?.file_name().into_string().ok()?;
-            let stem = name.strip_suffix(".py")?;
-            let (number, _) = stem.split_once('_')?;
-            if number.len() != 2 {
-                return None;
-            }
-            number.parse::<u8>().ok()
-        })
-        .min()
-        .map(|first| first.saturating_sub(1))
-}
-
 fn first_text(rows: &[crate::backend::EngineRow], column: &str) -> Option<String> {
     let (_, value) = rows
         .first()?
@@ -1042,35 +1021,6 @@ mod counted_failure_tests {
         assert!(
             counted_failure_text(&failure, Ok(Some(1)), message, "0012_x:02").starts_with(message)
         );
-    }
-
-    #[test]
-    fn the_rerun_step_is_the_one_before_the_first_data_step() {
-        let dir = std::env::temp_dir().join(format!("ferro-rerun-{}", std::process::id()));
-        let migration = dir.join("0012_author_slug");
-        std::fs::create_dir_all(&migration).expect("mkdir");
-        for name in [
-            "01_expand.up.postgres.sql",
-            "02_backfill_author.py",
-            "03_backfill_post.py",
-            "04_contract.up.postgres.sql",
-        ] {
-            std::fs::write(migration.join(name), "").expect("write");
-        }
-        let contract = migration.join("04_contract.up.postgres.sql");
-        assert_eq!(backfill_rerun_step(&contract), Some(1));
-        std::fs::remove_file(migration.join("01_expand.up.postgres.sql")).expect("rm");
-        std::fs::rename(
-            migration.join("02_backfill_author.py"),
-            migration.join("01_backfill_author.py"),
-        )
-        .expect("mv");
-        assert_eq!(backfill_rerun_step(&contract), Some(0));
-        for name in ["01_backfill_author.py", "03_backfill_post.py"] {
-            std::fs::remove_file(migration.join(name)).expect("rm");
-        }
-        assert_eq!(backfill_rerun_step(&contract), None);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
