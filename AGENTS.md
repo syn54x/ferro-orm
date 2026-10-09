@@ -192,6 +192,14 @@ on both dialects:
   the create pass standing in for each `AddTable`; its warnings equal the
   plan's reports by kind and subject, never by sentence.
 
+A pin that says "the same live schema" must list the catalog facts it reads,
+because a fact it does not read is a gap it cannot see. Pin (e) compared
+columns, types, nullability, indexes, constraints and policies but not server
+defaults, and that hid three real parity gaps for the whole epic: an invented
+enum `DEFAULT`, SQLite's leftover backfill `DEFAULT`, and a renamed table's old
+serial sequence. They surfaced only once the pin started reading
+`column_default` (#605, #608).
+
 A pin that fails against merged behaviour is listed in `FINDINGS` there,
 `xfail(strict=True)` with its reason, until the fix lands and the strict
 xfail removes it.
