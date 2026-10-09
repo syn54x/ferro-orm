@@ -1,6 +1,389 @@
 # CHANGELOG
 
 
+## v0.22.0 (2026-10-09)
+
+### Bug Fixes
+
+- **ddl**: The check normalizer folds Postgres text casts
+  ([#563](https://github.com/syn54x/ferro-orm/pull/563),
+  [`2a79f82`](https://github.com/syn54x/ferro-orm/commit/2a79f820bae3a4df562fa0aaf4a53ef676387dc6))
+
+- **migrate**: A migration with a data step drops in its contract, after the step
+  ([#584](https://github.com/syn54x/ferro-orm/pull/584),
+  [`482d386`](https://github.com/syn54x/ferro-orm/commit/482d386373c7e1092a29ae019a6c65d43d4f4f3d))
+
+- **migrate**: A removed label's down keeps its place, a live label rename is only the rename, one
+  copy of each plan helper ([#583](https://github.com/syn54x/ferro-orm/pull/583),
+  [`8edd577`](https://github.com/syn54x/ferro-orm/commit/8edd57723c304ab4c780ff383ce03dd7ab50bc3d))
+
+- **migrate**: Deepening close-out: a column's check rides its drop, the pass reports an enum type
+  move, carried minors ([#604](https://github.com/syn54x/ferro-orm/pull/604),
+  [`203c58a`](https://github.com/syn54x/ferro-orm/commit/203c58a9a743ab2572663a15dec1c177efd60e7e))
+
+- **migrate**: Drift renders the planner's ChangePrimaryKey op
+  ([#553](https://github.com/syn54x/ferro-orm/pull/553),
+  [`c150d1b`](https://github.com/syn54x/ferro-orm/commit/c150d1b3eb0f3f314b9b3b2b6e6e5c25a68ae9b1))
+
+- **migrate**: Drop dead DDL wrappers, bound --lock-timeout, one dialect parser
+  ([#581](https://github.com/syn54x/ferro-orm/pull/581),
+  [`8a53ed0`](https://github.com/syn54x/ferro-orm/commit/8a53ed0f031db8d56f3e83fdbc176813c9e2d6fc))
+
+- **migrate**: Keep trigger and BEGIN ATOMIC bodies whole in SQL steps; probe label hints only under
+  migrate_updates ([#580](https://github.com/syn54x/ferro-orm/pull/580),
+  [`df671dd`](https://github.com/syn54x/ferro-orm/commit/df671dd43d71dd3feb8c12e91e805c2f19568cf1))
+
+- **migrate**: Panel 2 generator fixes: no invented enum DEFAULT, AUTOINCREMENT kept across a
+  rebuild, IndexOp gone (F15, F16, F21) ([#605](https://github.com/syn54x/ferro-orm/pull/605),
+  [`244939b`](https://github.com/syn54x/ferro-orm/commit/244939b2edaa04c3fffde17152d71a3ff797685b))
+
+- **migrate**: Panel 2 runtime findings (F17-F19, F25-F27)
+  ([#607](https://github.com/syn54x/ferro-orm/pull/607),
+  [`972b45e`](https://github.com/syn54x/ferro-orm/commit/972b45eaab81700a2ed7235ec2030053d2e30496))
+
+- **migrate**: Same-storage columns are not drift on SQLite
+  ([#556](https://github.com/syn54x/ferro-orm/pull/556),
+  [`39be007`](https://github.com/syn54x/ferro-orm/commit/39be007b1250d9511b4ea18f4c602f7cd706d80c))
+
+- **migrate**: Say migrations, not in-house migrations, in runtime messages
+  ([#571](https://github.com/syn54x/ferro-orm/pull/571),
+  [`e68a24f`](https://github.com/syn54x/ferro-orm/commit/e68a24f1bd30fd973fa6dd997abe35b09231c43e))
+
+- **migrate**: Server defaults match on every door (SQLite backfill DEFAULT, renamed serial
+  sequence) ([#608](https://github.com/syn54x/ferro-orm/pull/608),
+  [`3ff5c08`](https://github.com/syn54x/ferro-orm/commit/3ff5c08dfed923f0d5877407b3ffdf737fe7f936))
+
+- **migrate**: Status says applied, not installed, and pin the bridge's dropped-table filters
+  ([#579](https://github.com/syn54x/ferro-orm/pull/579),
+  [`673a77f`](https://github.com/syn54x/ferro-orm/commit/673a77f9095f21fdb404a3639b0fdd7679c5b1ce))
+
+- **migrate**: The bridge downgrade marks a re-added required column, and a dropped model takes its
+  enum type ([#574](https://github.com/syn54x/ferro-orm/pull/574),
+  [`b2fe6e1`](https://github.com/syn54x/ferro-orm/commit/b2fe6e1e857d93c54c8d72c458f3c480e8916f59))
+
+- **migrate**: The create pass refuses a declared table whose name a view holds
+  ([#594](https://github.com/syn54x/ferro-orm/pull/594),
+  [`76df6a1`](https://github.com/syn54x/ferro-orm/commit/76df6a1dd4ff5b10507475b7af25c2c9f511c46f))
+
+- **migrate**: The pass renames a table whose live hint names a live table
+  ([#573](https://github.com/syn54x/ferro-orm/pull/573),
+  [`9165f78`](https://github.com/syn54x/ferro-orm/commit/9165f7838f4db3f71fbd6c57453472b4a9458ffc))
+
+- **migrate**: The pass renders a renamed column's type change, and warns of rows a SQLite label
+  rename strands ([#576](https://github.com/syn54x/ferro-orm/pull/576),
+  [`278b496`](https://github.com/syn54x/ferro-orm/commit/278b496ebec69af3b08abc2a793d62bae10ae6db))
+
+- **migrate**: The SQLite pass keeps NOT NULL DEFAULT; sequence rename refuses on a taken name
+  (panel 2 N1, N2) ([#609](https://github.com/syn54x/ferro-orm/pull/609),
+  [`a030cd4`](https://github.com/syn54x/ferro-orm/commit/a030cd47c32484b95994b7f17cfba39d8902f0ee))
+
+- **migrations**: Panel 2 docs, public API and test hygiene (F20, F22–F24, F28, F29, render_plan)
+  ([#606](https://github.com/syn54x/ferro-orm/pull/606),
+  [`df84de1`](https://github.com/syn54x/ferro-orm/commit/df84de15a67712b49a37734bce61512d99fef043))
+
+- **models**: Keep Any and dict | list refused as db_type json annotations
+  ([#566](https://github.com/syn54x/ferro-orm/pull/566),
+  [`f9eace3`](https://github.com/syn54x/ferro-orm/commit/f9eace30c5854424741ca9bad7e30db56aaf8d10))
+
+- **tests**: Isolated_imports drops only a test's project modules
+  ([#585](https://github.com/syn54x/ferro-orm/pull/585),
+  [`9e154a5`](https://github.com/syn54x/ferro-orm/commit/9e154a528e2b70923654571faf1a700e04e9ee51))
+
+- **transactions**: Roll back transaction() on BaseException (#484)
+  ([#541](https://github.com/syn54x/ferro-orm/pull/541),
+  [`e15e14b`](https://github.com/syn54x/ferro-orm/commit/e15e14b6998d7ac6c9f11720a62d4839569759f7))
+
+### Documentation
+
+- Close-out minors for epic #511 (contract rule, dated supersessions, ADR-0047 probe, bridge table
+  drop) ([#586](https://github.com/syn54x/ferro-orm/pull/586),
+  [`074f460`](https://github.com/syn54x/ferro-orm/commit/074f460fa1a16baac7ef7a7a4903f395e9f3eafc))
+
+- **adr**: A plan's sides are adapters, one down function, every door plans index redefinition and
+  foreign-key removal ([#590](https://github.com/syn54x/ferro-orm/pull/590),
+  [`5415f96`](https://github.com/syn54x/ferro-orm/commit/5415f968cccb9f8bc8e06b7e2ca23443f6bf2f7f))
+
+- **adr**: Record the epic #511 close-out decisions (pass rename hints, dropped-table drops, enum
+  types, drops after data steps, applied) ([#578](https://github.com/syn54x/ferro-orm/pull/578),
+  [`a0f57c3`](https://github.com/syn54x/ferro-orm/commit/a0f57c3e25f8c111ce7adffb0f821524558e8dbf))
+
+- **adr**: The run object (ADR-0048) and the pass report (ADR-0049)
+  ([#589](https://github.com/syn54x/ferro-orm/pull/589),
+  [`3f5e5ce`](https://github.com/syn54x/ferro-orm/commit/3f5e5ceb1be513f4e2e9fdbfa4ac849f29b13c58))
+
+- **agents**: Add the SDD routing block to AGENTS.md
+  ([#512](https://github.com/syn54x/ferro-orm/pull/512),
+  [`b5a9fda`](https://github.com/syn54x/ferro-orm/commit/b5a9fda910b958cf15a1c0b4f956647174a2f6a7))
+
+- **context**: Data steps are atomic or chunked; ADR-0024 runner-owned chunking, ADR-0025 union
+  snapshots ([#480](https://github.com/syn54x/ferro-orm/pull/480),
+  [`19730e0`](https://github.com/syn54x/ferro-orm/commit/19730e09e17bacccd693c05ce686cbf66c26313d))
+
+- **context**: Define Backfill, Expand step, Contract step and Restructure scaffold; ADR-0040 (#475)
+  ([#500](https://github.com/syn54x/ferro-orm/pull/500),
+  [`e2e7270`](https://github.com/syn54x/ferro-orm/commit/e2e72709cbe9d843e8d6c058396eb91a7799050a))
+
+- **context**: Define Baseline; ADR-0031 (#467)
+  ([#487](https://github.com/syn54x/ferro-orm/pull/487),
+  [`82dd855`](https://github.com/syn54x/ferro-orm/commit/82dd855225b69f0bd03518f643b711c864ae416e))
+
+- **context**: Define Database; ADR-0036 (#472)
+  ([#494](https://github.com/syn54x/ferro-orm/pull/494),
+  [`0bcee5b`](https://github.com/syn54x/ferro-orm/commit/0bcee5b20c6fe068b8832ba9f48ffbbc87d96a22))
+
+- **context**: Define Down and Irreversible step; ADR-0033 (#469)
+  ([#489](https://github.com/syn54x/ferro-orm/pull/489),
+  [`ee94635`](https://github.com/syn54x/ferro-orm/commit/ee946356c82d104ae49e8a170b41c59fecbcd82b))
+
+- **context**: Define Generated revision; ADR-0041 (#479)
+  ([#501](https://github.com/syn54x/ferro-orm/pull/501),
+  [`2e626da`](https://github.com/syn54x/ferro-orm/commit/2e626da5ebe64bf04c7dbd4e2abe053f39683607))
+
+- **context**: Define Index step and DDL lock timeout; ADR-0044 (#505)
+  ([#507](https://github.com/syn54x/ferro-orm/pull/507),
+  [`2bdd868`](https://github.com/syn54x/ferro-orm/commit/2bdd86885f5654cc8a29a4447d302bc67c6dccb8))
+
+- **context**: Define Migration test harness and Round trip; ADR-0045 (#506)
+  ([#508](https://github.com/syn54x/ferro-orm/pull/508),
+  [`f991337`](https://github.com/syn54x/ferro-orm/commit/f991337f317392ad5e0987a32a2483d8abd5be37))
+
+- **context**: Define Migration, Step and Data step for the in-house migration system
+  ([#476](https://github.com/syn54x/ferro-orm/pull/476),
+  [`2f89231`](https://github.com/syn54x/ferro-orm/commit/2f892316c3e1874165a762b24c7c4298465a3cf9))
+
+- **context**: Define Pending, Ahead and Project configuration; ADR-0038, ADR-0039 (#474)
+  ([#497](https://github.com/syn54x/ferro-orm/pull/497),
+  [`67d9630`](https://github.com/syn54x/ferro-orm/commit/67d963093f29efe4a10e4fac3698e954cc540292))
+
+- **context**: Define Rename hint, Destructive step, Data-dependent step; ADR-0032 (#468)
+  ([#488](https://github.com/syn54x/ferro-orm/pull/488),
+  [`942536e`](https://github.com/syn54x/ferro-orm/commit/942536eb7bf7f73ffc8ffdb3ecf9c10221f59274))
+
+- **context**: Define Rendering and Guard step; ADR-0037 (#473)
+  ([#496](https://github.com/syn54x/ferro-orm/pull/496),
+  [`33de692`](https://github.com/syn54x/ferro-orm/commit/33de6929357f340eafe4c3145746c17fabeb456d))
+
+- **context**: Define Run and Run lock; ADR-0028, ADR-0029 (#465)
+  ([#483](https://github.com/syn54x/ferro-orm/pull/483),
+  [`d1419ee`](https://github.com/syn54x/ferro-orm/commit/d1419ee2001c808421a91ada9efe0bcaed9ff5f9))
+
+- **context**: Define Schema snapshot and Drift; ADR-0023 snapshots outlive IR versions
+  ([#478](https://github.com/syn54x/ferro-orm/pull/478),
+  [`0f64fd0`](https://github.com/syn54x/ferro-orm/commit/0f64fd04186dec68351f3cdc912b59fdd0d710ba))
+
+- **context**: Define Staged constraint and Validate step; ADR-0043 (#502)
+  ([#504](https://github.com/syn54x/ferro-orm/pull/504),
+  [`4984a26`](https://github.com/syn54x/ferro-orm/commit/4984a2682ffbfc6fca2e033e6aa1b46dad4a1984))
+
+- **context**: Define Staged NOT NULL and Add-constraint step; ADR-0042 (#499)
+  ([#503](https://github.com/syn54x/ferro-orm/pull/503),
+  [`6e1ecf7`](https://github.com/syn54x/ferro-orm/commit/6e1ecf70e1a2da7f2810c79d1e4a1c8a625b9fd4))
+
+- **context**: Define Step context and Unwritten step; ADR-0035 (#471)
+  ([#493](https://github.com/syn54x/ferro-orm/pull/493),
+  [`aff9b9f`](https://github.com/syn54x/ferro-orm/commit/aff9b9fe0f9747e6e4b4838120f9049251a0e5f6))
+
+- **context**: Define Table rebuild; ADR-0034 (#470)
+  ([#490](https://github.com/syn54x/ferro-orm/pull/490),
+  [`aefd0cb`](https://github.com/syn54x/ferro-orm/commit/aefd0cb6a2e7be73fe793957282887a67df2d5d0))
+
+- **context**: Define Tracking table and Step record; ADR-0030 (#466)
+  ([#485](https://github.com/syn54x/ferro-orm/pull/485),
+  [`95535fd`](https://github.com/syn54x/ferro-orm/commit/95535fdd839a956e0396eb289b1b2ac4913d2268))
+
+- **context**: Per-dialect DDL renderings and the DDL-bearing diff (#481)
+  ([#482](https://github.com/syn54x/ferro-orm/pull/482),
+  [`4d5a850`](https://github.com/syn54x/ferro-orm/commit/4d5a850927d17637d83964c17618117c0d3e5d02))
+
+- **context**: Place the SQLite table rebuild in its phase step; ADR-0046 (#509)
+  ([#510](https://github.com/syn54x/ferro-orm/pull/510),
+  [`6dfe137`](https://github.com/syn54x/ferro-orm/commit/6dfe137006b4eb3136f9bbc084c21b5947485c52))
+
+- **research**: Primary-source findings for the in-house migrations map
+  ([#477](https://github.com/syn54x/ferro-orm/pull/477),
+  [`99f3df4`](https://github.com/syn54x/ferro-orm/commit/99f3df41f5e6586c1a6d03131917e2fbfb8d27e0))
+
+- **schema**: Auto-update renames a hinted table (#573)
+  ([#575](https://github.com/syn54x/ferro-orm/pull/575),
+  [`e007d86`](https://github.com/syn54x/ferro-orm/commit/e007d86a0caa510035d8584ff10eb5f3da6d12f4))
+
+- **schema**: The Schema Management group around the two doors (#539)
+  ([#570](https://github.com/syn54x/ferro-orm/pull/570),
+  [`1cc9865`](https://github.com/syn54x/ferro-orm/commit/1cc986546819cc98bda01bf76312362ce80c0033))
+
+### Features
+
+- In-process migration API and the connect() auto-migrate guard (#521)
+  ([#549](https://github.com/syn54x/ferro-orm/pull/549),
+  [`5836929`](https://github.com/syn54x/ferro-orm/commit/58369297f57ff73a09c8a0f55de87835bd84e7ec))
+
+- **cli**: Ferro console script, the cli extra and migrate init (#516)
+  ([#545](https://github.com/syn54x/ferro-orm/pull/545),
+  [`1312316`](https://github.com/syn54x/ferro-orm/commit/1312316a08d55f7a48b7ee98ca3c2da1038eed62))
+
+- **migrate**: Chunked data steps: keyset batches, cursor and resume (#532)
+  ([#562](https://github.com/syn54x/ferro-orm/pull/562),
+  [`4ff736d`](https://github.com/syn54x/ferro-orm/commit/4ff736d328761a13faaaa77aebe063dd97844967))
+
+- **migrate**: Column add/drop/type/nullability and indexes on existing tables (#524)
+  ([#550](https://github.com/syn54x/ferro-orm/pull/550),
+  [`8f5293e`](https://github.com/syn54x/ferro-orm/commit/8f5293ee074809003a848c980ce0ccf12cf6a41d))
+
+- **migrate**: Data steps, declarations, step context, historical models and atomic steps (#530)
+  ([#560](https://github.com/syn54x/ferro-orm/pull/560),
+  [`24660d1`](https://github.com/syn54x/ferro-orm/commit/24660d16d76a50c68cdc45bbfeec9fc144b8f0d2))
+
+- **migrate**: DDL lock timeout for runs and the reconciliation pass (#522)
+  ([#552](https://github.com/syn54x/ferro-orm/pull/552),
+  [`fb45464`](https://github.com/syn54x/ferro-orm/commit/fb4546414ff4be8d10e8267e9f1bb30cd9b6b9fe))
+
+- **migrate**: Enum label removal and the primary-key refusal (#536)
+  ([#569](https://github.com/syn54x/ferro-orm/pull/569),
+  [`27f93e6`](https://github.com/syn54x/ferro-orm/commit/27f93e62d13a3cd7a910a59ca897eb6350be1d5c))
+
+- **migrate**: Expand, backfill and contract for values existing rows need (#534)
+  ([#565](https://github.com/syn54x/ferro-orm/pull/565),
+  [`7990097`](https://github.com/syn54x/ferro-orm/commit/799009703c61609c74215ea693a6def7f2557366))
+
+- **migrate**: Ferro migrate drift and ferro.migrations.drift() (#523)
+  ([#551](https://github.com/syn54x/ferro-orm/pull/551),
+  [`1a708c7`](https://github.com/syn54x/ferro-orm/commit/1a708c741513facd7aecc3f4596b7c3ff2593037))
+
+- **migrate**: Ferro migrate new and check for new and dropped models (#518)
+  ([#546](https://github.com/syn54x/ferro-orm/pull/546),
+  [`906ad05`](https://github.com/syn54x/ferro-orm/commit/906ad05b300c3978a8becf9991f68e1fd7a58986))
+
+- **migrate**: Ferro.migrations.testing, the migration test harness (#535)
+  ([#561](https://github.com/syn54x/ferro-orm/pull/561),
+  [`f8ca673`](https://github.com/syn54x/ferro-orm/commit/f8ca67301157bfb307c29ff11795309699c72e19))
+
+- **migrate**: Generate enum label additions, label and type renames (#529)
+  ([#559](https://github.com/syn54x/ferro-orm/pull/559),
+  [`4b5dbf0`](https://github.com/syn54x/ferro-orm/commit/4b5dbf0ba82292f79d89c6ce22608910231ecebe))
+
+- **migrate**: Migrate baseline (#525) ([#554](https://github.com/syn54x/ferro-orm/pull/554),
+  [`c4c2ae5`](https://github.com/syn54x/ferro-orm/commit/c4c2ae5fa6154ac2051e1331dc794cb8d43700d3))
+
+- **migrate**: Migrate down and generated downs (#520)
+  ([#548](https://github.com/syn54x/ferro-orm/pull/548),
+  [`bbbad98`](https://github.com/syn54x/ferro-orm/commit/bbbad98a821f70c3d47ab378a77f895db63a5af0))
+
+- **migrate**: Postgres staged constraints, validate step and concurrent index steps (#527)
+  ([#557](https://github.com/syn54x/ferro-orm/pull/557),
+  [`c5a8cd8`](https://github.com/syn54x/ferro-orm/commit/c5a8cd8727379d2bd1b10c188c542919e8a0951a))
+
+- **migrate**: Rename hints for columns, foreign keys and tables (#528)
+  ([#558](https://github.com/syn54x/ferro-orm/pull/558),
+  [`00bfc97`](https://github.com/syn54x/ferro-orm/commit/00bfc97c2530cf133e4d851a8d91d2bd02e4f8a3))
+
+- **migrate**: Rerecord an edited step; refuse an edited chunked step until continued or restarted
+  (#537) ([#568](https://github.com/syn54x/ferro-orm/pull/568),
+  [`d3cec17`](https://github.com/syn54x/ferro-orm/commit/d3cec17442ae6c53cd6414e661870f87be27509d))
+
+- **migrate**: Riders, redefined indexes, removed foreign keys
+  ([#597](https://github.com/syn54x/ferro-orm/pull/597),
+  [`cd53d6e`](https://github.com/syn54x/ferro-orm/commit/cd53d6e2d071c0df06351808b642249945e7b719))
+
+- **migrate**: Row security in generated migrations (#531)
+  ([#564](https://github.com/syn54x/ferro-orm/pull/564),
+  [`9d21a88`](https://github.com/syn54x/ferro-orm/commit/9d21a883790b745e2e2c4341203c921745a0d035))
+
+- **migrate**: Run planner, tracking table and run lock: migrate up and migrate status (#519)
+  ([#547](https://github.com/syn54x/ferro-orm/pull/547),
+  [`ad219f3`](https://github.com/syn54x/ferro-orm/commit/ad219f3d3c02dd0e7fd008cf085340e1b4249c99))
+
+- **migrate**: SQLite inline db_check and ADD COLUMN REFERENCES; warnings name ferro migrate new
+  (#514) ([#542](https://github.com/syn54x/ferro-orm/pull/542),
+  [`283910e`](https://github.com/syn54x/ferro-orm/commit/283910ed25adad7294da03e97a91ce12fe580b84))
+
+- **migrate**: SQLite table rebuild in its phase step (#526)
+  ([#555](https://github.com/syn54x/ferro-orm/pull/555),
+  [`0a07ae9`](https://github.com/syn54x/ferro-orm/commit/0a07ae99c3b0d2700d7a8a06a61bf523ca21eea9))
+
+- **migrate**: The Alembic bridge translates the one planner (#533)
+  ([#567](https://github.com/syn54x/ferro-orm/pull/567),
+  [`9979b62`](https://github.com/syn54x/ferro-orm/commit/9979b622e666352253b13caced56d4cd308d5a84))
+
+- **migrate**: Validate NOT VALID constraints and rebuild invalid indexes (#515)
+  ([#543](https://github.com/syn54x/ferro-orm/pull/543),
+  [`e0671a8`](https://github.com/syn54x/ferro-orm/commit/e0671a8ea7efbb64f159c41780cde7665527d723))
+
+- **settings**: Project configuration through FerroSettings and model discovery (#513)
+  ([#540](https://github.com/syn54x/ferro-orm/pull/540),
+  [`bc74bf1`](https://github.com/syn54x/ferro-orm/commit/bc74bf1bf91849b103c78989244849e0b4294f28))
+
+### Refactoring
+
+- **migrate**: A run is one Rust object holding the lock, the directory read and the plan
+  ([#596](https://github.com/syn54x/ferro-orm/pull/596),
+  [`3183cbe`](https://github.com/syn54x/ferro-orm/commit/3183cbe1b7247af8dcf3c65d7c03e4da7a36ed19))
+
+- **migrate**: One live read decides which tables every door reads
+  ([#593](https://github.com/syn54x/ferro-orm/pull/593),
+  [`d983625`](https://github.com/syn54x/ferro-orm/commit/d983625a513835d15807ecce24e3badd324a099e))
+
+- **migrate**: One module renders a data step's text from the generator's record
+  ([#588](https://github.com/syn54x/ferro-orm/pull/588),
+  [`49e0922`](https://github.com/syn54x/ferro-orm/commit/49e0922c8cd1ee22eb4f86b405db531eeaf97f78))
+
+- **migrate**: One planner over two snapshots (#517)
+  ([#544](https://github.com/syn54x/ferro-orm/pull/544),
+  [`4310e79`](https://github.com/syn54x/ferro-orm/commit/4310e79926faa2f40a8a7ea872c6a7c1a9ef77e0))
+
+- **migrate**: One reading of where a database stands, one drift against a snapshot
+  ([#587](https://github.com/syn54x/ferro-orm/pull/587),
+  [`58d3d89`](https://github.com/syn54x/ferro-orm/commit/58d3d8963ca941891225b2727a12c012d0e464bd))
+
+- **migrate**: Plan sides are adapters, one verdict per op, one down for every door
+  ([#600](https://github.com/syn54x/ferro-orm/pull/600),
+  [`989d17d`](https://github.com/syn54x/ferro-orm/commit/989d17dcd9786e6d574e48f554d5bac8045cf02b))
+
+- **migrate**: Retire the per-artifact planner wrappers, pin through plan_from_ir
+  ([#591](https://github.com/syn54x/ferro-orm/pull/591),
+  [`49ccc87`](https://github.com/syn54x/ferro-orm/commit/49ccc87eae5227568dd6b345997737049ae5c5b2))
+
+- **migrate**: The auto-migrate pass reports what it executed (A-1)
+  ([#599](https://github.com/syn54x/ferro-orm/pull/599),
+  [`a02bd7e`](https://github.com/syn54x/ferro-orm/commit/a02bd7e562d7e709379b583aadbed1fdb5051989))
+
+- **migrate**: The DDL executor runs statement lists (and the create pass runs unprepared)
+  ([#592](https://github.com/syn54x/ferro-orm/pull/592),
+  [`8766011`](https://github.com/syn54x/ferro-orm/commit/8766011141c828f63af0074b6598b1272cf79638))
+
+- **migrate**: The generator plans once and lays out every step in Rust (B5)
+  ([#603](https://github.com/syn54x/ferro-orm/pull/603),
+  [`40fb7ab`](https://github.com/syn54x/ferro-orm/commit/40fb7abf350bd132ef967e32cb29e84cf95f8515))
+
+- **migrate**: Typed plan reports, and a plan that holds its sides
+  ([#595](https://github.com/syn54x/ferro-orm/pull/595),
+  [`c520346`](https://github.com/syn54x/ferro-orm/commit/c520346e2c7e4a2943c765267e3dfe4aaae8861f))
+
+- **migrations**: One function per verb, resolved by one Target
+  ([#598](https://github.com/syn54x/ferro-orm/pull/598),
+  [`9109ff2`](https://github.com/syn54x/ferro-orm/commit/9109ff204ec0ef4e9665ceab15eb86c5d2ef30a1))
+
+- **migrations**: The Alembic bridge's revision in one core call (B4)
+  ([#602](https://github.com/syn54x/ferro-orm/pull/602),
+  [`0d1d417`](https://github.com/syn54x/ferro-orm/commit/0d1d41787d654500566273974e7aeffd44534ec1))
+
+### Testing
+
+- Pin the migrations door as an I-1 emitter and rewrite AGENTS.md I-1 (#538)
+  ([#572](https://github.com/syn54x/ferro-orm/pull/572),
+  [`ae14b7b`](https://github.com/syn54x/ferro-orm/commit/ae14b7b3e65ac20289ab9a5c56b25c4db686fe5d))
+
+- **migrate**: Pin the transitive hold-back of tables awaiting a rename
+  ([#582](https://github.com/syn54x/ferro-orm/pull/582),
+  [`939b37a`](https://github.com/syn54x/ferro-orm/commit/939b37a41436387696128eb744da445b160fa0cf))
+
+- **parity**: Match the tracked-database refusal as #571 words it
+  ([`cd04e46`](https://github.com/syn54x/ferro-orm/commit/cd04e469940dda312537b591e91d602625a655ff))
+
+- **postgres**: Isolate concurrent suite runs on one server, and fix the guard's neighbour-schema
+  race ([#601](https://github.com/syn54x/ferro-orm/pull/601),
+  [`bd9c84a`](https://github.com/syn54x/ferro-orm/commit/bd9c84a72c7c0217e9dc96dea391d98a599b08a8))
+
+
 ## v0.21.2 (2026-09-29)
 
 ### Bug Fixes
