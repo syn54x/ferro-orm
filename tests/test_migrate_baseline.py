@@ -458,13 +458,15 @@ def test_the_typed_refusal_is_chosen_by_kind_never_by_text():
         "a reworded refusal",
         kind="already_tracked",
         names=["0001_create_author", "0002_add_teams"],
+        head="0002_from_the_core",
     )
     typed = baseline_module._typed(reworded, status)
     assert isinstance(typed, AlreadyTrackedError)
     assert str(typed) == "a reworded refusal"
+    # Both fields are the core's, read through, never re-derived here.
     assert (typed.applied, typed.head) == (
         ["0001_create_author", "0002_add_teams"],
-        "0002_add_teams",
+        "0002_from_the_core",
     )
     assert typed.report is status
 

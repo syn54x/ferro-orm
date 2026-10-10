@@ -124,7 +124,9 @@ def _typed(refused: RunRefused, report: StatusReport) -> MigrationRefused:
     baseline, each carrying ``report``. Any other refusal is returned as it
     came."""
     if refused.kind == "already_tracked":
-        return AlreadyTrackedError(str(refused), applied=refused.names, report=report)
+        return AlreadyTrackedError(
+            str(refused), applied=refused.names, head=refused.head, report=report
+        )
     if refused.kind == "applied_above_baseline":
         return AppliedAboveBaselineError(
             str(refused), above=refused.names, report=report

@@ -56,7 +56,9 @@ class RunRefused(MigrationRefused):
     alone would have let the run through. ``names`` lists the migrations
     (``NNNN_<name>``) a refusal about a set of them names: a tracked
     database's records (``already_tracked``), the run-applied migrations
-    above a baseline (``applied_above_baseline``); empty otherwise.
+    above a baseline (``applied_above_baseline``); empty otherwise. ``head``
+    is the newest of a tracked database's records (``already_tracked``),
+    ``None`` otherwise.
     """
 
     def __init__(
@@ -69,6 +71,7 @@ class RunRefused(MigrationRefused):
         reason: str | None = None,
         ahead_only: bool = False,
         names: Sequence[str] | None = None,
+        head: str | None = None,
     ) -> None:
         super().__init__(message)
         self.kind = kind
@@ -77,6 +80,7 @@ class RunRefused(MigrationRefused):
         self.reason = reason
         self.ahead_only = ahead_only
         self.names = list(names or ())
+        self.head = head
 
 
 @dataclass(frozen=True)

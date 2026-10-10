@@ -346,14 +346,13 @@ async def test_the_typed_baseline_refusals_are_migration_refusals():
     for typed in (AlreadyTrackedError, AppliedAboveBaselineError):
         assert issubclass(typed, MigrationRefused)
         assert typed.__name__ in ferro.migrations.__all__
-    err = AlreadyTrackedError("text", applied=["0001_a", "0002_b"])
+    err = AlreadyTrackedError("text", applied=["0001_a", "0002_b"], head="0002_b")
     assert (err.applied, err.head, err.report, str(err)) == (
         ["0001_a", "0002_b"],
         "0002_b",
         None,
         "text",
     )
-    assert AlreadyTrackedError("text", applied=[]).head is None
     above = AppliedAboveBaselineError("text", above=["0003_c"])
     assert (above.above, above.report) == (["0003_c"], None)
 

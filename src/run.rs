@@ -78,9 +78,9 @@ pub fn refused(text: impl Into<String>) -> PyErr {
 }
 
 /// A run planner refusal as `RunRefused(text, kind=..., migration=...,
-/// step=..., reason=..., ahead_only=..., names=...)`, so a caller matches on
-/// its kind rather than its text. Falls back to `RuntimeError` only if the
-/// Python module cannot be imported.
+/// step=..., reason=..., ahead_only=..., names=..., head=...)`, so a caller
+/// matches on its kind rather than its text. Falls back to `RuntimeError`
+/// only if the Python module cannot be imported.
 pub fn refused_by(refusal: &ferro_migrate::RunRefusal) -> PyErr {
     let text = refusal.to_string();
     Python::attach(|py| {
@@ -92,6 +92,7 @@ pub fn refused_by(refusal: &ferro_migrate::RunRefusal) -> PyErr {
             kwargs.set_item("reason", refusal.reason())?;
             kwargs.set_item("ahead_only", refusal.ahead_only())?;
             kwargs.set_item("names", refusal.names())?;
+            kwargs.set_item("head", refusal.head())?;
             py.import("ferro.migrations.report")?
                 .getattr("RunRefused")?
                 .call((text.clone(),), Some(&kwargs))

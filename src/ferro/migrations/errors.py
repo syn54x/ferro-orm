@@ -121,8 +121,8 @@ class AlreadyTrackedError(MigrationRefused):
     Two pre-deploys that adopt one database at once both find no records and
     both call ``baseline()``; the run lock lets one record, and the other
     raises this. ``applied`` names every migration the records name
-    (``NNNN_<name>``, in order), ``head`` the newest of them (``None`` when
-    there is none), and ``report`` is the database's
+    (``NNNN_<name>``, in order), ``head`` the newest of them (both as the
+    core decided the refusal), and ``report`` is the database's
     :class:`~ferro.migrations.report.StatusReport`, so the caller carries on
     to ``up()``::
 
@@ -138,10 +138,11 @@ class AlreadyTrackedError(MigrationRefused):
         message: str,
         *,
         applied: Sequence[str],
+        head: str | None,
         report: StatusReport | None = None,
     ) -> None:
         self.applied = list(applied)
-        self.head: str | None = self.applied[-1] if self.applied else None
+        self.head = head
         super().__init__(message, report=report)
 
 

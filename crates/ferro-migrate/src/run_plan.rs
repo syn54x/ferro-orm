@@ -707,6 +707,15 @@ impl RunRefusal {
         }
     }
 
+    /// The newest migration a tracked database's records name
+    /// ([`RunRefusal::AlreadyTracked`]'s `head`), `NNNN_<name>`.
+    pub fn head(&self) -> Option<&str> {
+        match self {
+            RunRefusal::AlreadyTracked { head, .. } => Some(head),
+            _ => None,
+        }
+    }
+
     /// Whether `allow_ahead` alone would have let the run through
     /// ([`RunRefusal::AppliedMissing`]'s `ahead_only`).
     pub fn ahead_only(&self) -> bool {
@@ -4916,6 +4925,7 @@ mod tests {
             head: "0002_add_teams".into(),
         };
         assert_eq!(refusal.kind(), "already_tracked");
+        assert_eq!(refusal.head(), Some("0002_add_teams"));
         assert_eq!(
             refusal.names(),
             Some(
@@ -4942,6 +4952,7 @@ mod tests {
         };
         assert_eq!(one.kind(), "applied_above_baseline");
         assert_eq!(one.names(), Some(&["0003_add_orgs".to_string()][..]));
+        assert_eq!(one.head(), None);
         assert_eq!(
             one.to_string(),
             "ferro migrate baseline --remove: 0003_add_orgs was applied by a run above the \
@@ -4982,7 +4993,11 @@ mod tests {
             refusals.iter().map(RunRefusal::kind).collect::<Vec<_>>(),
             ["nothing_to_baseline", "no_baseline_target", "baseline_step"]
         );
-        assert!(refusals.iter().all(|r| r.names().is_none()));
+        assert!(
+            refusals
+                .iter()
+                .all(|r| r.names().is_none() && r.head().is_none())
+        );
         assert_eq!(
             refusals[0].to_string(),
             "ferro migrate baseline: migrations/ holds no migration to record; generate the \
