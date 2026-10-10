@@ -27,6 +27,7 @@ file, a database ahead of the checkout, or a refusal ``up`` would meet).
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -52,7 +53,10 @@ class RunRefused(MigrationRefused):
     step's declared reason). Each is ``None`` for a refusal that is not the
     planner's (a lost lock, a missing schema). ``ahead_only`` is true when
     the database holds migrations the directory lacks and ``allow_ahead``
-    alone would have let the run through.
+    alone would have let the run through. ``names`` lists the migrations
+    (``NNNN_<name>``) a refusal about a set of them names: a tracked
+    database's records (``already_tracked``), the run-applied migrations
+    above a baseline (``applied_above_baseline``); empty otherwise.
     """
 
     def __init__(
@@ -64,6 +68,7 @@ class RunRefused(MigrationRefused):
         step: int | None = None,
         reason: str | None = None,
         ahead_only: bool = False,
+        names: Sequence[str] | None = None,
     ) -> None:
         super().__init__(message)
         self.kind = kind
@@ -71,6 +76,7 @@ class RunRefused(MigrationRefused):
         self.step = step
         self.reason = reason
         self.ahead_only = ahead_only
+        self.names = list(names or ())
 
 
 @dataclass(frozen=True)

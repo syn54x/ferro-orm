@@ -30,7 +30,13 @@ from typing import TYPE_CHECKING, Any
 
 from ._baseline import BaselineReport, baseline, remove_baseline
 from ._drift import DriftReport, drift, render_op
-from .errors import DatabaseAheadError, MigrationRefused, PendingMigrationsError
+from .errors import (
+    AlreadyTrackedError,
+    AppliedAboveBaselineError,
+    DatabaseAheadError,
+    MigrationRefused,
+    PendingMigrationsError,
+)
 from .generate import check
 from .runner import require_applied, status, up
 from .steps import atomic, chunked, irreversible, nothing_to_reverse, todo
@@ -39,6 +45,8 @@ if TYPE_CHECKING:
     from .alembic import ferro_options, get_metadata, render_item
 
 __all__ = [
+    "AlreadyTrackedError",
+    "AppliedAboveBaselineError",
     "BaselineReport",
     "DatabaseAheadError",
     "DriftReport",

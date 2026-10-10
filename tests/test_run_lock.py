@@ -99,6 +99,26 @@ async def test_a_lock_timeout_gives_up_naming_it_and_leaves_the_holder_alone(
     assert not await tracked.lock_held()
 
 
+async def test_a_baseline_that_outwaits_its_lock_timeout_is_the_base_refusal(
+    project, pkg, db, capsys
+):
+    # Only a tracked database (and a run above the baseline) has its own
+    # class; a lock wait that runs out is the run's refusal, untyped.
+    from ferro.migrations import AlreadyTrackedError, AppliedAboveBaselineError
+
+    settings, database = _project(project, pkg, db)
+    tracked = await _tracked(db, database)
+    async with tracked.locked(5.0):
+        for call in (ferro.migrations.baseline, ferro.migrations.remove_baseline):
+            with pytest.raises(RunRefused, match=r"lock timeout \(1s\)") as raised:
+                await call(settings, database.name, url=db.url, lock_timeout="1s")
+            assert not isinstance(
+                raised.value, (AlreadyTrackedError, AppliedAboveBaselineError)
+            )
+    assert WAITING in capsys.readouterr().err
+    assert "_ferro_migrations" not in db.tables() or db.records() == []
+
+
 async def test_status_shows_running_while_a_run_holds_the_lock(project, pkg, db):
     settings, database = _project(project, pkg, db, "second")
     tracked = await _tracked(db, database)
