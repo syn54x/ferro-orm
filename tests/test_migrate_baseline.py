@@ -26,8 +26,18 @@ import pytest
 
 import ferro
 from ferro import _core
-from ferro.migrations import DriftReport, MigrationRefused, baseline, remove_baseline
+from ferro.migrations import (
+    AlreadyTrackedError,
+    AppliedAboveBaselineError,
+    BaselineReport,
+    DriftReport,
+    MigrationRefused,
+    baseline,
+    remove_baseline,
+    up,
+)
 from ferro.migrations._drift import against
+from ferro.migrations.report import RunRefused, StatusReport
 from tests.test_migrate_drift import SQUADS, TEAMS, snapshot_of
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     AUTHOR,
@@ -61,6 +71,12 @@ class Org(Model):
 )
 
 BOTH = "0001_create_author … 0002_add_teams"
+TRACKED = (
+    "ferro migrate baseline: this database already has migration records ({}); "
+    "baseline records migrations only on a database that has none. Run `ferro "
+    "migrate status` to see where it stands. Nothing was recorded."
+)
+TYPED = (AlreadyTrackedError, AppliedAboveBaselineError)
 NOT_COMPARED = (
     "baseline checked what `ferro migrate drift` checks: column defaults and "
     "objects ferro does not own were not compared\n"
@@ -337,8 +353,7 @@ def test_a_database_with_records_is_refused_naming_status(project, pkg, db, caps
     code, out, err = cli(capsys, "baseline", "--url", db.url)
 
     assert (code, out) == (1, "")
-    assert "already has migration records (0001_create_author)" in err
-    assert "Run `ferro migrate status`" in err
+    assert err.strip() == TRACKED.format("0001_create_author")
     assert db.records() == before
 
 
@@ -356,8 +371,121 @@ def test_a_target_the_directory_lacks_is_refused_naming_the_directory(
         "(0002_add_teams). Nothing was recorded."
     )
     assert no_records(db)
-    with pytest.raises(MigrationRefused, match="0009 names no migration"):
+    with pytest.raises(MigrationRefused, match="0009 names no migration") as raised:
         asyncio.run(baseline(url=db.url, target="0009"))
+    assert not isinstance(raised.value, TYPED)
+    assert raised.value.kind == "no_baseline_target"
+
+
+def test_an_empty_directory_is_refused_as_the_base_refusal(project, pkg, db):
+    configure(project, pkg, db.backend)
+    (project / "migrations").mkdir(exist_ok=True)
+
+    with pytest.raises(
+        MigrationRefused, match="holds no migration to record"
+    ) as raised:
+        asyncio.run(baseline(url=db.url))
+    assert not isinstance(raised.value, TYPED)
+    assert raised.value.kind == "nothing_to_baseline"
+
+
+# -- a tracked database: the refusal a pre-deploy branches on (#624) -----------------
+
+
+def test_two_concurrent_baselines_record_once_and_the_second_is_already_tracked(
+    project, pkg, db
+):
+    # Two services' pre-deploys adopt the same database at once: both read
+    # "no records", both call baseline(); the run lock serialises them and
+    # the second is refused by type, so it can carry on to up().
+    auto_migrated(project, pkg, db)
+
+    async def both() -> list[object]:
+        return await asyncio.gather(
+            baseline(url=db.url), baseline(url=db.url), return_exceptions=True
+        )
+
+    outcomes = asyncio.run(both())
+
+    reports = [o for o in outcomes if isinstance(o, BaselineReport)]
+    refused = [o for o in outcomes if isinstance(o, AlreadyTrackedError)]
+    assert (len(reports), len(refused)) == (1, 1), outcomes
+    (report,), (err,) = reports, refused
+    assert report.recorded == ["0001_create_author", "0002_add_teams"]
+    assert err.applied == report.recorded
+    assert err.head == report.recorded[-1]
+    assert isinstance(err.report, StatusReport)
+    assert err.report.head_applied.name == "0002_add_teams"
+    assert str(err) == TRACKED.format("0001_create_author, 0002_add_teams")
+    assert {row[2] for row in origins(db)} == {"baseline"}
+    assert len(db.records()) == report.steps
+
+
+def test_baseline_on_a_database_up_migrated_is_already_tracked(project, pkg, db):
+    generated(project, pkg, db)
+    assert asyncio.run(up(url=db.url)).refusal is None
+    before = db.records()
+
+    with pytest.raises(AlreadyTrackedError) as raised:
+        asyncio.run(baseline(url=db.url))
+
+    err = raised.value
+    assert isinstance(err, MigrationRefused)
+    assert str(err) == TRACKED.format("0001_create_author, 0002_add_teams")
+    assert err.applied == ["0001_create_author", "0002_add_teams"]
+    assert err.head == "0002_add_teams"
+    assert err.report.head_applied.name == "0002_add_teams"
+    assert err.report.pending is False
+    assert db.records() == before
+
+    async def adopt_then_up() -> None:
+        # The adopting howto's start-up recipe.
+        try:
+            await baseline(url=db.url)
+        except AlreadyTrackedError:
+            pass
+        await up(url=db.url)
+
+    asyncio.run(adopt_then_up())
+    assert db.records() == before
+
+
+def test_the_typed_refusal_is_chosen_by_kind_never_by_text():
+    status = StatusReport(
+        database="default", dialect="sqlite", table="t", migrations=[]
+    )
+    reworded = RunRefused(
+        "a reworded refusal",
+        kind="already_tracked",
+        names=["0001_create_author", "0002_add_teams"],
+        head="0002_from_the_core",
+    )
+    typed = baseline_module._typed(reworded, status)
+    assert isinstance(typed, AlreadyTrackedError)
+    assert str(typed) == "a reworded refusal"
+    # Both fields are the core's, read through, never re-derived here.
+    assert (typed.applied, typed.head) == (
+        ["0001_create_author", "0002_add_teams"],
+        "0002_from_the_core",
+    )
+    assert typed.report is status
+
+    above = baseline_module._typed(
+        RunRefused("reworded too", kind="applied_above_baseline", names=["0003_x"]),
+        status,
+    )
+    assert isinstance(above, AppliedAboveBaselineError)
+    assert (str(above), above.above, above.report) == (
+        "reworded too",
+        ["0003_x"],
+        status,
+    )
+
+    # Today's text under any other kind stays the base refusal, unchanged.
+    other = RunRefused(TRACKED.format("0001_create_author"), kind="no_baseline_target")
+    assert baseline_module._typed(other, status) is other
+    lost = RunRefused("lock lost")
+    assert baseline_module._typed(lost, status) is lost
 
 
 # -- undoing a baseline, and down ------------------------------------------------------
@@ -379,6 +507,13 @@ def test_remove_is_refused_under_a_run_and_undoes_the_baseline_after_down(
         "the baseline at 0002_add_teams. Revert it first with `ferro migrate down "
         "--to 0002`, then remove the baseline. Nothing was removed."
     )
+    assert len(db.records()) == 3
+    with pytest.raises(AppliedAboveBaselineError) as raised:
+        asyncio.run(remove_baseline(url=db.url))
+    assert isinstance(raised.value, MigrationRefused)
+    assert str(raised.value) == err.strip()
+    assert raised.value.above == ["0003_add_orgs"]
+    assert raised.value.report.head_applied.name == "0003_add_orgs"
     assert len(db.records()) == 3
 
     assert cli(capsys, "down", "--to", "0002", "--yes", "--url", db.url)[0] == 0

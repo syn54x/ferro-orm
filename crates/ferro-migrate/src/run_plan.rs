@@ -606,6 +606,56 @@ pub enum RunRefusal {
         /// The edited file's order keys (empty when its `up` is not chunked).
         keys_on_disk: Vec<String>,
     },
+    /// `baseline` on a tracked database: its tracking table already holds
+    /// step records, and a baseline records only on a database that has
+    /// none (ADR-0031). The second of two concurrent pre-deploys meets it
+    /// once the first has recorded; the application's `baseline()` raises
+    /// `AlreadyTrackedError` on it, by this kind.
+    AlreadyTracked {
+        /// Every migration a record names (`NNNN_<name>`), in order.
+        applied: Vec<String>,
+        /// The last of them.
+        head: String,
+    },
+    /// `baseline --remove` under a run that applied a migration above the
+    /// baseline: removing it would leave applied migrations above pending
+    /// ones. The application's `remove_baseline()` raises
+    /// `AppliedAboveBaselineError` on it, by this kind.
+    AppliedAboveBaseline {
+        /// Each run-applied migration above the baseline (`NNNN_<name>`).
+        above: Vec<String>,
+        /// The highest baselined migration (`NNNN_<name>`): the floor
+        /// `down --to` reverts to.
+        floor: String,
+    },
+    /// `baseline` over a migrations directory that holds no migration.
+    NothingToBaseline {
+        /// The directory's name (`migrations`).
+        directory: String,
+    },
+    /// `baseline <target>` names no migration the directory holds.
+    NoBaselineTarget {
+        /// The target as the operator wrote it.
+        target: String,
+        /// The directory's name (`migrations`).
+        directory: String,
+        /// `NNNN_<name>` of the directory's head.
+        head: String,
+    },
+    /// A step `baseline` would record that no run could execute on this
+    /// dialect (a missing rendering, headers it cannot honour): the run
+    /// planner's own refusal, said as a baseline's.
+    BaselineStep {
+        /// The run planner's refusal for the step.
+        refusal: Box<RunRefusal>,
+    },
+}
+
+/// `NNNN` of a migration's `NNNN_<name>`.
+fn number_of(migration_name: &str) -> &str {
+    migration_name
+        .split_once('_')
+        .map_or(migration_name, |(number, _)| number)
 }
 
 impl RunRefusal {
@@ -637,6 +687,32 @@ impl RunRefusal {
             RunRefusal::NotAMigration { .. } => "not_a_migration",
             RunRefusal::Unreadable { .. } => "unreadable",
             RunRefusal::Rebuild { .. } => "rebuild",
+            RunRefusal::AlreadyTracked { .. } => "already_tracked",
+            RunRefusal::AppliedAboveBaseline { .. } => "applied_above_baseline",
+            RunRefusal::NothingToBaseline { .. } => "nothing_to_baseline",
+            RunRefusal::NoBaselineTarget { .. } => "no_baseline_target",
+            RunRefusal::BaselineStep { .. } => "baseline_step",
+        }
+    }
+
+    /// The migrations the refusal names (`NNNN_<name>`), when it is about a
+    /// set of them: a tracked database's records
+    /// ([`RunRefusal::AlreadyTracked`]) or the run-applied migrations above
+    /// a baseline ([`RunRefusal::AppliedAboveBaseline`]).
+    pub fn names(&self) -> Option<&[String]> {
+        match self {
+            RunRefusal::AlreadyTracked { applied, .. } => Some(applied),
+            RunRefusal::AppliedAboveBaseline { above, .. } => Some(above),
+            _ => None,
+        }
+    }
+
+    /// The newest migration a tracked database's records name
+    /// ([`RunRefusal::AlreadyTracked`]'s `head`), `NNNN_<name>`.
+    pub fn head(&self) -> Option<&str> {
+        match self {
+            RunRefusal::AlreadyTracked { head, .. } => Some(head),
+            _ => None,
         }
     }
 
@@ -663,6 +739,7 @@ impl RunRefusal {
             | RunRefusal::MissingRendering { migration, .. }
             | RunRefusal::EditedChunked { migration, .. }
             | RunRefusal::EditedReverting { migration, .. } => Some(*migration),
+            RunRefusal::BaselineStep { refusal } => refusal.migration(),
             _ => None,
         }
     }
@@ -675,6 +752,7 @@ impl RunRefusal {
             | RunRefusal::MissingRendering { step, .. }
             | RunRefusal::EditedChunked { step, .. }
             | RunRefusal::EditedReverting { step, .. } => Some(*step),
+            RunRefusal::BaselineStep { refusal } => refusal.step(),
             _ => None,
         }
     }
@@ -687,6 +765,7 @@ impl RunRefusal {
                 Some(reason)
             }
             RunRefusal::NothingToRerecord { why, .. } => Some(why),
+            RunRefusal::BaselineStep { refusal } => refusal.reason(),
             _ => None,
         }
     }
@@ -1058,6 +1137,54 @@ impl std::fmt::Display for RunRefusal {
             RunRefusal::Rebuild { file, reason } => {
                 write!(f, "ferro migrate: {file} {reason}. Nothing was applied.")
             }
+            RunRefusal::AlreadyTracked { applied, .. } => write!(
+                f,
+                "ferro migrate baseline: this database already has migration records ({}); \
+                 baseline records migrations only on a database that has none. Run `ferro \
+                 migrate status` to see where it stands. Nothing was recorded.",
+                applied.join(", ")
+            ),
+            RunRefusal::AppliedAboveBaseline { above, floor } => {
+                let (verb, pronoun) = if above.len() == 1 {
+                    ("was", "it")
+                } else {
+                    ("were", "them")
+                };
+                write!(
+                    f,
+                    "ferro migrate baseline --remove: {} {verb} applied by a run above the \
+                     baseline at {floor}. Revert {pronoun} first with `ferro migrate down --to \
+                     {}`, then remove the baseline. Nothing was removed.",
+                    above.join(", "),
+                    number_of(floor)
+                )
+            }
+            RunRefusal::NothingToBaseline { directory } => write!(
+                f,
+                "ferro migrate baseline: {directory}/ holds no migration to record; generate \
+                 the first with `ferro migrate new <name>`. Nothing was recorded."
+            ),
+            RunRefusal::NoBaselineTarget {
+                target,
+                directory,
+                head,
+            } => write!(
+                f,
+                "ferro migrate baseline: {target} names no migration in {directory}/: give a \
+                 migration number from 0001 to {}, or a migration's full name ({head}). \
+                 Nothing was recorded.",
+                number_of(head)
+            ),
+            RunRefusal::BaselineStep { refusal } => match refusal.as_ref() {
+                RunRefusal::BadHeaders { file, reason } => write!(
+                    f,
+                    "ferro migrate baseline: {file}: {reason}. Nothing was recorded."
+                ),
+                missing @ RunRefusal::MissingRendering { .. } => {
+                    write!(f, "ferro migrate baseline: {missing} Nothing was recorded.")
+                }
+                other => write!(f, "ferro migrate baseline: {other}"),
+            },
         }
     }
 }
@@ -4784,5 +4911,108 @@ mod tests {
                 ]
             );
         }
+    }
+
+    // A baseline's two refusals a caller branches on (#624, ADR-0031): a
+    // tracked database, and a run applied above the baseline. Each carries
+    // the migrations it names; the text is the one `ferro migrate baseline`
+    // has always printed.
+
+    #[test]
+    fn a_tracked_database_refuses_a_baseline_naming_its_records() {
+        let refusal = RunRefusal::AlreadyTracked {
+            applied: vec!["0001_create_author".into(), "0002_add_teams".into()],
+            head: "0002_add_teams".into(),
+        };
+        assert_eq!(refusal.kind(), "already_tracked");
+        assert_eq!(refusal.head(), Some("0002_add_teams"));
+        assert_eq!(
+            refusal.names(),
+            Some(
+                &[
+                    "0001_create_author".to_string(),
+                    "0002_add_teams".to_string()
+                ][..]
+            )
+        );
+        assert_eq!(
+            refusal.to_string(),
+            "ferro migrate baseline: this database already has migration records \
+             (0001_create_author, 0002_add_teams); baseline records migrations only on a \
+             database that has none. Run `ferro migrate status` to see where it stands. \
+             Nothing was recorded."
+        );
+    }
+
+    #[test]
+    fn a_run_above_the_baseline_refuses_its_removal_naming_each() {
+        let one = RunRefusal::AppliedAboveBaseline {
+            above: vec!["0003_add_orgs".into()],
+            floor: "0002_add_teams".into(),
+        };
+        assert_eq!(one.kind(), "applied_above_baseline");
+        assert_eq!(one.names(), Some(&["0003_add_orgs".to_string()][..]));
+        assert_eq!(one.head(), None);
+        assert_eq!(
+            one.to_string(),
+            "ferro migrate baseline --remove: 0003_add_orgs was applied by a run above the \
+             baseline at 0002_add_teams. Revert it first with `ferro migrate down --to 0002`, \
+             then remove the baseline. Nothing was removed."
+        );
+        let two = RunRefusal::AppliedAboveBaseline {
+            above: vec!["0003_add_orgs".into(), "0004_add_squads".into()],
+            floor: "0002_add_teams".into(),
+        };
+        assert_eq!(
+            two.to_string(),
+            "ferro migrate baseline --remove: 0003_add_orgs, 0004_add_squads were applied by \
+             a run above the baseline at 0002_add_teams. Revert them first with `ferro \
+             migrate down --to 0002`, then remove the baseline. Nothing was removed."
+        );
+    }
+
+    #[test]
+    fn a_baselines_other_refusals_name_no_migrations() {
+        let refusals = [
+            RunRefusal::NothingToBaseline {
+                directory: "migrations".into(),
+            },
+            RunRefusal::NoBaselineTarget {
+                target: "0009".into(),
+                directory: "migrations".into(),
+                head: "0002_add_teams".into(),
+            },
+            RunRefusal::BaselineStep {
+                refusal: Box::new(RunRefusal::BadHeaders {
+                    file: "0001_a/01_schema.up.sqlite.sql".into(),
+                    reason: "declares no-transaction".into(),
+                }),
+            },
+        ];
+        assert_eq!(
+            refusals.iter().map(RunRefusal::kind).collect::<Vec<_>>(),
+            ["nothing_to_baseline", "no_baseline_target", "baseline_step"]
+        );
+        assert!(
+            refusals
+                .iter()
+                .all(|r| r.names().is_none() && r.head().is_none())
+        );
+        assert_eq!(
+            refusals[0].to_string(),
+            "ferro migrate baseline: migrations/ holds no migration to record; generate the \
+             first with `ferro migrate new <name>`. Nothing was recorded."
+        );
+        assert_eq!(
+            refusals[1].to_string(),
+            "ferro migrate baseline: 0009 names no migration in migrations/: give a migration \
+             number from 0001 to 0002, or a migration's full name (0002_add_teams). Nothing \
+             was recorded."
+        );
+        assert_eq!(
+            refusals[2].to_string(),
+            "ferro migrate baseline: 0001_a/01_schema.up.sqlite.sql: declares no-transaction. \
+             Nothing was recorded."
+        );
     }
 }

@@ -45,6 +45,10 @@ Each call reads the project configuration (`settings=None` is `FerroSettings()`)
 
 ::: ferro.migrations.DatabaseAheadError
 
+::: ferro.migrations.AlreadyTrackedError
+
+::: ferro.migrations.AppliedAboveBaselineError
+
 ## Data step declarations
 
 ::: ferro.migrations.atomic

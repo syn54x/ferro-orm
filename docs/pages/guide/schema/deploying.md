@@ -65,6 +65,26 @@ Run `ferro migrate up` (or `await ferro.migrations.up()`) before serving.
 
 `.pending` lists the migrations; `.refusals` carries anything that would stop `up` (an interrupted run, an [edited file](#edited-files-and-rerecord)). Every refusal is a `MigrationRefused`, so one `except` catches them all.
 
+### Concurrent pre-deploys
+
+Two services that share one database often run their pre-deploy steps at the same time. When that database is being [adopted](../../howto/adopting-migrations.md), both pre-deploys find no migration records and both call `baseline()`. The run lock lets the first one record. The second then finds a tracked database (its tracking table holds records now) and raises `AlreadyTrackedError`. Catch it by type and go on to `up()`:
+
+```python
+import ferro
+import ferro.migrations
+
+
+async def pre_deploy() -> None:
+    await ferro.connect(database_url)
+    try:
+        await ferro.migrations.baseline()
+    except ferro.migrations.AlreadyTrackedError:
+        pass  # the other service's pre-deploy baselined it first
+    await ferro.migrations.up()
+```
+
+`AlreadyTrackedError` is a `MigrationRefused`, and its message is the one `ferro migrate baseline` prints. `.applied` names the recorded migrations, `.head` the newest of them, and `.report` is the database's status report. Every other refusal from `baseline()` is still a plain `MigrationRefused`: a target the directory lacks, an empty directory, a lock wait that outlasts `lock_timeout`, or a configuration that names no single database. Two `up()` calls need no such care, because the second waits for the lock and finds nothing pending.
+
 ## Apps that migrate at start-up
 
 A desktop or local-first app that ships a SQLite file has no deploy step: it applies its own migrations when it starts.

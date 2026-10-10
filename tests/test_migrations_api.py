@@ -23,6 +23,8 @@ import pytest
 import ferro
 from ferro import _core
 from ferro.migrations import (
+    AlreadyTrackedError,
+    AppliedAboveBaselineError,
     DatabaseAheadError,
     MigrationRefused,
     PendingMigrationsError,
@@ -336,6 +338,33 @@ async def test_up_refused_in_process_carries_its_run_report(project, pkg, db):
     assert report.applied == []
     assert report.refusal == str(raised.value)
     assert report.refused is not None and report.refused.kind == "edited_applied"
+
+
+async def test_the_typed_baseline_refusals_are_migration_refusals():
+    # A pre-deploy writes `except AlreadyTrackedError: pass`; a caller that
+    # catches every refusal still catches both.
+    for typed in (AlreadyTrackedError, AppliedAboveBaselineError):
+        assert issubclass(typed, MigrationRefused)
+        assert typed.__name__ in ferro.migrations.__all__
+    err = AlreadyTrackedError("text", applied=["0001_a", "0002_b"], head="0002_b")
+    assert (err.applied, err.head, err.report, str(err)) == (
+        ["0001_a", "0002_b"],
+        "0002_b",
+        None,
+        "text",
+    )
+    above = AppliedAboveBaselineError("text", above=["0003_c"])
+    assert (above.above, above.report) == (["0003_c"], None)
+
+
+async def test_baseline_without_a_single_database_is_the_base_refusal(project, pkg, db):
+    configure_two(project, pkg, db.backend)
+
+    for call in (ferro.migrations.baseline, ferro.migrations.remove_baseline):
+        with pytest.raises(MigrationRefused) as raised:
+            await call(url=db.url)
+        assert type(raised.value) is MigrationRefused
+        assert "`analytics`" in str(raised.value)
 
 
 async def test_importing_the_api_does_not_import_alembic():

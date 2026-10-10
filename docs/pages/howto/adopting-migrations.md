@@ -92,20 +92,12 @@ The steps are the same, with Alembic as the old door:
 A desktop or local-first app cannot baseline its users' files by hand. The release that switches to migrations does it in its start-up code: a file with no migration records is baselined at `0001` (the schema the previous release's auto-migrate built, if `0001` was generated from those models), and then `up()` applies the rest:
 
 ```python
-import ferro
-import ferro.migrations
-
-
-async def start(database_url: str) -> None:
-    await ferro.connect(database_url)
-    report = await ferro.migrations.status()
-    if all(migration.state == "pending" for migration in report.migrations):
-        # Nothing recorded yet. A file the previous release built matches 0001
-        # and is recorded; a brand-new, empty file matches nothing and stays
-        # unrecorded, and up() creates it.
-        await ferro.migrations.baseline(target="0001")
-    await ferro.migrations.up()
+--8<-- "docs/examples/migrations_adopting.py:recipe"
 ```
+
+`baseline()` itself decides whether the file still needs adopting. On a tracked file (an earlier start recorded it, or `up()` has run) it records nothing and raises `AlreadyTrackedError`, a `MigrationRefused` whose `applied` names the recorded migrations, `head` the newest of them and `report` the file's status. Nothing is wrong, so the app carries on to `up()`.
+
+This also covers a race. Two instances that start together (two windows of the app, or two services' pre-deploys against one shared database) both find no records and both call `baseline()`. The run lock lets one of them record, and the other raises `AlreadyTrackedError`. Do not check `status()` first to decide whether to call `baseline()`: the answer can change before the baseline takes the lock. Every other refusal (a target the directory lacks, a lock wait that runs out) is still raised as `MigrationRefused`.
 
 The baseline still checks the file. A file that matches neither (an even older build, or one edited by hand) is not recorded, and `up()` then refuses to run `0001` over its tables: the app fails loudly at start-up instead of serving a half-migrated file.
 
@@ -116,7 +108,7 @@ $ ferro migrate baseline --remove
 removed the baseline of 0001_create_author … 0002_author_slug
 ```
 
-It deletes the records the baseline wrote, and nothing else: the migrations are pending again. It is refused while a migration a run applied stands above the baseline (revert that one with `ferro migrate down` first). `down` itself never reverts a baselined migration, whose down would drop tables it never created:
+It deletes the records the baseline wrote, and nothing else: the migrations are pending again. It is refused while a migration a run applied stands above the baseline (revert that one with `ferro migrate down` first); in code, `remove_baseline()` raises `AppliedAboveBaselineError`, whose `above` names each such migration. `down` itself never reverts a baselined migration, whose down would drop tables it never created:
 
 ```text
 ferro migrate: 0002 was recorded by `baseline` and created nothing here; `down` can go no lower than 0002. Nothing was reverted.

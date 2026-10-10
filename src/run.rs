@@ -78,9 +78,9 @@ pub fn refused(text: impl Into<String>) -> PyErr {
 }
 
 /// A run planner refusal as `RunRefused(text, kind=..., migration=...,
-/// step=..., reason=..., ahead_only=...)`, so a caller matches on its kind
-/// rather than its text. Falls back to `RuntimeError` only if the Python
-/// module cannot be imported.
+/// step=..., reason=..., ahead_only=..., names=..., head=...)`, so a caller
+/// matches on its kind rather than its text. Falls back to `RuntimeError`
+/// only if the Python module cannot be imported.
 pub fn refused_by(refusal: &ferro_migrate::RunRefusal) -> PyErr {
     let text = refusal.to_string();
     Python::attach(|py| {
@@ -91,6 +91,8 @@ pub fn refused_by(refusal: &ferro_migrate::RunRefusal) -> PyErr {
             kwargs.set_item("step", refusal.step())?;
             kwargs.set_item("reason", refusal.reason())?;
             kwargs.set_item("ahead_only", refusal.ahead_only())?;
+            kwargs.set_item("names", refusal.names())?;
+            kwargs.set_item("head", refusal.head())?;
             py.import("ferro.migrations.report")?
                 .getattr("RunRefused")?
                 .call((text.clone(),), Some(&kwargs))
@@ -2586,7 +2588,7 @@ impl Locked {
             target,
             FERRO_VERSION,
         )
-        .map_err(refused)
+        .map_err(|refusal| refused_by(&refusal))
     }
 
     /// Write a baseline's records in one transaction, each data step's with
@@ -2957,10 +2959,12 @@ fn baseline_directory_label(dir: &MigrationsDir) -> String {
 /// checksum, exactly as `up` would have recorded it, stamped `now`.
 ///
 /// # Errors
-/// The operator's text, ending in what was recorded (nothing): a database
-/// that already has a record (naming `ferro migrate status`); a target the
-/// directory lacks (naming the directory); an empty directory; a step with
-/// no rendering for `dialect`, or headers it cannot honour.
+/// A [`RunRefusal`] whose text ends in what was recorded (nothing): a
+/// tracked database ([`RunRefusal::AlreadyTracked`], naming its records and
+/// `ferro migrate status`); a target the directory lacks
+/// ([`RunRefusal::NoBaselineTarget`]); an empty directory
+/// ([`RunRefusal::NothingToBaseline`]); a step with no rendering for
+/// `dialect`, or headers it cannot honour ([`RunRefusal::BaselineStep`]).
 pub fn plan_baseline(
     dir: &MigrationsDir,
     existing: &[StepRecord],
@@ -2968,24 +2972,20 @@ pub fn plan_baseline(
     target: Option<&str>,
     now: &str,
     ferro_version: &str,
-) -> Result<BaselinePlan, String> {
-    const NOTHING: &str = "Nothing was recorded.";
-    if !existing.is_empty() {
-        let names: std::collections::BTreeSet<&str> =
-            existing.iter().map(|r| r.migration_name.as_str()).collect();
-        return Err(format!(
-            "ferro migrate baseline: this database already has migration records ({}); \
-             baseline records migrations only on a database that has none. Run `ferro migrate \
-             status` to see where it stands. {NOTHING}",
-            names.into_iter().collect::<Vec<_>>().join(", ")
-        ));
+) -> Result<BaselinePlan, RunRefusal> {
+    // `NNNN_<name>` sorts by its number, so the set holds each migration
+    // once, in order, and its last is the newest.
+    let applied: std::collections::BTreeSet<&str> =
+        existing.iter().map(|r| r.migration_name.as_str()).collect();
+    if let Some(head) = applied.last() {
+        return Err(RunRefusal::AlreadyTracked {
+            head: (*head).to_string(),
+            applied: applied.iter().map(|name| (*name).to_string()).collect(),
+        });
     }
     let label = baseline_directory_label(dir);
     let Some(head) = dir.migrations.last() else {
-        return Err(format!(
-            "ferro migrate baseline: {label}/ holds no migration to record; generate the first \
-             with `ferro migrate new <name>`. {NOTHING}"
-        ));
+        return Err(RunRefusal::NothingToBaseline { directory: label });
     };
     let chosen = match target.map(str::trim) {
         None => head,
@@ -2997,14 +2997,10 @@ pub fn plan_baseline(
                     || (wanted.chars().all(|c| c.is_ascii_digit())
                         && wanted.parse::<u16>().ok() == Some(m.number))
             })
-            .ok_or_else(|| {
-                format!(
-                    "ferro migrate baseline: {wanted} names no migration in {label}/: give a \
-                     migration number from 0001 to {:04}, or a migration's full name ({}). \
-                     {NOTHING}",
-                    head.number,
-                    head.dir_name()
-                )
+            .ok_or_else(|| RunRefusal::NoBaselineTarget {
+                target: wanted.to_string(),
+                directory: label.clone(),
+                head: head.dir_name(),
             })?,
     };
     let mut plan = BaselinePlan {
@@ -3024,8 +3020,10 @@ pub fn plan_baseline(
         for step in &migration.steps {
             // The file this dialect runs, by the run planner's own rule: the
             // file `up` checks every applied record against.
-            let file = step_file(migration, step, dialect)
-                .map_err(|missing| format!("ferro migrate baseline: {missing} {NOTHING}"))?;
+            let as_baselines = |refusal| RunRefusal::BaselineStep {
+                refusal: Box::new(refusal),
+            };
+            let file = step_file(migration, step, dialect).map_err(as_baselines)?;
             let name = file_name(&file.up);
             let shown = format!("{}/{name}", migration.dir_name());
             let kind = if step.kind == StepKind::Data {
@@ -3035,12 +3033,7 @@ pub fn plan_baseline(
                 RecordKind::Atomic
             } else {
                 exec_mode(&file.headers, dialect, &shown)
-                    .map_err(|refusal| match refusal {
-                        RunRefusal::BadHeaders { file, reason } => {
-                            format!("ferro migrate baseline: {file}: {reason}. {NOTHING}")
-                        }
-                        other => format!("ferro migrate baseline: {other}"),
-                    })?
+                    .map_err(as_baselines)?
                     .record_kind()
             };
             plan.records.push(StepRecord {
@@ -3079,7 +3072,7 @@ pub fn plan_baseline_now(
     dialect: Dialect,
     target: Option<&str>,
     ferro_version: &str,
-) -> Result<BaselinePlan, String> {
+) -> Result<BaselinePlan, RunRefusal> {
     plan_baseline(dir, existing, dialect, target, &now_iso(), ferro_version)
 }
 
@@ -3087,11 +3080,11 @@ pub fn plan_baseline_now(
 /// by migration and step — none when there is no baseline.
 ///
 /// # Errors
-/// The operator's text when a run-origin record stands above the highest
-/// baselined migration, naming each such migration and the `down` that
-/// reverts it: removing the baseline under them would leave applied
-/// migrations above pending ones.
-pub fn baseline_removal(records: &[StepRecord]) -> Result<Vec<(u16, u8)>, String> {
+/// [`RunRefusal::AppliedAboveBaseline`] when a run-origin record stands
+/// above the highest baselined migration, naming each such migration and the
+/// `down` that reverts it: removing the baseline under them would leave
+/// applied migrations above pending ones.
+pub fn baseline_removal(records: &[StepRecord]) -> Result<Vec<(u16, u8)>, RunRefusal> {
     let baselined = || records.iter().filter(|r| r.origin == Origin::Baseline);
     let Some(floor) = baselined().max_by_key(|r| r.migration) else {
         return Ok(Vec::new());
@@ -3102,19 +3095,10 @@ pub fn baseline_removal(records: &[StepRecord]) -> Result<Vec<(u16, u8)>, String
         .map(|r| r.migration_name.as_str())
         .collect();
     if !above.is_empty() {
-        let (verb, pronoun) = if above.len() == 1 {
-            ("was", "it")
-        } else {
-            ("were", "them")
-        };
-        return Err(format!(
-            "ferro migrate baseline --remove: {} {verb} applied by a run above the baseline at \
-             {}. Revert {pronoun} first with `ferro migrate down --to {:04}`, then remove the \
-             baseline. Nothing was removed.",
-            above.into_iter().collect::<Vec<_>>().join(", "),
-            floor.migration_name,
-            floor.migration
-        ));
+        return Err(RunRefusal::AppliedAboveBaseline {
+            above: above.into_iter().map(str::to_string).collect(),
+            floor: floor.migration_name.clone(),
+        });
     }
     Ok(baselined().map(|r| (r.migration, r.step)).collect())
 }
@@ -3177,7 +3161,7 @@ pub async fn remove_baseline_records(
     if let Some(refusal) = state.refusal {
         return Err(refused(refusal));
     }
-    let removed = baseline_removal(&state.records).map_err(refused)?;
+    let removed = baseline_removal(&state.records).map_err(|refusal| refused_by(&refusal))?;
     if removed.is_empty() {
         return Ok(removed);
     }
@@ -3408,8 +3392,9 @@ mod baseline_tests {
         for target in ["0009", "0002_add_tames", "latest"] {
             let refusal = plan_baseline(&migrations, &[], Dialect::Sqlite, Some(target), NOW, "v")
                 .expect_err("refused");
+            assert_eq!(refusal.kind(), "no_baseline_target");
             assert_eq!(
-                refusal,
+                refusal.to_string(),
                 format!(
                     "ferro migrate baseline: {target} names no migration in migrations/: \
                      give a migration number from 0001 to 0003, or a migration's full name \
@@ -3418,8 +3403,11 @@ mod baseline_tests {
             );
         }
         let empty = dir(Vec::new());
+        let refusal =
+            plan_baseline(&empty, &[], Dialect::Sqlite, None, NOW, "v").expect_err("empty");
+        assert_eq!(refusal.kind(), "nothing_to_baseline");
         assert_eq!(
-            plan_baseline(&empty, &[], Dialect::Sqlite, None, NOW, "v").expect_err("empty"),
+            refusal.to_string(),
             "ferro migrate baseline: migrations/ holds no migration to record; generate the \
              first with `ferro migrate new <name>`. Nothing was recorded."
         );
@@ -3435,9 +3423,38 @@ mod baseline_tests {
             plan_baseline(&dir, &existing, Dialect::Sqlite, None, NOW, "v").expect_err("refused");
         assert_eq!(
             refusal,
+            RunRefusal::AlreadyTracked {
+                applied: vec!["0001_create_author".into()],
+                head: "0001_create_author".into(),
+            }
+        );
+        assert_eq!(
+            refusal.to_string(),
             "ferro migrate baseline: this database already has migration records \
              (0001_create_author); baseline records migrations only on a database that has \
              none. Run `ferro migrate status` to see where it stands. Nothing was recorded."
+        );
+        // A database a run took further names every migration, the newest
+        // last: what the second of two concurrent pre-deploys reads.
+        let refusal = plan_baseline(
+            &dir,
+            &records(&dir, "0003"),
+            Dialect::Sqlite,
+            None,
+            NOW,
+            "v",
+        )
+        .expect_err("refused");
+        assert_eq!(
+            refusal,
+            RunRefusal::AlreadyTracked {
+                applied: vec![
+                    "0001_create_author".into(),
+                    "0002_add_teams".into(),
+                    "0003_add_orgs".into()
+                ],
+                head: "0003_add_orgs".into(),
+            }
         );
     }
 
@@ -3456,8 +3473,14 @@ mod baseline_tests {
             rendered_for: vec!["postgres"],
         };
         assert_eq!(
-            refusal,
+            refusal.to_string(),
             format!("ferro migrate baseline: {missing} Nothing was recorded.")
+        );
+        assert_eq!(
+            refusal,
+            RunRefusal::BaselineStep {
+                refusal: Box::new(missing)
+            }
         );
     }
 
@@ -3516,12 +3539,18 @@ mod baseline_tests {
         standing.push(above);
         assert_eq!(
             baseline_removal(&standing),
-            Err(
-                "ferro migrate baseline --remove: 0003_add_orgs was applied by a run above \
-                 the baseline at 0002_add_teams. Revert it first with `ferro migrate down --to \
-                 0002`, then remove the baseline. Nothing was removed."
-                    .to_string()
-            )
+            Err(RunRefusal::AppliedAboveBaseline {
+                above: vec!["0003_add_orgs".into()],
+                floor: "0002_add_teams".into(),
+            })
+        );
+        assert_eq!(
+            baseline_removal(&standing)
+                .expect_err("refused")
+                .to_string(),
+            "ferro migrate baseline --remove: 0003_add_orgs was applied by a run above the \
+             baseline at 0002_add_teams. Revert it first with `ferro migrate down --to 0002`, \
+             then remove the baseline. Nothing was removed."
         );
     }
 }
