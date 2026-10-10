@@ -17,7 +17,9 @@ FerroError
 ├── SettingsError           the project configuration is missing a key, malformed, or contradicts itself
 └── MigrationRefused        a migration call refused; .report says how far it got
     ├── PendingMigrationsError
-    └── DatabaseAheadError
+    ├── DatabaseAheadError
+    ├── AlreadyTrackedError
+    └── AppliedAboveBaselineError
 ```
 
 `ForeignKeyViolationError` covers every foreign-key rejection: a dangling
@@ -64,14 +66,22 @@ write, or the variable to set.
 
 A refused migration call raises
 [`MigrationRefused`](migrations.md#ferro.migrations.MigrationRefused), or one
-of its two subclasses: [`PendingMigrationsError`](migrations.md#ferro.migrations.PendingMigrationsError)
-when `require_applied()` finds the database behind its migrations, and
+of its subclasses for the states an application branches on:
+[`PendingMigrationsError`](migrations.md#ferro.migrations.PendingMigrationsError)
+when `require_applied()` finds the database behind its migrations,
 [`DatabaseAheadError`](migrations.md#ferro.migrations.DatabaseAheadError) when
-the database has applied migrations this checkout does not have. Its `.report`
-is the report of the call that refused, when it has one: the run's report
-(what `up()` applied before it stopped, the refusal itself as
-`report.refused`) or the `check()` report whose `raise_for_problems()`
-raised it. A refusal is raised, never returned: an application
+the database has applied migrations this checkout does not have,
+[`AlreadyTrackedError`](migrations.md#ferro.migrations.AlreadyTrackedError)
+when `baseline()` finds the database already tracked (another pre-deploy
+adopted it first; `.applied` names the recorded migrations, `.head` the
+newest), and
+[`AppliedAboveBaselineError`](migrations.md#ferro.migrations.AppliedAboveBaselineError)
+when `remove_baseline()` finds a run applied migrations above the baseline
+(`.above` names them). Its `.report` is the report of the call that refused,
+when it has one: the run's report (what `up()` applied before it stopped, the
+refusal itself as `report.refused`), the `check()` report whose
+`raise_for_problems()` raised it, or the status report of the database a
+baseline refusal is about. A refusal is raised, never returned: an application
 that called `up()` must not go on serving a database the run did not reach.
 
 ```python
