@@ -33,9 +33,50 @@ use ferro_schema_ir::{SchemaIrPayload, SchemaModel};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+pub use step_class::StepClass;
+use step_class::migration_classes;
 
-/// The tracking table format this ferro reads and writes.
+/// The tracking table format this ferro reads and writes: a reshaping an
+/// older ferro refuses bumps it (ADR-0030 as amended). It stays 1.
 pub const TRACKING_FORMAT: i64 = 1;
+
+/// The tracking table's minor: each additive change within a format, a
+/// nullable column an older ferro reads, writes and re-records beside
+/// unchanged (ADR-0030 as amended). Minor 1 is the step class column
+/// (ADR-0054). A newer ferro's first mutating verb on a lower minor adds
+/// what is missing under the run lock and records the minor; readers never
+/// write.
+pub const TRACKING_MINOR: i64 = 1;
+
+/// How far `up` and `require_applied` let a database ahead of the
+/// directory through (ADR-0038, ADR-0054). As JSON and from Python: `false`,
+/// `"expand-only"`, `true`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AllowAhead {
+    /// Refuse any applied migration the directory lacks (`False`).
+    #[default]
+    No,
+    /// Let them through when every step record the directory lacks is of
+    /// class `expand` (`"expand-only"`).
+    ExpandOnly,
+    /// Let any distance through (`True`).
+    Any,
+}
+
+impl From<bool> for AllowAhead {
+    fn from(allow: bool) -> Self {
+        if allow {
+            AllowAhead::Any
+        } else {
+            AllowAhead::No
+        }
+    }
+}
+
+impl AllowAhead {
+    /// The spelling `"expand-only"` takes in every door.
+    pub const EXPAND_ONLY: &'static str = "expand-only";
+}
 
 /// What a step record's attempt was (#466: the edit rules depend on it).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -156,9 +197,25 @@ pub struct StepRecord {
     /// A chunked `down`'s own cursor (declared by #520; #532 drives it).
     #[serde(default)]
     pub revert_cursor: Option<String>,
+    /// The step's class (ADR-0054), recorded when the step is applied by a
+    /// run or a baseline; `None` for a record an older ferro wrote, read as
+    /// `contract` until a mutating verb classifies it ([`unclassified`]).
+    #[serde(default)]
+    pub class: Option<StepClass>,
 }
 
 impl StepRecord {
+    /// The step's class as the record says it: `contract` when it says
+    /// nothing (written by an older ferro).
+    pub fn class_or_contract(&self) -> StepClass {
+        self.class.unwrap_or(StepClass::Contract)
+    }
+
+    /// `NNNN_<name>:NN`, as `DatabaseAheadError.contract_steps` names a step.
+    pub fn address(&self) -> String {
+        format!("{}:{:02}", self.migration_name, self.step)
+    }
+
     /// Whether the step finished.
     pub fn is_finished(&self) -> bool {
         self.finished_at.is_some()
@@ -415,6 +472,13 @@ pub enum RunRefusal {
         /// meets no other refusal. The application's `up()` raises
         /// `DatabaseAheadError` on it, from this one answer.
         ahead_only: bool,
+        /// Each step record of an ahead migration whose class is not
+        /// `expand` (a missing class is `contract`), `NNNN_<name>:NN` in
+        /// order: what `allow_ahead="expand-only"` refuses on.
+        contract_steps: Vec<String>,
+        /// Whether the run asked for `allow_ahead="expand-only"`: the text
+        /// then names the first contract step that refused it.
+        expand_only: bool,
     },
     /// `up`'s `through` names a migration the directory does not hold.
     NoSuchMigration {
@@ -715,6 +779,15 @@ impl RunRefusal {
         match self {
             RunRefusal::AlreadyTracked { head, .. } => Some(head),
             _ => None,
+        }
+    }
+
+    /// The ahead step records whose class is not `expand`
+    /// ([`RunRefusal::AppliedMissing`]'s `contract_steps`), `NNNN_<name>:NN`.
+    pub fn contract_steps(&self) -> &[String] {
+        match self {
+            RunRefusal::AppliedMissing { contract_steps, .. } => contract_steps,
+            _ => &[],
         }
     }
 
@@ -1024,7 +1097,11 @@ impl std::fmt::Display for RunRefusal {
                  at the head\n(it becomes {next:04}). Nothing was applied."
             ),
             RunRefusal::AppliedMissing {
-                missing, directory, ..
+                missing,
+                directory,
+                contract_steps,
+                expand_only,
+                ..
             } => {
                 let verb = if missing.len() == 1 {
                     "which is"
@@ -1034,10 +1111,18 @@ impl std::fmt::Display for RunRefusal {
                 write!(
                     f,
                     "ferro migrate: this database has applied {}, {verb} not in {directory}/.\n\
-                     The directory is behind the database: check out the branch that holds it. \
-                     Nothing was applied.",
+                     The directory is behind the database: check out the branch that holds it.",
                     and_list(missing)
-                )
+                )?;
+                if let Some(first) = contract_steps.first().filter(|_| *expand_only) {
+                    write!(
+                        f,
+                        "\nIt is ahead by contract steps, starting with {first} (contract: a \
+                         write the previous release makes can fail beside it), so \
+                         allow_ahead=\"expand-only\" does not let it through."
+                    )?;
+                }
+                write!(f, " Nothing was applied.")
             }
             RunRefusal::NewerFormat {
                 found,
@@ -1325,7 +1410,7 @@ impl HeldDirectory {
         records: &[StepRecord],
         dialect: Dialect,
         direction: Direction,
-        allow_ahead: bool,
+        allow_ahead: impl Into<AllowAhead>,
         order_keys: Option<&OrderKeys>,
     ) -> Result<RunPlan, RunRefusal> {
         let mut plan = plan_run(
@@ -1546,11 +1631,14 @@ type RecordMap<'a> = BTreeMap<(u16, u8), &'a StepRecord>;
 
 /// The refusals that hold whichever way a run goes, from the records alone:
 /// a reverting record, and records the directory has no migration or step
-/// for. Returns the ahead migrations `allow_ahead` let through.
+/// for. Returns the ahead migrations `allow_ahead` let through: any of them
+/// with [`AllowAhead::Any`], only when every ahead step record is `expand`
+/// with [`AllowAhead::ExpandOnly`] (a record's class read from the record
+/// alone: the directory lacks the files).
 fn check_records(
     dir: &MigrationsDir,
     records: &[StepRecord],
-    allow_ahead: bool,
+    allow_ahead: AllowAhead,
     refuse_reverting: bool,
 ) -> Result<Vec<String>, RunRefusal> {
     if refuse_reverting && let Some(record) = records.iter().find(|r| r.reverting) {
@@ -1561,6 +1649,7 @@ fn check_records(
     let head = dir.head().map_or(0, |m| m.number);
     let mut ahead = BTreeSet::new();
     let mut missing = BTreeSet::new();
+    let mut contract_steps = Vec::new();
     for record in records {
         match dir
             .migrations
@@ -1568,6 +1657,9 @@ fn check_records(
         {
             None if record.migration > head => {
                 ahead.insert(record.migration_name.clone());
+                if record.class_or_contract() != StepClass::Expand {
+                    contract_steps.push(record.address());
+                }
             }
             None => {
                 missing.insert(record.migration_name.clone());
@@ -1581,13 +1673,20 @@ fn check_records(
             Some(_) => {}
         }
     }
-    if !missing.is_empty() || (!ahead.is_empty() && !allow_ahead) {
+    let ahead_allowed = match allow_ahead {
+        AllowAhead::No => ahead.is_empty(),
+        AllowAhead::ExpandOnly => contract_steps.is_empty(),
+        AllowAhead::Any => true,
+    };
+    if !missing.is_empty() || !ahead_allowed {
         // Whether `allow_ahead` alone would let the run through is the
         // caller's to answer: only it knows what else the run meets.
         return Err(RunRefusal::AppliedMissing {
             missing: ahead.iter().chain(missing.iter()).cloned().collect(),
             directory: directory_label(dir),
             ahead_only: false,
+            contract_steps,
+            expand_only: allow_ahead == AllowAhead::ExpandOnly,
         });
     }
     Ok(ahead.into_iter().collect())
@@ -1802,9 +1901,10 @@ pub fn plan_run(
     records: &[StepRecord],
     dialect: Dialect,
     direction: Direction,
-    allow_ahead: bool,
+    allow_ahead: impl Into<AllowAhead>,
     order_keys: Option<&OrderKeys>,
 ) -> Result<RunPlan, RunRefusal> {
+    let allow_ahead = allow_ahead.into();
     let through = match direction {
         Direction::Down { target } => {
             return plan_down(dir, records, dialect, target, order_keys);
@@ -1813,11 +1913,18 @@ pub fn plan_run(
     };
     match plan_up(dir, records, dialect, through, allow_ahead, order_keys) {
         Err(RunRefusal::AppliedMissing {
-            missing, directory, ..
-        }) if !allow_ahead => Err(RunRefusal::AppliedMissing {
             missing,
             directory,
-            ahead_only: plan_up(dir, records, dialect, through, true, order_keys).is_ok(),
+            contract_steps,
+            expand_only,
+            ..
+        }) if allow_ahead != AllowAhead::Any => Err(RunRefusal::AppliedMissing {
+            missing,
+            directory,
+            ahead_only: plan_up(dir, records, dialect, through, AllowAhead::Any, order_keys)
+                .is_ok(),
+            contract_steps,
+            expand_only,
         }),
         planned => planned,
     }
@@ -1829,7 +1936,7 @@ fn plan_up(
     records: &[StepRecord],
     dialect: Dialect,
     through: Option<u16>,
-    allow_ahead: bool,
+    allow_ahead: AllowAhead,
     order_keys: Option<&OrderKeys>,
 ) -> Result<RunPlan, RunRefusal> {
     let ahead = check_records(dir, records, allow_ahead, true)?;
@@ -1852,11 +1959,18 @@ fn plan_up(
         }
         let snapshot_checksum = encode_checksum(&migration.snapshot.checksum);
         let first_data_step = first_data_step(migration);
+        // Decided once per migration with a pending step (ADR-0054).
+        let mut classes: Option<BTreeMap<u8, StepClass>> = None;
         for step in &migration.steps {
             let record = by_key.get(&(migration.number, step.ordinal));
             if record.is_some_and(|r| r.is_finished()) {
                 continue;
             }
+            let class = classes
+                .get_or_insert_with(|| migration_classes(dir, migration, dialect))
+                .get(&step.ordinal)
+                .copied()
+                .unwrap_or(StepClass::Contract);
             let file = step_file(migration, step, dialect)?;
             let name = file_name(&file.up);
             let shown = format!("{}/{name}", migration.dir_name());
@@ -1913,6 +2027,7 @@ fn plan_up(
                     origin: Origin::Run,
                     reverting: false,
                     revert_cursor: None,
+                    class: Some(class),
                 },
                 first_data_step,
                 rebuilds: Vec::new(),
@@ -2010,7 +2125,7 @@ fn plan_down(
     target: Target,
     order_keys: Option<&OrderKeys>,
 ) -> Result<RunPlan, RunRefusal> {
-    check_records(dir, records, false, false)?;
+    check_records(dir, records, AllowAhead::No, false)?;
     let by_key: RecordMap = records.iter().map(|r| ((r.migration, r.step), r)).collect();
     check_applied(dir, &by_key, dialect, true)?;
     let floor = down_floor(dir, records, target)?;
@@ -2298,7 +2413,7 @@ pub fn rerecord_plan(
         target: shown.clone(),
         why,
     };
-    check_records(dir, records, true, false)?;
+    check_records(dir, records, AllowAhead::Any, false)?;
     if let Some(other) = records
         .iter()
         .find(|r| r.reverting && (r.migration, r.step) != (number, ordinal))
@@ -2493,6 +2608,10 @@ pub struct StepStatus {
     pub on_disk_checksum: Option<String>,
     /// `destructive` / `data-dependent` headers the file carries.
     pub flags: Vec<&'static str>,
+    /// The step's class (ADR-0054): its record's when it has one (`contract`
+    /// for a record an older ferro wrote without one), else the class a run
+    /// would record for it.
+    pub class: StepClass,
 }
 
 /// One migration in `ferro migrate status`.
@@ -2539,6 +2658,7 @@ pub fn run_status(
     let mut migrations = Vec::new();
     for migration in &dir.migrations {
         let mut steps = Vec::new();
+        let mut classes: Option<BTreeMap<u8, StepClass>> = None;
         for step in &migration.steps {
             let record = by_key.get(&(migration.number, step.ordinal));
             let file = step_file(migration, step, dialect).ok();
@@ -2578,6 +2698,14 @@ pub fn run_status(
             if headers.data_dependent {
                 flags.push("data-dependent");
             }
+            let class = match record {
+                Some(r) => r.class_or_contract(),
+                None => classes
+                    .get_or_insert_with(|| migration_classes(dir, migration, dialect))
+                    .get(&step.ordinal)
+                    .copied()
+                    .unwrap_or(StepClass::Contract),
+            };
             steps.push(StepStatus {
                 step: step.ordinal,
                 file: name,
@@ -2586,6 +2714,7 @@ pub fn run_status(
                 applied_checksum: record.map(|r| r.checksum.clone()),
                 on_disk_checksum: on_disk,
                 flags,
+                class,
             });
         }
         migrations.push(MigrationStatus {
@@ -2615,6 +2744,40 @@ pub fn run_status(
         refusal_needs_attention: refusal.as_ref().is_some_and(RunRefusal::needs_attention),
         refusal: refusal.map(|r| r.to_string()),
     }
+}
+
+/// The class of every record `records` holds without one (written by an
+/// older ferro), by `(migration, step)`: what the step's migration in `dir`
+/// decides ([`step_class::migration_classes`]) when the directory holds the
+/// migration under the record's name and the step, `contract` when it does
+/// not (an ahead record of unknown class is unsafe, ADR-0054). What every
+/// mutating verb writes under the run lock; readers never write it.
+pub fn unclassified(
+    dir: &MigrationsDir,
+    records: &[StepRecord],
+    dialect: Dialect,
+) -> Vec<(u16, u8, StepClass)> {
+    let mut by_migration: BTreeMap<u16, BTreeMap<u8, StepClass>> = BTreeMap::new();
+    records
+        .iter()
+        .filter(|record| record.class.is_none())
+        .map(|record| {
+            let present = dir
+                .migrations
+                .iter()
+                .find(|m| m.number == record.migration && m.dir_name() == record.migration_name);
+            let class = present
+                .and_then(|migration| {
+                    by_migration
+                        .entry(migration.number)
+                        .or_insert_with(|| migration_classes(dir, migration, dialect))
+                        .get(&record.step)
+                        .copied()
+                })
+                .unwrap_or(StepClass::Contract);
+            (record.migration, record.step, class)
+        })
+        .collect()
 }
 
 /// The Postgres run-lock key for `governed_schema` (ADR-0029, amended by
@@ -4418,6 +4581,180 @@ mod tests {
         )
         .expect_err("ahead");
         assert!(!down.ahead_only());
+    }
+
+    // -- step class and allow_ahead="expand-only" (ADR-0054) ----------------------------
+
+    fn up_allowing(
+        dir: &MigrationsDir,
+        records: &[StepRecord],
+        allow_ahead: AllowAhead,
+    ) -> Result<RunPlan, RunRefusal> {
+        plan_run(
+            dir,
+            records,
+            Dialect::Sqlite,
+            Direction::Up { through: None },
+            allow_ahead,
+            None,
+        )
+    }
+
+    #[test]
+    fn a_planned_step_records_the_class_its_migration_decides() {
+        let dir = three();
+        let plan = up(&dir, &[]).expect("plan");
+        // Each migration adds a table: expand.
+        assert!(
+            plan.steps
+                .iter()
+                .all(|step| step.record.class == Some(StepClass::Expand)),
+            "{:?}",
+            plan.steps
+                .iter()
+                .map(|s| s.record.class)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn expand_only_admits_a_database_ahead_only_by_expand_steps() {
+        let full = three();
+        let records = [
+            finished(&full, 1, 1),
+            finished(&full, 2, 1),
+            finished(&full, 3, 1),
+        ];
+        let mut behind = full.clone();
+        behind.migrations.truncate(2);
+        let plan = up_allowing(&behind, &records, AllowAhead::ExpandOnly).expect("admitted");
+        assert!(plan.steps.is_empty());
+        assert_eq!(plan.ahead, ["0003_add_orgs"]);
+    }
+
+    #[test]
+    fn expand_only_refuses_a_contract_step_and_names_it() {
+        let full = three();
+        let mut records = vec![
+            finished(&full, 1, 1),
+            finished(&full, 2, 1),
+            finished(&full, 3, 1),
+        ];
+        let mut behind = full.clone();
+        behind.migrations.truncate(2);
+        for class in [Some(StepClass::Contract), None] {
+            // A record an older ferro wrote has no class: it is contract.
+            records[2].class = class;
+            let refusal =
+                up_allowing(&behind, &records, AllowAhead::ExpandOnly).expect_err("contract");
+            assert_eq!(refusal.kind(), "applied_missing");
+            assert!(refusal.ahead_only(), "allow_ahead=True would admit it");
+            assert_eq!(refusal.contract_steps(), ["0003_add_orgs:01"]);
+            let text = refusal.to_string();
+            assert!(text.contains("0003_add_orgs:01 (contract"), "{text}");
+            assert!(text.contains("expand-only"), "{text}");
+            assert!(text.ends_with("Nothing was applied."), "{text}");
+            // Without expand-only the text is the plain ahead refusal; the
+            // contract steps are still named on the refusal.
+            let plain = up(&behind, &records).expect_err("ahead");
+            assert_eq!(plain.contract_steps(), ["0003_add_orgs:01"]);
+            assert!(!plain.to_string().contains("contract"), "{plain}");
+            // `True` admits any distance; `False` refuses any.
+            assert!(up_allowing(&behind, &records, AllowAhead::Any).is_ok());
+            assert!(up_allowing(&behind, &records, AllowAhead::No).is_err());
+        }
+    }
+
+    #[test]
+    fn records_without_a_class_are_classified_from_the_directory_or_contract() {
+        let full = three();
+        let mut records = vec![
+            finished(&full, 1, 1),
+            finished(&full, 2, 1),
+            finished(&full, 3, 1),
+        ];
+        for record in &mut records {
+            record.class = None;
+        }
+        assert_eq!(
+            unclassified(&full, &records, Dialect::Sqlite),
+            [
+                (1, 1, StepClass::Expand),
+                (2, 1, StepClass::Expand),
+                (3, 1, StepClass::Expand),
+            ]
+        );
+        // The migration's files are gone: its records are contract.
+        let mut behind = full.clone();
+        behind.migrations.truncate(2);
+        assert_eq!(
+            unclassified(&behind, &records, Dialect::Sqlite),
+            [
+                (1, 1, StepClass::Expand),
+                (2, 1, StepClass::Expand),
+                (3, 1, StepClass::Contract),
+            ]
+        );
+        // A classified record is not classified again.
+        records[0].class = Some(StepClass::Contract);
+        assert_eq!(unclassified(&full, &records, Dialect::Sqlite).len(), 2);
+    }
+
+    #[test]
+    fn a_hand_written_step_is_contract_unless_its_file_says_expand() {
+        let hand = |body: &str| {
+            let mut files = BTreeMap::new();
+            files.insert(
+                StepDialect::Portable,
+                StepFile {
+                    up: PathBuf::from("/m/02_fix.up.sql"),
+                    down: Some(PathBuf::from("/m/02_fix.down.sql")),
+                    up_checksum: sha384(body.as_bytes()),
+                    headers: Headers::parse(body).expect("headers"),
+                    down_checksum: Some(sha384(DOWN.as_bytes())),
+                    down_headers: Headers::default(),
+                },
+            );
+            Step {
+                ordinal: 2,
+                name: "fix".into(),
+                kind: StepKind::PortableSql,
+                files,
+            }
+        };
+        for (body, class) in [
+            ("UPDATE a SET id = id;\n", StepClass::Contract),
+            (
+                "-- ferro: expand\nCREATE INDEX i ON a (id);\n",
+                StepClass::Expand,
+            ),
+        ] {
+            let d = dir(vec![(
+                "create_author",
+                vec![ddl(1, "schema", "CREATE TABLE a (id int);\n"), hand(body)],
+                &["author"],
+            )]);
+            let classes = step_class::migration_classes(&d, &d.migrations[0], Dialect::Sqlite);
+            assert_eq!(classes[&1], StepClass::Expand);
+            assert_eq!(classes[&2], class, "{body}");
+        }
+    }
+
+    #[test]
+    fn status_shows_each_steps_class_a_classless_record_as_contract() {
+        let full = three();
+        let mut first = finished(&full, 1, 1);
+        first.class = None;
+        let status = run_status(&full, &[first], Dialect::Sqlite, false, None);
+        let classes: Vec<StepClass> = status
+            .migrations
+            .iter()
+            .flat_map(|m| m.steps.iter().map(|s| s.class))
+            .collect();
+        assert_eq!(
+            classes,
+            [StepClass::Contract, StepClass::Expand, StepClass::Expand]
+        );
     }
 
     // -- what a planned step carries for its execution (ADR-0048) -------------------------
