@@ -834,10 +834,11 @@ pub fn generate_with(
             carried: None,
         });
     }
-    let mut data_steps: Vec<GeneratedStep> = backfill::data_steps(&layout.demands, target, &skipped)?
-        .into_iter()
-        .map(|step| with_class(step, dialects, |_| DATA_STEP_CLASS))
-        .collect();
+    let mut data_steps: Vec<GeneratedStep> =
+        backfill::data_steps(&layout.demands, target, &skipped)?
+            .into_iter()
+            .map(|step| with_class(step, dialects, |_| DATA_STEP_CLASS))
+            .collect();
     let mut hand = hand.map(|step| with_class(step, dialects, |_| DATA_STEP_CLASS));
     let mut sql = sql;
     // The steps `--replace` carries across: each in the place of the first
@@ -3200,7 +3201,11 @@ mod tests {
         let options = GenerateOptions {
             carry: vec![
                 carried("backfill_author", StepKind::Data, filled),
-                carried("fix_rows", StepKind::PortableSql, "-- ferro: expand\nSELECT 2;\n"),
+                carried(
+                    "fix_rows",
+                    StepKind::PortableSql,
+                    "-- ferro: expand\nSELECT 2;\n",
+                ),
             ],
             ..GenerateOptions::default()
         };

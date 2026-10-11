@@ -249,7 +249,11 @@ def _print_replacement(shown: str, migration: GeneratedMigration) -> None:
     from ..migrations.layout import SNAPSHOT_FILE, Moved
 
     in_place = migration.replaces == migration.dir_name
-    where = "regenerated in place" if in_place else f"replaces {migration.replaces}, now deleted"
+    where = (
+        "regenerated in place"
+        if in_place
+        else f"replaces {migration.replaces}, now deleted"
+    )
     print(f"{shown}  ({where})")
     moved = {new: (old, how) for old, new, how in migration.moves}
     carried_over = {

@@ -447,7 +447,9 @@ def test_replace_composes_with_data_step_and_data_only(project, pkg, capsys):
     capsys.readouterr()
 
     # --data-step adds a person's data step beside the regenerated DDL.
-    assert run("migrate", "new", "b", "--replace", "0002_b", "--data-step", "Author") == 0
+    assert (
+        run("migrate", "new", "b", "--replace", "0002_b", "--data-step", "Author") == 0
+    )
     assert sorted(p.name for p in (migrations / "0002_b").iterdir()) == [
         "01_schema.down.postgres.sql",
         "01_schema.down.sqlite.sql",

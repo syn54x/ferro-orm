@@ -413,9 +413,7 @@ def _with_moves(
     for step in migration.steps:
         if step.carried:
             source = next(
-                c
-                for c in pending
-                if c["name"] == step.name and c["kind"] == step.kind
+                c for c in pending if c["name"] == step.name and c["kind"] == step.kind
             )
             pending.remove(source)
             new_files = sorted(step.files, key=lambda n: ".down." in n)

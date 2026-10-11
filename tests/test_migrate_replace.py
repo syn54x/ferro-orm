@@ -151,15 +151,18 @@ def test_a_new_parent_is_the_newest_snapshot_below_never_the_stale_one(
     write_models(project, pkg, Y + "    rank: int | None = None\n")
     new("more")
     back(project, hidden, "0002_add_x")
-    write_models(
-        project, pkg, XY + "    rank: int | None = None\n"
-    )
+    write_models(project, pkg, XY + "    rank: int | None = None\n")
     stale = parent_of(project, "0002_add_x")
     capsys.readouterr()
 
     assert run("migrate", "new", "add_x", "--replace", "0002_add_x") == 0
 
-    assert dirs(project) == ["0001_create_author", "0002_add_y", "0003_more", "0004_add_x"]
+    assert dirs(project) == [
+        "0001_create_author",
+        "0002_add_y",
+        "0003_more",
+        "0004_add_x",
+    ]
     parent = parent_of(project, "0004_add_x")
     assert parent == sha384(migrations(project) / "0003_more/ir.json") != stale
     assert run("migrate", "check") == 0
@@ -244,9 +247,10 @@ def test_a_bare_number_one_directory_carries_works(project, pkg):
     assert run("migrate", "new", "add_x", "--replace", "0002") == 0
 
     assert dirs(project) == ["0001_create_author", "0002_add_x"]
-    assert '"nick"' in (
-        migrations(project) / "0002_add_x/01_schema.up.postgres.sql"
-    ).read_text()
+    assert (
+        '"nick"'
+        in (migrations(project) / "0002_add_x/01_schema.up.postgres.sql").read_text()
+    )
 
 
 def test_a_shared_bare_number_and_an_unknown_name_are_refused(project, pkg, capsys):
