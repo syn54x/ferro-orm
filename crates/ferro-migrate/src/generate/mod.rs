@@ -1050,6 +1050,7 @@ mod tests {
             enum_type_name: None,
             postgres_native_enum: false,
             enum_renamed_labels: Default::default(),
+            enum_retired_labels: Default::default(),
             default_factory: None,
             retired: false,
         }

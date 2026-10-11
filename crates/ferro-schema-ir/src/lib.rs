@@ -184,6 +184,12 @@ pub struct SchemaColumn {
     /// same hints. Absent when undeclared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enum_renamed_labels: Option<SchemaRenamedLabels>,
+    /// Retired labels (`__ferro_retired_labels__` on the column's enum class;
+    /// ADR-0053): labels the model no longer writes but the member, the
+    /// database type and any check keep. Carried on every column of the
+    /// enum, as `enum_values` is; renders no DDL. Absent when undeclared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enum_retired_labels: Option<Vec<String>>,
     /// The field's Python `default_factory`, as `module.qualname`
     /// (`uuid.uuid4`): never a server default, but what a generated
     /// backfill gives the rows a new required column finds (ticket #534).
@@ -873,6 +879,41 @@ mod tests {
             plain,
             "no hint, no key: every existing envelope stays byte-identical"
         );
+    }
+
+    #[test]
+    fn enum_retired_labels_round_trip_and_stay_absent_when_undeclared() {
+        let declared = serde_json::json!({
+            "name": "status",
+            "logical_type": "string",
+            "nullable": false,
+            "primary_key": false,
+            "autoincrement": false,
+            "unique": false,
+            "index": false,
+            "default": null,
+            "format": null,
+            "enum_values": ["canceled", "paid"],
+            "enum_type_name": "orderstatus",
+            "enum_retired_labels": ["canceled"],
+        });
+        let column: SchemaColumn =
+            serde_json::from_value(declared.clone()).expect("column must deserialize");
+        assert_eq!(
+            column.enum_retired_labels,
+            Some(vec!["canceled".to_string()])
+        );
+        assert_eq!(serde_json::to_value(&column).expect("serialize"), declared);
+
+        let mut plain = declared;
+        plain
+            .as_object_mut()
+            .expect("object")
+            .remove("enum_retired_labels");
+        let column: SchemaColumn =
+            serde_json::from_value(plain.clone()).expect("a column without retirement loads");
+        assert_eq!(column.enum_retired_labels, None);
+        assert_eq!(serde_json::to_value(&column).expect("serialize"), plain);
     }
 
     #[test]
