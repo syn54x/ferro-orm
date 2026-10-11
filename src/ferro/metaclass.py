@@ -11,9 +11,10 @@ from typing import (
     get_type_hints,
 )
 
-from pydantic import BaseModel
+from pydantic import AfterValidator, BaseModel, ValidationError
 from pydantic import Field as PydanticField
 from pydantic.fields import FieldInfo
+from pydantic_core import PydanticCustomError
 
 from ._annotation_utils import (
     _strip_optional_union as _annotation_utils_strip_optional_union,
@@ -24,6 +25,7 @@ from .base import FerroField, ForeignKey, ManyToManyRelation
 from .columns import build_column_specs, refuse_back_ref_over_retired_relation
 from .fields import FERRO_FIELD_EXTRA_KEY
 from .ir import compile_model_schema_ir
+from .ir.compiler import declared_retired_labels
 from .query import Relation
 from .registry import REGISTRY
 from .relations.descriptors import ForwardDescriptor
@@ -88,6 +90,54 @@ def _reverse_relation_retired(model: str, field_name: str, m2m: bool) -> TypeErr
         f"{model}.{field_name}: a BackRef cannot be retired; it is not a column. "
         "Delete the BackRef"
     )
+
+
+def _retired_label_message(enum_cls: type[Enum], label: str) -> str:
+    member = next(m for m in enum_cls if m.value == label)
+    return (
+        f"{enum_cls.__name__}.{member.name} ('{label}') is retired in this release: "
+        "the previous release may still write it, this one does not"
+    )
+
+
+def _label_guard(enum_cls: type[Enum], labels: frozenset[str]):
+    def guard(value: Any) -> Any:
+        if isinstance(value, str) and value in labels:
+            raise ValueError(
+                _retired_label_message(
+                    enum_cls, str(value.value if isinstance(value, Enum) else value)
+                )
+            )
+        return value
+
+    return guard
+
+
+def _guarded_setattr(
+    retired_labels: dict[str, tuple[type[Enum], frozenset[str]]], inherited: Any
+):
+    def __setattr__(self: BaseModel, name: str, value: Any) -> None:
+        guarded = retired_labels.get(name)
+        if guarded is not None:
+            enum_cls, labels = guarded
+            if isinstance(value, str) and value in labels:
+                label = str(value.value if isinstance(value, Enum) else value)
+                raise ValidationError.from_exception_data(
+                    type(self).__name__,
+                    [
+                        {
+                            "type": PydanticCustomError(
+                                "retired_enum_label",
+                                _retired_label_message(enum_cls, label),
+                            ),
+                            "loc": (name,),
+                            "input": value,
+                        }
+                    ],
+                )
+        inherited(self, name, value)
+
+    return __setattr__
 
 
 class ModelMetaclass(type(BaseModel)):
@@ -657,11 +707,38 @@ class ModelMetaclass(type(BaseModel)):
     def _register_enum_fields(cls) -> None:
         """Populate ``cls._enum_fields`` from column-spec python types."""
         enum_fields: dict[str, type[Enum]] = {}
+        retired_labels: dict[str, tuple[type[Enum], frozenset[str]]] = {}
         for field_name, spec in cls.__ferro_columns__.items():
             enum_cls = spec.enum_class
             if enum_cls is not None:
                 enum_fields[field_name] = enum_cls
+                retired = declared_retired_labels(enum_cls)
+                if retired and field_name in cls.model_fields:
+                    retired_labels[field_name] = (enum_cls, retired)
         cls._enum_fields = enum_fields
+        if retired_labels:
+            ModelMetaclass._refuse_retired_labels(cls, retired_labels)
+
+    @staticmethod
+    def _refuse_retired_labels(
+        cls, retired_labels: dict[str, tuple[type[Enum], frozenset[str]]]
+    ) -> None:
+        """Refuse writing a retired enum label, field by field (ADR-0053).
+
+        Only the enum fields whose enum declares ``__ferro_retired_labels__``
+        gain an ``AfterValidator``: it runs on construction and, under
+        ``validate_assignment``, for the assigned field alone. Without
+        ``validate_assignment`` the class gets a ``__setattr__`` for the same
+        fields. Hydration runs neither, so a row holding the label loads and
+        saves back unchanged. A model without retired labels gains nothing.
+        """
+        for field_name, (enum_cls, labels) in retired_labels.items():
+            cls.model_fields[field_name].metadata.append(
+                AfterValidator(_label_guard(enum_cls, labels))
+            )
+        cls.model_rebuild(force=True, raise_errors=False)
+        if not cls.model_config.get("validate_assignment"):
+            cls.__setattr__ = _guarded_setattr(retired_labels, cls.__setattr__)
 
     @staticmethod
     def _validate_db_type_options(cls, ferro_fields: dict) -> None:

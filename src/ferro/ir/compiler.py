@@ -146,7 +146,42 @@ def _column_ir_from_spec(spec: ColumnSpec) -> dict[str, Any]:
             "enum_class": spec.enum_class.__name__,
             "labels": renamed_labels,
         }
+    retired_labels = declared_retired_labels(spec.enum_class)
+    # Absent, not empty, when undeclared (byte-identical envelopes, ADR-0053).
+    if retired_labels:
+        column_ir["enum_retired_labels"] = sorted(retired_labels)
     return column_ir
+
+
+def declared_retired_labels(enum_cls: type[Any] | None) -> frozenset[str]:
+    """``enum_cls``'s retired labels (ADR-0053), as a frozenset of label strings.
+
+    ``__ferro_retired_labels__ = frozenset({"canceled"})`` on a ``StrEnum``
+    says this release stops writing ``canceled`` while the member, the
+    database type and any check keep it. Each label must name a member's
+    value; anything else fails here, at class definition.
+    """
+    declared = getattr(enum_cls, "__ferro_retired_labels__", None)
+    if declared is None:
+        return frozenset()
+    name = getattr(enum_cls, "__name__", repr(enum_cls))
+    if not isinstance(declared, (set, frozenset)) or not all(
+        isinstance(label, str) for label in declared
+    ):
+        raise TypeError(
+            f"{name}.__ferro_retired_labels__ must be a frozenset of label strings "
+            f'(e.g. frozenset({{"canceled"}})); got {declared!r}'
+        )
+    members = [member.value for member in enum_cls]  # type: ignore[union-attr]
+    unknown = sorted(label for label in declared if label not in members)
+    if unknown:
+        raise TypeError(
+            f"{name}.__ferro_retired_labels__ names {unknown!r}, which is not a "
+            f"member of {name} (members: {members!r}); retire a label the enum "
+            "still declares, or delete the member and this declaration together "
+            "to remove the label"
+        )
+    return frozenset(declared)
 
 
 def declared_renamed_labels(enum_cls: type[Any] | None) -> dict[str, str]:

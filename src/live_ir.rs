@@ -108,6 +108,7 @@ fn live_table_model(
             enum_type_name: native_enum_type(col).map(str::to_string),
             postgres_native_enum: col.is_enum_udt,
             enum_renamed_labels: Default::default(),
+            enum_retired_labels: Default::default(),
             default_factory: None,
             retired: false,
         })

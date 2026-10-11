@@ -40,6 +40,7 @@ MIGRATION_EXAMPLES = [
     "migrations_backfill",
     "migrations_rename",
     "migrations_retire",
+    "migrations_retire_label",
     "migrations_testing",
 ]
 

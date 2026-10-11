@@ -226,6 +226,35 @@ On SQLite that is a [table rebuild](#sqlite-table-rebuilds). Retiring a column t
 
 The example runs all three releases end to end in [`docs/examples/migrations_retire.py`](https://github.com/syn54x/ferro-orm/blob/main/docs/examples/migrations_retire.py).
 
+## Retiring an enum label
+
+Removing a label in the release that stops writing it breaks the release still serving: its code may still write the label, and a removed label is gone from the Postgres type and from any `db_check`. Stop writing the label first, and remove it a release later. In the first release, declare it retired on the `StrEnum`, beside [`__ferro_renamed_labels__`](#renames):
+
+=== "Assignment"
+
+    ```python
+    --8<-- "docs/examples/migrations_retire_label.py:models"
+    ```
+
+=== "Annotated"
+
+    ```python
+    --8<-- "docs/examples/migrations_retire_label_annotated.py:models"
+    ```
+
+The member stays, so a row that holds `canceled` still loads as `Status.CANCELED`. Writing the label is refused, at construction and by attribute assignment, with a validation error:
+
+```text
+Order(status="canceled")
+  Status.CANCELED ('canceled') is retired in this release: the previous release may still write it, this one does not
+```
+
+A row loaded with the label can be saved after another field changes: loading does not validate, and `save()` writes every column, so the unchanged label goes back as it was. That is not a write of the label.
+
+Retiring a label is not a schema change. The Postgres type and any `db_check` keep listing it, so `new` says "no schema change", writes nothing, and `check` is clean. In the next release, delete the member and the declaration together: `new` then writes the ordinary [label removal](data-steps.md#what-the-generator-writes), the backfill for rows that still hold it, and on Postgres the type swap.
+
+Each label in `__ferro_retired_labels__` must be a member's value: a set of anything else, or a label that names no member, raises `TypeError` at class definition. The example runs in [`docs/examples/migrations_retire_label.py`](https://github.com/syn54x/ferro-orm/blob/main/docs/examples/migrations_retire_label.py).
+
 ## Changes existing rows need a value for
 
 Adding a required column to a table with rows, making a column required, or removing an enum label that rows still hold cannot be done by DDL alone: someone has to say what the existing rows get. `new` splits such a migration into an **expand step** (the new column, nullable), a **backfill** per model (a Python data step you write), and a **contract step** (the `NOT NULL`, the label removal), and `up` refuses the migration until the backfill is written. When you know no row needs a value, `--no-backfill <table>.<column>` writes a **guard step** instead, which fails the migration if one does. Both are on [Data steps and backfills](data-steps.md).
