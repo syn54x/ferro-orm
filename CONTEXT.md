@@ -392,3 +392,31 @@ _Avoid_: Policy tuple, RLS config, security metadata
 **Policy rebuild**:
 Drop-and-recreate of a ferro-owned row policy whose live catalog entry no longer matches the declaration — its command, its permissive/restrictive composition, which clauses it carries, or a body ferro itself rendered. Metadata-only: no row is read, validated, or rewritten. A body the *author* wrote (the raw `using=`/`with_check=` form) is never rebuilt on a textual difference — Postgres stores its own rewriting of raw SQL, so ferro reports the difference with both texts instead (ADR-0019).
 _Avoid_: Policy alter, policy sync, RLS drift repair
+
+**Retired column**:
+A column the model still declares but that this release's code neither reads nor writes: it is absent from the model's attributes and from every statement the model issues, and it stays in the *schema snapshot*, nullable, so a database built fresh still has it and *historical models* still see it. Retiring a required column is the change that makes it nullable; nothing else about the column changes until the declaration is deleted, which is the drop: its index, unique, check, foreign key, and every *table check*, *row policy*, composite index or unique that names it stay as declared. Only a scalar field or a `ForeignKey` field can be retired; a back-reference over a retired foreign key cannot exist, a join table is a table.
+_Avoid_: Deprecated column, hidden column, ignored field, soft-dropped column
+
+**Retired label**:
+An *enum label* whose member stays on the `StrEnum` so rows that hold it still hydrate, and stays in the native type and in any *column check*, but that the model refuses to write. How a label leaves an enum old code may still write: the previous release keeps writing it, the next removes it.
+_Avoid_: Deprecated label, removed value, hidden member
+
+**Step class**:
+Whether the previous release's writes keep succeeding beside a *step* (`expand`) or not (`contract`); a write notion, so an added label is `expand` though the previous release's reads do not know it yet. Decided once by the planner's *op verdict* for a generated step, declared in the file by the author of a hand-written SQL step (`contract` unless the file says `expand`), always `expand` for a *data step*. Recorded with the *step record* when the step is applied, so an *ahead* database can answer "ahead by what?" to a checkout that lacks the files; a record without one (written by an older ferro) is read as `contract`.
+_Avoid_: Safety level, compatibility class, risk class
+
+**Expand-only** (of an *ahead* database):
+The bounded permission an application gives to run beside an ahead database: every *step record* the checkout lacks must be of *step class* `expand`. Narrower than allowing any ahead migration; refused naming the first `contract` step.
+_Avoid_: Soft ahead, partial ahead, ahead-by-one
+
+**Replaced migration**:
+An unapplied *migration* regenerated in place against the current newest *schema snapshot* below it: new snapshot, regenerated DDL steps, every hand-written step carried across by name with its body intact, renumbered when its number is taken. Named in full (`NNNN_<name>`), since the number alone is what two branches share. The command never reads a database; a database that applied the old files meets the migration as a changed one and must revert it with the files that were applied.
+_Avoid_: Rebased migration, regenerated migration (alone), merged migration
+
+**Foreign default**:
+A server default on a live column that ferro did not leave there. Ferro persists no server default of its own; the ones it leaves are a serial key's sequence and, on SQLite, a literal on a required column (ADR-0034's kept default, told by shape alone: a literal default on a `NOT NULL` SQLite column is never drift, an expression default or a default on a nullable column is). Every other live default is *drift*, reported by `drift` and `baseline`, removed only under `migrate_destructive`.
+_Avoid_: Stray default, hand default, unmanaged default
+
+**Tracked database**:
+A database whose *tracking table* holds at least one *step record*. It is adopted: `baseline` refuses it, and so does every auto-migrate flag.
+_Avoid_: Migrated database, adopted database (alone), stamped database

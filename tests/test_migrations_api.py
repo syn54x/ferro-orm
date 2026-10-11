@@ -23,12 +23,14 @@ import pytest
 import ferro
 from ferro import _core
 from ferro.migrations import (
+    AlreadyTrackedError,
+    AppliedAboveBaselineError,
     DatabaseAheadError,
     MigrationRefused,
     PendingMigrationsError,
     runner,
 )
-from ferro.migrations.report import StatusReport
+from ferro.migrations.report import RunRefused, StatusReport
 from ferro.migrations.target import Target
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     AUTHOR,
@@ -336,6 +338,61 @@ async def test_up_refused_in_process_carries_its_run_report(project, pkg, db):
     assert report.applied == []
     assert report.refusal == str(raised.value)
     assert report.refused is not None and report.refused.kind == "edited_applied"
+
+
+async def test_the_typed_baseline_refusals_are_run_refusals():
+    # A pre-deploy writes `except AlreadyTrackedError: pass`; a caller that
+    # catches every refusal, or every run refusal, still catches both.
+    for typed in (AlreadyTrackedError, AppliedAboveBaselineError):
+        assert issubclass(typed, RunRefused)
+        assert issubclass(typed, MigrationRefused)
+        assert typed.__name__ in ferro.migrations.__all__
+
+
+async def test_the_core_s_refusal_class_is_chosen_by_kind_never_by_text():
+    # The one lookup the core raises every planner refusal through: a
+    # reworded message under the same kind is the same class, and the
+    # fields are the core's payload, read through.
+    tracked = RunRefused.from_core(
+        "a reworded refusal",
+        kind="already_tracked",
+        names=["0001_a", "0002_b"],
+        head="0002_from_the_core",
+    )
+    assert type(tracked) is AlreadyTrackedError
+    assert (str(tracked), tracked.kind, tracked.applied, tracked.head) == (
+        "a reworded refusal",
+        "already_tracked",
+        ["0001_a", "0002_b"],
+        "0002_from_the_core",
+    )
+    above = RunRefused.from_core(
+        "reworded too", kind="applied_above_baseline", names=["0003_c"]
+    )
+    assert type(above) is AppliedAboveBaselineError
+    assert (str(above), above.kind, above.above) == (
+        "reworded too",
+        "applied_above_baseline",
+        ["0003_c"],
+    )
+    # Today's tracked-database text under any other kind is plain RunRefused.
+    other = RunRefused.from_core(
+        "ferro migrate baseline: this database already has migration records "
+        "(0001_a); baseline records migrations only on a database that has none.",
+        kind="no_baseline_target",
+    )
+    assert type(other) is RunRefused
+    assert type(RunRefused.from_core("lock lost")) is RunRefused
+
+
+async def test_baseline_without_a_single_database_is_the_base_refusal(project, pkg, db):
+    configure_two(project, pkg, db.backend)
+
+    for call in (ferro.migrations.baseline, ferro.migrations.remove_baseline):
+        with pytest.raises(MigrationRefused) as raised:
+            await call(url=db.url)
+        assert type(raised.value) is MigrationRefused
+        assert "`analytics`" in str(raised.value)
 
 
 async def test_importing_the_api_does_not_import_alembic():

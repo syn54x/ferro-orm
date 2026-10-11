@@ -38,10 +38,12 @@ from typing import TYPE_CHECKING, Any
 from . import runner
 from ._drift import DriftReport, against
 from .errors import MigrationRefused
+from .report import RunRefused, StatusReport
 from .steps import declared_up_kind
 from .target import Target
 
 if TYPE_CHECKING:
+    from .._core import LockedDatabase
     from ..settings import DatabaseSettings, FerroSettings
 
 __all__ = ["BaselineReport", "baseline", "remove_baseline"]
@@ -115,6 +117,17 @@ def _span(names: list[str]) -> str:
     return names[0] if len(names) == 1 else f"{names[0]} … {names[-1]}"
 
 
+async def _status_under_lock(
+    run: LockedDatabase, database: DatabaseSettings
+) -> StatusReport:
+    """The ``report`` a baseline refusal carries (an ``AlreadyTrackedError``'s,
+    an ``AppliedAboveBaselineError``'s, ...): what ``status()`` reports,
+    through the same path, over the records the locked ``run`` read (the ones
+    its refusal was decided on). This run executes no step, so its own lock
+    marks nothing ``running``."""
+    return await runner.status_of(run, database, lock_held=False)
+
+
 async def _record(
     name: str,
     database: DatabaseSettings,
@@ -124,7 +137,11 @@ async def _record(
     timeout = database.lock_wait(lock_timeout)
     tracked = await runner.open_tracked(name, database)
     async with tracked.locked(timeout, runner.say_waiting) as run:
-        plan = run.plan_baseline(target)
+        try:
+            plan = run.plan_baseline(target)
+        except RunRefused as refused:
+            refused.report = await _status_under_lock(run, database)
+            raise
         # A baseline never runs a data step, so its file is never executed:
         # each one's record holds the shape its up declares, read from the
         # file's syntax tree (ADR-0035).
@@ -154,7 +171,11 @@ async def _remove(
     tracked = await runner.open_tracked(name, database)
     async with tracked.locked(timeout, runner.say_waiting) as run:
         names = {r["migration"]: r["migration_name"] for r in run.records}
-        removed = await run.remove_baseline()
+        try:
+            removed = await run.remove_baseline()
+        except RunRefused as refused:
+            refused.report = await _status_under_lock(run, database)
+            raise
     return [names[number] for number in sorted({m for m, _ in removed})]
 
 
@@ -179,8 +200,12 @@ async def baseline(
     private connection to ``url``, or on the default connection.
 
     Raises:
-        MigrationRefused: the database already has migration records, the
-            target is not in the migrations directory, the lock wait outlasts
+        AlreadyTrackedError: the database is already tracked (its tracking
+            table holds step records): ``applied`` names them, ``head`` the
+            newest, ``report`` is its status. Another pre-deploy may have
+            adopted it first; carry on to ``up()``.
+        MigrationRefused: the target is not in the migrations directory, the
+            directory holds no migration, the lock wait outlasts
             ``lock_timeout``, or the configuration names no single database.
     """
     where = Target.resolve(settings, database, using=using, url=url)
@@ -202,9 +227,11 @@ async def remove_baseline(
     afterwards.
 
     Raises:
-        MigrationRefused: a run applied a migration above the baseline
-            (revert it with ``ferro migrate down`` first; the message names
-            it), or the lock wait outlasts ``lock_timeout``.
+        AppliedAboveBaselineError: a run applied a migration above the
+            baseline (``above`` names each; revert them with ``ferro migrate
+            down`` first, as the message says).
+        MigrationRefused: the lock wait outlasts ``lock_timeout``, or the
+            configuration names no single database.
     """
     target = Target.resolve(settings, database, using=using, url=url)
     async with target.open() as name:

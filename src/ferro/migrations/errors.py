@@ -10,10 +10,12 @@ await ferro.migrations.require_applied()
 
 Every refusal a migration call makes is a :class:`MigrationRefused`, so one
 ``except`` catches them all and the CLI renders any of them as exit 1. The
-two states an application branches on have their own subclasses:
+states an application branches on have their own subclasses:
 :class:`PendingMigrationsError` (the database is behind the checkout) and
 :class:`DatabaseAheadError` (the database holds migrations the checkout
-lacks).
+lacks), here; a run planner refusal with a class of its own
+(``AlreadyTrackedError``, ``AppliedAboveBaselineError``) is a ``RunRefused``,
+beside it in :mod:`ferro.migrations.report`.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from ..exceptions import FerroError
 
 if TYPE_CHECKING:
     from .generate import CheckReport
+    from .report import StatusReport
     from .runner import RunReport
 
 __all__ = ["DatabaseAheadError", "MigrationRefused", "PendingMigrationsError"]
@@ -35,17 +38,23 @@ class MigrationRefused(FerroError):
 
     The base of every refusal: a run's (``RunRefused``), ``ferro migrate
     check``'s problems (``MigrationsCheckError``), a configuration that
-    names no single database, and the two below.
+    names no single database, and the subclasses an application branches
+    on.
 
     ``report`` is the report of the call that refused, when it has one: the
     :class:`~ferro.migrations.runner.RunReport` of a refused ``up`` or
     ``down`` (what it did before it stopped, and the refusal itself as
-    ``report.refused``), or the ``CheckReport`` whose problems
-    ``raise_for_problems()`` raised. ``None`` otherwise.
+    ``report.refused``), the ``CheckReport`` whose problems
+    ``raise_for_problems()`` raised, or the
+    :class:`~ferro.migrations.report.StatusReport` of the database a
+    baseline refusal is about. ``None`` otherwise.
     """
 
     def __init__(
-        self, message: str, *, report: RunReport | CheckReport | None = None
+        self,
+        message: str,
+        *,
+        report: RunReport | CheckReport | StatusReport | None = None,
     ) -> None:
         super().__init__(message)
         self.report = report
