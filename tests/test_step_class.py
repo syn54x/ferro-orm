@@ -53,9 +53,7 @@ COLUMNS_0_22 = (
 )
 
 # A nullable column and a plain index: two expand steps.
-BIO = AUTHOR + (
-    "    bio: Annotated[str | None, FerroField(index=True)] = None\n"
-)
+BIO = AUTHOR + ("    bio: Annotated[str | None, FerroField(index=True)] = None\n")
 # `status` dropped: a contract step.
 WITHOUT_STATUS = AUTHOR.replace("    status: Status = Status.DRAFT\n", "")
 
@@ -369,9 +367,7 @@ def test_the_deploying_guide_quotes_the_refusal_expand_only_raises(project, pkg,
     with pytest.raises(DatabaseAheadError) as raised:
         require_applied(db, allow_ahead="expand-only")
     assert raised.value.contract_steps == ["0002_drop_bio:01"]
-    raised_text = (
-        f"ferro.migrations.DatabaseAheadError: {raised.value}\n".replace(
-            "0002_drop_bio", "0008_drop_bio"
-        )
+    raised_text = f"ferro.migrations.DatabaseAheadError: {raised.value}\n".replace(
+        "0002_drop_bio", "0008_drop_bio"
     )
     assert quoted.group(1) == raised_text

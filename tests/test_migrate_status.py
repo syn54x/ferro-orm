@@ -156,7 +156,9 @@ def test_steps_print_their_class_beside_their_flags(project, pkg, db, capsys):
     configure(project, pkg, db.backend)
     write_models(project, pkg, AUTHOR)
     new("create_author")
-    write_models(project, pkg, AUTHOR.replace("    status: Status = Status.DRAFT\n", ""))
+    write_models(
+        project, pkg, AUTHOR.replace("    status: Status = Status.DRAFT\n", "")
+    )
     new("drop_status")
     capsys.readouterr()
 
