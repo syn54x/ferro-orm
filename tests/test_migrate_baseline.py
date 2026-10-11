@@ -34,6 +34,7 @@ from ferro.migrations import (
     MigrationRefused,
     baseline,
     remove_baseline,
+    status,
     up,
 )
 from ferro.migrations._drift import against
@@ -437,6 +438,8 @@ def test_baseline_on_a_database_up_migrated_is_already_tracked(project, pkg, db)
     assert err.head == "0002_add_teams"
     assert err.report.head_applied.name == "0002_add_teams"
     assert err.report.pending is False
+    # The report is what status() says of the same database, field for field.
+    assert err.report == asyncio.run(status(url=db.url))
     assert db.records() == before
 
     async def adopt_then_up() -> None:
@@ -478,6 +481,7 @@ def test_remove_is_refused_under_a_run_and_undoes_the_baseline_after_down(
     assert raised.value.above == ["0003_add_orgs"]
     assert raised.value.kind == "applied_above_baseline"
     assert raised.value.report.head_applied.name == "0003_add_orgs"
+    assert raised.value.report == asyncio.run(status(url=db.url))
     assert len(db.records()) == 3
 
     assert cli(capsys, "down", "--to", "0002", "--yes", "--url", db.url)[0] == 0

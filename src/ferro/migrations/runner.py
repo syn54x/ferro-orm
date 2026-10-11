@@ -779,18 +779,25 @@ def _step_line(
 
 
 async def status_of(
-    tracked: TrackedDatabase, database: DatabaseSettings
+    tracked: TrackedDatabase | LockedDatabase,
+    database: DatabaseSettings,
+    *,
+    lock_held: bool | None = None,
 ) -> StatusReport:
     """Where ``tracked`` stands against its held directory read: each step's
     state (a run holding the lock makes its step ``running``), and the
-    refusal ``up`` would meet. Takes no lock and creates nothing."""
+    refusal ``up`` would meet. Takes no lock and creates nothing.
+
+    ``lock_held`` is whether a run holds the lock; ``None`` asks the
+    database. A locked run that executes nothing (a refused baseline) passes
+    ``False``: its own lock puts no step in progress."""
     try:
         keys: list[tuple[int, int, list[str]]] | None = order_keys_on_disk(tracked)
     except MigrationRefused:
         # A step file that does not load: status still answers, and the
         # edited-chunked refusal offers --continue on its condition.
         keys = None
-    held = await tracked.lock_held()
+    held = await tracked.lock_held() if lock_held is None else lock_held
     return StatusReport.from_core(
         tracked.status(keys, lock_held=held),
         database=database.name,

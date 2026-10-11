@@ -117,18 +117,15 @@ def _span(names: list[str]) -> str:
     return names[0] if len(names) == 1 else f"{names[0]} … {names[-1]}"
 
 
-def _status_under_lock(run: LockedDatabase, database: DatabaseSettings) -> StatusReport:
-    """Where the database stands by the records the locked ``run`` read,
-    the ones its refusal was decided on: the ``report`` a baseline refusal
-    carries (an ``AlreadyTrackedError``'s, an ``AppliedAboveBaselineError``'s,
-    ...). This run executes no step, so its own lock marks nothing
-    ``running``."""
-    return StatusReport.from_core(
-        run.status(),
-        database=database.name,
-        dialect=run.dialect,
-        table=run.tracking_table,
-    )
+async def _status_under_lock(
+    run: LockedDatabase, database: DatabaseSettings
+) -> StatusReport:
+    """The ``report`` a baseline refusal carries (an ``AlreadyTrackedError``'s,
+    an ``AppliedAboveBaselineError``'s, ...): what ``status()`` reports,
+    through the same path, over the records the locked ``run`` read (the ones
+    its refusal was decided on). This run executes no step, so its own lock
+    marks nothing ``running``."""
+    return await runner.status_of(run, database, lock_held=False)
 
 
 async def _record(
@@ -143,7 +140,7 @@ async def _record(
         try:
             plan = run.plan_baseline(target)
         except RunRefused as refused:
-            refused.report = _status_under_lock(run, database)
+            refused.report = await _status_under_lock(run, database)
             raise
         # A baseline never runs a data step, so its file is never executed:
         # each one's record holds the shape its up declares, read from the
@@ -177,7 +174,7 @@ async def _remove(
         try:
             removed = await run.remove_baseline()
         except RunRefused as refused:
-            refused.report = _status_under_lock(run, database)
+            refused.report = await _status_under_lock(run, database)
             raise
     return [names[number] for number in sorted({m for m, _ in removed})]
 
