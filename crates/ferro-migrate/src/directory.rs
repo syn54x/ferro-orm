@@ -16,6 +16,7 @@
 //! ```
 
 use crate::Dialect;
+use crate::plan::and_list;
 use crate::snapshot::{Snapshot, SnapshotError, encode_checksum, sha384};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -262,6 +263,27 @@ pub enum DirectoryError {
         /// The other.
         second: PathBuf,
     },
+    /// `ferro migrate new --replace NNNN` names a number two migrations
+    /// share.
+    AmbiguousNumber {
+        /// The shared number.
+        number: u16,
+        /// Every migration carrying it (`NNNN_<name>`), in name order.
+        names: Vec<String>,
+    },
+    /// `ferro migrate new --replace` names no migration of the directory.
+    NoSuchMigration {
+        /// The target as written.
+        target: String,
+    },
+    /// `ferro migrate new --replace` names a migration a later one chains
+    /// from: only the newest migration can be replaced.
+    LaterMigration {
+        /// The migration named (`NNNN_<name>`).
+        replaced: String,
+        /// The later migration whose snapshot links to it (`NNNN_<name>`).
+        later: String,
+    },
     /// A number below the highest is missing.
     MissingNumber {
         /// The missing number.
@@ -341,6 +363,9 @@ impl DirectoryError {
             DirectoryError::Unreadable { .. } => "unreadable",
             DirectoryError::UnexpectedEntry { .. } => "unexpected_entry",
             DirectoryError::DuplicateNumber { .. } => "duplicate_number",
+            DirectoryError::AmbiguousNumber { .. } => "ambiguous_number",
+            DirectoryError::NoSuchMigration { .. } => "no_such_migration",
+            DirectoryError::LaterMigration { .. } => "later_migration",
             DirectoryError::MissingNumber { .. } => "missing_number",
             DirectoryError::MissingSnapshot { .. } => "missing_snapshot",
             DirectoryError::UnreadableSnapshot { .. } => "unreadable_snapshot",
@@ -372,13 +397,40 @@ impl std::fmt::Display for DirectoryError {
                 number,
                 first,
                 second,
-            } => write!(
+            } => {
+                write!(
+                    f,
+                    "two migrations are numbered {number:04}: {} and {}. Keep the one that is \
+                     applied anywhere and regenerate the other on top of it, with the line \
+                     that names it:",
+                    show(first),
+                    show(second)
+                )?;
+                for dir in [first, second] {
+                    write!(f, "\n  {}", replace_line(dir))?;
+                }
+                Ok(())
+            }
+            DirectoryError::AmbiguousNumber { number, names } => {
+                let named: Vec<String> = names.iter().map(|n| format!("--replace {n}")).collect();
+                write!(
+                    f,
+                    "--replace {number:04} matches {}; name the migration to replace in \
+                     full: {}",
+                    and_list(names),
+                    or_list(&named)
+                )
+            }
+            DirectoryError::NoSuchMigration { target } => write!(
                 f,
-                "two migrations are numbered {number:04}: {} and {}. Keep the one that is \
-                 applied anywhere, delete the other and run `ferro migrate new` again to \
-                 regenerate it on top",
-                show(first),
-                show(second)
+                "--replace {target}: the migrations directory holds no migration {target}; \
+                 name one of its migrations as NNNN_<name>, or as NNNN when one migration \
+                 carries the number"
+            ),
+            DirectoryError::LaterMigration { replaced, later } => write!(
+                f,
+                "{later} chains from {replaced}, and only the newest migration can be \
+                 replaced: replace the later one first, or delete it. Nothing was written"
             ),
             DirectoryError::MissingNumber { number, next } => write!(
                 f,
@@ -470,6 +522,27 @@ impl std::fmt::Display for DirectoryError {
 }
 
 impl std::error::Error for DirectoryError {}
+
+/// `a or b`, `a, b or c`.
+fn or_list(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [only] => only.clone(),
+        [init @ .., last] => format!("{} or {last}", init.join(", ")),
+    }
+}
+
+/// `ferro migrate new <name> --replace NNNN_<name>` for the migration
+/// directory `dir`: the command that regenerates it on top of the newest
+/// snapshot below it.
+fn replace_line(dir: &Path) -> String {
+    let full = dir
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| dir.display().to_string());
+    let name = split_numbered(&full, 4).map_or_else(|| full.clone(), |(_, name)| name);
+    format!("ferro migrate new {name} --replace {full}")
+}
 
 fn serialize_checksum<S: serde::Serializer>(
     checksum: &[u8; 48],
@@ -625,59 +698,159 @@ impl MigrationsDir {
                 migrations: Vec::new(),
             });
         }
-        let mut numbered: BTreeMap<u16, (String, PathBuf)> = BTreeMap::new();
-        for (name, entry) in entries(root, root)? {
-            if !entry.is_dir() {
-                continue;
-            }
-            let Some((number, migration_name)) = split_numbered(&name, 4)
-                .and_then(|(n, rest)| Some((u16::try_from(n).ok()?, rest)))
-                .filter(|(n, _)| *n > 0)
-            else {
-                return Err(DirectoryError::UnexpectedEntry {
-                    path: PathBuf::from(&name),
-                    expected: "a migration directory named NNNN_<name>",
-                });
-            };
-            if let Some((_, first)) = numbered.get(&number) {
-                return Err(DirectoryError::DuplicateNumber {
-                    number,
-                    first: relative(root, first),
-                    second: PathBuf::from(&name),
-                });
-            }
-            numbered.insert(number, (migration_name, entry));
-        }
+        assemble(root, unique_numbers(root, migration_dirs(root)?)?)
+    }
 
-        let mut migrations: Vec<Migration> = Vec::new();
-        for (expected, (number, (name, dir))) in (1u16..).zip(numbered) {
-            if number != expected {
-                return Err(DirectoryError::MissingNumber {
-                    number: expected,
-                    next: relative(root, &dir),
-                });
-            }
-            let migration = read_migration(root, number, name, dir)?;
-            let parent = migrations.last();
-            if migration.snapshot.parent_checksum != parent.map(|p| p.snapshot.checksum) {
-                return Err(DirectoryError::BrokenChain {
-                    parent: parent.map(|p| relative(root, &p.dir.join(SNAPSHOT_FILE))),
-                    child: relative(root, &migration.dir.join(SNAPSHOT_FILE)),
-                });
-            }
-            migrations.push(migration);
+    /// Read the migrations directory at `path` for `ferro migrate new
+    /// --replace <target>`: the directory without the migration `target`
+    /// names, read and verified as [`MigrationsDir::read`] reads it, and that
+    /// migration, read whole. `target` is `NNNN_<name>`, or `NNNN` when one
+    /// migration carries the number. The one duplicate admitted is at the
+    /// replaced number (two branches each generated it); the replaced
+    /// migration's own parent link is not checked, since its parent moving
+    /// under it is why it is replaced.
+    ///
+    /// # Errors
+    /// [`DirectoryError::AmbiguousNumber`] for a bare number two migrations
+    /// share, [`DirectoryError::NoSuchMigration`] for a target the directory
+    /// does not hold, [`DirectoryError::LaterMigration`] when a later
+    /// migration chains from it, and what [`MigrationsDir::read`] raises for
+    /// the rest of the directory and for the replaced migration's own files.
+    pub fn read_replacing(
+        path: &Path,
+        target: &str,
+    ) -> Result<(MigrationsDir, Migration), DirectoryError> {
+        let root = path;
+        let no_such = || DirectoryError::NoSuchMigration {
+            target: target.to_string(),
+        };
+        if !root.exists() {
+            return Err(no_such());
         }
-        Ok(MigrationsDir {
-            path: root.to_path_buf(),
-            migrations,
-        })
+        let mut dirs = migration_dirs(root)?;
+        let full = |(number, name, _): &(u16, String, PathBuf)| format!("{number:04}_{name}");
+        let matching: Vec<usize> = match target.parse::<u16>() {
+            Ok(number) if target.len() == 4 && target.chars().all(|c| c.is_ascii_digit()) => dirs
+                .iter()
+                .enumerate()
+                .filter(|(_, (n, _, _))| *n == number)
+                .map(|(at, _)| at)
+                .collect(),
+            _ => dirs
+                .iter()
+                .enumerate()
+                .filter(|(_, dir)| full(dir) == target)
+                .map(|(at, _)| at)
+                .collect(),
+        };
+        let at = match matching.as_slice() {
+            [] => return Err(no_such()),
+            [at] => *at,
+            several => {
+                return Err(DirectoryError::AmbiguousNumber {
+                    number: dirs[several[0]].0,
+                    names: several.iter().map(|at| full(&dirs[*at])).collect(),
+                });
+            }
+        };
+        let (number, name, dir) = dirs.remove(at);
+        let replaced = read_migration(root, number, name, dir)?;
+        // A later migration whose snapshot links to the replaced one would
+        // be left chained to a snapshot that no longer exists.
+        for later in dirs.iter().filter(|(n, _, _)| *n > number) {
+            let linked = std::fs::read(later.2.join(SNAPSHOT_FILE))
+                .ok()
+                .and_then(|bytes| Snapshot::load(&bytes).ok())
+                .is_some_and(|s| s.parent_checksum == Some(replaced.snapshot.checksum));
+            if linked {
+                return Err(DirectoryError::LaterMigration {
+                    replaced: replaced.dir_name(),
+                    later: full(later),
+                });
+            }
+        }
+        let dir = assemble(root, unique_numbers(root, dirs)?)?;
+        Ok((dir, replaced))
     }
 
     /// The newest migration, when there is one.
     pub fn head(&self) -> Option<&Migration> {
         self.migrations.last()
     }
+}
 
+/// Every migration directory under `root` as `(number, name, path)`, in
+/// name order; any other entry is refused.
+fn migration_dirs(root: &Path) -> Result<Vec<(u16, String, PathBuf)>, DirectoryError> {
+    let mut out = Vec::new();
+    for (name, entry) in entries(root, root)? {
+        if !entry.is_dir() {
+            continue;
+        }
+        let Some((number, migration_name)) = split_numbered(&name, 4)
+            .and_then(|(n, rest)| Some((u16::try_from(n).ok()?, rest)))
+            .filter(|(n, _)| *n > 0)
+        else {
+            return Err(DirectoryError::UnexpectedEntry {
+                path: PathBuf::from(&name),
+                expected: "a migration directory named NNNN_<name>",
+            });
+        };
+        out.push((number, migration_name, entry));
+    }
+    Ok(out)
+}
+
+/// `dirs` by number, refusing two that share one.
+fn unique_numbers(
+    root: &Path,
+    dirs: Vec<(u16, String, PathBuf)>,
+) -> Result<BTreeMap<u16, (String, PathBuf)>, DirectoryError> {
+    let mut numbered: BTreeMap<u16, (String, PathBuf)> = BTreeMap::new();
+    for (number, name, entry) in dirs {
+        if let Some((_, first)) = numbered.get(&number) {
+            return Err(DirectoryError::DuplicateNumber {
+                number,
+                first: relative(root, first),
+                second: relative(root, &entry),
+            });
+        }
+        numbered.insert(number, (name, entry));
+    }
+    Ok(numbered)
+}
+
+/// Read every migration of `numbered` and verify the numbers are dense from
+/// `0001` and the snapshots chained.
+fn assemble(
+    root: &Path,
+    numbered: BTreeMap<u16, (String, PathBuf)>,
+) -> Result<MigrationsDir, DirectoryError> {
+    let mut migrations: Vec<Migration> = Vec::new();
+    for (expected, (number, (name, dir))) in (1u16..).zip(numbered) {
+        if number != expected {
+            return Err(DirectoryError::MissingNumber {
+                number: expected,
+                next: relative(root, &dir),
+            });
+        }
+        let migration = read_migration(root, number, name, dir)?;
+        let parent = migrations.last();
+        if migration.snapshot.parent_checksum != parent.map(|p| p.snapshot.checksum) {
+            return Err(DirectoryError::BrokenChain {
+                parent: parent.map(|p| relative(root, &p.dir.join(SNAPSHOT_FILE))),
+                child: relative(root, &migration.dir.join(SNAPSHOT_FILE)),
+            });
+        }
+        migrations.push(migration);
+    }
+    Ok(MigrationsDir {
+        path: root.to_path_buf(),
+        migrations,
+    })
+}
+
+impl MigrationsDir {
     /// Every DDL step that lacks a rendering for one of `dialects`, as
     /// [`DirectoryError::MissingRendering`]s in migration and step order.
     pub fn missing_renderings(&self, dialects: &[Dialect]) -> Vec<DirectoryError> {
@@ -1098,6 +1271,90 @@ CREATE INDEX i ON t (c);
         let message = err.to_string();
         assert!(
             message.contains("0002_a") && message.contains("0002_b"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_duplicate_number_prints_a_replace_line_for_each_directory() {
+        let root = scratch("dup-replace");
+        let first = migration(&root, "0001_a", None);
+        migration(&root, "0002_add_x", Some(&first));
+        migration(&root, "0002_add_y", Some(&first));
+        let message = MigrationsDir::read(&root)
+            .expect_err("duplicate")
+            .to_string();
+        assert!(
+            message.contains("0002_add_x and 0002_add_y")
+                && message.contains("\n  ferro migrate new add_x --replace 0002_add_x")
+                && message.contains("\n  ferro migrate new add_y --replace 0002_add_y"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn reading_for_a_replace_admits_the_duplicate_at_the_replaced_number_only() {
+        let root = scratch("replacing");
+        let first = migration(&root, "0001_a", None);
+        let x = migration(&root, "0002_add_x", Some(&first));
+        migration(&root, "0002_add_y", Some(&first));
+
+        let (dir, replaced) = MigrationsDir::read_replacing(&root, "0002_add_x").expect("read");
+        assert_eq!(replaced.dir_name(), "0002_add_x");
+        assert_eq!(replaced.snapshot.checksum, sha384(&x));
+        let names: Vec<String> = dir.migrations.iter().map(Migration::dir_name).collect();
+        assert_eq!(names, ["0001_a", "0002_add_y"]);
+
+        // A bare number two directories share names both.
+        let err = MigrationsDir::read_replacing(&root, "0002").expect_err("ambiguous");
+        assert_eq!(err.kind(), "ambiguous_number");
+        let message = err.to_string();
+        assert!(
+            message.contains("--replace 0002_add_x") && message.contains("--replace 0002_add_y"),
+            "{message}"
+        );
+
+        // A name the directory does not hold.
+        let err = MigrationsDir::read_replacing(&root, "0009_nothing").expect_err("unknown");
+        assert_eq!(err.kind(), "no_such_migration");
+        assert!(err.to_string().contains("0009_nothing"), "{err}");
+
+        // A second duplicate elsewhere is still refused.
+        migration(&root, "0001_b", None);
+        let err = MigrationsDir::read_replacing(&root, "0002_add_x").expect_err("dup");
+        assert_eq!(err.kind(), "duplicate_number");
+    }
+
+    #[test]
+    fn a_bare_number_one_directory_carries_names_it() {
+        let root = scratch("replacing-bare");
+        let first = migration(&root, "0001_a", None);
+        migration(&root, "0002_add_x", Some(&first));
+        let (dir, replaced) = MigrationsDir::read_replacing(&root, "0002").expect("read");
+        assert_eq!(replaced.dir_name(), "0002_add_x");
+        assert_eq!(dir.migrations.len(), 1);
+
+        // The replaced migration's own parent link is not checked: its
+        // parent moved under it (a rebase), which is why it is replaced.
+        let root = scratch("replacing-stale");
+        migration(&root, "0001_a", None);
+        migration(&root, "0002_add_x", Some(b"a stale parent"));
+        let (_, replaced) = MigrationsDir::read_replacing(&root, "0002_add_x").expect("read");
+        assert_eq!(replaced.name, "add_x");
+    }
+
+    #[test]
+    fn a_migration_a_later_one_chains_from_is_not_replaced() {
+        let root = scratch("replacing-later");
+        let first = migration(&root, "0001_a", None);
+        let x = migration(&root, "0002_add_x", Some(&first));
+        migration(&root, "0003_later", Some(&x));
+        let err = MigrationsDir::read_replacing(&root, "0002_add_x").expect_err("later");
+        assert_eq!(err.kind(), "later_migration");
+        let message = err.to_string();
+        assert!(
+            message.contains("0003_later")
+                && message.contains("replace the later one first, or delete it"),
             "{message}"
         );
     }
