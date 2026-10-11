@@ -140,12 +140,27 @@ pub fn _check_migrations(
 /// `ValueError` naming the problem and its fix: a duplicate or missing
 /// number, a broken snapshot chain, a step with both suffixed and unsuffixed
 /// files, an unparseable header, an unexpected entry.
+///
+/// With `replacing` (`ferro migrate new --replace <target>`), the directory
+/// without that migration, admitting the duplicate at its number, and the
+/// migration itself under `"replaced"` (`MigrationsDir::read_replacing`);
+/// `ValueError` also for a target it does not hold, a bare number two
+/// migrations share, or a migration a later one chains from.
 #[pyfunction]
 #[pyo3(name = "_read_migrations_dir")]
-pub fn _read_migrations_dir(directory: String) -> PyResult<String> {
-    let dir = MigrationsDir::read(Path::new(&directory))
-        .map_err(|err| PyValueError::new_err(err.to_string()))?;
-    to_json(&dir)
+#[pyo3(signature = (directory, replacing = None))]
+pub fn _read_migrations_dir(directory: String, replacing: Option<String>) -> PyResult<String> {
+    let refused = |err: ferro_migrate::DirectoryError| PyValueError::new_err(err.to_string());
+    let Some(target) = replacing else {
+        return to_json(&MigrationsDir::read(Path::new(&directory)).map_err(refused)?);
+    };
+    let (dir, replaced) =
+        MigrationsDir::read_replacing(Path::new(&directory), &target).map_err(refused)?;
+    let mut json = serde_json::to_value(&dir)
+        .map_err(|err| PyValueError::new_err(format!("the migrations directory: {err}")))?;
+    json["replaced"] = serde_json::to_value(&replaced)
+        .map_err(|err| PyValueError::new_err(format!("the replaced migration: {err}")))?;
+    to_json(&json)
 }
 
 /// Load one `ir.json` (any shipped `ir_version`). Returns JSON

@@ -167,7 +167,11 @@ def test_a_duplicate_number_exits_3_naming_both_directories(project, pkg, capsys
 
     err = capsys.readouterr().err
     assert err.startswith("duplicate_number: "), err
-    assert "0001_create_author" in err and "0001_other" in err, err
+    assert "0001_create_author and 0001_other" in err, err
+    # One `--replace` line per directory, each with the full name (#629).
+    lines = err.splitlines()
+    assert "  ferro migrate new create_author --replace 0001_create_author" in lines
+    assert "  ferro migrate new other --replace 0001_other" in lines
 
 
 def test_a_missing_number_exits_3_naming_the_gap(project, pkg, capsys):

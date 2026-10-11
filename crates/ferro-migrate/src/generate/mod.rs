@@ -108,6 +108,43 @@ pub struct GeneratedStep {
     /// would change every applied file's checksum (ADR-0030).
     #[serde(skip)]
     pub class: BTreeMap<StepDialect, StepClass>,
+    /// A step carried across from the migration `ferro migrate new
+    /// --replace` regenerates: its files are written back byte for byte,
+    /// under the ordinal this step takes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub carried: Option<Carried>,
+}
+
+/// Where a carried step landed.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct Carried {
+    /// The step as it was carried.
+    #[serde(flatten)]
+    pub step: CarriedStep,
+    /// Whether it took the place of a step of its name and kind the
+    /// regeneration laid out (a rescaffolded backfill), which it wins over.
+    pub over_namesake: bool,
+}
+
+/// A step of a replaced migration a person wrote or filled in (a data step,
+/// a hand-written SQL step), carried across into the regenerated migration
+/// by name with its body intact (`ferro migrate new --replace`). Its header
+/// lines (`-- ferro: expand`, …) are part of its body.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CarriedStep {
+    /// The name after `NN_`.
+    pub name: String,
+    /// The up file's text: a data step's one `.py` file, or a hand-written
+    /// SQL step's `.up.sql`.
+    pub body: String,
+    /// [`StepKind::Data`] or [`StepKind::PortableSql`]; generated DDL is
+    /// regenerated, never carried.
+    pub kind: StepKind,
+    /// A hand-written SQL step's `.down.sql` text (`None` for a data step,
+    /// whose down lives in its one file).
+    #[serde(default)]
+    pub down: Option<String>,
 }
 
 /// Everything a new migration directory holds, ready to write.
@@ -189,6 +226,9 @@ pub enum GenerateError {
     /// A `--data-step` naming a model the migration's snapshot does not hold,
     /// listing those it does.
     DataStep(String),
+    /// A carried step (`--replace`) that is generated DDL, named: only a
+    /// data step or a hand-written SQL step is carried.
+    Carry(String),
     /// A declared rename hint `new` refuses (ADR-0032): its old name is still
     /// declared, or two hints claim one old name.
     Hint(HintError),
@@ -241,6 +281,11 @@ impl std::fmt::Display for GenerateError {
             GenerateError::NoBackfill(message) | GenerateError::DataStep(message) => {
                 f.write_str(message)
             }
+            GenerateError::Carry(name) => write!(
+                f,
+                "a carried step is a data step or a hand-written SQL step; {name} is generated \
+                 DDL, which --replace regenerates"
+            ),
             GenerateError::Hint(err) => write!(f, "rename hint refused: {err}"),
             GenerateError::Render(message) => f.write_str(message),
         }
@@ -581,6 +626,15 @@ pub struct GenerateOptions {
     /// parent's, linked to it (ADR-0037).
     #[serde(default)]
     pub data_only: bool,
+    /// `--replace`: the replaced migration's data steps and hand-written SQL
+    /// steps, in their order. Each takes the place of the first step of its
+    /// name and kind the regeneration lays out (a rescaffolded backfill, a
+    /// `--data-step` or `--sql-step` of the same name), which it wins over;
+    /// any other takes the place a person's step of its kind takes: a data
+    /// step after every generated step but the contract (ADR-0025), a SQL
+    /// step right before the data steps, or last when there are none.
+    #[serde(default)]
+    pub carry: Vec<CarriedStep>,
 }
 
 impl GenerateOptions {
@@ -666,6 +720,7 @@ pub fn generate_with(
         data: None,
         hand_model: None,
         class: BTreeMap::new(),
+        carried: None,
     });
     // Declared renames (ADR-0032): the planner puts them first; every other
     // op reads its table from `before`, the parent as the renames leave it.
@@ -675,7 +730,19 @@ pub fn generate_with(
 
     // One plan per dialect, every op placed in its step by its verdict, and
     // the schemas between the steps (ADR-0050).
-    let layout = stages::Layout::plan(parent_ir, before, target, dialects, hand.is_some())?;
+    // A carried data step is a person's data step: what the migration drops
+    // waits for it in the contract (ADR-0025).
+    if let Some(ddl) = options.carry.iter().find(|c| c.kind == StepKind::Ddl) {
+        return Err(GenerateError::Carry(ddl.name.clone()));
+    }
+    let carries_data = options.carry.iter().any(|c| c.kind == StepKind::Data);
+    let layout = stages::Layout::plan(
+        parent_ir,
+        before,
+        target,
+        dialects,
+        hand.is_some() || carries_data,
+    )?;
     let stages::Stages {
         before,
         expanded,
@@ -685,7 +752,7 @@ pub fn generate_with(
     if layout.is_empty() && !skipped.is_empty() {
         backfill::data_steps(&[], target, &skipped)?;
     }
-    if layout.is_empty() && hand.is_none() && sql.is_none() {
+    if layout.is_empty() && hand.is_none() && sql.is_none() && options.carry.is_empty() {
         return Ok(None);
     }
 
@@ -764,28 +831,51 @@ pub fn generate_with(
             data: None,
             hand_model: None,
             class,
+            carried: None,
         });
     }
-    steps.extend(
+    let mut data_steps: Vec<GeneratedStep> =
         backfill::data_steps(&layout.demands, target, &skipped)?
             .into_iter()
-            .map(|step| with_class(step, dialects, |_| DATA_STEP_CLASS)),
-    );
+            .map(|step| with_class(step, dialects, |_| DATA_STEP_CLASS))
+            .collect();
+    let mut hand = hand.map(|step| with_class(step, dialects, |_| DATA_STEP_CLASS));
+    let mut sql = sql;
+    // The steps `--replace` carries across: each in the place of the first
+    // step of its name and kind laid out here (a rescaffolded backfill), which
+    // it wins over, or else where a person's step of its kind goes.
+    let mut loose_data = Vec::new();
+    let mut loose_sql = Vec::new();
+    for carry in &options.carry {
+        let namesake = data_steps
+            .iter_mut()
+            .chain(hand.iter_mut())
+            .chain(sql.iter_mut())
+            .find(|s| s.carried.is_none() && s.name == carry.name && s.kind == carry.kind);
+        match (namesake, carry.kind) {
+            (Some(namesake), _) => *namesake = carried_step(carry, true, dialects),
+            (None, StepKind::Data) => loose_data.push(carried_step(carry, false, dialects)),
+            (None, _) => loose_sql.push(carried_step(carry, false, dialects)),
+        }
+    }
+    steps.extend(data_steps);
     for (at, op) in layout.index_ops.iter().enumerate() {
         let (step_before, step_after) = layout.index_stages(at, target);
         let step = staging::index_step(op, &step_before, &step_after, dialects)?;
         steps.push(with_class(step, dialects, |_| index_step_class(op, target)));
     }
-    // The steps a person asks for (`--sql-step`, `--data-step`), laid out
-    // whether or not the models changed: the SQL step right before the data
-    // step, or last; a data step after every generated step but the
-    // contract, which drops what it may still read (ADR-0025).
-    let (sql_first, sql_last) = if hand.is_some() {
-        (sql, None)
+    // The steps a person asks for (`--sql-step`, `--data-step`) or carries
+    // (`--replace`), laid out whether or not the models changed: the SQL
+    // steps right before the data steps, or last; a data step after every
+    // generated step but the contract, which drops what it may still read
+    // (ADR-0025). A carried step goes ahead of a new one of its kind.
+    let hand: Vec<GeneratedStep> = loose_data.into_iter().chain(hand).collect();
+    let sql: Vec<GeneratedStep> = loose_sql.into_iter().chain(sql).collect();
+    let (sql_first, sql_last) = if hand.is_empty() {
+        (Vec::new(), sql)
     } else {
-        (None, sql)
+        (sql, Vec::new())
     };
-    let hand = hand.map(|step| with_class(step, dialects, |_| DATA_STEP_CLASS));
     if !layout.contracts() {
         // A step every configured dialect would render not-applicable is not
         // generated: only Postgres stages a constraint (ADR-0043).
@@ -908,6 +998,30 @@ fn planned_ops(
                 })
         })
         .collect()
+}
+
+/// The step `carry` becomes: its body written back as it was, its class a
+/// data step's (`expand`) or, for a hand-written SQL step, the one its file
+/// declares when it is applied.
+fn carried_step(carry: &CarriedStep, over_namesake: bool, dialects: &[Dialect]) -> GeneratedStep {
+    let step = GeneratedStep {
+        ordinal: 0,
+        name: carry.name.clone(),
+        kind: carry.kind,
+        renderings: BTreeMap::new(),
+        data: None,
+        hand_model: None,
+        class: BTreeMap::new(),
+        carried: Some(Carried {
+            step: carry.clone(),
+            over_namesake,
+        }),
+    };
+    if carry.kind == StepKind::Data {
+        with_class(step, dialects, |_| DATA_STEP_CLASS)
+    } else {
+        step
+    }
 }
 
 /// `step` with `class_on` its class on each of `dialects`.
@@ -3068,6 +3182,125 @@ mod tests {
                 "04_contract",
                 "05_audit"
             ]
+        );
+    }
+
+    fn carried(name: &str, kind: StepKind, body: &str) -> CarriedStep {
+        CarriedStep {
+            name: name.into(),
+            body: body.into(),
+            kind,
+            down: (kind == StepKind::PortableSql).then(|| "SELECT 1;\n".to_string()),
+        }
+    }
+
+    #[test]
+    fn a_carried_step_wins_over_the_rescaffolded_step_of_its_name_and_kind() {
+        let parent = snapshot_of(&ir(vec![author()]), None);
+        let filled = "def up(ctx):\n    pass\n";
+        let options = GenerateOptions {
+            carry: vec![
+                carried("backfill_author", StepKind::Data, filled),
+                carried(
+                    "fix_rows",
+                    StepKind::PortableSql,
+                    "-- ferro: expand\nSELECT 2;\n",
+                ),
+            ],
+            ..GenerateOptions::default()
+        };
+        let migration = generate_with(Some(&parent), &ir(vec![slug_for_name()]), &BOTH, &options)
+            .expect("ok")
+            .expect("a change");
+        // With no data step left to place, the SQL step is last.
+        assert_eq!(
+            step_names(&migration),
+            [
+                "01_expand",
+                "02_backfill_author",
+                "03_add_constraint",
+                "04_contract",
+                "05_fix_rows"
+            ]
+        );
+        let backfill = &migration.steps[1];
+        let won = backfill.carried.as_ref().expect("carried");
+        assert_eq!((&won.step, won.over_namesake), (&options.carry[0], true));
+        assert!(backfill.data.is_none() && backfill.renderings.is_empty());
+        assert_eq!(
+            backfill.class.values().copied().collect::<Vec<_>>(),
+            [DATA_STEP_CLASS, DATA_STEP_CLASS]
+        );
+        let sql = &migration.steps[4];
+        assert_eq!(sql.kind, StepKind::PortableSql);
+        let last = sql.carried.as_ref().expect("carried");
+        assert_eq!((&last.step, last.over_namesake), (&options.carry[1], false));
+    }
+
+    #[test]
+    fn a_carried_step_without_a_namesake_takes_the_place_of_a_persons_step() {
+        let parent = snapshot_of(&ir(vec![author()]), None);
+        let options = GenerateOptions {
+            carry: vec![
+                carried("fix_rows", StepKind::PortableSql, "SELECT 2;\n"),
+                carried("backfill_custom", StepKind::Data, "# mine\n"),
+            ],
+            sql_step: Some("extra".into()),
+            ..GenerateOptions::default()
+        };
+        let migration = generate_with(Some(&parent), &ir(vec![slug_for_name()]), &BOTH, &options)
+            .expect("ok")
+            .expect("a change");
+        // The data step before the contract (ADR-0025), the SQL steps right
+        // before it, the carried ones ahead of the new one.
+        assert_eq!(
+            step_names(&migration),
+            [
+                "01_expand",
+                "02_backfill_author",
+                "03_add_constraint",
+                "04_fix_rows",
+                "05_extra",
+                "06_backfill_custom",
+                "07_contract"
+            ]
+        );
+        assert!(migration.steps[1].data.is_some(), "rescaffolded");
+        assert!(migration.steps[4].carried.is_none(), "the new --sql-step");
+        assert_eq!(
+            migration.steps[5].carried.as_ref().map(|c| &c.step),
+            Some(&options.carry[1])
+        );
+    }
+
+    #[test]
+    fn carried_steps_alone_make_a_migration_and_nothing_at_all_makes_none() {
+        let parent = snapshot_of(&ir(vec![author()]), None);
+        let same = ir(vec![author()]);
+        assert_eq!(
+            generate_with(Some(&parent), &same, &BOTH, &GenerateOptions::default()),
+            Ok(None)
+        );
+        let options = GenerateOptions {
+            carry: vec![carried("fix_rows", StepKind::PortableSql, "SELECT 2;\n")],
+            ..GenerateOptions::default()
+        };
+        let migration = generate_with(Some(&parent), &same, &BOTH, &options)
+            .expect("ok")
+            .expect("carried");
+        assert_eq!(step_names(&migration), ["01_fix_rows"]);
+        assert_eq!(migration.snapshot.parent_checksum, Some(parent.checksum));
+        // Generated DDL is regenerated, never carried.
+        let ddl = GenerateOptions {
+            carry: vec![carried("schema", StepKind::Ddl, "SELECT 1;\n")],
+            ..GenerateOptions::default()
+        };
+        assert_eq!(
+            generate_with(Some(&parent), &same, &BOTH, &ddl)
+                .expect_err("refused")
+                .to_string(),
+            "a carried step is a data step or a hand-written SQL step; schema is generated \
+             DDL, which --replace regenerates"
         );
     }
 
