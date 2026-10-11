@@ -79,8 +79,8 @@ TRACKED = (
 )
 TYPED = (AlreadyTrackedError, AppliedAboveBaselineError)
 NOT_COMPARED = (
-    "baseline checked what `ferro migrate drift` checks: column defaults and "
-    "objects ferro does not own were not compared\n"
+    "baseline checked what `ferro migrate drift` checks: objects ferro does not "
+    "own (functions, triggers) were not compared\n"
 )
 
 

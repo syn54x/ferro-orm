@@ -1166,6 +1166,12 @@ async def test_a_required_column_with_a_default_keeps_the_model_literal_on_sqlit
 
     again = await warned_auto_migrate(db_url, updates=True)
     assert (schema_steps(again), warning_texts(again)) == ([], [])
+    # The kept literal is ferro's own default (ADR-0034 as amended, told by
+    # shape): never a foreign default, so not even a destructive pass
+    # touches it or warns about it (#628).
+    ferro.reset_engine()
+    destroyed = await warned_auto_migrate(db_url, destructive=True)
+    assert (schema_steps(destroyed), warning_texts(destroyed)) == ([], [])
 
 
 @pytest.mark.asyncio

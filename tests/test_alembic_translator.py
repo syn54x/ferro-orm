@@ -1554,3 +1554,40 @@ def test_the_translator_writes_each_revision_op_the_way_the_core_says():
     assert (fk.constraint_name, fk.constraint_type) == ("fk_card_a_team", "foreignkey")
     assert isinstance(raised, FerroIrreversibleOp)
     assert raised.reason == "labels are append-only"
+
+
+def test_a_foreign_defaults_drop_is_alembics_alter_column_and_its_down_raises():
+    """The core writes a ``DropDefault`` as its twin: Alembic's
+    ``alter_column(server_default=None)``, the column's type and nullability
+    read from the models. Its down carries the core's reason, raised."""
+    from alembic.operations import ops
+
+    from ferro.migrations.translate import FerroIrreversibleOp, translate
+
+    op = {"kind": "DropDefault", "table": "card", "column": "flavor", "was": "''"}
+    [drop] = translate(
+        [
+            _written(
+                op,
+                statements=['ALTER TABLE "card" ALTER COLUMN "flavor" DROP DEFAULT'],
+                twin=True,
+            )
+        ],
+        target=_CARD_TARGET,
+        dialect="postgres",
+    )
+    assert isinstance(drop, ops.AlterColumnOp)
+    assert (drop.table_name, drop.column_name, drop.modify_server_default) == (
+        "card",
+        "flavor",
+        None,
+    )
+    assert drop.existing_nullable is False
+
+    reason = "the default '' on card.flavor was set outside ferro, …"
+    [raised] = translate(
+        [_written(op, twin=True, irreversible=reason)],
+        target=_CARD_TARGET,
+        dialect="postgres",
+    )
+    assert isinstance(raised, FerroIrreversibleOp) and raised.reason == reason
