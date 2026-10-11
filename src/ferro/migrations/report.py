@@ -55,7 +55,10 @@ class RunRefused(MigrationRefused):
     step's declared reason). Each is ``None`` for a refusal that is not the
     planner's (a lost lock, a missing schema). ``ahead_only`` is true when
     the database holds migrations the directory lacks and ``allow_ahead``
-    alone would have let the run through. ``names`` lists the migrations
+    alone would have let the run through; ``contract_steps`` then names each
+    step record of those migrations whose class is not ``expand``
+    (``NNNN_<name>:NN``, ADR-0054), what ``allow_ahead="expand-only"``
+    refuses on. ``names`` lists the migrations
     (``NNNN_<name>``) a refusal about a set of them names: a tracked
     database's records (``already_tracked``), the run-applied migrations
     above a baseline (``applied_above_baseline``); empty otherwise. ``head``
@@ -73,6 +76,7 @@ class RunRefused(MigrationRefused):
         step: int | None = None,
         reason: str | None = None,
         ahead_only: bool = False,
+        contract_steps: Sequence[str] | None = None,
         names: Sequence[str] | None = None,
         head: str | None = None,
     ) -> None:
@@ -82,6 +86,7 @@ class RunRefused(MigrationRefused):
         self.step = step
         self.reason = reason
         self.ahead_only = ahead_only
+        self.contract_steps = list(contract_steps or ())
         self.names = list(names or ())
         self.head = head
 
@@ -213,6 +218,11 @@ class StepStatus:
     on_disk_checksum: str | None = None
     flags: list[str] = field(default_factory=list)
     """``destructive`` / ``data-dependent`` headers the file carries."""
+    step_class: str = "contract"
+    """``expand`` or ``contract`` (ADR-0054): whether the previous release's
+    writes keep succeeding beside the step. The class its record holds, read
+    as ``contract`` when a record an older ferro wrote holds none; for a
+    step with no record, the class a run would record."""
     rows_done: int | None = None
     """The rows a chunked step's current walk has committed."""
 
@@ -412,6 +422,7 @@ class StatusReport:
                         applied_checksum=s["applied_checksum"],
                         on_disk_checksum=s["on_disk_checksum"],
                         flags=list(s["flags"]),
+                        step_class=s["class"],
                         rows_done=rows_done.get((m["number"], s["step"])),
                     )
                     for s in m["steps"]
@@ -433,7 +444,7 @@ class StatusReport:
 
     def render(self, steps: bool = False) -> str:
         """The text ``ferro migrate status`` prints (``--steps``: every
-        migration's steps)."""
+        migration's steps, each with its class after its flags)."""
         lines = [f"{self.database} ({self.dialect}) · {self.table}", ""]
         names = [m.name for m in self.migrations] + self.ahead
         name_width = max((len(name) for name in names), default=0)
@@ -445,7 +456,10 @@ class StatusReport:
                 continue
             for step in migration.steps:
                 flags = "".join(f"  [{flag}]" for flag in step.flags)
-                lines.append(f"  {step.file:<{file_width}}  {step.shown}{flags}")
+                shown_class = f"  {step.step_class}" if steps else ""
+                lines.append(
+                    f"  {step.file:<{file_width}}  {step.shown}{flags}{shown_class}"
+                )
                 if step.state == "applied (different checksum)":
                     lines.append(f"    applied   sha384:{step.applied_checksum}")
                     lines.append(f"    on disk   sha384:{step.on_disk_checksum}")

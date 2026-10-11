@@ -80,15 +80,18 @@ def test_after_up_everything_is_installed_and_steps_expand_on_request(
         f"{header(db)}\n\n0001_create_author  applied\n0002_second         applied\n"
     )
 
+    # Every step's class after its flags (ADR-0054): the generated table
+    # creation is expand, the hand-written step without `-- ferro: expand`
+    # contract.
     assert run("migrate", "status", "--steps", "--url", db.url) == 0
     up_file = f"01_schema.up.{db.backend}.sql"
     width = len(up_file)
     assert capsys.readouterr().out == (
         f"{header(db)}\n\n"
         f"0001_create_author  applied\n"
-        f"  {up_file:<{width}}  applied\n"
+        f"  {up_file:<{width}}  applied  expand\n"
         f"0002_second         applied\n"
-        f"  {'01_second.up.sql':<{width}}  applied\n"
+        f"  {'01_second.up.sql':<{width}}  applied  contract\n"
     )
 
     assert run("migrate", "status", "--json", "--url", db.url) == 0
@@ -102,6 +105,10 @@ def test_after_up_everything_is_installed_and_steps_expand_on_request(
     ]
     assert document["migrations"][0]["state"] == "applied"
     assert document["migrations"][0]["steps"][0]["state"] == "applied"
+    assert [m["steps"][0]["step_class"] for m in document["migrations"]] == [
+        "expand",
+        "contract",
+    ]
 
 
 def test_a_part_applied_migration_expands_and_an_interrupted_step_needs_attention(
@@ -143,6 +150,30 @@ def test_an_edited_applied_step_shows_both_checksums(project, pkg, db, capsys):
         f"    applied   sha384:{applied}\n"
         f"    on disk   sha384:{sha384(up_file)}\n"
     ) in out
+
+
+def test_steps_print_their_class_beside_their_flags(project, pkg, db, capsys):
+    configure(project, pkg, db.backend)
+    write_models(project, pkg, AUTHOR)
+    new("create_author")
+    write_models(project, pkg, AUTHOR.replace("    status: Status = Status.DRAFT\n", ""))
+    new("drop_status")
+    capsys.readouterr()
+
+    # Pending steps show the class a run would record.
+    assert run("migrate", "status", "--steps", "--url", db.url) == 3
+    lines = [line.split() for line in capsys.readouterr().out.splitlines()]
+    assert [f"01_schema.up.{db.backend}.sql", "pending", "expand"] in lines
+    assert [
+        f"01_schema.up.{db.backend}.sql",
+        "pending",
+        "[destructive]",
+        "contract",
+    ] in lines
+    # Without --steps no class is printed.
+    assert run("migrate", "status", "--url", db.url) == 3
+    out = capsys.readouterr().out
+    assert "expand" not in out and "contract" not in out
 
 
 def test_a_baselined_step_says_so(project, pkg, db, capsys):
@@ -251,6 +282,7 @@ def one_step(word: str) -> dict:
         "applied_checksum": None,
         "on_disk_checksum": None,
         "flags": [],
+        "class": "contract",
     }
 
 

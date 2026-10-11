@@ -71,7 +71,7 @@ from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, TypeAlias
 
 from .. import _core
 from ..models import transaction
@@ -103,6 +103,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "MAX_LOCK_TIMEOUT_S",
+    "AllowAhead",
     "AppliedStep",
     "DownPlan",
     "RunReport",
@@ -116,6 +117,26 @@ __all__ = [
     "tracking_schema_for",
     "up",
 ]
+
+AllowAhead: TypeAlias = bool | Literal["expand-only"]
+"""How far :func:`up` and :func:`require_applied` let a database ahead of
+the checkout through (ADR-0038, ADR-0054): ``False`` refuses any applied
+migration the directory lacks, ``"expand-only"`` admits them when every
+step they hold is of class ``expand``, ``True`` admits any distance."""
+
+
+def check_allow_ahead(allow_ahead: object) -> AllowAhead:
+    """``allow_ahead`` when it is one of the three values it takes.
+
+    Raises:
+        TypeError: anything else, naming the three.
+    """
+    if isinstance(allow_ahead, bool) or allow_ahead == "expand-only":
+        return allow_ahead  # ty: ignore[invalid-return-type]
+    raise TypeError(
+        f'allow_ahead must be False, True or "expand-only"; got {allow_ahead!r}'
+    )
+
 
 _STEP_STEM = re.compile(r"(\.(up|down)(\.[a-z]+)?\.sql|\.py)$")
 _TARGET = re.compile(r"(\d{4})(?::(\d{2}))?")
@@ -165,7 +186,12 @@ class RunReport:
         if self.refusal is None:
             return self
         if self.refused is not None and self.refused.ahead_only:
-            raise DatabaseAheadError(self.ahead, self.refusal, report=self)
+            raise DatabaseAheadError(
+                self.ahead,
+                self.refusal,
+                report=self,
+                contract_steps=self.refused.contract_steps,
+            )
         raise MigrationRefused(self.refusal, report=self)
 
 
@@ -209,7 +235,7 @@ async def up(
     using: str | None = None,
     url: str | None = None,
     lock_timeout: str | float | None = None,
-    allow_ahead: bool = False,
+    allow_ahead: AllowAhead = False,
     progress: Callable[[str], Any] | None = None,
 ) -> RunReport:
     """Apply every pending step of every pending migration, in order, under
@@ -220,7 +246,9 @@ async def up(
     (:meth:`~ferro.migrations.target.Target.resolve`). A second run waits up
     to ``lock_timeout`` (the database's configured ``lock_timeout`` when
     ``None``), saying so on stderr at once. ``allow_ahead`` lets a
-    database holding migrations the directory lacks through (ADR-0038).
+    database holding migrations the directory lacks through (ADR-0038):
+    ``"expand-only"`` when every step they hold is ``expand`` (ADR-0054),
+    ``True`` whatever they hold (:data:`AllowAhead`).
     ``progress`` receives each line as the run goes: one per applied step,
     and one per attempt a step makes while it waits for a table lock under
     the database's ``ddl_lock_timeout``.
@@ -230,12 +258,16 @@ async def up(
     Raises:
         DatabaseAheadError: the database has applied migrations the
             directory lacks, and nothing else is in the way
-            (``allow_ahead=True`` runs beside them).
+            (``allow_ahead=True`` runs beside them; ``.contract_steps`` names
+            the steps ``"expand-only"`` refuses on).
         MigrationRefused: the run refused or a step failed; the message says
             why and how to resume, and ``.report`` is the run's report. Also
             the configuration naming no single database, and a connection
             the run cannot work on.
+        TypeError: ``allow_ahead`` is not ``False``, ``True`` or
+            ``"expand-only"``.
     """
+    allow_ahead = check_allow_ahead(allow_ahead)
     target = Target.resolve(settings, database, using=using, url=url)
     async with target.open() as name:
         return await _up(
@@ -252,7 +284,7 @@ async def _up(
     database: DatabaseSettings,
     *,
     lock_timeout: str | float | None = None,
-    allow_ahead: bool = False,
+    allow_ahead: AllowAhead = False,
     progress: Callable[[str], Any] | None = None,
     through: str | None = None,
 ) -> RunReport:
@@ -838,10 +870,18 @@ async def require_applied(
     *,
     using: str | None = None,
     url: str | None = None,
-    allow_ahead: bool = False,
+    allow_ahead: AllowAhead = False,
 ) -> None:
     """Return when the database stands at the head of its migrations; raise
     otherwise. Takes no lock and changes nothing.
+
+    ``allow_ahead`` lets a database holding migrations this checkout lacks
+    through (:data:`AllowAhead`): ``"expand-only"`` when every step they hold
+    is ``expand`` (the previous release of a rolling deploy), ``True``
+    whatever they hold. A step's class is read from its step record, written
+    when it was applied; a record an older ferro wrote holds none and reads
+    as ``contract`` until the first run of this ferro on the database
+    classifies it.
 
     The answer is the run planner's: the plan ``up`` would make, read with
     no lock.
@@ -851,8 +891,12 @@ async def require_applied(
             tracking table refuses a run (``.refusals``: an interrupted run,
             an edited applied file, ...).
         DatabaseAheadError: the database has applied migrations this
-            checkout lacks (``allow_ahead=True`` lets it through).
+            checkout lacks (``allow_ahead=True`` lets it through;
+            ``.contract_steps`` names the steps ``"expand-only"`` refuses on).
+        TypeError: ``allow_ahead`` is not ``False``, ``True`` or
+            ``"expand-only"``.
     """
+    allow_ahead = check_allow_ahead(allow_ahead)
     target = Target.resolve(settings, database, using=using, url=url)
     async with target.open() as name:
         tracked = await open_tracked(name, target.database)
@@ -869,7 +913,11 @@ async def require_applied(
             await tracked.plan({"direction": "up"}, allow_ahead=allow_ahead)
         except RunRefused as refused:
             if refused.ahead_only:
-                raise DatabaseAheadError(report.ahead, str(refused)) from None
+                raise DatabaseAheadError(
+                    report.ahead,
+                    str(refused),
+                    contract_steps=refused.contract_steps,
+                ) from None
             raise PendingMigrationsError(pending, [str(refused)]) from None
     if pending:
         raise PendingMigrationsError(pending)

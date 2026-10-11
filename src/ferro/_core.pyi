@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 class RouteHandle:
     """Opaque, immutable route for one operation (FF-D D3).
@@ -395,7 +395,7 @@ class TrackedDatabase:
         self,
         direction: dict[str, Any],
         *,
-        allow_ahead: bool = False,
+        allow_ahead: bool | Literal["expand-only"] = False,
         order_keys: Any = None,
     ) -> Plan:
         """A preview: its steps cannot be executed."""
@@ -432,7 +432,7 @@ class LockedDatabase:
         self,
         direction: dict[str, Any],
         *,
-        allow_ahead: bool = False,
+        allow_ahead: bool | Literal["expand-only"] = False,
         order_keys: Any = None,
     ) -> Plan: ...
     async def execute(
