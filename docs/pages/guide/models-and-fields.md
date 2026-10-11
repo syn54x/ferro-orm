@@ -196,6 +196,7 @@ Database options accepted by `Field()` (and `FerroField()`):
 | `db_type` | `DbType \| None` | `None` | Column-type override (see above). |
 | `db_check` | `bool` | `False` | Emit a DB-side `CHECK` constraint for closed-domain types; only valid with `db_type`. |
 | `renamed_from` | `str \| None` | `None` | The column's previous name: a rename hint. `ferro migrate new` writes `RENAME COLUMN` instead of a drop and an add, so every row keeps its value; `ForeignKey(..., renamed_from=...)` does the same for a relation's `*_id` column. Inert once its migration is generated. See [Renames](schema/migrations.md#renames). |
+| `retired` | `bool` | `False` | Retire the column: the field leaves the model (no attribute, no keyword, no statement the model issues names it) and the column stays in the schema, nullable, until the declaration is deleted in a later release. The annotation must allow `None`; `ForeignKey(retired=True)` does the same for a relation's `*_id` column. See [Retiring a column](schema/migrations.md#retiring-a-column). |
 
 On top of these, every Pydantic validation option works in the same call: `min_length`, `max_length`, `pattern`, `gt`, `ge`, `lt`, `le`, `multiple_of`, `decimal_places`, `description`, and the rest — see [Pydantic's Field docs](https://docs.pydantic.dev/latest/api/fields/#pydantic.fields.Field).
 
