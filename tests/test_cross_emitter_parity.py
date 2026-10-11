@@ -1012,6 +1012,7 @@ REBUILD_CASES = (
     "A4-drop-a-required-column",
     "A5-rename-a-column",
     "A6-change-a-type",
+    "A6-retire-a-required-enum-column",
     "A7a-make-a-column-required",
     "A7b-make-a-column-optional",
     "A10-add-a-table-check",

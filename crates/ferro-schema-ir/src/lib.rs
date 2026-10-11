@@ -767,6 +767,39 @@ mod tests {
     }
 
     #[test]
+    fn schema_retired_column_v2_roundtrip() {
+        let fixture =
+            include_str!("../../../tests/fixtures/ir_vectors/schema_retired_column_v2.json");
+        let parsed: serde_json::Value =
+            serde_json::from_str(fixture).expect("schema fixture must parse");
+        let ir = parsed.get("ir").cloned().expect("fixture must contain ir");
+        let envelope: IrEnvelope<SchemaIrPayload> =
+            serde_json::from_value(ir.clone()).expect("schema IR v2 must deserialize");
+        let author = envelope
+            .payload
+            .models
+            .iter()
+            .find(|model| model.table_name == "author")
+            .expect("author model");
+        let retired: Vec<&str> = author
+            .columns
+            .iter()
+            .filter(|col| col.retired)
+            .map(|col| col.name.as_str())
+            .collect();
+        assert_eq!(retired, vec!["bio", "nickname", "team_id"]);
+        assert!(
+            author
+                .columns
+                .iter()
+                .filter(|col| col.retired)
+                .all(|col| col.nullable)
+        );
+        let encoded = serde_json::to_value(&envelope).expect("schema IR must serialize");
+        assert_eq!(encoded, ir, "schema v2 round-trip must not drift");
+    }
+
+    #[test]
     fn a_retired_column_carries_the_flag_and_an_unretired_one_has_no_key() {
         let declared = serde_json::json!({
             "name": "bio",

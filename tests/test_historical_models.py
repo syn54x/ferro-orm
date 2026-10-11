@@ -284,3 +284,28 @@ def test_the_historical_marker_does_not_leak_to_user_models():
         id: int | None = ferro.Field(default=None, primary_key=True)
 
     assert Plain.__dict__.get("__ferro_historical__") is False
+
+
+def test_a_retired_column_is_an_ordinary_nullable_column_of_the_historical_model():
+    """A data step is the one place a release may touch a retired column
+    (ADR-0053): the online rename recipe copies out of it there."""
+    mood = {"enum_values": ["calm", "loud"], "enum_type_name": "mood", "index": True}
+    parent = snapshot(model("author", pk(), col("name"), col("mood", **mood)))
+    own = snapshot(
+        model(
+            "author",
+            pk(),
+            col("name"),
+            col("mood", nullable=True, retired=True, **mood),
+        )
+    )
+
+    for models in (
+        historical.build(parent, own, rev="0002_retire_mood"),
+        historical.build_single(own, "0002_retire_mood"),
+    ):
+        author = models.Author
+        assert typing.get_args(fields(author)["mood"])[1] is type(None)
+        assert author.__ferro_columns__["mood"].nullable is True
+        assert author.__ferro_retired_names__ == frozenset()
+        assert author(name="ada", mood="calm").mood.value == "calm"

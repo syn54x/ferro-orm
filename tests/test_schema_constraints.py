@@ -228,3 +228,48 @@ async def test_foreign_key_index_runtime_ddl_parity_postgres(
     assert "org_id" in matching[0][1], (
         f"Index DDL should reference org_id column: {matching[0][1]!r}"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.sqlite_only
+async def test_a_retired_columns_constraints_keep_their_canonical_names(db_url):
+    """A retired column (ADR-0053) is created with every constraint it
+    declares, under the names a mapped column's would take: its index, its
+    unique and its foreign key stay as declared until the column is dropped."""
+
+    class RetiredTeam(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+
+    class RetiredRow(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        bio: str | None = Field(index=True, retired=True)
+        code: Annotated[str | None, FerroField(unique=True, retired=True)] = None
+        team: Annotated[RetiredTeam | None, ForeignKey(retired=True)] = None
+
+    await connect(db_url, auto_migrate=True)
+
+    db_path = db_url.replace("sqlite:", "").split("?")[0]
+    conn = sqlite3.connect(db_path)
+    try:
+        indexes = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index' "
+                "AND tbl_name = 'retiredrow'"
+            )
+        }
+        columns = {
+            row[1]: row[3] for row in conn.execute("PRAGMA table_info('retiredrow')")
+        }
+        foreign_keys = conn.execute("PRAGMA foreign_key_list('retiredrow')").fetchall()
+    finally:
+        conn.close()
+
+    assert "idx_retiredrow_bio" in indexes
+    assert "uq_retiredrow_code" in indexes
+    assert {name: columns[name] for name in ("bio", "code", "team_id")} == {
+        "bio": 0,
+        "code": 0,
+        "team_id": 0,
+    }
+    assert [(row[2], row[3]) for row in foreign_keys] == [("retiredteam", "team_id")]

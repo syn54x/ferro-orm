@@ -14,6 +14,7 @@ is still there or the next release already dropped it. The column stays in the
 schema snapshot, nullable, with its index (ADR-0053).
 """
 
+from enum import StrEnum
 from typing import Annotated, Optional
 
 import pytest
@@ -32,6 +33,8 @@ from ferro.base import FerroField
 from ferro.ir import compile_registry_schema_ir
 from ferro.raw import execute, fetch_all
 from ferro.relations import resolve_relationships
+from tests._alembic_harness import autogenerate, run_revision
+from tests._pass_harness import schema_steps, warning_texts
 
 pytestmark = pytest.mark.usefixtures("clean_registry")
 
@@ -378,3 +381,114 @@ async def test_a_retired_column_dropped_by_hand_changes_nothing(db_url):
     await ferro.connect(db_url)
     async with ferro.engines.session():
         await _round_trip(Author)
+
+
+# -- the reconciliation pass and the Alembic bridge -----------------------------------
+
+
+class Mood(StrEnum):
+    CALM = "calm"
+    LOUD = "loud"
+
+
+def _release_a() -> type[Model]:
+    """The previous release: ``mood`` is required, with an index."""
+
+    class Author(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+        mood: Annotated[Mood, FerroField(index=True)]
+
+    return Author
+
+
+def _release_b() -> type[Model]:
+    """This release: ``mood`` is retired."""
+
+    class Author(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+        mood: Annotated[Mood | None, FerroField(index=True, retired=True)] = None
+
+    return Author
+
+
+def _rewind() -> None:
+    from ferro.registry import REGISTRY
+
+    ferro.reset_engine()
+    ferro.clear_registry()
+    REGISTRY.reset_for_test()
+
+
+async def _live_nullable(db_url: str, column: str) -> bool:
+    """Whether the live ``author.<column>`` accepts ``NULL``."""
+    async with ferro.engines.session():
+        if db_url.startswith("sqlite"):
+            rows = await fetch_all("PRAGMA table_info(author)")
+            return next(r for r in rows if r["name"] == column)["notnull"] == 0
+        rows = await fetch_all(
+            "SELECT is_nullable FROM information_schema.columns "
+            "WHERE table_name = 'author' AND column_name = $1 "
+            "AND table_schema = current_schema()",
+            column,
+        )
+        return rows[0]["is_nullable"] == "YES"
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.asyncio
+async def test_the_create_pass_creates_a_retired_column_nullable_with_its_index(
+    db_url,
+):
+    _release_b()
+    await ferro.connect(db_url, auto_migrate=True)
+
+    assert await _live_nullable(db_url, "mood")
+    async with ferro.engines.session():
+        report = await ferro.migrate(destructive=True)
+    assert schema_steps(report) == []
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_migrate_updates_relaxes_not_null_and_destructive_never_drops(db_url):
+    _release_a()
+    await ferro.connect(db_url, auto_migrate=True)
+    assert not await _live_nullable(db_url, "mood")
+    _rewind()
+    _release_b()
+
+    await ferro.connect(db_url, auto_migrate=True, migrate_updates=True)
+
+    assert await _live_nullable(db_url, "mood")
+    async with ferro.engines.session():
+        report = await ferro.migrate(destructive=True)
+    # Nothing is left to change, and the destructive rung drops nothing: the
+    # retired column, its index and its type are all declared.
+    assert schema_steps(report) == []
+    assert warning_texts(report) == []
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_alembic_autogenerate_renders_only_the_relaxation(
+    db_url, postgres_base_url, db_schema_name
+):
+    _release_a()
+    await ferro.connect(db_url, auto_migrate=True)
+    _rewind()
+    _release_b()
+
+    upgrade, _ = autogenerate(db_url, postgres_base_url, db_schema_name)
+
+    lines = [line.strip() for line in upgrade.splitlines() if line.strip()]
+    ops = [line for line in lines if line.startswith("op.")]
+    assert len(ops) == 1, upgrade
+    assert ops[0].startswith("op.alter_column('author', 'mood'"), upgrade
+    assert "nullable=True" in upgrade, upgrade
+    run_revision(upgrade, db_url, postgres_base_url, db_schema_name)
+    await ferro.connect(db_url)
+    assert await _live_nullable(db_url, "mood")
