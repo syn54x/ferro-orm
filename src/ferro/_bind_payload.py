@@ -18,6 +18,7 @@ from typing import Any, Mapping
 from pydantic_core import to_json
 
 from .base import ForeignKey
+from .columns import retired_clause
 
 _SAVE_COLUMN_CONTAINERS = (set, frozenset, list, tuple)
 _SAVE_COLUMN_USAGE = {
@@ -148,7 +149,8 @@ def _validate_save_column_names(
             )
         if name not in columns:
             raise ValueError(
-                f"Unknown column {name!r} in save({param}=...). "
+                f"Unknown column {name!r} in save({param}=...)."
+                f"{retired_clause(model_cls, name)} "
                 f"Legal persisted columns: {legal}."
             )
     return columns

@@ -185,6 +185,47 @@ A hint is live only while the previous snapshot still holds the old name and lac
 
 The rename example runs end to end, including the revert, in [`docs/examples/migrations_rename.py`](https://github.com/syn54x/ferro-orm/blob/main/docs/examples/migrations_rename.py).
 
+A rename hint renames in one migration, so the previous release's code, still naming `nickname`, fails the moment it runs. When old and new code serve side by side (a rolling deploy), rename online instead, over three releases: add the new column, write both in app code and copy the existing rows across in a [data step](data-steps.md#a-data-step); [retire](#retiring-a-column) the old one; delete its declaration, which drops it.
+
+## Retiring a column
+
+Dropping a column in the release that stops using it breaks the release still serving: its code names the column in every `INSERT` and `UPDATE`, so it fails from the moment the drop runs until it is replaced. A column leaves in two releases instead. In the first, declare it `retired`:
+
+=== "Assignment"
+
+    ```python
+    --8<-- "docs/examples/migrations_retire.py:models"
+    ```
+
+=== "Annotated"
+
+    ```python
+    --8<-- "docs/examples/migrations_retire_annotated.py:models"
+    ```
+
+From this release on `bio` is gone from the model: `author.bio` raises `AttributeError`, `Author(bio="x")` raises `TypeError`, a query, `order_by`, `update()` or `save(only=...)` naming it fails with "retired in this release", and no `SELECT`, `INSERT` or `UPDATE` the model issues names it. The column stays in the schema snapshot, nullable, with its index, so the one change is the relaxation the previous release needs to keep writing beside this one:
+
+```sql
+-- 0002_retire_bio/01_schema.up.postgres.sql
+ALTER TABLE "author" ALTER COLUMN "bio" DROP NOT NULL;
+```
+
+On SQLite that is a [table rebuild](#sqlite-table-rebuilds). Retiring a column that already accepts `NULL` writes nothing: `new` says "no schema change" and `check` is clean. In the next release, delete the declaration: `new` writes the `DROP COLUMN`, marked destructive, and, when it was the last column of a Postgres enum type, the `DROP TYPE` after it.
+
+| Release | The model | The migration | Old code beside it |
+|---|---|---|---|
+| A | `bio: str = Field(index=True)` | creates `bio` | |
+| B | `bio: str \| None = Field(index=True, retired=True)` | `DROP NOT NULL` | A writes `bio`; works |
+| C | no `bio` | `DROP COLUMN "bio"` (destructive) | B never names `bio`; works |
+
+- `ForeignKey(retired=True)` retires a relation and its `*_id` column; its foreign key constraint stays until the column is dropped. It needs no `related_name`, and a `BackRef` reading it back is refused: delete it.
+- Nothing else about the column changes while it is retired: its index, unique, check and foreign key, and every table check, row policy, composite index or unique that names it, stay as declared.
+- A [historical model](data-steps.md#historical-models) sees a retired column as an ordinary nullable column, so a data step can still read it.
+- Auto-migrate creates the column on a fresh database and, under `migrate_updates`, relaxes its `NOT NULL`; it never drops it. Alembic autogenerate writes the same `alter_column(..., nullable=True)`.
+- Refused at class definition, each naming the fix: retiring a field whose annotation does not allow `None` (declare it `str | None`), a field declared `nullable=False` (a retired column stays nullable), a primary key, a field that also declares `renamed_from` (retire it or rename it, not both), a `BackRef` or a `ManyToMany`.
+
+The example runs all three releases end to end in [`docs/examples/migrations_retire.py`](https://github.com/syn54x/ferro-orm/blob/main/docs/examples/migrations_retire.py).
+
 ## Changes existing rows need a value for
 
 Adding a required column to a table with rows, making a column required, or removing an enum label that rows still hold cannot be done by DDL alone: someone has to say what the existing rows get. `new` splits such a migration into an **expand step** (the new column, nullable), a **backfill** per model (a Python data step you write), and a **contract step** (the `NOT NULL`, the label removal), and `up` refuses the migration until the backfill is written. When you know no row needs a value, `--no-backfill <table>.<column>` writes a **guard step** instead, which fails the migration if one does. Both are on [Data steps and backfills](data-steps.md).

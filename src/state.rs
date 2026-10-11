@@ -59,16 +59,23 @@ pub struct RegisteredModel {
     pub codec_plan: crate::codec_plan::ModelCodecPlan,
     /// Primary-key metadata, scanned once at registration (FF-G G2).
     pub meta: ModelMeta,
-    /// Column names in SchemaIR declaration order (#286): the instances
-    /// fetch walker enumerates each included hop's complete column list to
-    /// widen the SELECT deterministically (every populated hop is a complete
-    /// row — the complete-instance invariant, ADR-0008).
+    /// The mapped column names in SchemaIR declaration order (#286): the
+    /// root fetch names them, and the instances fetch walker enumerates each
+    /// included hop's complete column list to widen the SELECT
+    /// deterministically (every populated hop is a complete row — the
+    /// complete-instance invariant, ADR-0008). A retired column (ADR-0053) is
+    /// not part of the row the model owns, so it is not here.
     pub column_names: Vec<String>,
 }
 
 impl RegisteredModel {
     /// Compile the codec plan and wrap the registration for the registry.
+    ///
+    /// Retired columns (ADR-0053) are left out here, once: the registration
+    /// is the model's runtime view, and no statement the model issues names a
+    /// retired column. They stay in the schema modelset the DDL doors read.
     pub fn new(columns: Vec<SchemaColumn>, table_name: String) -> Result<Arc<Self>, String> {
+        let columns: Vec<SchemaColumn> = columns.into_iter().filter(|col| !col.retired).collect();
         let codec_plan = crate::codec_plan::ModelCodecPlan::compile_from_columns(&columns)?;
         let meta = ModelMeta::from_columns(&columns);
         let column_names = columns.iter().map(|col| col.name.clone()).collect();
@@ -1058,6 +1065,7 @@ mod install_registration_tests {
             postgres_native_enum: false,
             enum_renamed_labels: Default::default(),
             default_factory: None,
+            retired: false,
         }
     }
 
@@ -1086,6 +1094,7 @@ mod install_registration_tests {
                     postgres_native_enum: false,
                     enum_renamed_labels: Default::default(),
                     default_factory: None,
+                    retired: false,
                 },
             ],
             foreign_keys: vec![],
@@ -1095,6 +1104,26 @@ mod install_registration_tests {
             table_checks: vec![],
             row_security: None,
         }
+    }
+
+    #[test]
+    fn a_retired_column_is_outside_the_registration_rows_and_codec_plan() {
+        // ADR-0053: the registration owns the mapped columns only, so the root
+        // fetch and the include walker (ADR-0008) never name a retired column.
+        let mut columns = model("Author", "string").columns;
+        columns.push(SchemaColumn {
+            name: "bio".to_string(),
+            retired: true,
+            ..columns[1].clone()
+        });
+        let registered =
+            super::RegisteredModel::new(columns, "author".to_string()).expect("registration");
+        assert_eq!(
+            registered.column_names,
+            vec!["id".to_string(), "value".to_string()]
+        );
+        assert!(registered.codec_plan.codec("value").is_some());
+        assert!(registered.codec_plan.codec("bio").is_none());
     }
 
     fn envelope(models: Vec<SchemaModel>) -> IrEnvelope<SchemaIrPayload> {
@@ -1205,6 +1234,7 @@ mod model_meta_tests {
             postgres_native_enum: false,
             enum_renamed_labels: Default::default(),
             default_factory: None,
+            retired: false,
         }]);
         assert_eq!(meta.pk_col, None);
         assert!(meta.pk_autoincrement);
@@ -1230,6 +1260,7 @@ mod model_meta_tests {
             postgres_native_enum: false,
             enum_renamed_labels: Default::default(),
             default_factory: None,
+            retired: false,
         }]);
         assert_eq!(meta.pk_col.as_deref(), Some("id"));
         assert!(meta.pk_autoincrement);
@@ -1255,6 +1286,7 @@ mod model_meta_tests {
             postgres_native_enum: false,
             enum_renamed_labels: Default::default(),
             default_factory: None,
+            retired: false,
         }]);
         assert_eq!(meta.pk_col.as_deref(), Some("id"));
         assert!(!meta.pk_autoincrement);
@@ -1281,6 +1313,7 @@ mod model_meta_tests {
                 postgres_native_enum: false,
                 enum_renamed_labels: Default::default(),
                 default_factory: None,
+                retired: false,
             },
             SchemaColumn {
                 renamed_from: None,
@@ -1300,6 +1333,7 @@ mod model_meta_tests {
                 postgres_native_enum: false,
                 enum_renamed_labels: Default::default(),
                 default_factory: None,
+                retired: false,
             },
         ]);
         assert_eq!(meta.pk_col.as_deref(), Some("b_id"));

@@ -626,8 +626,23 @@ fn record_field_qualifier<'a>(
         })
 }
 
+/// The root fetch's SELECT list: the registration's mapped columns, each
+/// qualified by the root table, in declaration order, never `*`.
+///
+/// A hydrated instance holds exactly the row the model owns (the
+/// complete-instance invariant, ADR-0008): a column the live table has beyond
+/// the model's, such as a retired one (ADR-0053), never reaches the instance,
+/// and the statement works whether that column is still there or already
+/// dropped.
+fn select_root_columns(select: &mut SelectStatement, table_name: &str, columns: &[String]) {
+    for column in columns {
+        select.column((Alias::new(table_name), Alias::new(column.as_str())));
+    }
+}
+
 /// Apply a fetch SELECT list: the projected fields of a `record` plan (in
-/// selection order) or the root-table asterisk for full hydration (#279).
+/// selection order) or, for full hydration (#279), the root registration's
+/// mapped columns by name, `root_columns` ([`select_root_columns`]).
 ///
 /// Every record field renders under its output name (#293): a plain field as
 /// `<qualifier>.<column> AS "<name>"`, an aggregate as
@@ -649,11 +664,12 @@ fn record_field_qualifier<'a>(
 fn apply_select_list(
     select: &mut SelectStatement,
     table_name: &str,
+    root_columns: &[String],
     projected: Option<&[ProjectedField]>,
     join_plan: &JoinPlan,
 ) -> PyResult<()> {
     let Some(fields) = projected else {
-        select.column((Alias::new(table_name), sea_query::Asterisk));
+        select_root_columns(select, table_name, root_columns);
         return Ok(());
     };
     let derive_group_by = record_plan_has_aggregate(fields);
@@ -2176,7 +2192,7 @@ pub fn fetch_all<'py>(
             let (sql, pk_col, schema_for_decode) = {
                 let pk = schema.meta.pk_col.clone();
                 let mut stmt = Query::select();
-                stmt.column((Alias::new(&table_name), sea_query::Asterisk));
+                select_root_columns(&mut stmt, &table_name, &schema.column_names);
                 let s =
                     sea_query_to_string_for_backend!(stmt.from(Alias::new(&table_name)), backend);
                 (s, pk, schema.clone())
@@ -2310,7 +2326,7 @@ pub fn fetch_one<'py>(
                         pyo3::exceptions::PyRuntimeError::new_err("No primary key")
                     })?;
                 let mut stmt = Query::select();
-                stmt.column((Alias::new(&table_name), sea_query::Asterisk));
+                select_root_columns(&mut stmt, &table_name, &schema.column_names);
                 let no_enum_udt = HashMap::new();
                 let no_uuid = HashSet::new();
                 let no_ts: HashMap<String, String> = HashMap::new();
@@ -3088,7 +3104,13 @@ pub fn fetch_filtered<'py>(
                 let pk = schema.meta.pk_col.clone();
 
                 let mut select = Query::select();
-                apply_select_list(&mut select, &table_name, projected.as_deref(), &join_plan)?;
+                apply_select_list(
+                    &mut select,
+                    &table_name,
+                    &schema.column_names,
+                    projected.as_deref(),
+                    &join_plan,
+                )?;
                 apply_include_select_list(&mut select, &include_hops);
                 select.from(Alias::new(&table_name));
 
@@ -6676,6 +6698,7 @@ mod record_select_list_tests {
         apply_select_list(
             &mut select,
             "transaction",
+            &[],
             Some(&projected),
             &JoinPlan::default(),
         )
@@ -6701,17 +6724,29 @@ mod record_select_list_tests {
     }
 
     #[test]
-    fn root_instances_plan_renders_root_asterisk() {
+    fn root_instances_plan_names_the_registration_columns() {
+        // ADR-0053: the root fetch names the mapped columns, never `*`, so a
+        // retired column the table still holds never reaches the instance.
         let plan = plan_with_materialization(serde_json::json!({"kind": "root_instances"}));
         let projected = projected_record_fields(&plan).expect("root plan resolves");
         assert!(projected.is_none());
 
         let mut select = Query::select();
-        apply_select_list(&mut select, "transaction", None, &JoinPlan::default())
-            .expect("asterisk renders");
+        let columns = ["id".to_string(), "amount".to_string()];
+        apply_select_list(
+            &mut select,
+            "transaction",
+            &columns,
+            None,
+            &JoinPlan::default(),
+        )
+        .expect("root columns render");
         select.from(Alias::new("transaction"));
         let sql = select.to_string(PostgresQueryBuilder);
-        assert_eq!(sql, "SELECT \"transaction\".* FROM \"transaction\"");
+        assert_eq!(
+            sql,
+            "SELECT \"transaction\".\"id\", \"transaction\".\"amount\" FROM \"transaction\""
+        );
     }
 
     #[test]
@@ -6729,6 +6764,7 @@ mod record_select_list_tests {
         apply_select_list(
             &mut select,
             "transaction",
+            &[],
             Some(&projected),
             &JoinPlan::default(),
         )
@@ -6760,7 +6796,7 @@ mod record_select_list_tests {
         let join_plan = query_join_plan(&plan, "transaction", &[]).expect("join plan");
 
         let mut select = Query::select();
-        apply_select_list(&mut select, "transaction", Some(&projected), &join_plan)
+        apply_select_list(&mut select, "transaction", &[], Some(&projected), &join_plan)
             .expect("traversed field renders");
         apply_relation_joins(&mut select, &join_plan).expect("joins render");
         select.from(Alias::new("transaction"));
@@ -6800,7 +6836,7 @@ mod record_select_list_tests {
         let join_plan = query_join_plan(&plan, "transaction", &[]).expect("join plan");
 
         let mut select = Query::select();
-        apply_select_list(&mut select, "transaction", Some(&projected), &join_plan)
+        apply_select_list(&mut select, "transaction", &[], Some(&projected), &join_plan)
             .expect("traversed field renders");
         apply_relation_joins(&mut select, &join_plan).expect("joins render");
         select.from(Alias::new("transaction"));
@@ -6829,6 +6865,7 @@ mod record_select_list_tests {
         let err = apply_select_list(
             &mut select,
             "transaction",
+            &[],
             Some(&projected),
             &JoinPlan::default(),
         )
@@ -6865,6 +6902,7 @@ mod record_select_list_tests {
         apply_select_list(
             &mut select,
             "transaction",
+            &[],
             Some(&projected),
             &JoinPlan::default(),
         )
@@ -6904,7 +6942,7 @@ mod record_select_list_tests {
         let join_plan = query_join_plan(&plan, "transaction", &[]).expect("join plan");
 
         let mut select = Query::select();
-        apply_select_list(&mut select, "transaction", Some(&projected), &join_plan)
+        apply_select_list(&mut select, "transaction", &[], Some(&projected), &join_plan)
             .expect("traversed aggregate renders");
         apply_relation_joins(&mut select, &join_plan).expect("joins render");
         select.from(Alias::new("transaction"));
@@ -6943,7 +6981,7 @@ mod record_select_list_tests {
         let join_plan = query_join_plan(&plan, "transaction", &[]).expect("join plan");
 
         let mut select = Query::select();
-        apply_select_list(&mut select, "transaction", Some(&projected), &join_plan)
+        apply_select_list(&mut select, "transaction", &[], Some(&projected), &join_plan)
             .expect("grouped plan renders");
         apply_relation_joins(&mut select, &join_plan).expect("joins render");
         select.from(Alias::new("transaction"));
@@ -6975,6 +7013,7 @@ mod record_select_list_tests {
         apply_select_list(
             &mut select,
             "transaction",
+            &[],
             Some(&projected),
             &JoinPlan::default(),
         )
@@ -7172,7 +7211,9 @@ mod instances_select_list_tests {
         assert!(hops[0].parent_path.is_empty());
 
         let mut select = Query::select();
-        apply_select_list(&mut select, "transaction", None, &join_plan).expect("asterisk renders");
+        let root = ["id".to_string(), "account_id".to_string()];
+        apply_select_list(&mut select, "transaction", &root, None, &join_plan)
+            .expect("root columns render");
         apply_include_select_list(&mut select, &hops);
         select.from(Alias::new("transaction"));
         apply_relation_joins(&mut select, &join_plan).expect("joins render");
@@ -7180,7 +7221,7 @@ mod instances_select_list_tests {
         let sql = select.to_string(PostgresQueryBuilder);
         assert_eq!(
             sql,
-            "SELECT \"transaction\".*, \
+            "SELECT \"transaction\".\"id\", \"transaction\".\"account_id\", \
              \"j1_account\".\"id\" AS \"j1_account__id\", \
              \"j1_account\".\"label\" AS \"j1_account__label\" \
              FROM \"transaction\" \

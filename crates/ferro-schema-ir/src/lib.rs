@@ -191,6 +191,15 @@ pub struct SchemaColumn {
     /// byte-identical to before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_factory: Option<String>,
+    /// Retired column (`Field(retired=True)`, or the shadow column of a
+    /// `ForeignKey(retired=True)`; ADR-0053): the model no longer reads or
+    /// writes it, so it is nullable and no statement the model issues names
+    /// it, but it stays in the snapshot and every door creates and keeps it
+    /// as declared. Not a schema change by itself: the planner sees an
+    /// ordinary column. Absent when false, so every existing envelope is
+    /// byte-identical.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retired: bool,
 }
 
 /// An enum class's `__ferro_renamed_labels__` declaration.
@@ -755,6 +764,70 @@ mod tests {
         assert_eq!(book.foreign_keys[0].renamed_from.as_deref(), Some("press"));
         let encoded = serde_json::to_value(&envelope).expect("schema IR must serialize");
         assert_eq!(encoded, ir, "schema v2 round-trip must not drift");
+    }
+
+    #[test]
+    fn schema_retired_column_v2_roundtrip() {
+        let fixture =
+            include_str!("../../../tests/fixtures/ir_vectors/schema_retired_column_v2.json");
+        let parsed: serde_json::Value =
+            serde_json::from_str(fixture).expect("schema fixture must parse");
+        let ir = parsed.get("ir").cloned().expect("fixture must contain ir");
+        let envelope: IrEnvelope<SchemaIrPayload> =
+            serde_json::from_value(ir.clone()).expect("schema IR v2 must deserialize");
+        let author = envelope
+            .payload
+            .models
+            .iter()
+            .find(|model| model.table_name == "author")
+            .expect("author model");
+        let retired: Vec<&str> = author
+            .columns
+            .iter()
+            .filter(|col| col.retired)
+            .map(|col| col.name.as_str())
+            .collect();
+        assert_eq!(retired, vec!["bio", "nickname", "team_id"]);
+        assert!(
+            author
+                .columns
+                .iter()
+                .filter(|col| col.retired)
+                .all(|col| col.nullable)
+        );
+        let encoded = serde_json::to_value(&envelope).expect("schema IR must serialize");
+        assert_eq!(encoded, ir, "schema v2 round-trip must not drift");
+    }
+
+    #[test]
+    fn a_retired_column_carries_the_flag_and_an_unretired_one_has_no_key() {
+        let declared = serde_json::json!({
+            "name": "bio",
+            "logical_type": "string",
+            "nullable": true,
+            "primary_key": false,
+            "autoincrement": false,
+            "unique": false,
+            "index": true,
+            "default": null,
+            "format": null,
+            "retired": true,
+        });
+        let column: SchemaColumn =
+            serde_json::from_value(declared.clone()).expect("column must deserialize");
+        assert!(column.retired);
+        assert_eq!(serde_json::to_value(&column).expect("serialize"), declared);
+
+        let mut plain = declared;
+        plain.as_object_mut().expect("object").remove("retired");
+        let column: SchemaColumn =
+            serde_json::from_value(plain.clone()).expect("a column without the flag loads");
+        assert!(!column.retired);
+        assert_eq!(
+            serde_json::to_value(&column).expect("serialize"),
+            plain,
+            "not retired, no key: every existing envelope stays byte-identical"
+        );
     }
 
     #[test]

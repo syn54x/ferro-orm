@@ -1,0 +1,127 @@
+{
+  "vector_name": "schema_retired_column_v2",
+  "domain": "schema",
+  "expect_valid": true,
+  "fingerprint": "fdb8b59ae6e05582cb9194bd2bee219d9d2ac8393a7a29193a241cd6be4e8bb1",
+  "ir": {
+    "ir_kind": "schema",
+    "ir_version": 2,
+    "payload": {
+      "dialect_agnostic": true,
+      "models": [
+        {
+          "model_name": "tests.test_generate_retired.build_retired_column_models.<locals>.Author",
+          "table_name": "author",
+          "columns": [
+            {
+              "name": "bio",
+              "logical_type": "string",
+              "nullable": true,
+              "primary_key": false,
+              "autoincrement": false,
+              "unique": false,
+              "index": true,
+              "default": null,
+              "format": null,
+              "retired": true
+            },
+            {
+              "name": "id",
+              "logical_type": "integer",
+              "nullable": false,
+              "primary_key": true,
+              "autoincrement": true,
+              "unique": false,
+              "index": false,
+              "default": null,
+              "format": null
+            },
+            {
+              "name": "name",
+              "logical_type": "string",
+              "nullable": false,
+              "primary_key": false,
+              "autoincrement": false,
+              "unique": false,
+              "index": false,
+              "default": null,
+              "format": null
+            },
+            {
+              "name": "nickname",
+              "logical_type": "string",
+              "nullable": true,
+              "primary_key": false,
+              "autoincrement": false,
+              "unique": true,
+              "index": false,
+              "default": null,
+              "format": null,
+              "retired": true
+            },
+            {
+              "name": "team_id",
+              "logical_type": "integer",
+              "nullable": true,
+              "primary_key": false,
+              "autoincrement": false,
+              "unique": false,
+              "index": false,
+              "default": null,
+              "format": null,
+              "retired": true
+            }
+          ],
+          "foreign_keys": [
+            {
+              "column": "team_id",
+              "to_table": "team",
+              "to_column": "id",
+              "on_delete": "CASCADE",
+              "name": "fk_author_team_id_team"
+            }
+          ],
+          "indexes": [
+            {
+              "name": "idx_author_bio",
+              "columns": [
+                "bio"
+              ],
+              "unique": false
+            }
+          ],
+          "uniques": [
+            {
+              "name": "uq_author_nickname",
+              "columns": [
+                "nickname"
+              ]
+            }
+          ],
+          "checks": []
+        },
+        {
+          "model_name": "tests.test_generate_retired.build_retired_column_models.<locals>.Team",
+          "table_name": "team",
+          "columns": [
+            {
+              "name": "id",
+              "logical_type": "integer",
+              "nullable": false,
+              "primary_key": true,
+              "autoincrement": true,
+              "unique": false,
+              "index": false,
+              "default": null,
+              "format": null
+            }
+          ],
+          "foreign_keys": [],
+          "indexes": [],
+          "uniques": [],
+          "checks": []
+        }
+      ]
+    }
+  }
+}

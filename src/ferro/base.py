@@ -68,6 +68,13 @@ def _validate_renamed_from(renamed_from: str | None, owner: str) -> str | None:
     raise TypeError(f"{owner} renamed_from must be a non-empty str or None")
 
 
+def _validate_retired(retired: bool, owner: str) -> bool:
+    """Validate the ``retired`` flag (ADR-0053): a ``bool``."""
+    if isinstance(retired, bool):
+        return retired
+    raise TypeError(f"{owner} retired must be True or False")
+
+
 class FerroField:
     """Store database column metadata for a model field
 
@@ -92,6 +99,11 @@ class FerroField:
             allowed values for closed-domain types (``enum.Enum`` subclasses).
             Only valid in combination with ``db_type``; combining with default
             native-enum storage is rejected as redundant. Default ``False``.
+        retired: When ``True``, the column is retired (ADR-0053): it leaves the
+            model (no attribute, no keyword, no statement the model issues names
+            it) and stays in the schema snapshot, nullable, until the
+            declaration is deleted in a later release. The annotation must
+            allow ``None``. Default ``False``.
 
     Examples:
         >>> from typing import Annotated
@@ -112,6 +124,7 @@ class FerroField:
         db_type: DbType | None = None,
         db_check: bool = False,
         renamed_from: str | None = None,
+        retired: bool = False,
     ):
         """Initialize field metadata options
 
@@ -127,6 +140,7 @@ class FerroField:
                 renders ``RENAME COLUMN`` while the previous migration still
                 holds that name; afterwards the hint is inert and may stay or
                 be deleted (ADR-0032).
+            retired: Retire the column (ADR-0053); see the class docstring.
 
         Examples:
             >>> from typing import Annotated
@@ -144,6 +158,7 @@ class FerroField:
         self.db_type = db_type
         self.db_check = db_check
         self.renamed_from = _validate_renamed_from(renamed_from, "FerroField")
+        self.retired = _validate_retired(retired, "FerroField")
 
 
 class ForeignKey:
@@ -159,6 +174,10 @@ class ForeignKey:
         nullable: Alembic nullability for the shadow ``*_id`` column (see
             :class:`FerroField` ``nullable``). When ``'infer'``, uses whether the
             **relation** annotation allows ``None``.
+        retired: Retire the relation and its shadow ``*_id`` column
+            (ADR-0053): both leave the model, and the column stays in the schema
+            snapshot, nullable, with its foreign key, until the declaration is
+            deleted in a later release.
 
     Examples:
         >>> from typing import Annotated
@@ -174,18 +193,21 @@ class ForeignKey:
 
     def __init__(
         self,
-        related_name: str,
+        related_name: str | None = None,
         on_delete: str = "CASCADE",
         unique: bool = False,
         index: bool = False,
         nullable: FerroNullable = "infer",
         renamed_from: str | None = None,
+        retired: bool = False,
     ):
         """Initialize foreign-key relationship metadata
 
         Args:
 
             related_name: Name for reverse access from the related model.
+                Required unless ``retired=True``: a retired relation has no
+                reverse access.
             on_delete: Referential action for parent deletion.
                 Common values include "CASCADE", "RESTRICT", "SET NULL", "SET DEFAULT", and "NO ACTION".
             unique: Set to True to enforce one-to-one behavior. Implies an
@@ -200,6 +222,7 @@ class ForeignKey:
                 ``<field>_id`` column is renamed with it (``press`` →
                 ``house`` renames ``press_id`` to ``house_id``), together with
                 its ``fk_`` constraint (ADR-0032).
+            retired: Retire the relation (ADR-0053); see the class docstring.
 
         Examples:
             >>> from typing import Annotated
@@ -221,6 +244,13 @@ class ForeignKey:
         self.index = index
         self.nullable = _validate_nullable_option(nullable, "ForeignKey")
         self.renamed_from = _validate_renamed_from(renamed_from, "ForeignKey")
+        self.retired = _validate_retired(retired, "ForeignKey")
+        if related_name is None and not self.retired:
+            raise TypeError(
+                "ForeignKey requires related_name, the BackRef on the target "
+                'model that reads this relation back (ForeignKey(related_name="posts")); '
+                "only a retired relation (retired=True) has none"
+            )
         if str(self.on_delete).upper() == "SET NULL" and self.nullable is False:
             raise ValueError(
                 "ForeignKey(on_delete='SET NULL') requires nullable=True or 'infer'"

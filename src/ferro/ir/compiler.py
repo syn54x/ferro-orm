@@ -28,6 +28,7 @@ from ..columns import (
     build_relation_specs,
     build_reverse_specs,
     primary_key_field_name,
+    retired_column_specs,
 )
 from ..composite_indexes import drop_overlap_with_uniques, normalized_composite_indexes
 from ..composite_uniques import normalized_composite_uniques
@@ -292,6 +293,10 @@ def compile_schema_ir_payload(
         factory = (default_factories or {}).get(entry["name"])
         if factory is not None and entry["default"] is None:
             entry["default_factory"] = factory
+        # Absent, not false, for a mapped column (ADR-0053): the flag rides
+        # only on a retired one, so every other envelope stays byte-identical.
+        if deduped[entry["name"]].retired:
+            entry["retired"] = True
 
     foreign_keys: list[dict[str, Any]] = []
     indexes: list[dict[str, Any]] = []
@@ -498,11 +503,17 @@ def compile_model_schema_ir(
     """
     if specs is None:
         specs = build_column_specs(model_cls)
+    # Retired columns (ADR-0053) stay in the schema: every table-level
+    # declaration (composite index or unique, table check, row policy) that
+    # names one compiles as declared, and the envelope carries it, flagged.
+    # The class publishes the mapped columns only.
+    retired = retired_column_specs(model_cls)
+    schema_specs = {**specs, **retired}
     # Derive the PK fact (and run the at-most-one guard) before compile +
     # persist: a multi-PK model raises here, at class definition time, and
     # never persists an envelope or publishes specs.
     pk_field = primary_key_field_name(model_name, specs)
-    column_names = frozenset(specs)
+    column_names = frozenset(schema_specs)
     uniques = normalized_composite_uniques(model_cls, column_names)
     indexes = drop_overlap_with_uniques(
         normalized_composite_indexes(model_cls, column_names), uniques, model_name
@@ -510,14 +521,14 @@ def compile_model_schema_ir(
     # Table checks compile against THIS pass's specs (never the class's
     # published ones), so a predicate can reference a shadow FK column at class
     # definition and the resolved second pass re-lowers against fresh specs.
-    table_checks = compile_table_checks(model_cls, model_name, specs)
+    table_checks = compile_table_checks(model_cls, model_name, schema_specs)
     # Row security lowers against the same fresh column IR for the same reason:
     # a shorthand policy's column type is validated on every compile pass, so a
     # declaration can never outlive the column it scopes on.
     row_security = _declared_row_security(model_cls)
     envelope = _compile_and_persist_model_envelope(
         model_name,
-        tuple(specs.values()),
+        tuple(schema_specs.values()),
         table_name=getattr(model_cls, "__ferro_table__", None),
         composite_uniques=uniques,
         composite_indexes=indexes,
@@ -532,6 +543,7 @@ def compile_model_schema_ir(
     # "``__ferro_columns__`` can never go stale relative to the envelope"
     # invariant, made atomic.
     model_cls.__ferro_columns__ = specs
+    model_cls.__ferro_retired_columns__ = retired
     # Same choke point caches the PK fact: every ``__ferro_columns__`` refresh
     # re-derives ``__ferro_pk__``, so it can never go stale relative to specs.
     model_cls.__ferro_pk__ = pk_field

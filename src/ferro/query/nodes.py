@@ -7,6 +7,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Generic, NoReturn, TypeAlias, TypeVar, get_origin
 
 from .._bind_payload import canonicalize_wire_scalar
+from ..columns import retired_clause
 
 TField = TypeVar("TField")
 TModel = TypeVar("TModel")
@@ -851,7 +852,8 @@ def validate_query_column(model_cls: type, name: str) -> str:
     # for a specific name — include()'s BackRef/M2M guardrail (#287) — can
     # re-raise pointedly without parsing this message.
     raise AttributeError(
-        f"{model_cls.__name__} has no queryable column {name!r}.{hint} "
+        f"{model_cls.__name__} has no queryable column {name!r}."
+        f"{retired_clause(model_cls, name)}{hint} "
         f"Valid columns: {', '.join(sorted(valid))}.{relation_note}",
         name=name,
         obj=model_cls,

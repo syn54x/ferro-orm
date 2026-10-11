@@ -5121,6 +5121,7 @@ mod tests {
             postgres_native_enum: false,
             enum_renamed_labels: Default::default(),
             default_factory: None,
+            retired: false,
         }
     }
 
@@ -5149,6 +5150,7 @@ mod tests {
             postgres_native_enum: false,
             enum_renamed_labels: Default::default(),
             default_factory: None,
+            retired: false,
         }
     }
 
@@ -5438,6 +5440,7 @@ mod tests {
             postgres_native_enum: false,
             enum_renamed_labels: Default::default(),
             default_factory: None,
+            retired: false,
         };
         assert_eq!(
             logical_canonical_from_schema_column(&col, Dialect::Postgres),
@@ -5469,6 +5472,7 @@ mod tests {
             postgres_native_enum: false,
             enum_renamed_labels: Default::default(),
             default_factory: None,
+            retired: false,
         };
         assert!(logical_canonical_from_schema_column(&col, Dialect::Postgres).is_err());
     }

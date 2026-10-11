@@ -93,6 +93,16 @@ def _build_models() -> dict[str, type]:
         pinned_at: str | None = None
         updated_at: str = ""
 
+    # Keyword ``update()`` names declared columns only (ADR-0053), so the SET
+    # emission tests write to a model that declares theirs.
+    class SetKinds(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        first_blob: bytes = b""
+        count: int = 0
+        second_blob: bytes = b""
+        label: str = ""
+        value: Any = None
+
     resolve_relationships()
     return {
         "Owner": Owner,
@@ -101,6 +111,7 @@ def _build_models() -> dict[str, type]:
         "User": User,
         "Tag": Tag,
         "Card": Card,
+        "SetKinds": SetKinds,
     }
 
 
@@ -491,7 +502,7 @@ def test_literal_set_preserves_interleaved_bytes_assignment_order(
 ) -> None:
     payload = json.loads(
         compile_query(
-            models["User"].select(),
+            models["SetKinds"].select(),
             "update",
             assignments={
                 "first_blob": b"\x01",
@@ -525,7 +536,7 @@ def test_literal_set_preserves_interleaved_bytes_assignment_order(
 def test_literal_set_emits_every_json_value_kind(
     models: dict[str, type], value: object, kind: str, wire_value: object
 ) -> None:
-    query = models["User"].select()
+    query = models["SetKinds"].select()
     payload = json.loads(
         compile_query(query, "update", assignments={"value": value}).wire_json
     )["payload"]
