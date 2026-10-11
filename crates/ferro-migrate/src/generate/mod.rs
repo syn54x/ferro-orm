@@ -738,21 +738,21 @@ pub fn generate_with(
             .map(|placed| {
                 let on = StepDialect::from(placed.dialect);
                 let sides = Sides {
-                    before: parent_ir,
+                    before,
                     target: expanded,
                 };
                 let class = if phase == Phase::Labels {
-                    step_class::step_class(&planned_ops(placed, &placed.labels), sides, false)
+                    step_class::step_class(&planned_ops(placed, &placed.labels)?, sides, false)
                 } else {
                     schema_step_class(
-                        &planned_ops(placed, &placed.schema),
+                        &planned_ops(placed, &placed.schema)?,
                         sides,
                         stages_on.get(&on).copied().unwrap_or(false),
                     )
                 };
-                (on, class)
+                Ok((on, class))
             })
-            .collect();
+            .collect::<Result<_, GenerateError>>()?;
         steps.push(GeneratedStep {
             ordinal: 0,
             name: match phase {
@@ -836,16 +836,16 @@ pub fn generate_with(
                 let ops: Vec<MigrationOp> =
                     placed.held.iter().chain(&placed.relabel).cloned().collect();
                 let class = step_class::step_class(
-                    &planned_ops(placed, &ops),
+                    &planned_ops(placed, &ops)?,
                     Sides {
                         before: kept,
                         target,
                     },
                     validates || !layout.demands.is_empty(),
                 );
-                (on, class)
+                Ok((on, class))
             })
-            .collect();
+            .collect::<Result<_, GenerateError>>()?;
         steps.push(GeneratedStep { class, ..contract });
     }
     steps.extend(sql_last);
@@ -880,9 +880,16 @@ pub fn generate_with(
 }
 
 /// `ops`, each with the verdict `placed`'s plan decided for it: the
-/// inputs of a step's class. Every op the layout places is one of the
-/// plan's own.
-fn planned_ops(placed: &stages::Placed, ops: &[MigrationOp]) -> Vec<PlannedOp> {
+/// inputs of a step's class.
+///
+/// # Errors
+/// [`GenerateError::Render`] for an op the plan did not decide: the layout
+/// places only the plan's own ops, so meeting one is a generator bug, said
+/// loudly rather than classified without a verdict.
+fn planned_ops(
+    placed: &stages::Placed,
+    ops: &[MigrationOp],
+) -> Result<Vec<PlannedOp>, GenerateError> {
     ops.iter()
         .map(|op| {
             placed
@@ -891,14 +898,13 @@ fn planned_ops(placed: &stages::Placed, ops: &[MigrationOp]) -> Vec<PlannedOp> {
                 .iter()
                 .find(|planned| &planned.op == op)
                 .cloned()
-                // An op the plan did not decide has no verdict to read: it
-                // is read as one that can fail the previous release's writes.
-                .unwrap_or_else(|| PlannedOp {
-                    op: op.clone(),
-                    verdict: crate::OpVerdict {
-                        drops_data: true,
-                        ..crate::OpVerdict::default()
-                    },
+                .ok_or_else(|| {
+                    GenerateError::Render(format!(
+                        "{} on {} was placed in a step but not planned, so it has no verdict \
+                         to classify the step by",
+                        op_kind(op),
+                        op_subject(op)
+                    ))
                 })
         })
         .collect()
