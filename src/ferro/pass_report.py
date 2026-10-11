@@ -79,7 +79,7 @@ class Report:
     pass's own. ``str(report)`` is the sentence printed.
 
     ``kind`` is the kind's name: the planner's (``"LeftoverChecks"``,
-    ``"HintRefused"``, ...), the renderer's (``"RefusedConversion"``,
+    ``"HintRefused"``, ``"ForeignDefault"``, ...), the renderer's (``"RefusedConversion"``,
     ``"SqliteInPlace"``, ``"PrimaryKeyKept"``, ``"EnumTypeMove"``,
     ``"RowSecuritySkipped"``) or
     the pass's (``"PendingTableRename"``, ``"StrandedLabelRename"``,

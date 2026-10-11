@@ -47,6 +47,19 @@ pub struct LiveColumn {
     /// column declares. `None` everywhere else.
     #[serde(default)]
     pub enum_type_name: Option<String>,
+    /// The column's server default as the catalog prints it: Postgres
+    /// `information_schema.columns.column_default` (`''::character varying`,
+    /// `nextval('author_id_seq'::regclass)`), SQLite `PRAGMA table_info`'s
+    /// `dflt_value` (`'free'`, `0`, `CURRENT_TIMESTAMP`). `None` for a column
+    /// with no default. Whether ferro left it is the planner's decision
+    /// (`ferro_migrate`'s foreign default, ADR-0027 as amended).
+    #[serde(default)]
+    pub column_default: Option<String>,
+    /// Postgres: the column owns a sequence (`pg_get_serial_sequence` is not
+    /// null), the mark of a `serial` key whose `nextval` default is ferro's
+    /// own whatever the sequence is called. Always `false` on SQLite.
+    #[serde(default)]
+    pub owns_sequence: bool,
 }
 
 /// One live standalone index that Ferro owns (its name follows the `idx_`/`uq_`
@@ -526,6 +539,8 @@ async fn sqlite_table_columns(engine: &EngineHandle, table: &str) -> PyResult<Ve
                 char_max_len: None,
                 is_enum_udt: false,
                 enum_type_name: None,
+                column_default: row_string(row, "dflt_value"),
+                owns_sequence: false,
             })
         })
         .collect())
@@ -538,6 +553,10 @@ async fn postgres_table_columns(engine: &EngineHandle, table: &str) -> PyResult<
             c.data_type::text AS data_type,
             (c.is_nullable = 'YES') AS is_nullable,
             c.character_maximum_length::bigint AS char_max_len,
+            c.column_default::text AS column_default,
+            (pg_get_serial_sequence(
+                format('%I.%I', c.table_schema, c.table_name), c.column_name
+            ) IS NOT NULL) AS owns_sequence,
             EXISTS (
                 SELECT 1
                 FROM pg_attribute a
@@ -594,6 +613,8 @@ async fn postgres_table_columns(engine: &EngineHandle, table: &str) -> PyResult<
                 char_max_len: row_opt_i64(row, "char_max_len"),
                 is_enum_udt: row_bool(row, "is_enum_udt"),
                 enum_type_name: row_string(row, "enum_type_name"),
+                column_default: row_string(row, "column_default"),
+                owns_sequence: row_bool(row, "owns_sequence"),
             })
         })
         .collect())
@@ -696,7 +717,9 @@ async fn sqlite_table_indexes(engine: &EngineHandle, table: &str) -> PyResult<Ve
 
     let mut out = Vec::new();
     for index_row in &index_rows {
-        let Some(name) = row_string(index_row, "name") else { continue };
+        let Some(name) = row_string(index_row, "name") else {
+            continue;
+        };
         if !is_ferro_index_name(&name) {
             continue;
         }
@@ -707,7 +730,10 @@ async fn sqlite_table_indexes(engine: &EngineHandle, table: &str) -> PyResult<Ve
             .await
             .map_err(|e| introspection_error("PRAGMA index_info", table, e))?;
         // PRAGMA index_info returns rows in `seqno` order already.
-        let columns: Vec<String> = col_rows.iter().filter_map(|r| row_string(r, "name")).collect();
+        let columns: Vec<String> = col_rows
+            .iter()
+            .filter_map(|r| row_string(r, "name"))
+            .collect();
         // SQLite has no invalid indexes: `CREATE INDEX` either completes or
         // leaves nothing behind.
         out.push(LiveIndex {
@@ -746,13 +772,17 @@ async fn postgres_table_indexes(engine: &EngineHandle, table: &str) -> PyResult<
     // Group ordered rows into indexes (rows are already ordered by name, pos).
     let mut out: Vec<LiveIndex> = Vec::new();
     for row in &rows {
-        let Some(name) = row_string(row, "index_name") else { continue };
+        let Some(name) = row_string(row, "index_name") else {
+            continue;
+        };
         if !is_ferro_index_name(&name) {
             continue;
         }
         let unique = row_bool(row, "is_unique");
         let valid = row_bool(row, "is_valid");
-        let Some(column) = row_string(row, "column_name") else { continue };
+        let Some(column) = row_string(row, "column_name") else {
+            continue;
+        };
         match out.last_mut() {
             Some(last) if last.name == name => last.columns.push(column),
             _ => out.push(LiveIndex {
@@ -767,10 +797,7 @@ async fn postgres_table_indexes(engine: &EngineHandle, table: &str) -> PyResult<
 }
 
 /// Read every named CHECK constraint on `table`, ferro-owned or user-owned.
-pub async fn live_table_checks(
-    engine: &EngineHandle,
-    table: &str,
-) -> PyResult<Vec<LiveCheck>> {
+pub async fn live_table_checks(engine: &EngineHandle, table: &str) -> PyResult<Vec<LiveCheck>> {
     match engine.backend() {
         Dialect::Sqlite => sqlite_table_checks(engine, table).await,
         Dialect::Postgres => postgres_table_checks(engine, table).await,
@@ -1116,7 +1143,6 @@ pub fn _live_table_checks_for_test(
     })
 }
 
-
 /// Read a live table's whole row-security state: the two `pg_class` flags and
 /// every policy on it, ferro-owned or not (#413).
 ///
@@ -1139,7 +1165,10 @@ pub async fn live_table_row_security(
           AND rel.relname = $1
         "#;
     let flag_rows = engine
-        .fetch_all_sql_unprepared_with_binds(flags_sql, &[EngineBindValue::String(table.to_string())])
+        .fetch_all_sql_unprepared_with_binds(
+            flags_sql,
+            &[EngineBindValue::String(table.to_string())],
+        )
         .await
         .map_err(|e| introspection_error("pg_class", table, e))?;
     let Some(flags) = flag_rows.first() else {
@@ -1452,12 +1481,10 @@ mod tests {
             engine.execute_sql(sql).await.unwrap();
         }
 
-        let held = live_non_table_holders(
-            &engine,
-            &["alpha", "beta", "gamma", "gamma_data", "delta"],
-        )
-        .await
-        .unwrap();
+        let held =
+            live_non_table_holders(&engine, &["alpha", "beta", "gamma", "gamma_data", "delta"])
+                .await
+                .unwrap();
         assert_eq!(
             held.into_iter().collect::<Vec<_>>(),
             [
@@ -1466,7 +1493,12 @@ mod tests {
                 ("gamma_data".to_string(), NonTableHolder::ShadowTable),
             ]
         );
-        assert!(live_non_table_holders(&engine, &[]).await.unwrap().is_empty());
+        assert!(
+            live_non_table_holders(&engine, &[])
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1579,6 +1611,41 @@ mod tests {
         assert_eq!(paid_date.declared_type.to_lowercase(), "date_text");
         let total = by_name("total");
         assert!(!total.is_nullable);
+        assert_eq!(total.column_default.as_deref(), Some("0"));
+        assert_eq!(number.column_default, None);
+        assert!(!id.owns_sequence, "SQLite owns no sequence");
+    }
+
+    #[tokio::test]
+    async fn live_table_columns_reads_sqlite_defaults_as_written() {
+        let engine = memory_engine().await;
+        engine
+            .execute_sql(
+                "CREATE TABLE note (\
+                 id INTEGER PRIMARY KEY, \
+                 tier varchar NOT NULL DEFAULT 'free', \
+                 at datetime_text DEFAULT (datetime('now')), \
+                 bio varchar DEFAULT '')",
+            )
+            .await
+            .unwrap();
+        let columns = live_table_columns(&engine, "note")
+            .await
+            .unwrap()
+            .expect("table exists");
+        let defaults: Vec<(&str, Option<&str>)> = columns
+            .iter()
+            .map(|c| (c.name.as_str(), c.column_default.as_deref()))
+            .collect();
+        assert_eq!(
+            defaults,
+            [
+                ("id", None),
+                ("tier", Some("'free'")),
+                ("at", Some("datetime('now')")),
+                ("bio", Some("''")),
+            ]
+        );
     }
 
     #[tokio::test]

@@ -899,6 +899,22 @@ keeps is the model's own literal. A migration rebuilds the table without it,
 and Alembic autogenerate, which cannot write a rebuild, refuses the op."""
 
 
+FOREIGN_DEFAULTS_LEFT: dict[tuple[str, str], dict[tuple[str, str], str]] = {
+    ("A2-foreign-default-on-the-before-side", "sqlite"): {("author", "bio"): "''"},
+}
+"""A foreign default a case's hand edit leaves (``Case.hand_edit``), by
+case and dialect, that the reconciliation pass cannot drop: on SQLite only
+a rebuild drops a default, and the pass never rebuilds a table (ADR-0014),
+so it warns naming the fix and leaves it. On Postgres the pass drops every
+one under ``migrate_destructive`` (ADR-0027 as amended)."""
+
+
+def edit_by_hand(case: Case, db: Db) -> None:
+    """Run ``case``'s hand edit on ``db``, a database at ``case.before``."""
+    for statement in case.edit_by_hand(db.backend):
+        db.execute(statement)
+
+
 def expect_finding(request, case_id: str, dialect: str, pin: str) -> None:
     finding = FINDINGS.get(case_id)
     if finding and pin in finding.pins and dialect in finding.dialects:
@@ -912,6 +928,21 @@ def expect_finding(request, case_id: str, dialect: str, pin: str) -> None:
 def test_pin_a_the_generated_steps_are_the_pass_plan(request, doors, case_id, dialect):
     expect_finding(request, case_id, dialect, "a")
     assert_door_is_the_pass(doors(case_id), dialect)
+
+
+@pytest.mark.parametrize("dialect", DIALECTS)
+def test_the_generator_never_writes_a_foreign_defaults_drop(doors, dialect):
+    """A migration is planned between two snapshots, which hold no server
+    default: the foreign default a database carries is never a generated
+    op (ADR-0027 as amended). (A Postgres backfill's own ``DROP DEFAULT``
+    after its ``ADD COLUMN … DEFAULT`` is the add's, never this op.)"""
+    for case_id in CASE_IDS:
+        door = doors(case_id)
+        assert not any(
+            op["kind"] == "DropDefault"
+            for plan in door.pass_plans(dialect)
+            for op in plan
+        ), case_id
 
 
 def test_pin_a_names_the_case_the_dialect_and_both_statements(doors, tmp_path: Path):
@@ -1543,6 +1574,33 @@ def test_pin_e_a_migrated_database_is_the_auto_migrated_one(
         autogenerate(db_url, postgres_base_url, db_schema_name)
 
 
+def _third_db(
+    tmp_path: Path, backend: str, base: str | None
+) -> tuple[str, str | None]:
+    """A third, empty database of ``backend``: ``(url, schema)``."""
+    if backend == "sqlite":
+        return f"sqlite:{tmp_path / 'third.db'}?mode=rwc", None
+    import psycopg
+
+    from tests.db_backends import build_postgres_test_url
+
+    assert base is not None
+    schema = f"p628_{uuid.uuid4().hex[:16]}"
+    with psycopg.connect(base, autocommit=True) as conn:
+        conn.execute(f'CREATE SCHEMA "{schema}"')
+    return build_postgres_test_url(base, schema), schema
+
+
+def _drop_third_db(backend: str, base: str | None, schema: str | None) -> None:
+    reset_engine()
+    if backend != "postgres" or schema is None:
+        return
+    import psycopg
+
+    with psycopg.connect(base, autocommit=True) as conn:
+        conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+
+
 @pytest.mark.parametrize("case_id", CASE_IDS)
 def test_pin_e_a_migrated_database_holds_the_auto_migrated_server_defaults(
     request,
@@ -1555,9 +1613,9 @@ def test_pin_e_a_migrated_database_holds_the_auto_migrated_server_defaults(
     postgres_base_url,
     db_schema_name,
 ):
-    """Pin (e) on the one artifact the live read does not carry: every
-    column's server default (AGENTS.md I-1 item 9; ferro persists none,
-    ADR-0027), compared on the catalog itself between the database the
+    """Pin (e) on every column's server default (AGENTS.md I-1 item 9;
+    ferro persists none, ADR-0027), compared on the catalog itself, not
+    through the live read the planner judges them by, between the database the
     chain ``0001`` → ``0002`` migrated and the one ``connect(auto_migrate=
     True)`` built from the same models. Its own test, so a finding against
     it (``"e-defaults"``) leaves the rest of pin (e) pinned.
@@ -1565,7 +1623,11 @@ def test_pin_e_a_migrated_database_holds_the_auto_migrated_server_defaults(
     Where the pass, run over the ``before`` database, adds a column it can
     only add with a ``DEFAULT`` (``KEPT_DEFAULTS``, ADR-0034's SQLite
     exception), a third database reconciled that way holds the migrated
-    one's defaults plus exactly that literal, NOT NULL as the model is."""
+    one's defaults plus exactly that literal, NOT NULL as the model is.
+    Where the case's ``before`` database carries a foreign default
+    (``Case.hand_edit``), a database the pass reconciles under
+    ``migrate_destructive`` holds the migrated one's defaults too, plus on
+    SQLite the one it warns it cannot drop (``FOREIGN_DEFAULTS_LEFT``)."""
     expect_finding(request, case_id, db_backend, "e-defaults")
     case = CASEBOOK[case_id]
     migrate_through(project, case, db_url, db_backend)
@@ -1575,6 +1637,33 @@ def test_pin_e_a_migrated_database_holds_the_auto_migrated_server_defaults(
     migrated = Db(db_url, db_backend, postgres_base_url, db_schema_name)
     auto = Db(second, db_backend, postgres_base_url, second_schema)
     assert column_defaults(migrated) == column_defaults(auto), case_id
+
+    if case.hand_edit:
+        # The before database carries a foreign default; the pass, under
+        # migrate_destructive, leaves the migrated database's defaults (on
+        # SQLite, which cannot drop it in place, plus the one it warns of).
+        third, third_schema = _third_db(tmp_path, db_backend, postgres_base_url)
+        try:
+            project.register(case.before)
+            auto_migrate(third, name="foreign_default_before")
+            hand = Db(third, db_backend, postgres_base_url, third_schema)
+            edit_by_hand(case, hand)
+            project.register(case.after)
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                asyncio.run(
+                    connect(
+                        third,
+                        name="foreign_default_after",
+                        migrate_destructive=True,
+                    )
+                )
+            left = FOREIGN_DEFAULTS_LEFT.get((case_id, db_backend), {})
+            assert column_defaults(hand) == {**column_defaults(migrated), **left}
+            if left:
+                assert any("ferro migrate new" in str(w.message) for w in caught)
+        finally:
+            _drop_third_db(db_backend, postgres_base_url, third_schema)
 
     kept = KEPT_DEFAULTS.get((case_id, db_backend))
     if kept is None:
@@ -1701,6 +1790,8 @@ def test_pin_f_the_bridge_revision_runs_the_pass_ddl(
         Db(db_url, db_backend, postgres_base_url, db_schema_name),
         Db(second, db_backend, postgres_base_url, second_schema),
     ]
+    for db in databases:
+        edit_by_hand(case, db)
     if seed:
         for db in databases:
             db.execute(seed)
@@ -1799,7 +1890,7 @@ async def _run_the_pass(url: str) -> PassReport:
 
 @pytest.mark.parametrize("case_id", CASE_IDS)
 def test_pin_g_the_pass_executes_the_plan_it_renders(
-    request, project, case_id, db_url
+    request, project, case_id, db_url, db_backend, postgres_base_url, db_schema_name
 ):
     """A database at ``case.before``, the models at ``case.after``. The one
     planner renders the pair from the live read (``_plan_from_ir(render=True)``,
@@ -1822,6 +1913,7 @@ def test_pin_g_the_pass_executes_the_plan_it_renders(
     case = CASEBOOK[case_id]
     project.register(case.before)
     auto_migrate(db_url)
+    edit_by_hand(case, Db(db_url, db_backend, postgres_base_url, db_schema_name))
     after = project.register(case.after)
     # The pass reads only the tables the models declare (and a live rename's
     # old table): never a table only the old modelset had.

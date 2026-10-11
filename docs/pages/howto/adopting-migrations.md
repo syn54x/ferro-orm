@@ -22,7 +22,7 @@ Your database already exists: `connect(url, migrate_updates=True)` built it, or 
     ```text
     $ ferro migrate baseline
     recorded 0001_initial as baseline (1 step)
-    baseline checked what `ferro migrate drift` checks: column defaults and objects ferro does not own were not compared
+    baseline checked what `ferro migrate drift` checks: objects ferro does not own (functions, triggers) were not compared
     ```
 
     Without a target it records every migration in the directory; `ferro migrate baseline 0001` stops at `0001`. Data steps are listed and recorded, not run.
@@ -51,8 +51,24 @@ Each line is a piece of work, and there is no flag that records past them (ADR-0
 - **The database is ahead of the target** (here, it already has the `slug` a later migration adds): baseline a later migration instead, `ferro migrate baseline` with no target or `ferro migrate baseline 0002`.
 - **The database is behind the models**: finish step 1 (one more `migrate_updates` start or `alembic upgrade head`).
 - **Someone changed the database by hand**: put it back, or declare the change on the models and generate a migration, then baseline that one.
+- **A column has a server default nobody declared** (a *foreign default*; Ferro persists none of its own):
 
-Tables the snapshot does not declare (`alembic_version`, another application's tables) are never a difference. Column defaults and objects Ferro does not own are not compared, and the report says so.
+    ```text
+    $ ferro migrate baseline
+    drift against 0001_create_author:
+      author.slug has default '' in the database, none declared
+    nothing was recorded
+    ```
+
+    Drop it, then baseline again. Either give the old door one last start that removes what the models never declared, `connect(url, migrate_destructive=True)`, or drop it by hand:
+
+    ```sql
+    ALTER TABLE "author" ALTER COLUMN "slug" DROP DEFAULT;
+    ```
+
+    On SQLite neither works: SQLite drops a default only by rebuilding the table, so rebuild it without the `DEFAULT` by hand (create a copy, copy the rows across, drop the table, rename the copy).
+
+Tables the snapshot does not declare (`alembic_version`, another application's tables) are never a difference. Neither are the two server defaults Ferro leaves itself: a `serial` key's sequence on Postgres (recognised by the sequence the column owns, so a renamed table's still counts), and on SQLite a literal default on a `NOT NULL` column, which `migrate_updates` keeps when it adds a required column. Objects Ferro does not own (functions, triggers) are not compared, and the report says so.
 
 ## Databases at different points
 

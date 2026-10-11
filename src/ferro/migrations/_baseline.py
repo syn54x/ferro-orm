@@ -49,8 +49,8 @@ if TYPE_CHECKING:
 __all__ = ["BaselineReport", "baseline", "remove_baseline"]
 
 NOT_COMPARED = (
-    "baseline checked what `ferro migrate drift` checks: column defaults and "
-    "objects ferro does not own were not compared"
+    "baseline checked what `ferro migrate drift` checks: objects ferro does not "
+    "own (functions, triggers) were not compared"
 )
 """What a successful baseline says it did not check (ADR-0031)."""
 

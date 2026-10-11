@@ -45,6 +45,7 @@ What it covers depends on what each backend can do in place:
 | Change a foreign key's `on_delete` (or target) | ⚠️ `UserWarning`, no DDL; migrations generate the table rebuild | ✅ rebuild: `DROP CONSTRAINT` + `ADD CONSTRAINT` |
 | Change column type | ⚠️ `UserWarning`, no DDL (SQLite type affinity makes drift mostly cosmetic); migrations generate the table rebuild | ✅ `ALTER COLUMN ... TYPE ... USING` cast |
 | Change nullability | ⚠️ `UserWarning`, no DDL; migrations generate the table rebuild | ✅ `SET NOT NULL` / `DROP NOT NULL`. `SET NOT NULL` backfills nothing, whatever the default: it fails the connect if any row holds `NULL`. A [migration](data-steps.md) writes the backfill first |
+| A server default no model declares (a *foreign default*, [below](#destructive-drops-with-migrate_destructive)) | ⚠️ `UserWarning`, default stays; only a hand rebuild drops it (an expression, or any default on a nullable column; a literal on a `NOT NULL` column is ferro's own) | ⚠️ `UserWarning` under `migrate_updates`; ✅ with `migrate_destructive=True`: `DROP DEFAULT` |
 | Drop orphaned Ferro-named index (`idx_*` / `uq_*`) | ✅ with `migrate_destructive=True` | ✅ with `migrate_destructive=True` |
 | Redefine an index that keeps its name (a long name cut to 63 characters, two column groups that join to one name, or a live `idx_*` / `uq_*` index written another way) | ✅ `DROP INDEX` + `CREATE INDEX` under `migrate_updates`. A unique one over duplicate values fails the connect, counting them | ✅ same, in the table's transaction |
 | Add a missing enum label (a `StrEnum` grew a member) | ✅ nothing to do — enums store as text | ✅ `ALTER TYPE ... ADD VALUE` *0.18.0+* |
@@ -78,7 +79,7 @@ SQLite cannot add, change or drop a constraint, a type or a nullability on a tab
 Check constraint 'ck_author_kind' on column 'author.kind' is declared but missing from the live table, and SQLite cannot add a constraint to an existing column (it requires a full table rebuild). The invariant is not database-enforced; generate a reviewed migration with `ferro migrate new` to apply it.
 ```
 
-[Migrations](migrations.md#sqlite-table-rebuilds) generate the rebuild as a reviewed step. Row-level security is Postgres-only on every door: SQLite gets one warning per table and no DDL.
+[Migrations](migrations.md#sqlite-table-rebuilds) generate the rebuild as a reviewed step. A *foreign default* (a server default on a column that no model declares, below) is the one exception: no migration plans it, since the migrations' snapshots never hold it, so the warning names the hand rebuild that drops it, or a hand-written SQL step that does (`ferro migrate new <name> --sql-step drop_default`). Row-level security is Postgres-only on every door: SQLite gets one warning per table and no DDL.
 
 ## Evolving enums: label addition
 
@@ -163,6 +164,20 @@ Dropping is dependency-aware and fails loudly rather than skipping silently:
 - Explicit indexes covering a dropped column are dropped first (they would be orphaned anyway).
 - Columns that are **primary keys**, enforced by table constraints, or referenced by other tables' **foreign keys** abort with an error naming the constraint and pointing at `ferro migrate new`, which writes the drop as a reviewed [migration](migrations.md).
 
+It also drops a **foreign default**: a server default on a column that ferro did not leave there. Ferro persists no server default of its own, so a default someone set by hand (`ALTER TABLE "author" ALTER COLUMN "slug" SET DEFAULT ''`) is removed, and the `PassReport` lists the statement:
+
+```sql
+ALTER TABLE "author" ALTER COLUMN "slug" DROP DEFAULT
+```
+
+Under `migrate_updates` alone the default stays, and the pass warns on every start:
+
+```text
+author.slug has default '' in the database, none declared; it is left in place: connect(..., migrate_destructive=True) drops it, or run ALTER TABLE "author" ALTER COLUMN "slug" DROP DEFAULT.
+```
+
+Ferro's own two defaults are never foreign: a `serial` key's sequence on Postgres (recognised by the sequence the column owns, so a renamed table's still counts), and on SQLite a literal default on a `NOT NULL` column (what `migrate_updates` keeps when it adds a required column, above). On SQLite any other default (an expression such as `CURRENT_TIMESTAMP`, or any default on a nullable column) is foreign, and the pass warns and leaves it (above: only a rebuild drops a default there). `ferro migrate drift` and `ferro migrate baseline` report the same defaults.
+
 ## On-demand `migrate()`
 
 Run the same pass explicitly on a live connection instead of at connect time:
@@ -225,7 +240,7 @@ The report is built from what the pass actually executed, never from its plan, s
     - `"lock_timeout"`: the `SET LOCAL lock_timeout` (or `SET` / `RESET`) the pass wraps each Postgres unit in, so a statement never queues behind a long lock;
     - `"probe"`: the row read SQLite costs for a [label rename](#evolving-enums-label-addition) on a column with no check.
 - **`warnings`** is a tuple of `Report(kind, subject, text, recurs)`; `str(warning)` is its sentence. Every warning is still raised as a `UserWarning` too. `kind` names it, so code can match on it rather than on the text:
-    - the planner's and renderer's kinds: `LeftoverChecks`, `ExtraEnumLabels`, `ForeignFkDrift`, `HintRefused`, the row-security kinds (`DroppedRowSecurity`, `ForeignPolicies`, `UnverifiablePolicy`, `PolicyBodyReplaced`, `RowSecurityTeardown`, `ExtraPolicies`), `RefusedConversion`, `SqliteInPlace`, `PrimaryKeyKept`, `EnumTypeMove` (a column moving to or from a native enum type, reported with the recipe a migration follows), `RowSecuritySkipped`;
+    - the planner's and renderer's kinds: `LeftoverChecks`, `ExtraEnumLabels`, `ForeignFkDrift`, `ForeignDefault`, `HintRefused`, the row-security kinds (`DroppedRowSecurity`, `ForeignPolicies`, `UnverifiablePolicy`, `PolicyBodyReplaced`, `RowSecurityTeardown`, `ExtraPolicies`), `RefusedConversion`, `SqliteInPlace`, `PrimaryKeyKept`, `EnumTypeMove` (a column moving to or from a native enum type, reported with the recipe a migration follows), `RowSecuritySkipped`;
     - the pass's own: `PendingTableRename`, `StrandedLabelRename`, `RowSecurityUnderMigrator`, `RunLockWait` (it waited for the run lock) and `DdlLockRetry` (a statement timed out waiting for a table lock and its unit is retried).
 
     `recurs` is `True` for a warning raised on every pass until someone acts.

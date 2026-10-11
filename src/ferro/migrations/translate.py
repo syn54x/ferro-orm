@@ -335,6 +335,18 @@ def _twin(written: dict[str, Any], target: _Target) -> list[ops.MigrateOperation
                 existing_type=_sa_type(target, table, column),
             )
         ] + _executed(written, statements[1:])
+    if kind == "DropDefault":
+        # A foreign default (ADR-0027 as amended): Alembic's own drop.
+        table, column = op["table"], op["column"]
+        return [
+            ops.AlterColumnOp(
+                table,
+                column,
+                modify_server_default=None,
+                existing_type=_sa_type(target, table, column),
+                existing_nullable=bool(target.model_column(table, column)["nullable"]),
+            )
+        ]
     if kind == "AlterColumnType":
         table, column = op["table"], op["column"]
         kw: dict[str, Any] = {}
