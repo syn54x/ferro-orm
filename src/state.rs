@@ -43,10 +43,7 @@ impl ModelMeta {
                 break;
             }
         }
-        ModelMeta {
-            pk_col,
-            pk_autoincrement,
-        }
+        ModelMeta { pk_col, pk_autoincrement }
     }
 }
 
@@ -117,8 +114,9 @@ pub fn model_identity(cls: &Bound<'_, PyAny>) -> PyResult<String> {
             "Object is not a Ferro model class (missing __ferro_identity__)",
         )
     })?;
-    attr.extract::<String>()
-        .map_err(|_| pyo3::exceptions::PyTypeError::new_err("__ferro_identity__ must be a str"))
+    attr.extract::<String>().map_err(|_| {
+        pyo3::exceptions::PyTypeError::new_err("__ferro_identity__ must be a str")
+    })
 }
 
 /// Look up one registration by registry key.
@@ -240,8 +238,9 @@ pub fn install_registration(
     let mut new_registry: HashMap<String, Arc<RegisteredModel>> =
         HashMap::with_capacity(envelope.payload.models.len());
     for model in &envelope.payload.models {
-        let registered = RegisteredModel::new(model.columns.clone(), model.table_name.clone())
-            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        let registered =
+            RegisteredModel::new(model.columns.clone(), model.table_name.clone())
+                .map_err(pyo3::exceptions::PyValueError::new_err)?;
         new_registry.insert(model.model_name.clone(), registered);
     }
 
@@ -249,9 +248,9 @@ pub fn install_registration(
     // can observe a half-installed runtime. Lock order (registry → modelset →
     // fingerprint) is fixed and never nested-held elsewhere, so it cannot
     // deadlock.
-    let mut registry_guard = MODEL_REGISTRY
-        .write()
-        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Model Registry"))?;
+    let mut registry_guard = MODEL_REGISTRY.write().map_err(|_| {
+        pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Model Registry")
+    })?;
     let mut modelset_guard = SCHEMA_IR_MODELSET.write().map_err(|_| {
         pyo3::exceptions::PyRuntimeError::new_err("Failed to lock SchemaIR modelset")
     })?;
@@ -275,9 +274,9 @@ pub fn install_registration(
 /// # Errors
 /// `PyRuntimeError` when a store lock is poisoned.
 pub fn clear_registration() -> PyResult<()> {
-    let mut registry_guard = MODEL_REGISTRY
-        .write()
-        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Model Registry"))?;
+    let mut registry_guard = MODEL_REGISTRY.write().map_err(|_| {
+        pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Model Registry")
+    })?;
     let mut modelset_guard = SCHEMA_IR_MODELSET.write().map_err(|_| {
         pyo3::exceptions::PyRuntimeError::new_err("Failed to lock SchemaIR modelset")
     })?;
@@ -419,11 +418,7 @@ impl RouteHandle {
     #[new]
     #[pyo3(signature = (connection_name, tx_id=None, session_id=None))]
     fn new(connection_name: String, tx_id: Option<String>, session_id: Option<String>) -> Self {
-        Self {
-            tx_id,
-            connection_name,
-            session_id,
-        }
+        Self { tx_id, connection_name, session_id }
     }
 
     #[getter]
@@ -509,7 +504,8 @@ pub struct ConnectionSlot {
 /// pin, and the operations running on it.
 pub type TransactionConnection = Arc<ConnectionSlot>;
 
-pub(crate) const DISCARDED_CONNECTION_MSG: &str = "This connection is no longer available to this route: it was either \
+pub(crate) const DISCARDED_CONNECTION_MSG: &str =
+    "This connection is no longer available to this route: it was either \
      released back to the pool (its session closed) or discarded because \
      Ferro could not vouch for its state (a cancelled operation, or a failed \
      ROLLBACK). Ferro never reuses either.";
@@ -858,7 +854,8 @@ pub fn session_state(session_id: &str) -> PyResult<Arc<SessionState>> {
         })
 }
 
-pub(crate) const SESSION_CLOSE_ACTIVE_TRANSACTIONS_MSG: &str = "Cannot close session while transactions are active. \
+pub(crate) const SESSION_CLOSE_ACTIVE_TRANSACTIONS_MSG: &str =
+    "Cannot close session while transactions are active. \
      Exit all transaction() blocks before closing the session.";
 
 /// Guard that a session has no open transactions before close.
@@ -952,27 +949,18 @@ impl RustValue {
             RustValue::Double(f) => Ok(f.into_py_any(py)?.into_bound(py)),
             RustValue::String(s) => Ok(s.into_py_any(py)?.into_bound(py)),
             RustValue::Bool(b) => Ok(b.into_py_any(py)?.into_bound(py)),
-            RustValue::DateTime(s) => cached_callable(
-                py,
-                &DATETIME_FROMISOFORMAT,
-                "datetime",
-                &["datetime", "fromisoformat"],
-            )?
-            .call1((s.replace('Z', "+00:00"),)),
-            RustValue::Date(s) => cached_callable(
-                py,
-                &DATE_FROMISOFORMAT,
-                "datetime",
-                &["date", "fromisoformat"],
-            )?
-            .call1((s,)),
-            RustValue::Time(s) => cached_callable(
-                py,
-                &TIME_FROMISOFORMAT,
-                "datetime",
-                &["time", "fromisoformat"],
-            )?
-            .call1((s,)),
+            RustValue::DateTime(s) => {
+                cached_callable(py, &DATETIME_FROMISOFORMAT, "datetime", &["datetime", "fromisoformat"])?
+                    .call1((s.replace('Z', "+00:00"),))
+            }
+            RustValue::Date(s) => {
+                cached_callable(py, &DATE_FROMISOFORMAT, "datetime", &["date", "fromisoformat"])?
+                    .call1((s,))
+            }
+            RustValue::Time(s) => {
+                cached_callable(py, &TIME_FROMISOFORMAT, "datetime", &["time", "fromisoformat"])?
+                    .call1((s,))
+            }
             RustValue::Json(v) => {
                 cached_callable(py, &JSON_LOADS, "json", &["loads"])?.call1((v.to_string(),))
             }
@@ -991,7 +979,7 @@ impl RustValue {
 
 #[cfg(test)]
 mod session_close_tests {
-    use super::{SESSION_REGISTRY, TransactionHandle, register_session, unregister_session};
+    use super::{TransactionHandle, register_session, unregister_session, SESSION_REGISTRY};
     use crate::backend::EngineHandle;
     use sqlx::sqlite::SqlitePoolOptions;
 
@@ -1042,8 +1030,8 @@ mod session_close_tests {
 #[cfg(test)]
 mod install_registration_tests {
     use super::{
-        BULK_INSTALL_COUNT, INSTALLED_FINGERPRINT, MODEL_REGISTRY, SCHEMA_IR_MODELSET,
-        clear_registration, install_registration,
+        clear_registration, install_registration, BULK_INSTALL_COUNT, INSTALLED_FINGERPRINT,
+        MODEL_REGISTRY, SCHEMA_IR_MODELSET,
     };
     use ferro_schema_ir::{IrEnvelope, SchemaColumn, SchemaIrPayload, SchemaModel};
     use std::sync::atomic::Ordering;
@@ -1163,10 +1151,7 @@ mod install_registration_tests {
     }
 
     fn recorded_fingerprint() -> Option<String> {
-        INSTALLED_FINGERPRINT
-            .read()
-            .expect("fingerprint read")
-            .clone()
+        INSTALLED_FINGERPRINT.read().expect("fingerprint read").clone()
     }
 
     #[test]
@@ -1184,10 +1169,7 @@ mod install_registration_tests {
         )
         .expect("first install");
         assert!(installed, "first install should perform a swap");
-        assert_eq!(
-            registry_keys(),
-            vec!["Alpha".to_string(), "Beta".to_string()]
-        );
+        assert_eq!(registry_keys(), vec!["Alpha".to_string(), "Beta".to_string()]);
         assert_eq!(recorded_fingerprint().as_deref(), Some("fp-1"));
         assert!(SCHEMA_IR_MODELSET.read().unwrap().is_some());
         assert_eq!(BULK_INSTALL_COUNT.load(Ordering::Relaxed) - base_count, 1);
@@ -1205,10 +1187,7 @@ mod install_registration_tests {
         // unknown logical_type has no codec) must abort the whole install and
         // leave the previous registration + fingerprint untouched.
         let result = install_registration(
-            envelope(vec![
-                model("Gamma", "string"),
-                model("Broken", "not_a_type"),
-            ]),
+            envelope(vec![model("Gamma", "string"), model("Broken", "not_a_type")]),
             "fp-2".to_string(),
         );
         assert!(result.is_err(), "invalid model should fail the install");

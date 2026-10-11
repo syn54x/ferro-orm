@@ -289,7 +289,19 @@ def test_autogenerate_on_sqlite_refuses_naming_the_rebuild(project, pkg, db):
 # -- ferro's own defaults -------------------------------------------------------------
 
 
-def test_a_serial_keys_sequence_is_never_drift_on_an_up_or_pass_built_database(
+def test_a_fresh_tables_key_sequence_is_never_drift_where_up_built_it(
+    project, pkg, db, capsys
+):
+    generated(project, pkg, db, PLAIN_TEAM)
+    assert run("migrate", "up", "--url", db.url) == 0
+    capsys.readouterr()
+    assert cli(capsys, "drift", "--url", db.url)[:2] == (
+        0,
+        "no drift against 0001_create_author\n",
+    )
+
+
+def test_a_fresh_tables_key_sequence_is_never_drift_where_the_pass_built_it(
     project, pkg, db, capsys
 ):
     generated(project, pkg, db, PLAIN_TEAM)

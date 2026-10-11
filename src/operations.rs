@@ -6796,14 +6796,8 @@ mod record_select_list_tests {
         let join_plan = query_join_plan(&plan, "transaction", &[]).expect("join plan");
 
         let mut select = Query::select();
-        apply_select_list(
-            &mut select,
-            "transaction",
-            &[],
-            Some(&projected),
-            &join_plan,
-        )
-        .expect("traversed field renders");
+        apply_select_list(&mut select, "transaction", &[], Some(&projected), &join_plan)
+            .expect("traversed field renders");
         apply_relation_joins(&mut select, &join_plan).expect("joins render");
         select.from(Alias::new("transaction"));
 
@@ -6842,14 +6836,8 @@ mod record_select_list_tests {
         let join_plan = query_join_plan(&plan, "transaction", &[]).expect("join plan");
 
         let mut select = Query::select();
-        apply_select_list(
-            &mut select,
-            "transaction",
-            &[],
-            Some(&projected),
-            &join_plan,
-        )
-        .expect("traversed field renders");
+        apply_select_list(&mut select, "transaction", &[], Some(&projected), &join_plan)
+            .expect("traversed field renders");
         apply_relation_joins(&mut select, &join_plan).expect("joins render");
         select.from(Alias::new("transaction"));
 
@@ -6954,14 +6942,8 @@ mod record_select_list_tests {
         let join_plan = query_join_plan(&plan, "transaction", &[]).expect("join plan");
 
         let mut select = Query::select();
-        apply_select_list(
-            &mut select,
-            "transaction",
-            &[],
-            Some(&projected),
-            &join_plan,
-        )
-        .expect("traversed aggregate renders");
+        apply_select_list(&mut select, "transaction", &[], Some(&projected), &join_plan)
+            .expect("traversed aggregate renders");
         apply_relation_joins(&mut select, &join_plan).expect("joins render");
         select.from(Alias::new("transaction"));
 
@@ -6999,14 +6981,8 @@ mod record_select_list_tests {
         let join_plan = query_join_plan(&plan, "transaction", &[]).expect("join plan");
 
         let mut select = Query::select();
-        apply_select_list(
-            &mut select,
-            "transaction",
-            &[],
-            Some(&projected),
-            &join_plan,
-        )
-        .expect("grouped plan renders");
+        apply_select_list(&mut select, "transaction", &[], Some(&projected), &join_plan)
+            .expect("grouped plan renders");
         apply_relation_joins(&mut select, &join_plan).expect("joins render");
         select.from(Alias::new("transaction"));
 
