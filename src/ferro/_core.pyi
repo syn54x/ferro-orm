@@ -235,7 +235,7 @@ def _check_migrations(directory: str, target_ir_json: str, dialects: list[str]) 
     """
     ...
 
-def _read_migrations_dir(directory: str) -> str:
+def _read_migrations_dir(directory: str, replacing: str | None = None) -> str:
     """Read and verify a migrations directory; returns the JSON of its migrations.
 
     ``{"path", "migrations": [{"number", "name", "dir", "steps": [{"ordinal",
@@ -251,6 +251,13 @@ def _read_migrations_dir(directory: str) -> str:
     Raises ``ValueError`` naming the problem and its fix (a duplicate or
     missing number, a broken chain, an unparseable header, ...). A directory
     that does not exist holds no migrations.
+
+    With ``replacing`` (``ferro migrate new --replace``: ``NNNN_<name>``, or
+    ``NNNN`` when one migration carries the number), the directory without
+    that migration, admitting the duplicate at its number only, plus the
+    migration itself under ``"replaced"``. Also raises for a target the
+    directory does not hold, a bare number two migrations share, and a
+    migration a later one chains from.
     """
     ...
 

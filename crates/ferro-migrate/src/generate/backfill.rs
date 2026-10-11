@@ -515,6 +515,7 @@ pub fn hand_data_step(
         data: None,
         hand_model: Some(model_name.to_string()),
         class: BTreeMap::new(),
+        carried: None,
     })
 }
 
@@ -700,6 +701,7 @@ pub fn data_steps(
                 }),
                 hand_model: None,
                 class: BTreeMap::new(),
+                carried: None,
             }
         })
         .collect())
@@ -822,6 +824,7 @@ pub fn add_constraint_step(demands: &[Demand], dialects: &[Dialect]) -> Option<G
         data: None,
         hand_model: None,
         class: BTreeMap::new(),
+        carried: None,
     })
 }
 
@@ -1039,6 +1042,7 @@ pub(super) fn contract_step(
         data: None,
         hand_model: None,
         class: BTreeMap::new(),
+        carried: None,
     })
 }
 

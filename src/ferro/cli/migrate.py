@@ -43,6 +43,7 @@ from . import Global, exit_codes
 
 if TYPE_CHECKING:
     from ..migrations.errors import MigrationRefused
+    from ..migrations.layout import GeneratedMigration
 
 __all__ = ["migrate"]
 
@@ -185,6 +186,17 @@ def new(
             negative="",
         ),
     ] = None,
+    replace: Annotated[
+        str | None,
+        Parameter(
+            help=(
+                "Regenerate this migration (NNNN_<name>, or NNNN when one "
+                "migration carries the number) on top of the newest snapshot "
+                "below it, carrying its data steps and hand-written SQL steps "
+                "across: two branches that each generated the same number."
+            )
+        ),
+    ] = None,
     glob: Annotated[Global, Parameter(parse=False)],
 ) -> int:
     """Write the next migration from the models' difference with the last one.
@@ -194,7 +206,8 @@ def new(
     dialect. A change that renders no DDL writes nothing, unless a step was
     asked for. A change that asks existing rows for values (a new required
     column, a column made required) is written as expand, a backfill per
-    model, and contract.
+    model, and contract. With --replace, the named migration is regenerated
+    instead, keeping its number when it is free.
     """
     from ..migrations.generate import prepare, write
 
@@ -208,20 +221,66 @@ def new(
         data_step=data_step,
         data_only=data_only,
         no_backfill=no_backfill or (),
+        replace=replace,
     )
     if migration is None:
         print("no schema change: nothing written")
         return exit_codes.OK
     written = write(database, migration)
 
-    print(f"{_shown(written, Path.cwd().resolve())}/")
-    for file_name in migration.files():
-        print(f"  {file_name}")
+    shown = f"{_shown(written, Path.cwd().resolve())}/"
+    if migration.replaces is None:
+        print(shown)
+        for file_name in migration.files():
+            print(f"  {file_name}")
+    else:
+        _print_replacement(shown, migration)
     if migration.summary:
         print(migration.summary)
     for warning in migration.warnings:
         print(f"warning: {warning}", file=sys.stderr)
     return exit_codes.OK
+
+
+def _print_replacement(shown: str, migration: GeneratedMigration) -> None:
+    """``new --replace``'s per-file lines: what each file of the replaced
+    migration became (kept, moved, renumbered), "carried, review it" for
+    each carried step, and every file that is new."""
+    from ..migrations.layout import SNAPSHOT_FILE, Moved
+
+    in_place = migration.replaces == migration.dir_name
+    where = (
+        "regenerated in place"
+        if in_place
+        else f"replaces {migration.replaces}, now deleted"
+    )
+    print(f"{shown}  ({where})")
+    moved = {new: (old, how) for old, new, how in migration.moves}
+    carried_over = {
+        name for step in migration.steps if step.over_namesake for name in step.files
+    }
+    for file_name in migration.files():
+        if file_name == SNAPSHOT_FILE:
+            parent = migration.chained_from or "no migration (the first)"
+            print(f"  {file_name}  new snapshot, chained from {parent}")
+            continue
+        if file_name not in moved:
+            print(f"  {file_name}  new")
+            continue
+        old, how = moved[file_name]
+        if how is Moved.CARRIED:
+            wins = (
+                "; it wins over the regenerated step of the same name"
+                if file_name in carried_over
+                else ""
+            )
+            print(f"  {file_name}  carried, review it (was {old}{wins})")
+        elif how is Moved.RENUMBERED:
+            print(f"  {file_name}  renumbered (was {old})")
+        elif in_place:
+            print(f"  {file_name}  kept")
+        else:
+            print(f"  {file_name}  moved (was {old})")
 
 
 @migrate.command
