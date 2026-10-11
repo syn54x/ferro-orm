@@ -327,10 +327,10 @@ def prepare(
         old = _dir_name(replaced)
         below = _dir_name(migrations[-1]) if migrations else "no migration"
         raise MigrationsDirectoryError(
-            f"--replace {replace}: regenerated on top of {below}, {old} changes "
-            f"nothing the models declare and carries no data step or hand-written "
-            f"SQL step; delete the directory {directory / old} instead. Nothing "
-            f"was written."
+            f"--replace {replace}: on top of {below}, the models change nothing "
+            f"that renders DDL, and {old} has no data step or hand-written SQL "
+            f"step to carry, so the regenerated migration would be empty; delete "
+            f"the directory {directory / old} instead. Nothing was written."
         )
     if raw is None:
         return None
