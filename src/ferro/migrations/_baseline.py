@@ -37,7 +37,7 @@ from typing import TYPE_CHECKING, Any
 
 from . import runner
 from ._drift import DriftReport, against
-from .errors import AlreadyTrackedError, AppliedAboveBaselineError, MigrationRefused
+from .errors import MigrationRefused
 from .report import RunRefused, StatusReport
 from .steps import declared_up_kind
 from .target import Target
@@ -117,27 +117,12 @@ def _span(names: list[str]) -> str:
     return names[0] if len(names) == 1 else f"{names[0]} … {names[-1]}"
 
 
-def _typed(refused: RunRefused, report: StatusReport) -> MigrationRefused:
-    """The refusal a caller branches on, chosen by the core's ``kind`` and
-    never by its text: :class:`AlreadyTrackedError` for a tracked database,
-    :class:`AppliedAboveBaselineError` for a run applied above the
-    baseline, each carrying ``report``. Any other refusal is returned as it
-    came."""
-    if refused.kind == "already_tracked":
-        return AlreadyTrackedError(
-            str(refused), applied=refused.names, head=refused.head, report=report
-        )
-    if refused.kind == "applied_above_baseline":
-        return AppliedAboveBaselineError(
-            str(refused), above=refused.names, report=report
-        )
-    return refused
-
-
 def _status_under_lock(run: LockedDatabase, database: DatabaseSettings) -> StatusReport:
     """Where the database stands by the records the locked ``run`` read,
-    the ones its refusal was decided on. This run executes no step, so its
-    own lock marks nothing ``running``."""
+    the ones its refusal was decided on: the ``report`` a baseline refusal
+    carries (an ``AlreadyTrackedError``'s, an ``AppliedAboveBaselineError``'s,
+    ...). This run executes no step, so its own lock marks nothing
+    ``running``."""
     return StatusReport.from_core(
         run.status(),
         database=database.name,
@@ -158,7 +143,8 @@ async def _record(
         try:
             plan = run.plan_baseline(target)
         except RunRefused as refused:
-            raise _typed(refused, _status_under_lock(run, database)) from None
+            refused.report = _status_under_lock(run, database)
+            raise
         # A baseline never runs a data step, so its file is never executed:
         # each one's record holds the shape its up declares, read from the
         # file's syntax tree (ADR-0035).
@@ -191,7 +177,8 @@ async def _remove(
         try:
             removed = await run.remove_baseline()
         except RunRefused as refused:
-            raise _typed(refused, _status_under_lock(run, database)) from None
+            refused.report = _status_under_lock(run, database)
+            raise
     return [names[number] for number in sorted({m for m, _ in removed})]
 
 

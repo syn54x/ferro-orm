@@ -430,7 +430,8 @@ def test_baseline_on_a_database_up_migrated_is_already_tracked(project, pkg, db)
         asyncio.run(baseline(url=db.url))
 
     err = raised.value
-    assert isinstance(err, MigrationRefused)
+    assert isinstance(err, RunRefused) and isinstance(err, MigrationRefused)
+    assert err.kind == "already_tracked"
     assert str(err) == TRACKED.format("0001_create_author, 0002_add_teams")
     assert err.applied == ["0001_create_author", "0002_add_teams"]
     assert err.head == "0002_add_teams"
@@ -448,44 +449,6 @@ def test_baseline_on_a_database_up_migrated_is_already_tracked(project, pkg, db)
 
     asyncio.run(adopt_then_up())
     assert db.records() == before
-
-
-def test_the_typed_refusal_is_chosen_by_kind_never_by_text():
-    status = StatusReport(
-        database="default", dialect="sqlite", table="t", migrations=[]
-    )
-    reworded = RunRefused(
-        "a reworded refusal",
-        kind="already_tracked",
-        names=["0001_create_author", "0002_add_teams"],
-        head="0002_from_the_core",
-    )
-    typed = baseline_module._typed(reworded, status)
-    assert isinstance(typed, AlreadyTrackedError)
-    assert str(typed) == "a reworded refusal"
-    # Both fields are the core's, read through, never re-derived here.
-    assert (typed.applied, typed.head) == (
-        ["0001_create_author", "0002_add_teams"],
-        "0002_from_the_core",
-    )
-    assert typed.report is status
-
-    above = baseline_module._typed(
-        RunRefused("reworded too", kind="applied_above_baseline", names=["0003_x"]),
-        status,
-    )
-    assert isinstance(above, AppliedAboveBaselineError)
-    assert (str(above), above.above, above.report) == (
-        "reworded too",
-        ["0003_x"],
-        status,
-    )
-
-    # Today's text under any other kind stays the base refusal, unchanged.
-    other = RunRefused(TRACKED.format("0001_create_author"), kind="no_baseline_target")
-    assert baseline_module._typed(other, status) is other
-    lost = RunRefused("lock lost")
-    assert baseline_module._typed(lost, status) is lost
 
 
 # -- undoing a baseline, and down ------------------------------------------------------
@@ -513,6 +476,7 @@ def test_remove_is_refused_under_a_run_and_undoes_the_baseline_after_down(
     assert isinstance(raised.value, MigrationRefused)
     assert str(raised.value) == err.strip()
     assert raised.value.above == ["0003_add_orgs"]
+    assert raised.value.kind == "applied_above_baseline"
     assert raised.value.report.head_applied.name == "0003_add_orgs"
     assert len(db.records()) == 3
 

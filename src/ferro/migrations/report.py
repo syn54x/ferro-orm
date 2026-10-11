@@ -34,6 +34,8 @@ from typing import Any
 from .errors import MigrationRefused
 
 __all__ = [
+    "AlreadyTrackedError",
+    "AppliedAboveBaselineError",
     "MigrationStatus",
     "RunRefused",
     "StatusReport",
@@ -58,7 +60,8 @@ class RunRefused(MigrationRefused):
     database's records (``already_tracked``), the run-applied migrations
     above a baseline (``applied_above_baseline``); empty otherwise. ``head``
     is the newest of a tracked database's records (``already_tracked``),
-    ``None`` otherwise.
+    ``None`` otherwise. The core builds every planner refusal through
+    :meth:`from_core`, so a kind with a class of its own arrives as it.
     """
 
     def __init__(
@@ -81,6 +84,61 @@ class RunRefused(MigrationRefused):
         self.ahead_only = ahead_only
         self.names = list(names or ())
         self.head = head
+
+    @classmethod
+    def from_core(
+        cls, message: str, *, kind: str | None = None, **payload: Any
+    ) -> RunRefused:
+        """The refusal the core raises for ``kind``: the subclass a caller
+        branches on when the kind has one (:class:`AlreadyTrackedError`,
+        :class:`AppliedAboveBaselineError`), plain :class:`RunRefused`
+        otherwise. Chosen by ``kind`` alone, never by ``message``; ``payload``
+        is the keyword data ``RunRefused`` takes."""
+        return _BY_KIND.get(kind or "", RunRefused)(message, kind=kind, **payload)
+
+
+class AlreadyTrackedError(RunRefused):
+    """``baseline()``: the database is already tracked; its tracking table
+    holds step records, and a baseline records only on a database that has
+    none (ADR-0031). Nothing was recorded.
+
+    Two pre-deploys that adopt one database at once both find no records and
+    both call ``baseline()``; the run lock lets one record, and the other
+    raises this. ``applied`` names every migration the records name
+    (``NNNN_<name>``, in order), ``head`` the newest of them (both as the
+    core decided the refusal), and ``report`` is the database's
+    :class:`StatusReport`, so the caller carries on to ``up()``::
+
+        try:
+            await ferro.migrations.baseline()
+        except ferro.migrations.AlreadyTrackedError:
+            pass
+        await ferro.migrations.up()
+    """
+
+    def __init__(self, message: str, **payload: Any) -> None:
+        super().__init__(message, **payload)
+        self.applied = list(self.names)
+
+
+class AppliedAboveBaselineError(RunRefused):
+    """``remove_baseline()``: a run applied migrations above the baseline
+    (``above``, ``NNNN_<name>``); removing it under them would leave applied
+    migrations above pending ones. The message names the ``ferro migrate
+    down --to`` that reverts them; nothing was removed. ``report`` is the
+    database's :class:`StatusReport`.
+    """
+
+    def __init__(self, message: str, **payload: Any) -> None:
+        super().__init__(message, **payload)
+        self.above = list(self.names)
+
+
+_BY_KIND: dict[str, type[RunRefused]] = {
+    "already_tracked": AlreadyTrackedError,
+    "applied_above_baseline": AppliedAboveBaselineError,
+}
+"""The run planner refusal kinds a caller branches on by type."""
 
 
 @dataclass(frozen=True)
