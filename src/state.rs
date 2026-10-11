@@ -1064,6 +1064,7 @@ mod install_registration_tests {
             enum_type_name: None,
             postgres_native_enum: false,
             enum_renamed_labels: Default::default(),
+            enum_retired_labels: Default::default(),
             default_factory: None,
             retired: false,
         }
@@ -1093,6 +1094,7 @@ mod install_registration_tests {
                     enum_type_name: None,
                     postgres_native_enum: false,
                     enum_renamed_labels: Default::default(),
+                    enum_retired_labels: Default::default(),
                     default_factory: None,
                     retired: false,
                 },
@@ -1233,6 +1235,7 @@ mod model_meta_tests {
             enum_type_name: None,
             postgres_native_enum: false,
             enum_renamed_labels: Default::default(),
+            enum_retired_labels: Default::default(),
             default_factory: None,
             retired: false,
         }]);
@@ -1259,6 +1262,7 @@ mod model_meta_tests {
             enum_type_name: None,
             postgres_native_enum: false,
             enum_renamed_labels: Default::default(),
+            enum_retired_labels: Default::default(),
             default_factory: None,
             retired: false,
         }]);
@@ -1285,6 +1289,7 @@ mod model_meta_tests {
             enum_type_name: None,
             postgres_native_enum: false,
             enum_renamed_labels: Default::default(),
+            enum_retired_labels: Default::default(),
             default_factory: None,
             retired: false,
         }]);
@@ -1312,6 +1317,7 @@ mod model_meta_tests {
                 enum_type_name: None,
                 postgres_native_enum: false,
                 enum_renamed_labels: Default::default(),
+                enum_retired_labels: Default::default(),
                 default_factory: None,
                 retired: false,
             },
@@ -1332,6 +1338,7 @@ mod model_meta_tests {
                 enum_type_name: None,
                 postgres_native_enum: false,
                 enum_renamed_labels: Default::default(),
+                enum_retired_labels: Default::default(),
                 default_factory: None,
                 retired: false,
             },

@@ -18,7 +18,8 @@ if TYPE_CHECKING:
     from .rowsecurity import RowSecurity
     from .session import Session
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, ValidationError, model_validator
+from pydantic_core import PydanticCustomError
 
 from ._bind_payload import (
     apply_save_exclude,
@@ -206,6 +207,38 @@ async def transaction(
         _CURRENT_TRANSACTION_CONNECTION.reset(connection_token)
 
 
+def _retired_label_message(enum_cls: type[Enum], label: str) -> str:
+    member = next(m for m in enum_cls if m.value == label)
+    return (
+        f"{enum_cls.__name__}.{member.name} ('{label}') is retired in this release: "
+        "the previous release may still write it, this one does not"
+    )
+
+
+def _refuse_retired_label(
+    instance: BaseModel,
+    name: str,
+    guarded: tuple[type[Enum], frozenset[str]],
+    value: Any,
+) -> None:
+    """Refuse assigning a retired enum label to ``name`` (ADR-0053)."""
+    enum_cls, labels = guarded
+    for label in labels:
+        if value == label:
+            raise ValidationError.from_exception_data(
+                type(instance).__name__,
+                [
+                    {
+                        "type": PydanticCustomError(
+                            "retired_enum_label", _retired_label_message(enum_cls, label)
+                        ),
+                        "loc": (name,),
+                        "input": value,
+                    }
+                ],
+            )
+
+
 class Model(BaseModel, metaclass=ModelMetaclass):
     """Provide the base class for all Ferro models
 
@@ -278,6 +311,9 @@ class Model(BaseModel, metaclass=ModelMetaclass):
     #: retired relations and their shadow ``*_id`` columns.
     __ferro_retired_names__: ClassVar[frozenset[str]] = frozenset()
     _enum_fields: ClassVar[dict[str, type[Enum]]] = {}
+    __ferro_retired_enum_labels__: ClassVar[
+        dict[str, tuple[type[Enum], frozenset[str]]]
+    ] = {}
 
     @classmethod
     def _reregister_ferro(cls) -> None:
@@ -337,6 +373,12 @@ class Model(BaseModel, metaclass=ModelMetaclass):
 
         super().__init__(**data)
 
+    def __setattr__(self, name: str, value: Any) -> None:
+        guarded = type(self).__ferro_retired_enum_labels__.get(name)
+        if guarded is not None:
+            _refuse_retired_label(self, name, guarded, value)
+        super().__setattr__(name, value)
+
     if not TYPE_CHECKING:
 
         def __getattr__(self, item: str) -> Any:
@@ -350,6 +392,20 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                     obj=self,
                 )
             return super().__getattr__(item)
+
+    @model_validator(mode="after")
+    def _refuse_retired_labels(self) -> Self:
+        """Construction may not write a retired enum label (ADR-0053).
+
+        Hydration never runs validators, so a row already holding the label
+        loads and saves back unchanged.
+        """
+        for name, guarded in type(self).__ferro_retired_enum_labels__.items():
+            value = self.__dict__.get(name)
+            for label in guarded[1]:
+                if value == label:
+                    raise ValueError(_retired_label_message(guarded[0], label))
+        return self
 
     @model_validator(mode="after")
     def _validate_required_foreign_keys(self) -> Self:

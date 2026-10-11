@@ -24,6 +24,7 @@ from .base import FerroField, ForeignKey, ManyToManyRelation
 from .columns import build_column_specs, refuse_back_ref_over_retired_relation
 from .fields import FERRO_FIELD_EXTRA_KEY
 from .ir import compile_model_schema_ir
+from .ir.compiler import declared_retired_labels
 from .query import Relation
 from .registry import REGISTRY
 from .relations.descriptors import ForwardDescriptor
@@ -657,11 +658,19 @@ class ModelMetaclass(type(BaseModel)):
     def _register_enum_fields(cls) -> None:
         """Populate ``cls._enum_fields`` from column-spec python types."""
         enum_fields: dict[str, type[Enum]] = {}
+        retired_labels: dict[str, tuple[type[Enum], frozenset[str]]] = {}
         for field_name, spec in cls.__ferro_columns__.items():
             enum_cls = spec.enum_class
             if enum_cls is not None:
                 enum_fields[field_name] = enum_cls
+                retired = declared_retired_labels(enum_cls)
+                if retired and field_name in cls.model_fields:
+                    retired_labels[field_name] = (enum_cls, retired)
         cls._enum_fields = enum_fields
+        # Field -> (enum, labels this release no longer writes; ADR-0053).
+        # Read by ``Model`` on construction and attribute assignment only:
+        # hydration bypasses both, so a row holding the label still loads.
+        cls.__ferro_retired_enum_labels__ = retired_labels
 
     @staticmethod
     def _validate_db_type_options(cls, ferro_fields: dict) -> None:
