@@ -107,10 +107,12 @@ class AlreadyTrackedError(RunRefused):
     raises this. ``applied`` names every migration the records name
     (``NNNN_<name>``, in order), ``head`` the newest of them (both as the
     core decided the refusal), and ``report`` is the database's
-    :class:`StatusReport`, so the caller carries on to ``up()``::
+    :class:`StatusReport` (what ``status()`` reports), so the caller carries
+    on to ``up()``. The target is the migration the previous release's models
+    generated, so an unattended baseline records no step it did not run::
 
         try:
-            await ferro.migrations.baseline()
+            await ferro.migrations.baseline(target="0001")
         except ferro.migrations.AlreadyTrackedError:
             pass
         await ferro.migrations.up()
