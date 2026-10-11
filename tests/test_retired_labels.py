@@ -11,7 +11,7 @@ from enum import StrEnum
 from typing import Annotated
 
 import pytest
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from ferro import Field, FerroField, Model, connect, engines
 from ferro.ir.compiler import compile_model_schema_ir, declared_retired_labels
@@ -180,10 +180,11 @@ def test_the_column_carries_the_retired_labels_and_an_undeclared_enum_does_not()
 # -- a hydrated row is saved back -----------------------------------------------------
 
 
-def order_model() -> type[Model]:
+def order_model(validate_assignment: bool = False) -> type[Model]:
     """A fresh ``RtlOrder`` registered for this test (the registry is wiped per test)."""
 
     class RtlOrder(Model):
+        model_config = ConfigDict(validate_assignment=validate_assignment)
         id: int | None = Field(default=None, primary_key=True)
         status: RtlStatus = RtlStatus.PAID
         note: str = ""
@@ -304,3 +305,51 @@ def test_deleting_the_member_and_the_declaration_is_the_existing_removal(
         assert text(migration, "02_contract.up.postgres.sql") == (
             "-- ferro: data-dependent\n\n" + "\n\n".join(f"{s};" for s in SWAP) + "\n"
         )
+
+
+class RtlPlain(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    status: RtlLive
+
+
+def test_a_model_without_retired_labels_gains_no_setattr_or_validator():
+    assert RtlPlain.__setattr__ is Model.__setattr__
+    assert RtlPlain.model_fields["status"].metadata == []
+    assert Model.__setattr__ is BaseModel.__setattr__
+
+
+@pytest.mark.parametrize("validate_assignment", [False, True])
+def test_assigning_the_label_fails_with_the_ticket_text_under_both_configs(
+    validate_assignment,
+):
+    order = order_model(validate_assignment)()
+    with pytest.raises(ValidationError) as raised:
+        order.status = RtlStatus.CANCELED
+    assert "RtlStatus.CANCELED ('canceled') is retired in this release" in str(
+        raised.value
+    )
+    with pytest.raises(ValidationError):
+        order_model(validate_assignment)(status="canceled")
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.asyncio
+@pytest.mark.parametrize("validate_assignment", [False, True])
+async def test_a_hydrated_retired_row_changes_another_field_and_saves(
+    db_url, validate_assignment
+):
+    RtlOrder = order_model(validate_assignment)
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        await RtlOrder.model_construct(
+            id=1, status=RtlStatus.CANCELED, note="a"
+        ).save()
+        order = await RtlOrder.where(lambda rtlorder: rtlorder.id == 1).first()
+        assert order is not None and order.status is RtlStatus.CANCELED
+
+        order.note = "b"
+        await order.save()
+
+        again = await RtlOrder.where(lambda rtlorder: rtlorder.id == 1).first()
+        assert again is not None
+        assert (again.status, again.note) == (RtlStatus.CANCELED, "b")
