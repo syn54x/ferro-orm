@@ -1613,9 +1613,9 @@ def test_pin_e_a_migrated_database_holds_the_auto_migrated_server_defaults(
     postgres_base_url,
     db_schema_name,
 ):
-    """Pin (e) on the one artifact the live read does not carry: every
-    column's server default (AGENTS.md I-1 item 9; ferro persists none,
-    ADR-0027), compared on the catalog itself between the database the
+    """Pin (e) on every column's server default (AGENTS.md I-1 item 9;
+    ferro persists none, ADR-0027), compared on the catalog itself, not
+    through the live read the planner judges them by, between the database the
     chain ``0001`` → ``0002`` migrated and the one ``connect(auto_migrate=
     True)`` built from the same models. Its own test, so a finding against
     it (``"e-defaults"``) leaves the rest of pin (e) pinned.
@@ -1623,7 +1623,11 @@ def test_pin_e_a_migrated_database_holds_the_auto_migrated_server_defaults(
     Where the pass, run over the ``before`` database, adds a column it can
     only add with a ``DEFAULT`` (``KEPT_DEFAULTS``, ADR-0034's SQLite
     exception), a third database reconciled that way holds the migrated
-    one's defaults plus exactly that literal, NOT NULL as the model is."""
+    one's defaults plus exactly that literal, NOT NULL as the model is.
+    Where the case's ``before`` database carries a foreign default
+    (``Case.hand_edit``), a database the pass reconciles under
+    ``migrate_destructive`` holds the migrated one's defaults too, plus on
+    SQLite the one it warns it cannot drop (``FOREIGN_DEFAULTS_LEFT``)."""
     expect_finding(request, case_id, db_backend, "e-defaults")
     case = CASEBOOK[case_id]
     migrate_through(project, case, db_url, db_backend)
