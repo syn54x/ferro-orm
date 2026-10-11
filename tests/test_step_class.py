@@ -17,6 +17,7 @@ rolled-back release by deleting the newer migration's directory.
 from __future__ import annotations
 
 import asyncio
+import re
 import shutil
 from pathlib import Path
 
@@ -339,3 +340,38 @@ def test_generated_files_carry_no_class_header(project, pkg, db):
     assert files
     for path in files:
         assert "-- ferro: expand" not in path.read_text(), path
+
+
+# -- the deploying guide ----------------------------------------------------------------
+
+DEPLOYING = Path(__file__).resolve().parents[1] / "docs/pages/guide/schema/deploying.md"
+
+
+def test_the_deploying_guide_quotes_the_refusal_expand_only_raises(project, pkg, db):
+    """The rolling-deploy recipe is ``"expand-only"``, and the refusal it
+    quotes is the text ferro raises (the guide's migration is ``0008``)."""
+    page = DEPLOYING.read_text()
+    recipe = 'await ferro.migrations.require_applied(allow_ahead="expand-only")'
+    assert f"```python\n{recipe}\n```" in page
+    quoted = re.search(
+        r"```text\n(ferro\.migrations\.DatabaseAheadError: [^`]*?0008_drop_bio:01[^`]*)```",
+        page,
+    )
+    assert quoted is not None
+
+    configure(project, pkg, db.backend)
+    write_models(project, pkg, BIO)
+    new("create_author")
+    write_models(project, pkg, AUTHOR)
+    new("drop_bio")
+    assert run("migrate", "up", "--url", db.url) == 0
+    shutil.rmtree(migrations(project) / "0002_drop_bio")
+    with pytest.raises(DatabaseAheadError) as raised:
+        require_applied(db, allow_ahead="expand-only")
+    assert raised.value.contract_steps == ["0002_drop_bio:01"]
+    raised_text = (
+        f"ferro.migrations.DatabaseAheadError: {raised.value}\n".replace(
+            "0002_drop_bio", "0008_drop_bio"
+        )
+    )
+    assert quoted.group(1) == raised_text

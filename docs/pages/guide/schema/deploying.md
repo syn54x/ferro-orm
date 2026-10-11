@@ -123,13 +123,39 @@ The directory is behind the database: check out the branch that holds it. Nothin
 Pass allow_ahead=True to run beside them (a rolling deploy).
 ```
 
-So the old release must start with `allow_ahead=True`:
+So the old release starts with `allow_ahead="expand-only"`:
 
 ```python
-await ferro.migrations.require_applied(allow_ahead=True)
+await ferro.migrations.require_applied(allow_ahead="expand-only")
 ```
 
-A deployment that runs a fixed old version beside a new schema says so in code; nothing in the database or the configuration turns the check off. The one-migration shape (expand, backfill and contract together) is for deploys where writers stop, or where every writer already supplies the value. If a row slips in behind a backfill anyway, the contract fails and names [the recovery](data-steps.md#when-a-late-row-arrives).
+It lets the database through when every step the old checkout lacks is an *expand* step: one the old release's writes keep succeeding beside. `0008_author_slug` adds a nullable column, so release 0 starts. A database ahead by a *contract* step is refused, naming the first one (`ferro migrate up --allow-ahead=expand-only` does the same):
+
+```text
+ferro.migrations.DatabaseAheadError: ferro migrate: this database has applied 0008_drop_bio, which is not in migrations/.
+The directory is behind the database: check out the branch that holds it.
+It is ahead by contract steps, starting with 0008_drop_bio:01 (contract: a write the previous release makes can fail beside it), so allow_ahead="expand-only" does not let it through. Nothing was applied.
+Pass allow_ahead=True to run beside them (a rolling deploy).
+```
+
+`.contract_steps` lists every such step (`["0008_drop_bio:01"]`). Each step's class is decided from what the step does:
+
+| Expand | Contract |
+| :--- | :--- |
+| adding a table, or a nullable column | dropping a table or a column |
+| `DROP NOT NULL` | `SET NOT NULL`: a required column's add-constraint and contract steps |
+| a plain index; dropping an index, a check, a foreign key or a unique | a unique index; a type change |
+| adding an enum label | renaming a column, a table, an enum type or a label; removing a label |
+| a data step, a guard step | adding a check or a foreign key (`NOT VALID`) and its validate step |
+| a hand-written SQL step whose file says `-- ferro: expand` | any other hand-written SQL step |
+
+A SQLite table rebuild takes the class of what it carries, and a step that runs nothing on a dialect (`not-applicable`) is expand there.
+
+The class is about **writes**. `expand` means the previous release's writes keep succeeding beside the step, not that its reads only meet values it knows. Adding a label is `expand`, yet release 0 reading a row that holds the new label gets a value its enum does not have. So add a label in one release and write it in the next.
+
+`allow_ahead=True` is the unbounded form: it admits any distance and any step, for a deployment that runs a fixed old version beside a newer schema on purpose. Either way the deployment says so in code; nothing in the database or the configuration turns the check off.
+
+The class is recorded in each step's record when the step is applied, so a rolled-back checkout that lacks the files still knows what the database is ahead by. A database last migrated by ferro 0.22 has records without a class, and they read as `contract`. The first run of a newer ferro against it (`up`, `down`, `baseline` or `rerecord`) records each class from the migration files, and `contract` for a migration whose files are gone. So `"expand-only"` is answerable only after the first run since ferro was upgraded. The upgrade itself changes nothing a 0.22 runner refuses, so the release that upgrades ferro can still roll back to its predecessor. The one-migration shape (expand, backfill and contract together) is for deploys where writers stop, or where every writer already supplies the value. If a row slips in behind a backfill anyway, the contract fails and names [the recovery](data-steps.md#when-a-late-row-arrives).
 
 ## Locks and timeouts
 
@@ -160,13 +186,15 @@ $ ferro migrate status --steps
 default (sqlite) · main._ferro_migrations
 
 0001_create_author  applied
-  01_schema.up.sqlite.sql          applied
+  01_schema.up.sqlite.sql          applied  expand
 0002_author_slug    partial, 1 of 4 steps
-  01_expand.up.sqlite.sql          applied
-  02_backfill_author.py            pending
-  03_add_constraint.up.sqlite.sql  pending
-  04_contract.up.sqlite.sql        pending  [data-dependent]
+  01_expand.up.sqlite.sql          applied  expand
+  02_backfill_author.py            pending  expand
+  03_add_constraint.up.sqlite.sql  pending  expand
+  04_contract.up.sqlite.sql        pending  [data-dependent]  contract
 ```
+
+With `--steps`, each step's [class](#rolling-deploys-and-the-two-release-contract) follows its flags.
 
 | Exit code | Meaning |
 | :--- | :--- |
