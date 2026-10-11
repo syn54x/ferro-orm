@@ -135,9 +135,7 @@ pub fn schema_bind_expr(
     }
 
     let expr = match value {
-        value
-            if backend == Dialect::Postgres && matches!(codec, Some(ColumnCodec::Json)) =>
-        {
+        value if backend == Dialect::Postgres && matches!(codec, Some(ColumnCodec::Json)) => {
             if value.is_null() {
                 Expr::value(SeaValue::String(None)).cast_as("json")
             } else {

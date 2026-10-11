@@ -136,6 +136,8 @@ pub fn op_class(planned: &PlannedOp, sides: Sides<'_>) -> StepClass {
         | MigrationOp::RenameConstraint { .. }
         | MigrationOp::RenamePolicy { .. }
         | MigrationOp::DropForeignKey { .. }
+        // A foreign default nothing declares; no release relies on it.
+        | MigrationOp::DropDefault { .. }
         | MigrationOp::DropCheck { .. }
         | MigrationOp::DisableRowSecurity { .. }
         | MigrationOp::NoForceRowSecurity { .. } => StepClass::Expand,

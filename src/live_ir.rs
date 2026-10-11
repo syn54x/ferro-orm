@@ -97,14 +97,25 @@ fn live_table_model(
             db_type_explicit: None,
             nullable: col.is_nullable,
             primary_key: col.is_primary_key,
-            autoincrement: false,
+            // A column that owns a sequence (Postgres `serial`) reads as
+            // autoincrement: its `nextval` default is ferro's own.
+            autoincrement: col.owns_sequence,
             unique: false,
             index: false,
-            default: None,
+            // The catalog's text, never a value: the planner's live side
+            // answers whether ferro left it (a foreign default, ADR-0027 as
+            // amended) and keeps it out of every backfill.
+            default: col.column_default.clone().map(serde_json::Value::String),
             format: None,
             enum_values: native_enum_type(col)
                 .and_then(|name| enum_labels.get(name))
-                .map(|labels| labels.iter().cloned().map(serde_json::Value::String).collect()),
+                .map(|labels| {
+                    labels
+                        .iter()
+                        .cloned()
+                        .map(serde_json::Value::String)
+                        .collect()
+                }),
             enum_type_name: native_enum_type(col).map(str::to_string),
             postgres_native_enum: col.is_enum_udt,
             enum_renamed_labels: Default::default(),
@@ -357,6 +368,8 @@ mod tests {
             char_max_len: None,
             is_enum_udt: false,
             enum_type_name: None,
+            column_default: None,
+            owns_sequence: false,
         }
     }
 
@@ -400,6 +413,49 @@ mod tests {
                 }],
             },
         }
+    }
+
+    #[test]
+    fn a_live_column_carries_its_catalog_default_and_its_sequence_as_autoincrement() {
+        let author = LiveTable {
+            name: "author".to_string(),
+            columns: vec![
+                LiveColumn {
+                    column_default: Some("nextval('writer_id_seq'::regclass)".to_string()),
+                    owns_sequence: true,
+                    ..column("id", "integer", false, true)
+                },
+                LiveColumn {
+                    column_default: Some("''::character varying".to_string()),
+                    ..column("slug", "character varying", false, false)
+                },
+                column("bio", "character varying", true, false),
+            ],
+            ..LiveTable::default()
+        };
+        let (envelope, _) =
+            live_tables_to_schema_ir(vec![author], BTreeMap::new(), Dialect::Postgres);
+        let read: Vec<(&str, bool, Option<serde_json::Value>)> = envelope.payload.models[0]
+            .columns
+            .iter()
+            .map(|c| (c.name.as_str(), c.autoincrement, c.default.clone()))
+            .collect();
+        assert_eq!(
+            read,
+            vec![
+                ("bio", false, None),
+                (
+                    "id",
+                    true,
+                    Some(serde_json::json!("nextval('writer_id_seq'::regclass)"))
+                ),
+                (
+                    "slug",
+                    false,
+                    Some(serde_json::json!("''::character varying"))
+                ),
+            ]
+        );
     }
 
     #[test]

@@ -66,9 +66,12 @@ pub fn _install_registration(payload_json: String, fingerprint: String) -> PyRes
     if crate::state::installed_fingerprint_matches(&fingerprint)? {
         return Ok(false);
     }
-    let envelope: IrEnvelope<SchemaIrPayload> = serde_json::from_str(&payload_json).map_err(|e| {
-        pyo3::exceptions::PyValueError::new_err(format!("invalid registration payload json: {e}"))
-    })?;
+    let envelope: IrEnvelope<SchemaIrPayload> =
+        serde_json::from_str(&payload_json).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "invalid registration payload json: {e}"
+            ))
+        })?;
     if envelope.ir_kind != "schema" {
         return Err(pyo3::exceptions::PyValueError::new_err(format!(
             "expected ir_kind 'schema', got '{}'",
@@ -97,9 +100,9 @@ pub fn _bulk_install_count_for_test() -> u64 {
 #[pyfunction]
 #[pyo3(name = "_rust_model_registry_count_for_test")]
 pub fn _rust_model_registry_count_for_test() -> PyResult<usize> {
-    let registry = MODEL_REGISTRY.read().map_err(|_| {
-        pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Model Registry")
-    })?;
+    let registry = MODEL_REGISTRY
+        .read()
+        .map_err(|_| pyo3::exceptions::PyRuntimeError::new_err("Failed to lock Model Registry"))?;
     Ok(registry.len())
 }
 
@@ -655,9 +658,7 @@ pub fn tracked_schema_refusal(governed: &str, home: &str) -> String {
 ///   "card" is a view: rename or drop the view, or declare a different __ferro_table__ on app.models.Card.
 /// Nothing was created.
 /// ```
-pub fn table_name_held_refusal(
-    held: &[(&str, &str, crate::introspect::NonTableHolder)],
-) -> String {
+pub fn table_name_held_refusal(held: &[(&str, &str, crate::introspect::NonTableHolder)]) -> String {
     let mut lines = vec![
         "Table creation is refused: a declared table's name is held by something that is \
          not a table, so CREATE TABLE would skip it and leave the model without one."
@@ -1005,10 +1006,7 @@ async fn run_passes(
                         Door::Pass(subject),
                         &current.statements,
                         |attempt| {
-                            report.warn(pass_attempt_warning(
-                                Subject::enum_type(subject),
-                                &attempt,
-                            ))
+                            report.warn(pass_attempt_warning(Subject::enum_type(subject), &attempt))
                         },
                         None,
                     )
@@ -1340,9 +1338,8 @@ pub fn _plan_revision(
     let backend = parse_dialect(&dialect)?;
     let live = parse_schema_envelope(&live_ir_json, "live_ir_json")?;
     let declared = parse_schema_envelope(&declared_json, "declared_json")?;
-    let facts: LiveFacts = serde_json::from_str(&facts_json).map_err(|e| {
-        pyo3::exceptions::PyValueError::new_err(format!("invalid facts_json: {e}"))
-    })?;
+    let facts: LiveFacts = serde_json::from_str(&facts_json)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("invalid facts_json: {e}")))?;
     validate_schema_ir(&declared).map_err(emission_error)?;
     let live = Side::live(live, facts).map_err(plan_error)?;
     let wire = match plan_revision(&live, &declared, backend) {

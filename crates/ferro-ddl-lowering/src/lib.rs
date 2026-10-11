@@ -3871,6 +3871,13 @@ pub enum ReportKind {
         /// The policies.
         names: Vec<String>,
     },
+    /// A live server default ferro did not leave (a *foreign default*,
+    /// ADR-0027 as amended), left in place by a plan that removes nothing.
+    ForeignDefault {
+        /// The default as the catalog holds it, a literal's display cast
+        /// folded (`''`, `datetime('now')`).
+        was: String,
+    },
     // -- the renderer's ---------------------------------------------------
     /// A storage conversion that could reinterpret or destroy stored values,
     /// not executed.
@@ -3927,6 +3934,62 @@ pub enum InPlaceChange {
     AlterColumnType,
     /// Change a column's nullability.
     AlterColumnNullability,
+    /// Drop a column's server default.
+    DropDefault,
+}
+
+/// [`ReportKind::ForeignDefault`]: `table.column` has the server default
+/// `was` in the database, which the model does not declare (ferro persists
+/// none, ADR-0027), and a plan that removes nothing leaves it. The sentence
+/// names the fix on `dialect`: `migrate_destructive`, or the statement by
+/// hand, on Postgres; a table rebuild on SQLite, which has no `ALTER COLUMN
+/// … DROP DEFAULT`. It holds until someone acts, so it recurs.
+pub fn foreign_default_warning(table: &str, column: &str, was: &str, dialect: Dialect) -> Report {
+    let fix = match dialect {
+        Dialect::Postgres => format!(
+            "connect(..., migrate_destructive=True) drops it, or run ALTER TABLE {} ALTER \
+             COLUMN {} DROP DEFAULT",
+            quote_ident(table),
+            quote_ident(column)
+        ),
+        Dialect::Sqlite => SQLITE_DROP_DEFAULT_FIX.to_string(),
+    };
+    Report::recurring(
+        ReportKind::ForeignDefault {
+            was: was.to_string(),
+        },
+        Subject::column(table, column),
+        format!(
+            "{table}.{column} has default {was} in the database, none declared; it is left \
+             in place: {fix}."
+        ),
+    )
+}
+
+/// What drops a column's server default on SQLite, which has no `ALTER
+/// COLUMN … DROP DEFAULT`: a rebuild of its table, which no door plans
+/// from a declaration (a migration between two snapshots never meets a
+/// default the snapshots do not hold).
+const SQLITE_DROP_DEFAULT_FIX: &str = "SQLite cannot drop a column default in place, so \
+     rebuild the table without it: write the rebuild as a hand-written SQL step \
+     (ferro migrate new <name> --sql-step drop_default), or run it once on the database \
+     (CREATE TABLE a copy without the DEFAULT, copy the rows across, drop the table, \
+     rename the copy)";
+
+/// [`ReportKind::SqliteInPlace`] for dropping the server default `was` of
+/// `table.column` on SQLite: the reconciliation pass, which never rebuilds a
+/// table (ADR-0014), says so and names the rebuild that does it.
+pub fn sqlite_drop_default_report(table: &str, column: &str, was: &str) -> Report {
+    Report::new(
+        ReportKind::SqliteInPlace {
+            what: InPlaceChange::DropDefault,
+        },
+        Subject::column(table, column),
+        format!(
+            "{table}.{column} has default {was} in the database, none declared, and it stays: \
+             {SQLITE_DROP_DEFAULT_FIX}."
+        ),
+    )
 }
 
 /// [`ReportKind::SqliteInPlace`] on `subject`, with the sentence saying so.

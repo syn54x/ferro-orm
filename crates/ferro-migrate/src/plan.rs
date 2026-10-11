@@ -30,11 +30,11 @@ use ferro_ddl_lowering::{
     dropped_row_security_warning, enum_label_strings, enum_type_provenance,
     excess_row_security_flags, extra_check_names, extra_check_names_warning, extra_enum_labels,
     extra_enum_labels_warning, extra_row_policy_names_warning, ferro_manages_row_security,
-    fk_action_from_str, fk_action_sql, fk_name, foreign_fk_drift_warning, is_ferro_fk_name,
-    is_ferro_row_policy_name, missing_check_names, missing_enum_labels, normalize_check_definition,
-    normalize_row_policy_expr, plan_row_security_reconcile, quote_label, render_check_body,
-    render_table_check_body, resolve_column_storage, row_policy_clauses, row_policy_command_token,
-    schema_columns_storage_drift,
+    fk_action_from_str, fk_action_sql, fk_name, foreign_default_warning, foreign_fk_drift_warning,
+    is_ferro_fk_name, is_ferro_row_policy_name, missing_check_names, missing_enum_labels,
+    normalize_check_definition, normalize_row_policy_expr, plan_row_security_reconcile,
+    quote_label, render_check_body, render_table_check_body, resolve_column_storage,
+    row_policy_clauses, row_policy_command_token, schema_columns_storage_drift,
 };
 pub use ferro_ddl_lowering::{HintError, hint_refusal_warning, pending_table_rename_warning};
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
@@ -398,6 +398,51 @@ impl Side {
         matches!(self.0, SideKind::Live { .. })
     }
 
+    /// The foreign default of `column` on `model` as the side holds it, read
+    /// for a plan ([`foreign_default`]): a live column's server default ferro
+    /// did not leave, as the catalog prints it (a literal's display cast
+    /// folded). A declaration holds none: its `default` is the field's
+    /// Python default, which ferro never persists (ADR-0027).
+    pub(crate) fn foreign_default(
+        &self,
+        model: &SchemaModel,
+        column: &str,
+        dialect: Dialect,
+    ) -> Option<String> {
+        if matches!(self.0, SideKind::Declared(_)) {
+            return None;
+        }
+        let col = model.columns.iter().find(|col| col.name == column)?;
+        foreign_default(col, dialect)
+            .then(|| server_default_text(col).map(folded_default))
+            .flatten()
+    }
+
+    /// `model` as the values a statement may write read it. A live column's
+    /// `default` is the catalog's text of its server default, never a value
+    /// a backfill can write, so a live side's is left out; a declaration's is
+    /// its own.
+    pub(crate) fn writable_values<'a>(&self, model: &'a SchemaModel) -> Cow<'a, SchemaModel> {
+        match &self.0 {
+            SideKind::Declared(_) => Cow::Borrowed(model),
+            SideKind::Live { .. } => Cow::Owned(without_server_defaults(model)),
+        }
+    }
+
+    /// The side's IR as [`Side::writable_values`] reads each of its models.
+    pub(crate) fn writable_ir(&self) -> Cow<'_, IrEnvelope<SchemaIrPayload>> {
+        match &self.0 {
+            SideKind::Declared(ir) => Cow::Borrowed(ir),
+            SideKind::Live { ir, .. } => {
+                let mut ir = ir.clone();
+                for model in &mut ir.payload.models {
+                    *model = without_server_defaults(model);
+                }
+                Cow::Owned(ir)
+            }
+        }
+    }
+
     /// Whether the side, as a plan's target, can express `op`. A declaration
     /// expresses every op. A live database cannot have an enum label removed
     /// (labels are append-only, ADR-0011, and rows may hold it), nor a row
@@ -414,6 +459,11 @@ impl Side {
             } => Err(format!(
                 "label {label:?} of enum type {type_name} cannot be removed: enum labels are \
                  append-only (ADR-0011), and rows may hold it"
+            )),
+            MigrationOp::DropDefault { table, column, was } => Err(format!(
+                "the default {was} on {table}.{column} was set outside ferro, and no declared \
+                 side holds it to put back; set it again by hand (ALTER TABLE \"{table}\" \
+                 ALTER COLUMN \"{column}\" SET DEFAULT {was}) if it is wanted"
             )),
             MigrationOp::AddRowPolicy { table, name }
             | MigrationOp::RebuildRowPolicy { table, name } => match self.policy(table, name) {
@@ -449,6 +499,163 @@ impl Side {
     fn fact_renames(&self, ops: &mut Vec<MigrationOp>, hints: &[Hint], dialect: Dialect) {
         if let SideKind::Live { ir, facts } = &self.0 {
             fact_renames(ops, facts, ir, hints, dialect);
+        }
+    }
+}
+
+// -- foreign defaults (ADR-0027, ADR-0034 as amended) ---------------------------------
+
+/// Whether the live column `col` holds a *foreign default*: a server default
+/// ferro did not leave there. Ferro persists no default of its own
+/// (ADR-0027) but two:
+///
+/// | Dialect | Ferro's own | Foreign |
+/// | :-- | :-- | :-- |
+/// | Postgres | the default of a column that owns a sequence (`serial`, read as `autoincrement`), whatever the sequence is called | every other default |
+/// | SQLite | a literal on a `NOT NULL` column (ADR-0034's kept default), whatever the literal | an expression, or any default on a nullable column |
+///
+/// The sequence is recognised by the column's ownership of it
+/// (`pg_get_serial_sequence`, read by introspection), never by the text of
+/// its `nextval`: a renamed table's sequence is still its own. SQLite's rule
+/// is by shape alone: a hand-set literal on a `NOT NULL` column cannot be
+/// told from the pass's and is accepted too (ADR-0034 as amended).
+///
+/// The question is asked of a live column only ([`Side::foreign_default`]):
+/// a declared column's `default` is its Python default.
+pub fn foreign_default(col: &ferro_schema_ir::SchemaColumn, dialect: Dialect) -> bool {
+    let Some(text) = server_default_text(col) else {
+        return false;
+    };
+    match dialect {
+        Dialect::Postgres => !col.autoincrement,
+        Dialect::Sqlite => col.nullable || !is_sqlite_literal(text),
+    }
+}
+
+/// A live column's server default, as introspection read it.
+fn server_default_text(col: &ferro_schema_ir::SchemaColumn) -> Option<&str> {
+    col.default.as_ref()?.as_str()
+}
+
+/// `model` with no column default: what a live table's columns give a
+/// statement to write ([`Side::writable_values`]).
+fn without_server_defaults(model: &SchemaModel) -> SchemaModel {
+    let mut model = model.clone();
+    for col in &mut model.columns {
+        col.default = None;
+    }
+    model
+}
+
+/// The byte just past the quoted SQL string literal `text` opens with
+/// (`'it''s'` is one literal), or `None` when it opens with none.
+fn quoted_literal_end(text: &str) -> Option<usize> {
+    let bytes = text.as_bytes();
+    if bytes.first() != Some(&b'\'') {
+        return None;
+    }
+    let mut at = 1;
+    while at < bytes.len() {
+        if bytes[at] == b'\'' {
+            if bytes.get(at + 1) == Some(&b'\'') {
+                at += 2;
+                continue;
+            }
+            return Some(at + 1);
+        }
+        at += 1;
+    }
+    None
+}
+
+/// Whether SQLite's `dflt_value` text is a literal: a string, a blob, a
+/// number, `NULL`, `TRUE` or `FALSE`. SQLite gives a parenthesised default
+/// back without its parentheses, so `DEFAULT (1)` is the literal `1` and
+/// `DEFAULT (datetime('now'))` the expression `datetime('now')`.
+fn is_sqlite_literal(text: &str) -> bool {
+    let text = text.trim();
+    if quoted_literal_end(text) == Some(text.len()) {
+        return true;
+    }
+    if let Some(blob) = text.strip_prefix(['x', 'X'])
+        && quoted_literal_end(blob) == Some(blob.len())
+    {
+        return true;
+    }
+    if ["NULL", "TRUE", "FALSE"]
+        .iter()
+        .any(|word| text.eq_ignore_ascii_case(word))
+    {
+        return true;
+    }
+    let unsigned = text.strip_prefix(['+', '-']).unwrap_or(text);
+    if let Some(hex) = unsigned
+        .strip_prefix("0x")
+        .or_else(|| unsigned.strip_prefix("0X"))
+    {
+        return !hex.is_empty() && hex.chars().all(|c| c.is_ascii_hexdigit());
+    }
+    unsigned
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_digit() || c == '.')
+        && unsigned.parse::<f64>().is_ok()
+}
+
+/// A server default as a person reads it: the catalog's text with the cast
+/// Postgres adds to a literal for display folded (`''::character varying`
+/// is `''`, `'free'::text` is `'free'`); any other text as it is.
+fn folded_default(text: &str) -> String {
+    let text = text.trim();
+    if let Some(end) = quoted_literal_end(text)
+        && let Some(cast) = text[end..].strip_prefix("::")
+        && !cast.is_empty()
+        && cast
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || " _()[],\"".contains(c))
+    {
+        return text[..end].to_string();
+    }
+    text.to_string()
+}
+
+/// The foreign default of every column `old_model` and `new_model` share
+/// ([`Side::foreign_default`]). Read from a live `old` (drift, baseline, the
+/// pass, a revision's upgrade): dropped under `destructive`, else reported
+/// and left. Read from a live `new` (a revision's downgrade): the op whose
+/// verdict says no declared side can put the default back.
+#[allow(clippy::too_many_arguments)]
+fn plan_foreign_defaults(
+    old: &Side,
+    new: &Side,
+    old_model: &SchemaModel,
+    new_model: &SchemaModel,
+    dialect: Dialect,
+    destructive: bool,
+    ops: &mut Vec<MigrationOp>,
+    reports: &mut Vec<Report>,
+) {
+    let table = new_model.table_name.as_str();
+    for col in &new_model.columns {
+        if !old_model.columns.iter().any(|old| old.name == col.name) {
+            continue;
+        }
+        let (was, from_live) = match (
+            old.foreign_default(old_model, &col.name, dialect),
+            new.foreign_default(new_model, &col.name, dialect),
+        ) {
+            (Some(was), _) => (was, true),
+            (None, Some(was)) => (was, false),
+            (None, None) => continue,
+        };
+        if destructive {
+            ops.push(MigrationOp::DropDefault {
+                table: table.to_string(),
+                column: col.name.clone(),
+                was,
+            });
+        } else if from_live {
+            reports.push(foreign_default_warning(table, &col.name, &was, dialect));
         }
     }
 }
@@ -1092,6 +1299,18 @@ fn plan_existing_table(
     let mut column_drops = Vec::new();
 
     ops.extend(primary_key_change(table, old_model, new_model));
+    // A foreign default goes first among the column ops: a type change after
+    // it then never has a default to cast.
+    plan_foreign_defaults(
+        old,
+        new,
+        old_model,
+        new_model,
+        dialect,
+        options.destructive,
+        &mut ops,
+        &mut plan.reports,
+    );
     diff_model_columns(
         table,
         old_model,
@@ -1890,7 +2109,10 @@ fn find_column<'a>(
 fn verdict(op: &MigrationOp, before: &Side, target: &Side, dialect: Dialect) -> OpVerdict {
     let table = op.table();
     let was = table.and_then(|table| before.model(table));
-    let now = table.and_then(|table| target.model(table));
+    let now_values = table
+        .and_then(|table| target.model(table))
+        .map(|model| target.writable_values(model));
+    let now = now_values.as_deref();
     let goes_with = goes_with(op, before, target).or_else(|| {
         (before.plans_label_removals() && rides_removed_label(op, was, now))
             .then_some(Rider::RemovedLabel)
@@ -2107,6 +2329,7 @@ fn execution(
 /// | drop a plain column | native |
 /// | drop a foreign-key column | rebuild |
 /// | change a column's type or nullability | rebuild |
+/// | drop a foreign default | rebuild |
 /// | add, change or drop a check (but a dropped column's own) | rebuild |
 /// | add, retarget or drop a foreign key (on a kept column) | rebuild |
 /// | change the primary key | rebuild |
@@ -2162,8 +2385,10 @@ fn sqlite_rebuilds(
             find_column(now, column).is_some_and(|col| !col.nullable)
         }
         MigrationOp::DropColumn { column, .. } => has_foreign_key(was, column),
+        // SQLite has no `ALTER COLUMN … DROP DEFAULT`.
         MigrationOp::AlterColumnType { .. }
         | MigrationOp::AlterColumnNullability { .. }
+        | MigrationOp::DropDefault { .. }
         | MigrationOp::ChangePrimaryKey { .. }
         | MigrationOp::AddCheck { .. }
         | MigrationOp::RebuildCheck { .. }
@@ -2328,6 +2553,8 @@ enum Artifact {
     Table(String),
     /// A column.
     Column(String, String),
+    /// A column's server default.
+    Default(String, String),
     /// A table's primary key.
     PrimaryKey(String),
     /// A standalone index, by name.
@@ -2367,6 +2594,9 @@ fn key(op: &MigrationOp) -> Option<Artifact> {
         | MigrationOp::AlterColumnType { table, column }
         | MigrationOp::AlterColumnNullability { table, column } => {
             Artifact::Column(t(table), column.clone())
+        }
+        MigrationOp::DropDefault { table, column, .. } => {
+            Artifact::Default(t(table), column.clone())
         }
         MigrationOp::ChangePrimaryKey { table, .. } => Artifact::PrimaryKey(t(table)),
         MigrationOp::AddIndex { table, name, .. }
@@ -2497,6 +2727,11 @@ impl KeyRenames {
                 let t = self.table(&t);
                 let c = self.column(&t, &c);
                 Artifact::Column(t, c)
+            }
+            Artifact::Default(t, c) => {
+                let t = self.table(&t);
+                let c = self.column(&t, &c);
+                Artifact::Default(t, c)
             }
             Artifact::PrimaryKey(t) => Artifact::PrimaryKey(self.table(&t)),
             Artifact::Index(t, n) => {
@@ -4368,5 +4603,356 @@ mod live_table_hint_tests {
                 recurs: true,
             }
         );
+    }
+}
+
+#[cfg(test)]
+mod foreign_default_tests {
+    //! Foreign defaults (ADR-0027, ADR-0034 as amended): a live server
+    //! default ferro did not leave is a `DropDefault`, whose verdict is
+    //! decided here once for every door.
+    use super::*;
+    use ferro_schema_ir::SchemaColumn;
+
+    fn envelope(models: Vec<SchemaModel>) -> IrEnvelope<SchemaIrPayload> {
+        IrEnvelope {
+            ir_kind: "schema".into(),
+            ir_version: 2,
+            payload: SchemaIrPayload {
+                dialect_agnostic: true,
+                models,
+            },
+        }
+    }
+
+    fn column(name: &str, db_type: &str, nullable: bool) -> SchemaColumn {
+        SchemaColumn {
+            renamed_from: None,
+            name: name.into(),
+            logical_type: "unknown".into(),
+            db_type: Some(db_type.into()),
+            db_type_explicit: None,
+            nullable,
+            primary_key: name == "id",
+            autoincrement: false,
+            unique: false,
+            index: false,
+            default: None,
+            default_factory: None,
+            retired: false,
+            format: None,
+            enum_values: None,
+            enum_type_name: None,
+            postgres_native_enum: false,
+            enum_renamed_labels: Default::default(),
+        }
+    }
+
+    /// A live column holding the server default `text`, as introspection
+    /// reads it.
+    fn with_default(col: SchemaColumn, text: &str) -> SchemaColumn {
+        SchemaColumn {
+            default: Some(serde_json::json!(text)),
+            ..col
+        }
+    }
+
+    fn author(columns: Vec<SchemaColumn>) -> SchemaModel {
+        SchemaModel {
+            renamed_from: None,
+            model_name: "app.Author".into(),
+            table_name: "author".into(),
+            columns,
+            foreign_keys: Vec::new(),
+            indexes: Vec::new(),
+            uniques: Vec::new(),
+            checks: Vec::new(),
+            table_checks: Vec::new(),
+            row_security: None,
+        }
+    }
+
+    fn live(columns: Vec<SchemaColumn>) -> Side {
+        let mut facts = LiveFacts::default();
+        facts
+            .tables
+            .insert("author".into(), LiveTableFacts::default());
+        Side::live(envelope(vec![author(columns)]), facts).expect("live side")
+    }
+
+    fn declared(columns: Vec<SchemaColumn>) -> Side {
+        Side::declared(envelope(vec![author(columns)]))
+    }
+
+    const DESTRUCTIVE: PlanOptions = PlanOptions { destructive: true };
+    const UPDATES: PlanOptions = PlanOptions { destructive: false };
+
+    fn ops(plan: &Plan) -> Vec<MigrationOp> {
+        plan.ops().cloned().collect()
+    }
+
+    fn drop_default(column: &str, was: &str) -> MigrationOp {
+        MigrationOp::DropDefault {
+            table: "author".into(),
+            column: column.into(),
+            was: was.into(),
+        }
+    }
+
+    /// The models: `id` and a required `slug`, no server default (ferro
+    /// persists none).
+    fn models() -> Side {
+        declared(vec![
+            SchemaColumn {
+                autoincrement: true,
+                ..column("id", "int", false)
+            },
+            SchemaColumn {
+                default: Some(serde_json::json!("python-side")),
+                ..column("slug", "varchar", false)
+            },
+        ])
+    }
+
+    fn serial_id(sequence: &str) -> SchemaColumn {
+        SchemaColumn {
+            autoincrement: true,
+            ..with_default(
+                column("id", "int", false),
+                &format!("nextval('{sequence}'::regclass)"),
+            )
+        }
+    }
+
+    #[test]
+    fn a_hand_set_postgres_default_is_dropped_natively_under_destructive() {
+        let db = live(vec![
+            serial_id("author_id_seq"),
+            with_default(column("slug", "varchar", false), "''::character varying"),
+        ]);
+        let plan = plan_from_ir(&db, &models(), Dialect::Postgres, DESTRUCTIVE);
+        assert_eq!(ops(&plan), vec![drop_default("slug", "''")]);
+        let verdict = &plan.operations[0].verdict;
+        assert_eq!(verdict.execution, Execution::Native);
+        assert!(!verdict.drops_data && !verdict.demands_values && !verdict.recreates);
+        assert_eq!(verdict.fails_on_rows, RowRisk::None);
+        let rendered = plan.render().expect("renders");
+        assert_eq!(
+            rendered[0].statements,
+            ["ALTER TABLE \"author\" ALTER COLUMN \"slug\" DROP DEFAULT"]
+        );
+        assert!(plan.reports.is_empty(), "{:?}", plan.reports);
+    }
+
+    #[test]
+    fn without_destructive_the_foreign_default_stays_and_is_reported_with_its_fix() {
+        let db = live(vec![
+            serial_id("author_id_seq"),
+            with_default(column("slug", "varchar", false), "''::character varying"),
+        ]);
+        let plan = plan_from_ir(&db, &models(), Dialect::Postgres, UPDATES);
+        assert!(ops(&plan).is_empty());
+        let [report] = plan.reports.as_slice() else {
+            panic!("{:?}", plan.reports);
+        };
+        assert_eq!(
+            report.kind,
+            crate::ReportKind::ForeignDefault { was: "''".into() }
+        );
+        assert_eq!(report.subject, crate::Subject::column("author", "slug"));
+        assert!(report.recurs);
+        assert_eq!(
+            report.text,
+            "author.slug has default '' in the database, none declared; it is left in \
+             place: connect(..., migrate_destructive=True) drops it, or run ALTER TABLE \
+             \"author\" ALTER COLUMN \"slug\" DROP DEFAULT."
+        );
+    }
+
+    #[test]
+    fn a_serial_keys_sequence_is_ferros_own_whatever_it_is_called() {
+        for sequence in ["author_id_seq", "writer_id_seq", "anything"] {
+            let db = live(vec![serial_id(sequence), column("slug", "varchar", false)]);
+            let plan = plan_from_ir(&db, &models(), Dialect::Postgres, DESTRUCTIVE);
+            assert!(ops(&plan).is_empty(), "{sequence}: {:?}", ops(&plan));
+        }
+        // The same `nextval` text on a column that owns no sequence is not
+        // recognised by its text.
+        let db = live(vec![
+            with_default(
+                column("id", "int", false),
+                "nextval('author_id_seq'::regclass)",
+            ),
+            column("slug", "varchar", false),
+        ]);
+        let plan = plan_from_ir(&db, &models(), Dialect::Postgres, DESTRUCTIVE);
+        assert_eq!(
+            ops(&plan),
+            vec![drop_default("id", "nextval('author_id_seq'::regclass)")]
+        );
+    }
+
+    #[test]
+    fn sqlites_kept_literal_on_a_not_null_column_is_never_drift_whatever_the_literal() {
+        for literal in ["'free'", "'x'", "0", "-1", "1.5", "TRUE", "NULL", "X'00'"] {
+            let db = live(vec![
+                column("id", "int", false),
+                with_default(column("slug", "varchar", false), literal),
+            ]);
+            let plan = plan_from_ir(&db, &models(), Dialect::Sqlite, DESTRUCTIVE);
+            assert!(ops(&plan).is_empty(), "{literal}: {:?}", ops(&plan));
+        }
+    }
+
+    #[test]
+    fn sqlite_an_expression_or_a_nullable_columns_default_is_a_rebuild() {
+        let cases = [
+            (column("slug", "varchar", false), "datetime('now')"),
+            (column("slug", "varchar", false), "CURRENT_TIMESTAMP"),
+            (column("slug", "varchar", true), "''"),
+        ];
+        for (col, text) in cases {
+            let nullable = col.nullable;
+            let db = live(vec![column("id", "int", false), with_default(col, text)]);
+            let target = declared(vec![
+                column("id", "int", false),
+                column("slug", "varchar", nullable),
+            ]);
+            let plan = plan_from_ir(&db, &target, Dialect::Sqlite, DESTRUCTIVE);
+            assert_eq!(ops(&plan), vec![drop_default("slug", text)], "{text}");
+            let verdict = &plan.operations[0].verdict;
+            assert_eq!(verdict.execution, Execution::Rebuild);
+            assert!(!verdict.drops_data);
+            let rendered = plan.render().expect("renders");
+            assert!(rendered[0].statements.is_empty());
+            let [report] = rendered[0].reports.as_slice() else {
+                panic!("{:?}", rendered[0].reports);
+            };
+            assert_eq!(
+                report.kind,
+                crate::ReportKind::SqliteInPlace {
+                    what: crate::InPlaceChange::DropDefault
+                }
+            );
+            assert!(report.text.contains("ferro migrate new"), "{}", report.text);
+            assert!(report.blocks());
+        }
+    }
+
+    #[test]
+    fn two_declared_snapshots_never_plan_a_drop_default() {
+        let before = declared(vec![
+            column("id", "int", false),
+            with_default(column("slug", "varchar", false), "datetime('now')"),
+        ]);
+        for dialect in [Dialect::Postgres, Dialect::Sqlite] {
+            let plan = plan_from_ir(&before, &models(), dialect, DESTRUCTIVE);
+            assert!(
+                !ops(&plan)
+                    .iter()
+                    .any(|op| matches!(op, MigrationOp::DropDefault { .. })),
+                "{dialect:?}: {:?}",
+                ops(&plan)
+            );
+        }
+    }
+
+    #[test]
+    fn the_down_toward_the_database_is_irreversible_with_its_reason() {
+        for (dialect, text, was) in [
+            (Dialect::Postgres, "''::character varying", "''"),
+            (Dialect::Sqlite, "datetime('now')", "datetime('now')"),
+        ] {
+            let db = live(vec![
+                column("id", "int", false),
+                with_default(column("slug", "varchar", false), text),
+            ]);
+            let up = plan_from_ir(&db, &models(), dialect, DESTRUCTIVE);
+            let up_ops = ops(&up);
+            assert_eq!(up_ops, vec![drop_default("slug", was)]);
+            let down = plan_down(&up_ops, &models(), &db, dialect);
+            let [PlannedOp { op, verdict }] = down.operations.as_slice() else {
+                panic!("{dialect:?}: {:?}", down.operations);
+            };
+            assert_eq!(op, &drop_default("slug", was));
+            assert!(!verdict.drops_data);
+            let Execution::Irreversible(reason) = &verdict.execution else {
+                panic!("{verdict:?}");
+            };
+            assert_eq!(
+                reason,
+                &format!(
+                    "the default {was} on author.slug was set outside ferro, and no declared \
+                     side holds it to put back; set it again by hand (ALTER TABLE \"author\" \
+                     ALTER COLUMN \"slug\" SET DEFAULT {was}) if it is wanted"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn a_live_default_is_never_a_value_a_down_writes() {
+        // The up drops a required column that holds a server default; its
+        // down puts the column back with no value for the rows, as before
+        // the live read carried defaults: the catalog text is no literal.
+        let db = live(vec![
+            column("id", "int", false),
+            with_default(
+                column("tier", "varchar", false),
+                "'free'::character varying",
+            ),
+        ]);
+        let models = declared(vec![column("id", "int", false)]);
+        let up = plan_from_ir(&db, &models, Dialect::Postgres, DESTRUCTIVE);
+        let up_ops = ops(&up);
+        assert!(
+            up_ops
+                .iter()
+                .all(|op| !matches!(op, MigrationOp::DropDefault { .. }))
+        );
+        let down = plan_down(&up_ops, &models, &db, Dialect::Postgres);
+        let add = down
+            .operations
+            .iter()
+            .find(|planned| matches!(planned.op, MigrationOp::AddColumn { .. }))
+            .expect("the column comes back");
+        assert!(add.verdict.demands_values, "{:?}", add.verdict);
+    }
+
+    #[test]
+    fn a_literals_display_cast_is_folded_and_anything_else_kept() {
+        assert_eq!(folded_default("''::character varying"), "''");
+        assert_eq!(folded_default("'it''s'::text"), "'it''s'");
+        assert_eq!(folded_default("'-1'::integer"), "'-1'");
+        assert_eq!(folded_default("0"), "0");
+        assert_eq!(
+            folded_default("nextval('x_seq'::regclass)"),
+            "nextval('x_seq'::regclass)"
+        );
+        assert_eq!(
+            folded_default("('a'::text || 'b'::text)"),
+            "('a'::text || 'b'::text)"
+        );
+        assert_eq!(folded_default("'a'::text || 'b'"), "'a'::text || 'b'");
+    }
+
+    #[test]
+    fn sqlite_literal_shapes() {
+        for literal in [
+            "'x'", "''", "'it''s'", "0", "+1", "-2.5", "1e3", ".5", "0x1F", "x'00'",
+        ] {
+            assert!(is_sqlite_literal(literal), "{literal}");
+        }
+        for expression in [
+            "datetime('now')",
+            "CURRENT_TIMESTAMP",
+            "'a' || 'b'",
+            "inf",
+            "nan",
+            "1 + 1",
+            "abs(-1)",
+        ] {
+            assert!(!is_sqlite_literal(expression), "{expression}");
+        }
     }
 }
