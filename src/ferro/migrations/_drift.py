@@ -180,6 +180,9 @@ _RENDERERS: dict[str, Callable[[dict[str, Any]], str]] = {
     "DropColumn": lambda op: f"{_column(op)} column is extra",
     "AlterColumnType": _type,
     "AlterColumnNullability": _nullability,
+    "DropDefault": lambda op: (
+        f"{_column(op)} has default {op['was']} in the database, none declared"
+    ),
     "ChangePrimaryKey": lambda op: (
         f"{op['table']} primary key is ({', '.join(op['from'])}), "
         f"snapshot says ({', '.join(op['to'])})"

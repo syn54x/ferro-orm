@@ -19,7 +19,8 @@ use ferro_ddl_lowering::{
     render_pg_enum_rename_type, render_pg_enum_rename_value, render_pg_serial_sequence_rename,
     render_rename_column, render_rename_constraint, render_rename_index, render_rename_policy,
     render_rename_table, render_validate_constraint, resolve_column_storage, row_policy_clauses,
-    row_policy_rebuild_statements, row_security_statements, sqlite_in_place_report,
+    row_policy_rebuild_statements, row_security_statements, sqlite_drop_default_report,
+    sqlite_in_place_report,
 };
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -139,7 +140,10 @@ pub(crate) fn render_from(
         Dialect::Postgres => indexes,
         Dialect::Sqlite => IndexMode::Plain,
     };
-    let (old, new) = (old_side.ir(), new_side.ir());
+    // A live column's `default` is its server default's catalog text, never
+    // a value a statement may write (a backfill reads the declared one).
+    let (old, new) = (old_side.writable_ir(), new_side.writable_ir());
+    let (old, new) = (old.as_ref(), new.as_ref());
     validate_schema_ir(old)?;
     validate_schema_ir(new)?;
     let old_models = index_models(&old.payload.models);
@@ -401,6 +405,18 @@ pub(crate) fn render_from(
                 out.statements.extend(emission.statements);
                 out.reports.extend(emission.reports);
             }
+            // A foreign default (ADR-0027 as amended): SQLite has no `ALTER
+            // COLUMN … DROP DEFAULT`, so only a rebuild drops it there.
+            MigrationOp::DropDefault { table, column, was } => match dialect {
+                Dialect::Postgres => out.statements.push(format!(
+                    "ALTER TABLE {} ALTER COLUMN {} DROP DEFAULT",
+                    quote_ident(table),
+                    quote_ident(column)
+                )),
+                Dialect::Sqlite => out
+                    .reports
+                    .push(sqlite_drop_default_report(table, column, was)),
+            },
             // No door changes a primary key in place: warn and skip.
             MigrationOp::ChangePrimaryKey { table, from, to } => {
                 out.reports.push(primary_key_kept_warning(table, to, from));
@@ -726,8 +742,8 @@ fn created_type_guards(
 
 /// The `serial` columns ([`is_pg_serial_column`]) of the table named any of
 /// `tables` on either side: a rename's sequence follows it whichever side
-/// declares the key (a live side reads no `autoincrement`, so a down planned
-/// back to the database finds it on the side it starts from).
+/// declares the key (a live side reads `autoincrement` from the sequence the
+/// column owns).
 fn serial_columns(
     sides: &[&BTreeMap<String, &SchemaModel>],
     tables: &[&String],

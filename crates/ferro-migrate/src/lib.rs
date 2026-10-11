@@ -37,7 +37,7 @@ pub use generate::{
 pub use order::order_by_dependencies;
 pub use plan::{
     Execution, Hint, HintError, LiveCheckFact, LiveFacts, LiveTableFacts, OpVerdict, PlanError,
-    PlannedOp, Refusal, Rider, RowRisk, Side, live_hints, plan_down, plan_from_ir,
+    PlannedOp, Refusal, Rider, RowRisk, Side, foreign_default, live_hints, plan_down, plan_from_ir,
 };
 pub use render::{RenderedOp, validate_schema_ir};
 pub use revision::{
@@ -255,6 +255,25 @@ pub enum MigrationOp {
         /// Column whose nullability drifted.
         column: String,
     },
+    /// A *foreign default* (ADR-0027 as amended): a server default a live
+    /// column holds that ferro did not leave there (ferro's own are a
+    /// `serial` key's sequence and SQLite's kept literal on a `NOT NULL`
+    /// column, ADR-0034). `ALTER TABLE … ALTER COLUMN … DROP DEFAULT` on
+    /// Postgres; a table rebuild on SQLite. Planned only between a live side
+    /// and a declared one, never between two snapshots, and from a live
+    /// database only under `migrate_destructive` (ADR-0013's ladder): it
+    /// removes what the model never declared. Toward a live database (a
+    /// down) it is irreversible: no declared side holds the default to put
+    /// back.
+    DropDefault {
+        /// Owning table.
+        table: String,
+        /// The column.
+        column: String,
+        /// The default as the catalog holds it, a literal's display cast
+        /// folded (`''`, `nextval('x_seq'::regclass)`, `datetime('now')`).
+        was: String,
+    },
     /// The table's primary-key columns differ between the snapshots (a key
     /// moved between columns, gained or lost one). No migration door changes
     /// a primary key in place: the pass warns and skips, the generator
@@ -454,6 +473,7 @@ impl MigrationOp {
             | MigrationOp::DropColumn { table, .. }
             | MigrationOp::AlterColumnType { table, .. }
             | MigrationOp::AlterColumnNullability { table, .. }
+            | MigrationOp::DropDefault { table, .. }
             | MigrationOp::ChangePrimaryKey { table, .. }
             | MigrationOp::AddIndex { table, .. }
             | MigrationOp::DropIndex { table, .. }
@@ -602,6 +622,13 @@ impl AnsweredBy for Report {
                             | MigrationOp::NoForceRowSecurity { table } if on_table(table))
                     }))
             }
+            // The foreign default, dropped.
+            ReportKind::ForeignDefault { .. } => has(&|op| {
+                matches!((op, &self.subject), (
+                    MigrationOp::DropDefault { table, column, .. },
+                    Subject::Column { table: subject, column: on },
+                ) if table == subject && column == on)
+            }),
             ReportKind::PolicyBodyReplaced { name } => has(&|op| {
                 matches!(op, MigrationOp::RebuildRowPolicy { table, name: rebuilt }
                     if on_table(table) && rebuilt == name)

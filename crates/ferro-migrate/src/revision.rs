@@ -509,7 +509,8 @@ fn written(
     plan: &Plan,
     up: bool,
 ) -> Result<RevisionOp, RevisionRefusal> {
-    let target = plan.target.ir();
+    let target = plan.target.writable_ir();
+    let target = target.as_ref();
     let demanding = rendered.is_none();
     let (statements, row_security_statements) = match rendered {
         Some(rendered) => (rendered.statements, rendered.row_security_statements),
@@ -617,6 +618,7 @@ fn has_twin(
         | MigrationOp::DropColumn { .. }
         | MigrationOp::AlterColumnNullability { .. }
         | MigrationOp::AlterColumnType { .. }
+        | MigrationOp::DropDefault { .. }
         | MigrationOp::AddIndex { .. }
         | MigrationOp::DropIndex { .. }
         | MigrationOp::RedefineIndex { .. }
@@ -700,6 +702,7 @@ fn op_column(op: &MigrationOp) -> Option<&str> {
         | MigrationOp::DropColumn { column, .. }
         | MigrationOp::AlterColumnType { column, .. }
         | MigrationOp::AlterColumnNullability { column, .. }
+        | MigrationOp::DropDefault { column, .. }
         | MigrationOp::AddForeignKey { column, .. }
         | MigrationOp::DropForeignKey { column, .. }
         | MigrationOp::RebuildForeignKey { column, .. } => Some(column),
