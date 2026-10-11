@@ -196,10 +196,7 @@ fn create_path_golden_fixture() -> Vec<SchemaModel> {
     let role_col = SchemaColumn {
         db_type: Some("text".to_string()),
         db_type_explicit: Some(true),
-        enum_values: Some(vec![
-            serde_json::json!("admin"),
-            serde_json::json!("user"),
-        ]),
+        enum_values: Some(vec![serde_json::json!("admin"), serde_json::json!("user")]),
         enum_type_name: Some("role".to_string()),
         ..ir_col("role", "string", None, false, false, false)
     };
@@ -209,7 +206,14 @@ fn create_path_golden_fixture() -> Vec<SchemaModel> {
             ir_col("avatar", "binary", Some("binary"), false, false, false),
             ir_col("balance", "decimal", Some("decimal"), false, false, false),
             ir_col("birth_date", "date", Some("date"), false, false, false),
-            ir_col("created_at", "datetime", Some("date-time"), false, false, false),
+            ir_col(
+                "created_at",
+                "datetime",
+                Some("date-time"),
+                false,
+                false,
+                false,
+            ),
             ir_col("email", "string", None, false, false, true),
             SchemaColumn {
                 primary_key: true,
@@ -280,10 +284,8 @@ fn create_path_golden_fixture() -> Vec<SchemaModel> {
 // (`ferro._core._render_create_table_sql_for_test`) — see
 // `.superpowers/sdd/capture_ground_truth.py`. The new IR-driven
 // `render_create_table` must match these byte-for-byte.
-const ORG_CREATE_SQLITE: &str =
-    "CREATE TABLE IF NOT EXISTS \"organization\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"name\" varchar NOT NULL )";
-const ORG_CREATE_POSTGRES: &str =
-    "CREATE TABLE IF NOT EXISTS \"organization\" ( \"id\" serial PRIMARY KEY NOT NULL, \"name\" varchar NOT NULL )";
+const ORG_CREATE_SQLITE: &str = "CREATE TABLE IF NOT EXISTS \"organization\" ( \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"name\" varchar NOT NULL )";
+const ORG_CREATE_POSTGRES: &str = "CREATE TABLE IF NOT EXISTS \"organization\" ( \"id\" serial PRIMARY KEY NOT NULL, \"name\" varchar NOT NULL )";
 const ACCOUNT_CREATE_SQLITE: &str = "CREATE TABLE IF NOT EXISTS \"account\" ( \"avatar\" blob NOT NULL, \"balance\" NUMERIC NOT NULL, \"birth_date\" DATE NOT NULL, \"created_at\" DATETIME NOT NULL, \"email\" varchar NOT NULL, \"id\" integer NOT NULL PRIMARY KEY AUTOINCREMENT, \"metadata_blob\" JSON NOT NULL, \"org_id\" integer NOT NULL, \"owner_id\" integer NOT NULL, \"role\" text NOT NULL CONSTRAINT \"ck_account_role\" CHECK (\"role\" IN ('admin', 'user')), \"token\" CHAR(32) NOT NULL, \"username\" varchar NOT NULL, \"wake_time\" TIME NOT NULL, CONSTRAINT \"fk_account_org_id_organization\" FOREIGN KEY (\"org_id\") REFERENCES \"organization\" (\"id\") ON DELETE CASCADE, CONSTRAINT \"fk_account_owner_id_organization\" FOREIGN KEY (\"owner_id\") REFERENCES \"organization\" (\"id\") ON DELETE RESTRICT )";
 const ACCOUNT_CREATE_POSTGRES: &str = "CREATE TABLE IF NOT EXISTS \"account\" ( \"avatar\" bytea NOT NULL, \"balance\" decimal NOT NULL, \"birth_date\" date NOT NULL, \"created_at\" timestamp with time zone NOT NULL, \"email\" varchar NOT NULL, \"id\" serial PRIMARY KEY NOT NULL, \"metadata_blob\" jsonb NOT NULL, \"org_id\" integer NOT NULL, \"owner_id\" integer NOT NULL, \"role\" text NOT NULL, \"token\" uuid NOT NULL, \"username\" varchar NOT NULL, \"wake_time\" time NOT NULL, CONSTRAINT \"fk_account_org_id_organization\" FOREIGN KEY (\"org_id\") REFERENCES \"organization\" (\"id\") ON DELETE CASCADE, CONSTRAINT \"fk_account_owner_id_organization\" FOREIGN KEY (\"owner_id\") REFERENCES \"organization\" (\"id\") ON DELETE RESTRICT )";
 
@@ -450,10 +452,7 @@ fn emit_sql_with_ir_drop_table_sqlite() {
 fn emit_sql_with_ir_add_table_postgres() {
     let model = schema_model(
         "user",
-        vec![
-            col("id", "int", false),
-            col("email", "text", true),
-        ],
+        vec![col("id", "int", false), col("email", "text", true)],
     );
     let new_ir = envelope(vec![model]);
     let plan = Plan::unplaced(vec![MigrationOp::AddTable {
@@ -1041,12 +1040,17 @@ fn emit_sql_i1_unique_names() {
 
 #[test]
 fn emit_sql_i1_check_names() {
-    assert_eq!(test_db_check_constraint_name("user", "role"), "ck_user_role");
+    assert_eq!(
+        test_db_check_constraint_name("user", "role"),
+        "ck_user_role"
+    );
 }
 
 #[test]
 fn emit_sql_canonical_db_type_spelling() {
-    use ferro_ddl_lowering::{db_type_token_to_canonical, sqlite_declared_type, CanonicalType, Dialect};
+    use ferro_ddl_lowering::{
+        CanonicalType, Dialect, db_type_token_to_canonical, sqlite_declared_type,
+    };
     let canonical = db_type_token_to_canonical("date", Dialect::Sqlite).unwrap();
     assert_eq!(canonical, CanonicalType::Date);
     // SQLAlchemy-compatible SQLite spelling (FF-B B5).
@@ -1109,7 +1113,10 @@ fn emit_sql_multi_op_ordering() {
         "named inline FK missing from user create: {user_create}"
     );
     assert!(
-        !result.statements.iter().any(|s| s.starts_with("ALTER TABLE") && s.contains("FOREIGN KEY")),
+        !result
+            .statements
+            .iter()
+            .any(|s| s.starts_with("ALTER TABLE") && s.contains("FOREIGN KEY")),
         "FKs must be inline, not standalone ALTER statements"
     );
 }
@@ -1199,10 +1206,7 @@ fn emit_drop_index_renders_drop() {
 
 #[test]
 fn emit_sql_no_comment_placeholders_on_full_plan() {
-    let old_ir = envelope(vec![schema_model(
-        "doc",
-        vec![col("name", "text", false)],
-    )]);
+    let old_ir = envelope(vec![schema_model("doc", vec![col("name", "text", false)])]);
     let new_ir = envelope(vec![schema_model(
         "doc",
         vec![
@@ -1229,7 +1233,11 @@ fn plan_from_ir_composite_all_new_columns_emits_add_index() {
     let old = envelope(vec![schema_model("doc", vec![col("id", "int", false)])]);
     let mut nm = schema_model(
         "doc",
-        vec![col("id", "int", false), col("a", "text", true), col("b", "text", true)],
+        vec![
+            col("id", "int", false),
+            col("a", "text", true),
+            col("b", "text", true),
+        ],
     );
     nm.indexes = vec![SchemaIndex {
         name: "idx_doc_a_b".to_string(),
@@ -1379,15 +1387,25 @@ fn render_create_table_golden_postgres() {
 
     // Postgres emits the db_check ALTER (quoted column, byte-matching runtime),
     // wrapped in the idempotent DO-block guard (G6, #176).
-    assert!(acct
-        .post_create_sqls
-        .iter()
-        .any(|s| s == PG_DB_CHECK_ACCOUNT_ROLE));
-    assert!(acct.reports.is_empty(), "unexpected warnings: {:?}", acct.reports);
+    assert!(
+        acct.post_create_sqls
+            .iter()
+            .any(|s| s == PG_DB_CHECK_ACCOUNT_ROLE)
+    );
+    assert!(
+        acct.reports.is_empty(),
+        "unexpected warnings: {:?}",
+        acct.reports
+    );
 
     // FKs inline, named, not in post-create.
     assert!(acct.create_sql.contains("CONSTRAINT \"fk_account_owner_id_organization\" FOREIGN KEY (\"owner_id\") REFERENCES \"organization\" (\"id\") ON DELETE RESTRICT"));
-    assert!(!acct.post_create_sqls.iter().any(|s| s.contains("FOREIGN KEY")));
+    assert!(
+        !acct
+            .post_create_sqls
+            .iter()
+            .any(|s| s.contains("FOREIGN KEY"))
+    );
 }
 
 /// The pinned CREATE TYPE guard for the golden enum fixture.
@@ -1418,11 +1436,12 @@ fn enum_fixture_model() -> SchemaModel {
 fn render_create_table_enum_native_on_postgres() {
     let model = enum_fixture_model();
     let emission = render_create_table(&model, Dialect::Postgres).unwrap();
-    assert_eq!(emission.pre_create_sqls, vec![PG_CREATE_TYPE_STATUS.to_string()]);
+    assert_eq!(
+        emission.pre_create_sqls,
+        vec![PG_CREATE_TYPE_STATUS.to_string()]
+    );
     assert!(
-        emission
-            .create_sql
-            .contains("\"status\" status NOT NULL"),
+        emission.create_sql.contains("\"status\" status NOT NULL"),
         "column must be typed as the enum: {}",
         emission.create_sql
     );
@@ -1470,8 +1489,14 @@ fn emit_add_table_dedupes_create_type_across_columns() {
         .collect();
     assert_eq!(create_types.len(), 1, "{:?}", result.statements);
     // And the guard precedes the CREATE TABLE.
-    let type_pos = result.statements.iter().position(|s| s.contains("CREATE TYPE"));
-    let table_pos = result.statements.iter().position(|s| s.starts_with("CREATE TABLE"));
+    let type_pos = result
+        .statements
+        .iter()
+        .position(|s| s.contains("CREATE TYPE"));
+    let table_pos = result
+        .statements
+        .iter()
+        .position(|s| s.starts_with("CREATE TABLE"));
     assert!(type_pos < table_pos);
 }
 
@@ -1549,7 +1574,11 @@ fn emit_alter_refuses_varchar_to_enum_and_varchar_to_time() {
         result.reports[0],
         ferro_ddl_lowering::enum_type_move_report("ticket", "status", Some("text"))
     );
-    assert!(result.reports[1].text.contains("ticket.wake_time"), "{}", result.reports[1].text);
+    assert!(
+        result.reports[1].text.contains("ticket.wake_time"),
+        "{}",
+        result.reports[1].text
+    );
 }
 
 /// `mood: Mood` (a native Postgres enum type) becomes `mood: str`, and back:
@@ -1637,7 +1666,10 @@ fn plan_from_ir_single_column_new_index_is_skipped() {
     let old = envelope(vec![schema_model("doc", vec![col("id", "int", false)])]);
     let mut nm = schema_model(
         "doc",
-        vec![col("id", "int", false), col_with_flags("c", "text", true, false, true, None)],
+        vec![
+            col("id", "int", false),
+            col_with_flags("c", "text", true, false, true, None),
+        ],
     );
     nm.indexes = vec![SchemaIndex {
         name: "idx_doc_c".to_string(),
@@ -1779,7 +1811,10 @@ fn render_create_table_inlines_named_table_checks_on_both_dialects() {
             emission.create_sql
         );
         assert!(
-            !emission.post_create_sqls.iter().any(|s| s.contains("CHECK")),
+            !emission
+                .post_create_sqls
+                .iter()
+                .any(|s| s.contains("CHECK")),
             "table checks must not travel the ALTER-shaped post-create path ({dialect:?}): {:?}",
             emission.post_create_sqls
         );
@@ -1803,11 +1838,12 @@ fn render_create_table_inlines_every_table_check_in_ir_order() {
         let inflow = sql
             .find("ck_transfer_at_most_one_inflow")
             .unwrap_or_else(|| panic!("missing inflow check ({dialect:?}): {sql}"));
-        assert!(outflow < inflow, "IR order must be preserved ({dialect:?}): {sql}");
         assert!(
-            sql.contains(
-                "IS NULL)), CONSTRAINT \"ck_transfer_at_most_one_inflow\""
-            ),
+            outflow < inflow,
+            "IR order must be preserved ({dialect:?}): {sql}"
+        );
+        assert!(
+            sql.contains("IS NULL)), CONSTRAINT \"ck_transfer_at_most_one_inflow\""),
             "checks must be comma-separated inline clauses ({dialect:?}): {sql}"
         );
     }
@@ -1819,7 +1855,9 @@ fn render_create_table_inlines_every_table_check_in_ir_order() {
 fn render_create_table_without_table_checks_is_unchanged() {
     let with_checks = transfer_model_with_table_checks(vec![]);
     for dialect in [Dialect::Sqlite, Dialect::Postgres] {
-        let sql = render_create_table(&with_checks, dialect).unwrap().create_sql;
+        let sql = render_create_table(&with_checks, dialect)
+            .unwrap()
+            .create_sql;
         assert!(!sql.contains("CHECK"), "{sql}");
         assert!(!sql.contains(", )"), "{sql}");
     }
@@ -1913,7 +1951,10 @@ fn a_column_check_rides_its_new_column_and_stands_alone_on_an_existing_one() {
     // `emit_add_column` already emits the db_check DO-block for a column it
     // adds; a standalone AddCheck would duplicate it (the same dedup
     // `diff_model_indexes` applies to single-column indexes).
-    let mut model = schema_model("account", vec![ir_col("role", "string", None, true, false, false)]);
+    let mut model = schema_model(
+        "account",
+        vec![ir_col("role", "string", None, true, false, false)],
+    );
     model.checks = vec![SchemaCheck {
         name: test_db_check_constraint_name("account", "role"),
         column: "role".to_string(),
@@ -1978,7 +2019,9 @@ fn emit_sql_with_ir_add_check_table_check_alters_on_postgres_and_warns_on_sqlite
     assert!(lite.statements.is_empty(), "{:?}", lite.statements);
     assert_eq!(lite.reports.len(), 1);
     assert!(
-        lite.reports[0].text.contains("ck_transfer_at_most_one_outflow"),
+        lite.reports[0]
+            .text
+            .contains("ck_transfer_at_most_one_outflow"),
         "the SQLite skip names the constraint: {}",
         lite.reports[0].text
     );
@@ -1986,7 +2029,10 @@ fn emit_sql_with_ir_add_check_table_check_alters_on_postgres_and_warns_on_sqlite
 
 #[test]
 fn emit_sql_with_ir_add_check_column_check_reuses_the_db_check_do_block() {
-    let mut model = schema_model("account", vec![ir_col("role", "string", None, true, false, false)]);
+    let mut model = schema_model(
+        "account",
+        vec![ir_col("role", "string", None, true, false, false)],
+    );
     model.checks = vec![SchemaCheck {
         name: test_db_check_constraint_name("account", "role"),
         column: "role".to_string(),
@@ -2117,7 +2163,9 @@ fn emit_sql_with_ir_rebuild_check_drops_then_bare_adds_on_postgres() {
     assert!(lite.statements.is_empty(), "{:?}", lite.statements);
     assert_eq!(lite.reports.len(), 1);
     assert!(
-        lite.reports[0].text.contains("ck_transfer_at_most_one_outflow"),
+        lite.reports[0]
+            .text
+            .contains("ck_transfer_at_most_one_outflow"),
         "{}",
         lite.reports[0].text
     );
@@ -2727,7 +2775,11 @@ fn emit_sql_with_ir_add_fk_postgres_and_sqlite() {
     let sqlite = render_flat(&plan, &empty_envelope(), &new_ir, Dialect::Sqlite).unwrap();
     assert!(sqlite.statements.is_empty());
     assert_eq!(sqlite.reports.len(), 1);
-    assert!(sqlite.reports[0].text.contains("SQLite cannot add table constraints"));
+    assert!(
+        sqlite.reports[0]
+            .text
+            .contains("SQLite cannot add table constraints")
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -5046,11 +5098,7 @@ mod enum_renames {
             }
             assert_eq!(plan.op_list(), expected, "{dialect:?}");
             assert!(plan.reports.is_empty(), "{:?}", plan.reports);
-            assert!(
-                plan.reports.is_empty(),
-                "{:?}",
-                plan.reports
-            );
+            assert!(plan.reports.is_empty(), "{:?}", plan.reports);
         }
     }
 
@@ -5314,11 +5362,7 @@ mod enum_renames {
             // warning that `canceled` is a label the model no longer declares.
             assert_eq!(plan.op_list(), expected);
             assert!(plan.reports.is_empty(), "{:?}", plan.reports);
-            assert!(
-                plan.reports.is_empty(),
-                "{:?}",
-                plan.reports
-            );
+            assert!(plan.reports.is_empty(), "{:?}", plan.reports);
         }
     }
 
@@ -5473,11 +5517,7 @@ fn the_snapshot_side_tears_down_a_dropped_declaration_and_rebuilds_an_edited_raw
             name: "rls_ledgerrow_raw".into(),
         }]
     );
-    assert!(
-        plan.reports.is_empty(),
-        "{:?}",
-        plan.reports
-    );
+    assert!(plan.reports.is_empty(), "{:?}", plan.reports);
 }
 
 #[test]
@@ -5936,7 +5976,10 @@ fn a_dropped_columns_own_live_check_rides_the_drop_on_both_dialects() {
             .collect();
         let mut expected = vec!["ALTER TABLE \"author\" DROP COLUMN \"mood\""];
         if dialect == Dialect::Postgres {
-            expected.insert(0, "ALTER TABLE \"author\" DROP CONSTRAINT \"ck_author_mood\"");
+            expected.insert(
+                0,
+                "ALTER TABLE \"author\" DROP CONSTRAINT \"ck_author_mood\"",
+            );
         }
         assert_eq!(statements, expected, "{dialect:?}");
     }

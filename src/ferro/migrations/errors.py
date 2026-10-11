@@ -87,13 +87,24 @@ class DatabaseAheadError(MigrationRefused):
     """``up()`` / ``require_applied()``: the database has applied migrations
     this checkout does not have (``ahead``, ``NNNN_<name>``).
 
-    Pass ``allow_ahead=True`` to run beside them, as a rolling deploy does.
+    ``contract_steps`` names each of their steps whose class is not
+    ``expand`` (``NNNN_<name>:NN``, ADR-0054): a step the previous release's
+    writes may fail beside. ``allow_ahead="expand-only"`` lets the database
+    through when it is empty, and its message names the first; pass
+    ``allow_ahead=True`` to run beside any of them, as a rolling deploy with
+    a fixed old version does.
     """
 
     def __init__(
-        self, ahead: Sequence[str], message: str, *, report: RunReport | None = None
+        self,
+        ahead: Sequence[str],
+        message: str,
+        *,
+        report: RunReport | None = None,
+        contract_steps: Sequence[str] = (),
     ) -> None:
         self.ahead = list(ahead)
+        self.contract_steps = list(contract_steps)
         super().__init__(
             f"{message}\nPass allow_ahead=True to run beside them (a rolling deploy).",
             report=report,

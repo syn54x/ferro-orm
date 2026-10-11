@@ -182,10 +182,27 @@ async def test_a_database_ahead_of_the_checkout_is_refused_unless_allowed(
 
     for raised in (from_require, from_up):
         assert raised.value.ahead == ["0002_add_teams"]
+        # 0002 adds a table: every step it holds is expand.
+        assert raised.value.contract_steps == []
         assert str(raised.value) == expected
     assert await ferro.migrations.require_applied(allow_ahead=True) is None
     report = await ferro.migrations.up(allow_ahead=True)
     assert report.applied == [] and report.ahead == ["0002_add_teams"]
+    # The previous release of a rolling deploy (ADR-0054).
+    assert await ferro.migrations.require_applied(allow_ahead="expand-only") is None
+    report = await ferro.migrations.up(allow_ahead="expand-only")
+    assert report.applied == [] and report.ahead == ["0002_add_teams"]
+
+
+async def test_allow_ahead_takes_only_its_three_values(project, pkg, db):
+    two_migrations(project, pkg, db.backend)
+    await connect(db.url)
+    for call in (ferro.migrations.up, ferro.migrations.require_applied):
+        with pytest.raises(TypeError, match='False, True or "expand-only"'):
+            await call(allow_ahead="sometimes")  # ty: ignore[invalid-argument-type]
+        with pytest.raises(TypeError, match="got 1"):
+            await call(allow_ahead=1)  # ty: ignore[invalid-argument-type]
+    assert "_ferro_migrations" not in db.tables()
 
 
 async def test_up_raises_a_run_refusal_rather_than_returning_it(project, pkg, db):

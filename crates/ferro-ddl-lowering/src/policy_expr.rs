@@ -107,9 +107,30 @@ fn precedence(token: &Token) -> Option<Precedence> {
 /// Words that introduce a clause rather than call a function, so a `(` right
 /// after one is a grouping paren and not an argument list.
 const CLAUSE_WORDS: [&str; 24] = [
-    "and", "or", "not", "in", "where", "having", "on", "select", "from", "values", "by",
-    "when", "then", "else", "case", "exists", "all", "any", "using", "check", "returning",
-    "distinct", "as", "is",
+    "and",
+    "or",
+    "not",
+    "in",
+    "where",
+    "having",
+    "on",
+    "select",
+    "from",
+    "values",
+    "by",
+    "when",
+    "then",
+    "else",
+    "case",
+    "exists",
+    "all",
+    "any",
+    "using",
+    "check",
+    "returning",
+    "distinct",
+    "as",
+    "is",
 ];
 
 fn is_ident_start(ch: char) -> bool {
@@ -132,8 +153,8 @@ fn is_bare_ident(word: &str) -> bool {
 }
 
 const OPERATOR_CHARS: [char; 20] = [
-    '=', '<', '>', '!', '~', '@', '#', '&', '|', '?', '+', '-', '*', '/', '%', '^', ':',
-    '.', ',', ';',
+    '=', '<', '>', '!', '~', '@', '#', '&', '|', '?', '+', '-', '*', '/', '%', '^', ':', '.', ',',
+    ';',
 ];
 
 /// Split a policy expression into [`Token`]s. Unrecognized bytes become
@@ -250,7 +271,10 @@ pub(crate) enum Node {
     Leaf(Token),
     /// A parenthesized group. `call` marks an argument list (`nullif(…)`),
     /// which is never a grouping paren and never dropped.
-    Group { call: bool, children: Vec<Node> },
+    Group {
+        call: bool,
+        children: Vec<Node>,
+    },
 }
 
 /// Build the paren tree. Unbalanced input (never produced by the catalog or by
@@ -364,8 +388,10 @@ fn strip_column_qualifiers(nodes: Vec<Node>) -> Vec<Node> {
     let mut out: Vec<Node> = Vec::new();
     let mut i = 0usize;
     while i < nodes.len() {
-        let is_qualifier = matches!(nodes.get(i), Some(Node::Leaf(Token::Word(_))) | Some(Node::Leaf(Token::Quoted(_))))
-            && matches!(nodes.get(i + 1), Some(Node::Leaf(Token::Op(op))) if op == ".")
+        let is_qualifier = matches!(
+            nodes.get(i),
+            Some(Node::Leaf(Token::Word(_))) | Some(Node::Leaf(Token::Quoted(_)))
+        ) && matches!(nodes.get(i + 1), Some(Node::Leaf(Token::Op(op))) if op == ".")
             && matches!(
                 nodes.get(i + 2),
                 Some(Node::Leaf(Token::Word(_))) | Some(Node::Leaf(Token::Quoted(_)))
@@ -703,9 +729,7 @@ fn array_literal_items(children: &[Node]) -> Option<Vec<Node>> {
     }
     let rest: Vec<Node> = iter.cloned().collect();
     match rest.last() {
-        Some(Node::Leaf(Token::Op(op))) if op == "]" => {
-            Some(rest[..rest.len() - 1].to_vec())
-        }
+        Some(Node::Leaf(Token::Op(op))) if op == "]" => Some(rest[..rest.len() - 1].to_vec()),
         _ => None,
     }
 }

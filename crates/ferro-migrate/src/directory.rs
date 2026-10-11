@@ -89,6 +89,12 @@ pub struct Headers {
     pub data_dependent: bool,
     /// `-- ferro: not-applicable`
     pub not_applicable: bool,
+    /// `-- ferro: expand`: a hand-written SQL step its author declares
+    /// `expand` (ADR-0054); without it a hand-written step is `contract`. The
+    /// generator never writes it: a generated step's class is the planner's.
+    /// A ferro older than the header refuses the file, as it refuses any
+    /// header it does not know.
+    pub expand: bool,
     /// `-- ferro: nothing-to-reverse <reason>`
     pub nothing_to_reverse: Option<String>,
     /// `-- ferro: irreversible <reason>`
@@ -124,6 +130,7 @@ impl Headers {
                 ("destructive", None) => headers.destructive = true,
                 ("data-dependent", None) => headers.data_dependent = true,
                 ("not-applicable", None) => headers.not_applicable = true,
+                ("expand", None) => headers.expand = true,
                 ("nothing-to-reverse", Some(reason)) if !reason.is_empty() => {
                     headers.nothing_to_reverse = Some(reason)
                 }
@@ -145,6 +152,7 @@ impl Headers {
             (self.foreign_keys_off, "foreign-keys-off"),
             (self.destructive, "destructive"),
             (self.data_dependent, "data-dependent"),
+            (self.expand, "expand"),
         ];
         for (set, token) in flags {
             if set {
@@ -1004,6 +1012,7 @@ mod tests {
             destructive: true,
             data_dependent: true,
             not_applicable: true,
+            expand: true,
             nothing_to_reverse: Some("the up drops nothing".into()),
             irreversible: Some("rows are gone".into()),
         };
@@ -1042,6 +1051,39 @@ mod tests {
             Headers::parse("-- ferro: destructive now\n"),
             Err("-- ferro: destructive now".to_string()),
             "a flag takes no reason"
+        );
+    }
+
+    #[test]
+    fn a_hand_step_declares_itself_expand_and_the_flag_takes_no_text() {
+        // ADR-0054: a hand-written SQL step is contract unless its author
+        // writes `-- ferro: expand` beside the SQL.
+        assert_eq!(
+            Headers::parse(
+                "-- ferro: expand
+CREATE INDEX i ON t (c);
+"
+            ),
+            Ok(Headers {
+                expand: true,
+                ..Headers::default()
+            })
+        );
+        assert!(
+            !Headers::parse(
+                "UPDATE t SET c = 1;
+"
+            )
+            .unwrap()
+            .expand
+        );
+        assert_eq!(
+            Headers::parse(
+                "-- ferro: expand now
+"
+            ),
+            Err("-- ferro: expand now".to_string()),
+            "a flag takes no text after it"
         );
     }
 

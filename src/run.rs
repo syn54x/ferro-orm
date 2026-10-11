@@ -32,9 +32,10 @@ use crate::ddl_exec::{
 use crate::state::TransactionConnection;
 use ferro_ddl_lowering::{Dialect, quote_ident};
 use ferro_migrate::run_plan::{
-    Direction, ExecMode, HeldDirectory, OrderKeys, Origin, PlannedStep, RebuildExpectation,
-    RecordKind, RerecordAction, RerecordMode, RunPlan, RunStatus, StepRecord, TRACKING_FORMAT,
-    check_adoption, check_format, rerecord_plan, run_lock_key, run_status, split_statements,
+    AllowAhead, Direction, ExecMode, HeldDirectory, OrderKeys, Origin, PlannedStep,
+    RebuildExpectation, RecordKind, RerecordAction, RerecordMode, RunPlan, RunStatus, StepClass,
+    StepRecord, TRACKING_FORMAT, TRACKING_MINOR, check_adoption, check_format, rerecord_plan,
+    run_lock_key, run_status, split_statements, unclassified,
 };
 use ferro_migrate::snapshot::encode_checksum;
 use ferro_schema_ir::SchemaModel;
@@ -78,8 +79,8 @@ pub fn refused(text: impl Into<String>) -> PyErr {
 }
 
 /// A run planner refusal as `RunRefused.from_core(text, kind=...,
-/// migration=..., step=..., reason=..., ahead_only=..., names=...,
-/// head=...)`: the `RunRefused` subclass its kind has (`AlreadyTrackedError`,
+/// migration=..., step=..., reason=..., ahead_only=..., contract_steps=...,
+/// names=..., head=...)`: the `RunRefused` subclass its kind has (`AlreadyTrackedError`,
 /// ...), plain `RunRefused` otherwise, so a caller matches on its kind or
 /// type rather than its text. Falls back to `RuntimeError` only if the
 /// Python module cannot be imported.
@@ -93,6 +94,7 @@ pub fn refused_by(refusal: &ferro_migrate::RunRefusal) -> PyErr {
             kwargs.set_item("step", refusal.step())?;
             kwargs.set_item("reason", refusal.reason())?;
             kwargs.set_item("ahead_only", refusal.ahead_only())?;
+            kwargs.set_item("contract_steps", refusal.contract_steps())?;
             kwargs.set_item("names", refusal.names())?;
             kwargs.set_item("head", refusal.head())?;
             py.import("ferro.migrations.report")?
@@ -360,6 +362,55 @@ async fn table_exists(engine: &EngineHandle, tracking: &Tracking, name: &str) ->
     }
     .map_err(|e| db_error("reading the catalog", e))?;
     Ok(!rows.is_empty())
+}
+
+/// Whether the tracking table `table` has the column `name`: what tells a
+/// reader on a lower tracking minor (ADR-0030 as amended) not to name a
+/// column an older ferro never added.
+async fn column_exists(
+    engine: &EngineHandle,
+    tracking: &Tracking,
+    table: &str,
+    name: &str,
+) -> PyResult<bool> {
+    let (sql, binds) = column_exists_query(engine.backend(), tracking, table, name);
+    let rows = engine
+        .fetch_all_sql_unprepared_with_binds(&sql, &binds)
+        .await
+        .map_err(|e| db_error("reading the catalog", e))?;
+    Ok(!rows.is_empty())
+}
+
+/// The catalog query [`column_exists`] runs, for a connection or a pool.
+fn column_exists_query(
+    dialect: Dialect,
+    tracking: &Tracking,
+    table: &str,
+    name: &str,
+) -> (String, Vec<EngineBindValue>) {
+    match dialect {
+        Dialect::Sqlite => (
+            "SELECT 1 FROM pragma_table_info(?) WHERE name = ?".to_string(),
+            vec![
+                EngineBindValue::String(table.to_string()),
+                EngineBindValue::String(name.to_string()),
+            ],
+        ),
+        Dialect::Postgres => (
+            "SELECT 1 FROM information_schema.columns \
+             WHERE table_schema = COALESCE($1, current_schema()) AND table_name = $2 \
+             AND column_name = $3"
+                .to_string(),
+            vec![
+                match &tracking.schema {
+                    Some(schema) => EngineBindValue::String(schema.clone()),
+                    None => EngineBindValue::Null(NullKind::String),
+                },
+                EngineBindValue::String(table.to_string()),
+                EngineBindValue::String(name.to_string()),
+            ],
+        ),
+    }
 }
 
 /// The tables in the governed schema, sorted — what the adoption refusal
@@ -921,11 +972,13 @@ fn tracking_ddl(dialect: Dialect, tracking: &Tracking) -> [String; 2] {
              \x20   origin             TEXT        NOT NULL,\n\
              \x20   reverting          {boolean},\n\
              \x20   revert_cursor      TEXT,\n\
+             \x20   class              TEXT,\n\
              \x20   PRIMARY KEY (migration, step)\n)",
             tracking.table(TRACKING_TABLE)
         ),
         format!(
-            "CREATE TABLE IF NOT EXISTS {} (format INTEGER NOT NULL, governed_schema TEXT NOT NULL)",
+            "CREATE TABLE IF NOT EXISTS {} (format INTEGER NOT NULL, governed_schema TEXT NOT \
+             NULL, minor INTEGER NOT NULL DEFAULT 0)",
             tracking.table(FORMAT_TABLE)
         ),
     ]
@@ -957,9 +1010,12 @@ async fn refuse_missing_schema(engine: &EngineHandle, tracking: &Tracking) -> Py
 }
 
 /// Create `_ferro_migrations` and `_ferro_migrations_format` (with its one
-/// row: format 1 and the governed schema) where they are missing, in
-/// `tracking_schema` when set. Run under the run lock by the first mutating
-/// verb.
+/// row: format 1, the governed schema and [`TRACKING_MINOR`]) where they are
+/// missing, in `tracking_schema` when set; on tables an older ferro created
+/// at a lower minor, add what each later minor adds (minor 1: the format
+/// table's `minor` and the records' nullable `class`) and record the minor,
+/// leaving `format` as it is (ADR-0030 as amended, ADR-0054). Run under the
+/// run lock by the first mutating verb.
 ///
 /// # Errors
 /// A refusal naming `CREATE SCHEMA` when `tracking_schema` does not exist;
@@ -982,19 +1038,53 @@ pub async fn ensure_tracking_tables(
             conn.execute_sql_unprepared(&ddl).await?;
         }
         let format_table = tracking.table(FORMAT_TABLE);
+        // Minor 1, on tables an older ferro created without it: additive
+        // columns only, each nullable or defaulted, so an older ferro reads,
+        // inserts and re-records beside them unchanged.
+        for (table, name, ddl) in [
+            (FORMAT_TABLE, "minor", "minor INTEGER NOT NULL DEFAULT 0"),
+            (TRACKING_TABLE, "class", "class TEXT"),
+        ] {
+            let (sql, binds) = column_exists_query(dialect, &tracking, table, name);
+            if conn
+                .fetch_all_sql_unprepared_with_binds(&sql, &binds)
+                .await?
+                .is_empty()
+            {
+                let alter = format!("ALTER TABLE {} ADD COLUMN {ddl}", tracking.table(table));
+                crate::log_debug(format!("ferro migrate: {alter}"));
+                conn.execute_sql_unprepared(&alter).await?;
+            }
+        }
         let present = conn
             .fetch_all_sql_unprepared_with_binds(&format!("SELECT format FROM {format_table}"), &[])
             .await?;
         if present.is_empty() {
             conn.fetch_all_sql_unprepared_with_binds(
                 &format!(
-                    "INSERT INTO {format_table} (format, governed_schema) VALUES ({}, {})",
+                    "INSERT INTO {format_table} (format, governed_schema, minor) VALUES ({}, {}, \
+                     {})",
                     param(dialect, 1),
-                    param(dialect, 2)
+                    param(dialect, 2),
+                    param(dialect, 3)
                 ),
                 &[
                     EngineBindValue::I64(TRACKING_FORMAT),
                     EngineBindValue::String(governed.clone()),
+                    EngineBindValue::I64(TRACKING_MINOR),
+                ],
+            )
+            .await?;
+        } else {
+            conn.fetch_all_sql_unprepared_with_binds(
+                &format!(
+                    "UPDATE {format_table} SET minor = {} WHERE minor < {}",
+                    param(dialect, 1),
+                    param(dialect, 2)
+                ),
+                &[
+                    EngineBindValue::I64(TRACKING_MINOR),
+                    EngineBindValue::I64(TRACKING_MINOR),
                 ],
             )
             .await?;
@@ -1018,6 +1108,10 @@ pub struct TrackingState {
     pub exists: bool,
     /// The format number, when the format table exists.
     pub format: Option<i64>,
+    /// The tracking minor (ADR-0030 as amended): 0 on tables an older ferro
+    /// created, which have no `minor` column; [`TRACKING_MINOR`] once a
+    /// mutating verb of this ferro has run.
+    pub minor: i64,
     /// The connection's governed schema.
     pub governed_schema: String,
     /// The step records, by migration and step.
@@ -1027,9 +1121,16 @@ pub struct TrackingState {
     pub refusal: Option<String>,
 }
 
+/// The columns of format 1, minor 0: what ferro 0.22 reads and writes, by
+/// name, so it reads, inserts and re-records beside any column a later
+/// minor adds.
 const RECORD_COLUMNS: &str = "migration, step, migration_name, file, kind, checksum, \
      snapshot_checksum, started_at, finished_at, failed_at, error, resume_cursor, rows_done, \
      duration_ms, ferro_version, origin, reverting, revert_cursor";
+
+/// Minor 1's column (ADR-0054): the step class, read when the table has it
+/// and written by every record writer of this ferro.
+const CLASS_COLUMN: &str = "class";
 
 fn record_from_row(row: &EngineRow) -> PyResult<StepRecord> {
     let bad = |what: &str| {
@@ -1066,6 +1167,9 @@ fn record_from_row(row: &EngineRow) -> PyResult<StepRecord> {
             .ok_or_else(|| bad("origin"))?,
         reverting: int(get(16)).unwrap_or(0) != 0,
         revert_cursor: text(get(17)),
+        // Absent on a lower minor, `NULL` in a record an older ferro wrote,
+        // and never a spelling this ferro does not know: each is no class.
+        class: text(get(18)).and_then(|class| StepClass::parse(&class)),
     })
 }
 
@@ -1090,6 +1194,7 @@ pub async fn read_records(
         table: format!("{shown_schema}.{TRACKING_TABLE}"),
         exists: false,
         format: None,
+        minor: 0,
         governed_schema: governed,
         records: Vec::new(),
         refusal: None,
@@ -1106,12 +1211,32 @@ pub async fn read_records(
             .await
             .map_err(|e| db_error("reading the tracking table's format", e))?;
         state.format = rows.first().and_then(|row| int(column(row, 0)));
+        if column_exists(engine, &tracking, FORMAT_TABLE, "minor").await? {
+            let rows = engine
+                .fetch_all_sql_unprepared(&format!(
+                    "SELECT minor FROM {}",
+                    tracking.table(FORMAT_TABLE)
+                ))
+                .await
+                .map_err(|e| db_error("reading the tracking table's minor", e))?;
+            state.minor = rows
+                .first()
+                .and_then(|row| int(column(row, 0)))
+                .unwrap_or(0);
+        }
     }
     state.exists = table_exists(engine, &tracking, TRACKING_TABLE).await?;
     if state.exists {
+        // A reader never writes: on a lower minor it reads the columns that
+        // are there, and every record reads as having no class.
+        let columns = if column_exists(engine, &tracking, TRACKING_TABLE, CLASS_COLUMN).await? {
+            format!("{RECORD_COLUMNS}, {CLASS_COLUMN}")
+        } else {
+            RECORD_COLUMNS.to_string()
+        };
         let rows = engine
             .fetch_all_sql_unprepared(&format!(
-                "SELECT {RECORD_COLUMNS} FROM {} ORDER BY migration, step",
+                "SELECT {columns} FROM {} ORDER BY migration, step",
                 tracking.table(TRACKING_TABLE)
             ))
             .await;
@@ -1167,6 +1292,10 @@ fn record_binds(record: &StepRecord) -> Vec<EngineBindValue> {
         EngineBindValue::String(record.origin.as_str().to_string()),
         EngineBindValue::Bool(record.reverting),
         opt(&record.revert_cursor),
+        match record.class {
+            Some(class) => EngineBindValue::String(class.as_str().to_string()),
+            None => EngineBindValue::Null(NullKind::String),
+        },
     ]
 }
 
@@ -1198,6 +1327,7 @@ fn upsert_sql(dialect: Dialect, tracking: &Tracking) -> String {
         p(16),
         p(17),
         p(18),
+        p(19),
     ]
     .join(", ");
     let updated = [
@@ -1215,13 +1345,14 @@ fn upsert_sql(dialect: Dialect, tracking: &Tracking) -> String {
         "origin",
         "reverting",
         "revert_cursor",
+        CLASS_COLUMN,
     ]
     .iter()
     .map(|c| format!("{c} = excluded.{c}"))
     .collect::<Vec<_>>()
     .join(", ");
     format!(
-        "INSERT INTO {} AS t ({RECORD_COLUMNS}) VALUES ({values}) \
+        "INSERT INTO {} AS t ({RECORD_COLUMNS}, {CLASS_COLUMN}) VALUES ({values}) \
          ON CONFLICT (migration, step) DO UPDATE SET {updated}, \
          duration_ms = t.duration_ms + excluded.duration_ms",
         tracking.table(TRACKING_TABLE)
@@ -1677,6 +1808,57 @@ pub async fn rerecord_checksum(
     Ok(())
 }
 
+/// Record each `(migration, step, class)` on a record that has no class
+/// yet, in one transaction: a record a run of this ferro classified since is
+/// left as it is. Called under the run lock, by
+/// [`Locked`]'s first step on a database an older ferro wrote to.
+///
+/// # Errors
+/// A database error, after which nothing is written.
+pub async fn write_classes(
+    engine: &EngineHandle,
+    tracking_schema: Option<&str>,
+    classes: &[(u16, u8, StepClass)],
+) -> PyResult<()> {
+    if classes.is_empty() {
+        return Ok(());
+    }
+    let dialect = engine.backend();
+    let p = |n: usize| param(dialect, n);
+    let sql = format!(
+        "UPDATE {} SET {CLASS_COLUMN} = {} WHERE migration = {} AND step = {} AND \
+         {CLASS_COLUMN} IS NULL",
+        Tracking::new(dialect, tracking_schema).table(TRACKING_TABLE),
+        p(1),
+        p(2),
+        p(3)
+    );
+    let mut conn = engine
+        .begin_transaction_connection()
+        .await
+        .map_err(|e| db_error("recording the step classes", e))?;
+    let result: Result<(), sqlx::Error> = async {
+        for (migration, step, class) in classes {
+            conn.fetch_all_sql_unprepared_with_binds(
+                &sql,
+                &[
+                    EngineBindValue::String(class.as_str().to_string()),
+                    EngineBindValue::I64(i64::from(*migration)),
+                    EngineBindValue::I64(i64::from(*step)),
+                ],
+            )
+            .await?;
+        }
+        conn.commit().await
+    }
+    .await;
+    if let Err(err) = result {
+        let _ = conn.rollback().await;
+        return Err(db_error("recording the step classes", err));
+    }
+    Ok(())
+}
+
 /// A SQLite `foreign-keys-off` step, outside the DDL executor on purpose:
 /// the pragma read back, `BEGIN IMMEDIATE`, the file, `foreign_key_check`
 /// as a failure, the run lock verified, the record settled, `COMMIT`. Its
@@ -1916,7 +2098,7 @@ impl Tracked {
     pub async fn plan(
         &self,
         direction: Direction,
-        allow_ahead: bool,
+        allow_ahead: AllowAhead,
         order_keys: Option<&OrderKeys>,
     ) -> PyResult<RunPlan> {
         if let Some(refusal) = &self.state.refusal {
@@ -1964,7 +2146,7 @@ impl Tracked {
                 return Err(err);
             }
         };
-        Ok(Locked {
+        let locked = Locked {
             tracked: Tracked {
                 engine: Arc::clone(&self.engine),
                 tracking_schema: self.tracking_schema.clone(),
@@ -1976,7 +2158,14 @@ impl Tracked {
             started: std::sync::Mutex::new(HashMap::new()),
             id: NEXT_LOCKED.fetch_add(1, Ordering::Relaxed),
             refresh_fault: AtomicBool::new(false),
-        })
+        };
+        match locked.bring_up_to_minor().await {
+            Ok(locked) => Ok(locked),
+            Err((locked, err)) => {
+                let _ = locked.release().await;
+                Err(err)
+            }
+        }
     }
 }
 
@@ -2057,6 +2246,47 @@ impl Locked {
             self.tables_ready.store(true, Ordering::Release);
         }
         Ok(())
+    }
+
+    /// What every mutating verb does first, under the run lock (ADR-0054):
+    /// on tracking tables an older ferro left at a lower minor, add the
+    /// minor's columns and record it; then give every record without a
+    /// class the one [`unclassified`] decides (from the directory's files,
+    /// `contract` for a migration the directory lacks), and re-read the
+    /// records. Nothing is written on a database whose tables do not exist
+    /// yet (the first write creates them at this minor), whose format is
+    /// newer (every verb refuses on it), or that has nothing to bring up.
+    /// A directory that cannot be read classifies nothing: the verb refuses
+    /// on it, and the next one classifies.
+    async fn bring_up_to_minor(mut self) -> Result<Self, (Self, PyErr)> {
+        let state = &self.tracked.state;
+        if !state.exists || state.refusal.is_some() {
+            return Ok(self);
+        }
+        if state.minor >= TRACKING_MINOR && state.records.iter().all(|r| r.class.is_some()) {
+            return Ok(self);
+        }
+        if let Err(err) = self.ready_to_write().await {
+            return Err((self, err));
+        }
+        let classes = match self.tracked.held.as_ref() {
+            Ok(held) => unclassified(&held.dir, &self.tracked.state.records, self.dialect()),
+            Err(_) => Vec::new(),
+        };
+        if let Err(err) = write_classes(self.engine(), self.tracking_schema(), &classes).await {
+            return Err((self, err));
+        }
+        match read_records(self.engine(), self.tracking_schema()).await {
+            Ok(state) => {
+                self.tracked.state = state;
+                Ok(self)
+            }
+            Err(err) => Err((self, err)),
+        }
+    }
+
+    fn dialect(&self) -> Dialect {
+        self.tracked.dialect()
     }
 
     /// Release the run lock. Every write after it refuses.
@@ -2859,9 +3089,12 @@ mod tests {
         }
         assert!(table.contains("started_at         TIMESTAMPTZ NOT NULL"));
         assert!(table.contains("PRIMARY KEY (migration, step)"));
+        // Minor 1 (ADR-0054): the nullable class column, and the format
+        // table's minor, which ferro 0.22 never selects.
+        assert!(table.contains(&format!("    {CLASS_COLUMN}              TEXT,")));
         assert_eq!(
             format,
-            "CREATE TABLE IF NOT EXISTS \"audit\".\"_ferro_migrations_format\" (format INTEGER NOT NULL, governed_schema TEXT NOT NULL)"
+            "CREATE TABLE IF NOT EXISTS \"audit\".\"_ferro_migrations_format\" (format INTEGER NOT NULL, governed_schema TEXT NOT NULL, minor INTEGER NOT NULL DEFAULT 0)"
         );
         let [sqlite, _] = tracking_ddl(
             Dialect::Sqlite,
@@ -2924,6 +3157,7 @@ mod tests {
 // above them (ADR-0031).
 
 use ferro_migrate::directory::{MigrationsDir, StepKind};
+use ferro_migrate::run_plan::step_class::migration_classes;
 use ferro_migrate::run_plan::{RunRefusal, exec_mode, file_name, step_file};
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload};
 
@@ -3020,6 +3254,8 @@ pub fn plan_baseline(
         .take_while(|m| m.number <= chosen.number)
     {
         let snapshot_checksum = encode_checksum(&migration.snapshot.checksum);
+        // The class a run would have recorded (ADR-0054, ADR-0031).
+        let classes = migration_classes(dir, migration, dialect);
         for step in &migration.steps {
             // The file this dialect runs, by the run planner's own rule: the
             // file `up` checks every applied record against.
@@ -3058,6 +3294,12 @@ pub fn plan_baseline(
                 origin: Origin::Baseline,
                 reverting: false,
                 revert_cursor: None,
+                class: Some(
+                    classes
+                        .get(&step.ordinal)
+                        .copied()
+                        .unwrap_or(StepClass::Contract),
+                ),
             });
         }
         plan.recorded.push(migration.dir_name());
