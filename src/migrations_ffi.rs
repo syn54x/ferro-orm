@@ -275,6 +275,29 @@ fn dumps(value: &Bound<'_, PyAny>) -> PyResult<String> {
 /// "up", "through": "0007"}`, `{"direction": "down", "target": "latest" |
 /// "all" | {"migration": 5} | {"step": [7, 2]}}`. `through` is read by the
 /// planner's own rule ([`ferro_migrate::run_plan::parse_through`]).
+/// `allow_ahead` as Python spells it: `False`, `True` or `"expand-only"`
+/// (ADR-0054).
+///
+/// # Errors
+/// `TypeError` naming the three accepted values for anything else.
+fn allow_ahead_arg(value: &Bound<'_, PyAny>) -> PyResult<ferro_migrate::run_plan::AllowAhead> {
+    use ferro_migrate::run_plan::AllowAhead;
+    if let Ok(flag) = value.cast::<pyo3::types::PyBool>() {
+        return Ok(AllowAhead::from(flag.is_true()));
+    }
+    if let Ok(text) = value.extract::<String>()
+        && text == AllowAhead::EXPAND_ONLY
+    {
+        return Ok(AllowAhead::ExpandOnly);
+    }
+    Err(pyo3::exceptions::PyTypeError::new_err(format!(
+        "allow_ahead must be False, True or \"expand-only\"; got {}",
+        value
+            .repr()
+            .map_or_else(|_| "?".to_string(), |r| r.to_string())
+    )))
+}
+
 fn parse_direction(direction: &Bound<'_, PyAny>) -> PyResult<ferro_migrate::Direction> {
     let mut value: serde_json::Value = parse_json(&dumps(direction)?, "direction")?;
     if let Some(through) = value.get("through").and_then(serde_json::Value::as_str) {
@@ -621,15 +644,19 @@ impl TrackedDatabase {
     ///
     /// # Errors
     /// `RunRefused` for every refusal the run would meet.
-    #[pyo3(signature = (direction, *, allow_ahead=false, order_keys=None))]
+    #[pyo3(signature = (direction, *, allow_ahead=None, order_keys=None))]
     fn plan<'py>(
         &self,
         py: Python<'py>,
         direction: &Bound<'py, PyAny>,
-        allow_ahead: bool,
+        allow_ahead: Option<&Bound<'py, PyAny>>,
         order_keys: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let direction = parse_direction(direction)?;
+        let allow_ahead = allow_ahead
+            .map(allow_ahead_arg)
+            .transpose()?
+            .unwrap_or_default();
         let order_keys = order_keys_arg(order_keys)?;
         let tracked = Arc::clone(&self.inner);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -887,15 +914,19 @@ impl LockedDatabase {
     ///
     /// # Errors
     /// `RunRefused` for every refusal the run meets.
-    #[pyo3(signature = (direction, *, allow_ahead=false, order_keys=None))]
+    #[pyo3(signature = (direction, *, allow_ahead=None, order_keys=None))]
     fn plan<'py>(
         &self,
         py: Python<'py>,
         direction: &Bound<'py, PyAny>,
-        allow_ahead: bool,
+        allow_ahead: Option<&Bound<'py, PyAny>>,
         order_keys: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let direction = parse_direction(direction)?;
+        let allow_ahead = allow_ahead
+            .map(allow_ahead_arg)
+            .transpose()?
+            .unwrap_or_default();
         let order_keys = order_keys_arg(order_keys)?;
         let locked = Arc::clone(&self.inner);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {

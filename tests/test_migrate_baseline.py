@@ -188,6 +188,31 @@ def test_data_steps_are_recorded_without_running_and_listed(project, pkg, db, ca
     ) == [("chunked",)]
 
 
+def test_a_baseline_records_every_steps_class_and_status_shows_them(
+    project, pkg, db, capsys
+):
+    # ADR-0054, ADR-0031: a baseline records each step with the class a run
+    # would have recorded, so an ahead database it adopted answers
+    # "ahead by what?" too.
+    auto_migrated(project, pkg, db)
+    sql = migrations(project) / "0003_tidy/01_tidy.up.sql"
+    assert run("migrate", "new", "tidy", "--sql-step", "tidy") == 0
+    sql.write_text("-- ferro: expand\nSELECT 1;\n")
+    (sql.parent / "01_tidy.down.sql").write_text("SELECT 1;\n")
+    capsys.readouterr()
+
+    code, _, err = cli(capsys, "baseline", "--url", db.url)
+    assert (code, err) == (0, "")
+    assert db.rows(
+        "SELECT migration, step, class FROM _ferro_migrations ORDER BY migration, step"
+    ) == [(1, 1, "expand"), (2, 1, "expand"), (3, 1, "expand")]
+
+    code, out, _ = cli(capsys, "status", "--steps", "--url", db.url)
+    assert code == 0
+    steps = [line.split() for line in out.splitlines() if line.startswith("  ")]
+    assert [step[-1] for step in steps] == ["expand", "expand", "expand"], out
+
+
 def test_an_undeclared_data_step_refuses_the_baseline(project, pkg, db, capsys):
     auto_migrated(project, pkg, db)
     data_step = migrations(project) / "0001_create_author/02_backfill_author.py"

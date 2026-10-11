@@ -970,12 +970,7 @@ pub fn render_check_expr(expr: &ferro_schema_ir::CheckExpr) -> String {
                 ferro_schema_ir::CheckOperand::Column { name } => quote_ident(name),
                 ferro_schema_ir::CheckOperand::Literal { token } => token.clone(),
             };
-            format!(
-                "{} {} {}",
-                quote_ident(column),
-                check_cmp_op_sql(*op),
-                rhs
-            )
+            format!("{} {} {}", quote_ident(column), check_cmp_op_sql(*op), rhs)
         }
         ferro_schema_ir::CheckExpr::In { column, values } => {
             format!("{} IN ({})", quote_ident(column), values.join(", "))
@@ -1007,7 +1002,11 @@ pub fn render_table_check_body(check: &ferro_schema_ir::SchemaTableCheck) -> Str
 /// Quoting is double-quote on both backends; Postgres wraps it in an
 /// `ALTER ... ADD CONSTRAINT`, SQLite in a column constraint (see `render_db_check`).
 pub fn render_check_body(check: &ferro_schema_ir::SchemaCheck) -> String {
-    format!("{} IN ({})", quote_ident(&check.column), check.values.join(", "))
+    format!(
+        "{} IN ({})",
+        quote_ident(&check.column),
+        check.values.join(", ")
+    )
 }
 
 /// How a foreign key or check is added (ADR-0043).
@@ -1496,9 +1495,9 @@ pub struct CheckRebuildEmission {
 /// (`VALIDATE CONSTRAINT`, [`render_validate_constraint`]); ADR-0043.
 pub fn normalize_check_definition(definition: &str) -> String {
     let tokens = flatten_associative_chains(unwrap_outer_parens(strip_pg_in_any(
-        fold_pg_like_operator(strip_type_casts(strip_trailing_not_valid(strip_leading_check(
-            tokenize_check_sql(definition),
-        )))),
+        fold_pg_like_operator(strip_type_casts(strip_trailing_not_valid(
+            strip_leading_check(tokenize_check_sql(definition)),
+        ))),
     )));
     render_check_tokens(&tokens)
 }
@@ -2297,7 +2296,11 @@ pub fn declared_row_policy_names(model: &ferro_schema_ir::SchemaModel) -> Vec<St
 
 /// `DROP POLICY "<name>" ON "<table>"`.
 pub fn render_drop_row_policy(table: &str, name: &str) -> String {
-    format!("DROP POLICY {} ON {}", quote_ident(name), quote_ident(table))
+    format!(
+        "DROP POLICY {} ON {}",
+        quote_ident(name),
+        quote_ident(table)
+    )
 }
 
 /// The DROP + CREATE one drifted policy is rebuilt with, or `None` when the
@@ -2707,9 +2710,7 @@ pub fn plan_row_security_reconcile(
     // nothing else; under `migrate_destructive` it is torn down and the
     // teardown is reported (below). Warning about a flag on the very run that
     // clears it would be telling the author to do what ferro just did.
-    if !destructive
-        && let Some(warning) = dropped_row_security_warning(model, live)
-    {
+    if !destructive && let Some(warning) = dropped_row_security_warning(model, live) {
         plan.reports.push(warning);
     }
 
@@ -3099,10 +3100,10 @@ fn cast_operand(out: &[CheckToken]) -> (CastOperand, Option<(usize, usize)>) {
     // (`AND (x)::t` / `NOT (x)::t` are operators, not calls).
     let called = open > 0
         && matches!(&out[open - 1], CheckToken::Word(w)
-            if !matches!(
-                w.to_ascii_lowercase().as_str(),
-                "and" | "or" | "not" | "in" | "any" | "all" | "like" | "is"
-            ));
+        if !matches!(
+            w.to_ascii_lowercase().as_str(),
+            "and" | "or" | "not" | "in" | "any" | "all" | "like" | "is"
+        ));
     if called {
         return (CastOperand::Expression, None);
     }
@@ -3110,11 +3111,12 @@ fn cast_operand(out: &[CheckToken]) -> (CastOperand, Option<(usize, usize)>) {
     let operand = match inner {
         [CheckToken::String(_)] => CastOperand::Literal,
         [CheckToken::Word(_)] => CastOperand::Identifier,
-        [CheckToken::Word(w), CheckToken::Punct('['), .., CheckToken::Punct(']')]
-            if w.eq_ignore_ascii_case("array") =>
-        {
-            CastOperand::Array
-        }
+        [
+            CheckToken::Word(w),
+            CheckToken::Punct('['),
+            ..,
+            CheckToken::Punct(']'),
+        ] if w.eq_ignore_ascii_case("array") => CastOperand::Array,
         _ if is_numeric_literal(inner) => CastOperand::Literal,
         _ => CastOperand::Expression,
     };
@@ -4431,7 +4433,10 @@ mod tests {
         )
         .expect("declared table check must resolve");
         assert!(emission.statement.is_none(), "ADR-0014: no SQLite ALTER");
-        let warning = emission.warning.expect("SQLite must never skip silently").text;
+        let warning = emission
+            .warning
+            .expect("SQLite must never skip silently")
+            .text;
         assert!(
             warning.contains("ck_transfer_at_most_one_outflow"),
             "{warning}"
@@ -4459,7 +4464,10 @@ mod tests {
             emission.inline.is_none(),
             "no column definition to carry it"
         );
-        let warning = emission.warning.expect("SQLite must never skip silently").text;
+        let warning = emission
+            .warning
+            .expect("SQLite must never skip silently")
+            .text;
         assert!(warning.contains("ck_transfer_kind"), "{warning}");
         assert!(warning.contains("ferro migrate new"), "{warning}");
         assert!(!warning.contains("Alembic"), "{warning}");
@@ -4864,7 +4872,10 @@ mod tests {
         )
         .expect("declared table check must resolve");
         assert!(emission.statements.is_empty(), "ADR-0014: no SQLite ALTER");
-        let warning = emission.warning.expect("SQLite must never skip silently").text;
+        let warning = emission
+            .warning
+            .expect("SQLite must never skip silently")
+            .text;
         assert!(
             warning.contains("ck_transfer_at_most_one_outflow"),
             "{warning}"
@@ -4966,7 +4977,10 @@ mod tests {
     fn render_check_drop_warns_and_skips_on_sqlite() {
         let emission = render_check_drop("transfer", "ck_transfer_orphan", Dialect::Sqlite);
         assert!(emission.statement.is_none(), "ADR-0014: no SQLite ALTER");
-        let warning = emission.warning.expect("SQLite must never skip silently").text;
+        let warning = emission
+            .warning
+            .expect("SQLite must never skip silently")
+            .text;
         assert!(warning.contains("ck_transfer_orphan"), "{warning}");
         assert!(warning.contains("ferro migrate new"), "{warning}");
         assert!(!warning.contains("Alembic"), "{warning}");
@@ -5144,7 +5158,11 @@ mod tests {
         let live = col_with_db_type("id", "string", Some("uuid"), Some("uuid"));
         // Model derived IR: logical_type "uuid" (Python SchemaIR compiler).
         let model = col_with_db_type("id", "uuid", None, None);
-        assert!(!schema_columns_storage_drift(&live, &model, Dialect::Sqlite));
+        assert!(!schema_columns_storage_drift(
+            &live,
+            &model,
+            Dialect::Sqlite
+        ));
     }
 
     /// Drift compares rendered storage, not tokens. A `datetime` field resolves
@@ -5206,16 +5224,28 @@ mod tests {
             "status",
             "unknown",
             None,
-            Some(&information_schema_to_db_type_token("varchar(9)", None, Dialect::Sqlite)),
+            Some(&information_schema_to_db_type_token(
+                "varchar(9)",
+                None,
+                Dialect::Sqlite,
+            )),
         );
         let mut model = col_with_db_type("status", "string", None, None);
         model.enum_values = Some(vec![
             serde_json::json!("draft"),
             serde_json::json!("published"),
         ]);
-        assert!(!schema_columns_storage_drift(&live, &model, Dialect::Sqlite));
+        assert!(!schema_columns_storage_drift(
+            &live,
+            &model,
+            Dialect::Sqlite
+        ));
         let wider = col_with_db_type("status", "unknown", None, Some("varchar(4)"));
-        assert!(schema_columns_storage_drift(&wider, &model, Dialect::Sqlite));
+        assert!(schema_columns_storage_drift(
+            &wider,
+            &model,
+            Dialect::Sqlite
+        ));
     }
 
     /// Since FF-B B2, `datetime.time` fields store as `time` on both dialects
@@ -5342,21 +5372,48 @@ mod tests {
 
     #[test]
     fn canonical_to_db_type_token_roundtrips_core_tokens() {
-        assert_eq!(canonical_to_db_type_token(CanonicalType::Integer, Dialect::Postgres), "int");
-        assert_eq!(canonical_to_db_type_token(CanonicalType::Char(32), Dialect::Sqlite), "uuid");
-        assert_eq!(canonical_to_db_type_token(CanonicalType::Char(10), Dialect::Sqlite), "char(10)");
-        assert_eq!(canonical_to_db_type_token(CanonicalType::TimestampTz, Dialect::Postgres), "timestamptz");
-        assert_eq!(canonical_to_db_type_token(CanonicalType::DateTime, Dialect::Postgres), "timestamp");
-        assert_eq!(canonical_to_db_type_token(CanonicalType::Char(32), Dialect::Postgres), "char(32)");
+        assert_eq!(
+            canonical_to_db_type_token(CanonicalType::Integer, Dialect::Postgres),
+            "int"
+        );
+        assert_eq!(
+            canonical_to_db_type_token(CanonicalType::Char(32), Dialect::Sqlite),
+            "uuid"
+        );
+        assert_eq!(
+            canonical_to_db_type_token(CanonicalType::Char(10), Dialect::Sqlite),
+            "char(10)"
+        );
+        assert_eq!(
+            canonical_to_db_type_token(CanonicalType::TimestampTz, Dialect::Postgres),
+            "timestamptz"
+        );
+        assert_eq!(
+            canonical_to_db_type_token(CanonicalType::DateTime, Dialect::Postgres),
+            "timestamp"
+        );
+        assert_eq!(
+            canonical_to_db_type_token(CanonicalType::Char(32), Dialect::Postgres),
+            "char(32)"
+        );
     }
 
     #[test]
     fn canonical_from_parts_matches_schema_column_path() {
         // db_type wins
-        assert_eq!(canonical_from_parts("string", None, "bigint", Dialect::Postgres), Ok(CanonicalType::BigInt));
+        assert_eq!(
+            canonical_from_parts("string", None, "bigint", Dialect::Postgres),
+            Ok(CanonicalType::BigInt)
+        );
         // domain logical_type tokens
-        assert_eq!(canonical_from_parts("datetime", None, "", Dialect::Postgres), Ok(CanonicalType::TimestampTz));
-        assert_eq!(canonical_from_parts("integer", None, "", Dialect::Sqlite), Ok(CanonicalType::Integer));
+        assert_eq!(
+            canonical_from_parts("datetime", None, "", Dialect::Postgres),
+            Ok(CanonicalType::TimestampTz)
+        );
+        assert_eq!(
+            canonical_from_parts("integer", None, "", Dialect::Sqlite),
+            Ok(CanonicalType::Integer)
+        );
         // unknown is an error (CREATE path maps this to Varchar at its call site)
         assert!(canonical_from_parts("mystery", None, "", Dialect::Postgres).is_err());
     }
@@ -5419,12 +5476,19 @@ mod tests {
     #[test]
     fn timestamp_tz_conversion_warning_names_column_db_type_and_alembic() {
         let w = timestamp_tz_conversion_warning(
-            "event", "occurred_at", "timestamp", "timestamptz", "timestamp",
+            "event",
+            "occurred_at",
+            "timestamp",
+            "timestamptz",
+            "timestamp",
         );
         let col = w.find("event.occurred_at").expect("names the column");
         let dbt = w.find("db_type").expect("names db_type");
         let alembic = w.find("Alembic").expect("names Alembic");
-        assert!(col < dbt && dbt < alembic, "tokens must appear in order: {w}");
+        assert!(
+            col < dbt && dbt < alembic,
+            "tokens must appear in order: {w}"
+        );
     }
 
     #[test]
@@ -5617,7 +5681,11 @@ mod tests {
         );
     }
 
-    fn enum_col(name: &str, type_name: Option<&str>, values: Vec<serde_json::Value>) -> SchemaColumn {
+    fn enum_col(
+        name: &str,
+        type_name: Option<&str>,
+        values: Vec<serde_json::Value>,
+    ) -> SchemaColumn {
         SchemaColumn {
             enum_values: Some(values),
             enum_type_name: type_name.map(str::to_string),
@@ -5676,7 +5744,11 @@ mod tests {
         let col = enum_col(
             "priority",
             Some("priority"),
-            vec![serde_json::json!(1), serde_json::json!(2), serde_json::json!(3)],
+            vec![
+                serde_json::json!(1),
+                serde_json::json!(2),
+                serde_json::json!(3),
+            ],
         );
         match resolve_column_storage(&col, Dialect::Postgres) {
             Ok(ResolvedStorage::PgEnum { labels, .. }) => {
@@ -5729,10 +5801,8 @@ mod tests {
 
     #[test]
     fn render_pg_enum_create_type_is_idempotent_and_pinned() {
-        let sql = render_pg_enum_create_type(
-            "status",
-            &["draft".to_string(), "active".to_string()],
-        );
+        let sql =
+            render_pg_enum_create_type("status", &["draft".to_string(), "active".to_string()]);
         assert_eq!(
             sql,
             "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_type t \
@@ -6014,11 +6084,21 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 ("accountkind", Reused),
-                ("auditlevel", Introduced { creation: Statement }),
+                (
+                    "auditlevel",
+                    Introduced {
+                        creation: Statement
+                    }
+                ),
                 ("cardsize", Introduced { creation: Inline }),
                 ("categorycolor", Introduced { creation: Inline }),
                 ("ledgerrole", Reused),
-                ("memberkind", Introduced { creation: Statement }),
+                (
+                    "memberkind",
+                    Introduced {
+                        creation: Statement
+                    }
+                ),
             ]
         );
         assert!(enum_type_provenance(&declaring, &[], &[]).is_empty());
@@ -6052,7 +6132,10 @@ mod tests {
             render_pg_enum_drop_type("categorycolor"),
             "DROP TYPE \"categorycolor\""
         );
-        assert_eq!(render_pg_enum_drop_type("Odd\"Name"), "DROP TYPE \"Odd\"\"Name\"");
+        assert_eq!(
+            render_pg_enum_drop_type("Odd\"Name"),
+            "DROP TYPE \"Odd\"\"Name\""
+        );
     }
 
     #[test]
@@ -6532,7 +6615,9 @@ mod tests {
 
         // SQLite says the PostgreSQL-only thing instead — same sentence the
         // create path emits, single-sourced.
-        let lite = row_security_existing_table_warning(&model, Dialect::Sqlite).unwrap().text;
+        let lite = row_security_existing_table_warning(&model, Dialect::Sqlite)
+            .unwrap()
+            .text;
         assert_eq!(
             lite,
             row_security_statements(&model, Dialect::Sqlite)
@@ -6588,8 +6673,7 @@ mod tests {
     mod catalog_fixtures {
         /// `RowPolicy(column="ledger_id", setting="pinch.ledger_id")` on a
         /// `uuid` column.
-        pub const UUID_SHORTHAND_LIVE: &str =
-            "(ledger_id = (NULLIF(current_setting('pinch.ledger_id'::text, true), ''::text))::uuid)";
+        pub const UUID_SHORTHAND_LIVE: &str = "(ledger_id = (NULLIF(current_setting('pinch.ledger_id'::text, true), ''::text))::uuid)";
         pub const UUID_SHORTHAND_DECLARED: &str =
             "\"ledger_id\" = NULLIF(current_setting('pinch.ledger_id', true), '')::uuid";
 
@@ -7080,19 +7164,22 @@ mod tests {
             "DROP POLICY \"rls_ledgerrow_ledger_id\" ON \"ledgerrow\""
         );
         assert!(statements[1].starts_with("CREATE POLICY"));
-        assert!(row_policy_rebuild_statements(&model, "rls_ledgerrow_nope")
-            .unwrap()
-            .is_none());
+        assert!(
+            row_policy_rebuild_statements(&model, "rls_ledgerrow_nope")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
     fn the_migrator_warning_names_the_forced_tables() {
         assert!(row_security_migrator_warning(&[]).is_none());
-        let warning = row_security_migrator_warning(&["ledgerrow".to_string()]).unwrap().text;
+        let warning = row_security_migrator_warning(&["ledgerrow".to_string()])
+            .unwrap()
+            .text;
         assert!(warning.contains("'ledgerrow'"));
         assert!(warning.contains("BYPASSRLS"));
     }
-
 
     // -----------------------------------------------------------------------
     // #413 gate round: roles, teardown scope, unmodeled operators, casts,
@@ -7255,9 +7342,13 @@ mod tests {
         );
 
         for destructive in [false, true] {
-            let plan =
-                plan_row_security_reconcile(&undeclared, &hand_managed, Dialect::Postgres, destructive)
-                    .unwrap();
+            let plan = plan_row_security_reconcile(
+                &undeclared,
+                &hand_managed,
+                Dialect::Postgres,
+                destructive,
+            )
+            .unwrap();
             assert!(
                 plan.excess_flags.is_empty() && plan.extra.is_empty(),
                 "{destructive}"
@@ -7285,7 +7376,8 @@ mod tests {
         };
         assert!(ferro_manages_row_security(&ferro_managed));
         let plan =
-            plan_row_security_reconcile(&undeclared, &ferro_managed, Dialect::Postgres, true).unwrap();
+            plan_row_security_reconcile(&undeclared, &ferro_managed, Dialect::Postgres, true)
+                .unwrap();
         assert_eq!(plan.extra, vec!["rls_ledgerrow_ledger_id".to_string()]);
         assert_eq!(
             plan.excess_flags,
@@ -7795,11 +7887,8 @@ mod tests {
 
     #[test]
     fn a_varchar_compared_to_a_string_literal_normalizes_equal_to_catalog() {
-        let rendered = render_check_expr(&cmp_literal(
-            "name",
-            ferro_schema_ir::CheckCmpOp::Ne,
-            "''",
-        ));
+        let rendered =
+            render_check_expr(&cmp_literal("name", ferro_schema_ir::CheckCmpOp::Ne, "''"));
         assert_eq!(rendered, "\"name\" <> ''");
         text_cast_pin(&rendered, "CHECK (((name)::text <> ''::text))");
         text_cast_pin(&rendered, "((name)::text <> ''::text)");
@@ -7808,11 +7897,7 @@ mod tests {
 
     #[test]
     fn a_text_column_compared_to_a_string_literal_normalizes_equal_to_catalog() {
-        let rendered = render_check_expr(&cmp_literal(
-            "t",
-            ferro_schema_ir::CheckCmpOp::Ne,
-            "''",
-        ));
+        let rendered = render_check_expr(&cmp_literal("t", ferro_schema_ir::CheckCmpOp::Ne, "''"));
         text_cast_pin(&rendered, "CHECK ((t <> ''::text))");
     }
 
@@ -7880,17 +7965,10 @@ mod tests {
     #[test]
     fn a_literal_coerced_to_its_column_type_normalizes_equal_to_catalog() {
         // `price` is numeric, `c` is char(3).
-        let rendered = render_check_expr(&cmp_literal(
-            "price",
-            ferro_schema_ir::CheckCmpOp::Gt,
-            "10",
-        ));
+        let rendered =
+            render_check_expr(&cmp_literal("price", ferro_schema_ir::CheckCmpOp::Gt, "10"));
         text_cast_pin(&rendered, "CHECK ((price > (10)::numeric))");
-        let bpchar = render_check_expr(&cmp_literal(
-            "c",
-            ferro_schema_ir::CheckCmpOp::Ne,
-            "''",
-        ));
+        let bpchar = render_check_expr(&cmp_literal("c", ferro_schema_ir::CheckCmpOp::Ne, "''"));
         text_cast_pin(&bpchar, "CHECK ((c <> ''::bpchar))");
     }
 
@@ -7927,11 +8005,8 @@ mod tests {
 
     #[test]
     fn a_changed_text_literal_is_still_drift() {
-        let rendered = render_check_expr(&cmp_literal(
-            "name",
-            ferro_schema_ir::CheckCmpOp::Ne,
-            "''",
-        ));
+        let rendered =
+            render_check_expr(&cmp_literal("name", ferro_schema_ir::CheckCmpOp::Ne, "''"));
         assert_ne!(
             normalize_check_definition("CHECK (((name)::text <> 'x'::text))"),
             normalize_check_definition(&rendered),

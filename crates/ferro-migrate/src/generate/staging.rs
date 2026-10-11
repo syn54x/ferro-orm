@@ -226,6 +226,7 @@ pub(super) fn index_step(
         renderings,
         data: None,
         hand_model: None,
+        class: BTreeMap::new(),
     })
 }
 
@@ -365,5 +366,6 @@ pub fn validate_step(constraints: &[StagedConstraint], dialects: &[Dialect]) -> 
         renderings,
         data: None,
         hand_model: None,
+        class: BTreeMap::new(),
     }
 }

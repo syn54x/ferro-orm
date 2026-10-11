@@ -70,7 +70,9 @@ of its subclasses for the states an application branches on:
 [`PendingMigrationsError`](migrations.md#ferro.migrations.PendingMigrationsError)
 when `require_applied()` finds the database behind its migrations,
 [`DatabaseAheadError`](migrations.md#ferro.migrations.DatabaseAheadError) when
-the database has applied migrations this checkout does not have,
+the database has applied migrations this checkout does not have (`.ahead`
+names them, `.contract_steps` each of their steps that is not `expand`, as
+`NNNN_<name>:NN`: what `allow_ahead="expand-only"` refuses on),
 [`AlreadyTrackedError`](migrations.md#ferro.migrations.AlreadyTrackedError)
 when `baseline()` finds the database already tracked (another pre-deploy
 adopted it first; `.applied` names the recorded migrations, `.head` the

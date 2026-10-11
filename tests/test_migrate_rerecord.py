@@ -69,9 +69,10 @@ pytestmark = [
 EVERY_COLUMN = (
     "migration, step, migration_name, file, kind, checksum, snapshot_checksum, "
     "started_at, finished_at, failed_at, error, resume_cursor, rows_done, "
-    "duration_ms, ferro_version, origin, reverting, revert_cursor"
+    "duration_ms, ferro_version, origin, reverting, revert_cursor, class"
 )
 CHECKSUM = 5
+CLASS = 18
 
 
 def every_column(db, migration: int, step: int) -> tuple:
@@ -142,6 +143,8 @@ def test_a_finished_step_edited_is_refused_and_rerecord_changes_only_its_checksu
     assert after[:CHECKSUM] + after[CHECKSUM + 1 :] == (
         before[:CHECKSUM] + before[CHECKSUM + 1 :]
     ), "rerecord changes the checksum and nothing else"
+    # The class recorded when the step was applied stays (ADR-0054).
+    assert after[CLASS] == before[CLASS] == "expand"
     assert db.tables() == tables and "marker" not in tables, "no SQL ran"
 
     code, out, _ = cli("up", "--url", db.url, capsys=capsys)

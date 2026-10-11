@@ -27,7 +27,7 @@ import sys
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Literal
 
 from cyclopts import App, Parameter
 
@@ -263,6 +263,18 @@ def up(
             )
         ),
     ] = None,
+    allow_ahead: Annotated[
+        bool | Literal["expand-only"],
+        Parameter(
+            negative="",
+            help=(
+                "Run beside a database that has applied migrations this "
+                "directory lacks: --allow-ahead=expand-only when every step "
+                "they hold is expand (the previous release of a rolling "
+                "deploy), --allow-ahead (or =true) whatever they hold."
+            ),
+        ),
+    ] = False,
     glob: Annotated[Global, Parameter(parse=False)],
 ) -> int:
     """Apply every pending migration, in order, under the run lock.
@@ -283,6 +295,7 @@ def up(
                 glob.database,
                 url=_url(settings, glob),
                 lock_timeout=lock_timeout,
+                allow_ahead=allow_ahead,
                 progress=lambda line: print(line, flush=True),
             )
         )
@@ -389,8 +402,8 @@ def down(
 
 def _render_run_refusal(refused: MigrationRefused) -> int:
     """A refused ``up`` or ``down``: its run report's refusal, as the
-    operator's text (the application's ``allow_ahead=`` hint is not a
-    flag here), and exit 1. A refusal with no run report (the
+    operator's text (the application's ``allow_ahead=`` hint names the
+    API's argument, not ``--allow-ahead``), and exit 1. A refusal with no run report (the
     configuration, the connection) prints its own message."""
     from ..migrations.runner import RunReport
 
