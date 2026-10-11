@@ -246,6 +246,7 @@ _Avoid_: Batch operation, table recreate, copy-and-move, 12-step
 
 **Run**:
 One invocation of the in-house migration runner against one database, from taking the *run lock* to releasing it. It goes one way: it applies zero or more pending *steps* in order, or reverts applied steps in reverse order through their *downs*, and stops at the first that fails.
+In `_core` a run is held by a `TrackedDatabase` (read) that becomes a `LockedDatabase` (write) for the run's length (ADR-0048).
 _Avoid_: Deploy, session, migration (a run applies migrations; it is not one)
 
 **Run lock**:
@@ -303,6 +304,7 @@ _Avoid_: Assignment, needs, classification
 
 **Plan report**:
 Something the planner tells its reader that is not a change it makes: a refused *rename hint*, a leftover ferro check, an extra *enum label*, a foreign or unverifiable policy. Each has a kind and a subject, and some recur on every run until someone acts. A *migration* refuses a report that none of its changes answers.
+In Python these are the pass's `PassReport.warnings` (ADR-0049 records the name); the *avoid* line below is about prose, not that field.
 _Avoid_: Warning (alone), notice, message
 
 **Drift**:
