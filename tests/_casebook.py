@@ -32,6 +32,15 @@ class Case:
     id: str
     before: str
     after: str
+    hand_edit: tuple[tuple[str, str], ...] = ()
+    """``(dialect, statement)`` pairs a pin runs on a database it built at
+    ``before``, in order: what someone did by hand that no model declares
+    (a foreign default, ADR-0027 as amended). The generated migrations
+    never see it; every door that reads the live database does."""
+
+    def edit_by_hand(self, dialect: str) -> list[str]:
+        """The hand edit's statements on ``dialect``."""
+        return [sql for on, sql in self.hand_edit if on == dialect]
 
 
 _SHIPMENT = """
@@ -89,6 +98,17 @@ CASES: tuple[Case, ...] = (
         "A2-required-column-with-a-literal-default",
         AUTHOR,
         AUTHOR + '    tier: str = "free"\n',
+    ),
+    Case(
+        "A2-foreign-default-on-the-before-side",
+        columns.BIO,
+        columns.BIO + "    subtitle: str | None = None\n",
+        hand_edit=(
+            ("postgres", 'ALTER TABLE "author" ALTER COLUMN "bio" SET DEFAULT \'\''),
+            # SQLite sets no default in place: the column comes back with one.
+            ("sqlite", 'ALTER TABLE "author" DROP COLUMN "bio"'),
+            ("sqlite", 'ALTER TABLE "author" ADD COLUMN "bio" varchar DEFAULT \'\''),
+        ),
     ),
     Case(
         "A2b-required-column-with-a-factory",
