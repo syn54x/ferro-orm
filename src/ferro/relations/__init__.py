@@ -2,7 +2,7 @@ from typing import ForwardRef
 
 from .._shadow_fk_types import pk_python_type_for_model, reconcile_shadow_fk_types
 from ..base import ForeignKey, ManyToManyRelation
-from ..columns import fk_shadow_spec
+from ..columns import fk_shadow_spec, refuse_back_ref_over_retired_relation
 from ..ir.compiler import (
     RenameHints,
     compile_model_schema_ir,
@@ -179,6 +179,23 @@ def resolve_relationships():
                     "rename_hints": join_hints,
                 },
             )
+
+    # Retired relations (ADR-0053) never enter the pending queue: their shadow
+    # column compiles from the ForeignKey alone, so each needs its target
+    # resolved, a recompile against it, and no BackRef reading it back.
+    for model_name, model_cls in REGISTRY.models().items():
+        retired = model_cls.__dict__.get("__ferro_retired_relations__") or {}
+        for field_name, rel in retired.items():
+            if isinstance(rel.to, (str, ForwardRef)):
+                to_name = rel.to if isinstance(rel.to, str) else rel.to.__forward_arg__
+                target_model = REGISTRY.resolve_reference(to_name, default=None)
+                if not target_model:
+                    raise RuntimeError(
+                        f"Relationship resolution failed: '{to_name}' not found"
+                    )
+                rel.to = target_model
+            refuse_back_ref_over_retired_relation(model_cls, field_name, rel)
+            recompile_targets.add(model_name)
 
     rebuilt = reconcile_shadow_fk_types(REGISTRY.models())
     for model_cls in rebuilt:

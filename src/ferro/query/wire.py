@@ -566,10 +566,18 @@ def _literal_assignment(column: str, value: Any) -> SetAssignment:
     return SetAssignment(column=column, value=LiteralValueExpr(value=query_value))
 
 
-def _literal_set(assignments: Mapping[str, Any] | None) -> tuple[SetAssignment, ...]:
-    """Compile kwargs literals into ordered, typed SET value-expression nodes."""
+def _literal_set(
+    model_cls: type, assignments: Mapping[str, Any] | None
+) -> tuple[SetAssignment, ...]:
+    """Compile kwargs literals into ordered, typed SET value-expression nodes.
+
+    Each keyword names a queryable column of ``model_cls``, as a recipe's keys
+    do: a misspelled or retired one (ADR-0053) fails here, naming it, before
+    any statement reaches the database.
+    """
     compiled: list[SetAssignment] = []
     for column, value in (assignments or {}).items():
+        validate_query_column(model_cls, column)
         _reject_kwargs_value_expr(value)
         compiled.append(_literal_assignment(column, value))
     return tuple(compiled)
@@ -973,7 +981,7 @@ def compile_query(
                     ),
                 )
                 if recipe is not None
-                else _literal_set(assignments)
+                else _literal_set(query.model_cls, assignments)
             )
         else:
             set_assignments = ()
