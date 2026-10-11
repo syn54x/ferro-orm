@@ -432,6 +432,59 @@ def test_a_duplicate_number_is_refused_naming_both_directories(project, pkg, cap
 
     err = capsys.readouterr().err
     assert "0001_a" in err and "0001_b" in err, err
+    lines = err.splitlines()
+    assert "  ferro migrate new a --replace 0001_a" in lines, err
+    assert "  ferro migrate new b --replace 0001_b" in lines, err
+
+
+def test_replace_composes_with_data_step_and_data_only(project, pkg, capsys):
+    write_config(project, pkg)
+    write_models(project, pkg, AUTHOR)
+    assert run("migrate", "new", "a") == 0
+    write_models(project, pkg, AUTHOR + "    bio: str | None = None\n")
+    assert run("migrate", "new", "b") == 0
+    migrations = project / "migrations"
+    capsys.readouterr()
+
+    # --data-step adds a person's data step beside the regenerated DDL.
+    assert run("migrate", "new", "b", "--replace", "0002_b", "--data-step", "Author") == 0
+    assert sorted(p.name for p in (migrations / "0002_b").iterdir()) == [
+        "01_schema.down.postgres.sql",
+        "01_schema.down.sqlite.sql",
+        "01_schema.up.postgres.sql",
+        "01_schema.up.sqlite.sql",
+        "02_backfill_author.py",
+        "ir.json",
+    ]
+    assert "  02_backfill_author.py  new" in capsys.readouterr().out.splitlines()
+
+    # --data-only regenerates it as that data step alone; the one it had is
+    # carried across, winning over the rescaffolded one of its name.
+    hand = migrations / "0002_b/02_backfill_author.py"
+    hand.write_text("# filled in\n")
+    assert (
+        run(
+            "migrate",
+            "new",
+            "b",
+            "--replace",
+            "0002_b",
+            "--data-step",
+            "Author",
+            "--data-only",
+        )
+        == 0
+    )
+    assert sorted(p.name for p in (migrations / "0002_b").iterdir()) == [
+        "01_backfill_author.py",
+        "ir.json",
+    ]
+    assert (migrations / "0002_b/01_backfill_author.py").read_text() == "# filled in\n"
+    out = capsys.readouterr().out
+    assert (
+        "  01_backfill_author.py  carried, review it (was 0002_b/02_backfill_author.py; "
+        "it wins over the regenerated step of the same name)"
+    ) in out.splitlines(), out
 
 
 def test_a_gap_in_the_numbers_is_refused_naming_it(project, pkg, capsys):

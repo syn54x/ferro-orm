@@ -393,3 +393,48 @@ def test_a_migration_replaced_in_place_meets_the_snapshot_mismatch_naming_it(
         "applied (check out the commit that applied it, `ferro migrate down --to "
         "0001`), then `up`. Nothing was applied."
     ) in err, err
+
+
+# -- the guide ----------------------------------------------------------------------
+
+GUIDE = Path(__file__).resolve().parents[1] / "docs/pages/guide/schema/migrations.md"
+
+
+def _guide_blocks(command: str) -> list[str]:
+    """The lines of the guide's "Two branches, one number" text block that
+    ``$ <command>`` opens, without the prompt."""
+    text = GUIDE.read_text()
+    section = text.split("## Two branches, one number\n", 1)[1].split("\n## ", 1)[0]
+    block = section.split(f"$ {command}\n", 1)[1].split("```", 1)[0]
+    return block.splitlines()
+
+
+def test_the_guide_quotes_what_check_and_replace_print(project, pkg, capsys):
+    # The guide's 0006 / 0007 / 0008 are this project's 0001 / 0002 / 0003.
+    def shifted(lines: list[str]) -> list[str]:
+        return [
+            line.replace("0008", "0003").replace("0007", "0002").replace("0006", "0001")
+            for line in lines
+        ]
+
+    write_config(project, pkg, '["postgres"]')
+    write_models(project, pkg, AUTHOR)
+    new("create_author")
+    write_models(project, pkg, X)
+    new("add_x", "--sql-step", "fix_rows")
+    hidden = aside(project, "0002_add_x")
+    write_models(project, pkg, Y)
+    new("add_y")
+    back(project, hidden, "0002_add_x")
+    write_models(project, pkg, XY)
+    capsys.readouterr()
+
+    assert run("migrate", "check") == 3
+    assert capsys.readouterr().err.splitlines() == shifted(
+        _guide_blocks("ferro migrate check")
+    )
+
+    assert run("migrate", "new", "add_x", "--replace", "0002_add_x") == 0
+    assert capsys.readouterr().out.splitlines() == shifted(
+        _guide_blocks("ferro migrate new add_x --replace 0007_add_x")
+    )

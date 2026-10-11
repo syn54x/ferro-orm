@@ -60,6 +60,7 @@ Write the next migration from the models' difference with the last one. Diffs ag
 | `--data-step MODEL` | Also add a Python data step `NN_backfill_<model>.py` over this model (its class name), to be written where it says `todo(...)`. |
 | `--data-only` | Write only the `--data-step`: no DDL, and a full copy of the previous migration's snapshot. |
 | `--no-backfill TABLE.COLUMN` | Replace the generated backfill of this column with a guard step that fails the migration while any row still needs a value. Repeatable. |
+| `--replace NNNN_NAME` | Regenerate this migration (or `NNNN`, when one migration carries the number) on top of the newest snapshot below it, carrying its data steps and hand-written SQL steps across byte for byte; the number is kept when free. Only the newest migration can be replaced. See [Two branches, one number](../guide/schema/migrations.md#two-branches-one-number). |
 
 Exit 0 when written (or nothing to write), 1 when refused. A primary-key change is refused, writing nothing:
 

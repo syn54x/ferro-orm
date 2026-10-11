@@ -497,7 +497,7 @@ impl std::fmt::Display for DirectoryError {
             DirectoryError::UnparseableHeader { file, line } => write!(
                 f,
                 "{}: {line:?} is not a ferro header; the headers are no-transaction, \
-                 foreign-keys-off, destructive, data-dependent, not-applicable, \
+                 foreign-keys-off, destructive, data-dependent, not-applicable, expand, \
                  nothing-to-reverse <reason> and irreversible <reason>",
                 show(file)
             ),

@@ -106,7 +106,7 @@ DROP TABLE "author";
 
 ### Headers
 
-A step file may open with `-- ferro: …` lines. The generator writes them; you read them in review.
+A step file may open with `-- ferro: …` lines. The generator writes them, except `expand` and `irreversible`, which only a person writes; you read them in review.
 
 | Header | Meaning |
 | :--- | :--- |
@@ -115,6 +115,7 @@ A step file may open with `-- ferro: …` lines. The generator writes them; you 
 | `-- ferro: no-transaction` | The runner opens no transaction around the step, so a statement such as `CREATE INDEX CONCURRENTLY` can run. The step is written to be safe to re-run from its first statement. |
 | `-- ferro: foreign-keys-off` | A SQLite [table rebuild](#sqlite-table-rebuilds): the runner turns foreign-key enforcement off while the step runs. |
 | `-- ferro: not-applicable` | This dialect has nothing to do at this step number. |
+| `-- ferro: expand` | In a [hand-written SQL step](#hand-written-steps): its author declares it *expand*, so the previous release's writes keep succeeding beside it ([step class](deploying.md#rolling-deploys-and-the-two-release-contract)). A hand-written step without it is *contract*. The generator never writes it: a generated step's class comes from what the step does. A ferro older than this header refuses the file, as it refuses any header it does not know. |
 | `-- ferro: nothing-to-reverse <reason>` | In a `.down` file: reverting removes the step's record and runs nothing. |
 | `-- ferro: irreversible <reason>` | In a `.down` file: a run that would revert this step refuses before reverting anything. Only a person declares one. |
 
@@ -345,6 +346,55 @@ Revert 0002_rename_writer (1 step)? [y/N] y
 ## Editing a migration
 
 A migration no database has applied is yours to change: edit it, or delete its directory and run `new` again. Once a database has applied a step, `up` checks the step's file against the checksum it recorded, and an edited file is refused; see [Edited files and `rerecord`](deploying.md#edited-files-and-rerecord).
+
+## Two branches, one number
+
+Your branch adds `bio` to `Author` and generates `0007_add_x`, with a hand-written step `02_fix_rows` you filled in. Meanwhile a teammate merges `0007_add_y`, which adds `nick`. Both were generated on top of `0006`, so after you rebase, the directory holds two `0007`s, and every command refuses it:
+
+```text
+$ ferro migrate check
+duplicate_number: two migrations are numbered 0007: 0007_add_x and 0007_add_y. Keep the one that is applied anywhere and regenerate the other on top of it:
+  ferro migrate new add_x --replace 0007_add_x
+  ferro migrate new add_y --replace 0007_add_y
+(each line regenerates the migration it names)
+```
+
+`0007_add_y` is on main, so keep it and regenerate yours:
+
+```text
+$ ferro migrate new add_x --replace 0007_add_x
+migrations/0008_add_x/  (replaces 0007_add_x, now deleted)
+  01_schema.up.postgres.sql  moved (was 0007_add_x/01_schema.up.postgres.sql)
+  01_schema.down.postgres.sql  moved (was 0007_add_x/01_schema.down.postgres.sql)
+  02_fix_rows.up.sql  carried, review it (was 0007_add_x/02_fix_rows.up.sql)
+  02_fix_rows.down.sql  carried, review it (was 0007_add_x/02_fix_rows.down.sql)
+  ir.json  new snapshot, chained from 0007_add_y
+changed models: Author
+```
+
+`0008_add_x` is what `new` would have written had `0007_add_y` been there first: a new schema snapshot chained from `0007_add_y`'s, and the DDL regenerated from the difference, so it adds `bio` and nothing of `nick`.
+
+- **What is carried.** Every data step (`NN_<name>.py`) and hand-written SQL step (`NN_<name>.up.sql` / `.down.sql`, headers included) keeps its body byte for byte, under the number its place in the regenerated migration gives it. A carried step wins over a step of the same name the regeneration scaffolds again (a backfill's `todo`), and the line says so. The DDL steps, the files with a dialect suffix, are regenerated. Read every step marked `carried, review it`: it was written against the old parent.
+- **The number.** It is kept when it is free, and the next one is taken when it is not. A lone `0007_add_x` whose parent changed is regenerated in place as `0007_add_x`.
+- **Naming the migration.** `--replace` takes `NNNN_<name>`, or `NNNN` when one directory carries the number. A number two directories share is refused, naming both.
+- **Only the newest.** A migration a later one chains from is refused: `replace the later one first, or delete it`. A regeneration that holds nothing (the models add nothing it does not already hold, and nothing is carried) is refused too: delete the directory.
+- **Offline.** Like `new`, it reads the models and the directory, never a database; `--url` is refused. `--sql-step`, `--data-step`, `--data-only` and `--no-backfill` mean what they mean to `new`.
+
+A database that applied the old `0007_add_x` meets the replaced migration as a changed one. `up` refuses it, naming the replacement as the second cause:
+
+```text
+ferro migrate: this database has applied 0007_add_x, which is not in migrations/.
+The directory is behind the database: check out the branch that holds it, or 0007 was replaced: revert it with the files that were applied (check out the commit that applied it, `ferro migrate down --to 0006`), then `up`. Nothing was applied.
+```
+
+When the number was free and the migration was regenerated in place, the same cause follows the snapshot refusal (`0007_add_x/ir.json is not the snapshot this database applied 0007_add_x under`). Either way, a down needs the files that went up:
+
+```text
+$ git checkout <the commit that applied 0007_add_x>
+$ ferro migrate down --to 0006
+$ git checkout -
+$ ferro migrate up
+```
 
 ## Changing a primary key
 
