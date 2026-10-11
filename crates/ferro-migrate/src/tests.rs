@@ -109,6 +109,7 @@ fn col(name: &str, db_type: &str, nullable: bool) -> SchemaColumn {
         postgres_native_enum: false,
         enum_renamed_labels: Default::default(),
         default_factory: None,
+        retired: false,
     }
 }
 
@@ -167,6 +168,7 @@ fn ir_col(
         postgres_native_enum: false,
         enum_renamed_labels: Default::default(),
         default_factory: None,
+        retired: false,
     }
 }
 
@@ -1695,6 +1697,7 @@ fn render_create_table_unknown_logical_type_errors() {
         postgres_native_enum: false,
         enum_renamed_labels: Default::default(),
         default_factory: None,
+        retired: false,
     };
     let model = schema_model("widget", vec![col]);
     for dialect in [Dialect::Sqlite, Dialect::Postgres] {
