@@ -401,15 +401,14 @@ impl std::fmt::Display for DirectoryError {
                 write!(
                     f,
                     "two migrations are numbered {number:04}: {} and {}. Keep the one that is \
-                     applied anywhere and regenerate the other on top of it, with the line \
-                     that names it:",
+                     applied anywhere and regenerate the other on top of it:",
                     show(first),
                     show(second)
                 )?;
                 for dir in [first, second] {
                     write!(f, "\n  {}", replace_line(dir))?;
                 }
-                Ok(())
+                write!(f, "\n(each line regenerates the migration it names)")
             }
             DirectoryError::AmbiguousNumber { number, names } => {
                 let named: Vec<String> = names.iter().map(|n| format!("--replace {n}")).collect();

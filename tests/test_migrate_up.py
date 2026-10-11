@@ -584,8 +584,28 @@ def test_an_edited_snapshot_is_refused(project, pkg, db, capsys):
         f"  applied   sha384:{applied}\n"
         f"  on disk   sha384:{sha384(snapshot)}\n"
         f"A snapshot is never edited: later migrations and historical models are built "
-        f"from it.\nRestore the file. Nothing was applied.",
+        f"from it.\nRestore the file, or 0001 was replaced: revert it with the files "
+        f"that were applied (check out the commit that applied it, `ferro migrate "
+        f"down --to 0000`), then `up`. Nothing was applied.",
     )
+
+
+def test_a_duplicate_number_is_refused_with_a_replace_line_for_each(
+    project, pkg, db, capsys
+):
+    _apply(project, pkg, db)
+    shutil.copytree(
+        migrations(project) / "0001_create_author", migrations(project) / "0001_other"
+    )
+    capsys.readouterr()
+
+    assert run("migrate", "up", "--url", db.url) != 0
+
+    err = capsys.readouterr().err
+    assert "two migrations are numbered 0001: 0001_create_author and 0001_other" in err
+    lines = err.splitlines()
+    assert "  ferro migrate new create_author --replace 0001_create_author" in lines
+    assert "  ferro migrate new other --replace 0001_other" in lines
 
 
 def test_a_broken_chain_is_refused_with_both_checksums(project, pkg, db, capsys):

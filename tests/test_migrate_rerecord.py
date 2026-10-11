@@ -490,7 +490,11 @@ def test_rerecord_names_one_step_and_never_the_snapshot(
     code, _, err = cli("rerecord", "0001:01", "--url", db.url, capsys=capsys)
     assert code == 1
     assert "0001_create_author/ir.json is not the snapshot this database applied" in err
-    assert err.endswith("Restore the file. Nothing was applied.\n")
+    assert err.endswith(
+        "Restore the file, or 0001 was replaced: revert it with the files that were "
+        "applied (check out the commit that applied it, `ferro migrate down --to "
+        "0000`), then `up`. Nothing was applied.\n"
+    )
     assert every_column(db, 1, 1) == before
 
 

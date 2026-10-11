@@ -26,6 +26,7 @@ import json
 import re
 import shutil
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -39,10 +40,12 @@ __all__ = [
     "GeneratedMigration",
     "GeneratedStep",
     "MigrationsDirectoryError",
+    "Moved",
     "ensure_gitattributes",
     "next_number",
     "portable_sql_step",
     "read_migrations",
+    "read_replacing",
     "write_migration",
 ]
 
@@ -72,6 +75,18 @@ def check_name(name: str, what: str) -> None:
         )
 
 
+class Moved(StrEnum):
+    """What ``ferro migrate new --replace`` did with one file of the
+    migration it replaced."""
+
+    KEPT = "kept"
+    """A regenerated file under the name it had."""
+    RENUMBERED = "renumbered"
+    """A regenerated file of the same step under another number."""
+    CARRIED = "carried"
+    """A data step or hand-written SQL step written back byte for byte."""
+
+
 @dataclass(frozen=True)
 class GeneratedStep:
     """One step of a migration about to be written."""
@@ -83,6 +98,11 @@ class GeneratedStep:
     ``data`` (a Python data step)."""
     files: dict[str, str] = field(default_factory=dict)
     """File name to its exact text."""
+    carried: bool = False
+    """Carried across from the migration ``--replace`` regenerates."""
+    over_namesake: bool = False
+    """Carried, and in the place of a step of its name and kind the
+    regeneration laid out, which it wins over."""
 
 
 def portable_sql_step(ordinal: int, name: str) -> GeneratedStep:
@@ -111,6 +131,16 @@ class GeneratedMigration:
     """The ``ir.json`` text exactly as it is to be stored."""
     summary: str = ""
     warnings: tuple[str, ...] = ()
+    replaces: str | None = None
+    """``--replace``: the replaced migration's directory name (``NNNN_<name>``),
+    deleted once this one is written."""
+    chained_from: str | None = None
+    """``--replace``: the directory name of the migration whose snapshot this
+    one's links to (``None`` for the first)."""
+    moves: tuple[tuple[str, str, Moved], ...] = ()
+    """``--replace``: ``(old file, new file, what happened)`` for every file
+    of this migration the replaced one had a counterpart for, ``old file``
+    relative to the migrations directory, ``new file`` to this migration's."""
 
     @property
     def dir_name(self) -> str:
@@ -128,8 +158,21 @@ class GeneratedMigration:
             for dialect, rendering in step["renderings"].items():
                 files[f"{stem}.up.{dialect}.sql"] = rendering["up"]
                 files[f"{stem}.down.{dialect}.sql"] = rendering["down"]
+            carried = step.get("carried")
+            if carried is not None and step["kind"] == "data":
+                files[f"{stem}.py"] = carried["body"]
+            elif carried is not None:
+                files[f"{stem}.up.sql"] = carried["body"]
+                files[f"{stem}.down.sql"] = carried["down"]
             steps.append(
-                GeneratedStep(step["ordinal"], step["name"], step["kind"], files)
+                GeneratedStep(
+                    step["ordinal"],
+                    step["name"],
+                    step["kind"],
+                    files,
+                    carried=carried is not None,
+                    over_namesake=bool(carried and carried["over_namesake"]),
+                )
             )
         return cls(
             number=number,
@@ -161,6 +204,27 @@ def read_migrations(directory: Path) -> list[dict[str, Any]]:
     except ValueError as err:
         raise MigrationsDirectoryError(f"{directory}: {err}") from None
     return json.loads(raw)["migrations"]
+
+
+def read_replacing(
+    directory: Path, target: str
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """For ``ferro migrate new --replace <target>``: every migration in
+    ``directory`` but the one ``target`` names (``NNNN_<name>``, or ``NNNN``
+    when one migration carries the number), read and verified by the Rust
+    core with the duplicate at that number admitted, and that migration.
+
+    Raises:
+        MigrationsDirectoryError: the target is not in the directory, is a
+            number two migrations share, or a later migration chains from it;
+            or the rest of the directory is malformed.
+    """
+    try:
+        raw = _read_migrations_dir(str(directory), replacing=target)
+    except ValueError as err:
+        raise MigrationsDirectoryError(f"{directory}: {err}") from None
+    read = json.loads(raw)
+    return read["migrations"], read["replaced"]
 
 
 def next_number(directory: Path) -> int:

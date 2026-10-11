@@ -112,7 +112,18 @@ pub struct GeneratedStep {
     /// --replace` regenerates: its files are written back byte for byte,
     /// under the ordinal this step takes.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub carried: Option<CarriedStep>,
+    pub carried: Option<Carried>,
+}
+
+/// Where a carried step landed.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct Carried {
+    /// The step as it was carried.
+    #[serde(flatten)]
+    pub step: CarriedStep,
+    /// Whether it took the place of a step of its name and kind the
+    /// regeneration laid out (a rescaffolded backfill), which it wins over.
+    pub over_namesake: bool,
 }
 
 /// A step of a replaced migration a person wrote or filled in (a data step,
@@ -835,16 +846,15 @@ pub fn generate_with(
     let mut loose_data = Vec::new();
     let mut loose_sql = Vec::new();
     for carry in &options.carry {
-        let step = carried_step(carry, dialects);
         let namesake = data_steps
             .iter_mut()
             .chain(hand.iter_mut())
             .chain(sql.iter_mut())
             .find(|s| s.carried.is_none() && s.name == carry.name && s.kind == carry.kind);
         match (namesake, carry.kind) {
-            (Some(namesake), _) => *namesake = step,
-            (None, StepKind::Data) => loose_data.push(step),
-            (None, _) => loose_sql.push(step),
+            (Some(namesake), _) => *namesake = carried_step(carry, true, dialects),
+            (None, StepKind::Data) => loose_data.push(carried_step(carry, false, dialects)),
+            (None, _) => loose_sql.push(carried_step(carry, false, dialects)),
         }
     }
     steps.extend(data_steps);
@@ -992,7 +1002,7 @@ fn planned_ops(
 /// The step `carry` becomes: its body written back as it was, its class a
 /// data step's (`expand`) or, for a hand-written SQL step, the one its file
 /// declares when it is applied.
-fn carried_step(carry: &CarriedStep, dialects: &[Dialect]) -> GeneratedStep {
+fn carried_step(carry: &CarriedStep, over_namesake: bool, dialects: &[Dialect]) -> GeneratedStep {
     let step = GeneratedStep {
         ordinal: 0,
         name: carry.name.clone(),
@@ -1001,7 +1011,10 @@ fn carried_step(carry: &CarriedStep, dialects: &[Dialect]) -> GeneratedStep {
         data: None,
         hand_model: None,
         class: BTreeMap::new(),
-        carried: Some(carry.clone()),
+        carried: Some(Carried {
+            step: carry.clone(),
+            over_namesake,
+        }),
     };
     if carry.kind == StepKind::Data {
         with_class(step, dialects, |_| DATA_STEP_CLASS)
@@ -3206,7 +3219,8 @@ mod tests {
             ]
         );
         let backfill = &migration.steps[1];
-        assert_eq!(backfill.carried, Some(options.carry[0].clone()));
+        let won = backfill.carried.as_ref().expect("carried");
+        assert_eq!((&won.step, won.over_namesake), (&options.carry[0], true));
         assert!(backfill.data.is_none() && backfill.renderings.is_empty());
         assert_eq!(
             backfill.class.values().copied().collect::<Vec<_>>(),
@@ -3214,7 +3228,8 @@ mod tests {
         );
         let sql = &migration.steps[4];
         assert_eq!(sql.kind, StepKind::PortableSql);
-        assert_eq!(sql.carried, Some(options.carry[1].clone()));
+        let last = sql.carried.as_ref().expect("carried");
+        assert_eq!((&last.step, last.over_namesake), (&options.carry[1], false));
     }
 
     #[test]
@@ -3247,7 +3262,10 @@ mod tests {
         );
         assert!(migration.steps[1].data.is_some(), "rescaffolded");
         assert!(migration.steps[4].carried.is_none(), "the new --sql-step");
-        assert_eq!(migration.steps[5].carried, Some(options.carry[1].clone()));
+        assert_eq!(
+            migration.steps[5].carried.as_ref().map(|c| &c.step),
+            Some(&options.carry[1])
+        );
     }
 
     #[test]

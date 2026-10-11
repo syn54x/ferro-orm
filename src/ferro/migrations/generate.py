@@ -22,9 +22,11 @@ does every model change have a migration, and is the directory intact?
 from __future__ import annotations
 
 import json
+import shutil
 import warnings
 from collections.abc import Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
+from dataclasses import replace as dataclass_replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -42,9 +44,11 @@ from .layout import (
     GeneratedMigration,
     GeneratedStep,
     MigrationsDirectoryError,
+    Moved,
     check_name,
     ensure_gitattributes,
     read_migrations,
+    read_replacing,
     portable_sql_step,
     write_migration,
 )
@@ -60,6 +64,7 @@ __all__ = [
     "declared_modelset",
     "new",
     "prepare",
+    "replace",
     "write",
 ]
 
@@ -186,11 +191,83 @@ def new(
     return write(database, migration)
 
 
+def replace(
+    database: DatabaseSettings,
+    name: str,
+    target: str,
+    *,
+    sql_step: str | None = None,
+    data_step: str | None = None,
+    data_only: bool = False,
+    no_backfill: Sequence[str] = (),
+) -> Path:
+    """Regenerate the migration ``target`` names as ``name`` on top of the
+    newest schema snapshot below it (``ferro migrate new <name> --replace
+    <target>``), and return its directory.
+
+    Two branches each generated ``0007``; after the rebase the directory
+    holds ``0007_add_x`` and ``0007_add_y``. ``replace(db, "add_x",
+    "0007_add_x")`` writes ``0008_add_x`` chained from ``0007_add_y``'s
+    snapshot and deletes ``0007_add_x``: a new snapshot, regenerated DDL
+    steps, and every data step and hand-written SQL step carried across by
+    name with its body intact, renumbered when the regenerated steps move
+    it. A carried step wins over a rescaffolded step of its name. The number
+    is kept when it is free. ``target`` is ``NNNN_<name>``, or ``NNNN`` when
+    one migration carries the number. The other options mean what they mean
+    to :func:`new`. It never opens a database (ADR-0023); a database that
+    applied the old files meets the replaced migration as a changed one.
+
+    Raises:
+        MigrationsDirectoryError: the target is not in the directory, is a
+            number two migrations share, or a later migration chains from it
+            ("replace the later one first, or delete it"); the regeneration
+            is empty and carries nothing ("delete the directory"); or what
+            :func:`new` raises.
+    """
+    migration = prepare(
+        database,
+        name,
+        sql_step=sql_step,
+        data_step=data_step,
+        data_only=data_only,
+        no_backfill=no_backfill,
+        replace=target,
+    )
+    if migration is None:  # pragma: no cover - prepare refuses an empty replace
+        raise MigrationsDirectoryError(f"--replace {target}: nothing to write")
+    for message in migration.warnings:
+        warnings.warn(f"ferro migrate new: {message}", UserWarning, stacklevel=2)
+    return write(database, migration)
+
+
 def write(database: DatabaseSettings, migration: GeneratedMigration) -> Path:
     """Write a migration :func:`prepare` returned into ``database``'s
-    directory (with its ``.gitattributes``); return the migration's directory."""
-    ensure_gitattributes(database.directory)
-    return write_migration(database.directory, migration)
+    directory (with its ``.gitattributes``); return the migration's directory.
+
+    A replacement (``migration.replaces``) deletes the replaced migration's
+    directory once the new one is in place; when the two share a name (the
+    number was free) the old one is set aside first and put back if the
+    write fails."""
+    directory = database.directory
+    ensure_gitattributes(directory)
+    if migration.replaces is None:
+        return write_migration(directory, migration)
+    old = directory / migration.replaces
+    if migration.dir_name != migration.replaces:
+        written = write_migration(directory, migration)
+        shutil.rmtree(old)
+        return written
+    aside = directory / f".{migration.replaces}.replaced"
+    if aside.exists():
+        shutil.rmtree(aside)
+    old.rename(aside)
+    try:
+        written = write_migration(directory, migration)
+    except BaseException:
+        aside.rename(old)
+        raise
+    shutil.rmtree(aside)
+    return written
 
 
 def prepare(
@@ -201,14 +278,23 @@ def prepare(
     data_step: str | None = None,
     data_only: bool = False,
     no_backfill: Sequence[str] = (),
+    replace: str | None = None,
 ) -> GeneratedMigration | None:
     """The migration :func:`new` would write, without writing it; ``None``
-    for no schema change. Raises what :func:`new` raises."""
+    for no schema change. Raises what :func:`new` raises. With ``replace``,
+    the migration :func:`replace` would write (never ``None``), raising what
+    it raises."""
     check_name(name, "migration name")
     if sql_step is not None:
         check_name(sql_step, "--sql-step name")
     directory = database.directory
-    migrations = read_migrations(directory)
+    replaced: dict[str, Any] | None = None
+    carry: list[dict[str, Any]] = []
+    if replace is None:
+        migrations = read_migrations(directory)
+    else:
+        migrations, replaced = read_replacing(directory, replace)
+        carry = _carried_steps(directory, replaced)
     parent = _head_snapshot_text(migrations)
     number = len(migrations) + 1
     try:
@@ -228,18 +314,125 @@ def prepare(
                     "data_step": data_step,
                     "sql_step": sql_step,
                     "data_only": data_only,
+                    "carry": [
+                        {k: step[k] for k in ("name", "body", "kind", "down")}
+                        for step in carry
+                    ],
                 }
             ),
         )
     except ValueError as err:
         raise MigrationsDirectoryError(str(err)) from None
+    if raw is None and replaced is not None:
+        old = _dir_name(replaced)
+        below = _dir_name(migrations[-1]) if migrations else "no migration"
+        raise MigrationsDirectoryError(
+            f"--replace {replace}: regenerated on top of {below}, {old} changes "
+            f"nothing the models declare and carries no data step or hand-written "
+            f"SQL step; delete the directory {directory / old} instead. Nothing "
+            f"was written."
+        )
     if raw is None:
         return None
     generated = json.loads(raw)
-    return _with_data_steps(
+    migration = _with_data_steps(
         GeneratedMigration.from_generated(generated, number=number, name=name),
         generated,
         directory / TEMPLATES_DIR,
+    )
+    if replaced is None:
+        return migration
+    return _with_moves(migration, replaced, carry, migrations)
+
+
+def _dir_name(migration: dict[str, Any]) -> str:
+    return f"{migration['number']:04d}_{migration['name']}"
+
+
+def _carried_steps(directory: Path, replaced: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every data step and hand-written SQL step of ``replaced``, in order,
+    as the generator's ``carry`` option takes them (plus each one's ``old``
+    files, for the per-file lines). A dialect-suffixed SQL file is generated
+    DDL: it is regenerated, never carried."""
+    carry: list[dict[str, Any]] = []
+    for step in replaced["steps"]:
+        if step["kind"] not in ("data", "portable_sql"):
+            continue
+        files = step["files"]["portable"]
+        up = Path(files["up"])
+        down = Path(files["down"]) if files.get("down") else None
+        carry.append(
+            {
+                "name": step["name"],
+                "kind": step["kind"],
+                "body": _text(directory, up),
+                "down": _text(directory, down) if down is not None else None,
+                "old": [p for p in (up, down) if p is not None],
+            }
+        )
+    return carry
+
+
+def _text(directory: Path, path: Path) -> str:
+    """``path``'s text, exactly: a carried file is written back byte for byte."""
+    try:
+        return path.read_bytes().decode("utf-8")
+    except UnicodeDecodeError:
+        raise MigrationsDirectoryError(
+            f"{path.relative_to(directory)} is not UTF-8, so --replace cannot carry "
+            f"it byte for byte; save it as UTF-8 and run the command again. Nothing "
+            f"was written."
+        ) from None
+
+
+def _with_moves(
+    migration: GeneratedMigration,
+    replaced: dict[str, Any],
+    carry: list[dict[str, Any]],
+    migrations: list[dict[str, Any]],
+) -> GeneratedMigration:
+    """``migration`` as the replacement of ``replaced``: what happened to
+    each file the replaced migration had (kept, renumbered, carried)."""
+    old_dir = _dir_name(replaced)
+    old_files = {
+        Path(path).name
+        for step in replaced["steps"]
+        for files in step["files"].values()
+        for path in (files["up"], files.get("down"))
+        if path
+    }
+
+    def unnumbered(file_name: str) -> str:
+        return file_name[3:]
+
+    by_rest = {unnumbered(name): name for name in old_files}
+    # A carried step's old files, matched by name and kind in order: the
+    # generator keeps carried steps of one name and kind in their order.
+    pending = list(carry)
+    moves: list[tuple[str, str, Moved]] = []
+    for step in migration.steps:
+        if step.carried:
+            source = next(
+                c
+                for c in pending
+                if c["name"] == step.name and c["kind"] == step.kind
+            )
+            pending.remove(source)
+            new_files = sorted(step.files, key=lambda n: ".down." in n)
+            for old, new in zip(source["old"], new_files):
+                moves.append((f"{old_dir}/{Path(old).name}", new, Moved.CARRIED))
+            continue
+        for new in step.files:
+            if new in old_files:
+                moves.append((f"{old_dir}/{new}", new, Moved.KEPT))
+            elif unnumbered(new) in by_rest:
+                old = by_rest[unnumbered(new)]
+                moves.append((f"{old_dir}/{old}", new, Moved.RENUMBERED))
+    return dataclass_replace(
+        migration,
+        replaces=old_dir,
+        chained_from=_dir_name(migrations[-1]) if migrations else None,
+        moves=tuple(moves),
     )
 
 
@@ -256,6 +449,9 @@ def _with_data_steps(
     steps: list[GeneratedStep] = []
     notes: list[str] = []
     for step in migration.steps:
+        if step.carried:
+            steps.append(step)
+            continue
         if step.kind == "portable_sql":
             # A --sql-step the generator placed: its placeholder files.
             steps.append(portable_sql_step(step.ordinal, step.name))
@@ -279,7 +475,7 @@ def _with_data_steps(
         if note is not None:
             notes.append(note)
     summary = "\n".join(line for line in (migration.summary, *notes) if line)
-    return replace(migration, steps=tuple(steps), summary=summary)
+    return dataclass_replace(migration, steps=tuple(steps), summary=summary)
 
 
 async def check(
