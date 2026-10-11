@@ -56,7 +56,10 @@ fn apply_resolved_storage(col_def: &mut ColumnDef, storage: &ResolvedStorage, di
 
 /// The FK constraint name for one IR foreign key: the compiler-provided
 /// `SchemaForeignKey.name` when set, else the shared `fk_name` convention.
-pub(crate) fn fk_constraint_name(table_lower: &str, fk: &ferro_schema_ir::SchemaForeignKey) -> String {
+pub(crate) fn fk_constraint_name(
+    table_lower: &str,
+    fk: &ferro_schema_ir::SchemaForeignKey,
+) -> String {
     fk.name
         .clone()
         .unwrap_or_else(|| fk_name(table_lower, &fk.column, &fk.to_table))
@@ -147,7 +150,10 @@ pub(crate) fn find_column<'a>(
         .iter()
         .find(|c| c.name == column)
         .ok_or_else(|| EmissionError {
-            message: format!("column '{}.{}' not found in IR context", model.table_name, column),
+            message: format!(
+                "column '{}.{}' not found in IR context",
+                model.table_name, column
+            ),
         })
 }
 
@@ -381,13 +387,13 @@ fn post_create_artifacts(
     // Row security lands last: the flags and policies go on after the table's
     // columns, indexes and checks exist, so nothing this pass runs against the
     // fresh table is itself filtered (PRD #406).
-    let rls = row_security_statements(model, dialect).map_err(|message| EmissionError { message })?;
+    let rls =
+        row_security_statements(model, dialect).map_err(|message| EmissionError { message })?;
     statements.extend(rls.statements);
     reports.extend(rls.warning);
 
     Ok((statements, reports))
 }
-
 
 /// Order `AddTable` models so each table's FK targets are created before it.
 ///
@@ -502,9 +508,7 @@ pub(crate) fn emit_add_column(
 ) -> Result<EmissionResult, EmissionError> {
     let col = find_column(model, column)?;
     let ld = dialect;
-    let storage = resolve_column_storage(col, ld).map_err(|message| EmissionError {
-        message,
-    })?;
+    let storage = resolve_column_storage(col, ld).map_err(|message| EmissionError { message })?;
 
     if col.primary_key {
         return Err(EmissionError {
@@ -795,14 +799,10 @@ pub(crate) fn emit_alter_column_type(
             if old_col.primary_key || new_col.primary_key {
                 return Ok(result);
             }
-            let new_canonical = canonical_from_schema_column(new_col, ld).map_err(|message| {
-                EmissionError {
-                    message: format!(
-                        "Cannot alter type for '{}.{}': {}",
-                        table, column, message
-                    ),
-                }
-            })?;
+            let new_canonical =
+                canonical_from_schema_column(new_col, ld).map_err(|message| EmissionError {
+                    message: format!("Cannot alter type for '{}.{}': {}", table, column, message),
+                })?;
             if sqlite_type_storage_drift(old_col.db_type.as_deref().unwrap_or(""), new_canonical) {
                 result.reports.push(sqlite_in_place_report(
                     InPlaceChange::AlterColumnType,

@@ -19,6 +19,8 @@
 //! into the statements the executor sends one at a time, and
 //! [`run_lock_key`] is the one derivation of the Postgres run-lock key.
 
+pub mod step_class;
+
 use crate::Dialect;
 use crate::directory::{
     DirectoryError, Headers, Migration, MigrationsDir, SNAPSHOT_FILE, Step, StepDialect, StepFile,
@@ -2469,9 +2471,7 @@ impl StepState {
     pub fn is_pending(self) -> bool {
         !matches!(
             self,
-            StepState::Applied
-                | StepState::AppliedDifferentChecksum
-                | StepState::AppliedBaseline
+            StepState::Applied | StepState::AppliedDifferentChecksum | StepState::AppliedBaseline
         )
     }
 }
@@ -4053,11 +4053,7 @@ mod tests {
         let states: Vec<StepState> = status.migrations[2].steps.iter().map(|s| s.state).collect();
         assert_eq!(
             states,
-            [
-                StepState::Applied,
-                StepState::Applied,
-                StepState::Failed
-            ]
+            [StepState::Applied, StepState::Applied, StepState::Failed]
         );
         assert_eq!(
             keys(&down(&dir, &records, Target::Latest).expect("resume")),

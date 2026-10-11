@@ -43,6 +43,10 @@ pub use rebuild::{NEW_TABLE_PREFIX, new_table_name};
 use crate::directory::{DirectoryError, Headers, MigrationsDir, StepDialect, StepKind};
 use crate::plan::{HintError, renamed_snapshot};
 use crate::render::render_ops;
+use crate::run_plan::step_class::{
+    self, DATA_STEP_CLASS, Sides, StepClass, constraint_step_class, index_step_class,
+    schema_step_class,
+};
 use crate::snapshot::{Snapshot, SnapshotError};
 use crate::{
     AnsweredBy, Dialect, EmissionError, Execution, MigrationOp, Plan, PlanOptions, PlannedOp,
@@ -96,6 +100,14 @@ pub struct GeneratedStep {
     /// skeleton over. Placed by [`generate_with`], never appended after it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hand_model: Option<String>,
+    /// The step's class on each dialect it renders for (ADR-0054), decided
+    /// from the ops the layout puts in it ([`crate::run_plan::step_class`]):
+    /// what a run or a baseline records when it applies the step. Empty for a
+    /// hand-written SQL step, whose class its file declares
+    /// (`-- ferro: expand`), and never written into a file: a class header
+    /// would change every applied file's checksum (ADR-0030).
+    #[serde(skip)]
+    pub class: BTreeMap<StepDialect, StepClass>,
 }
 
 /// Everything a new migration directory holds, ready to write.
@@ -653,6 +665,7 @@ pub fn generate_with(
         renderings: BTreeMap::new(),
         data: None,
         hand_model: None,
+        class: BTreeMap::new(),
     });
     // Declared renames (ADR-0032): the planner puts them first; every other
     // op reads its table from `before`, the parent as the renames leave it.
@@ -678,6 +691,8 @@ pub fn generate_with(
 
     let mut warnings = Vec::new();
     let mut staged = Vec::new();
+    // Whether each dialect's early steps stage a constraint `NOT VALID`.
+    let mut stages_on: BTreeMap<StepDialect, bool> = BTreeMap::new();
     let mut suggestions = Vec::new();
     for placed in &layout.placed {
         let dialect = placed.dialect;
@@ -688,7 +703,9 @@ pub fn generate_with(
             .cloned()
             .collect();
         render_warnings(&early, parent_ir, expanded, dialect, &mut warnings)?;
-        for constraint in staging::staged_constraints(&early, before, expanded, dialect)? {
+        let staged_here = staging::staged_constraints(&early, before, expanded, dialect)?;
+        stages_on.insert(StepDialect::from(dialect), !staged_here.is_empty());
+        for constraint in staged_here {
             if !staged.contains(&constraint) {
                 staged.push(constraint);
             }
@@ -715,6 +732,27 @@ pub fn generate_with(
             };
             renderings.insert(StepDialect::from(dialect), rendering);
         }
+        let class = layout
+            .placed
+            .iter()
+            .map(|placed| {
+                let on = StepDialect::from(placed.dialect);
+                let sides = Sides {
+                    before: parent_ir,
+                    target: expanded,
+                };
+                let class = if phase == Phase::Labels {
+                    step_class::step_class(&planned_ops(placed, &placed.labels), sides, false)
+                } else {
+                    schema_step_class(
+                        &planned_ops(placed, &placed.schema),
+                        sides,
+                        stages_on.get(&on).copied().unwrap_or(false),
+                    )
+                };
+                (on, class)
+            })
+            .collect();
         steps.push(GeneratedStep {
             ordinal: 0,
             name: match phase {
@@ -725,17 +763,18 @@ pub fn generate_with(
             renderings,
             data: None,
             hand_model: None,
+            class,
         });
     }
-    steps.extend(backfill::data_steps(&layout.demands, target, &skipped)?);
+    steps.extend(
+        backfill::data_steps(&layout.demands, target, &skipped)?
+            .into_iter()
+            .map(|step| with_class(step, dialects, |_| DATA_STEP_CLASS)),
+    );
     for (at, op) in layout.index_ops.iter().enumerate() {
         let (step_before, step_after) = layout.index_stages(at, target);
-        steps.push(staging::index_step(
-            op,
-            &step_before,
-            &step_after,
-            dialects,
-        )?);
+        let step = staging::index_step(op, &step_before, &step_after, dialects)?;
+        steps.push(with_class(step, dialects, |_| index_step_class(op, target)));
     }
     // The steps a person asks for (`--sql-step`, `--data-step`), laid out
     // whether or not the models changed: the SQL step right before the data
@@ -746,18 +785,23 @@ pub fn generate_with(
     } else {
         (None, sql)
     };
+    let hand = hand.map(|step| with_class(step, dialects, |_| DATA_STEP_CLASS));
     if !layout.contracts() {
         // A step every configured dialect would render not-applicable is not
         // generated: only Postgres stages a constraint (ADR-0043).
         if !staged.is_empty() {
-            steps.push(staging::validate_step(&staged, dialects));
+            steps.push(constraint_classes(staging::validate_step(
+                &staged, dialects,
+            )));
         }
         steps.extend(sql_first);
         steps.extend(hand);
     } else {
         // The contract validates what the expand staged (ADR-0043): no
         // separate validate step.
-        steps.extend(backfill::add_constraint_step(&layout.demands, dialects));
+        steps.extend(
+            backfill::add_constraint_step(&layout.demands, dialects).map(constraint_classes),
+        );
         steps.extend(sql_first);
         steps.extend(hand);
         let held: Vec<Vec<MigrationOp>> = layout
@@ -770,7 +814,7 @@ pub fn generate_with(
             .iter()
             .map(|placed| placed.relabel.clone())
             .collect();
-        steps.push(backfill::contract_step(
+        let contract = backfill::contract_step(
             &layout.demands,
             &staged,
             &held,
@@ -779,7 +823,30 @@ pub fn generate_with(
             loose,
             target,
             dialects,
-        )?);
+        )?;
+        // The contract validates what the expand staged and makes each
+        // demanded column `NOT NULL` (on SQLite, by a rebuild), beside the
+        // drops and label removals it was handed.
+        let class = layout
+            .placed
+            .iter()
+            .map(|placed| {
+                let on = StepDialect::from(placed.dialect);
+                let validates = stages_on.get(&on).copied().unwrap_or(false);
+                let ops: Vec<MigrationOp> =
+                    placed.held.iter().chain(&placed.relabel).cloned().collect();
+                let class = step_class::step_class(
+                    &planned_ops(placed, &ops),
+                    Sides {
+                        before: kept,
+                        target,
+                    },
+                    validates || !layout.demands.is_empty(),
+                );
+                (on, class)
+            })
+            .collect();
+        steps.push(GeneratedStep { class, ..contract });
     }
     steps.extend(sql_last);
     for (ordinal, step) in (1u8..).zip(&mut steps) {
@@ -810,6 +877,58 @@ pub fn generate_with(
             .join("\n"),
         warnings,
     }))
+}
+
+/// `ops`, each with the verdict `placed`'s plan decided for it: the
+/// inputs of a step's class. Every op the layout places is one of the
+/// plan's own.
+fn planned_ops(placed: &stages::Placed, ops: &[MigrationOp]) -> Vec<PlannedOp> {
+    ops.iter()
+        .map(|op| {
+            placed
+                .plan
+                .operations
+                .iter()
+                .find(|planned| &planned.op == op)
+                .cloned()
+                // An op the plan did not decide has no verdict to read: it
+                // is read as one that can fail the previous release's writes.
+                .unwrap_or_else(|| PlannedOp {
+                    op: op.clone(),
+                    verdict: crate::OpVerdict {
+                        drops_data: true,
+                        ..crate::OpVerdict::default()
+                    },
+                })
+        })
+        .collect()
+}
+
+/// `step` with `class_on` its class on each of `dialects`.
+fn with_class(
+    step: GeneratedStep,
+    dialects: &[Dialect],
+    class_on: impl Fn(Dialect) -> StepClass,
+) -> GeneratedStep {
+    GeneratedStep {
+        class: dialects
+            .iter()
+            .map(|&dialect| (StepDialect::from(dialect), class_on(dialect)))
+            .collect(),
+        ..step
+    }
+}
+
+/// A step that only stages or validates constraints (the validate and
+/// add-constraint steps), with its class on each dialect it renders for,
+/// read off that rendering ([`constraint_step_class`]).
+fn constraint_classes(step: GeneratedStep) -> GeneratedStep {
+    let class = step
+        .renderings
+        .iter()
+        .map(|(on, rendering)| (*on, constraint_step_class(&rendering.headers)))
+        .collect();
+    GeneratedStep { class, ..step }
 }
 
 /// One thing `ferro migrate check` found wrong.
