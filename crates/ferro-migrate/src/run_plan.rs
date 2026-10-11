@@ -479,6 +479,12 @@ pub enum RunRefusal {
         /// Whether the run asked for `allow_ahead="expand-only"`: the text
         /// then names the first contract step that refused it.
         expand_only: bool,
+        /// The lowest number at or below the directory's head whose applied
+        /// migration (or step) the directory lacks: a migration replaced
+        /// after this database applied it (`ferro migrate new --replace`)
+        /// looks exactly like this, so the text names that cause and its
+        /// revert beside the checkout.
+        replaced: Option<u16>,
     },
     /// `up`'s `through` names a migration the directory does not hold.
     NoSuchMigration {
@@ -1048,7 +1054,9 @@ impl std::fmt::Display for RunRefusal {
                 "ferro migrate: {migration_name}/{SNAPSHOT_FILE} is not the snapshot this \
                  database applied {migration_name} under.\n  applied   sha384:{applied}\n  \
                  on disk   sha384:{on_disk}\nA snapshot is never edited: later migrations and \
-                 historical models are built from it.\nRestore the file. Nothing was applied."
+                 historical models are built from it.\nRestore the file, or {}. Nothing was \
+                 applied.",
+                replaced_cause(migration_number(migration_name))
             ),
             RunRefusal::BrokenChain {
                 child,
@@ -1101,6 +1109,7 @@ impl std::fmt::Display for RunRefusal {
                 directory,
                 contract_steps,
                 expand_only,
+                replaced,
                 ..
             } => {
                 let verb = if missing.len() == 1 {
@@ -1111,9 +1120,13 @@ impl std::fmt::Display for RunRefusal {
                 write!(
                     f,
                     "ferro migrate: this database has applied {}, {verb} not in {directory}/.\n\
-                     The directory is behind the database: check out the branch that holds it.",
+                     The directory is behind the database: check out the branch that holds it",
                     and_list(missing)
                 )?;
+                match replaced {
+                    Some(number) => write!(f, ", or {}.", replaced_cause(Some(*number)))?,
+                    None => write!(f, ".")?,
+                }
                 if let Some(first) = contract_steps.first().filter(|_| *expand_only) {
                     write!(
                         f,
@@ -1620,6 +1633,29 @@ pub fn exec_mode(headers: &Headers, dialect: Dialect, file: &str) -> Result<Exec
     }
 }
 
+/// The `NNNN` of `NNNN_<name>`.
+fn migration_number(migration_name: &str) -> Option<u16> {
+    migration_name.get(..4)?.parse().ok()
+}
+
+/// The second cause of a snapshot mismatch or an applied migration the
+/// directory lacks, and its fix: the migration was replaced (`ferro migrate
+/// new --replace`) after this database applied it, so it is reverted with
+/// the files that were applied before the new ones go up.
+fn replaced_cause(number: Option<u16>) -> String {
+    let (number, parent) = match number {
+        Some(number) => (
+            format!("{number:04}"),
+            format!("{:04}", number.saturating_sub(1)),
+        ),
+        None => ("the migration".to_string(), "<parent>".to_string()),
+    };
+    format!(
+        "{number} was replaced: revert it with the files that were applied (check out the \
+         commit that applied it, `ferro migrate down --to {parent}`), then `up`"
+    )
+}
+
 fn directory_label(dir: &MigrationsDir) -> String {
     dir.path
         .file_name()
@@ -1650,6 +1686,8 @@ fn check_records(
     let mut ahead = BTreeSet::new();
     let mut missing = BTreeSet::new();
     let mut contract_steps = Vec::new();
+    let mut replaced: Option<u16> = None;
+    let mut lacks = |number: u16| replaced = Some(replaced.map_or(number, |r| r.min(number)));
     for record in records {
         match dir
             .migrations
@@ -1663,12 +1701,15 @@ fn check_records(
             }
             None => {
                 missing.insert(record.migration_name.clone());
+                lacks(record.migration);
             }
             Some(migration) if migration.dir_name() != record.migration_name => {
                 missing.insert(record.migration_name.clone());
+                lacks(record.migration);
             }
             Some(migration) if !migration.steps.iter().any(|s| s.ordinal == record.step) => {
                 missing.insert(record.path());
+                lacks(record.migration);
             }
             Some(_) => {}
         }
@@ -1687,6 +1728,7 @@ fn check_records(
             ahead_only: false,
             contract_steps,
             expand_only: allow_ahead == AllowAhead::ExpandOnly,
+            replaced,
         });
     }
     Ok(ahead.into_iter().collect())
@@ -1917,6 +1959,7 @@ pub fn plan_run(
             directory,
             contract_steps,
             expand_only,
+            replaced,
             ..
         }) if allow_ahead != AllowAhead::Any => Err(RunRefusal::AppliedMissing {
             missing,
@@ -1925,6 +1968,7 @@ pub fn plan_run(
                 .is_ok(),
             contract_steps,
             expand_only,
+            replaced,
         }),
         planned => planned,
     }
@@ -3321,7 +3365,9 @@ mod tests {
                 "ferro migrate: 0001_create_author/ir.json is not the snapshot this database \
                  applied 0001_create_author under.\n  applied   sha384:{}\n  on disk   \
                  sha384:{on_disk}\nA snapshot is never edited: later migrations and historical \
-                 models are built from it.\nRestore the file. Nothing was applied.",
+                 models are built from it.\nRestore the file, or 0001 was replaced: revert \
+                 it with the files that were applied (check out the commit that applied it, \
+                 `ferro migrate down --to 0000`), then `up`. Nothing was applied.",
                 "b".repeat(96)
             )
         );
@@ -3385,10 +3431,13 @@ mod tests {
         )
         .expect_err("missing");
         assert_eq!(refusal.kind(), "applied_missing");
-        assert!(
-            refusal
-                .to_string()
-                .contains("applied 0001_other, which is not in")
+        assert_eq!(
+            refusal.to_string(),
+            "ferro migrate: this database has applied 0001_other, which is not in \
+             migrations/.\nThe directory is behind the database: check out the branch that \
+             holds it, or 0001 was replaced: revert it with the files that were applied \
+             (check out the commit that applied it, `ferro migrate down --to 0000`), then \
+             `up`. Nothing was applied."
         );
     }
 
