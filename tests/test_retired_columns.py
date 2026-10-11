@@ -102,14 +102,6 @@ def test_constructing_with_a_retired_field_is_a_type_error_naming_it(declare):
         Author(name="a", bio="x")
 
 
-def test_a_retired_required_column_is_nullable_in_the_snapshot():
-    class Author(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-        nickname: str | None = Field(retired=True, nullable=False)
-
-    assert _column("author", "nickname")["nullable"] is True
-
-
 def test_a_retired_foreign_key_leaves_the_model_and_keeps_its_constraint():
     class Team(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
@@ -228,6 +220,41 @@ def test_retiring_a_non_optional_foreign_key_is_refused_naming_the_fix():
         class Author(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
             team: Annotated[Team, ForeignKey(retired=True)]
+
+
+NOT_NULLABLE = (
+    r"Author\.{field} is retired but declared `nullable=False`: a retired column "
+    r"stays nullable; drop `nullable=False`"
+)
+
+
+def test_retiring_a_field_declared_not_nullable_is_refused_naming_the_fix():
+    with pytest.raises(TypeError, match=NOT_NULLABLE.format(field="nickname")):
+
+        class Author(Model):
+            id: Annotated[int | None, FerroField(primary_key=True)] = None
+            nickname: str | None = Field(retired=True, nullable=False)
+
+    with pytest.raises(TypeError, match=NOT_NULLABLE.format(field="nickname")):
+
+        class Author(Model):  # noqa: F811 - the Annotated style
+            id: Annotated[int | None, FerroField(primary_key=True)] = None
+            nickname: Annotated[
+                str | None, FerroField(retired=True, nullable=False)
+            ] = None
+
+
+def test_retiring_a_foreign_key_declared_not_nullable_is_refused_naming_the_fix():
+    class Team(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+
+    with pytest.raises(TypeError, match=NOT_NULLABLE.format(field="team")):
+
+        class Author(Model):
+            id: Annotated[int | None, FerroField(primary_key=True)] = None
+            team: Annotated[Team | None, ForeignKey(retired=True, nullable=False)] = (
+                None
+            )
 
 
 def test_retiring_a_primary_key_is_refused():

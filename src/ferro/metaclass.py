@@ -64,6 +64,13 @@ def _retired_not_optional(model: str, field_name: str, annotation: Any) -> TypeE
     )
 
 
+def _retired_not_nullable(model: str, field_name: str) -> TypeError:
+    return TypeError(
+        f"{model}.{field_name} is retired but declared `nullable=False`: a retired "
+        "column stays nullable; drop `nullable=False`"
+    )
+
+
 def _retired_and_renamed(model: str, field_name: str) -> TypeError:
     return TypeError(
         f"{model}.{field_name}: retire it or rename it, not both; drop "
@@ -153,8 +160,8 @@ class ModelMetaclass(type(BaseModel)):
 
         Raises:
             TypeError: a retired primary key, a retired field that also
-                declares ``renamed_from``, or one whose annotation does not
-                allow ``None`` (each naming the fix).
+                declares ``renamed_from`` or ``nullable=False``, or one whose
+                annotation does not allow ``None`` (each naming the fix).
         """
         model = cls.__name__
         retired = {
@@ -169,6 +176,8 @@ class ModelMetaclass(type(BaseModel)):
                 )
             if meta.renamed_from is not None:
                 raise _retired_and_renamed(model, field_name)
+            if meta.nullable is False:
+                raise _retired_not_nullable(model, field_name)
             annotation = cls.model_fields[field_name].annotation
             if not annotation_allows_none(annotation):
                 raise _retired_not_optional(model, field_name, annotation)
@@ -517,6 +526,8 @@ class ModelMetaclass(type(BaseModel)):
             raise _retired_and_renamed(model_name, field_name)
         if not annotation_allows_none(metadata.relation_annotation):
             raise _retired_not_optional(model_name, field_name, metadata.to)
+        if metadata.nullable is False:
+            raise _retired_not_nullable(model_name, field_name)
         annotations.pop(field_name, None)
         namespace.pop(field_name, None)
 

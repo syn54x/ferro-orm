@@ -222,7 +222,7 @@ On SQLite that is a [table rebuild](#sqlite-table-rebuilds). Retiring a column t
 - Nothing else about the column changes while it is retired: its index, unique, check and foreign key, and every table check, row policy, composite index or unique that names it, stay as declared.
 - A [historical model](data-steps.md#historical-models) sees a retired column as an ordinary nullable column, so a data step can still read it.
 - Auto-migrate creates the column on a fresh database and, under `migrate_updates`, relaxes its `NOT NULL`; it never drops it. Alembic autogenerate writes the same `alter_column(..., nullable=True)`.
-- Refused at class definition, each naming the fix: retiring a field whose annotation does not allow `None` (declare it `str | None`), a primary key, a field that also declares `renamed_from` (retire it or rename it, not both), a `BackRef` or a `ManyToMany`.
+- Refused at class definition, each naming the fix: retiring a field whose annotation does not allow `None` (declare it `str | None`), a field declared `nullable=False` (a retired column stays nullable), a primary key, a field that also declares `renamed_from` (retire it or rename it, not both), a `BackRef` or a `ManyToMany`.
 
 The example runs all three releases end to end in [`docs/examples/migrations_retire.py`](https://github.com/syn54x/ferro-orm/blob/main/docs/examples/migrations_retire.py).
 
