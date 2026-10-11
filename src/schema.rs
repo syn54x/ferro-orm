@@ -596,6 +596,7 @@ pub fn infer_test_schema_columns(schema: &serde_json::Value) -> Vec<ferro_schema
             postgres_native_enum: false,
             enum_renamed_labels: Default::default(),
             default_factory: None,
+            retired: false,
         });
     }
     columns
@@ -793,6 +794,7 @@ mod tests {
                 postgres_native_enum: false,
                 enum_renamed_labels: Default::default(),
                 default_factory: None,
+                retired: false,
             }
         }
 

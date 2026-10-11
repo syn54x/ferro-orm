@@ -202,3 +202,42 @@ def test_hydration_abi_guard_passes_real_basemodel():
     from ferro._core import _verify_hydration_abi_for_test
 
     _verify_hydration_abi_for_test(BaseModel)  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_hydration_holds_the_mapped_columns_only(db_url):
+    """The root fetch names the registration's mapped columns, never ``*``
+    (ADR-0053, the complete-instance invariant): a retired column the table
+    still holds, and a column added by hand, never reach the instance, which
+    is the one ``__init__`` builds from the same row."""
+    from ferro import Field as FerroFieldOption
+    from ferro.raw import execute
+
+    class RetiredHydrationUser(Model):
+        id: int = Field(default=None, json_schema_extra={"primary_key": True})
+        name: str
+        bio: str | None = FerroFieldOption(retired=True)
+
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        await execute("ALTER TABLE retiredhydrationuser ADD COLUMN extra varchar")
+        await execute(
+            "INSERT INTO retiredhydrationuser (id, name, bio, extra) "
+            "VALUES (1, 'kept', 'old', 'by hand')"
+        )
+
+    ferro.reset_engine()
+    await ferro.connect(db_url)
+    async with ferro.engines.session():
+        rows = [
+            await RetiredHydrationUser.get(1),
+            *(await RetiredHydrationUser.all()),
+            await RetiredHydrationUser.where(lambda user: user.id == 1).first(),
+        ]
+
+    built = RetiredHydrationUser(id=1, name="kept")
+    for row in rows:
+        assert row is not None
+        row_fields = {k: v for k, v in row.__dict__.items() if not k.startswith("__")}
+        assert row_fields == built.__dict__ == {"id": 1, "name": "kept"}
+        _assert_pydantic_slots(row, expected_fields={"id", "name"}, expected_extra=None)

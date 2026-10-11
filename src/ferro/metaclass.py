@@ -1,4 +1,5 @@
 import re
+from dataclasses import replace
 from enum import Enum
 from typing import (
     Annotated,
@@ -17,9 +18,10 @@ from pydantic.fields import FieldInfo
 from ._annotation_utils import (
     _strip_optional_union as _annotation_utils_strip_optional_union,
 )
-from ._annotation_utils import is_closed_domain_annotation
+from ._annotation_utils import annotation_allows_none, is_closed_domain_annotation
 from ._shadow_fk_types import shadow_annotation_for_foreign_key
 from .base import FerroField, ForeignKey, ManyToManyRelation
+from .columns import build_column_specs, refuse_back_ref_over_retired_relation
 from .fields import FERRO_FIELD_EXTRA_KEY
 from .ir import compile_model_schema_ir
 from .query import Relation
@@ -46,6 +48,48 @@ def _assert_weakref_support(cls: type) -> None:
         )
 
 
+def _type_name(annotation: Any) -> str:
+    """``str`` for ``str``, ``Team`` for ``Team`` or ``"Team"``."""
+    if isinstance(annotation, ForwardRef):
+        return annotation.__forward_arg__
+    if isinstance(annotation, str):
+        return annotation
+    return getattr(annotation, "__name__", None) or repr(annotation)
+
+
+def _retired_not_optional(model: str, field_name: str, annotation: Any) -> TypeError:
+    return TypeError(
+        f"{model}.{field_name} is retired but not optional: declare it "
+        f"`{_type_name(annotation)} | None`"
+    )
+
+
+def _retired_not_nullable(model: str, field_name: str) -> TypeError:
+    return TypeError(
+        f"{model}.{field_name} is retired but declared `nullable=False`: a retired "
+        "column stays nullable; drop `nullable=False`"
+    )
+
+
+def _retired_and_renamed(model: str, field_name: str) -> TypeError:
+    return TypeError(
+        f"{model}.{field_name}: retire it or rename it, not both; drop "
+        "`renamed_from` once its migration is generated"
+    )
+
+
+def _reverse_relation_retired(model: str, field_name: str, m2m: bool) -> TypeError:
+    if m2m:
+        return TypeError(
+            f"{model}.{field_name}: a ManyToMany cannot be retired; it is a join "
+            "table, not a column. Delete the declaration to drop the join table"
+        )
+    return TypeError(
+        f"{model}.{field_name}: a BackRef cannot be retired; it is not a column. "
+        "Delete the BackRef"
+    )
+
+
 class ModelMetaclass(type(BaseModel)):
     """
     Metaclass for Ferro models that provisionally registers schema in Python caches.
@@ -60,7 +104,7 @@ class ModelMetaclass(type(BaseModel)):
         annotations = mcs._resolve_deferred_annotations(namespace)
         namespace["__annotations__"] = annotations
 
-        local_relations, fields_to_remove, pending_relations = (
+        local_relations, fields_to_remove, pending_relations, retired_relations = (
             mcs._scan_relationship_annotations(annotations, namespace, name)
         )
         mcs._inject_shadow_fields(annotations, namespace, local_relations)
@@ -92,6 +136,7 @@ class ModelMetaclass(type(BaseModel)):
         ferro_fields = mcs._parse_ferro_field_metadata(cls)
         cls.ferro_fields = ferro_fields
         mcs._validate_db_type_options(cls, ferro_fields)
+        mcs._retire_fields(cls, retired_relations)
         mcs._inject_relation_descriptors(cls, local_relations)
         mcs._generate_and_register_schema(cls, cls.__ferro_identity__)
 
@@ -101,6 +146,69 @@ class ModelMetaclass(type(BaseModel)):
         mcs._register_enum_fields(cls)
 
         return cls
+
+    @staticmethod
+    def _retire_fields(cls, retired_relations: dict[str, ForeignKey]) -> None:
+        """Take the retired fields out of the model (ADR-0053).
+
+        A retired scalar field's column spec is derived here, once, while the
+        field is still a Pydantic field (its annotation resolved, its ``db_type``
+        and enum read the one way every column's are); then the field leaves
+        the Pydantic model, so the model has no attribute, keyword or dump key
+        for it. A retired relation never became a field: the class-body scan
+        kept it out of ``ferro_relations`` and gave it no shadow column.
+
+        Raises:
+            TypeError: a retired primary key, a retired field that also
+                declares ``renamed_from`` or ``nullable=False``, or one whose
+                annotation does not allow ``None`` (each naming the fix).
+        """
+        model = cls.__name__
+        retired = {
+            field_name: meta
+            for field_name, meta in cls.ferro_fields.items()
+            if getattr(meta, "retired", False)
+        }
+        for field_name, meta in retired.items():
+            if meta.primary_key:
+                raise TypeError(
+                    f"{model}.{field_name}: a primary key cannot be retired"
+                )
+            if meta.renamed_from is not None:
+                raise _retired_and_renamed(model, field_name)
+            if meta.nullable is False:
+                raise _retired_not_nullable(model, field_name)
+            annotation = cls.model_fields[field_name].annotation
+            if not annotation_allows_none(annotation):
+                raise _retired_not_optional(model, field_name, annotation)
+
+        retired_fields = {}
+        if retired:
+            specs = build_column_specs(cls)
+            retired_fields = {
+                field_name: replace(specs[field_name], nullable=True, retired=True)
+                for field_name in retired
+            }
+            for field_name in retired:
+                del cls.__pydantic_fields__[field_name]
+                del cls.ferro_fields[field_name]
+            annotations = dict(cls.__dict__.get("__annotations__", {}))
+            for field_name in retired:
+                annotations.pop(field_name, None)
+            cls.__annotations__ = annotations
+            cls.model_rebuild(force=True, raise_errors=False)
+
+        for field_name, meta in retired_relations.items():
+            refuse_back_ref_over_retired_relation(cls, field_name, meta)
+        cls.__ferro_retired_fields__ = retired_fields
+        cls.__ferro_retired_relations__ = retired_relations
+        cls.__ferro_retired_names__ = frozenset(
+            [
+                *retired_fields,
+                *retired_relations,
+                *(f"{field_name}_id" for field_name in retired_relations),
+            ]
+        )
 
     @staticmethod
     def _resolve_table_name(name: str, namespace: dict) -> str:
@@ -307,15 +415,18 @@ class ModelMetaclass(type(BaseModel)):
         Scan annotations for relationship fields (BackRef, ForeignKey, ManyToMany).
 
         Returns:
-            (local_relations, fields_to_remove, pending_relations): Relationship
-            metadata, fields to hide from Pydantic, and ``(field_name, metadata)``
-            entries deferred to the Registry's pending-relation queue (flushed
-            under the model's resolved ``__ferro_identity__`` after the class
-            object exists).
+            (local_relations, fields_to_remove, pending_relations,
+            retired_relations): Relationship metadata, fields to hide from
+            Pydantic, ``(field_name, metadata)`` entries deferred to the
+            Registry's pending-relation queue (flushed under the model's
+            resolved ``__ferro_identity__`` after the class object exists), and
+            the retired ``ForeignKey`` relations (ADR-0053), which leave the
+            class body entirely.
         """
         local_relations = {}
         fields_to_remove = []
         pending_relations = []
+        retired_relations: dict[str, ForeignKey] = {}
 
         for field_name, hint in list(annotations.items()):
             if ModelMetaclass._annotation_looks_like_back_ref(hint):
@@ -326,6 +437,10 @@ class ModelMetaclass(type(BaseModel)):
             )
             is_back_field = relationship_payload.get("back_ref") is True
             is_m2m_field = relationship_payload.get("many_to_many") is True
+            if relationship_payload.get("retired") is True and (
+                is_back_field or is_m2m_field
+            ):
+                raise _reverse_relation_retired(model_name, field_name, is_m2m_field)
 
             if is_back_field and is_m2m_field:
                 raise TypeError(
@@ -374,6 +489,12 @@ class ModelMetaclass(type(BaseModel)):
                         metadata.relation_annotation = args[0]
                         inner = ModelMetaclass._strip_optional_union(args[0])
                         metadata.to = inner
+                        if metadata.retired:
+                            ModelMetaclass._retire_relation(
+                                model_name, field_name, metadata, annotations, namespace
+                            )
+                            retired_relations[field_name] = metadata
+                            break
                         local_relations[field_name] = metadata
                         pending_relations.append((field_name, metadata))
                         fields_to_remove.append(field_name)
@@ -385,7 +506,30 @@ class ModelMetaclass(type(BaseModel)):
                             "Relation[list[T]] = ManyToMany(...)."
                         )
 
-        return local_relations, fields_to_remove, pending_relations
+        return local_relations, fields_to_remove, pending_relations, retired_relations
+
+    @staticmethod
+    def _retire_relation(
+        model_name: str,
+        field_name: str,
+        metadata: ForeignKey,
+        annotations: dict,
+        namespace: dict,
+    ) -> None:
+        """Take a retired ``ForeignKey`` out of the class body (ADR-0053).
+
+        The relation gets no descriptor and no shadow ``*_id`` field, so the
+        model has neither attribute; its column is compiled from the
+        ``ForeignKey`` alone (:func:`ferro.columns.retired_column_specs`).
+        """
+        if metadata.renamed_from is not None:
+            raise _retired_and_renamed(model_name, field_name)
+        if not annotation_allows_none(metadata.relation_annotation):
+            raise _retired_not_optional(model_name, field_name, metadata.to)
+        if metadata.nullable is False:
+            raise _retired_not_nullable(model_name, field_name)
+        annotations.pop(field_name, None)
+        namespace.pop(field_name, None)
 
     @staticmethod
     def _inject_shadow_fields(
@@ -489,6 +633,7 @@ class ModelMetaclass(type(BaseModel)):
                             "db_type",
                             "db_check",
                             "renamed_from",
+                            "retired",
                         )
                         if key in wrapped_payload
                     }

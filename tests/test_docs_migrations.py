@@ -39,6 +39,7 @@ MIGRATION_EXAMPLES = [
     "migrations_quickstart",
     "migrations_backfill",
     "migrations_rename",
+    "migrations_retire",
     "migrations_testing",
 ]
 

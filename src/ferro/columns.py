@@ -40,6 +40,9 @@ __all__ = [
     "fk_shadow_spec",
     "pk_spec",
     "primary_key_field_name",
+    "refuse_back_ref_over_retired_relation",
+    "retired_clause",
+    "retired_column_specs",
 ]
 
 
@@ -153,6 +156,9 @@ class ColumnSpec:
     db_type_explicit: bool = False
     db_check: bool = False
     foreign_key: ForeignKeyRef | None = None
+    #: A retired column (ADR-0053): in the schema snapshot, nullable, never in
+    #: ``__ferro_columns__`` (the mapped columns the model reads and writes).
+    retired: bool = False
 
 
 def _derive_autoincrement(
@@ -659,3 +665,79 @@ def fk_shadow_spec(
         index=index,
         nullable=nullable,
     )
+
+
+def retired_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
+    """The retired columns of ``model_cls`` (ADR-0053), flagged and nullable.
+
+    A retired scalar field's spec was derived once at class creation, before
+    the field left the Pydantic model (``__ferro_retired_fields__``); a retired
+    ``ForeignKey``'s shadow column is derived here on every compile, as the
+    mapped relation's would be, so it follows its target's resolution.
+    """
+    specs: dict[str, ColumnSpec] = dict(
+        model_cls.__dict__.get("__ferro_retired_fields__", {})
+    )
+    relations = model_cls.__dict__.get("__ferro_retired_relations__", {})
+    for field_name, meta in relations.items():
+        from ._shadow_fk_types import is_concrete_ferro_model, pk_python_type_for_model
+
+        target = meta.to
+        python_type = (
+            pk_python_type_for_model(target)
+            if is_concrete_ferro_model(target)
+            else None
+        )
+        name = f"{field_name}_id"
+        specs[name] = replace(
+            fk_shadow_spec(
+                name,
+                python_type=python_type,
+                to_table=_target_table_name(target),
+                on_delete=meta.on_delete,
+                unique=bool(meta.unique),
+                index=bool(meta.index),
+                nullable=True,
+            ),
+            default=None,
+            retired=True,
+        )
+    return specs
+
+
+def retired_clause(model_cls: type[Any], name: str) -> str:
+    """`` 'bio' is retired in this release.`` when ``name`` is one of
+    ``model_cls``'s retired fields or columns (ADR-0053), else ``""``: the
+    clause the usual unknown-column errors carry, so the reader learns the
+    name is gone on purpose, not misspelled."""
+    retired = getattr(model_cls, "__ferro_retired_names__", frozenset())
+    if name not in retired:
+        return ""
+    return (
+        f" {model_cls.__name__}.{name} is retired in this release: the model "
+        "no longer reads or writes it (ADR-0053)."
+    )
+
+
+def refuse_back_ref_over_retired_relation(
+    model_cls: type[Any], field_name: str, meta: ForeignKey
+) -> None:
+    """Refuse a ``BackRef`` that reads a retired relation back (ADR-0053).
+
+    A retired ``ForeignKey`` leaves the model, so nothing fills the target's
+    ``BackRef``; it renders no DDL, and the fix is to delete it. Checked when
+    the target is a concrete class: at class creation when the target already
+    exists, and again by relationship resolution for a forward reference.
+
+    Raises:
+        TypeError: The target declares ``meta.related_name`` as a ``BackRef``.
+    """
+    target = meta.to
+    if meta.related_name is None or not isinstance(target, type):
+        return
+    relations = getattr(target, "ferro_relations", None) or {}
+    if relations.get(meta.related_name) == "BackRef":
+        raise TypeError(
+            f"{target.__name__}.{meta.related_name} is a BackRef over the retired "
+            f"relation {model_cls.__name__}.{field_name}; delete the BackRef"
+        )

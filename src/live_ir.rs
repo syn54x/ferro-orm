@@ -109,6 +109,7 @@ fn live_table_model(
             postgres_native_enum: col.is_enum_udt,
             enum_renamed_labels: Default::default(),
             default_factory: None,
+            retired: false,
         })
         .collect();
     columns.sort_by(|a, b| a.name.cmp(&b.name));

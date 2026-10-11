@@ -515,6 +515,41 @@ def test_rename_hint_schema_compiler_matches_v2_vector(
     assert [fk.get("renamed_from") for fk in book["foreign_keys"]] == ["press"]
 
 
+def test_retired_column_schema_compiler_matches_v2_vector(
+    clean_model_registry: None,
+) -> None:
+    """The retired-column vector pins the flag's wire shape (ADR-0053):
+    ``retired: true`` on a retired scalar, in either declaration style, and on
+    a retired ``ForeignKey``'s shadow column, each nullable, with its index,
+    unique and foreign key as declared; absent on every mapped column."""
+    from ferro.ir import compile_registry_schema_ir, schema_ir_fingerprint
+    from ferro.relations import resolve_relationships
+    from tests.test_generate_retired import build_retired_column_models
+
+    build_retired_column_models()
+    resolve_relationships()
+
+    compiled = compile_registry_schema_ir()
+    vector = _load_vector(VECTORS_DIR / "schema_retired_column_v2.json")
+
+    assert compiled == vector["ir"]
+    assert schema_ir_fingerprint(compiled) == vector["fingerprint"]
+    author = next(
+        m for m in compiled["payload"]["models"] if m["table_name"] == "author"
+    )
+    flags = {c["name"]: (c.get("retired"), c["nullable"]) for c in author["columns"]}
+    assert flags == {
+        "bio": (True, True),
+        "id": (None, False),
+        "name": (None, False),
+        "nickname": (True, True),
+        "team_id": (True, True),
+    }
+    assert [fk["name"] for fk in author["foreign_keys"]] == ["fk_author_team_id_team"]
+    assert [i["name"] for i in author["indexes"]] == ["idx_author_bio"]
+    assert [u["name"] for u in author["uniques"]] == ["uq_author_nickname"]
+
+
 def test_phase1_schema_compiler_is_deterministic(clean_model_registry: None) -> None:
     from ferro.ir import compile_registry_schema_ir, schema_ir_fingerprint
     from ferro.relations import resolve_relationships

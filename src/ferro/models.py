@@ -271,6 +271,12 @@ class Model(BaseModel, metaclass=ModelMetaclass):
     #: Reverse (BackRef) relation facts for existence tests (#314, ADR-0007),
     #: refreshed at the same compile choke point as ``__ferro_relation_specs__``.
     __ferro_reverse_specs__: ClassVar[dict[str, "ReverseSpec"]] = {}
+    #: Retired columns (ADR-0053), refreshed at the same compile choke point:
+    #: in the schema snapshot, never in ``__ferro_columns__``.
+    __ferro_retired_columns__: ClassVar[dict[str, "ColumnSpec"]] = {}
+    #: Every name a retired declaration took out of the model: retired fields,
+    #: retired relations and their shadow ``*_id`` columns.
+    __ferro_retired_names__: ClassVar[frozenset[str]] = frozenset()
     _enum_fields: ClassVar[dict[str, type[Enum]]] = {}
 
     @classmethod
@@ -297,6 +303,14 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             >>> isinstance(user, User)
             True
         """
+        retired = self.__class__.__ferro_retired_names__
+        if retired and not retired.isdisjoint(data):
+            name = min(retired.intersection(data))
+            raise TypeError(
+                f"{self.__class__.__name__}.{name} is retired in this release: the "
+                f"model no longer reads or writes it (ADR-0053); drop {name}= from "
+                "the call"
+            )
         # 1. Handle relationship inputs (e.g. Product(category=my_cat))
         relations = getattr(self.__class__, "ferro_relations", {})
         for field_name, metadata in relations.items():
@@ -322,6 +336,20 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                     data[f"{field_name}_id"] = val
 
         super().__init__(**data)
+
+    if not TYPE_CHECKING:
+
+        def __getattr__(self, item: str) -> Any:
+            # Only a miss reaches here: a retired field (ADR-0053) is no
+            # attribute, and the error says it is gone on purpose.
+            if item in type(self).__ferro_retired_names__:
+                raise AttributeError(
+                    f"{type(self).__name__}.{item} is retired in this release: the "
+                    "model no longer reads or writes it (ADR-0053)",
+                    name=item,
+                    obj=self,
+                )
+            return super().__getattr__(item)
 
     @model_validator(mode="after")
     def _validate_required_foreign_keys(self) -> Self:

@@ -3650,6 +3650,7 @@ mod down_tests {
             index: false,
             default: None,
             default_factory: None,
+            retired: false,
             format: None,
             enum_values: None,
             enum_type_name: None,

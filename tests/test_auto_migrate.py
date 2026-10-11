@@ -493,8 +493,11 @@ async def test_manual_migrate_on_live_pool_refreshes_cached_statements(
             )
         await execute('INSERT INTO "migreport" ("title") VALUES (\'Q1\')')
 
-        # Prepare (and cache) the SELECT against the narrow schema.
-        rows_before = await MigReport.all()
+        # Prepare (and cache) a `SELECT *` against the narrow schema. The
+        # model's own fetch names its columns (ADR-0053), so it cannot run
+        # against a table that lacks one; a raw `*` is the statement whose
+        # result shape the DDL changes.
+        rows_before = await fetch_all('SELECT * FROM "migreport"')
         assert len(rows_before) == 1
 
         report = await ferro.migrate()
@@ -505,6 +508,7 @@ async def test_manual_migrate_on_live_pool_refreshes_cached_statements(
 
         # Same query again: without the pool refresh this panics in the sqlx
         # worker and silently returns zero rows on SQLite.
+        assert len(await fetch_all('SELECT * FROM "migreport"')) == 1
         rows_after = await MigReport.all()
         assert len(rows_after) == 1
         assert rows_after[0].title == "Q1"

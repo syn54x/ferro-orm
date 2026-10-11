@@ -18,6 +18,7 @@ from tests import test_generate_enums as enums
 from tests import test_generate_indexes as indexes
 from tests import test_generate_postgres_staging as staging
 from tests import test_generate_renames as renames
+from tests import test_generate_retired as retired
 from tests import test_generate_row_security as row_security
 from tests import test_generate_sqlite_rebuild as sqlite_rebuild
 from tests.test_migrate_new import AUTHOR, LIBRARY
@@ -112,6 +113,16 @@ CASES: tuple[Case, ...] = (
         "A6-change-a-type",
         sqlite_rebuild.AGE_INT,
         sqlite_rebuild.AGE_TEXT,
+    ),
+    Case(
+        "A6-retire-a-required-enum-column",
+        retired.REQUIRED_MOOD,
+        retired.RETIRED_MOOD,
+    ),
+    Case(
+        "A6-delete-a-retired-enum-column",
+        retired.RETIRED_MOOD,
+        retired.MOOD_GONE,
     ),
     Case(
         "A7a-make-a-column-required",

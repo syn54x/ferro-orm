@@ -14,6 +14,7 @@ from .base import (
     FerroNullable,
     _validate_nullable_option,
     _validate_renamed_from,
+    _validate_retired,
 )
 
 if TYPE_CHECKING:
@@ -45,6 +46,7 @@ def Field(
     db_type: DbType | None = ...,
     db_check: bool = ...,
     renamed_from: str | None = ...,
+    retired: bool = ...,
     alias: str | None = ...,
     alias_priority: int | None = ...,
     validation_alias: str | AliasPath | AliasChoices | None = ...,
@@ -99,6 +101,7 @@ def Field(
     db_type: DbType | None = ...,
     db_check: bool = ...,
     renamed_from: str | None = ...,
+    retired: bool = ...,
     alias: str | None = ...,
     alias_priority: int | None = ...,
     validation_alias: str | AliasPath | AliasChoices | None = ...,
@@ -153,6 +156,7 @@ def Field(
     db_type: DbType | None = ...,
     db_check: bool = ...,
     renamed_from: str | None = ...,
+    retired: bool = ...,
     alias: str | None = ...,
     alias_priority: int | None = ...,
     validation_alias: str | AliasPath | AliasChoices | None = ...,
@@ -206,6 +210,7 @@ def Field(
     db_type: DbType | None = ...,
     db_check: bool = ...,
     renamed_from: str | None = ...,
+    retired: bool = ...,
     default_factory: Callable[[], Any] | Callable[[dict[str, Any]], Any],
     alias: str | None = ...,
     alias_priority: int | None = ...,
@@ -260,6 +265,7 @@ def Field(
     db_type: DbType | None = ...,
     db_check: bool = ...,
     renamed_from: str | None = ...,
+    retired: bool = ...,
     default_factory: Callable[[], _T] | Callable[[dict[str, Any]], _T],
     alias: str | None = ...,
     alias_priority: int | None = ...,
@@ -314,6 +320,7 @@ def Field(
     db_type: DbType | None = ...,
     db_check: bool = ...,
     renamed_from: str | None = ...,
+    retired: bool = ...,
     alias: str | None = ...,
     alias_priority: int | None = ...,
     validation_alias: str | AliasPath | AliasChoices | None = ...,
@@ -368,6 +375,7 @@ def Field(
     db_type: DbType | None | Any = _Unset,
     db_check: bool | Any = _Unset,
     renamed_from: str | None | Any = _Unset,
+    retired: bool | Any = _Unset,
     default_factory: Callable[[], Any]
     | Callable[[dict[str, Any]], Any]
     | None = _Unset,
@@ -428,6 +436,11 @@ def Field(
             ``RENAME COLUMN`` (and renames every index and check named after the
             column) while the previous migration still holds that name; after
             that migration the hint is inert and may stay or be deleted.
+        retired: Retire the column (ADR-0053): the field leaves the model (no
+            attribute, no keyword, no statement the model issues names it) and
+            the column stays in the schema snapshot, nullable, until the
+            declaration is deleted in a later release. The annotation must
+            allow ``None``.
         default_factory: A callable to generate the default value. The callable can either take 0 arguments
             (in which case it is called as is) or a single argument containing the already validated data.
         alias: The name to use for the attribute when validating or serializing by alias.
@@ -523,6 +536,8 @@ def Field(
         ferro_kwargs["db_check"] = db_check
     if renamed_from is not _Unset:
         ferro_kwargs["renamed_from"] = _validate_renamed_from(renamed_from, "Field")
+    if retired is not _Unset:
+        ferro_kwargs["retired"] = _validate_retired(retired, "Field")
 
     schema_extra = json_schema_extra
     if ferro_kwargs:
