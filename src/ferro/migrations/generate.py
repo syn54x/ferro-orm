@@ -342,7 +342,9 @@ def prepare(
         return None
     generated = json.loads(raw)
     migration = _with_data_steps(
-        GeneratedMigration.from_generated(generated, number=number, name=name),
+        GeneratedMigration.from_generated(
+            generated, number=number, name=name, carry=carry
+        ),
         generated,
         directory / TEMPLATES_DIR,
     )
@@ -398,7 +400,9 @@ def _with_moves(
     migrations: list[dict[str, Any]],
 ) -> GeneratedMigration:
     """``migration`` as the replacement of ``replaced``: what happened to
-    each file the replaced migration had (kept, renumbered, carried)."""
+    each file the replaced migration had (kept, renumbered, carried). A
+    carried step's old files are those of the ``carry`` entry the generator
+    placed it from."""
     old_dir = _dir_name(replaced)
     old_files = {
         Path(path).name
@@ -412,18 +416,11 @@ def _with_moves(
         return file_name[3:]
 
     by_rest = {unnumbered(name): name for name in old_files}
-    # A carried step's old files, matched by name and kind in order: the
-    # generator keeps carried steps of one name and kind in their order.
-    pending = list(carry)
     moves: list[tuple[str, str, Moved]] = []
     for step in migration.steps:
-        if step.carried:
-            source = next(
-                c for c in pending if c["name"] == step.name and c["kind"] == step.kind
-            )
-            pending.remove(source)
+        if step.carry is not None:
             new_files = sorted(step.files, key=lambda n: ".down." in n)
-            for old, new in zip(source["old"], new_files):
+            for old, new in zip(carry[step.carry]["old"], new_files):
                 moves.append((f"{old_dir}/{Path(old).name}", new, Moved.CARRIED))
             continue
         for new in step.files:
@@ -453,7 +450,7 @@ def _with_data_steps(
     steps: list[GeneratedStep] = []
     notes: list[str] = []
     for step in migration.steps:
-        if step.carried:
+        if step.carry is not None:
             steps.append(step)
             continue
         if step.kind == "portable_sql":
