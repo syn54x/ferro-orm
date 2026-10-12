@@ -33,7 +33,7 @@ a data step's declared kind and an edited chunked query's order keys.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -64,6 +64,9 @@ class RerecordReport:
     old_checksum: str
     new_checksum: str
     mode: Mode = "record"
+    notes: list[str] = field(default_factory=list)
+    """Warnings taking the lock gave: the records of a migration that does
+    not regenerate keep no class (ADR-0054)."""
 
     def render(self) -> str:
         """The line ``ferro migrate rerecord`` prints."""
@@ -117,11 +120,16 @@ async def rerecord(
     timeout = where.database.lock_wait(lock_timeout)
     async with where.open() as name:
         tracked = await runner.open_tracked(name, where.database)
-        async with tracked.locked(timeout, runner.say_waiting) as run:
-            return await _rerecord(run, target, mode)
+        async with tracked.locked(
+            timeout, runner.say_waiting, decides_classes=False
+        ) as run:
+            notes = runner.warn_unclassified(run)
+            return await _rerecord(run, target, mode, notes)
 
 
-async def _rerecord(run: LockedDatabase, target: str, mode: Mode) -> RerecordReport:
+async def _rerecord(
+    run: LockedDatabase, target: str, mode: Mode, notes: list[str]
+) -> RerecordReport:
     try:
         keys = runner.order_keys_on_disk(run)
     except MigrationRefused as refused:
@@ -141,4 +149,5 @@ async def _rerecord(run: LockedDatabase, target: str, mode: Mode) -> RerecordRep
         old_checksum=action.old_checksum,
         new_checksum=action.new_checksum,
         mode=mode,
+        notes=notes,
     )

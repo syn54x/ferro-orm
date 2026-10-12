@@ -67,6 +67,7 @@ import logging
 import re
 import sys
 import time
+import warnings
 from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass, field
@@ -222,6 +223,19 @@ async def open_tracked(name: str, database: DatabaseSettings) -> TrackedDatabase
 def say_waiting(text: str) -> None:
     """Say on stderr, at once, that a run waits for another run's lock."""
     print(text, file=sys.stderr, flush=True)
+
+
+def warn_unclassified(run: LockedDatabase) -> list[str]:
+    """Warn, once per migration, of the records taking the lock left without
+    a class (ADR-0054): a verb that reads no class (``down``, ``rerecord``,
+    ``baseline --remove``) does not refuse on a migration that does not
+    regenerate. Those records read as ``contract`` until the next ``up`` or
+    ``baseline`` classifies them or refuses naming the fix. Returns the
+    warnings."""
+    deferred = list(run.class_warnings)
+    for text in deferred:
+        warnings.warn(text, UserWarning, stacklevel=3)
+    return deferred
 
 
 def _stem(file: str) -> str:
@@ -1120,7 +1134,11 @@ async def down(
             report.declined = True
             return report
         try:
-            async with tracked.locked(timeout, say_waiting) as run:
+            async with tracked.locked(
+                timeout, say_waiting, decides_classes=False
+            ) as run:
+                deferred = warn_unclassified(run)
+                report.notes.extend(deferred)
                 plan = await run.plan(
                     direction, order_keys=_order_keys_for(run, "reverted")
                 )
@@ -1132,6 +1150,7 @@ async def down(
                     )
                     return report._raise_if_refused()
                 report = await _walk(run, plan, progress, using=name)
+                report.notes[:0] = deferred
         except RunRefused as refused:
             report._refuse(refused)
     return report._raise_if_refused()

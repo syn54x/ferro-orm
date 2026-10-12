@@ -34,8 +34,8 @@ use ferro_ddl_lowering::{Dialect, quote_ident};
 use ferro_migrate::run_plan::{
     AllowAhead, Direction, ExecMode, HeldDirectory, OrderKeys, Origin, PlannedStep,
     RebuildExpectation, RecordKind, RerecordAction, RerecordMode, RunPlan, RunStatus, StepClass,
-    StepRecord, TRACKING_FORMAT, TRACKING_MINOR, check_adoption, check_format, rerecord_plan,
-    run_lock_key, run_status, split_statements, unclassified,
+    StepRecord, TRACKING_FORMAT, TRACKING_MINOR, Unclassified, check_adoption, check_format,
+    rerecord_plan, run_lock_key, run_status, split_statements, unclassified,
 };
 use ferro_migrate::snapshot::encode_checksum;
 use ferro_schema_ir::SchemaModel;
@@ -2118,13 +2118,20 @@ impl Tracked {
 
     /// Take the run lock, waiting up to `timeout` (`on_wait` hears
     /// [`WAITING_TEXT`] once, at once, when another run holds it), and
-    /// re-read the records under it (ADR-0029).
+    /// re-read the records under it (ADR-0029). `classes` says whether the
+    /// verb decides step classes (`up`, `baseline`) or reads none (ADR-0054).
     ///
     /// # Errors
-    /// The lock's refusals (timeout, pooler); a database error.
-    pub async fn lock(&self, timeout: Duration, on_wait: impl FnOnce(&str)) -> PyResult<Locked> {
+    /// The lock's refusals (timeout, pooler); a database error; for a verb
+    /// that decides classes, [`RunRefusal::Unclassifiable`].
+    pub async fn lock(
+        &self,
+        timeout: Duration,
+        on_wait: impl FnOnce(&str),
+        classes: ClassNeed,
+    ) -> PyResult<Locked> {
         let lock = RunLock::acquire(&self.engine, None, timeout, on_wait).await?;
-        self.locked_with(lock).await
+        self.locked_with(lock, classes).await
     }
 
     /// A locked run whose Postgres lock never took the advisory lock and was
@@ -2133,12 +2140,12 @@ impl Tracked {
     ///
     /// # Errors
     /// A refusal for a non-Postgres database; a database error.
-    pub async fn lock_unacquired_for_test(&self) -> PyResult<Locked> {
+    pub async fn lock_unacquired_for_test(&self, classes: ClassNeed) -> PyResult<Locked> {
         let lock = RunLock::unacquired_for_test(&self.engine).await?;
-        self.locked_with(lock).await
+        self.locked_with(lock, classes).await
     }
 
-    async fn locked_with(&self, lock: RunLock) -> PyResult<Locked> {
+    async fn locked_with(&self, lock: RunLock, classes: ClassNeed) -> PyResult<Locked> {
         let state = match read_records(&self.engine, self.tracking_schema.as_deref()).await {
             Ok(state) => state,
             Err(err) => {
@@ -2158,8 +2165,9 @@ impl Tracked {
             started: std::sync::Mutex::new(HashMap::new()),
             id: NEXT_LOCKED.fetch_add(1, Ordering::Relaxed),
             refresh_fault: AtomicBool::new(false),
+            class_warnings: Vec::new(),
         };
-        match locked.bring_up_to_minor().await {
+        match locked.bring_up_to_minor(classes).await {
             Ok(locked) => Ok(locked),
             Err((locked, err)) => {
                 let _ = locked.release().await;
@@ -2167,6 +2175,18 @@ impl Tracked {
             }
         }
     }
+}
+
+/// Whether a verb taking the run lock decides step classes (ADR-0054).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClassNeed {
+    /// `up` and `baseline`, which extend the records with classed steps: a
+    /// record whose migration does not regenerate refuses the verb.
+    Decides,
+    /// A verb that reads no class (`down`, `rerecord`, `baseline --remove`):
+    /// such a record keeps no class, read as `contract`, with a warning; the
+    /// next `up` or `baseline` classifies it or refuses.
+    Defers,
 }
 
 /// A run holding the run lock (ADR-0048): the reads of [`Tracked`], its
@@ -2188,6 +2208,9 @@ pub struct Locked {
     /// Test-only: the next pool refresh after a step fails as the database
     /// refusing a new connection would ([`Locked::fail_next_refresh_for_test`]).
     refresh_fault: AtomicBool,
+    /// One warning per migration whose records the lock left without a class
+    /// (a verb that reads none, [`ClassNeed::Defers`]).
+    class_warnings: Vec<String>,
 }
 
 /// A chunked step's position as a transition records it: the cursor
@@ -2258,9 +2281,12 @@ impl Locked {
     /// newer (every verb refuses on it), or that has nothing to bring up.
     /// A directory that cannot be read classifies nothing: the verb refuses
     /// on it, and the next one classifies. A record whose applied migration
-    /// does not regenerate refuses the verb ([`RunRefusal::Unclassifiable`]):
-    /// no class is recorded that the planner did not decide.
-    async fn bring_up_to_minor(mut self) -> Result<Self, (Self, PyErr)> {
+    /// does not regenerate gets no class the planner did not decide: a verb
+    /// that decides classes ([`ClassNeed::Decides`]) refuses before anything
+    /// is written ([`RunRefusal::Unclassifiable`]); any other verb leaves the
+    /// record without one (read as `contract`) and carries a warning
+    /// ([`Locked::class_warnings`]).
+    async fn bring_up_to_minor(mut self, need: ClassNeed) -> Result<Self, (Self, PyErr)> {
         let state = &self.tracked.state;
         if !state.exists || state.refusal.is_some() {
             return Ok(self);
@@ -2268,18 +2294,25 @@ impl Locked {
         if state.minor >= TRACKING_MINOR && state.records.iter().all(|r| r.class.is_some()) {
             return Ok(self);
         }
+        let decided = match self.tracked.held.as_ref() {
+            Ok(held) => unclassified(&held.dir, &self.tracked.state.records, self.dialect()),
+            Err(_) => Unclassified::default(),
+        };
+        if need == ClassNeed::Decides
+            && let Some(refusal) = decided.undecided.first()
+        {
+            let err = refused_by(refusal);
+            return Err((self, err));
+        }
+        self.class_warnings = decided
+            .undecided
+            .iter()
+            .filter_map(RunRefusal::deferred_class_warning)
+            .collect();
         if let Err(err) = self.ready_to_write().await {
             return Err((self, err));
         }
-        let classes = match self.tracked.held.as_ref() {
-            Ok(held) => {
-                match unclassified(&held.dir, &self.tracked.state.records, self.dialect()) {
-                    Ok(classes) => classes,
-                    Err(refusal) => return Err((self, refused_by(&refusal))),
-                }
-            }
-            Err(_) => Vec::new(),
-        };
+        let classes = decided.classes;
         if let Err(err) = write_classes(self.engine(), self.tracking_schema(), &classes).await {
             return Err((self, err));
         }
@@ -2294,6 +2327,13 @@ impl Locked {
 
     fn dialect(&self) -> Dialect {
         self.tracked.dialect()
+    }
+
+    /// One warning per migration whose records taking the lock left without
+    /// a class, because the migration does not regenerate and this verb
+    /// reads no class ([`ClassNeed::Defers`]); empty otherwise.
+    pub fn class_warnings(&self) -> &[String] {
+        &self.class_warnings
     }
 
     /// Release the run lock. Every write after it refuses.

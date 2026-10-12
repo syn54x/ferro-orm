@@ -735,7 +735,10 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("primary key"), "{text}");
-        assert!(text.ends_with("Nothing was changed."), "{text}");
+        assert!(
+            text.ends_with("No class was recorded for it, and none of its steps was applied."),
+            "{text}"
+        );
         // A migration that regenerates still answers.
         assert!(migration_classes(&dir, &dir.migrations[0], Dialect::Sqlite).is_ok());
     }
