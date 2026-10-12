@@ -28,6 +28,7 @@ import shutil
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from .._core import _read_migrations_dir
@@ -98,8 +99,10 @@ class GeneratedStep:
     ``data`` (a Python data step)."""
     files: dict[str, str] = field(default_factory=dict)
     """File name to its exact text."""
-    carried: bool = False
-    """Carried across from the migration ``--replace`` regenerates."""
+    carry: int | None = None
+    """Carried across from the migration ``--replace`` regenerates: the
+    position of the step it carries in the generator's ``carry`` option, as
+    the generator names it."""
     over_namesake: bool = False
     """Carried, and in the place of a step of its name and kind the
     regeneration laid out, which it wins over."""
@@ -148,9 +151,15 @@ class GeneratedMigration:
 
     @classmethod
     def from_generated(
-        cls, raw: dict[str, Any], *, number: int, name: str
+        cls,
+        raw: dict[str, Any],
+        *,
+        number: int,
+        name: str,
+        carry: Sequence[Mapping[str, Any]] = (),
     ) -> GeneratedMigration:
-        """Build from the JSON ``_core._generate_migration`` returns."""
+        """Build from the JSON ``_core._generate_migration`` returns; a
+        carried step's files are the texts of the ``carry`` entry it names."""
         steps = []
         for step in raw["steps"]:
             files: dict[str, str] = {}
@@ -159,18 +168,19 @@ class GeneratedMigration:
                 files[f"{stem}.up.{dialect}.sql"] = rendering["up"]
                 files[f"{stem}.down.{dialect}.sql"] = rendering["down"]
             carried = step.get("carried")
-            if carried is not None and step["kind"] == "data":
-                files[f"{stem}.py"] = carried["body"]
-            elif carried is not None:
-                files[f"{stem}.up.sql"] = carried["body"]
-                files[f"{stem}.down.sql"] = carried["down"]
+            source = carry[carried["carry"]] if carried is not None else None
+            if source is not None and step["kind"] == "data":
+                files[f"{stem}.py"] = source["body"]
+            elif source is not None:
+                files[f"{stem}.up.sql"] = source["body"]
+                files[f"{stem}.down.sql"] = source["down"]
             steps.append(
                 GeneratedStep(
                     step["ordinal"],
                     step["name"],
                     step["kind"],
                     files,
-                    carried=carried is not None,
+                    carry=carried["carry"] if carried is not None else None,
                     over_namesake=bool(carried and carried["over_namesake"]),
                 )
             )

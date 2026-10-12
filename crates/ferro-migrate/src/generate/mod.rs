@@ -106,18 +106,19 @@ pub struct GeneratedStep {
     #[serde(skip)]
     pub class: BTreeMap<StepDialect, StepClass>,
     /// A step carried across from the migration `ferro migrate new
-    /// --replace` regenerates: its files are written back byte for byte,
-    /// under the ordinal this step takes.
+    /// --replace` regenerates: the files of the carry entry it names are
+    /// written back byte for byte, under the ordinal this step takes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub carried: Option<Carried>,
 }
 
-/// Where a carried step landed.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+/// Where a carried step landed: the placement the generator decides, which
+/// the Python side maps to the files it read (`--replace`'s per-file lines)
+/// and decides nothing of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct Carried {
-    /// The step as it was carried.
-    #[serde(flatten)]
-    pub step: CarriedStep,
+    /// Which step was carried: its position in [`GenerateOptions::carry`].
+    pub carry: usize,
     /// Whether it took the place of a step of its name and kind the
     /// regeneration laid out (a rescaffolded backfill), which it wins over.
     pub over_namesake: bool,
@@ -841,16 +842,16 @@ pub fn generate_with(
     // it wins over, or else where a person's step of its kind goes.
     let mut loose_data = Vec::new();
     let mut loose_sql = Vec::new();
-    for carry in &options.carry {
+    for (at, carry) in options.carry.iter().enumerate() {
         let namesake = data_steps
             .iter_mut()
             .chain(hand.iter_mut())
             .chain(sql.iter_mut())
             .find(|s| s.carried.is_none() && s.name == carry.name && s.kind == carry.kind);
         match (namesake, carry.kind) {
-            (Some(namesake), _) => *namesake = carried_step(carry, true, dialects),
-            (None, StepKind::Data) => loose_data.push(carried_step(carry, false, dialects)),
-            (None, _) => loose_sql.push(carried_step(carry, false, dialects)),
+            (Some(namesake), _) => *namesake = carried_step(at, carry, true, dialects),
+            (None, StepKind::Data) => loose_data.push(carried_step(at, carry, false, dialects)),
+            (None, _) => loose_sql.push(carried_step(at, carry, false, dialects)),
         }
     }
     steps.extend(data_steps);
@@ -1002,10 +1003,15 @@ fn planned_ops(
         .collect()
 }
 
-/// The step `carry` becomes: its body written back as it was, its class a
-/// data step's (`expand`) or, for a hand-written SQL step, the one its file
-/// declares when it is applied.
-fn carried_step(carry: &CarriedStep, over_namesake: bool, dialects: &[Dialect]) -> GeneratedStep {
+/// The step `carry`, the carry entry at `at`, becomes: its body written back
+/// as it was, its class a data step's (`expand`) or, for a hand-written SQL
+/// step, the one its file declares when it is applied.
+fn carried_step(
+    at: usize,
+    carry: &CarriedStep,
+    over_namesake: bool,
+    dialects: &[Dialect],
+) -> GeneratedStep {
     let step = GeneratedStep {
         ordinal: 0,
         name: carry.name.clone(),
@@ -1015,7 +1021,7 @@ fn carried_step(carry: &CarriedStep, over_namesake: bool, dialects: &[Dialect]) 
         hand_model: None,
         class: BTreeMap::new(),
         carried: Some(Carried {
-            step: carry.clone(),
+            carry: at,
             over_namesake,
         }),
     };
@@ -3234,7 +3240,12 @@ mod tests {
         );
         let backfill = &migration.steps[1];
         let won = backfill.carried.as_ref().expect("carried");
-        assert_eq!((&won.step, won.over_namesake), (&options.carry[0], true));
+        assert_eq!((won.carry, won.over_namesake), (0, true));
+        // What the Python side reads: which carry entry, and whether it won.
+        assert_eq!(
+            serde_json::to_value(won).expect("serializes"),
+            serde_json::json!({"carry": 0, "over_namesake": true})
+        );
         assert!(backfill.data.is_none() && backfill.renderings.is_empty());
         assert_eq!(
             backfill.class.values().copied().collect::<Vec<_>>(),
@@ -3243,7 +3254,7 @@ mod tests {
         let sql = &migration.steps[4];
         assert_eq!(sql.kind, StepKind::PortableSql);
         let last = sql.carried.as_ref().expect("carried");
-        assert_eq!((&last.step, last.over_namesake), (&options.carry[1], false));
+        assert_eq!((last.carry, last.over_namesake), (1, false));
     }
 
     #[test]
@@ -3275,10 +3286,14 @@ mod tests {
             ]
         );
         assert!(migration.steps[1].data.is_some(), "rescaffolded");
+        assert_eq!(
+            migration.steps[3].carried.as_ref().map(|c| c.carry),
+            Some(0)
+        );
         assert!(migration.steps[4].carried.is_none(), "the new --sql-step");
         assert_eq!(
-            migration.steps[5].carried.as_ref().map(|c| &c.step),
-            Some(&options.carry[1])
+            migration.steps[5].carried.as_ref().map(|c| c.carry),
+            Some(1)
         );
     }
 
