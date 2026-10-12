@@ -466,3 +466,48 @@ async def test_update_refuses_the_retired_label_and_writes_nothing(db_url, kind,
             assert await query.update(status=Status.PAID, note="kept") == 1
         else:
             assert await query.update(lambda order: {"note": "kept"}) == 1
+
+
+# -- every write path refuses with one error type -------------------------------------
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["str_enum", "plain_enum"])
+@pytest.mark.parametrize(
+    "path",
+    [
+        "construction",
+        "assignment",
+        "validated_assignment",
+        "keyword_update",
+        "recipe_update",
+    ],
+)
+async def test_every_write_path_refuses_with_the_retired_enum_label_type(
+    db_url, kind, path
+):
+    make = order_model if kind == "str_enum" else plain_order_model
+    Order = make(validate_assignment=path == "validated_assignment")
+    Status = RtlStatus if kind == "str_enum" else RtlPlainStatus
+    message = MESSAGE if kind == "str_enum" else PLAIN_MESSAGE
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        await Order(id=1, status=Status.PAID).save()
+        query = Order.where(lambda order: order.id == 1)
+        held = await query.first()
+        assert held is not None
+        with pytest.raises(ValidationError) as raised:
+            if path == "construction":
+                Order(status=Status.CANCELED)
+            elif path in ("assignment", "validated_assignment"):
+                held.status = Status.CANCELED
+            elif path == "keyword_update":
+                await query.update(status=Status.CANCELED)
+            else:
+                await query.update(lambda order: {"status": Status.CANCELED})
+
+    (error,) = raised.value.errors()
+    assert error["type"] == "retired_enum_label"
+    assert error["msg"] == message
+    assert error["loc"] == ("status",)

@@ -194,15 +194,18 @@ async def test_a_database_ahead_of_the_checkout_is_refused_unless_allowed(
     assert report.applied == [] and report.ahead == ["0002_add_teams"]
 
 
-async def test_allow_ahead_takes_only_its_three_values(project, pkg, db):
+@pytest.mark.parametrize(
+    ("value", "shown"), [("sometimes", "'sometimes'"), (1, "1"), (None, "None")]
+)
+async def test_allow_ahead_takes_only_its_three_values(project, pkg, db, value, shown):
+    """Refused before any connection opens: the URL below cannot be opened."""
     two_migrations(project, pkg, db.backend)
-    await connect(db.url)
+    unreachable = f"sqlite:///{project / 'no-such-dir' / 'app.db'}"
+    text = f'allow_ahead must be False, True or "expand-only"; got {shown}'
     for call in (ferro.migrations.up, ferro.migrations.require_applied):
-        with pytest.raises(TypeError, match='False, True or "expand-only"'):
-            await call(allow_ahead="sometimes")  # ty: ignore[invalid-argument-type]
-        with pytest.raises(TypeError, match="got 1"):
-            await call(allow_ahead=1)  # ty: ignore[invalid-argument-type]
-    assert "_ferro_migrations" not in db.tables()
+        with pytest.raises(TypeError) as raised:
+            await call(url=unreachable, allow_ahead=value)  # ty: ignore[invalid-argument-type]
+        assert str(raised.value) == text
 
 
 async def test_up_raises_a_run_refusal_rather_than_returning_it(project, pkg, db):
