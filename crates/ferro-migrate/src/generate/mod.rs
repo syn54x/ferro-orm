@@ -28,14 +28,14 @@
 //! The phase table in [`columns`] reads each op's step off its verdict; an op
 //! no door runs is refused with its recipe.
 
-mod backfill;
+pub(crate) mod backfill;
 mod columns;
 mod downs;
 pub(crate) mod enums;
 pub(crate) mod rebuild;
 mod renames;
 mod stages;
-mod staging;
+pub(crate) mod staging;
 
 pub use backfill::{STAGED_NOT_NULL_PREFIX, staged_not_null_name};
 pub use rebuild::{NEW_TABLE_PREFIX, new_table_name};
@@ -43,10 +43,7 @@ pub use rebuild::{NEW_TABLE_PREFIX, new_table_name};
 use crate::directory::{DirectoryError, Headers, MigrationsDir, StepDialect, StepKind};
 use crate::plan::{HintError, renamed_snapshot};
 use crate::render::render_ops;
-use crate::run_plan::step_class::{
-    self, DATA_STEP_CLASS, Sides, StepClass, constraint_step_class, index_step_class,
-    schema_step_class,
-};
+use crate::run_plan::step_class::{LaidOutStep, SchemaStep, Sides, StepClass, step_class};
 use crate::snapshot::{Snapshot, SnapshotError};
 use crate::{
     AnsweredBy, Dialect, EmissionError, Execution, MigrationOp, Plan, PlanOptions, PlannedOp,
@@ -101,7 +98,7 @@ pub struct GeneratedStep {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hand_model: Option<String>,
     /// The step's class on each dialect it renders for (ADR-0054), decided
-    /// from the ops the layout puts in it ([`crate::run_plan::step_class`]):
+    /// from the step as the layout puts it together ([`step_class`]):
     /// what a run or a baseline records when it applies the step. Empty for a
     /// hand-written SQL step, whose class its file declares
     /// (`-- ferro: expand`), and never written into a file: a class header
@@ -758,8 +755,6 @@ pub fn generate_with(
 
     let mut warnings = Vec::new();
     let mut staged = Vec::new();
-    // Whether each dialect's early steps stage a constraint `NOT VALID`.
-    let mut stages_on: BTreeMap<StepDialect, bool> = BTreeMap::new();
     let mut suggestions = Vec::new();
     for placed in &layout.placed {
         let dialect = placed.dialect;
@@ -770,9 +765,7 @@ pub fn generate_with(
             .cloned()
             .collect();
         render_warnings(&early, parent_ir, expanded, dialect, &mut warnings)?;
-        let staged_here = staging::staged_constraints(&early, before, expanded, dialect)?;
-        stages_on.insert(StepDialect::from(dialect), !staged_here.is_empty());
-        for constraint in staged_here {
+        for constraint in staging::staged_constraints(&early, before, expanded, dialect)? {
             if !staged.contains(&constraint) {
                 staged.push(constraint);
             }
@@ -803,21 +796,23 @@ pub fn generate_with(
             .placed
             .iter()
             .map(|placed| {
-                let on = StepDialect::from(placed.dialect);
                 let sides = Sides {
                     before,
                     target: expanded,
                 };
                 let class = if phase == Phase::Labels {
-                    step_class::step_class(&planned_ops(placed, &placed.labels)?, sides, false)
-                } else {
-                    schema_step_class(
-                        &planned_ops(placed, &placed.schema)?,
+                    step_class(&LaidOutStep::Labels {
+                        ops: &planned_ops(placed, &placed.labels)?,
                         sides,
-                        stages_on.get(&on).copied().unwrap_or(false),
-                    )
+                    })
+                } else {
+                    step_class(&LaidOutStep::Schema(SchemaStep {
+                        ops: &planned_ops(placed, &placed.schema)?,
+                        sides,
+                        dialect: placed.dialect,
+                    }))
                 };
-                Ok((on, class))
+                Ok((StepDialect::from(placed.dialect), class))
             })
             .collect::<Result<_, GenerateError>>()?;
         steps.push(GeneratedStep {
@@ -837,9 +832,9 @@ pub fn generate_with(
     let mut data_steps: Vec<GeneratedStep> =
         backfill::data_steps(&layout.demands, target, &skipped)?
             .into_iter()
-            .map(|step| with_class(step, dialects, |_| DATA_STEP_CLASS))
+            .map(|step| data_class(step, dialects))
             .collect();
-    let mut hand = hand.map(|step| with_class(step, dialects, |_| DATA_STEP_CLASS));
+    let mut hand = hand.map(|step| data_class(step, dialects));
     let mut sql = sql;
     // The steps `--replace` carries across: each in the place of the first
     // step of its name and kind laid out here (a rescaffolded backfill), which
@@ -862,7 +857,8 @@ pub fn generate_with(
     for (at, op) in layout.index_ops.iter().enumerate() {
         let (step_before, step_after) = layout.index_stages(at, target);
         let step = staging::index_step(op, &step_before, &step_after, dialects)?;
-        steps.push(with_class(step, dialects, |_| index_step_class(op, target)));
+        let class = step_class(&LaidOutStep::Index { op, target });
+        steps.push(with_class(step, dialects, class));
     }
     // The steps a person asks for (`--sql-step`, `--data-step`) or carries
     // (`--replace`), laid out whether or not the models changed: the SQL
@@ -921,19 +917,25 @@ pub fn generate_with(
             .placed
             .iter()
             .map(|placed| {
-                let on = StepDialect::from(placed.dialect);
-                let validates = stages_on.get(&on).copied().unwrap_or(false);
                 let ops: Vec<MigrationOp> =
                     placed.held.iter().chain(&placed.relabel).cloned().collect();
-                let class = step_class::step_class(
-                    &planned_ops(placed, &ops)?,
-                    Sides {
+                let class = step_class(&LaidOutStep::Contract {
+                    ops: &planned_ops(placed, &ops)?,
+                    sides: Sides {
                         before: kept,
                         target,
                     },
-                    validates || !layout.demands.is_empty(),
-                );
-                Ok((on, class))
+                    expand: SchemaStep {
+                        ops: &planned_ops(placed, &placed.schema)?,
+                        sides: Sides {
+                            before,
+                            target: expanded,
+                        },
+                        dialect: placed.dialect,
+                    },
+                    demands: &layout.demands,
+                });
+                Ok((StepDialect::from(placed.dialect), class))
             })
             .collect::<Result<_, GenerateError>>()?;
         steps.push(GeneratedStep { class, ..contract });
@@ -1018,35 +1020,42 @@ fn carried_step(carry: &CarriedStep, over_namesake: bool, dialects: &[Dialect]) 
         }),
     };
     if carry.kind == StepKind::Data {
-        with_class(step, dialects, |_| DATA_STEP_CLASS)
+        data_class(step, dialects)
     } else {
         step
     }
 }
 
-/// `step` with `class_on` its class on each of `dialects`.
-fn with_class(
-    step: GeneratedStep,
-    dialects: &[Dialect],
-    class_on: impl Fn(Dialect) -> StepClass,
-) -> GeneratedStep {
+/// `step` with `class` its class on each of `dialects`.
+fn with_class(step: GeneratedStep, dialects: &[Dialect], class: StepClass) -> GeneratedStep {
     GeneratedStep {
         class: dialects
             .iter()
-            .map(|&dialect| (StepDialect::from(dialect), class_on(dialect)))
+            .map(|&dialect| (StepDialect::from(dialect), class))
             .collect(),
         ..step
     }
 }
 
+/// A data step (a generated backfill or guard, a person's, a carried one),
+/// with its class on each of `dialects`.
+fn data_class(step: GeneratedStep, dialects: &[Dialect]) -> GeneratedStep {
+    with_class(step, dialects, step_class(&LaidOutStep::Data))
+}
+
 /// A step that only stages or validates constraints (the validate and
 /// add-constraint steps), with its class on each dialect it renders for,
-/// read off that rendering ([`constraint_step_class`]).
+/// read off that rendering.
 fn constraint_classes(step: GeneratedStep) -> GeneratedStep {
     let class = step
         .renderings
         .iter()
-        .map(|(on, rendering)| (*on, constraint_step_class(&rendering.headers)))
+        .map(|(on, rendering)| {
+            let class = step_class(&LaidOutStep::Constraints {
+                headers: &rendering.headers,
+            });
+            (*on, class)
+        })
         .collect();
     GeneratedStep { class, ..step }
 }
@@ -3229,7 +3238,7 @@ mod tests {
         assert!(backfill.data.is_none() && backfill.renderings.is_empty());
         assert_eq!(
             backfill.class.values().copied().collect::<Vec<_>>(),
-            [DATA_STEP_CLASS, DATA_STEP_CLASS]
+            [StepClass::Expand, StepClass::Expand]
         );
         let sql = &migration.steps[4];
         assert_eq!(sql.kind, StepKind::PortableSql);
