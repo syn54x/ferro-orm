@@ -166,11 +166,7 @@ fn adds_labels_only(op: &MigrationOp, sides: Sides<'_>) -> bool {
             match (column_of(sides.before), column_of(sides.target)) {
                 (Some(old), Some(new)) => match (&old.enum_values, &new.enum_values) {
                     (Some(was), Some(now)) => {
-                        superset(was, now)
-                            && ferro_schema_ir::SchemaColumn {
-                                enum_values: new.enum_values.clone(),
-                                ..old.clone()
-                            } == new
+                        superset(was, now) && storage_facts(&old) == storage_facts(&new)
                     }
                     _ => false,
                 },
@@ -190,6 +186,21 @@ fn adds_labels_only(op: &MigrationOp, sides: Sides<'_>) -> bool {
             }
         }
         _ => false,
+    }
+}
+
+/// `column` without its labels and the facts that render no storage: the
+/// labels it retires (ADR-0053), whether it is retired, its server default
+/// and its Python default factory. Two columns with equal storage facts
+/// differ, if at all, in what they admit and in what no statement changes.
+fn storage_facts(column: &ferro_schema_ir::SchemaColumn) -> ferro_schema_ir::SchemaColumn {
+    ferro_schema_ir::SchemaColumn {
+        enum_values: None,
+        enum_retired_labels: None,
+        retired: false,
+        default: None,
+        default_factory: None,
+        ..column.clone()
     }
 }
 
@@ -770,6 +781,26 @@ mod tests {
         let after = author(vec![status(&["draft", "live", "archived"])]);
         for dialect in BOTH {
             let rows = classes(vec![before.clone()], vec![after.clone()], dialect);
+            assert!(
+                rows.iter().all(|(_, class)| *class == Expand),
+                "{dialect:?}: {rows:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_added_label_beside_a_retired_one_is_expand() {
+        // Release B adds `cancelled_by_user` and retires `canceled` (the
+        // online label-rename recipe). On SQLite the longer label widens the
+        // column's `varchar`, a rebuild; the retirement renders nothing.
+        let before = author(vec![status(&["draft", "canceled"])]);
+        let after = author(vec![SchemaColumn {
+            enum_retired_labels: Some(vec!["canceled".into()]),
+            ..status(&["draft", "canceled", "cancelled_by_user"])
+        }]);
+        for dialect in BOTH {
+            let rows = classes(vec![before.clone()], vec![after.clone()], dialect);
+            assert!(!rows.is_empty(), "{dialect:?}");
             assert!(
                 rows.iter().all(|(_, class)| *class == Expand),
                 "{dialect:?}: {rows:?}"
