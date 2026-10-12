@@ -7,7 +7,7 @@ check keep it, so the previous release's writes stay valid. Names start with
 Postgres server.
 """
 
-from enum import StrEnum
+from enum import Enum, StrEnum
 from typing import Annotated
 
 import pytest
@@ -353,3 +353,79 @@ async def test_a_hydrated_retired_row_changes_another_field_and_saves(
         again = await RtlOrder.where(lambda rtlorder: rtlorder.id == 1).first()
         assert again is not None
         assert (again.status, again.note) == (RtlStatus.CANCELED, "b")
+
+
+# -- a plain Enum is guarded by its member values (panel F4) --------------------------
+
+
+class RtlPlainStatus(Enum):
+    __ferro_retired_labels__ = frozenset({"canceled"})
+    PAID = "paid"
+    CANCELED = "canceled"
+
+
+PLAIN_MESSAGE = (
+    "RtlPlainStatus.CANCELED ('canceled') is retired in this release: the previous "
+    "release may still write it, this one does not"
+)
+
+
+def plain_order_model(validate_assignment: bool = False) -> type[Model]:
+    """An order whose status is a plain ``Enum`` (not a ``str`` subclass)."""
+
+    class RtlPlainOrder(Model):
+        model_config = ConfigDict(validate_assignment=validate_assignment)
+        id: int | None = Field(default=None, primary_key=True)
+        status: RtlPlainStatus = RtlPlainStatus.PAID
+        note: str = ""
+
+    return RtlPlainOrder
+
+
+@pytest.mark.parametrize("validate_assignment", [False, True])
+def test_a_plain_enum_refuses_the_retired_label_on_construction(validate_assignment):
+    RtlPlainOrder = plain_order_model(validate_assignment)
+    for value in ("canceled", RtlPlainStatus.CANCELED):
+        with pytest.raises(ValidationError) as raised:
+            RtlPlainOrder(status=value)
+        assert PLAIN_MESSAGE in str(raised.value)
+    assert RtlPlainOrder(status="paid").status is RtlPlainStatus.PAID
+
+
+@pytest.mark.parametrize("validate_assignment", [False, True])
+def test_a_plain_enum_refuses_the_retired_label_on_assignment(validate_assignment):
+    order = plain_order_model(validate_assignment)()
+    for value in (RtlPlainStatus.CANCELED, "canceled"):
+        with pytest.raises(ValidationError) as raised:
+            order.status = value
+        assert PLAIN_MESSAGE in str(raised.value)
+    assert order.status is RtlPlainStatus.PAID
+    order.status = RtlPlainStatus.PAID
+    order.note = "still assignable"
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.asyncio
+@pytest.mark.parametrize("validate_assignment", [False, True])
+async def test_a_hydrated_plain_enum_retired_row_changes_another_field_and_saves(
+    db_url, validate_assignment
+):
+    RtlPlainOrder = plain_order_model(validate_assignment)
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        await RtlPlainOrder.model_construct(
+            id=1, status=RtlPlainStatus.CANCELED, note="a"
+        ).save()
+        order = await RtlPlainOrder.where(
+            lambda rtlplainorder: rtlplainorder.id == 1
+        ).first()
+        assert order is not None and order.status is RtlPlainStatus.CANCELED
+
+        order.note = "b"
+        await order.save()
+
+        again = await RtlPlainOrder.where(
+            lambda rtlplainorder: rtlplainorder.id == 1
+        ).first()
+        assert again is not None
+        assert (again.status, again.note) == (RtlPlainStatus.CANCELED, "b")
