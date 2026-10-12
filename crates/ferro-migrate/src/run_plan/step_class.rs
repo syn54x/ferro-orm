@@ -10,13 +10,14 @@
 //!     email: str = Field(unique=True) ─▶ 02_uq_…     CREATE UNIQUE INDEX …       contract
 //! ```
 //!
-//! Decided once, here, from the one planner's op verdicts and op kinds
-//! (ADR-0050): the generator asks [`step_class`] (and its siblings) for each
-//! step it lays out, and the run and the baseline record what the generator
-//! decides, regenerating a migration from its two snapshots
+//! Decided once, here, by [`step_class`]: the generator hands it each step
+//! it lays out ([`LaidOutStep`]: the step's phase, the planned ops it
+//! carries with their verdicts (ADR-0050), the schemas on either side of
+//! it, its rendering's headers), and the run and the baseline record what
+//! the generator decides, regenerating a migration from its two snapshots
 //! ([`migration_classes`]) when they record it. A hand-written SQL step is
-//! `contract` unless its file declares `-- ferro: expand`
-//! ([`hand_sql_class`]); a data step is always `expand`.
+//! `contract` unless its file declares `-- ferro: expand`; a data step is
+//! always `expand`.
 //!
 //! | The step carries | Class |
 //! | :-- | :-- |
@@ -32,6 +33,8 @@
 //! | a step whose rendering on the dialect runs nothing (`not-applicable`) | expand |
 
 use crate::directory::{Headers, Migration, MigrationsDir, Step, StepDialect, StepKind};
+use crate::generate::backfill::Demand;
+use crate::generate::staging::stages_not_valid;
 use crate::generate::{GenerateError, GenerateOptions, GeneratedStep, generate_with};
 use crate::run_plan::RunRefusal;
 use crate::snapshot::sha384;
@@ -73,18 +76,157 @@ impl StepClass {
 
 /// The two schemas a step leads between: what its ops read besides their
 /// verdicts (whether a redefined index is unique, whether a rebuilt column
-/// only gained labels).
+/// only gained labels, whether a constraint is added to a table that
+/// already exists).
 #[derive(Clone, Copy, Debug)]
-pub struct Sides<'a> {
+pub(crate) struct Sides<'a> {
     /// The schema the step starts from.
     pub before: &'a IrEnvelope<SchemaIrPayload>,
     /// The schema it leads to.
     pub target: &'a IrEnvelope<SchemaIrPayload>,
 }
 
+/// A migration's `schema` (or `expand`) step on one dialect.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SchemaStep<'a> {
+    /// The planned ops it carries, a demanded column's add among them,
+    /// which the step renders nullable.
+    pub ops: &'a [PlannedOp],
+    /// The schemas it leads between.
+    pub sides: Sides<'a>,
+    /// The dialect it renders for: on Postgres it adds a constraint to a
+    /// table that already exists `NOT VALID` (ADR-0043).
+    pub dialect: Dialect,
+}
+
+/// A step as the generator lays it out on one dialect: what its class is
+/// read from.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum LaidOutStep<'a> {
+    /// The `labels` step: each label added to an existing enum type.
+    Labels {
+        /// The planned ops it carries.
+        ops: &'a [PlannedOp],
+        /// The schemas it leads between.
+        sides: Sides<'a>,
+    },
+    /// The `schema` (or `expand`) step.
+    Schema(SchemaStep<'a>),
+    /// An index step: the one index it builds, drops or redefines
+    /// (ADR-0044) toward `target`.
+    Index {
+        /// The index op.
+        op: &'a MigrationOp,
+        /// The schema the step leads to, which declares the index it
+        /// redefines.
+        target: &'a IrEnvelope<SchemaIrPayload>,
+    },
+    /// The validate or add-constraint step, which only adds constraints
+    /// `NOT VALID` or validates them, by its rendering's headers.
+    Constraints {
+        /// Its up file's headers on the dialect.
+        headers: &'a Headers,
+    },
+    /// The contract: what the migration holds back for its data steps.
+    Contract {
+        /// The planned ops it carries: the drops held for the data steps,
+        /// the removed labels and the column changes they make.
+        ops: &'a [PlannedOp],
+        /// The schemas it leads between.
+        sides: Sides<'a>,
+        /// The `schema` (or `expand`) step it finishes, whose constraints
+        /// staged `NOT VALID` it validates.
+        expand: SchemaStep<'a>,
+        /// Every column whose existing rows the data steps fill, which the
+        /// contract holds to its values (`NOT NULL`, a removed label gone).
+        demands: &'a [Demand],
+    },
+    /// A data step, a guard step included.
+    Data,
+    /// A hand-written SQL step, by its file's headers.
+    HandSql {
+        /// Its up file's headers.
+        headers: &'a Headers,
+    },
+}
+
+/// The class of `step`: `contract` when anything it does can make a write
+/// of the previous release fail, `expand` otherwise.
+pub(crate) fn step_class(step: &LaidOutStep<'_>) -> StepClass {
+    match *step {
+        LaidOutStep::Labels { ops, sides } => ops_class(ops, sides),
+        LaidOutStep::Schema(schema) => {
+            // A column that demands values is added nullable (its backfill
+            // and contract come later), so the previous release's writes,
+            // which leave it empty, keep succeeding.
+            let relaxed: Vec<PlannedOp> = schema
+                .ops
+                .iter()
+                .map(|planned| match planned.op {
+                    MigrationOp::AddColumn { .. } if planned.verdict.demands_values => {
+                        let mut nullable = planned.clone();
+                        nullable.verdict.demands_values = false;
+                        nullable.verdict.fails_on_rows = RowRisk::None;
+                        nullable
+                    }
+                    _ => planned.clone(),
+                })
+                .collect();
+            ops_class(&relaxed, schema.sides).max(constraint_class(stages(schema)))
+        }
+        LaidOutStep::Index { op, target } => kind_class(op, target),
+        LaidOutStep::Constraints { headers } => constraint_class(!headers.not_applicable),
+        LaidOutStep::Contract {
+            ops,
+            sides,
+            expand,
+            demands,
+        } => ops_class(ops, sides).max(constraint_class(stages(expand) || !demands.is_empty())),
+        LaidOutStep::Data => StepClass::Expand,
+        LaidOutStep::HandSql { headers } => {
+            if headers.expand {
+                StepClass::Expand
+            } else {
+                StepClass::Contract
+            }
+        }
+    }
+}
+
+/// Whether `schema` adds a constraint `NOT VALID`, which a later step
+/// validates.
+fn stages(schema: SchemaStep<'_>) -> bool {
+    schema.ops.iter().any(|planned| {
+        stages_not_valid(
+            &planned.op,
+            schema.sides.before,
+            schema.sides.target,
+            schema.dialect,
+        )
+    })
+}
+
+/// `contract` when a step adds a constraint `NOT VALID` or validates one:
+/// either refuses a write the previous release may make.
+fn constraint_class(constrains: bool) -> StepClass {
+    if constrains {
+        StepClass::Contract
+    } else {
+        StepClass::Expand
+    }
+}
+
+/// The class of a step running each of `ops` (natively, or folded into a
+/// SQLite rebuild, which runs each of them) between `sides`.
+fn ops_class(ops: &[PlannedOp], sides: Sides<'_>) -> StepClass {
+    ops.iter()
+        .map(|op| op_class(op, sides))
+        .fold(StepClass::Expand, StepClass::max)
+}
+
 /// The class of one planned op between `sides`, from its verdict and its
 /// kind.
-pub fn op_class(planned: &PlannedOp, sides: Sides<'_>) -> StepClass {
+fn op_class(planned: &PlannedOp, sides: Sides<'_>) -> StepClass {
     let verdict = &planned.verdict;
     // A label added to a column's enum (on SQLite, where labels are text, a
     // rebuild widening the column; a text column's check widened to admit
@@ -95,8 +237,12 @@ pub fn op_class(planned: &PlannedOp, sides: Sides<'_>) -> StepClass {
     if verdict.drops_data || verdict.demands_values || verdict.fails_on_rows != RowRisk::None {
         return StepClass::Contract;
     }
-    let target = sides.target;
-    match &planned.op {
+    kind_class(&planned.op, sides.target)
+}
+
+/// The class `op`'s kind alone decides toward `target`.
+fn kind_class(op: &MigrationOp, target: &IrEnvelope<SchemaIrPayload>) -> StepClass {
+    match op {
         // A rename moves what the previous release writes to.
         MigrationOp::RenameTable { .. }
         | MigrationOp::RenameColumn { .. }
@@ -119,10 +265,12 @@ pub fn op_class(planned: &PlannedOp, sides: Sides<'_>) -> StepClass {
         | MigrationOp::DropRowPolicy { .. }
         | MigrationOp::EnableRowSecurity { .. }
         | MigrationOp::ForceRowSecurity { .. } => StepClass::Contract,
+        // A unique index refuses a duplicate the previous release may write.
         MigrationOp::AddIndex { unique, .. } | MigrationOp::RebuildIndex { unique, .. } => {
-            unique_class(*unique)
+            constraint_class(*unique)
         }
-        MigrationOp::RedefineIndex { table, name } => unique_class(
+        // Undeclared on the target, its uniqueness is unknown: contract.
+        MigrationOp::RedefineIndex { table, name } => constraint_class(
             declared_index(target, table, name).is_none_or(|(_, unique)| unique),
         ),
         MigrationOp::AddEnumLabel { .. }
@@ -191,10 +339,16 @@ fn adds_labels_only(op: &MigrationOp, sides: Sides<'_>) -> bool {
     }
 }
 
-/// `column` without its labels and the facts that render no storage: the
-/// labels it retires (ADR-0053), whether it is retired, its server default
-/// and its Python default factory. Two columns with equal storage facts
-/// differ, if at all, in what they admit and in what no statement changes.
+/// `column` without its labels and the facts that render no storage. The
+/// schema IR offers no DDL-bearing projection of a column, so this is the
+/// one list, and its rule is: a field is left out only when it renders no
+/// storage (the labels it retires (ADR-0053), whether it is retired, its
+/// server default and its Python default factory), or it is the labels it
+/// admits, which [`adds_labels_only`] compares on its own (a superset).
+/// Every field that renders storage (the type, `db_type`, nullability,
+/// length, key and enum-type facts) stays in the comparison. Two columns
+/// with equal storage facts differ, if at all, in what they admit and in
+/// what no statement changes.
 fn storage_facts(column: &ferro_schema_ir::SchemaColumn) -> ferro_schema_ir::SchemaColumn {
     ferro_schema_ir::SchemaColumn {
         enum_values: None,
@@ -206,102 +360,12 @@ fn storage_facts(column: &ferro_schema_ir::SchemaColumn) -> ferro_schema_ir::Sch
     }
 }
 
-fn unique_class(unique: bool) -> StepClass {
-    if unique {
-        StepClass::Contract
-    } else {
-        StepClass::Expand
-    }
-}
-
-/// The class of a SQL step carrying `ops` (natively, or folded into a SQLite
-/// rebuild, which runs each of them) toward `target`, and `constrains` when
-/// it also adds a constraint `NOT VALID` or validates one: `contract` when
-/// anything it does is.
-pub fn step_class<'a>(
-    ops: impl IntoIterator<Item = &'a PlannedOp>,
-    sides: Sides<'_>,
-    constrains: bool,
-) -> StepClass {
-    let base = if constrains {
-        StepClass::Contract
-    } else {
-        StepClass::Expand
-    };
-    ops.into_iter()
-        .map(|op| op_class(op, sides))
-        .fold(base, StepClass::max)
-}
-
-/// The class of a migration's `schema` (or `expand`) step: [`step_class`],
-/// with each column that demands values read as the step adds it, nullable
-/// (its backfill and contract come later), so the previous release's writes,
-/// which leave it empty, keep succeeding.
-pub fn schema_step_class<'a>(
-    ops: impl IntoIterator<Item = &'a PlannedOp>,
-    sides: Sides<'_>,
-    constrains: bool,
-) -> StepClass {
-    let relaxed: Vec<PlannedOp> = ops
-        .into_iter()
-        .map(|planned| match planned.op {
-            MigrationOp::AddColumn { .. } if planned.verdict.demands_values => {
-                let mut nullable = planned.clone();
-                nullable.verdict.demands_values = false;
-                nullable.verdict.fails_on_rows = RowRisk::None;
-                nullable
-            }
-            _ => planned.clone(),
-        })
-        .collect();
-    step_class(&relaxed, sides, constrains)
-}
-
-/// The class of an index step building, redefining or dropping one index
-/// toward `target`: a unique index built is `contract`, anything else
-/// `expand`.
-pub fn index_step_class(op: &MigrationOp, target: &IrEnvelope<SchemaIrPayload>) -> StepClass {
-    match op {
-        MigrationOp::AddIndex { unique, .. } => unique_class(*unique),
-        MigrationOp::RedefineIndex { table, name } => {
-            unique_class(declared_index(target, table, name).is_none_or(|(_, unique)| unique))
-        }
-        _ => StepClass::Expand,
-    }
-}
-
-/// The class of a step that only adds constraints `NOT VALID` or validates
-/// them (the validate and add-constraint steps), from its rendering's
-/// headers on a dialect: `contract` wherever it runs a statement, `expand`
-/// where its rendering is `not-applicable`.
-pub fn constraint_step_class(headers: &Headers) -> StepClass {
-    if headers.not_applicable {
-        StepClass::Expand
-    } else {
-        StepClass::Contract
-    }
-}
-
-/// The class of a hand-written SQL step: what its author declares, `expand`
-/// only with `-- ferro: expand`.
-pub fn hand_sql_class(headers: &Headers) -> StepClass {
-    if headers.expand {
-        StepClass::Expand
-    } else {
-        StepClass::Contract
-    }
-}
-
-/// The class of every data step, a guard step included: it writes rows, and
-/// changes no schema the previous release writes to.
-pub const DATA_STEP_CLASS: StepClass = StepClass::Expand;
-
 /// The class of every step of `migration` on a `dialect` database, by
 /// ordinal: what the generator decides for the step when it regenerates the
 /// migration from its parent's snapshot and its own (a generated step is
 /// known by its name), the file's own declaration for a step it does not
-/// generate (a hand-written one, [`hand_sql_class`]), and `expand` for a
-/// data step. A DDL step regeneration does not produce under its name, or
+/// generate (a hand-written one), and `expand` for a data step, each by
+/// [`step_class`]. A DDL step regeneration does not produce under its name, or
 /// produces with another body than its file holds on the dialect (a step a
 /// person edited, ADR-0030), is read as hand-written: `contract` unless its
 /// file says `expand`.
@@ -326,7 +390,7 @@ pub fn migration_classes(
         .iter()
         .map(|step| {
             let class = match step.kind {
-                StepKind::Data => DATA_STEP_CLASS,
+                StepKind::Data => step_class(&LaidOutStep::Data),
                 StepKind::PortableSql => declared_class(step, on),
                 StepKind::Ddl => generated
                     .iter()
@@ -356,7 +420,11 @@ fn declared_class(step: &Step, on: StepDialect) -> StepClass {
     step.files
         .get(&on)
         .or_else(|| step.files.get(&StepDialect::Portable))
-        .map_or(StepClass::Contract, |file| hand_sql_class(&file.headers))
+        .map_or(StepClass::Contract, |file| {
+            step_class(&LaidOutStep::HandSql {
+                headers: &file.headers,
+            })
+        })
 }
 
 /// `migration`'s steps as the generator lays them out from its parent's
@@ -573,11 +641,10 @@ mod tests {
             .steps
             .iter()
             .map(|step| {
-                let class = match step.kind {
-                    StepKind::Data => DATA_STEP_CLASS,
-                    _ => step.class[&StepDialect::from(dialect)],
-                };
-                (format!("{:02}_{}", step.ordinal, step.name), class)
+                (
+                    format!("{:02}_{}", step.ordinal, step.name),
+                    step.class[&StepDialect::from(dialect)],
+                )
             })
             .collect()
     }
@@ -999,11 +1066,42 @@ mod tests {
 
     #[test]
     fn a_hand_written_sql_step_is_contract_unless_it_says_expand() {
-        assert_eq!(hand_sql_class(&Headers::default()), Contract);
         assert_eq!(
-            hand_sql_class(&Headers {
-                expand: true,
-                ..Headers::default()
+            step_class(&LaidOutStep::HandSql {
+                headers: &Headers::default()
+            }),
+            Contract
+        );
+        assert_eq!(
+            step_class(&LaidOutStep::HandSql {
+                headers: &Headers {
+                    expand: true,
+                    ..Headers::default()
+                }
+            }),
+            Expand
+        );
+    }
+
+    #[test]
+    fn a_data_step_is_expand() {
+        assert_eq!(step_class(&LaidOutStep::Data), Expand);
+    }
+
+    #[test]
+    fn a_constraint_step_is_contract_wherever_it_runs_a_statement() {
+        assert_eq!(
+            step_class(&LaidOutStep::Constraints {
+                headers: &Headers::default()
+            }),
+            Contract
+        );
+        assert_eq!(
+            step_class(&LaidOutStep::Constraints {
+                headers: &Headers {
+                    not_applicable: true,
+                    ..Headers::default()
+                }
             }),
             Expand
         );
@@ -1012,26 +1110,30 @@ mod tests {
     #[test]
     fn every_op_reads_its_class_off_its_verdict_and_kind() {
         // The op-level table, against the verdicts the one planner decides.
+        // The whole plan carried by one contract step, which runs each op as
+        // it is planned: what the verdicts and kinds alone decide.
         let class_of = |before: Vec<SchemaModel>, after: Vec<SchemaModel>| {
-            let before_models = before.clone();
+            let (before, after) = (ir(before), ir(after));
             let plan = plan_from_ir(
-                &Side::declared(ir(before)),
-                &Side::declared(ir(after.clone())),
+                &Side::declared(before.clone()),
+                &Side::declared(after.clone()),
                 Dialect::Postgres,
                 crate::PlanOptions { destructive: true },
             );
-            plan.operations
-                .iter()
-                .map(|op| {
-                    op_class(
-                        op,
-                        Sides {
-                            before: &ir(before_models.clone()),
-                            target: &ir(after.clone()),
-                        },
-                    )
-                })
-                .fold(Expand, StepClass::max)
+            let sides = Sides {
+                before: &before,
+                target: &after,
+            };
+            step_class(&LaidOutStep::Contract {
+                ops: &plan.operations,
+                sides,
+                expand: SchemaStep {
+                    ops: &[],
+                    sides,
+                    dialect: Dialect::Postgres,
+                },
+                demands: &[],
+            })
         };
         assert_eq!(
             class_of(vec![author(vec![])], vec![author(vec![]), team()]),
@@ -1058,10 +1160,21 @@ mod tests {
         );
     }
 
+    /// The class of a `schema` step on `dialect` carrying `ops` between
+    /// `sides`.
+    fn schema_class(ops: &[PlannedOp], sides: Sides<'_>, dialect: Dialect) -> StepClass {
+        step_class(&LaidOutStep::Schema(SchemaStep {
+            ops,
+            sides,
+            dialect,
+        }))
+    }
+
     #[test]
     fn every_op_kind_has_its_class_under_a_quiet_verdict() {
         // Each op kind with a verdict that drops nothing, demands nothing
-        // and cannot fail on rows: what the kind alone decides.
+        // and cannot fail on rows, alone in a schema step: what the kind
+        // alone decides.
         let t = || "author".to_string();
         let empty = ir(vec![]);
         let sides = Sides {
@@ -1323,7 +1436,13 @@ mod tests {
             (MigrationOp::NoForceRowSecurity { table: t() }, Expand),
         ];
         for (op, class) in rows {
-            assert_eq!(op_class(&quiet(op.clone()), sides), class, "{op:?}");
+            for dialect in BOTH {
+                assert_eq!(
+                    schema_class(&[quiet(op.clone())], sides, dialect),
+                    class,
+                    "{op:?} on {dialect:?}"
+                );
+            }
         }
         // The verdict overrides the kind: dropping data, demanding values
         // and failing on rows are each contract.
@@ -1331,13 +1450,36 @@ mod tests {
             table: t(),
             column: "c".into(),
         };
+        let demanding = PlannedOp {
+            op: add.clone(),
+            verdict: crate::OpVerdict {
+                demands_values: true,
+                ..Default::default()
+            },
+        };
+        // In the schema (expand) step a demanded column is added nullable:
+        // its backfill and contract come later. The contract that holds it
+        // to its values is contract.
+        assert_eq!(
+            schema_class(std::slice::from_ref(&demanding), sides, Dialect::Postgres),
+            Expand
+        );
+        assert_eq!(
+            step_class(&LaidOutStep::Contract {
+                ops: std::slice::from_ref(&demanding),
+                sides,
+                expand: SchemaStep {
+                    ops: &[],
+                    sides,
+                    dialect: Dialect::Postgres,
+                },
+                demands: &[],
+            }),
+            Contract
+        );
         for verdict in [
             crate::OpVerdict {
                 drops_data: true,
-                ..Default::default()
-            },
-            crate::OpVerdict {
-                demands_values: true,
                 ..Default::default()
             },
             crate::OpVerdict {
@@ -1353,7 +1495,11 @@ mod tests {
                 op: add.clone(),
                 verdict,
             };
-            assert_eq!(op_class(&planned, sides), Contract, "{planned:?}");
+            assert_eq!(
+                schema_class(std::slice::from_ref(&planned), sides, Dialect::Postgres),
+                Contract,
+                "{planned:?}"
+            );
         }
         // A SQLite rebuild is how the dialect runs the op, not what it does.
         let rebuilt = PlannedOp {
@@ -1367,7 +1513,101 @@ mod tests {
                 ..Default::default()
             },
         };
-        assert_eq!(op_class(&rebuilt, sides), Expand);
+        assert_eq!(schema_class(&[rebuilt], sides, Dialect::Sqlite), Expand);
+    }
+
+    #[test]
+    fn an_index_step_is_contract_only_when_it_builds_a_unique_index() {
+        let t = || "author".to_string();
+        let declared = ir(vec![with_index(author(vec![]), false)]);
+        let index = |op: MigrationOp| {
+            step_class(&LaidOutStep::Index {
+                op: &op,
+                target: &declared,
+            })
+        };
+        for unique in [false, true] {
+            assert_eq!(
+                index(MigrationOp::AddIndex {
+                    table: t(),
+                    name: "idx_author_name".into(),
+                    columns: vec!["name".into()],
+                    unique,
+                }),
+                if unique { Contract } else { Expand },
+            );
+        }
+        assert_eq!(
+            index(MigrationOp::DropIndex {
+                table: t(),
+                name: "idx_author_name".into(),
+            }),
+            Expand
+        );
+        // Redefined as the target declares it: a plain index here.
+        assert_eq!(
+            index(MigrationOp::RedefineIndex {
+                table: t(),
+                name: "idx_author_name".into(),
+            }),
+            Expand
+        );
+        // Undeclared on the target: its uniqueness is unknown.
+        assert_eq!(
+            index(MigrationOp::RedefineIndex {
+                table: t(),
+                name: "idx_author_other".into(),
+            }),
+            Contract
+        );
+    }
+
+    #[test]
+    fn a_schema_step_staging_a_constraint_not_valid_is_contract_and_so_is_its_contract() {
+        // A nullable column with a foreign key, added to a table that
+        // exists: on Postgres the schema step adds the key `NOT VALID`, which
+        // a write the previous release makes can fail on, and the contract
+        // validates it; SQLite's rebuild adds it validated by copying.
+        let before = ir(vec![author(vec![]), team()]);
+        let mut owned = author(vec![nullable("owner_id", "integer")]);
+        owned.foreign_keys.push(SchemaForeignKey {
+            renamed_from: None,
+            column: "owner_id".into(),
+            to_table: "team".into(),
+            to_column: "id".into(),
+            on_delete: None,
+            name: Some("fk_author_owner_id_team".into()),
+        });
+        let after = ir(vec![owned, team()]);
+        let sides = Sides {
+            before: &before,
+            target: &after,
+        };
+        let added = [PlannedOp {
+            op: MigrationOp::AddColumn {
+                table: "author".into(),
+                column: "owner_id".into(),
+            },
+            verdict: crate::OpVerdict::default(),
+        }];
+        assert_eq!(schema_class(&added, sides, Dialect::Postgres), Contract);
+        assert_eq!(schema_class(&added, sides, Dialect::Sqlite), Expand);
+        for (dialect, class) in [(Dialect::Postgres, Contract), (Dialect::Sqlite, Expand)] {
+            assert_eq!(
+                step_class(&LaidOutStep::Contract {
+                    ops: &[],
+                    sides,
+                    expand: SchemaStep {
+                        ops: &added,
+                        sides,
+                        dialect,
+                    },
+                    demands: &[],
+                }),
+                class,
+                "{dialect:?}"
+            );
+        }
     }
 
     #[test]

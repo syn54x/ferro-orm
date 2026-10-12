@@ -261,14 +261,11 @@ pub fn staged_constraints(
     dialect: Dialect,
 ) -> Result<Vec<StagedConstraint>, GenerateError> {
     let mut staged = Vec::new();
-    if dialect != Dialect::Postgres {
-        return Ok(staged);
-    }
-    for op in ops {
-        let Some(table) = op.table() else {
-            continue;
-        };
-        let (Some(_), Some(model)) = (find_model(before, table), find_model(after, table)) else {
+    for op in ops
+        .iter()
+        .filter(|op| stages_not_valid(op, before, after, dialect))
+    {
+        let Some(model) = op.table().and_then(|table| find_model(after, table)) else {
             continue;
         };
         let table = &model.table_name;
@@ -313,6 +310,40 @@ pub fn staged_constraints(
         }
     }
     Ok(staged)
+}
+
+/// Whether `op`, in an up file turning `before` into `after` on `dialect`,
+/// adds a foreign key or check `NOT VALID` ([`staged_constraints`] stages
+/// exactly the ops this admits): on Postgres, a foreign key or check added
+/// or rebuilt on a table that already exists, or an added column's own.
+/// A step that does refuses writes the previous release may make, so this
+/// is also what the step's class reads ([`crate::run_plan::step_class`]).
+pub(crate) fn stages_not_valid(
+    op: &MigrationOp,
+    before: &IrEnvelope<SchemaIrPayload>,
+    after: &IrEnvelope<SchemaIrPayload>,
+    dialect: Dialect,
+) -> bool {
+    if dialect != Dialect::Postgres {
+        return false;
+    }
+    let Some(table) = op.table() else {
+        return false;
+    };
+    let (Some(_), Some(model)) = (find_model(before, table), find_model(after, table)) else {
+        return false;
+    };
+    match op {
+        MigrationOp::AddCheck { .. }
+        | MigrationOp::RebuildCheck { .. }
+        | MigrationOp::AddForeignKey { .. }
+        | MigrationOp::RebuildForeignKey { .. } => true,
+        MigrationOp::AddColumn { column, .. } => {
+            let riders = column_riders(model, column);
+            riders.check.is_some() || riders.foreign_key.is_some()
+        }
+        _ => false,
+    }
 }
 
 /// The validate step for `constraints`, rendered for every dialect in
