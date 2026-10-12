@@ -257,8 +257,15 @@ def test_retiring_a_foreign_key_declared_not_nullable_is_refused_naming_the_fix(
             )
 
 
-def test_retiring_a_primary_key_is_refused():
-    with pytest.raises(TypeError, match=r"Author\.id: a primary key cannot be retired"):
+def test_retiring_a_primary_key_is_refused_naming_the_fix():
+    with pytest.raises(
+        TypeError,
+        match=(
+            r"Author\.id: a primary key cannot be retired; drop `retired=True`\. "
+            r"To remove the key, change the primary key first: see the Migrations "
+            r"docs § Changing a primary key"
+        ),
+    ):
 
         class Author(Model):
             id: Annotated[int | None, FerroField(primary_key=True, retired=True)] = None

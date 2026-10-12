@@ -73,6 +73,14 @@ def _retired_not_nullable(model: str, field_name: str) -> TypeError:
     )
 
 
+def _retired_primary_key(model: str, field_name: str) -> TypeError:
+    return TypeError(
+        f"{model}.{field_name}: a primary key cannot be retired; drop "
+        "`retired=True`. To remove the key, change the primary key first: see "
+        "the Migrations docs § Changing a primary key"
+    )
+
+
 def _retired_and_renamed(model: str, field_name: str) -> TypeError:
     return TypeError(
         f"{model}.{field_name}: retire it or rename it, not both; drop "
@@ -100,14 +108,58 @@ def _retired_label_message(enum_cls: type[Enum], label: str) -> str:
     )
 
 
+def written_retired_label(value: Any, labels: frozenset[str]) -> str | None:
+    """The retired label ``value`` would write, or ``None`` (ADR-0053).
+
+    Compared by value: a ``StrEnum`` member, a plain ``Enum`` member and the
+    raw label string all write the member's value, so each is caught.
+    """
+    raw = value.value if isinstance(value, Enum) else value
+    if isinstance(raw, str) and raw in labels:
+        return raw
+    return None
+
+
+def retired_label_error(
+    model: str, field_name: str, enum_cls: type[Enum], label: str, value: Any
+) -> ValidationError:
+    """The ``retired_enum_label`` error every write path raises (ADR-0053)."""
+    return ValidationError.from_exception_data(
+        model,
+        [
+            {
+                "type": PydanticCustomError(
+                    "retired_enum_label", _retired_label_message(enum_cls, label)
+                ),
+                "loc": (field_name,),
+                "input": value,
+            }
+        ],
+    )
+
+
+def refuse_retired_label_write(model_cls: type, column: str, value: Any) -> None:
+    """Refuse a query-side write of a retired label to ``column`` (ADR-0053).
+
+    ``update()`` sets columns without constructing a model, so it asks here,
+    with the same by-value rule the field guard uses.
+
+    Raises:
+        ValidationError: ``retired_enum_label``, as construction raises it.
+    """
+    enum_cls = getattr(model_cls, "_enum_fields", {}).get(column)
+    if enum_cls is None:
+        return
+    label = written_retired_label(value, declared_retired_labels(enum_cls))
+    if label is not None:
+        raise retired_label_error(model_cls.__name__, column, enum_cls, label, value)
+
+
 def _label_guard(enum_cls: type[Enum], labels: frozenset[str]):
     def guard(value: Any) -> Any:
-        if isinstance(value, str) and value in labels:
-            raise ValueError(
-                _retired_label_message(
-                    enum_cls, str(value.value if isinstance(value, Enum) else value)
-                )
-            )
+        label = written_retired_label(value, labels)
+        if label is not None:
+            raise ValueError(_retired_label_message(enum_cls, label))
         return value
 
     return guard
@@ -120,20 +172,10 @@ def _guarded_setattr(
         guarded = retired_labels.get(name)
         if guarded is not None:
             enum_cls, labels = guarded
-            if isinstance(value, str) and value in labels:
-                label = str(value.value if isinstance(value, Enum) else value)
-                raise ValidationError.from_exception_data(
-                    type(self).__name__,
-                    [
-                        {
-                            "type": PydanticCustomError(
-                                "retired_enum_label",
-                                _retired_label_message(enum_cls, label),
-                            ),
-                            "loc": (name,),
-                            "input": value,
-                        }
-                    ],
+            label = written_retired_label(value, labels)
+            if label is not None:
+                raise retired_label_error(
+                    type(self).__name__, name, enum_cls, label, value
                 )
         inherited(self, name, value)
 
@@ -221,9 +263,7 @@ class ModelMetaclass(type(BaseModel)):
         }
         for field_name, meta in retired.items():
             if meta.primary_key:
-                raise TypeError(
-                    f"{model}.{field_name}: a primary key cannot be retired"
-                )
+                raise _retired_primary_key(model, field_name)
             if meta.renamed_from is not None:
                 raise _retired_and_renamed(model, field_name)
             if meta.nullable is False:

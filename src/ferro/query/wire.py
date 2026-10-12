@@ -555,6 +555,20 @@ def _reject_kwargs_value_expr(value: Any) -> None:
         )
 
 
+def _guarded_literal_assignment(
+    model_cls: type, column: str, value: Any
+) -> SetAssignment:
+    """A literal SET of a root column, refused first if it writes a retired label.
+
+    Raises:
+        ValidationError: ``retired_enum_label`` (ADR-0053), before compiling.
+    """
+    from ..metaclass import refuse_retired_label_write
+
+    refuse_retired_label_write(model_cls, column, value)
+    return _literal_assignment(column, value)
+
+
 def _literal_assignment(column: str, value: Any) -> SetAssignment:
     """Canonicalize one literal (including bytes) into a SET assignment."""
     payload = update_bind_payload({column: value})
@@ -573,13 +587,13 @@ def _literal_set(
 
     Each keyword names a queryable column of ``model_cls``, as a recipe's keys
     do: a misspelled or retired one (ADR-0053) fails here, naming it, before
-    any statement reaches the database.
+    any statement reaches the database, and so does a retired enum label.
     """
     compiled: list[SetAssignment] = []
     for column, value in (assignments or {}).items():
         validate_query_column(model_cls, column)
         _reject_kwargs_value_expr(value)
-        compiled.append(_literal_assignment(column, value))
+        compiled.append(_guarded_literal_assignment(model_cls, column, value))
     return tuple(compiled)
 
 
@@ -810,7 +824,7 @@ def _recipe_set(
                 )
             )
             continue
-        compiled.append(_literal_assignment(column, value))
+        compiled.append(_guarded_literal_assignment(model_cls, column, value))
     return tuple(compiled)
 
 
