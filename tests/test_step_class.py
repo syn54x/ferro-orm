@@ -220,9 +220,7 @@ def test_a_generated_step_edited_to_drop_a_column_is_recorded_contract(
     write_models(project, pkg, nickname + "    bio: str | None = None\n")
     new("bio")
     step = migrations(project) / f"0002_bio/01_schema.up.{db.backend}.sql"
-    step.write_text(
-        step.read_text() + 'ALTER TABLE "author" DROP COLUMN "nickname";\n'
-    )
+    step.write_text(step.read_text() + 'ALTER TABLE "author" DROP COLUMN "nickname";\n')
 
     assert up(db).applied
     assert classes(db) == [(1, 1, "expand"), (2, 1, "contract")]
