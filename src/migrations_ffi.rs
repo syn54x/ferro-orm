@@ -24,6 +24,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_load_snapshot, m)?)?;
     m.add_function(wrap_pyfunction!(_open_tracked, m)?)?;
     m.add_function(wrap_pyfunction!(_tracking_tables_for, m)?)?;
+    m.add_function(wrap_pyfunction!(_allow_ahead, m)?)?;
     m.add_class::<TrackedDatabase>()?;
     m.add_class::<LockScope>()?;
     m.add_class::<LockedDatabase>()?;
@@ -311,6 +312,24 @@ fn allow_ahead_arg(value: &Bound<'_, PyAny>) -> PyResult<ferro_migrate::run_plan
             .repr()
             .map_or_else(|_| "?".to_string(), |r| r.to_string())
     )))
+}
+
+/// `allow_ahead` read by [`allow_ahead_arg`] and returned in its Python
+/// spelling (`False`, `True` or `"expand-only"`), so `up()` and
+/// `require_applied()` refuse anything else before they open a connection.
+///
+/// # Errors
+/// `allow_ahead_arg`'s `TypeError`, naming the three accepted values.
+#[pyfunction]
+fn _allow_ahead<'py>(value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    use ferro_migrate::run_plan::AllowAhead;
+    use pyo3::IntoPyObjectExt;
+    let py = value.py();
+    match allow_ahead_arg(value)? {
+        AllowAhead::No => false.into_bound_py_any(py),
+        AllowAhead::Any => true.into_bound_py_any(py),
+        AllowAhead::ExpandOnly => AllowAhead::EXPAND_ONLY.into_bound_py_any(py),
+    }
 }
 
 fn parse_direction(direction: &Bound<'_, PyAny>) -> PyResult<ferro_migrate::Direction> {
