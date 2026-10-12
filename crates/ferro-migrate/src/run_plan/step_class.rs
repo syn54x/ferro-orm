@@ -33,6 +33,7 @@
 
 use crate::directory::{Headers, Migration, MigrationsDir, Step, StepDialect, StepKind};
 use crate::generate::{GenerateOptions, GeneratedStep, generate_with};
+use crate::snapshot::sha384;
 use crate::{Dialect, MigrationOp, PlannedOp, RowRisk, declared_index};
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload};
 use std::collections::BTreeMap;
@@ -319,12 +320,24 @@ pub fn migration_classes(
                 StepKind::Ddl => generated
                     .iter()
                     .find(|g| g.kind == StepKind::Ddl && g.name == step.name)
+                    .filter(|g| renders_as_its_file(g, step, on))
                     .and_then(|g| g.class.get(&on).copied())
                     .unwrap_or_else(|| declared_class(step, on)),
             };
             (step.ordinal, class)
         })
         .collect()
+}
+
+/// Whether `step`'s file on dialect `on` is, byte for byte, what the
+/// generator renders for it (`generated`): only then is the class the
+/// generator decides the class of what the file does. A generated step a
+/// person edited (ADR-0030) is classed as a hand-written one.
+fn renders_as_its_file(generated: &GeneratedStep, step: &Step, on: StepDialect) -> bool {
+    match (generated.renderings.get(&on), step.files.get(&on)) {
+        (Some(rendering), Some(file)) => sha384(rendering.up.as_bytes()) == file.up_checksum,
+        _ => false,
+    }
 }
 
 /// A step's class as its file declares it, on dialect `on`.
@@ -552,6 +565,116 @@ mod tests {
                 (format!("{:02}_{}", step.ordinal, step.name), class)
             })
             .collect()
+    }
+
+    /// A step file holding `up`, as the Python layout writes a rendering.
+    fn step_file(on: StepDialect, ordinal: u8, name: &str, up: &str) -> crate::directory::StepFile {
+        let suffix = match on {
+            StepDialect::Postgres => ".postgres",
+            StepDialect::Sqlite => ".sqlite",
+            StepDialect::Portable => "",
+        };
+        crate::directory::StepFile {
+            up: format!("/m/{ordinal:02}_{name}.up{suffix}.sql").into(),
+            down: Some(format!("/m/{ordinal:02}_{name}.down{suffix}.sql").into()),
+            up_checksum: crate::snapshot::sha384(up.as_bytes()),
+            headers: Headers::parse(up).expect("headers"),
+            down_checksum: Some(crate::snapshot::sha384(b"")),
+            down_headers: Headers::default(),
+        }
+    }
+
+    /// The directory `ferro migrate new` writes for each schema in turn,
+    /// every generated file as the generator renders it.
+    fn generated_dir(schemas: Vec<Vec<SchemaModel>>) -> MigrationsDir {
+        let mut migrations: Vec<Migration> = Vec::new();
+        for (i, models) in schemas.into_iter().enumerate() {
+            let target = ir(models);
+            let parent = migrations.last().map(|m| &m.snapshot);
+            let generated = generate(parent, &target, &BOTH)
+                .expect("generates")
+                .expect("changes something");
+            let bytes = Snapshot::store(&target, parent.map(|s| s.checksum)).expect("store");
+            let steps = generated
+                .steps
+                .iter()
+                .map(|g| Step {
+                    ordinal: g.ordinal,
+                    name: g.name.clone(),
+                    kind: g.kind,
+                    files: if g.kind == StepKind::Data {
+                        BTreeMap::from([(
+                            StepDialect::Portable,
+                            crate::directory::StepFile {
+                                up: format!("/m/{:02}_{}.py", g.ordinal, g.name).into(),
+                                down: None,
+                                up_checksum: crate::snapshot::sha384(b"# data"),
+                                headers: Headers::default(),
+                                down_checksum: None,
+                                down_headers: Headers::default(),
+                            },
+                        )])
+                    } else {
+                        g.renderings
+                            .iter()
+                            .map(|(on, r)| (*on, step_file(*on, g.ordinal, &g.name, &r.up)))
+                            .collect()
+                    },
+                })
+                .collect();
+            let number = u16::try_from(i + 1).expect("number");
+            migrations.push(Migration {
+                number,
+                name: format!("m{number}"),
+                dir: format!("/migrations/{number:04}_m{number}").into(),
+                steps,
+                snapshot: Snapshot::load(&bytes).expect("load"),
+            });
+        }
+        MigrationsDir {
+            path: "/proj/migrations".into(),
+            migrations,
+        }
+    }
+
+    #[test]
+    fn a_generated_step_edited_by_hand_is_classed_by_its_file() {
+        let mut dir = generated_dir(vec![
+            vec![author(vec![])],
+            vec![author(vec![nullable("bio", "string")])],
+        ]);
+        for dialect in BOTH {
+            let classes = migration_classes(&dir, &dir.migrations[1], dialect);
+            assert_eq!(classes[&1], Expand, "as generated, {dialect:?}");
+        }
+        // ADR-0030 lets a person edit an unfinished step: a drop added to
+        // the generated expand step makes it contract, and only the
+        // file's own `-- ferro: expand` says otherwise.
+        let on = StepDialect::Sqlite;
+        let schema = &mut dir.migrations[1].steps[0];
+        let body = |header: &str| {
+            format!("{header}ALTER TABLE \"author\" ADD COLUMN \"bio\" varchar;\nALTER TABLE \"author\" DROP COLUMN \"name\";\n")
+        };
+        schema
+            .files
+            .insert(on, step_file(on, 1, "schema", &body("")));
+        assert_eq!(
+            migration_classes(&dir, &dir.migrations[1], Dialect::Sqlite)[&1],
+            Contract
+        );
+        let schema = &mut dir.migrations[1].steps[0];
+        schema
+            .files
+            .insert(on, step_file(on, 1, "schema", &body("-- ferro: expand\n")));
+        assert_eq!(
+            migration_classes(&dir, &dir.migrations[1], Dialect::Sqlite)[&1],
+            Expand
+        );
+        // The other dialect's file is untouched: still the generator's.
+        assert_eq!(
+            migration_classes(&dir, &dir.migrations[1], Dialect::Postgres)[&1],
+            Expand
+        );
     }
 
     fn named(rows: &[(&str, StepClass)]) -> Vec<(String, StepClass)> {

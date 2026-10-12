@@ -3199,6 +3199,42 @@ mod tests {
         }
     }
 
+    /// `dir` with each DDL step's files holding what the generator renders
+    /// for it from the migration's two snapshots, as `ferro migrate new`
+    /// writes them: the files whose class the generator decides (ADR-0054).
+    fn as_generated(mut dir: MigrationsDir) -> MigrationsDir {
+        let snapshots: Vec<Snapshot> = dir.migrations.iter().map(|m| m.snapshot.clone()).collect();
+        for (i, migration) in dir.migrations.iter_mut().enumerate() {
+            let parent = i.checked_sub(1).map(|p| &snapshots[p]);
+            let generated = crate::generate::generate(
+                parent,
+                &migration.snapshot.ir,
+                &[Dialect::Postgres, Dialect::Sqlite],
+            )
+            .expect("generates")
+            .expect("changes something");
+            for step in migration.steps.iter_mut().filter(|s| s.kind == StepKind::Ddl) {
+                let g = generated
+                    .steps
+                    .iter()
+                    .find(|g| g.name == step.name)
+                    .expect("generated");
+                for (on, rendering) in &g.renderings {
+                    let dialect = match on {
+                        StepDialect::Postgres => "postgres",
+                        StepDialect::Sqlite => "sqlite",
+                        StepDialect::Portable => continue,
+                    };
+                    step.files.insert(
+                        *on,
+                        sql_file(dialect, step.ordinal, &step.name, &rendering.up, DOWN),
+                    );
+                }
+            }
+        }
+        dir
+    }
+
     fn three() -> MigrationsDir {
         dir(vec![
             (
@@ -4651,7 +4687,7 @@ mod tests {
 
     #[test]
     fn a_planned_step_records_the_class_its_migration_decides() {
-        let dir = three();
+        let dir = as_generated(three());
         let plan = up(&dir, &[]).expect("plan");
         // Each migration adds a table: expand.
         assert!(
@@ -4668,7 +4704,7 @@ mod tests {
 
     #[test]
     fn expand_only_admits_a_database_ahead_only_by_expand_steps() {
-        let full = three();
+        let full = as_generated(three());
         let records = [
             finished(&full, 1, 1),
             finished(&full, 2, 1),
@@ -4716,7 +4752,7 @@ mod tests {
 
     #[test]
     fn records_without_a_class_are_classified_from_the_directory_or_contract() {
-        let full = three();
+        let full = as_generated(three());
         let mut records = vec![
             finished(&full, 1, 1),
             finished(&full, 2, 1),
@@ -4778,11 +4814,11 @@ mod tests {
                 StepClass::Expand,
             ),
         ] {
-            let d = dir(vec![(
+            let d = as_generated(dir(vec![(
                 "create_author",
                 vec![ddl(1, "schema", "CREATE TABLE a (id int);\n"), hand(body)],
                 &["author"],
-            )]);
+            )]));
             let classes = step_class::migration_classes(&d, &d.migrations[0], Dialect::Sqlite);
             assert_eq!(classes[&1], StepClass::Expand);
             assert_eq!(classes[&2], class, "{body}");
@@ -4791,7 +4827,7 @@ mod tests {
 
     #[test]
     fn status_shows_each_steps_class_a_classless_record_as_contract() {
-        let full = three();
+        let full = as_generated(three());
         let mut first = finished(&full, 1, 1);
         first.class = None;
         let status = run_status(&full, &[first], Dialect::Sqlite, false, None);
