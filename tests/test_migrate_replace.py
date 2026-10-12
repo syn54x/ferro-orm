@@ -319,6 +319,144 @@ def test_replace_with_url_is_refused_and_opens_no_connection(project, pkg, capsy
     assert tree(project) == before
 
 
+# -- an interrupted replace (panel F6) ----------------------------------------------
+#
+# A replacement sets the old directory aside under a hidden name, writes the
+# new one and deletes the aside. A kill (SIGKILL, power loss, OOM) between
+# two of those leaves the aside, or a half-written ``.partial``, behind; no
+# exception handler runs. Every reader refuses the leftover, naming it and
+# the recovery, and a later ``--replace`` never deletes it.
+
+
+def hidden_entries(project: Path) -> list[str]:
+    return sorted(
+        p.name for p in migrations(project).iterdir() if p.name.startswith(".")
+    )
+
+
+def one_branch(project: Path, pkg: str) -> None:
+    """``0001_create_author`` and ``0002_add_x`` (``X``), models at ``X``."""
+    write_config(project, pkg)
+    write_models(project, pkg, AUTHOR)
+    new("create_author")
+    write_models(project, pkg, X)
+    new("add_x")
+
+
+def test_a_replace_leaves_nothing_hidden_behind(project, pkg):
+    two_branches(project, pkg)
+    new("add_x", "--replace", "0002_add_x")
+    assert hidden_entries(project) == [".gitattributes"]
+
+
+def test_a_replace_killed_after_setting_aside_is_named_by_every_reader(
+    project, pkg, capsys
+):
+    one_branch(project, pkg)
+    root = migrations(project)
+    # Killed after the rename, before the new directory appeared.
+    (root / "0002_add_x").rename(root / ".0002_add_x.replaced")
+    before = tree(project)
+    capsys.readouterr()
+
+    assert run("migrate", "check") == 3
+    err = capsys.readouterr().err
+    assert err.startswith("interrupted_replace: "), err
+    assert (
+        ".0002_add_x.replaced is 0002_add_x, set aside by an interrupted `ferro "
+        "migrate new --replace 0002_add_x`; 0002_add_x was never written. Rename "
+        ".0002_add_x.replaced back to 0002_add_x, then run `ferro migrate new add_x "
+        "--replace 0002_add_x` again"
+    ) in err, err
+
+    # new, plain or --replace, refuses too, and never deletes the aside.
+    write_models(project, pkg, XY)
+    assert run("migrate", "new", "add_x", "--replace", "0002_add_x") != 0
+    assert "Rename .0002_add_x.replaced back to 0002_add_x" in capsys.readouterr().err
+    assert run("migrate", "new", "more") != 0
+    assert ".0002_add_x.replaced" in capsys.readouterr().err
+    assert tree(project) == before
+
+    # The recovery the refusal names.
+    (root / ".0002_add_x.replaced").rename(root / "0002_add_x")
+    write_models(project, pkg, X)
+    assert run("migrate", "check") == 0
+    write_models(project, pkg, XY)
+    new("add_x", "--replace", "0002_add_x")
+    assert dirs(project) == ["0001_create_author", "0002_add_x"]
+    assert hidden_entries(project) == [".gitattributes"]
+
+
+def test_a_renumbered_replace_killed_before_its_cleanup_names_the_aside_to_delete(
+    project, pkg, capsys
+):
+    two_branches(project, pkg)
+    old = {
+        p.name: p.read_bytes() for p in (migrations(project) / "0002_add_x").iterdir()
+    }
+    new("add_x", "--replace", "0002_add_x")
+    # Killed after 0003_add_x appeared, before the aside was deleted.
+    leftover = migrations(project) / ".0002_add_x.0003_add_x.replaced"
+    leftover.mkdir()
+    for name, body in old.items():
+        (leftover / name).write_bytes(body)
+    capsys.readouterr()
+
+    assert run("migrate", "check") == 3
+    err = capsys.readouterr().err
+    assert err == (
+        "interrupted_replace: .0002_add_x.0003_add_x.replaced is 0002_add_x, set "
+        "aside by an interrupted `ferro migrate new --replace 0002_add_x`; its "
+        "replacement 0003_add_x is complete. Delete .0002_add_x.0003_add_x.replaced\n"
+    ), err
+
+    shutil.rmtree(leftover)
+    assert run("migrate", "check") == 0
+
+
+def test_a_renumbered_replace_killed_before_writing_names_the_rename_back(
+    project, pkg, capsys
+):
+    two_branches(project, pkg)
+    root = migrations(project)
+    (root / "0002_add_x").rename(root / ".0002_add_x.0003_add_x.replaced")
+    capsys.readouterr()
+
+    assert run("migrate", "check") == 3
+    err = capsys.readouterr().err
+    assert (
+        "0003_add_x was never written. Rename .0002_add_x.0003_add_x.replaced back "
+        "to 0002_add_x, then run `ferro migrate new add_x --replace 0002_add_x` again"
+    ) in err, err
+
+    (root / ".0002_add_x.0003_add_x.replaced").rename(root / "0002_add_x")
+    new("add_x", "--replace", "0002_add_x")
+    assert dirs(project) == ["0001_create_author", "0002_add_y", "0003_add_x"]
+
+
+def test_a_write_killed_halfway_names_the_partial_to_delete(project, pkg, capsys):
+    one_branch(project, pkg)
+    partial = migrations(project) / ".0003_more.partial"
+    partial.mkdir()
+    (partial / "ir.json").write_text("{")
+    capsys.readouterr()
+
+    assert run("migrate", "check") == 3
+    err = capsys.readouterr().err
+    assert err == (
+        "interrupted_write: .0003_more.partial is part of 0003_more, left by an "
+        "interrupted `ferro migrate new`; 0003_more was never written. Delete "
+        ".0003_more.partial, then run `ferro migrate new` again\n"
+    ), err
+    write_models(project, pkg, XY)
+    assert run("migrate", "new", "more") != 0
+    assert partial.exists()
+
+    shutil.rmtree(partial)
+    new("more")
+    assert dirs(project) == ["0001_create_author", "0002_add_x", "0003_more"]
+
+
 # -- a database that applied the old files ------------------------------------------
 
 

@@ -244,22 +244,28 @@ def write(database: DatabaseSettings, migration: GeneratedMigration) -> Path:
     """Write a migration :func:`prepare` returned into ``database``'s
     directory (with its ``.gitattributes``); return the migration's directory.
 
-    A replacement (``migration.replaces``) deletes the replaced migration's
-    directory once the new one is in place; when the two share a name (the
-    number was free) the old one is set aside first and put back if the
-    write fails."""
+    A replacement (``migration.replaces``) sets the replaced migration's
+    directory aside under a hidden name naming both (``.0007_add_x.replaced``
+    in place, ``.0007_add_x.0008_add_x.replaced`` renumbered), writes the new
+    one, and deletes the aside; a write that raises puts it back. A run killed
+    in between leaves the aside, which every directory reader refuses by
+    name with its recovery (panel F6): rename it back while the replacement
+    is absent, delete it once the replacement is in place."""
     directory = database.directory
     ensure_gitattributes(directory)
     if migration.replaces is None:
         return write_migration(directory, migration)
     old = directory / migration.replaces
-    if migration.dir_name != migration.replaces:
-        written = write_migration(directory, migration)
-        shutil.rmtree(old)
-        return written
-    aside = directory / f".{migration.replaces}.replaced"
+    if migration.dir_name == migration.replaces:
+        aside = directory / f".{migration.replaces}.replaced"
+    else:
+        aside = directory / f".{migration.replaces}.{migration.dir_name}.replaced"
     if aside.exists():
-        shutil.rmtree(aside)
+        raise MigrationsDirectoryError(
+            f"{aside} exists: another `ferro migrate new --replace` is running, "
+            "or one was interrupted. Nothing was written; `ferro migrate check` "
+            "names how to recover it"
+        )
     old.rename(aside)
     try:
         written = write_migration(directory, migration)
