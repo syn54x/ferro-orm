@@ -2252,12 +2252,14 @@ impl Locked {
     /// on tracking tables an older ferro left at a lower minor, add the
     /// minor's columns and record it; then give every record without a
     /// class the one [`unclassified`] decides (from the directory's files,
-    /// `contract` for a migration the directory lacks), and re-read the
+    /// `contract` where the directory lacks the files it applied), and re-read the
     /// records. Nothing is written on a database whose tables do not exist
     /// yet (the first write creates them at this minor), whose format is
     /// newer (every verb refuses on it), or that has nothing to bring up.
     /// A directory that cannot be read classifies nothing: the verb refuses
-    /// on it, and the next one classifies.
+    /// on it, and the next one classifies. A record whose applied migration
+    /// does not regenerate refuses the verb ([`RunRefusal::Unclassifiable`]):
+    /// no class is recorded that the planner did not decide.
     async fn bring_up_to_minor(mut self) -> Result<Self, (Self, PyErr)> {
         let state = &self.tracked.state;
         if !state.exists || state.refusal.is_some() {
@@ -2270,7 +2272,12 @@ impl Locked {
             return Err((self, err));
         }
         let classes = match self.tracked.held.as_ref() {
-            Ok(held) => unclassified(&held.dir, &self.tracked.state.records, self.dialect()),
+            Ok(held) => {
+                match unclassified(&held.dir, &self.tracked.state.records, self.dialect()) {
+                    Ok(classes) => classes,
+                    Err(refusal) => return Err((self, refused_by(&refusal))),
+                }
+            }
             Err(_) => Vec::new(),
         };
         if let Err(err) = write_classes(self.engine(), self.tracking_schema(), &classes).await {
@@ -3201,7 +3208,9 @@ fn baseline_directory_label(dir: &MigrationsDir) -> String {
 /// `ferro migrate status`); a target the directory lacks
 /// ([`RunRefusal::NoBaselineTarget`]); an empty directory
 /// ([`RunRefusal::NothingToBaseline`]); a step with no rendering for
-/// `dialect`, or headers it cannot honour ([`RunRefusal::BaselineStep`]).
+/// `dialect`, or headers it cannot honour ([`RunRefusal::BaselineStep`]); a
+/// migration whose snapshots do not regenerate, so no class is decided for
+/// its generated steps ([`RunRefusal::Unclassifiable`]).
 pub fn plan_baseline(
     dir: &MigrationsDir,
     existing: &[StepRecord],
@@ -3255,7 +3264,7 @@ pub fn plan_baseline(
     {
         let snapshot_checksum = encode_checksum(&migration.snapshot.checksum);
         // The class a run would have recorded (ADR-0054, ADR-0031).
-        let classes = migration_classes(dir, migration, dialect);
+        let classes = migration_classes(dir, migration, dialect)?;
         for step in &migration.steps {
             // The file this dialect runs, by the run planner's own rule: the
             // file `up` checks every applied record against.

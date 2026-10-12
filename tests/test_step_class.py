@@ -207,6 +207,28 @@ def test_a_hand_sql_step_is_admitted_only_when_it_declares_expand(project, pkg, 
     assert require_applied(db, allow_ahead="expand-only") is None
 
 
+def test_a_generated_step_edited_to_drop_a_column_is_recorded_contract(
+    project, pkg, db
+):
+    # Panel F1: ADR-0030 lets a person edit a step no database finished. The
+    # class is what the file does, so a drop added by hand to a generated
+    # expand step is contract, whatever the generator would have said.
+    nickname = AUTHOR + "    nickname: str | None = None\n"
+    configure(project, pkg, db.backend)
+    write_models(project, pkg, nickname)
+    new("create_author")
+    write_models(project, pkg, nickname + "    bio: str | None = None\n")
+    new("bio")
+    step = migrations(project) / f"0002_bio/01_schema.up.{db.backend}.sql"
+    step.write_text(
+        step.read_text() + 'ALTER TABLE "author" DROP COLUMN "nickname";\n'
+    )
+
+    assert up(db).applied
+    assert classes(db) == [(1, 1, "expand"), (2, 1, "contract")]
+    assert "nickname" not in columns(db, "author")
+
+
 def test_the_expand_header_takes_no_text(project, pkg, db, capsys):
     configure(project, pkg, db.backend)
     write_models(project, pkg, AUTHOR)
@@ -311,6 +333,30 @@ def test_a_record_written_with_0_22_columns_is_contract_until_the_next_up(
 
     assert up(db).applied == []
     assert classes(db)[1] == (2, 1, "expand")
+
+
+def test_a_record_whose_migration_was_replaced_in_place_is_classified_contract(
+    project, pkg, db
+):
+    # Panel F3: 0002_change applied a drop (contract) under 0.22, then was
+    # replaced in place by an expand migration of the same number and name.
+    # The files on disk are not the ones the record applied: the backfill
+    # records contract, never the new SQL's expand, and the verb then refuses.
+    configure(project, pkg, db.backend)
+    write_models(project, pkg, AUTHOR)
+    new("create_author")
+    write_models(project, pkg, WITHOUT_STATUS)
+    new("change")
+    assert run("migrate", "up", "--url", db.url) == 0
+    as_0_22(db)
+    write_models(project, pkg, BIO)
+    new("change", "--replace", "0002_change")
+    assert (migrations(project) / "0002_change").is_dir()
+
+    with pytest.raises(runner.MigrationRefused) as raised:
+        up(db)
+    assert raised.value.report.refused.kind == "snapshot_mismatch"
+    assert classes(db) == [(1, 1, "expand"), (2, 1, "contract")]
 
 
 def test_status_on_a_lower_minor_writes_nothing(project, pkg, db):
