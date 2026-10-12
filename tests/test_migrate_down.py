@@ -204,6 +204,28 @@ def test_down_reverts_a_new_model_and_the_type_it_introduced(project, pkg, db, c
     assert keys(db) == [(1, 1), (2, 1)]
 
 
+def test_the_first_down_after_upgrading_from_0_22_reverts_at_once(
+    project, pkg, db, capsys
+):
+    # Panel F7: ferro 0.22 left records with no class. The lock's backfill
+    # classifies them; that is not a change to the records the plan showed.
+    configure(project, pkg, db.backend)
+    write_models(project, pkg, AUTHOR)
+    new("create_author")
+    write_models(project, pkg, LIBRARY)
+    new("create_post")
+    assert run("migrate", "up", "--url", db.url) == 0
+    db.execute("ALTER TABLE _ferro_migrations DROP COLUMN class")
+    db.execute("ALTER TABLE _ferro_migrations_format DROP COLUMN minor")
+    capsys.readouterr()
+
+    assert run("migrate", "down", "--yes", "--url", db.url) == 0, capsys.readouterr()
+
+    assert keys(db) == [(1, 1)]
+    assert "post" not in db.tables()
+    assert db.rows("SELECT class FROM _ferro_migrations") == [("expand",)]
+
+
 def test_down_recreates_a_dropped_model_empty_from_the_parent_snapshot(
     project, pkg, db, capsys
 ):

@@ -685,18 +685,28 @@ impl TrackedDatabase {
     /// The run lock, as an async context manager whose block holds it: a
     /// second run waits up to `timeout_s` seconds (`0` tries once), and
     /// `on_wait(text)` hears at once that it waits. The block's
-    /// [`LockedDatabase`] re-reads the records under the lock.
+    /// [`LockedDatabase`] re-reads the records under the lock. With
+    /// `decides_classes` false (a verb that reads no step class: `down`,
+    /// `rerecord`, `baseline --remove`), a migration that does not regenerate
+    /// leaves its records without a class and warns
+    /// ([`LockedDatabase::class_warnings`]) instead of refusing.
     ///
     /// # Errors
     /// `ValueError` for a negative, non-finite or unrepresentable timeout.
-    #[pyo3(signature = (timeout_s, on_wait=None))]
-    fn locked(&self, timeout_s: f64, on_wait: Option<Py<PyAny>>) -> PyResult<LockScope> {
+    #[pyo3(signature = (timeout_s, on_wait=None, decides_classes=true))]
+    fn locked(
+        &self,
+        timeout_s: f64,
+        on_wait: Option<Py<PyAny>>,
+        decides_classes: bool,
+    ) -> PyResult<LockScope> {
         Ok(LockScope {
             tracked: Arc::clone(&self.inner),
             ddl: Arc::clone(&self.ddl),
             timeout: lock_timeout(timeout_s)?,
             on_wait,
             unacquired: false,
+            classes: class_need(decides_classes),
             entered: Arc::new(std::sync::Mutex::new(None)),
         })
     }
@@ -711,6 +721,7 @@ impl TrackedDatabase {
             timeout: std::time::Duration::ZERO,
             on_wait: None,
             unacquired: true,
+            classes: crate::run::ClassNeed::Decides,
             entered: Arc::new(std::sync::Mutex::new(None)),
         }
     }
@@ -736,7 +747,16 @@ pub struct LockScope {
     timeout: std::time::Duration,
     on_wait: Option<Py<PyAny>>,
     unacquired: bool,
+    classes: crate::run::ClassNeed,
     entered: Arc<std::sync::Mutex<Option<Arc<crate::run::Locked>>>>,
+}
+
+fn class_need(decides_classes: bool) -> crate::run::ClassNeed {
+    if decides_classes {
+        crate::run::ClassNeed::Decides
+    } else {
+        crate::run::ClassNeed::Defers
+    }
 }
 
 fn scope_poisoned() -> PyErr {
@@ -749,22 +769,26 @@ impl LockScope {
         let tracked = Arc::clone(&self.tracked);
         let ddl = Arc::clone(&self.ddl);
         let on_wait = self.on_wait.as_ref().map(|c| c.clone_ref(py));
-        let (timeout, unacquired) = (self.timeout, self.unacquired);
+        let (timeout, unacquired, classes) = (self.timeout, self.unacquired, self.classes);
         let entered = Arc::clone(&self.entered);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let locked = if unacquired {
-                tracked.lock_unacquired_for_test().await?
+                tracked.lock_unacquired_for_test(classes).await?
             } else {
                 tracked
-                    .lock(timeout, |text| {
-                        if let Some(callback) = &on_wait {
-                            Python::attach(|py| {
-                                if let Err(err) = callback.call1(py, (text,)) {
-                                    err.print(py);
-                                }
-                            });
-                        }
-                    })
+                    .lock(
+                        timeout,
+                        |text| {
+                            if let Some(callback) = &on_wait {
+                                Python::attach(|py| {
+                                    if let Err(err) = callback.call1(py, (text,)) {
+                                        err.print(py);
+                                    }
+                                });
+                            }
+                        },
+                        classes,
+                    )
                     .await?
             };
             let locked = Arc::new(locked);
@@ -893,6 +917,13 @@ impl LockedDatabase {
     #[getter]
     fn refusal(&self) -> Option<&str> {
         self.inner.tracked().format_refusal()
+    }
+
+    /// One warning per migration whose records taking the lock left without
+    /// a class (ADR-0054), for a verb that reads none.
+    #[getter]
+    fn class_warnings(&self) -> Vec<String> {
+        self.inner.class_warnings().to_vec()
     }
 
     /// The held directory read (the tracked database's one read).

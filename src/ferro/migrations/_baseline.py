@@ -169,7 +169,10 @@ async def _remove(
 ) -> list[str]:
     timeout = database.lock_wait(lock_timeout)
     tracked = await runner.open_tracked(name, database)
-    async with tracked.locked(timeout, runner.say_waiting) as run:
+    async with tracked.locked(
+        timeout, runner.say_waiting, decides_classes=False
+    ) as run:
+        runner.warn_unclassified(run)
         names = {r["migration"]: r["migration_name"] for r in run.records}
         try:
             removed = await run.remove_baseline()
