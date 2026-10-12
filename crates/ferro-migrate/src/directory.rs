@@ -345,6 +345,30 @@ pub enum DirectoryError {
         /// The line.
         line: String,
     },
+    /// A migration `ferro migrate new --replace` set aside under a hidden
+    /// name (`.NNNN_<name>.replaced`, or `.NNNN_<name>.MMMM_<new>.replaced`
+    /// when the replacement takes another name) and never deleted: the run
+    /// was killed between setting it aside and deleting it.
+    InterruptedReplace {
+        /// The hidden directory.
+        aside: PathBuf,
+        /// The migration it holds (`NNNN_<name>`).
+        replaced: String,
+        /// The replacement's directory name (`MMMM_<new>`).
+        replacement: String,
+        /// Whether the replacement is in the directory: it appears whole,
+        /// by one rename, so present means complete.
+        complete: bool,
+    },
+    /// A migration `ferro migrate new` was writing into a hidden sibling
+    /// (`.NNNN_<name>.partial`) and never moved into place: the run was
+    /// killed while writing it.
+    InterruptedWrite {
+        /// The hidden directory.
+        partial: PathBuf,
+        /// The migration it was becoming (`NNNN_<name>`).
+        migration: String,
+    },
     /// A DDL step with no rendering for a target dialect.
     MissingRendering {
         /// The migration.
@@ -376,6 +400,8 @@ impl DirectoryError {
             DirectoryError::MissingPair { .. } => "missing_pair",
             DirectoryError::UnparseableHeader { .. } => "unparseable_header",
             DirectoryError::MissingRendering { .. } => "missing_rendering",
+            DirectoryError::InterruptedReplace { .. } => "interrupted_replace",
+            DirectoryError::InterruptedWrite { .. } => "interrupted_write",
         }
     }
 }
@@ -500,6 +526,43 @@ impl std::fmt::Display for DirectoryError {
                  foreign-keys-off, destructive, data-dependent, not-applicable, expand, \
                  nothing-to-reverse <reason> and irreversible <reason>",
                 show(file)
+            ),
+            DirectoryError::InterruptedReplace {
+                aside,
+                replaced,
+                replacement,
+                complete,
+            } => {
+                write!(
+                    f,
+                    "{} is {replaced}, set aside by an interrupted `ferro migrate new \
+                     --replace {replaced}`; ",
+                    show(aside)
+                )?;
+                if *complete {
+                    write!(
+                        f,
+                        "its replacement {replacement} is complete. Delete {}",
+                        show(aside)
+                    )
+                } else {
+                    let name = split_numbered(replacement, 4)
+                        .map_or_else(|| replacement.clone(), |(_, name)| name);
+                    write!(
+                        f,
+                        "{replacement} was never written. Rename {} back to {replaced}, \
+                         then run `ferro migrate new {name} --replace {replaced}` again",
+                        show(aside)
+                    )
+                }
+            }
+            DirectoryError::InterruptedWrite { partial, migration } => write!(
+                f,
+                "{} is part of {migration}, left by an interrupted `ferro migrate new`; \
+                 {migration} was never written. Delete {}, then run `ferro migrate new` \
+                 again",
+                show(partial),
+                show(partial)
             ),
             DirectoryError::MissingRendering {
                 migration,
@@ -697,6 +760,7 @@ impl MigrationsDir {
                 migrations: Vec::new(),
             });
         }
+        interrupted_writes(root)?;
         assemble(root, unique_numbers(root, migration_dirs(root)?)?)
     }
 
@@ -726,6 +790,7 @@ impl MigrationsDir {
         if !root.exists() {
             return Err(no_such());
         }
+        interrupted_writes(root)?;
         let mut dirs = migration_dirs(root)?;
         let full = |(number, name, _): &(u16, String, PathBuf)| format!("{number:04}_{name}");
         let matching: Vec<usize> = match target.parse::<u16>() {
@@ -775,6 +840,55 @@ impl MigrationsDir {
     /// The newest migration, when there is one.
     pub fn head(&self) -> Option<&Migration> {
         self.migrations.last()
+    }
+}
+
+/// Refuse what an interrupted `ferro migrate new` left under a hidden name
+/// (panel F6): a migration `--replace` set aside and never deleted
+/// (`.NNNN_<name>.replaced`, `.NNNN_<name>.MMMM_<new>.replaced`), ahead of a
+/// half-written one (`.NNNN_<name>.partial`), since the aside may hold the
+/// only copy of hand-written steps. Other hidden names stay ignored.
+fn interrupted_writes(root: &Path) -> Result<(), DirectoryError> {
+    let unreadable = |err: std::io::Error| DirectoryError::Unreadable {
+        path: PathBuf::from("."),
+        reason: err.to_string(),
+    };
+    let migration_name = |name: &str| split_numbered(name, 4).map(|_| name.to_string());
+    let mut asides = Vec::new();
+    let mut partials = Vec::new();
+    for entry in std::fs::read_dir(root).map_err(unreadable)? {
+        let file_name = entry.map_err(unreadable)?.file_name();
+        let file_name = file_name.to_string_lossy();
+        let Some(hidden) = file_name.strip_prefix('.') else {
+            continue;
+        };
+        if let Some(names) = hidden.strip_suffix(".replaced") {
+            let (replaced, replacement) = names.split_once('.').unwrap_or((names, names));
+            if let (Some(replaced), Some(replacement)) =
+                (migration_name(replaced), migration_name(replacement))
+            {
+                let complete = root.join(&replacement).is_dir();
+                asides.push(DirectoryError::InterruptedReplace {
+                    aside: PathBuf::from(file_name.as_ref()),
+                    replaced,
+                    replacement,
+                    complete,
+                });
+            }
+        } else if let Some(migration) = hidden.strip_suffix(".partial").and_then(migration_name) {
+            partials.push(DirectoryError::InterruptedWrite {
+                partial: PathBuf::from(file_name.as_ref()),
+                migration,
+            });
+        }
+    }
+    let first = |mut found: Vec<DirectoryError>| {
+        found.sort_by_key(ToString::to_string);
+        found.into_iter().next()
+    };
+    match first(asides).or_else(|| first(partials)) {
+        Some(err) => Err(err),
+        None => Ok(()),
     }
 }
 
@@ -1257,6 +1371,52 @@ CREATE INDEX i ON t (c);
             Err("-- ferro: expand now".to_string()),
             "a flag takes no text after it"
         );
+    }
+
+    #[test]
+    fn a_leftover_replace_aside_or_partial_write_is_refused_by_every_read() {
+        // Panel F6: a kill mid `--replace` leaves the old migration under a
+        // hidden name the reader would otherwise skip.
+        let root = scratch("aside");
+        let first = migration(&root, "0001_a", None);
+        migration(&root, ".0002_b.replaced", Some(&first));
+        for err in [
+            MigrationsDir::read(&root).expect_err("aside"),
+            MigrationsDir::read_replacing(&root, "0001_a").expect_err("aside"),
+        ] {
+            assert_eq!(err.kind(), "interrupted_replace");
+            assert_eq!(
+                err.to_string(),
+                ".0002_b.replaced is 0002_b, set aside by an interrupted `ferro migrate \
+                 new --replace 0002_b`; 0002_b was never written. Rename .0002_b.replaced \
+                 back to 0002_b, then run `ferro migrate new b --replace 0002_b` again"
+            );
+        }
+        // Renumbered and complete: the aside names its replacement.
+        std::fs::rename(root.join(".0002_b.replaced"), root.join(".0002_b.0002_c.replaced"))
+            .expect("rename");
+        migration(&root, "0002_c", Some(&first));
+        let err = MigrationsDir::read(&root).expect_err("aside");
+        assert_eq!(
+            err.to_string(),
+            ".0002_b.0002_c.replaced is 0002_b, set aside by an interrupted `ferro \
+             migrate new --replace 0002_b`; its replacement 0002_c is complete. Delete \
+             .0002_b.0002_c.replaced"
+        );
+        // The aside comes first; the partial once it is gone.
+        migration(&root, ".0003_d.partial", None);
+        assert_eq!(MigrationsDir::read(&root).expect_err("aside").kind(), "interrupted_replace");
+        std::fs::remove_dir_all(root.join(".0002_b.0002_c.replaced")).expect("rm");
+        let err = MigrationsDir::read(&root).expect_err("partial");
+        assert_eq!(err.kind(), "interrupted_write");
+        assert_eq!(
+            err.to_string(),
+            ".0003_d.partial is part of 0003_d, left by an interrupted `ferro migrate \
+             new`; 0003_d was never written. Delete .0003_d.partial, then run `ferro \
+             migrate new` again"
+        );
+        std::fs::remove_dir_all(root.join(".0003_d.partial")).expect("rm");
+        assert_eq!(MigrationsDir::read(&root).expect("clean").migrations.len(), 2);
     }
 
     #[test]

@@ -248,7 +248,8 @@ def write_migration(directory: Path, migration: GeneratedMigration) -> Path:
     Every file is written as raw UTF-8 bytes, never newline-translated.
 
     Raises:
-        MigrationsDirectoryError: the migration's directory already exists.
+        MigrationsDirectoryError: the migration's directory, or its hidden
+            staging sibling (another run, or an interrupted one), already exists.
     """
     target = directory / migration.dir_name
     if target.exists():
@@ -258,7 +259,11 @@ def write_migration(directory: Path, migration: GeneratedMigration) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     staging = directory / f".{migration.dir_name}.partial"
     if staging.exists():
-        shutil.rmtree(staging)
+        raise MigrationsDirectoryError(
+            f"{staging} exists: another `ferro migrate new` is writing "
+            f"{migration.dir_name}, or one was interrupted. Nothing was written; "
+            "`ferro migrate check` names how to recover it"
+        )
     staging.mkdir()
     try:
         for name, text in migration.files().items():

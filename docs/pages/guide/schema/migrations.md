@@ -379,6 +379,7 @@ changed models: Author
 - **Naming the migration.** `--replace` takes `NNNN_<name>`, or `NNNN` when one directory carries the number. A number two directories share is refused, naming both.
 - **Only the newest.** A migration a later one chains from is refused: `replace the later one first, or delete it`. A regeneration that holds nothing (the models add nothing it does not already hold, and nothing is carried) is refused too: delete the directory.
 - **Offline.** Like `new`, it reads the models and the directory, never a database; `--url` is refused. `--sql-step`, `--data-step`, `--data-only` and `--no-backfill` mean what they mean to `new`.
+- **Interrupted.** Until the new directory is written, the old one waits under a hidden name: `.0007_add_x.0008_add_x.replaced` (`.0007_add_x.replaced` when the number is kept). A run killed in between leaves it there, and every command refuses the directory, naming it and what to do: rename it back to `0007_add_x` when the replacement was never written, delete it when the replacement is complete.
 
 A database that applied the old `0007_add_x` meets the replaced migration as a changed one. `up` refuses it, naming the replacement as the second cause:
 
