@@ -1,6 +1,64 @@
 # CHANGELOG
 
 
+## v0.23.0 (2026-10-12)
+
+### Bug Fixes
+
+- **migrate**: Step class is what the applied file did; the first down after upgrade succeeds (panel
+  F1, F2, F3, F7, F9, C1) ([#639](https://github.com/syn54x/ferro-orm/pull/639),
+  [`3a0d64c`](https://github.com/syn54x/ferro-orm/commit/3a0d64c52bd3b893d567fb4970bdd3ce00a7fe30))
+
+- **migrations**: A leftover --replace aside is refused by name and never deleted blindly (panel F6)
+  ([#637](https://github.com/syn54x/ferro-orm/pull/637),
+  [`c7a72a8`](https://github.com/syn54x/ferro-orm/commit/c7a72a8c550b854c8554261930058ab8f8500d97))
+
+- **models**: Retired labels are refused by value on every write path; the primary-key refusal names
+  its fix (panel F4, F5, F8) ([#638](https://github.com/syn54x/ferro-orm/pull/638),
+  [`f3ed626`](https://github.com/syn54x/ferro-orm/commit/f3ed62618ec543278bad8e94ee1d96f263691334))
+
+### Documentation
+
+- Record epic #511 close-out learnings ([#617](https://github.com/syn54x/ferro-orm/pull/617),
+  [`6a06786`](https://github.com/syn54x/ferro-orm/commit/6a067868052ce04e66c1d94ff463a193bfc0fbc7))
+
+### Features
+
+- **migrations**: Ferro migrate new --replace regenerates the newest migration carrying hand-written
+  steps (#629) ([#635](https://github.com/syn54x/ferro-orm/pull/635),
+  [`2b12325`](https://github.com/syn54x/ferro-orm/commit/2b1232501aa5ef1045d970507c2f1e0a8ed711eb))
+
+- **migrations**: Foreign defaults are drift; the live read carries defaults and DropDefault runs on
+  every door (#628) ([#634](https://github.com/syn54x/ferro-orm/pull/634),
+  [`f9fc550`](https://github.com/syn54x/ferro-orm/commit/f9fc550de56e4f7ad745e10b1b23b219c913593f))
+
+- **migrations**: Step class recorded at apply, additive tracking minor, allow_ahead="expand-only"
+  (#626) ([#632](https://github.com/syn54x/ferro-orm/pull/632),
+  [`cd3fab9`](https://github.com/syn54x/ferro-orm/commit/cd3fab903a2f4294df4584b62c8c4642f25c68cf))
+
+- **migrations**: Typed baseline refusals for concurrent pre-deploys (#624)
+  ([#630](https://github.com/syn54x/ferro-orm/pull/630),
+  [`ac3215e`](https://github.com/syn54x/ferro-orm/commit/ac3215e9a8e37c98045164f744bd71265dffebd9))
+
+- **models**: Retired columns, Field(retired=True) leaves the model and stays in the snapshot (#625)
+  ([#631](https://github.com/syn54x/ferro-orm/pull/631),
+  [`321bb8d`](https://github.com/syn54x/ferro-orm/commit/321bb8d946802c14e30e78aae3c1b609dd43d70c))
+
+- **schema**: Retired enum labels stay in the type and refuse writes (#627)
+  ([#633](https://github.com/syn54x/ferro-orm/pull/633),
+  [`c49bd7b`](https://github.com/syn54x/ferro-orm/commit/c49bd7b3200b268c755007c6ac11e90a57766301))
+
+### Refactoring
+
+- **migrate**: One step-class entry point; the generator names each carried step's move
+  (architecture pass on #636) ([#641](https://github.com/syn54x/ferro-orm/pull/641),
+  [`5a49671`](https://github.com/syn54x/ferro-orm/commit/5a49671720d897ad60332c6542170d26e1751997))
+
+- **models**: One retired-label refusal type on every write path; allow_ahead parsed once
+  (architecture pass on #636) ([#640](https://github.com/syn54x/ferro-orm/pull/640),
+  [`183d2c3`](https://github.com/syn54x/ferro-orm/commit/183d2c33d80ff1239dfc26a47bce06a4838315ac))
+
+
 ## v0.22.0 (2026-10-09)
 
 ### Bug Fixes
