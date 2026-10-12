@@ -199,18 +199,28 @@ def test_a_baseline_records_every_steps_class_and_status_shows_them(
     assert run("migrate", "new", "tidy", "--sql-step", "tidy") == 0
     sql.write_text("-- ferro: expand\nSELECT 1;\n")
     (sql.parent / "01_tidy.down.sql").write_text("SELECT 1;\n")
+    # A hand-written step without the header: contract (panel F9).
+    audit = migrations(project) / "0004_audit/01_audit.up.sql"
+    assert run("migrate", "new", "audit", "--sql-step", "audit") == 0
+    audit.write_text("SELECT 1;\n")
+    (audit.parent / "01_audit.down.sql").write_text("SELECT 1;\n")
     capsys.readouterr()
 
     code, _, err = cli(capsys, "baseline", "--url", db.url)
     assert (code, err) == (0, "")
     assert db.rows(
         "SELECT migration, step, class FROM _ferro_migrations ORDER BY migration, step"
-    ) == [(1, 1, "expand"), (2, 1, "expand"), (3, 1, "expand")]
+    ) == [(1, 1, "expand"), (2, 1, "expand"), (3, 1, "expand"), (4, 1, "contract")]
 
     code, out, _ = cli(capsys, "status", "--steps", "--url", db.url)
     assert code == 0
     steps = [line.split() for line in out.splitlines() if line.startswith("  ")]
-    assert [step[-1] for step in steps] == ["expand", "expand", "expand"], out
+    assert [step[-1] for step in steps] == [
+        "expand",
+        "expand",
+        "expand",
+        "contract",
+    ], out
 
 
 def test_an_undeclared_data_step_refuses_the_baseline(project, pkg, db, capsys):

@@ -67,6 +67,7 @@ import logging
 import re
 import sys
 import time
+import warnings
 from collections.abc import Callable
 from contextlib import ExitStack
 from dataclasses import dataclass, field
@@ -222,6 +223,19 @@ async def open_tracked(name: str, database: DatabaseSettings) -> TrackedDatabase
 def say_waiting(text: str) -> None:
     """Say on stderr, at once, that a run waits for another run's lock."""
     print(text, file=sys.stderr, flush=True)
+
+
+def warn_unclassified(run: LockedDatabase) -> list[str]:
+    """Warn, once per migration, of the records taking the lock left without
+    a class (ADR-0054): a verb that reads no class (``down``, ``rerecord``,
+    ``baseline --remove``) does not refuse on a migration that does not
+    regenerate. Those records read as ``contract`` until the next ``up`` or
+    ``baseline`` classifies them or refuses naming the fix. Returns the
+    warnings."""
+    deferred = list(run.class_warnings)
+    for text in deferred:
+        warnings.warn(text, UserWarning, stacklevel=3)
+    return deferred
 
 
 def _stem(file: str) -> str:
@@ -1042,6 +1056,28 @@ async def plan_down(
             return DownPlan(refusal=str(refused))
 
 
+def _records_as_shown(locked: list[Any], shown: list[Any]) -> bool:
+    """Whether the steps planned under the lock stand on the records the
+    preview showed. Taking the lock gives a record an older ferro wrote
+    without a class the class ADR-0054 decides for it; that fills a gap and
+    changes nothing the plan was shown, so a class the preview read as
+    missing is not compared."""
+
+    def standing(step: Any, missing_class: bool) -> dict[str, Any] | None:
+        record = step.standing
+        if record is None or not missing_class:
+            return record
+        return {key: value for key, value in record.items() if key != "class"}
+
+    if len(locked) != len(shown):
+        return False
+    for now, before in zip(locked, shown, strict=True):
+        missing = before.standing is not None and before.standing.get("class") is None
+        if standing(now, missing) != standing(before, missing):
+            return False
+    return True
+
+
 async def down(
     settings: FerroSettings | None = None,
     database: str | None = None,
@@ -1098,11 +1134,15 @@ async def down(
             report.declined = True
             return report
         try:
-            async with tracked.locked(timeout, say_waiting) as run:
+            async with tracked.locked(
+                timeout, say_waiting, decides_classes=False
+            ) as run:
+                deferred = warn_unclassified(run)
+                report.notes.extend(deferred)
                 plan = await run.plan(
                     direction, order_keys=_order_keys_for(run, "reverted")
                 )
-                if [s.standing for s in plan.steps] != [s.standing for s in seen.steps]:
+                if not _records_as_shown(plan.steps, seen.steps):
                     report.refusal = (
                         "ferro migrate: the database's migration records changed while "
                         "the plan was shown; nothing was reverted. Run `ferro migrate "
@@ -1110,6 +1150,7 @@ async def down(
                     )
                     return report._raise_if_refused()
                 report = await _walk(run, plan, progress, using=name)
+                report.notes[:0] = deferred
         except RunRefused as refused:
             report._refuse(refused)
     return report._raise_if_refused()

@@ -721,6 +721,18 @@ pub enum RunRefusal {
         /// The run planner's refusal for the step.
         refusal: Box<RunRefusal>,
     },
+    /// A migration whose generated steps need a class (a run applying one,
+    /// a baseline recording one, a record an older ferro wrote) and that does
+    /// not regenerate from its two snapshots, so the planner decides no
+    /// class for them (ADR-0054): none is guessed.
+    Unclassifiable {
+        /// `NNNN`.
+        migration: u16,
+        /// `NNNN_<name>`.
+        migration_name: String,
+        /// The generator's refusal.
+        error: String,
+    },
 }
 
 /// `NNNN` of a migration's `NNNN_<name>`.
@@ -764,6 +776,7 @@ impl RunRefusal {
             RunRefusal::NothingToBaseline { .. } => "nothing_to_baseline",
             RunRefusal::NoBaselineTarget { .. } => "no_baseline_target",
             RunRefusal::BaselineStep { .. } => "baseline_step",
+            RunRefusal::Unclassifiable { .. } => "unclassifiable",
         }
     }
 
@@ -819,7 +832,8 @@ impl RunRefusal {
             | RunRefusal::BelowBaseline { migration }
             | RunRefusal::MissingRendering { migration, .. }
             | RunRefusal::EditedChunked { migration, .. }
-            | RunRefusal::EditedReverting { migration, .. } => Some(*migration),
+            | RunRefusal::EditedReverting { migration, .. }
+            | RunRefusal::Unclassifiable { migration, .. } => Some(*migration),
             RunRefusal::BaselineStep { refusal } => refusal.migration(),
             _ => None,
         }
@@ -1285,6 +1299,19 @@ impl std::fmt::Display for RunRefusal {
                 }
                 other => write!(f, "ferro migrate baseline: {other}"),
             },
+            RunRefusal::Unclassifiable {
+                migration_name,
+                error,
+                ..
+            } => write!(
+                f,
+                "ferro migrate: {migration_name} does not regenerate from its snapshots, so \
+                 ferro cannot decide the class of its generated steps (ADR-0054): {error}\nA \
+                 step records the class the planner decides for it, never a guess. Restore \
+                 {migration_name}/ir.json and the snapshot before it as `ferro migrate new` \
+                 wrote them, or run the migration with the ferro version that generated it. \
+                 No class was recorded for it, and none of its steps was applied."
+            ),
         }
     }
 }
@@ -2010,9 +2037,12 @@ fn plan_up(
             if record.is_some_and(|r| r.is_finished()) {
                 continue;
             }
+            if classes.is_none() {
+                classes = Some(migration_classes(dir, migration, dialect)?);
+            }
             let class = classes
-                .get_or_insert_with(|| migration_classes(dir, migration, dialect))
-                .get(&step.ordinal)
+                .as_ref()
+                .and_then(|classes| classes.get(&step.ordinal))
                 .copied()
                 .unwrap_or(StepClass::Contract);
             let file = step_file(migration, step, dialect)?;
@@ -2744,8 +2774,12 @@ pub fn run_status(
             }
             let class = match record {
                 Some(r) => r.class_or_contract(),
+                // A migration that does not regenerate shows `contract`; the
+                // run's refusal below names it.
                 None => classes
-                    .get_or_insert_with(|| migration_classes(dir, migration, dialect))
+                    .get_or_insert_with(|| {
+                        migration_classes(dir, migration, dialect).unwrap_or_default()
+                    })
                     .get(&step.ordinal)
                     .copied()
                     .unwrap_or(StepClass::Contract),
@@ -2793,35 +2827,97 @@ pub fn run_status(
 /// The class of every record `records` holds without one (written by an
 /// older ferro), by `(migration, step)`: what the step's migration in `dir`
 /// decides ([`step_class::migration_classes`]) when the directory holds the
-/// migration under the record's name and the step, `contract` when it does
-/// not (an ahead record of unknown class is unsafe, ADR-0054). What every
-/// mutating verb writes under the run lock; readers never write it.
-pub fn unclassified(
-    dir: &MigrationsDir,
-    records: &[StepRecord],
-    dialect: Dialect,
-) -> Vec<(u16, u8, StepClass)> {
-    let mut by_migration: BTreeMap<u16, BTreeMap<u8, StepClass>> = BTreeMap::new();
-    records
-        .iter()
-        .filter(|record| record.class.is_none())
-        .map(|record| {
-            let present = dir
-                .migrations
-                .iter()
-                .find(|m| m.number == record.migration && m.dir_name() == record.migration_name);
-            let class = present
-                .and_then(|migration| {
-                    by_migration
-                        .entry(migration.number)
-                        .or_insert_with(|| migration_classes(dir, migration, dialect))
+/// files the record applied (the migration under the record's name and
+/// snapshot, the step's file under the record's name and checksum),
+/// `contract` when it does not: the class is what the applied step did, and
+/// an ahead record of unknown class is unsafe (ADR-0054). A migration
+/// replaced in place, or a step edited or renamed after it was recorded, is
+/// not what was applied. What every mutating verb writes under the run lock;
+/// readers never write it. A record whose applied migration does not
+/// regenerate from its snapshots gets no class: its migration's
+/// [`RunRefusal::Unclassifiable`] is in [`Unclassified::undecided`], for
+/// the verb to refuse on (`up`, `baseline`) or to warn of (a verb that
+/// reads no class).
+pub fn unclassified(dir: &MigrationsDir, records: &[StepRecord], dialect: Dialect) -> Unclassified {
+    let mut by_migration: BTreeMap<u16, Option<BTreeMap<u8, StepClass>>> = BTreeMap::new();
+    let mut out = Unclassified::default();
+    for record in records.iter().filter(|record| record.class.is_none()) {
+        let mut class = Some(StepClass::Contract);
+        if let Some(migration) = applied_migration(dir, record, dialect) {
+            let decided = by_migration.entry(migration.number).or_insert_with(|| {
+                match migration_classes(dir, migration, dialect) {
+                    Ok(classes) => Some(classes),
+                    Err(refusal) => {
+                        out.undecided.push(refusal);
+                        None
+                    }
+                }
+            });
+            class = match decided {
+                Some(classes) => Some(
+                    classes
                         .get(&record.step)
                         .copied()
-                })
-                .unwrap_or(StepClass::Contract);
-            (record.migration, record.step, class)
-        })
-        .collect()
+                        .unwrap_or(StepClass::Contract),
+                ),
+                None => None,
+            };
+        }
+        if let Some(class) = class {
+            out.classes.push((record.migration, record.step, class));
+        }
+    }
+    out
+}
+
+/// What [`unclassified`] decides for the records without a class.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Unclassified {
+    /// Each `(migration, step, class)` to record.
+    pub classes: Vec<(u16, u8, StepClass)>,
+    /// Each applied migration that does not regenerate, whose records keep
+    /// no class ([`RunRefusal::Unclassifiable`]), once.
+    pub undecided: Vec<RunRefusal>,
+}
+
+impl RunRefusal {
+    /// The warning a verb that reads no class gives for an
+    /// [`RunRefusal::Unclassifiable`] migration whose records it leaves
+    /// without one; `None` for any other refusal.
+    pub fn deferred_class_warning(&self) -> Option<String> {
+        match self {
+            RunRefusal::Unclassifiable {
+                migration_name,
+                error,
+                ..
+            } => Some(format!(
+                "ferro migrate: {migration_name} does not regenerate from its snapshots, so \
+                 its records keep no class and read as contract (ADR-0054): {error}\nThe next \
+                 `ferro migrate up` or `ferro migrate baseline` classifies them, or refuses \
+                 naming the fix."
+            )),
+            _ => None,
+        }
+    }
+}
+
+/// The migration of `dir` holding the files `record` applied on `dialect`:
+/// its number, name and snapshot, and its step's file name and checksum, as
+/// the record names them.
+fn applied_migration<'a>(
+    dir: &'a MigrationsDir,
+    record: &StepRecord,
+    dialect: Dialect,
+) -> Option<&'a Migration> {
+    let migration = dir.migrations.iter().find(|m| {
+        m.number == record.migration
+            && m.dir_name() == record.migration_name
+            && encode_checksum(&m.snapshot.checksum) == record.snapshot_checksum
+    })?;
+    let step = migration.steps.iter().find(|s| s.ordinal == record.step)?;
+    let file = step_file(migration, step, dialect).ok()?;
+    (file_name(&file.up) == record.file && encode_checksum(&file.up_checksum) == record.checksum)
+        .then_some(migration)
 }
 
 /// The Postgres run-lock key for `governed_schema` (ADR-0029, amended by
@@ -3197,6 +3293,46 @@ mod tests {
             path: PathBuf::from("/proj/migrations"),
             migrations: out,
         }
+    }
+
+    /// `dir` with each DDL step's files holding what the generator renders
+    /// for it from the migration's two snapshots, as `ferro migrate new`
+    /// writes them: the files whose class the generator decides (ADR-0054).
+    fn as_generated(mut dir: MigrationsDir) -> MigrationsDir {
+        let snapshots: Vec<Snapshot> = dir.migrations.iter().map(|m| m.snapshot.clone()).collect();
+        for (i, migration) in dir.migrations.iter_mut().enumerate() {
+            let parent = i.checked_sub(1).map(|p| &snapshots[p]);
+            let generated = crate::generate::generate(
+                parent,
+                &migration.snapshot.ir,
+                &[Dialect::Postgres, Dialect::Sqlite],
+            )
+            .expect("generates")
+            .expect("changes something");
+            for step in migration
+                .steps
+                .iter_mut()
+                .filter(|s| s.kind == StepKind::Ddl)
+            {
+                let g = generated
+                    .steps
+                    .iter()
+                    .find(|g| g.name == step.name)
+                    .expect("generated");
+                for (on, rendering) in &g.renderings {
+                    let dialect = match on {
+                        StepDialect::Postgres => "postgres",
+                        StepDialect::Sqlite => "sqlite",
+                        StepDialect::Portable => continue,
+                    };
+                    step.files.insert(
+                        *on,
+                        sql_file(dialect, step.ordinal, &step.name, &rendering.up, DOWN),
+                    );
+                }
+            }
+        }
+        dir
     }
 
     fn three() -> MigrationsDir {
@@ -4651,7 +4787,7 @@ mod tests {
 
     #[test]
     fn a_planned_step_records_the_class_its_migration_decides() {
-        let dir = three();
+        let dir = as_generated(three());
         let plan = up(&dir, &[]).expect("plan");
         // Each migration adds a table: expand.
         assert!(
@@ -4668,7 +4804,7 @@ mod tests {
 
     #[test]
     fn expand_only_admits_a_database_ahead_only_by_expand_steps() {
-        let full = three();
+        let full = as_generated(three());
         let records = [
             finished(&full, 1, 1),
             finished(&full, 2, 1),
@@ -4716,7 +4852,7 @@ mod tests {
 
     #[test]
     fn records_without_a_class_are_classified_from_the_directory_or_contract() {
-        let full = three();
+        let full = as_generated(three());
         let mut records = vec![
             finished(&full, 1, 1),
             finished(&full, 2, 1),
@@ -4726,7 +4862,7 @@ mod tests {
             record.class = None;
         }
         assert_eq!(
-            unclassified(&full, &records, Dialect::Sqlite),
+            unclassified(&full, &records, Dialect::Sqlite).classes,
             [
                 (1, 1, StepClass::Expand),
                 (2, 1, StepClass::Expand),
@@ -4737,7 +4873,7 @@ mod tests {
         let mut behind = full.clone();
         behind.migrations.truncate(2);
         assert_eq!(
-            unclassified(&behind, &records, Dialect::Sqlite),
+            unclassified(&behind, &records, Dialect::Sqlite).classes,
             [
                 (1, 1, StepClass::Expand),
                 (2, 1, StepClass::Expand),
@@ -4746,7 +4882,46 @@ mod tests {
         );
         // A classified record is not classified again.
         records[0].class = Some(StepClass::Contract);
-        assert_eq!(unclassified(&full, &records, Dialect::Sqlite).len(), 2);
+        assert_eq!(
+            unclassified(&full, &records, Dialect::Sqlite).classes.len(),
+            2
+        );
+    }
+
+    #[test]
+    fn a_record_is_classified_from_files_only_when_they_are_the_ones_it_applied() {
+        let full = as_generated(three());
+        let fresh = || {
+            let mut records = vec![
+                finished(&full, 1, 1),
+                finished(&full, 2, 1),
+                finished(&full, 3, 1),
+            ];
+            for record in &mut records {
+                record.class = None;
+            }
+            records
+        };
+        // 0002 was replaced in place after the record (`--replace` keeps
+        // the number and the name): the snapshot the record names is gone.
+        let mut replaced = fresh();
+        replaced[1].snapshot_checksum = "b".repeat(96);
+        // 0003's step was edited or renamed after it finished.
+        replaced[2].checksum = "c".repeat(96);
+        assert_eq!(
+            unclassified(&full, &replaced, Dialect::Sqlite).classes,
+            [
+                (1, 1, StepClass::Expand),
+                (2, 1, StepClass::Contract),
+                (3, 1, StepClass::Contract),
+            ]
+        );
+        let mut renamed = fresh();
+        renamed[2].file = "01_old.up.sqlite.sql".into();
+        assert_eq!(
+            unclassified(&full, &renamed, Dialect::Sqlite).classes[2],
+            (3, 1, StepClass::Contract)
+        );
     }
 
     #[test]
@@ -4778,12 +4953,13 @@ mod tests {
                 StepClass::Expand,
             ),
         ] {
-            let d = dir(vec![(
+            let d = as_generated(dir(vec![(
                 "create_author",
                 vec![ddl(1, "schema", "CREATE TABLE a (id int);\n"), hand(body)],
                 &["author"],
-            )]);
-            let classes = step_class::migration_classes(&d, &d.migrations[0], Dialect::Sqlite);
+            )]));
+            let classes = step_class::migration_classes(&d, &d.migrations[0], Dialect::Sqlite)
+                .expect("classes");
             assert_eq!(classes[&1], StepClass::Expand);
             assert_eq!(classes[&2], class, "{body}");
         }
@@ -4791,7 +4967,7 @@ mod tests {
 
     #[test]
     fn status_shows_each_steps_class_a_classless_record_as_contract() {
-        let full = three();
+        let full = as_generated(three());
         let mut first = finished(&full, 1, 1);
         first.class = None;
         let status = run_status(&full, &[first], Dialect::Sqlite, false, None);

@@ -17,6 +17,8 @@ rolled-back release by deleting the newer migration's directory.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import re
 import shutil
 from pathlib import Path
@@ -24,6 +26,7 @@ from pathlib import Path
 import pytest
 
 from ferro.migrations import DatabaseAheadError, runner
+from ferro.migrations.rerecord import rerecord
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     AUTHOR,
     pkg,
@@ -207,6 +210,26 @@ def test_a_hand_sql_step_is_admitted_only_when_it_declares_expand(project, pkg, 
     assert require_applied(db, allow_ahead="expand-only") is None
 
 
+def test_a_generated_step_edited_to_drop_a_column_is_recorded_contract(
+    project, pkg, db
+):
+    # Panel F1: ADR-0030 lets a person edit a step no database finished. The
+    # class is what the file does, so a drop added by hand to a generated
+    # expand step is contract, whatever the generator would have said.
+    nickname = AUTHOR + "    nickname: str | None = None\n"
+    configure(project, pkg, db.backend)
+    write_models(project, pkg, nickname)
+    new("create_author")
+    write_models(project, pkg, nickname + "    bio: str | None = None\n")
+    new("bio")
+    step = migrations(project) / f"0002_bio/01_schema.up.{db.backend}.sql"
+    step.write_text(step.read_text() + 'ALTER TABLE "author" DROP COLUMN "nickname";\n')
+
+    assert up(db).applied
+    assert classes(db) == [(1, 1, "expand"), (2, 1, "contract")]
+    assert "nickname" not in columns(db, "author")
+
+
 def test_the_expand_header_takes_no_text(project, pkg, db, capsys):
     configure(project, pkg, db.backend)
     write_models(project, pkg, AUTHOR)
@@ -311,6 +334,94 @@ def test_a_record_written_with_0_22_columns_is_contract_until_the_next_up(
 
     assert up(db).applied == []
     assert classes(db)[1] == (2, 1, "expand")
+
+
+def test_a_record_whose_migration_was_replaced_in_place_is_classified_contract(
+    project, pkg, db
+):
+    # Panel F3: 0002_change applied a drop (contract) under 0.22, then was
+    # replaced in place by an expand migration of the same number and name.
+    # The files on disk are not the ones the record applied: the backfill
+    # records contract, never the new SQL's expand, and the verb then refuses.
+    configure(project, pkg, db.backend)
+    write_models(project, pkg, AUTHOR)
+    new("create_author")
+    write_models(project, pkg, WITHOUT_STATUS)
+    new("change")
+    assert run("migrate", "up", "--url", db.url) == 0
+    as_0_22(db)
+    write_models(project, pkg, BIO)
+    new("change", "--replace", "0002_change")
+    assert (migrations(project) / "0002_change").is_dir()
+
+    with pytest.raises(runner.MigrationRefused) as raised:
+        up(db)
+    assert raised.value.report.refused.kind == "snapshot_mismatch"
+    assert classes(db) == [(1, 1, "expand"), (2, 1, "contract")]
+
+
+def test_a_migration_that_does_not_regenerate_refuses_up_and_warns_down(
+    project, pkg, db
+):
+    # Panel F2: 0002_bio's records were written by 0.22 (no class), and its
+    # snapshot now moves author's key, which the generator refuses. `up`
+    # decides classes and refuses before writing anything; `rerecord` and
+    # `down` read none, so they run, leaving the class NULL with a warning.
+    configure(project, pkg, db.backend)
+    write_models(project, pkg, AUTHOR)
+    new("create_author")
+    write_models(project, pkg, AUTHOR + "    bio: str | None = None\n")
+    new("bio")
+    assert run("migrate", "up", "--url", db.url) == 0
+    ir = migrations(project) / "0002_bio/ir.json"
+    snapshot = json.loads(ir.read_text())
+    (author,) = snapshot["payload"]["models"]
+    for column in author["columns"]:
+        column["primary_key"] = column["name"] == "name"
+        column["autoincrement"] = False
+    ir.write_text(json.dumps(snapshot, indent=2) + "\n")
+    checksum = hashlib.sha384(ir.read_bytes()).hexdigest()
+    db.execute(
+        f"UPDATE _ferro_migrations SET class = NULL, snapshot_checksum = '{checksum}' "
+        "WHERE migration = 2"
+    )
+    tracking = db.rows("SELECT * FROM _ferro_migrations ORDER BY migration, step")
+
+    with pytest.raises(runner.MigrationRefused) as raised:
+        up(db)
+    assert raised.value.report.refused.kind == "unclassifiable"
+    assert str(raised.value).startswith(
+        "ferro migrate: 0002_bio does not regenerate from its snapshots, so ferro "
+        "cannot decide the class of its generated steps (ADR-0054): "
+    ), raised.value
+    assert str(raised.value).endswith(
+        "No class was recorded for it, and none of its steps was applied."
+    )
+    assert db.rows("SELECT * FROM _ferro_migrations ORDER BY migration, step") == (
+        tracking
+    )
+
+    step = migrations(project) / f"0001_create_author/01_schema.up.{db.backend}.sql"
+    step.write_text(step.read_text() + "-- reviewed\n")
+    settings, database = settings_and_database()
+    with pytest.warns(UserWarning, match="0002_bio does not regenerate") as rerecorded:
+        report = asyncio.run(
+            rerecord(settings, database.name, url=db.url, target="0001:01")
+        )
+    assert report.notes == [str(w.message) for w in rerecorded]
+    assert report.notes[0].endswith(
+        "The next `ferro migrate up` or `ferro migrate baseline` classifies them, "
+        "or refuses naming the fix."
+    ), report.notes
+    assert classes(db) == [(1, 1, "expand"), (2, 1, None)]
+
+    with pytest.warns(UserWarning, match="0002_bio does not regenerate"):
+        reverted = asyncio.run(
+            runner.down(settings, database.name, url=db.url, confirm=None)
+        )
+    assert [step.migration for step in reverted.reverted] == ["0002_bio"]
+    assert reverted.notes and "0002_bio" in reverted.notes[0]
+    assert classes(db) == [(1, 1, "expand")]
 
 
 def test_status_on_a_lower_minor_writes_nothing(project, pkg, db):
