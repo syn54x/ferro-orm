@@ -126,19 +126,6 @@ migration the directory lacks, ``"expand-only"`` admits them when every
 step they hold is of class ``expand``, ``True`` admits any distance."""
 
 
-def check_allow_ahead(allow_ahead: object) -> AllowAhead:
-    """``allow_ahead`` when it is one of the three values it takes.
-
-    Raises:
-        TypeError: anything else, naming the three.
-    """
-    if isinstance(allow_ahead, bool) or allow_ahead == "expand-only":
-        return allow_ahead  # ty: ignore[invalid-return-type]
-    raise TypeError(
-        f'allow_ahead must be False, True or "expand-only"; got {allow_ahead!r}'
-    )
-
-
 _STEP_STEM = re.compile(r"(\.(up|down)(\.[a-z]+)?\.sql|\.py)$")
 _TARGET = re.compile(r"(\d{4})(?::(\d{2}))?")
 
@@ -281,7 +268,7 @@ async def up(
         TypeError: ``allow_ahead`` is not ``False``, ``True`` or
             ``"expand-only"``.
     """
-    allow_ahead = check_allow_ahead(allow_ahead)
+    allow_ahead = _core._allow_ahead(allow_ahead)
     target = Target.resolve(settings, database, using=using, url=url)
     async with target.open() as name:
         return await _up(
@@ -910,7 +897,7 @@ async def require_applied(
         TypeError: ``allow_ahead`` is not ``False``, ``True`` or
             ``"expand-only"``.
     """
-    allow_ahead = check_allow_ahead(allow_ahead)
+    allow_ahead = _core._allow_ahead(allow_ahead)
     target = Target.resolve(settings, database, using=using, url=url)
     async with target.open() as name:
         tracked = await open_tracked(name, target.database)

@@ -1,5 +1,6 @@
 import re
 from dataclasses import replace
+from functools import partial
 from enum import Enum
 from typing import (
     Annotated,
@@ -100,16 +101,8 @@ def _reverse_relation_retired(model: str, field_name: str, m2m: bool) -> TypeErr
     )
 
 
-def _retired_label_message(enum_cls: type[Enum], label: str) -> str:
-    member = next(m for m in enum_cls if m.value == label)
-    return (
-        f"{enum_cls.__name__}.{member.name} ('{label}') is retired in this release: "
-        "the previous release may still write it, this one does not"
-    )
-
-
-def written_retired_label(value: Any, labels: frozenset[str]) -> str | None:
-    """The retired label ``value`` would write, or ``None`` (ADR-0053).
+def _written_retired_label(value: Any, labels: frozenset[str]) -> str | None:
+    """The retired label ``value`` would write, or ``None``.
 
     Compared by value: a ``StrEnum`` member, a plain ``Enum`` member and the
     raw label string all write the member's value, so each is caught.
@@ -120,63 +113,62 @@ def written_retired_label(value: Any, labels: frozenset[str]) -> str | None:
     return None
 
 
-def retired_label_error(
-    model: str, field_name: str, enum_cls: type[Enum], label: str, value: Any
-) -> ValidationError:
-    """The ``retired_enum_label`` error every write path raises (ADR-0053)."""
-    return ValidationError.from_exception_data(
-        model,
-        [
-            {
-                "type": PydanticCustomError(
-                    "retired_enum_label", _retired_label_message(enum_cls, label)
-                ),
-                "loc": (field_name,),
-                "input": value,
-            }
-        ],
+def refuse_retired_label(
+    enum_cls: type[Enum], labels: frozenset[str], value: Any
+) -> Any:
+    """Refuse ``value`` if it writes one of ``enum_cls``'s retired ``labels``.
+
+    The one retired-label refusal (ADR-0053), whichever path writes: the
+    field's ``AfterValidator`` raises it from inside Pydantic validation
+    (construction, and assignment under ``validate_assignment``), and
+    :func:`refuse_retired_label_write` carries it out of the paths that run
+    no validation. Every one surfaces as a ``ValidationError`` whose error
+    type is ``retired_enum_label``.
+
+    Returns:
+        ``value`` unchanged when it writes no retired label.
+
+    Raises:
+        PydanticCustomError: ``retired_enum_label``, naming the member.
+    """
+    label = _written_retired_label(value, labels)
+    if label is None:
+        return value
+    member = next(m for m in enum_cls if m.value == label)
+    raise PydanticCustomError(
+        "retired_enum_label",
+        f"{enum_cls.__name__}.{member.name} ('{label}') is retired in this release: "
+        "the previous release may still write it, this one does not",
     )
 
 
 def refuse_retired_label_write(model_cls: type, column: str, value: Any) -> None:
-    """Refuse a query-side write of a retired label to ``column`` (ADR-0053).
+    """Refuse a write of a retired label to ``column`` that runs no validation.
 
-    ``update()`` sets columns without constructing a model, so it asks here,
-    with the same by-value rule the field guard uses.
+    Attribute assignment without ``validate_assignment`` and ``update()``
+    (keyword and recipe) set a column without Pydantic validating it, so
+    they ask here; the refusal is :func:`refuse_retired_label`'s, raised as
+    the ``ValidationError`` validation would have raised.
 
     Raises:
-        ValidationError: ``retired_enum_label``, as construction raises it.
+        ValidationError: ``retired_enum_label`` at ``(column,)``.
     """
     enum_cls = getattr(model_cls, "_enum_fields", {}).get(column)
     if enum_cls is None:
         return
-    label = written_retired_label(value, declared_retired_labels(enum_cls))
-    if label is not None:
-        raise retired_label_error(model_cls.__name__, column, enum_cls, label, value)
+    try:
+        refuse_retired_label(enum_cls, declared_retired_labels(enum_cls), value)
+    except PydanticCustomError as refusal:
+        raise ValidationError.from_exception_data(
+            model_cls.__name__,
+            [{"type": refusal, "loc": (column,), "input": value}],
+        ) from None
 
 
-def _label_guard(enum_cls: type[Enum], labels: frozenset[str]):
-    def guard(value: Any) -> Any:
-        label = written_retired_label(value, labels)
-        if label is not None:
-            raise ValueError(_retired_label_message(enum_cls, label))
-        return value
-
-    return guard
-
-
-def _guarded_setattr(
-    retired_labels: dict[str, tuple[type[Enum], frozenset[str]]], inherited: Any
-):
+def _guarded_setattr(guarded: frozenset[str], inherited: Any):
     def __setattr__(self: BaseModel, name: str, value: Any) -> None:
-        guarded = retired_labels.get(name)
-        if guarded is not None:
-            enum_cls, labels = guarded
-            label = written_retired_label(value, labels)
-            if label is not None:
-                raise retired_label_error(
-                    type(self).__name__, name, enum_cls, label, value
-                )
+        if name in guarded:
+            refuse_retired_label_write(type(self), name, value)
         inherited(self, name, value)
 
     return __setattr__
@@ -774,11 +766,13 @@ class ModelMetaclass(type(BaseModel)):
         """
         for field_name, (enum_cls, labels) in retired_labels.items():
             cls.model_fields[field_name].metadata.append(
-                AfterValidator(_label_guard(enum_cls, labels))
+                AfterValidator(partial(refuse_retired_label, enum_cls, labels))
             )
         cls.model_rebuild(force=True, raise_errors=False)
         if not cls.model_config.get("validate_assignment"):
-            cls.__setattr__ = _guarded_setattr(retired_labels, cls.__setattr__)
+            cls.__setattr__ = _guarded_setattr(
+                frozenset(retired_labels), cls.__setattr__
+            )
 
     @staticmethod
     def _validate_db_type_options(cls, ferro_fields: dict) -> None:

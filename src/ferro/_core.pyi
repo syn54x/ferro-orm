@@ -501,6 +501,12 @@ async def _tracking_tables_for(using: str | None, schema: str | None = None) -> 
     """JSON list of the tracking tables governing ``schema``."""
     ...
 
+def _allow_ahead(value: object) -> bool | Literal["expand-only"]:
+    """``value`` when it is ``False``, ``True`` or ``"expand-only"``; the one
+    parse of ``allow_ahead`` (ADR-0054). Raises ``TypeError`` naming the
+    three otherwise."""
+    ...
+
 async def _disconnect(name: str) -> None:
     """Close and forget one named, non-default connection."""
     ...
