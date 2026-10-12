@@ -25,10 +25,10 @@ from __future__ import annotations
 import json
 import re
 import shutil
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from collections.abc import Mapping, Sequence
 from typing import Any
 
 from .._core import _read_migrations_dir

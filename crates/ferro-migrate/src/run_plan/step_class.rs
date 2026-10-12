@@ -339,15 +339,16 @@ fn adds_labels_only(op: &MigrationOp, sides: Sides<'_>) -> bool {
     }
 }
 
-/// `column` without its labels and the facts no write of the previous
-/// release can fail on. The schema IR offers no DDL-bearing projection of a
-/// column, so this is the one list, and its rule is: a field is left out
-/// when changing it alone cannot refuse a value the previous release
-/// writes. Today that is the labels it admits (whose growth
-/// [`adds_labels_only`] reads on its own) and retires (ADR-0053), whether
-/// it is retired, its server default and its Python default factory. Two
-/// columns with equal storage facts differ, if at all, in what they admit
-/// and in what no write can fail on.
+/// `column` without its labels and the facts that render no storage. The
+/// schema IR offers no DDL-bearing projection of a column, so this is the
+/// one list, and its rule is: a field is left out only when it renders no
+/// storage (the labels it retires (ADR-0053), whether it is retired, its
+/// server default and its Python default factory), or it is the labels it
+/// admits, which [`adds_labels_only`] compares on its own (a superset).
+/// Every field that renders storage (the type, `db_type`, nullability,
+/// length, key and enum-type facts) stays in the comparison. Two columns
+/// with equal storage facts differ, if at all, in what they admit and in
+/// what no statement changes.
 fn storage_facts(column: &ferro_schema_ir::SchemaColumn) -> ferro_schema_ir::SchemaColumn {
     ferro_schema_ir::SchemaColumn {
         enum_values: None,
