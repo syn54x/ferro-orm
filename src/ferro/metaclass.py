@@ -138,6 +138,23 @@ def retired_label_error(
     )
 
 
+def refuse_retired_label_write(model_cls: type, column: str, value: Any) -> None:
+    """Refuse a query-side write of a retired label to ``column`` (ADR-0053).
+
+    ``update()`` sets columns without constructing a model, so it asks here,
+    with the same by-value rule the field guard uses.
+
+    Raises:
+        ValidationError: ``retired_enum_label``, as construction raises it.
+    """
+    enum_cls = getattr(model_cls, "_enum_fields", {}).get(column)
+    if enum_cls is None:
+        return
+    label = written_retired_label(value, declared_retired_labels(enum_cls))
+    if label is not None:
+        raise retired_label_error(model_cls.__name__, column, enum_cls, label, value)
+
+
 def _label_guard(enum_cls: type[Enum], labels: frozenset[str]):
     def guard(value: Any) -> Any:
         label = written_retired_label(value, labels)

@@ -429,3 +429,40 @@ async def test_a_hydrated_plain_enum_retired_row_changes_another_field_and_saves
         ).first()
         assert again is not None
         assert (again.status, again.note) == (RtlPlainStatus.CANCELED, "b")
+
+
+# -- update() refuses the retired label (panel F8) ------------------------------------
+
+
+def _update_case(kind: str):
+    if kind == "str_enum":
+        return order_model(), RtlStatus, MESSAGE
+    return plain_order_model(), RtlPlainStatus, PLAIN_MESSAGE
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["str_enum", "plain_enum"])
+@pytest.mark.parametrize("form", ["keyword", "recipe"])
+async def test_update_refuses_the_retired_label_and_writes_nothing(db_url, kind, form):
+    Order, Status, message = _update_case(kind)
+    await connect(db_url, auto_migrate=True)
+    async with engines.session():
+        await Order(id=1, status=Status.PAID).save()
+        query = Order.where(lambda order: order.id == 1)
+
+        for value in (Status.CANCELED, "canceled"):
+            with pytest.raises(ValidationError) as raised:
+                if form == "keyword":
+                    await query.update(status=value)
+                else:
+                    await query.update(lambda order: {"status": value})
+            assert message in str(raised.value)
+
+        held = await query.first()
+        assert held is not None and held.status is Status.PAID
+
+        if form == "keyword":
+            assert await query.update(status=Status.PAID, note="kept") == 1
+        else:
+            assert await query.update(lambda order: {"note": "kept"}) == 1
