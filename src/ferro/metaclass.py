@@ -73,6 +73,14 @@ def _retired_not_nullable(model: str, field_name: str) -> TypeError:
     )
 
 
+def _retired_primary_key(model: str, field_name: str) -> TypeError:
+    return TypeError(
+        f"{model}.{field_name}: a primary key cannot be retired; drop "
+        "`retired=True`. To remove the key, change the primary key first: see "
+        "the Migrations docs § Changing a primary key"
+    )
+
+
 def _retired_and_renamed(model: str, field_name: str) -> TypeError:
     return TypeError(
         f"{model}.{field_name}: retire it or rename it, not both; drop "
@@ -221,9 +229,7 @@ class ModelMetaclass(type(BaseModel)):
         }
         for field_name, meta in retired.items():
             if meta.primary_key:
-                raise TypeError(
-                    f"{model}.{field_name}: a primary key cannot be retired"
-                )
+                raise _retired_primary_key(model, field_name)
             if meta.renamed_from is not None:
                 raise _retired_and_renamed(model, field_name)
             if meta.nullable is False:
