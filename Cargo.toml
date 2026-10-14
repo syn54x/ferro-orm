@@ -41,6 +41,9 @@ dashmap = "6.1"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "postgres", "any", "tls-rustls-ring-webpki", "uuid", "chrono", "bigdecimal", "json"]}
 sea-query = { version = "0.32", features = ["with-uuid"] }
 tokio = { version = "1.49", features = ["full"] }
+# The parser sqlx reads connection URLs with: the redactor masks what it
+# reads, so what Ferro shows is what the driver connects to.
+url = "2"
 pyo3-async-runtimes = { version = "0.27", features = ["tokio-runtime"] }
 uuid = { version = "1.11", features = ["v4"] }
 # Same crate sqlx re-exports; direct dep only for formatting helpers
