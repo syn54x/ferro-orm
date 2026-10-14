@@ -202,6 +202,12 @@ def _plan_from_ir(
     """
     ...
 
+def _redact_url(url: str) -> str:
+    """``url`` with its secrets masked by ``***`` (the userinfo password and
+    every secret query value); raises ``InterfaceError``, as ``connect(url)``
+    does, when its scheme is not one Ferro connects to."""
+    ...
+
 def _generate_migration(
     parent_ir_json: str | None,
     target_ir_json: str,
@@ -383,6 +389,10 @@ class TrackedDatabase:
     @property
     def dialect(self) -> str: ...
     @property
+    def url(self) -> str:
+        """The URL the connection was opened with, its secrets masked by ``***``."""
+        ...
+    @property
     def tracking_table(self) -> str: ...
     @property
     def records(self) -> list[dict[str, Any]]: ...
@@ -428,6 +438,10 @@ class LockedDatabase:
 
     @property
     def dialect(self) -> str: ...
+    @property
+    def url(self) -> str:
+        """The URL the connection was opened with, its secrets masked by ``***``."""
+        ...
     @property
     def tracking_table(self) -> str: ...
     @property

@@ -200,6 +200,10 @@ pub struct EngineHandle {
     settings_delivery: SettingsDelivery,
     /// Settings-bearing sessions currently holding a pinned connection here.
     pins: Arc<AtomicUsize>,
+    /// The URL this engine was opened with, its secrets masked by `***`:
+    /// what `ferro migrate status` reports it works on. Empty for a handle
+    /// wrapped around an externally built pool.
+    shown_url: Arc<str>,
 }
 
 #[derive(Clone, Debug)]
@@ -376,6 +380,7 @@ impl EngineHandle {
         let backend = spec.backend;
         let settings_delivery = spec.settings_delivery;
         let pins = spec.pins.clone();
+        let shown_url = Arc::from(crate::connection::redact_connection_url(&spec.url));
         let pool = spec.build().await?;
         Ok(Self {
             backend,
@@ -386,6 +391,7 @@ impl EngineHandle {
             catalog_cache: Arc::new(RwLock::new(HashMap::new())),
             settings_delivery,
             pins,
+            shown_url,
         })
     }
 
@@ -403,6 +409,7 @@ impl EngineHandle {
             catalog_cache: Arc::new(RwLock::new(HashMap::new())),
             settings_delivery: SettingsDelivery::Transaction,
             pins: Arc::new(AtomicUsize::new(0)),
+            shown_url: Arc::from(""),
         }
     }
 
@@ -420,6 +427,7 @@ impl EngineHandle {
             catalog_cache: Arc::new(RwLock::new(HashMap::new())),
             settings_delivery: SettingsDelivery::Transaction,
             pins: Arc::new(AtomicUsize::new(0)),
+            shown_url: Arc::from(""),
         }
     }
 
@@ -543,8 +551,22 @@ impl EngineHandle {
         self
     }
 
+    /// Names the URL this engine was opened with, as `connect(url)` was
+    /// given it (a `ferro_search_path` included), its secrets masked.
+    #[must_use]
+    pub fn with_shown_url(mut self, url: &str) -> Self {
+        self.shown_url = Arc::from(crate::connection::redact_connection_url(url));
+        self
+    }
+
     pub fn backend(&self) -> Dialect {
         self.backend
+    }
+
+    /// The URL this engine was opened with, its secrets masked by `***`.
+    #[must_use]
+    pub fn shown_url(&self) -> &str {
+        &self.shown_url
     }
 
     /// How this connection's pool delivers session settings.

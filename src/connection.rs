@@ -59,7 +59,20 @@ fn is_secret_query_key(key: &str) -> bool {
         || key.contains("service_role")
 }
 
-fn redact_connection_url(url: &str) -> String {
+/// What a connection URL's secrets are masked with.
+const MASK: &str = "***";
+
+/// `url` with its secrets masked by `***`: the userinfo password, and the
+/// value of every query key [`is_secret_query_key`] names. The scheme, user,
+/// host, port, path, every other query key and the fragment are kept, and a
+/// URL with no secret (a SQLite URL) comes back as given.
+///
+/// The userinfo ends at the last `@` and the user at the first `:`, so a
+/// password holding a raw `@` or `:` is masked whole. A path that holds an
+/// `@` after a host can mask more than the password, never less. A URL
+/// whose part after `://` starts with `/` (`sqlite:///app.db`) has no
+/// userinfo.
+pub(crate) fn redact_connection_url(url: &str) -> String {
     let (without_fragment, fragment) = match url.split_once('#') {
         Some((base, fragment)) => (base, Some(fragment)),
         None => (url, None),
@@ -73,21 +86,20 @@ fn redact_connection_url(url: &str) -> String {
         Some(scheme_idx) => {
             let authority_start = scheme_idx + 3;
             let after_scheme = &base[authority_start..];
-            if let Some(at_idx) = after_scheme.find('@') {
-                let userinfo = &after_scheme[..at_idx];
-                let authority_rest = &after_scheme[at_idx..];
-                if let Some((user, _password)) = userinfo.rsplit_once(':') {
-                    format!(
-                        "{}{}:<redacted>{}",
-                        &base[..authority_start],
-                        user,
-                        authority_rest
-                    )
-                } else {
-                    base.to_string()
-                }
+            let userinfo = if after_scheme.starts_with('/') {
+                None
             } else {
-                base.to_string()
+                after_scheme
+                    .rfind('@')
+                    .map(|at_idx| (&after_scheme[..at_idx], &after_scheme[at_idx..]))
+            };
+            match userinfo
+                .and_then(|(userinfo, rest)| userinfo.split_once(':').map(|(user, _)| (user, rest)))
+            {
+                Some((user, authority_rest)) => {
+                    format!("{}{user}:{MASK}{authority_rest}", &base[..authority_start])
+                }
+                None => base.to_string(),
             }
         }
         None => base.to_string(),
@@ -99,7 +111,7 @@ fn redact_connection_url(url: &str) -> String {
             .map(|pair| {
                 let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
                 if is_secret_query_key(key) {
-                    format!("{key}=<redacted>")
+                    format!("{key}={MASK}")
                 } else if value.is_empty() {
                     key.to_string()
                 } else {
@@ -119,6 +131,38 @@ fn redact_connection_url(url: &str) -> String {
         redacted.push_str(fragment);
     }
     redacted
+}
+
+/// `DB Connection failed for <url>`, the URL's secrets masked: the context
+/// every connection error carries.
+fn connection_failed_context(url: &str) -> String {
+    format!("DB Connection failed for {}", redact_connection_url(url))
+}
+
+/// The dialect `connection_url` reaches, or the `InterfaceError` every
+/// connection to an unsupported scheme fails with.
+fn accepted_dialect(connection_url: &str) -> PyResult<Dialect> {
+    dialect_from_url(connection_url).map_err(|e| {
+        crate::errors::interface_error(format!(
+            "{}: {e}",
+            connection_failed_context(connection_url)
+        ))
+    })
+}
+
+/// `url` as Ferro shows it, its secrets masked by `***` (the userinfo
+/// password and every secret query value): what `ferro migrate` prints on
+/// its database line and `status --json` carries as `url`. A URL with no
+/// secret (a SQLite URL) comes back as given.
+///
+/// # Errors
+/// `InterfaceError` when `url`'s scheme is not one Ferro connects to, the
+/// same error `connect(url)` raises, so a URL is shown only once accepted.
+#[pyfunction]
+pub fn _redact_url(url: String) -> PyResult<String> {
+    let (connection_url, _) = split_search_path(&url);
+    accepted_dialect(&connection_url)?;
+    Ok(redact_connection_url(&url))
 }
 
 fn normalized_connection_name(name: Option<String>) -> PyResult<(String, bool)> {
@@ -238,10 +282,9 @@ pub fn connect(
         .with_ddl_lock_timeout_seconds(ddl_lock_timeout_s)?
         .with_lock_timeout_seconds(lock_timeout_s)?;
     let (connection_url, search_path) = split_search_path(&url);
+    let failed_context = connection_failed_context(&connection_url);
     let redacted_url = redact_connection_url(&connection_url);
-    let backend = dialect_from_url(&connection_url).map_err(|e| {
-        crate::errors::interface_error(format!("DB Connection failed for {}: {}", redacted_url, e))
-    })?;
+    let backend = accepted_dialect(&connection_url)?;
     let (connection_name, is_implicit_default) = normalized_connection_name(name)?;
     let should_select_default = default || is_implicit_default;
 
@@ -283,10 +326,9 @@ pub fn connect(
             settings_delivery,
         )
         .await
-        .map_err(|e| {
-            crate::errors::map_db_error(&format!("DB Connection failed for {}", redacted_url), e)
-        })?
-        .with_identity_map_enabled(identity_map);
+        .map_err(|e| crate::errors::map_db_error(&failed_context, e))?
+        .with_identity_map_enabled(identity_map)
+        .with_shown_url(&url);
 
         let engine_handle = Arc::new(engine_handle);
 
@@ -492,8 +534,115 @@ pub fn set_default_connection(name: String) -> PyResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::connect_engine_handle;
+    use super::{connect_engine_handle, connection_failed_context, redact_connection_url};
     use ferro_ddl_lowering::Dialect;
+
+    #[test]
+    fn redact_masks_a_password_containing_an_at_sign() {
+        assert_eq!(
+            redact_connection_url("postgresql://u:p@ss@h:5432/db"),
+            "postgresql://u:***@h:5432/db"
+        );
+    }
+
+    #[test]
+    fn redact_masks_a_password_containing_a_colon() {
+        assert_eq!(
+            redact_connection_url("postgresql://u:p:ss@h/db"),
+            "postgresql://u:***@h/db"
+        );
+    }
+
+    #[test]
+    fn redact_masks_a_percent_escaped_password() {
+        assert_eq!(
+            redact_connection_url("postgresql://u:p%40ss%3A@h/db"),
+            "postgresql://u:***@h/db"
+        );
+    }
+
+    #[test]
+    fn redact_keeps_a_url_without_a_password() {
+        for url in [
+            "postgresql://pinch@db.internal:5432/pinch_prod?sslmode=require",
+            "postgresql://db.internal/pinch_prod",
+        ] {
+            assert_eq!(redact_connection_url(url), url);
+        }
+    }
+
+    #[test]
+    fn redact_keeps_a_sqlite_url() {
+        for url in [
+            "sqlite:///var/data/app.db?mode=rwc",
+            "sqlite:app.db",
+            "sqlite::memory:",
+            "sqlite:///tmp/odd@name:1.db",
+        ] {
+            assert_eq!(redact_connection_url(url), url);
+        }
+    }
+
+    #[test]
+    fn redact_masks_every_secret_query_key() {
+        for key in [
+            "password",
+            "db_PASSWORD",
+            "passwd",
+            "pwd",
+            "client_secret",
+            "access_token",
+            "apikey",
+            "api_key",
+            "service_role",
+        ] {
+            assert_eq!(
+                redact_connection_url(&format!("postgresql://u@h/db?{key}=hunter2")),
+                format!("postgresql://u@h/db?{key}=***"),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn redact_keeps_a_non_secret_query_key() {
+        assert_eq!(
+            redact_connection_url(
+                "postgresql://u:pw@h/db?sslmode=require&password=x&application_name=pinch"
+            ),
+            "postgresql://u:***@h/db?sslmode=require&password=***&application_name=pinch"
+        );
+    }
+
+    #[test]
+    fn redact_keeps_the_fragment() {
+        assert_eq!(
+            redact_connection_url("postgresql://u:pw@h/db?token=t#replica"),
+            "postgresql://u:***@h/db?token=***#replica"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_connection_failure_names_the_url_with_its_password_masked() {
+        let url = "postgresql://u:secret@127.0.0.1:1/db";
+        let err = match connect_engine_handle(
+            url,
+            Dialect::Postgres,
+            None,
+            1,
+            0,
+            crate::session_settings::SettingsDelivery::Transaction,
+        )
+        .await
+        {
+            Ok(_) => panic!("nothing listens on port 1"),
+            Err(err) => err,
+        };
+        let message = format!("{}: {}", connection_failed_context(url), err);
+        assert!(message.contains("u:***@"), "{message}");
+        assert!(!message.contains("secret"), "{message}");
+        assert!(!message.contains("<redacted>"), "{message}");
+    }
 
     #[tokio::test]
     async fn connect_engine_handle_uses_typed_sqlite_backend() {

@@ -2026,6 +2026,11 @@ impl Tracked {
         self.engine.backend()
     }
 
+    /// The URL the connection was opened with, its secrets masked.
+    pub fn shown_url(&self) -> &str {
+        self.engine.shown_url()
+    }
+
     /// `<schema>._ferro_migrations`, as `status` names it.
     pub fn tracking_table(&self) -> &str {
         &self.state.table

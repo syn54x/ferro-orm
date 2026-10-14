@@ -130,6 +130,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<state::RouteHandle>()?;
     m.add_function(wrap_pyfunction!(schema::register_model_schema, m)?)?;
     m.add_function(wrap_pyfunction!(connection::connect, m)?)?;
+    m.add_function(wrap_pyfunction!(connection::_redact_url, m)?)?;
     m.add_function(wrap_pyfunction!(operations::fetch_all, m)?)?;
     m.add_function(wrap_pyfunction!(operations::fetch_filtered, m)?)?;
     m.add_function(wrap_pyfunction!(operations::count_filtered, m)?)?;
