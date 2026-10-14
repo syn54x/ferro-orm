@@ -64,77 +64,69 @@ const MASK: &str = "***";
 
 /// `url` with its secrets masked by `***`: the userinfo password, and the
 /// value of every query key [`is_secret_query_key`] names. The scheme, user,
-/// host, port, path, every other query key and the fragment are kept, and a
-/// URL with no secret (a SQLite URL) comes back as given.
+/// host, port, path, every other query pair and the fragment are kept, and a
+/// URL with no secret (a SQLite URL) comes back as the parser reads it.
 ///
-/// The user and password are cut out before the query and fragment: they
-/// run from `://` to the last `@` in the whole URL, and the user ends at the
-/// first `:`. So a password holding a raw `@`, `:`, `/`, `?` or `#` is
-/// masked whole. The string cannot tell such a password from an `@` that
-/// follows the host (`h:5432/db@x`), so that one masks up to it too (more
-/// than the password, never less); percent-encoded as `%40`, it shows. A
-/// URL whose part after `://` starts with `/` (`sqlite:///app.db`), or whose
-/// part before the last `@` holds no `:`, has no password.
+/// The URL is read with `url::Url::parse`, the parser sqlx reads connection
+/// URLs with, so the parts masked are the parts the driver connects with.
+/// What it cannot read is masked whole (`<scheme>://***`, or `***` when no
+/// scheme is readable): the driver refuses it too. So is a URL with an `@`
+/// past a non-empty authority (in its path, query or fragment): that is
+/// where the delimiter of a password holding a raw `/`, `?` or `#` lands
+/// (`u:9/s3cret@h` reads as host `u`, port `9`), and the string cannot tell
+/// the two apart; written as `%40`, the `@` shows.
 pub(crate) fn redact_connection_url(url: &str) -> String {
-    let (masked_userinfo, rest) = match url.find("://") {
-        Some(scheme_idx) => {
-            let authority_start = scheme_idx + 3;
-            let after_scheme = &url[authority_start..];
-            let user = if after_scheme.starts_with('/') {
-                None
-            } else {
-                after_scheme.rfind('@').and_then(|at_idx| {
-                    after_scheme[..at_idx]
-                        .split_once(':')
-                        .map(|(user, _password)| (user, &after_scheme[at_idx..]))
-                })
-            };
-            match user {
-                Some((user, rest)) => (format!("{}{user}:{MASK}", &url[..authority_start]), rest),
-                None => (String::new(), url),
-            }
-        }
-        None => (String::new(), url),
+    let Ok(mut parsed) = url::Url::parse(url) else {
+        return masked_whole(readable_scheme(url));
     };
-    masked_userinfo + &redact_query_values(rest)
-}
-
-/// `rest` (what follows the userinfo) with the value of every secret query
-/// key masked; its path and fragment kept.
-fn redact_query_values(rest: &str) -> String {
-    let (without_fragment, fragment) = match rest.split_once('#') {
-        Some((base, fragment)) => (base, Some(fragment)),
-        None => (rest, None),
-    };
-    let (base, query) = match without_fragment.split_once('?') {
-        Some((base, query)) => (base, Some(query)),
-        None => (without_fragment, None),
-    };
-
-    let mut redacted = base.to_string();
-    if let Some(query) = query {
+    let has_authority = parsed.host_str().is_some_and(|host| !host.is_empty());
+    let at_past_authority = [Some(parsed.path()), parsed.query(), parsed.fragment()]
+        .into_iter()
+        .flatten()
+        .any(|part| part.contains('@'));
+    if has_authority && at_past_authority {
+        return masked_whole(Some(parsed.scheme()));
+    }
+    if parsed.password().is_some() && parsed.set_password(Some(MASK)).is_err() {
+        return masked_whole(Some(parsed.scheme()));
+    }
+    if let Some(query) = parsed.query() {
         let query = query
             .split('&')
             .map(|pair| {
-                let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-                if is_secret_query_key(key) {
-                    format!("{key}={MASK}")
-                } else if value.is_empty() {
-                    key.to_string()
-                } else {
-                    format!("{key}={value}")
+                let secret = url::form_urlencoded::parse(pair.as_bytes())
+                    .next()
+                    .is_some_and(|(key, _)| is_secret_query_key(&key));
+                match pair.split_once('=') {
+                    _ if !secret => pair.to_string(),
+                    Some((key, _)) => format!("{key}={MASK}"),
+                    None => format!("{pair}={MASK}"),
                 }
             })
             .collect::<Vec<_>>()
             .join("&");
-        redacted.push('?');
-        redacted.push_str(&query);
+        parsed.set_query(Some(&query));
     }
-    if let Some(fragment) = fragment {
-        redacted.push('#');
-        redacted.push_str(fragment);
+    parsed.into()
+}
+
+/// A URL masked whole: `<scheme>://***`, or `***` without a scheme.
+fn masked_whole(scheme: Option<&str>) -> String {
+    match scheme {
+        Some(scheme) => format!("{scheme}://{MASK}"),
+        None => MASK.to_string(),
     }
-    redacted
+}
+
+/// The scheme `url` starts with, when it has a well-formed one (a letter,
+/// then letters, digits, `+`, `-` or `.`, then `:`).
+fn readable_scheme(url: &str) -> Option<&str> {
+    let (scheme, _) = url.split_once(':')?;
+    let mut chars = scheme.chars();
+    let first = chars.next()?;
+    (first.is_ascii_alphabetic()
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.')))
+    .then_some(scheme)
 }
 
 /// `DB Connection failed for <url>`, the URL's secrets masked: the context
@@ -557,64 +549,106 @@ mod tests {
         );
     }
 
+    /// `redact_connection_url(url)`, asserting that no piece of `secret`
+    /// (split on the characters a password may hold raw) appears in it.
+    fn redacted_without(url: &str, secret: &str) -> String {
+        let shown = redact_connection_url(url);
+        for piece in secret
+            .split(['@', ':', '/', '?', '#'])
+            .filter(|piece| !piece.is_empty())
+        {
+            assert!(!shown.contains(piece), "{piece:?} of {secret:?} in {shown}");
+        }
+        shown
+    }
+
     #[test]
-    fn redact_masks_a_password_containing_a_question_mark() {
+    fn redact_masks_a_password_holding_any_raw_delimiter() {
+        // The parser reads a raw `@` or `:` inside the userinfo. A raw `/`,
+        // `?` or `#` ends the authority early, so `u:s3` is read as a host
+        // with an invalid port, the string does not parse, and it is masked
+        // whole.
+        for (raw, shown) in [
+            ("@", "postgresql://u:***@h:5432/db?sslmode=require"),
+            (":", "postgresql://u:***@h:5432/db?sslmode=require"),
+            ("/", "postgresql://***"),
+            ("?", "postgresql://***"),
+            ("#", "postgresql://***"),
+        ] {
+            let secret = format!("s3{raw}cret");
+            assert_eq!(
+                redacted_without(
+                    &format!("postgresql://u:{secret}@h:5432/db?sslmode=require"),
+                    &secret
+                ),
+                shown,
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn redact_masks_a_password_whose_raw_delimiter_leaves_a_valid_port() {
+        // `u:9/s3cret@h` parses as host `u`, port `9`, path `/s3cret@h/db`.
+        // The parser sees no password, but an `@` past a non-empty authority
+        // is where an unencoded password's delimiter lands: masked whole.
+        for (url, secret) in [
+            ("postgresql://u:9/s3cret@h/db", "9/s3cret"),
+            ("postgresql://u:9?s3cret@h/db", "9?s3cret"),
+            ("postgresql://u:9#s3cret@h/db", "9#s3cret"),
+            ("postgresql://u:pw@sx/s3cret@h/db", "pw@sx/s3cret"),
+            ("postgresql://h:5432/db@x", "5432/db"),
+        ] {
+            assert_eq!(redacted_without(url, secret), "postgresql://***", "{url}");
+        }
+    }
+
+    #[test]
+    fn redact_masks_an_at_sign_in_a_query_value_whole() {
+        // The second review's case: an `@` in a query value must never print
+        // the `password=` value after it. The string cannot be told from a
+        // password holding a raw `?`, so it is masked whole.
         assert_eq!(
-            redact_connection_url("postgresql://u:pa?ss@h/db"),
-            "postgresql://u:***@h/db"
+            redacted_without(
+                "postgresql://u:pw@h/db?application_name=a@b&password=s3cret",
+                "s3cret"
+            ),
+            "postgresql://***"
+        );
+        assert_eq!(
+            redacted_without("postgresql://h/db?app=me@x&password=s3cret", "s3cret"),
+            "postgresql://***"
         );
     }
 
     #[test]
-    fn redact_masks_a_password_containing_a_hash() {
+    fn redact_shows_an_at_sign_written_as_percent_40() {
+        for url in [
+            "postgresql://h:5432/db%40x",
+            "postgresql://h/db?application_name=a%40b",
+        ] {
+            assert_eq!(redact_connection_url(url), url);
+        }
         assert_eq!(
-            redact_connection_url("postgresql://u:pa#ss@h/db"),
-            "postgresql://u:***@h/db"
+            redact_connection_url("postgresql://u:pw@h/db?application_name=a%40b&password=s"),
+            "postgresql://u:***@h/db?application_name=a%40b&password=***"
         );
     }
 
     #[test]
-    fn redact_masks_a_password_containing_a_slash() {
+    fn redact_masks_a_string_the_parser_rejects() {
         assert_eq!(
-            redact_connection_url("postgresql://u:ab/c+d==@h:5432/db?sslmode=require"),
-            "postgresql://u:***@h:5432/db?sslmode=require"
+            redact_connection_url("postgresql://u:pw@h:99999/db"),
+            "postgresql://***"
         );
-    }
-
-    #[test]
-    fn redact_masks_a_password_containing_an_at_sign_and_a_slash() {
-        assert_eq!(
-            redact_connection_url("postgresql://u:p@s/s@h/db"),
-            "postgresql://u:***@h/db"
-        );
-    }
-
-    #[test]
-    fn redact_masks_through_an_at_sign_after_the_host_never_less() {
-        // `5432/db` cannot be told from a password holding a raw `/`, so it
-        // is masked; percent-encoded (`%40`), the `@` shows everything.
-        assert_eq!(
-            redact_connection_url("postgresql://h:5432/db@x"),
-            "postgresql://h:***@x"
-        );
-        assert_eq!(
-            redact_connection_url("postgresql://h:5432/db%40x"),
-            "postgresql://h:5432/db%40x"
-        );
-    }
-
-    #[test]
-    fn redact_masks_a_secret_query_value_when_no_password_comes_first() {
-        assert_eq!(
-            redact_connection_url("postgresql://h/db?app=me@x&password=s"),
-            "postgresql://h/db?app=me@x&password=***"
-        );
+        assert_eq!(redact_connection_url("not a url: pw"), "***");
+        assert_eq!(redact_connection_url(""), "***");
     }
 
     #[test]
     fn redact_masks_a_percent_escaped_password() {
         assert_eq!(
-            redact_connection_url("postgresql://u:p%40ss%3A@h/db"),
+            redacted_without("postgresql://u:p%40ss%3A@h/db", "p%40ss%3A"),
             "postgresql://u:***@h/db"
         );
     }
@@ -636,6 +670,7 @@ mod tests {
             "sqlite:app.db",
             "sqlite::memory:",
             "sqlite:///tmp/odd@name:1.db",
+            "sqlite:/tmp/app.db?mode=rwc",
         ] {
             assert_eq!(redact_connection_url(url), url);
         }
@@ -653,6 +688,7 @@ mod tests {
             "apikey",
             "api_key",
             "service_role",
+            "pass%77ord",
         ] {
             assert_eq!(
                 redact_connection_url(&format!("postgresql://u@h/db?{key}=hunter2")),

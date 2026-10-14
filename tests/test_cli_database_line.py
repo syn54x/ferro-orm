@@ -219,8 +219,9 @@ def test_a_postgres_url_masks_its_password_and_its_secret_query_values(
 def test_a_password_holding_a_raw_delimiter_never_reaches_either_stream(
     project, pkg, capsys, raw
 ):
-    """A password that was not percent-encoded is masked whole: the line is
-    printed before the driver reads (and refuses) the URL."""
+    """A raw ``/``, ``?`` or ``#`` ends the URL's authority early, so the URL
+    parser (the driver's) reads ``u:<secret>`` as a host with a bad port and
+    refuses the URL. The line masks it whole, then the driver refuses it."""
     configure(project, pkg, "postgres")
     write_models(project, pkg, AUTHOR)
     url = f"postgresql://u:{SECRET}{raw}tail@127.0.0.1:1/db?sslmode=require"
@@ -228,7 +229,38 @@ def test_a_password_holding_a_raw_delimiter_never_reaches_either_stream(
     code, out, err = cli(capsys, "status", "--url", url)
 
     assert code == 1
-    assert out == "default · postgresql://u:***@127.0.0.1:1/db?sslmode=require\n"
+    assert out == "default · postgresql://***\n"
+    assert SECRET not in out
+    assert "tail" not in out
+    assert SECRET not in err
+    assert "tail" not in err
+
+
+def test_an_at_sign_in_a_query_value_never_shows_the_password_after_it(
+    project, pkg, capsys
+):
+    """An ``@`` past the host cannot be told from the delimiter of a password
+    holding a raw ``?``, so the URL is masked whole; ``%40`` shows it."""
+    configure(project, pkg, "postgres")
+    write_models(project, pkg, AUTHOR)
+    url = f"postgresql://u:pw@127.0.0.1:1/db?application_name=a@b&password={SECRET}"
+
+    code, out, err = cli(capsys, "status", "--url", url)
+
+    assert code == 1
+    assert out == "default · postgresql://***\n"
+    assert SECRET not in out
+    assert SECRET not in err
+
+    code, out, err = cli(
+        capsys, "status", "--url", url.replace("a@b", "a%40b")
+    )
+
+    assert code == 1
+    assert out == (
+        "default · postgresql://u:***@127.0.0.1:1/db"
+        "?application_name=a%40b&password=***\n"
+    )
     assert SECRET not in out
     assert SECRET not in err
 
