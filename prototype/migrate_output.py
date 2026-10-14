@@ -338,6 +338,30 @@ INIT = {
 
 VERBS = ["init", "new", "check", "up", "down", "status", "drift", "baseline", "rerecord"]
 
+# Which database a verb worked on. Every verb's first line names it: the
+# config entry, and the URL with its password replaced (new and check read
+# models and files only, so they name the directory instead).
+DB = {
+    "name": "main",
+    "url": "postgresql://pinch:hunter2@db.internal.pinch.finance:5432/pinch_prod?sslmode=require",
+    "directory": "migrations/main",
+}
+CLEAN_DB_URL = "sqlite:///./dev.db"
+
+
+def redact(url: str) -> str:
+    """The URL with its password replaced by ***; everything else as given."""
+    from urllib.parse import urlsplit, urlunsplit
+
+    parts = urlsplit(url)
+    if parts.password is None:
+        return url
+    host = parts.hostname or ""
+    if parts.port:
+        host += f":{parts.port}"
+    netloc = f"{parts.username}:***@{host}"
+    return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+
 # -- shared bits ---------------------------------------------------------------
 
 GLYPH = {  # (tty, plain)
@@ -401,6 +425,18 @@ class Out:
 
 def prompt(o: Out, argv: str) -> None:
     o.out.print(Text(f"$ {argv}", style="bold" if not o.plain else ""))
+
+
+def where(o: Out, *, connected: bool = True, url: str | None = None) -> None:
+    """The first line of every verb: which database, and how it was reached."""
+    t = Text()
+    t.append(DB["name"], style="bold")
+    t.append(" · ")
+    if connected:
+        t.append(redact(url or DB["url"]), style="dim")
+    else:
+        t.append(f"{DB['directory']} · not connected", style="dim")
+    o.out.print(t)
 
 
 def count(n: int, noun: str) -> str:
@@ -553,6 +589,7 @@ def a_init(o: Out) -> None:
 
 
 def a_new(o: Out, m: NewMigration) -> None:
+    where(o, connected=False)
     heading(o, "ok", f"Wrote {m.directory}")
     fw = max(len(f.name) for f in m.files)
     for f in m.files:
@@ -584,11 +621,13 @@ def _warn_line(o: Out, w: str) -> None:
 
 def a_check(o: Out) -> None:
     prompt(o, CHECK_OK["argv"])
+    where(o, connected=False)
     if o.plain:
         o.out.print(f"ok: models match {CHECK_OK['head']}")
     else:
         heading(o, "ok", "models match", CHECK_OK["head"])
     prompt(o, CHECK_BAD["argv"])
+    where(o, connected=False)
     heading(o, "err", f"{count(len(CHECK_BAD['problems']), 'problem')} since {CHECK_OK['head']}", err=True)
     for kind, message in CHECK_BAD["problems"]:
         t = Text("  ")
@@ -598,7 +637,10 @@ def a_check(o: Out) -> None:
 
 
 def a_up(o: Out) -> None:
-    heading(o, "partial", f"{UP_RUN['database']} ({UP_RUN['dialect']})", "ferro migrate up")
+    where(o)
+    applied = sum(st[2] == "applied" for st in UP_RUN["steps"])
+    failed = sum(st[2] == "failed" for st in UP_RUN["steps"])
+    heading(o, "partial", "up stopped", f"{count(applied, 'step')} applied · {failed} failed")
     sw = max(len(s[1]) for s in UP_RUN["steps"])
     for mig, step, state, ms, error in UP_RUN["steps"]:
         g = "ok" if state == "applied" else "err"
@@ -615,6 +657,7 @@ def a_up(o: Out) -> None:
 
 
 def a_down(o: Out) -> None:
+    where(o)
     heading(o, "warn", "down reverts, newest first", "0002_add_team, 4 steps")
     sw = max(len(p[1]) for p in DOWN_RUN["plan"])
     for mig, step, nothing in DOWN_RUN["plan"]:
@@ -635,8 +678,9 @@ def a_down(o: Out) -> None:
 
 
 def a_status(o: Out) -> None:
+    where(o)
     s = STATUS
-    heading(o, "warn", f"{s['database']} ({s['dialect']})", f"{s['table']} · 1 failed · 2 pending · 1 ahead")
+    heading(o, "warn", "1 failed · 2 pending · 1 ahead", s["table"])
     nw = max(len(m.name) for m in s["migrations"] + [Migration(a, "", []) for a in s["ahead"]])
     for m in s["migrations"]:
         key = {"pending": "pending", "applied": "ok", "applied (baseline)": "ok"}.get(m.state, "err" if "checksum" in m.state else "partial")
@@ -674,6 +718,7 @@ def a_status(o: Out) -> None:
 
 
 def a_drift(o: Out) -> None:
+    where(o)
     for w in DRIFT["warnings"]:
         _warn_line(o, w)
     heading(o, "err", f"{count(len(DRIFT['lines']), 'difference')} against {DRIFT['against']}")
@@ -684,6 +729,7 @@ def a_drift(o: Out) -> None:
         o.out.print(t)
     o.out.print()
     prompt(o, "ferro migrate drift   # a clean database")
+    where(o, url=CLEAN_DB_URL)
     if o.plain:
         o.out.print(f"no drift against {DRIFT['against']}")
     else:
@@ -691,6 +737,7 @@ def a_drift(o: Out) -> None:
 
 
 def a_baseline(o: Out) -> None:
+    where(o)
     b = BASELINE
     heading(o, "ok", f"recorded {b['recorded'][0]} … {b['recorded'][-1]} as baseline", f"{count(b['steps'], 'step')}")
     for d in b["data_steps"]:
@@ -701,6 +748,7 @@ def a_baseline(o: Out) -> None:
 
 
 def a_rerecord(o: Out) -> None:
+    where(o)
     r = RERECORD
     heading(o, "ok", f"re-recorded {r['file']}", "nothing was run")
     t = Text(f"  sha384:{r['old']} ")
@@ -729,6 +777,7 @@ def b_init(o: Out) -> None:
 
 
 def b_new(o: Out, m: NewMigration) -> None:
+    where(o, connected=False)
     t = table(o, "File", "Kind", "Direction", "Dialect", title=m.directory)
     for f in m.files:
         t.add_row(f.name, f.role, f.direction or "", f.dialect or "")
@@ -751,8 +800,10 @@ def b_new(o: Out, m: NewMigration) -> None:
 
 def b_check(o: Out) -> None:
     prompt(o, CHECK_OK["argv"])
+    where(o, connected=False)
     o.out.print(Text(f"ok: models match {CHECK_OK['head']}", style="green"))
     prompt(o, CHECK_BAD["argv"])
+    where(o, connected=False)
     t = table(o, "Problem", "Detail", title=f"{count(len(CHECK_BAD['problems']), 'problem')} since {CHECK_OK['head']}")
     for kind, message in CHECK_BAD["problems"]:
         t.add_row(Text(kind, style="bold red"), message)
@@ -760,7 +811,8 @@ def b_check(o: Out) -> None:
 
 
 def b_up(o: Out) -> None:
-    t = table(o, "Migration", "Step", "Result", "Time", title=f"{UP_RUN['database']} ({UP_RUN['dialect']})")
+    where(o)
+    t = table(o, "Migration", "Step", "Result", "Time", title="ferro migrate up")
     for mig, step, state, ms, _ in UP_RUN["steps"]:
         t.add_row(mig, step, o.state(state), f"{ms / 1000:.1f}s")
     o.out.print(t)
@@ -770,6 +822,7 @@ def b_up(o: Out) -> None:
 
 
 def b_down(o: Out) -> None:
+    where(o)
     t = table(o, "#", "Migration", "Step", "Note", title="down reverts, in this order")
     for i, (mig, step, nothing) in enumerate(DOWN_RUN["plan"], 1):
         t.add_row(str(i), mig, step, Text(f"nothing to reverse: {nothing}", style="dim") if nothing else "")
@@ -782,8 +835,9 @@ def b_down(o: Out) -> None:
 
 
 def b_status(o: Out) -> None:
+    where(o)
     s = STATUS
-    t = table(o, "Migration", "State", "Applied at", "Steps", title=f"{s['database']} ({s['dialect']}) · {s['table']}")
+    t = table(o, "Migration", "State", "Applied at", "Steps", title=s["table"])
     for m in s["migrations"]:
         done = sum(st.state.startswith("applied") for st in m.steps)
         t.add_row(m.name, o.state(m.state) if m.state in STATE_STYLE else Text(m.state, style="yellow"), m.applied_at or "", f"{done}/{len(m.steps)}")
@@ -812,6 +866,7 @@ def b_status(o: Out) -> None:
 
 
 def b_drift(o: Out) -> None:
+    where(o)
     for w in DRIFT["warnings"]:
         o.err.print(Text(f"warning: {w}", style="yellow"))
     t = table(o, "Object", "Kind", "Finding", title=f"drift against {DRIFT['against']}")
@@ -820,10 +875,12 @@ def b_drift(o: Out) -> None:
     o.out.print(t)
     o.out.print()
     prompt(o, "ferro migrate drift   # a clean database")
+    where(o, url=CLEAN_DB_URL)
     o.out.print(Text(f"no drift against {DRIFT['against']}", style="green"))
 
 
 def b_baseline(o: Out) -> None:
+    where(o)
     b = BASELINE
     t = table(o, "Recorded", "Steps", "Listed, not run", title="baseline")
     t.add_row(f"{b['recorded'][0]} … {b['recorded'][-1]}", str(b["steps"]), "\n".join(b["data_steps"]))
@@ -832,6 +889,7 @@ def b_baseline(o: Out) -> None:
 
 
 def b_rerecord(o: Out) -> None:
+    where(o)
     r = RERECORD
     t = table(o, "Re-recorded", "Was", "Now", "Next up")
     t.add_row(r["file"], f"sha384:{r['old']}", f"sha384:{r['new']}", "continues from its cursor")
@@ -865,6 +923,7 @@ def c_init(o: Out) -> None:
 
 
 def c_new(o: Out, m: NewMigration) -> None:
+    where(o, connected=False)
     gutter(o, "Wrote", m.directory)
     for f in m.files:
         verb = {"snapshot": "Snapshot", "backfill": "Backfill", "data step": "Data step"}.get(f.role, f.direction.capitalize())
@@ -883,17 +942,20 @@ def c_new(o: Out, m: NewMigration) -> None:
 
 def c_check(o: Out) -> None:
     prompt(o, CHECK_OK["argv"])
+    where(o, connected=False)
     if o.plain:
         o.out.print(f"ok: models match {CHECK_OK['head']}")
     else:
         gutter(o, "Checked", f"models match {CHECK_OK['head']}")
     prompt(o, CHECK_BAD["argv"])
+    where(o, connected=False)
     for kind, message in CHECK_BAD["problems"]:
         gutter(o, kind.capitalize(), message, "bold red", err=True)
 
 
 def c_up(o: Out) -> None:
-    gutter(o, "Migrating", f"{UP_RUN['database']} ({UP_RUN['dialect']})", "bold cyan")
+    gutter(o, "Database", f"{DB['name']} · {redact(DB['url'])}", "bold cyan")
+    gutter(o, "Migrating", "0002_add_team, 3 steps", "bold cyan")
     for mig, step, state, ms, _ in UP_RUN["steps"]:
         verb = "Applied" if state == "applied" else "Failed"
         gutter(o, verb, f"{mig}  {step}  ({ms / 1000:.1f}s)", "bold green" if state == "applied" else "bold red")
@@ -903,6 +965,7 @@ def c_up(o: Out) -> None:
 
 
 def c_down(o: Out) -> None:
+    where(o)
     gutter(o, "Reverting", "0002_add_team, 4 steps, newest first", "bold cyan")
     for mig, step, nothing in DOWN_RUN["plan"]:
         gutter(o, "", f"{mig}  {step}" + (f"  (nothing to reverse: {nothing})" if nothing else ""), "")
@@ -917,7 +980,8 @@ def c_down(o: Out) -> None:
 
 def c_status(o: Out) -> None:
     s = STATUS
-    gutter(o, "Database", f"{s['database']} ({s['dialect']}) · {s['table']}", "bold cyan")
+    gutter(o, "Database", f"{DB['name']} · {redact(DB['url'])}", "bold cyan")
+    gutter(o, "Table", s["table"], "bold cyan")
     verbs = {"applied": ("Applied", "bold green"), "applied (baseline)": ("Baseline", "bold green"), "pending": ("Pending", "bold yellow"), "applied (different checksum)": ("Edited", "bold red")}
     for m in s["migrations"]:
         verb, style = verbs.get(m.state, ("Partial", "bold yellow"))
@@ -938,6 +1002,7 @@ def c_status(o: Out) -> None:
 
 
 def c_drift(o: Out) -> None:
+    where(o)
     for w in DRIFT["warnings"]:
         gutter(o, "Warning", w, "bold yellow", err=True)
     gutter(o, "Drift", f"against {DRIFT['against']}, {count(len(DRIFT['lines']), 'difference')}", "bold red")
@@ -946,6 +1011,7 @@ def c_drift(o: Out) -> None:
         gutter(o, verb, line, "red")
     o.out.print()
     prompt(o, "ferro migrate drift   # a clean database")
+    where(o, url=CLEAN_DB_URL)
     if o.plain:
         o.out.print(f"no drift against {DRIFT['against']}")
     else:
@@ -953,6 +1019,7 @@ def c_drift(o: Out) -> None:
 
 
 def c_baseline(o: Out) -> None:
+    where(o)
     b = BASELINE
     gutter(o, "Recorded", f"{b['recorded'][0]} … {b['recorded'][-1]} as baseline ({count(b['steps'], 'step')})")
     for d in b["data_steps"]:
@@ -961,6 +1028,7 @@ def c_baseline(o: Out) -> None:
 
 
 def c_rerecord(o: Out) -> None:
+    where(o)
     r = RERECORD
     gutter(o, "Re-recorded", f"{r['file']}  sha384:{r['old']} {o.glyph('arrow')} sha384:{r['new']}")
     gutter(o, "Next up", "continues from its cursor; nothing was run", "dim")
