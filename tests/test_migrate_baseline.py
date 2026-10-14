@@ -136,7 +136,7 @@ def test_an_auto_migrated_database_is_baselined_and_up_applies_only_the_next(
 
     code, out, err = cli(capsys, "baseline", "--url", db.url)
     assert (code, err) == (0, "")
-    assert out == f"recorded {BOTH} as baseline (2 steps)\n" + NOT_COMPARED
+    assert out == f"{db.line}\nrecorded {BOTH} as baseline (2 steps)\n" + NOT_COMPARED
     true = 1 if db.backend == "sqlite" else True
     assert origins(db) == [(1, 1, "baseline", 0, true), (2, 1, "baseline", 0, true)]
 
@@ -150,8 +150,9 @@ def test_an_auto_migrated_database_is_baselined_and_up_applies_only_the_next(
     capsys.readouterr()
     code, out, _ = cli(capsys, "up", "--url", db.url)
     assert code == 0
-    assert out.splitlines()[0].startswith("0003_add_orgs  01_schema  applied (")
-    assert len(out.splitlines()) == 1
+    assert out.splitlines()[0] == db.line
+    assert out.splitlines()[1].startswith("0003_add_orgs  01_schema  applied (")
+    assert len(out.splitlines()) == 2
     assert "org" in db.tables()
 
 
@@ -172,6 +173,7 @@ def test_data_steps_are_recorded_without_running_and_listed(project, pkg, db, ca
     assert (
         out
         == (
+            f"{db.line}\n"
             f"recorded {BOTH} as baseline (3 steps; 1 data step listed, not run)\n"
             "  0001_create_author/02_backfill_author.py  recorded, not run\n"
         )
@@ -264,7 +266,7 @@ def test_an_alembic_built_database_is_baselined_and_alembic_version_untouched(
     code, out, err = cli(capsys, "baseline", "--url", db.url)
 
     assert (code, err) == (0, "")
-    assert out.startswith(f"recorded {BOTH} as baseline (2 steps)\n")
+    assert out.startswith(f"{db.line}\nrecorded {BOTH} as baseline (2 steps)\n")
     assert db.rows("SELECT version_num FROM alembic_version") == [("ae1027a6acf",)]
 
 
@@ -276,7 +278,9 @@ def test_a_baseline_at_an_earlier_migration_ignores_the_later_tables(
 
     code, out, _ = cli(capsys, "baseline", "0001", "--url", db.url)
     assert code == 0
-    assert out == "recorded 0001_create_author as baseline (1 step)\n" + NOT_COMPARED
+    assert out == (
+        f"{db.line}\nrecorded 0001_create_author as baseline (1 step)\n" + NOT_COMPARED
+    )
     assert [row[:3] for row in origins(db)] == [(1, 1, "baseline")]
 
     code, out, _ = cli(capsys, "status", "--url", db.url)
@@ -297,6 +301,7 @@ def test_drift_is_listed_exits_4_and_records_nothing(project, pkg, db, capsys):
 
     assert code == 4
     assert out == (
+        f"{db.line}\n"
         "drift against 0002_add_teams:\n"
         "  team.name column is missing\n"
         "nothing was recorded\n"
@@ -338,7 +343,10 @@ def test_baseline_lists_exactly_what_drift_against_its_target_gives(
     assert report.drift == expected
     assert len(expected.lines) == 2
     code, out, _ = cli(capsys, "baseline", "--url", db.url)
-    assert (code, out) == (4, expected.render() + "\nnothing was recorded\n")
+    assert (code, out) == (
+        4,
+        f"{db.line}\n" + expected.render() + "\nnothing was recorded\n",
+    )
     assert no_records(db)
 
 
@@ -368,6 +376,7 @@ def test_a_pending_table_rename_is_listed_as_drift_and_records_nothing(
         lines += ["ck_squad_size_ok check is missing", "ck_team_size_ok check is extra"]
     assert code == 4
     assert out == (
+        f"{db.line}\n"
         "drift against 0003_rename_team:\n"
         + "".join(f"  {line}\n" for line in lines)
         + "nothing was recorded\n"
@@ -388,7 +397,7 @@ def test_a_database_with_records_is_refused_naming_status(project, pkg, db, caps
 
     code, out, err = cli(capsys, "baseline", "--url", db.url)
 
-    assert (code, out) == (1, "")
+    assert (code, out) == (1, f"{db.line}\n")
     assert err.strip() == TRACKED.format("0001_create_author")
     assert db.records() == before
 
@@ -502,7 +511,7 @@ def test_remove_is_refused_under_a_run_and_undoes_the_baseline_after_down(
     assert cli(capsys, "up", "--url", db.url)[0] == 0
 
     code, out, err = cli(capsys, "baseline", "--remove", "--url", db.url)
-    assert (code, out) == (1, "")
+    assert (code, out) == (1, f"{db.line}\n")
     assert err.strip() == (
         "ferro migrate baseline --remove: 0003_add_orgs was applied by a run above "
         "the baseline at 0002_add_teams. Revert it first with `ferro migrate down "
@@ -522,7 +531,7 @@ def test_remove_is_refused_under_a_run_and_undoes_the_baseline_after_down(
     assert cli(capsys, "down", "--to", "0002", "--yes", "--url", db.url)[0] == 0
     code, out, _ = cli(capsys, "baseline", "--remove", "--url", db.url)
     assert code == 0
-    assert out == f"removed the baseline of {BOTH}\n"
+    assert out == f"{db.line}\nremoved the baseline of {BOTH}\n"
     assert db.records() == []
 
     code, out, _ = cli(capsys, "status", "--url", db.url)
@@ -533,7 +542,7 @@ def test_remove_is_refused_under_a_run_and_undoes_the_baseline_after_down(
 
     assert asyncio.run(remove_baseline(url=db.url)) == []
     assert cli(capsys, "baseline", "--remove", "--url", db.url)[1] == (
-        "no baseline to remove\n"
+        f"{db.line}\nno baseline to remove\n"
     )
 
 

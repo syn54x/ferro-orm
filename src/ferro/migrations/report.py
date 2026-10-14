@@ -344,6 +344,8 @@ class StatusReport:
     """
 
     database: str
+    url: str
+    """The database's URL, its secrets masked by ``***``."""
     dialect: str
     table: str
     """``<schema>._ferro_migrations``."""
@@ -400,13 +402,15 @@ class StatusReport:
         raw: dict[str, Any],
         *,
         database: str,
+        url: str,
         dialect: str,
         table: str,
         refusal: str | None = None,
         rows_done: dict[tuple[int, int], int] | None = None,
     ) -> StatusReport:
         """Build the report from the tracked database's ``status()``
-        document; ``refusal`` replaces its refusal when given; ``rows_done``
+        document; ``url`` is the database's URL, masked; ``refusal`` replaces
+        its refusal when given; ``rows_done``
         holds each chunked step's committed rows by ``(migration, step)``."""
         rows_done = rows_done or {}
         migrations = [
@@ -432,6 +436,7 @@ class StatusReport:
         ]
         return cls(
             database=database,
+            url=url,
             dialect=dialect,
             table=table,
             migrations=migrations,
@@ -476,6 +481,7 @@ class StatusReport:
         return json.dumps(
             {
                 "database": self.database,
+                "url": self.url,
                 "dialect": self.dialect,
                 "table": self.table,
                 "pending": self.pending,

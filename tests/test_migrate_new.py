@@ -102,6 +102,11 @@ def write_config(project: Path, pkg: str, dialects: str = '["postgres", "sqlite"
     )
 
 
+DIRECTORY_LINE = "default · migrations"
+"""The database line ``new`` and ``check`` open with: the configured
+database, then its migrations directory relative to the working directory."""
+
+
 def run(*argv: str) -> int:
     from ferro.cli import main
 
@@ -376,7 +381,9 @@ def test_an_edit_that_renders_no_ddl_writes_nothing(project, pkg, capsys, edit):
 
     assert run("migrate", "new", "nothing") == 0
 
-    assert capsys.readouterr().out == "no schema change: nothing written\n"
+    assert capsys.readouterr().out == (
+        f"{DIRECTORY_LINE}\nno schema change: nothing written\n"
+    )
     assert listing(project / "migrations") == before
 
 

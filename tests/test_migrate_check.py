@@ -17,6 +17,7 @@ import pytest
 from ferro import FerroSettings
 from tests.test_migrate_new import (
     AUTHOR,
+    DIRECTORY_LINE,
     LIBRARY,
     run,
     write_config,
@@ -55,7 +56,9 @@ def test_a_clean_tree_exits_0_naming_the_head(project, pkg, capsys):
 
     assert run("migrate", "check") == 0
 
-    assert capsys.readouterr().out == "ok: models match 0001_create_author\n"
+    assert capsys.readouterr().out == (
+        f"{DIRECTORY_LINE}\nok: models match 0001_create_author\n"
+    )
 
 
 def test_an_ungenerated_model_exits_3_naming_it(project, pkg, capsys):
@@ -97,7 +100,9 @@ def test_a_label_added_on_a_sqlite_only_project_is_recorded_and_check_is_clean(
     assert "dead" in json.dumps(stored)
     capsys.readouterr()
     assert run("migrate", "check") == 0
-    assert capsys.readouterr().out == "ok: models match 0002_status_dead\n"
+    assert capsys.readouterr().out == (
+        f"{DIRECTORY_LINE}\nok: models match 0002_status_dead\n"
+    )
 
 
 def test_a_change_new_cannot_generate_yet_is_still_ungenerated(project, pkg, capsys):
@@ -232,7 +237,9 @@ def test_an_unwritten_data_step_exits_3_naming_each_todo(project, pkg, capsys):
         '@nothing_to_reverse("nothing was changed")\ndef down(ctx): ...\n'
     )
     assert run("migrate", "check") == 0
-    assert capsys.readouterr().out == "ok: models match 0002_backfill\n"
+    assert capsys.readouterr().out == (
+        f"{DIRECTORY_LINE}\nok: models match 0002_backfill\n"
+    )
 
 
 def test_a_config_without_dialects_is_refused_with_the_line_to_add(
