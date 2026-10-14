@@ -67,46 +67,53 @@ const MASK: &str = "***";
 /// host, port, path, every other query key and the fragment are kept, and a
 /// URL with no secret (a SQLite URL) comes back as given.
 ///
-/// The userinfo ends at the last `@` and the user at the first `:`, so a
-/// password holding a raw `@` or `:` is masked whole. A path that holds an
-/// `@` after a host can mask more than the password, never less. A URL
-/// whose part after `://` starts with `/` (`sqlite:///app.db`) has no
-/// userinfo.
+/// The user and password are cut out before the query and fragment: they
+/// run from `://` to the last `@` in the whole URL, and the user ends at the
+/// first `:`. So a password holding a raw `@`, `:`, `/`, `?` or `#` is
+/// masked whole. The string cannot tell such a password from an `@` that
+/// follows the host (`h:5432/db@x`), so that one masks up to it too (more
+/// than the password, never less); percent-encoded as `%40`, it shows. A
+/// URL whose part after `://` starts with `/` (`sqlite:///app.db`), or whose
+/// part before the last `@` holds no `:`, has no password.
 pub(crate) fn redact_connection_url(url: &str) -> String {
-    let (without_fragment, fragment) = match url.split_once('#') {
+    let (masked_userinfo, rest) = match url.find("://") {
+        Some(scheme_idx) => {
+            let authority_start = scheme_idx + 3;
+            let after_scheme = &url[authority_start..];
+            let user = if after_scheme.starts_with('/') {
+                None
+            } else {
+                after_scheme.rfind('@').and_then(|at_idx| {
+                    after_scheme[..at_idx]
+                        .split_once(':')
+                        .map(|(user, _password)| (user, &after_scheme[at_idx..]))
+                })
+            };
+            match user {
+                Some((user, rest)) => (format!("{}{user}:{MASK}", &url[..authority_start]), rest),
+                None => (String::new(), url),
+            }
+        }
+        None => (String::new(), url),
+    };
+    masked_userinfo + &redact_query_values(rest)
+}
+
+/// `rest` (what follows the userinfo) with the value of every secret query
+/// key masked; its path and fragment kept.
+fn redact_query_values(rest: &str) -> String {
+    let (without_fragment, fragment) = match rest.split_once('#') {
         Some((base, fragment)) => (base, Some(fragment)),
-        None => (url, None),
+        None => (rest, None),
     };
     let (base, query) = match without_fragment.split_once('?') {
         Some((base, query)) => (base, Some(query)),
         None => (without_fragment, None),
     };
 
-    let redacted_base = match base.find("://") {
-        Some(scheme_idx) => {
-            let authority_start = scheme_idx + 3;
-            let after_scheme = &base[authority_start..];
-            let userinfo = if after_scheme.starts_with('/') {
-                None
-            } else {
-                after_scheme
-                    .rfind('@')
-                    .map(|at_idx| (&after_scheme[..at_idx], &after_scheme[at_idx..]))
-            };
-            match userinfo
-                .and_then(|(userinfo, rest)| userinfo.split_once(':').map(|(user, _)| (user, rest)))
-            {
-                Some((user, authority_rest)) => {
-                    format!("{}{user}:{MASK}{authority_rest}", &base[..authority_start])
-                }
-                None => base.to_string(),
-            }
-        }
-        None => base.to_string(),
-    };
-
-    let redacted_query = query.map(|query| {
-        query
+    let mut redacted = base.to_string();
+    if let Some(query) = query {
+        let query = query
             .split('&')
             .map(|pair| {
                 let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
@@ -119,13 +126,10 @@ pub(crate) fn redact_connection_url(url: &str) -> String {
                 }
             })
             .collect::<Vec<_>>()
-            .join("&")
-    });
-
-    let mut redacted = match redacted_query {
-        Some(query) => format!("{redacted_base}?{query}"),
-        None => redacted_base,
-    };
+            .join("&");
+        redacted.push('?');
+        redacted.push_str(&query);
+    }
     if let Some(fragment) = fragment {
         redacted.push('#');
         redacted.push_str(fragment);
@@ -550,6 +554,60 @@ mod tests {
         assert_eq!(
             redact_connection_url("postgresql://u:p:ss@h/db"),
             "postgresql://u:***@h/db"
+        );
+    }
+
+    #[test]
+    fn redact_masks_a_password_containing_a_question_mark() {
+        assert_eq!(
+            redact_connection_url("postgresql://u:pa?ss@h/db"),
+            "postgresql://u:***@h/db"
+        );
+    }
+
+    #[test]
+    fn redact_masks_a_password_containing_a_hash() {
+        assert_eq!(
+            redact_connection_url("postgresql://u:pa#ss@h/db"),
+            "postgresql://u:***@h/db"
+        );
+    }
+
+    #[test]
+    fn redact_masks_a_password_containing_a_slash() {
+        assert_eq!(
+            redact_connection_url("postgresql://u:ab/c+d==@h:5432/db?sslmode=require"),
+            "postgresql://u:***@h:5432/db?sslmode=require"
+        );
+    }
+
+    #[test]
+    fn redact_masks_a_password_containing_an_at_sign_and_a_slash() {
+        assert_eq!(
+            redact_connection_url("postgresql://u:p@s/s@h/db"),
+            "postgresql://u:***@h/db"
+        );
+    }
+
+    #[test]
+    fn redact_masks_through_an_at_sign_after_the_host_never_less() {
+        // `5432/db` cannot be told from a password holding a raw `/`, so it
+        // is masked; percent-encoded (`%40`), the `@` shows everything.
+        assert_eq!(
+            redact_connection_url("postgresql://h:5432/db@x"),
+            "postgresql://h:***@x"
+        );
+        assert_eq!(
+            redact_connection_url("postgresql://h:5432/db%40x"),
+            "postgresql://h:5432/db%40x"
+        );
+    }
+
+    #[test]
+    fn redact_masks_a_secret_query_value_when_no_password_comes_first() {
+        assert_eq!(
+            redact_connection_url("postgresql://h/db?app=me@x&password=s"),
+            "postgresql://h/db?app=me@x&password=***"
         );
     }
 

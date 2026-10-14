@@ -215,6 +215,24 @@ def test_a_postgres_url_masks_its_password_and_its_secret_query_values(
     assert SECRET not in err
 
 
+@pytest.mark.parametrize("raw", ["?", "#", "/"])
+def test_a_password_holding_a_raw_delimiter_never_reaches_either_stream(
+    project, pkg, capsys, raw
+):
+    """A password that was not percent-encoded is masked whole: the line is
+    printed before the driver reads (and refuses) the URL."""
+    configure(project, pkg, "postgres")
+    write_models(project, pkg, AUTHOR)
+    url = f"postgresql://u:{SECRET}{raw}tail@127.0.0.1:1/db?sslmode=require"
+
+    code, out, err = cli(capsys, "status", "--url", url)
+
+    assert code == 1
+    assert out == "default · postgresql://u:***@127.0.0.1:1/db?sslmode=require\n"
+    assert SECRET not in out
+    assert SECRET not in err
+
+
 # -- nothing on stdout before a refused URL ---------------------------------------
 
 
