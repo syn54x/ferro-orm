@@ -129,7 +129,10 @@ NEW_TEAM = NewMigration(
     changes={
         "new models": ["Team", "TeamMember"],
         "changed models": ["Account", "Transaction", "User"],
+        "dropped models": ["LegacyImport"],
         "new enum labels": ["accountkind.escrow"],
+        "renamed enum labels": ["categorycolor.grey → gray"],
+        "removed enum labels": ["connectionstatus.stale"],
     },
     notes=[
         "02_backfill_account.py: fill account.team_id for every row, then "
@@ -421,6 +424,12 @@ def file_text(o: Out, name: str, *, pad: int = 0) -> Text:
     return t
 
 
+# One colour per verb of the change summary, as the generator labels them
+# (new / changed / dropped / renamed / removed): the diff convention, so a
+# reader who knows `git status` knows these. The subject (model, enum type,
+# enum label) stays a word.
+CHANGE_STYLE = {"new": "green", "changed": "yellow", "dropped": "red", "removed": "red", "renamed": "blue"}
+
 LONG_LIST = 12
 SHOWN_FIRST = 6
 
@@ -608,8 +617,14 @@ def heading(o: Out, key: str, title: str, where: str = "", *, err: bool = False)
 
 def name_block(o: Out, label: str, names: list[str]) -> None:
     shown, hidden = o.names(names)
-    o.out.print(Text(f"  {count(len(names), label)}", style="bold"))
-    cols = Columns([Text(n) for n in shown], padding=(0, 2), equal=False, column_first=True)
+    verb, _, subject = count(len(names), label).partition(" ")  # "2", "new models"
+    verb_word, _, subject = subject.partition(" ")
+    style = CHANGE_STYLE[verb_word]
+    t = Text(f"  {verb} ", style="bold")
+    t.append(verb_word, style=f"bold {style}")
+    t.append(f" {subject}", style="bold")
+    o.out.print(t)
+    cols = Columns([Text(n, style=style) for n in shown], padding=(0, 2), equal=False, column_first=True)
     o.out.print(_indent(cols, 4))
     if hidden:
         o.out.print(Text(f"    … and {hidden} more (--verbose shows them all)", style="dim"))
@@ -638,9 +653,8 @@ def a_new(o: Out, m: NewMigration) -> None:
         o.out.print(t)
     o.out.print()
     for label, names in m.changes.items():
-        noun = label.removeprefix("new ").removeprefix("changed ").removeprefix("dropped ")
+        adj, _, noun = label.partition(" ")
         singular = noun[:-1] if noun.endswith("s") else noun
-        adj = label.split()[0]
         name_block(o, f"{adj} {singular}", names)
     for note in m.notes:
         t = Text("  ")
