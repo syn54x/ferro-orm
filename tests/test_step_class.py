@@ -275,7 +275,8 @@ def test_a_minor_0_database_reads_as_contract_and_the_next_up_classifies_it(
     assert db.rows("SELECT format, minor FROM _ferro_migrations_format") == [(1, 1)]
     assert classes(db) == [(1, 1, "expand"), (2, 1, "expand"), (2, 2, "expand")]
     assert run("migrate", "status", "--steps", "--url", db.url) == 0
-    assert "contract" not in capsys.readouterr().out
+    # The database line names the SQLite file, after this test.
+    assert "contract" not in capsys.readouterr().out.split("\n", 1)[1]
 
     # A second run finds nothing to classify.
     assert up(db).applied == []
