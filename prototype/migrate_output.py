@@ -386,6 +386,38 @@ STATE_STYLE = {
     "nothing to reverse": "dim",
 }
 
+# One colour per kind of file, as `GeneratedStep.kind` names them: ddl (a
+# schema step the generator rendered, one per dialect), portable_sql (a
+# hand-written .up.sql / .down.sql), data (a Python step: a generated
+# backfill or a --data-step), and the snapshot. The suffix stays dim so the
+# eye lands on the step's name.
+KIND_STYLE = {"ddl": "cyan", "portable_sql": "blue", "data": "magenta", "snapshot": "dim"}
+
+
+def kind_of(name: str) -> str:
+    """The kind of a step by its file name or step name (sample data only)."""
+    if name == "ir.json":
+        return "snapshot"
+    if name.endswith(".py") or "backfill" in name:
+        return "data"
+    if name.endswith((".up.sql", ".down.sql")):
+        return "portable_sql"
+    return "ddl"
+
+
+def file_text(o: Out, name: str, *, pad: int = 0) -> Text:
+    """A file or step name coloured by what it does: the stem by kind, the
+    suffix dim."""
+    stem, dot, suffix = name.partition(".")
+    t = Text()
+    t.append(stem, style=KIND_STYLE[kind_of(name)])
+    if dot:
+        t.append(dot + suffix, style="dim")
+    if pad > len(name):
+        t.append(" " * (pad - len(name)))
+    return t
+
+
 LONG_LIST = 12
 SHOWN_FIRST = 6
 
@@ -562,7 +594,10 @@ def heading(o: Out, key: str, title: str, where: str = "", *, err: bool = False)
     t = Text()
     t.append(o.glyph(key), style=style)
     t.append(" ")
-    t.append(title, style="bold")
+    if isinstance(title, Text):
+        t.append_text(title)
+    else:
+        t.append(title, style="bold")
     if where:
         t.append(f"  {where}", style="dim")
     (o.err if err else o.out).print(t)
@@ -593,7 +628,9 @@ def a_new(o: Out, m: NewMigration) -> None:
     heading(o, "ok", f"Wrote {m.directory}")
     fw = max(len(f.name) for f in m.files)
     for f in m.files:
-        t = Text(f"  {f.name:<{fw}}  ")
+        t = Text("  ")
+        t.append_text(file_text(o, f.name, pad=fw))
+        t.append("  ")
         t.append(role_of(f), style="dim")
         o.out.print(t)
     o.out.print()
@@ -646,7 +683,9 @@ def a_up(o: Out) -> None:
         g = "ok" if state == "applied" else "err"
         t = Text("  ")
         t.append(o.glyph(g), style="green" if g == "ok" else "bold red")
-        t.append(f" {mig}  {step:<{sw}}  ")
+        t.append(f" {mig}  ")
+        t.append_text(file_text(o, step, pad=sw))
+        t.append("  ")
         t.append(state, style=STATE_STYLE[state])
         t.append(f"  {ms / 1000:.1f}s", style="dim")
         o.out.print(t)
@@ -661,7 +700,8 @@ def a_down(o: Out) -> None:
     heading(o, "warn", "down reverts, newest first", "0002_add_team, 4 steps")
     sw = max(len(p[1]) for p in DOWN_RUN["plan"])
     for mig, step, nothing in DOWN_RUN["plan"]:
-        t = Text(f"  {mig}  {step:<{sw}}")
+        t = Text(f"  {mig}  ")
+        t.append_text(file_text(o, step, pad=sw))
         if nothing:
             t.append(f"  nothing to reverse: {nothing}", style="dim")
         o.out.print(t)
@@ -669,7 +709,9 @@ def a_down(o: Out) -> None:
     for mig, step, state, ms in DOWN_RUN["results"]:
         t = Text("  ")
         t.append(o.glyph("ok" if state == "reverted" else "bullet"), style="green" if state == "reverted" else "dim")
-        t.append(f" {mig}  {step:<{sw}}  ")
+        t.append(f" {mig}  ")
+        t.append_text(file_text(o, step, pad=sw))
+        t.append("  ")
         t.append(state, style=STATE_STYLE[state])
         if ms:
             t.append(f"  {ms / 1000:.1f}s", style="dim")
@@ -695,7 +737,9 @@ def a_status(o: Out) -> None:
             continue
         fw = max(len(st.file) for st in m.steps)
         for st in m.steps:
-            t = Text(f"      {st.file:<{fw}}  ")
+            t = Text("      ")
+            t.append_text(file_text(o, st.file, pad=fw))
+            t.append("  ")
             shown = st.state if st.rows_done is None else f"{st.state} at {st.rows_done:,} rows"
             t.append(shown, style=STATE_STYLE.get(st.state, ""))
             for f in st.flags:
@@ -741,7 +785,10 @@ def a_baseline(o: Out) -> None:
     b = BASELINE
     heading(o, "ok", f"recorded {b['recorded'][0]} … {b['recorded'][-1]} as baseline", f"{count(b['steps'], 'step')}")
     for d in b["data_steps"]:
-        t = Text(f"  {d}  ")
+        mig, _, file = d.rpartition("/")
+        t = Text(f"  {mig}/")
+        t.append_text(file_text(o, file))
+        t.append("  ")
         t.append("recorded, not run", style="dim")
         o.out.print(t)
     o.out.print(_indent(Text(b["not_compared"], style="dim"), 2))
@@ -750,7 +797,11 @@ def a_baseline(o: Out) -> None:
 def a_rerecord(o: Out) -> None:
     where(o)
     r = RERECORD
-    heading(o, "ok", f"re-recorded {r['file']}", "nothing was run")
+    mig, _, file = r["file"].rpartition("/")
+    title = Text("re-recorded ", style="bold")
+    title.append(f"{mig}/", style="bold")
+    title.append_text(file_text(o, file))
+    heading(o, "ok", title, "nothing was run")
     t = Text(f"  sha384:{r['old']} ")
     t.append(o.glyph("arrow"), style="dim")
     t.append(f" sha384:{r['new']}")
