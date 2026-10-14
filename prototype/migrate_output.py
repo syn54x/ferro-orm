@@ -620,10 +620,7 @@ def name_block(o: Out, label: str, names: list[str]) -> None:
     verb, _, subject = count(len(names), label).partition(" ")  # "2", "new models"
     verb_word, _, subject = subject.partition(" ")
     style = CHANGE_STYLE[verb_word]
-    t = Text(f"  {verb} ", style="bold")
-    t.append(verb_word, style=f"bold {style}")
-    t.append(f" {subject}", style="bold")
-    o.out.print(t)
+    o.out.print(Text(f"  {verb} {verb_word} {subject}", style="bold"))
     cols = Columns([Text(n, style=style) for n in shown], padding=(0, 2), equal=False, column_first=True)
     o.out.print(_indent(cols, 4))
     if hidden:
