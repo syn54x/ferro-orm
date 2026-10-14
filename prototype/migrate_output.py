@@ -435,7 +435,7 @@ def where(o: Out, *, connected: bool = True, url: str | None = None) -> None:
     if connected:
         t.append(redact(url or DB["url"]), style="dim")
     else:
-        t.append(f"{DB['directory']} · not connected", style="dim")
+        t.append(DB["directory"], style="dim")
     o.out.print(t)
 
 
