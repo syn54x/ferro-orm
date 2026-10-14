@@ -390,7 +390,7 @@ STATE_STYLE = {
 # schema step the generator rendered, one per dialect), portable_sql (a
 # hand-written .up.sql / .down.sql), data (a Python step: a generated
 # backfill or a --data-step), and the snapshot. The suffix stays dim so the
-# eye lands on the step's name.
+# eye lands on the step's name. A down file keeps its kind's hue, dimmed.
 KIND_STYLE = {"ddl": "cyan", "portable_sql": "blue", "data": "magenta", "snapshot": "dim"}
 
 
@@ -410,7 +410,10 @@ def file_text(o: Out, name: str, *, pad: int = 0) -> Text:
     suffix dim."""
     stem, dot, suffix = name.partition(".")
     t = Text()
-    t.append(stem, style=KIND_STYLE[kind_of(name)])
+    style = KIND_STYLE[kind_of(name)]
+    if suffix.startswith("down."):
+        style += " dim"  # same hue, lower weight: a down file is the up file's shadow
+    t.append(stem, style=style)
     if dot:
         t.append(dot + suffix, style="dim")
     if pad > len(name):
