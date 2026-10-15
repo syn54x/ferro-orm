@@ -1,6 +1,15 @@
 # CHANGELOG
 
 
+## v0.24.0 (2026-10-15)
+
+### Features
+
+- **migrate**: Readable, structured ferro migrate output — headed TTY form, plain piped form,
+  database line, applied-at (#647) ([#662](https://github.com/syn54x/ferro-orm/pull/662),
+  [`37680b3`](https://github.com/syn54x/ferro-orm/commit/37680b322aa4298508bd8069b51d132317e3747b))
+
+
 ## v0.23.0 (2026-10-12)
 
 ### Bug Fixes
