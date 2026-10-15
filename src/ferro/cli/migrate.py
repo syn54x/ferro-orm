@@ -247,8 +247,6 @@ def new(
     return exit_codes.OK
 
 
-
-
 @migrate.command
 def check(
     *,

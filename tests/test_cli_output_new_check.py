@@ -103,7 +103,9 @@ def many_models(count: int, *, enums: int = 0, rls: bool = False) -> str:
                 '    __ferro_rls__ = RowSecurity(RowPolicy(column="owner_id", '
                 'setting="app.owner_id"))'
             )
-        lines.append("    id: Annotated[int | None, FerroField(primary_key=True)] = None")
+        lines.append(
+            "    id: Annotated[int | None, FerroField(primary_key=True)] = None"
+        )
         lines.append("    owner_id: int = 0")
         if i < enums:
             lines.append(f"    kind: Kind{i:02d} = Kind{i:02d}.A")
@@ -175,9 +177,7 @@ SCHEMA_FILES_BOTH = (
 )
 
 
-def test_plain_first_migration_lists_every_name_on_its_own_line(
-    project, pkg, capsys
-):
+def test_plain_first_migration_lists_every_name_on_its_own_line(project, pkg, capsys):
     first_migration(project, pkg)
 
     code, out, err = cli(capsys, "new", "initial")
@@ -358,9 +358,20 @@ def test_colour_never_carries_meaning_alone(project, pkg, capsys, monkeypatch):
     text = re.sub(r"\x1b\[[0-9;]*m", "", out)
     lines = text.splitlines()
     files = lines[2 : lines.index("")]
-    roles = ("schema step, up", "schema step, down", "backfill", "data step", "snapshot")
+    roles = (
+        "schema step, up",
+        "schema step, down",
+        "backfill",
+        "data step",
+        "snapshot",
+    )
     assert files and all(any(r in line for r in roles) for line in files), text
-    for heading in ("1 new model", "1 changed model", "1 dropped model", "1 dropped enum type"):
+    for heading in (
+        "1 new model",
+        "1 changed model",
+        "1 dropped model",
+        "1 dropped enum type",
+    ):
         assert f"  {heading}" in lines, text
 
 
@@ -460,9 +471,7 @@ TTY_CHECKOK_OUT = (
     "\x1b[0m\n"
 )
 
-TTY_PROBLEMS_OUT = (
-    "\x1b[1mdefault\x1b[0m · \x1b[2mmigrations\x1b[0m\n"
-)
+TTY_PROBLEMS_OUT = "\x1b[1mdefault\x1b[0m · \x1b[2mmigrations\x1b[0m\n"
 TTY_PROBLEMS_ERR = (
     "\x1b[1;31m✘\x1b[0m \x1b[1;31m2 problems since 0002_add_slug\x1b[0m\n"
     "ungenerated: the models changed since 0002_add_slug and no migration "
