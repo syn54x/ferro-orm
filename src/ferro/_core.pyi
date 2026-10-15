@@ -468,7 +468,7 @@ class LockedDatabase:
     async def execute(
         self, step: StepHandle, on_attempt: Callable[[str], object] | None = None
     ) -> dict[str, Any]:
-        """Run a SQL step from the held bytes; ``{"ok", "ms", "error",
+        """Run a SQL step from the held bytes; ``{"ok", "ms", "error", "hint",
         "message"}``."""
         ...
     async def start(self, step: StepHandle, kind: str) -> None: ...

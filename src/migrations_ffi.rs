@@ -1021,7 +1021,7 @@ impl LockedDatabase {
 
     /// Execute one planned SQL step, up or down, from the held bytes, and
     /// settle its record. `on_attempt(text)` hears each attempt that timed
-    /// out waiting for a lock (ADR-0044). Returns `{"ok", "ms", "error",
+    /// out waiting for a lock (ADR-0044). Returns `{"ok", "ms", "error", "hint",
     /// "message"}`.
     ///
     /// # Errors
