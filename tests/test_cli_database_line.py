@@ -191,6 +191,25 @@ def test_a_secret_query_value_is_masked_on_every_stream(project, pkg, tmp_path, 
     assert SECRET not in err
 
 
+@pytest.mark.sqlite_only
+def test_a_sqlite_path_with_a_space_is_shown_as_configured(
+    project, pkg, tmp_path, capsys
+):
+    """A URL with nothing to mask comes back byte for byte: the space is not
+    escaped to ``%20``."""
+    configure(project, pkg, "sqlite")
+    write_models(project, pkg, AUTHOR)
+    new("create_author")
+    folder = tmp_path / "Jane Doe"
+    folder.mkdir()
+    url = f"sqlite:{folder / 'app.db'}?mode=rwc"
+
+    code, out, _ = cli(capsys, "status", "--url", url)
+
+    assert code == 3
+    assert out.splitlines()[0] == f"default · {url}"
+
+
 def test_a_postgres_url_masks_its_password_and_its_secret_query_values(
     project, pkg, capsys
 ):

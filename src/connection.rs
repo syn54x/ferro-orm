@@ -65,7 +65,8 @@ const MASK: &str = "***";
 /// `url` with its secrets masked by `***`: the userinfo password, and the
 /// value of every query key [`is_secret_query_key`] names. The scheme, user,
 /// host, port, path, every other query pair and the fragment are kept, and a
-/// URL with no secret (a SQLite URL) comes back as the parser reads it.
+/// URL with nothing to mask (a SQLite URL) comes back as given, byte for
+/// byte; only a URL with a secret is rebuilt from what the parser read.
 ///
 /// The URL is read with `url::Url::parse`, the parser sqlx reads connection
 /// URLs with, so the parts masked are the parts the driver connects with.
@@ -87,21 +88,28 @@ pub(crate) fn redact_connection_url(url: &str) -> String {
     if has_authority && at_past_authority {
         return masked_whole(Some(parsed.scheme()));
     }
+    let is_secret_pair = |pair: &str| {
+        url::form_urlencoded::parse(pair.as_bytes())
+            .next()
+            .is_some_and(|(key, _)| is_secret_query_key(&key))
+    };
+    let has_secret_pair = parsed
+        .query()
+        .is_some_and(|query| query.split('&').any(is_secret_pair));
+    if parsed.password().is_none() && !has_secret_pair {
+        // Nothing to mask: shown as given, never re-escaped by the parser.
+        return url.to_string();
+    }
     if parsed.password().is_some() && parsed.set_password(Some(MASK)).is_err() {
         return masked_whole(Some(parsed.scheme()));
     }
     if let Some(query) = parsed.query() {
         let query = query
             .split('&')
-            .map(|pair| {
-                let secret = url::form_urlencoded::parse(pair.as_bytes())
-                    .next()
-                    .is_some_and(|(key, _)| is_secret_query_key(&key));
-                match pair.split_once('=') {
-                    _ if !secret => pair.to_string(),
-                    Some((key, _)) => format!("{key}={MASK}"),
-                    None => format!("{pair}={MASK}"),
-                }
+            .map(|pair| match pair.split_once('=') {
+                _ if !is_secret_pair(pair) => pair.to_string(),
+                Some((key, _)) => format!("{key}={MASK}"),
+                None => format!("{pair}={MASK}"),
             })
             .collect::<Vec<_>>()
             .join("&");
@@ -633,6 +641,21 @@ mod tests {
             redact_connection_url("postgresql://u:pw@h/db?application_name=a%40b&password=s"),
             "postgresql://u:***@h/db?application_name=a%40b&password=***"
         );
+    }
+
+    #[test]
+    fn redact_returns_a_url_with_nothing_to_mask_byte_for_byte() {
+        // The parser would escape these (`Jane%20Doe`, `%C3%A9`); a URL with
+        // nothing to mask is shown as the user configured it.
+        for url in [
+            "sqlite:/Users/Jane Doe/app.db",
+            "sqlite:///Users/Jane Doe/app.db?mode=rwc",
+            "sqlite:/données/café.db",
+            "sqlite::memory:",
+            "postgresql://pinch@db.internal:5432/pinch prod?application_name=Jane Doe",
+        ] {
+            assert_eq!(redact_connection_url(url), url);
+        }
     }
 
     #[test]
