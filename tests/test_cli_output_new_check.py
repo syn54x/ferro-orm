@@ -628,3 +628,37 @@ def test_a_dumb_terminal_gets_the_ascii_glyphs(project, pkg, capsys, tty, monkey
     assert code == 0
     assert lines[1] == "ok Wrote migrations/0001_initial/"
     assert lines[-1] == "    ... and 7 more (--verbose shows them all)"
+
+
+# -- a width nobody can use ---------------------------------------------------------
+
+
+@pytest.mark.parametrize("columns", ["0", "abc"])
+def test_plain_check_prints_every_line_whatever_columns_says(
+    project, pkg, capsys, monkeypatch, columns
+):
+    """The plain form never asks the width whether to print a line: a pipe
+    under ``COLUMNS=0`` prints the same bytes as without it."""
+    monkeypatch.setenv("COLUMNS", columns)
+    two_problems(project, pkg)
+
+    assert cli(capsys, "check") == (3, f"{DIRECTORY_LINE}\n", CHECK_PROBLEMS)
+
+
+@pytest.mark.parametrize("columns", ["0", "abc"])
+def test_tty_new_and_check_print_every_line_whatever_columns_says(
+    project, pkg, capsys, monkeypatch, columns
+):
+    """On a terminal a width below one is no width: the layout falls back to
+    eighty columns, the width Rich assumes when it cannot tell."""
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    monkeypatch.setenv("COLUMNS", columns)
+    write_config(project, pkg)
+    write_models(project, pkg, AUTHOR)
+
+    code, out, err = cli(capsys, "new", "initial")
+
+    assert (code, err) == (0, "")
+    assert "Wrote migrations/0001_initial/" in out
+    assert "1 new model" in out
+    assert cli(capsys, "check") == (0, TTY_CHECKOK_OUT, "")

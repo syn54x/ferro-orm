@@ -242,8 +242,18 @@ class Output:
     def print(self, text: str | Text = "", *, err: bool = False) -> None:
         """Print one line, through :meth:`fit`. No form wraps it: a script
         reads what was said, and a command quoted in a note or a refusal is
-        copied whole; a terminal folds a long line on its own."""
+        copied whole; a terminal folds a long line on its own.
+
+        A stream that is not a terminal gets the line's text written to it
+        as it is, never laid out by Rich: no width (``COLUMNS=0`` included)
+        decides whether a line prints, and a tab or a carriage return in a
+        refusal reaches the pipe unchanged."""
         console = self.err if err else self.out
+        if not console.is_terminal:
+            line = text if isinstance(text, str) else text.plain
+            console.file.write(self.fit(line, err=err) + "\n")
+            console.file.flush()
+            return
         if _ascii_only(console):
             text = (
                 self.fit(text, err=err)
@@ -389,7 +399,17 @@ def _console(file: TextIO) -> Console:
             soft_wrap=True,
             color_system=None,
         )
+    if console.width < 1:
+        # A width below one (``COLUMNS=0``, a pseudo-terminal reporting no
+        # size) is no width at all: Rich would render nothing. Lay out at
+        # the width Rich assumes when it cannot tell.
+        console.width = FALLBACK_WIDTH
     return console
+
+
+FALLBACK_WIDTH = 80
+"""The terminal width the TTY form lays out at when the reported one is
+below one column."""
 
 
 NAME_INDENT = "    "
