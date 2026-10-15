@@ -52,6 +52,19 @@ migrate = App(
     help="Write, apply and check schema migrations.",
 )
 
+Verbose = Annotated[
+    bool,
+    Parameter(
+        help=(
+            "Show every name in a long list of the change summary; a terminal "
+            "otherwise shows the first few."
+        ),
+        negative="",
+    ),
+]
+"""``--verbose`` on ``new`` and ``check``, the verbs that print a change
+summary."""
+
 DIALECTS = ("postgres", "sqlite")
 _DATABASE_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 _ANOTHER = "Another database (separate tables, own migration history)?"
@@ -189,16 +202,7 @@ def new(
             negative="",
         ),
     ] = None,
-    verbose: Annotated[
-        bool,
-        Parameter(
-            help=(
-                "Show every name of a long change list; a terminal otherwise "
-                "shows the first few."
-            ),
-            negative="",
-        ),
-    ] = False,
+    verbose: Verbose = False,
     replace: Annotated[
         str | None,
         Parameter(
@@ -252,16 +256,7 @@ def new(
 @migrate.command
 def check(
     *,
-    verbose: Annotated[
-        bool,
-        Parameter(
-            help=(
-                "Show every name of a long change list; a terminal otherwise "
-                "shows the first few."
-            ),
-            negative="",
-        ),
-    ] = False,
+    verbose: Verbose = False,
     glob: Annotated[Global, Parameter(parse=False)],
 ) -> int:
     """Check, offline, that every model change has a migration and the

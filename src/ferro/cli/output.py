@@ -19,7 +19,7 @@ keeps the one-liners (``ok: models match 0001_initial``), every refusal and
 every ``warning: …`` line on stderr byte for byte. The **TTY form** (a
 terminal, or ``FORCE_COLOR`` set) is headed: a glyph and a bold heading, the
 details indented beneath, name lists in columns sized to the terminal, a long
-change list collapsed behind ``--verbose``. ``NO_COLOR`` strips every escape
+list of the change summary collapsed behind ``--verbose``. ``NO_COLOR`` strips every escape
 and keeps the layout; a dumb terminal gets the ASCII glyphs, and a stream
 that cannot encode Unicode (``PYTHONIOENCODING=ascii``) gets ASCII
 throughout: the glyphs, and ``-``, ``->`` and ``...`` for ``·``, ``→`` and
@@ -54,6 +54,7 @@ if TYPE_CHECKING:
     from ..migrations._drift import DriftReport
     from ..migrations.errors import MigrationRefused
     from ..migrations.generate import CheckReport
+    from ..migrations.layout import Change
     from ..migrations.layout import GeneratedMigration, GeneratedStep
     from ..migrations.report import MigrationStatus, StatusReport
     from ..migrations.rerecord import RerecordReport
@@ -70,6 +71,7 @@ __all__ = [
     "applied_at_short",
     "kind_of_file",
     "print_baseline",
+    "print_changes",
     "print_check",
     "print_done",
     "print_down_plan",
@@ -170,7 +172,8 @@ a line carries (the database line's separator, a rename's arrow, an
 elision); the glyphs fall back through :data:`GLYPHS`."""
 
 LONG_LIST = 12
-"""A change list of up to this many names is shown whole on a TTY."""
+"""A list of the change summary of up to this many names is shown whole on
+a TTY."""
 SHOWN_FIRST = 6
 """A longer one shows its first names, then how many more ``--verbose``
 shows."""
@@ -308,44 +311,47 @@ class Output:
         *,
         verb: str,
         verbose: bool,
+        err: bool = False,
     ) -> None:
-        """One change list: its count heading (``2 new models``), plain
+        """One list of the change summary: its count heading (``2 new models``), plain
         bold, then its names coloured by ``verb``. One name per line in the
         plain form; columns on a TTY, where a list longer than
         :data:`LONG_LIST` shows its first :data:`SHOWN_FIRST` unless
         ``verbose``."""
-        self.print(Text(f"  {label_count}", style="bold"))
+        self.print(Text(f"  {label_count}", style="bold"), err=err)
         style = CHANGE_STYLE[verb]
-        names = [self.fit(name) for name in names]
+        names = [self.fit(name, err=err) for name in names]
         if self.plain:
             for name in names:
-                self.print(Text(f"    {name}", style=style))
+                self.print(Text(f"    {name}", style=style), err=err)
             return
         shown, hidden = list(names), 0
         if not verbose and len(names) > LONG_LIST:
             shown, hidden = shown[:SHOWN_FIRST], len(names) - SHOWN_FIRST
-        for row in _columns(shown, self.width - len(NAME_INDENT)):
+        width = (self.err if err else self.out).width
+        for row in _columns(shown, width - len(NAME_INDENT)):
             line = Text(NAME_INDENT)
-            for at, (name, width) in enumerate(row):
+            for at, (name, column) in enumerate(row):
                 line.append(name, style=style)
                 if at < len(row) - 1:
-                    line.append(" " * (width - len(name) + NAME_GAP))
-            self.print(line)
+                    line.append(" " * (column - len(name) + NAME_GAP))
+            self.print(line, err=err)
         if hidden:
             dots = "..." if self._ascii else "…"
             self.print(
                 Text(
                     f"    {dots} and {hidden} more (--verbose shows them all)",
                     style="dim",
-                )
+                ),
+                err=err,
             )
 
-    def note(self, text: str) -> None:
+    def note(self, text: str, *, err: bool = False) -> None:
         """A note after a result, behind a bullet."""
         line = Text("  ")
         line.append(self.glyph("bullet"), style=GLYPH_STYLE["bullet"])
         line.append(f" {text}")
-        self.print(line)
+        self.print(line, err=err)
 
     def warning(self, text: str) -> None:
         """A warning, on stderr: ``warning: <text>`` in the plain form, the
@@ -470,18 +476,28 @@ def print_new(
 
     if migration.summary or migration.notes:
         out.print()
-    for change in migration.summary.changes:
+    print_changes(out, migration.summary.changes, verbose=verbose)
+    for note in migration.notes:
+        out.note(note)
+    for warning in migration.warnings:
+        out.warning(warning)
+
+
+def print_changes(
+    out: Output, changes: Sequence[Change], *, verbose: bool, err: bool = False
+) -> None:
+    """A change summary laid out from its data, as ``new`` and ``check``
+    print it: each change's count heading (``2 new models``), then its
+    names (:meth:`Output.names`)."""
+    for change in changes:
         noun = f"{change.verb} {change.kind.removesuffix('s')}"
         out.names(
             count(len(change.names), noun),
             change.names,
             verb=change.verb,
             verbose=verbose,
+            err=err,
         )
-    for note in migration.notes:
-        out.note(note)
-    for warning in migration.warnings:
-        out.warning(warning)
 
 
 DATA_ROLE = {"backfill": "backfill", "guard": "guard", "data_step": "data step"}
@@ -549,10 +565,13 @@ def _became(migration: GeneratedMigration, name: str) -> str:
 
 def print_check(out: Output, report: CheckReport, *, verbose: bool) -> None:
     """What ``ferro migrate check`` found: ``ok: models match NNNN`` (the
-    plain one-liner) or a heading on a TTY; else every problem on stderr as
-    ``kind: message``, never collapsed. ``verbose`` is accepted for the
-    shape every list-printing verb shares; no problem is ever hidden."""
-    del verbose
+    plain one-liner) or a heading on a TTY; else every problem on stderr,
+    never dropped. In the plain form each problem is ``kind: message``, the
+    change summary inside the sentence as the core wrote it. On a TTY the
+    problems sit under a red heading, and an ``ungenerated`` problem prints
+    its sentence without the summary, then the summary laid out from its
+    data as ``new`` lays it out (:func:`print_changes`: a long list
+    collapses unless ``verbose``), then its notes."""
     head = report.head or "no migration"
     if report.ok:
         if out.plain:
@@ -560,10 +579,21 @@ def print_check(out: Output, report: CheckReport, *, verbose: bool) -> None:
         else:
             out.heading("ok", "models match", head)
         return
-    out.problems(
-        f"{count(len(report.problems), 'problem')} since {head}",
-        [f"{problem.kind}: {problem.message}" for problem in report.problems],
+    if out.plain:
+        for problem in report.problems:
+            out.print(f"{problem.kind}: {problem.message}", err=True)
+        return
+    out.heading(
+        "error", f"{count(len(report.problems), 'problem')} since {head}", err=True
     )
+    for problem in report.problems:
+        if problem.headline is None:
+            out.print(f"{problem.kind}: {problem.message}", err=True)
+            continue
+        out.print(f"{problem.kind}: {problem.headline}", err=True)
+        print_changes(out, problem.changes, verbose=verbose, err=True)
+        for note in problem.notes:
+            out.note(note, err=True)
 
 
 # -- status ---------------------------------------------------------------------

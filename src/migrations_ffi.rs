@@ -119,8 +119,10 @@ pub fn _generate_migration(
 
 /// Check a migrations directory against the declared modelset, reading files
 /// only. Returns JSON `{"ok": bool, "head": str | null, "problems":
-/// [{"kind": str, "message": str, "changes": [{"verb", "kind", "names"}]}]}`;
-/// `changes` is empty for every problem but `ungenerated`.
+/// [{"kind": str, "message": str, "changes": [{"verb", "kind", "names"}],
+/// "headline": str | null, "notes": [str]}]}`; `changes` and `notes` are
+/// empty and `headline` null for every problem but `ungenerated`, whose
+/// headline is its message without the summary and notes it quotes.
 ///
 /// # Errors
 /// `ValueError` when the target IR or a dialect is malformed.

@@ -338,9 +338,9 @@ def test_verbose_changes_nothing_in_a_pipe(project, pkg, capsys):
 
     assert code == 0
     assert (loud, loud_err) == (quiet, quiet_err)
-    _, check_quiet, _ = cli(capsys, "check")
-    _, check_loud, _ = cli(capsys, "check", "--verbose")
-    assert check_loud == check_quiet
+    _, check_quiet, check_quiet_err = cli(capsys, "check")
+    _, check_loud, check_loud_err = cli(capsys, "check", "--verbose")
+    assert (check_loud, check_loud_err) == (check_quiet, check_quiet_err)
 
 
 def test_colour_never_carries_meaning_alone(project, pkg, capsys, monkeypatch):
@@ -475,8 +475,10 @@ TTY_PROBLEMS_OUT = "\x1b[1mdefault\x1b[0m · \x1b[2mmigrations\x1b[0m\n"
 TTY_PROBLEMS_ERR = (
     "\x1b[1;31m✘\x1b[0m \x1b[1;31m2 problems since 0002_add_slug\x1b[0m\n"
     "ungenerated: the models changed since 0002_add_slug and no migration "
-    "records it (new models: Team); run `ferro migrate new <name>` and "
-    "commit the migration it writes\n"
+    "records it; run `ferro migrate new <name>` and commit the migration it "
+    "writes\n"
+    "\x1b[1m  1 new model\x1b[0m\n"
+    "    \x1b[32mTeam\x1b[0m\n"
     "unwritten_step: 0002_add_slug/02_backfill_author.py:15: not written "
     "yet: the slug for an existing author\n"
 )
@@ -731,3 +733,61 @@ def test_a_refusal_with_no_verb_is_headed_ferro_refused(capsys, monkeypatch):
 
     assert render_refusal(SettingsError("bad")) == exit_codes.REFUSED
     assert capsys.readouterr().err == refused_heading("ferro") + "bad\n"
+
+
+# -- check lays out its change summary on a terminal --------------------------------
+
+TTY_CHECK_THIRTEEN_HEAD = (
+    "\x1b[1;31m✘\x1b[0m \x1b[1;31m1 problem since no migration\x1b[0m\n"
+    "ungenerated: there is no migration yet and no migration records it; run "
+    "`ferro migrate new <name>` and commit the migration it writes\n"
+    "\x1b[1m  13 new models\x1b[0m\n"
+)
+TTY_CHECK_THIRTEEN_ERR = TTY_CHECK_THIRTEEN_HEAD + (
+    "    \x1b[32mItem00\x1b[0m  \x1b[32mItem01\x1b[0m  \x1b[32mItem02\x1b[0m"
+    "  \x1b[32mItem03\x1b[0m  \x1b[32mItem04\x1b[0m  \x1b[32mItem05\x1b[0m\n"
+    "\x1b[2m    … and 7 more (--verbose shows them all)\x1b[0m\n"
+)
+TTY_CHECK_THIRTEEN_VERBOSE_ERR = TTY_CHECK_THIRTEEN_HEAD + (
+    "    \x1b[32mItem00\x1b[0m  \x1b[32mItem02\x1b[0m  \x1b[32mItem04\x1b[0m"
+    "  \x1b[32mItem06\x1b[0m  \x1b[32mItem08\x1b[0m  \x1b[32mItem10\x1b[0m  "
+    "\x1b[32mItem12\x1b[0m\n"
+    "    \x1b[32mItem01\x1b[0m  \x1b[32mItem03\x1b[0m  \x1b[32mItem05\x1b[0m"
+    "  \x1b[32mItem07\x1b[0m  \x1b[32mItem09\x1b[0m  \x1b[32mItem11\x1b[0m\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [
+        pytest.param((), TTY_CHECK_THIRTEEN_ERR, id="collapsed"),
+        pytest.param(("--verbose",), TTY_CHECK_THIRTEEN_VERBOSE_ERR, id="verbose"),
+    ],
+)
+def test_tty_check_lays_out_its_change_summary_as_new_does(
+    project, pkg, capsys, tty, flags, expected
+):
+    """An ``ungenerated`` problem's sentence, then the summary laid out from
+    its data as ``new`` lays it out: a list longer than twelve collapses
+    unless ``--verbose``."""
+    write_config(project, pkg, '["postgres"]')
+    write_models(project, pkg, many_models(13))
+
+    assert cli(capsys, "check", *flags) == (3, TTY_PROBLEMS_OUT, expected)
+
+
+def test_plain_check_keeps_the_summary_sentence_whatever_the_list(
+    project, pkg, capsys
+):
+    write_config(project, pkg, '["postgres"]')
+    write_models(project, pkg, many_models(13))
+    names = ", ".join(f"Item{i:02d}" for i in range(13))
+
+    for flags in ((), ("--verbose",)):
+        assert cli(capsys, "check", *flags) == (
+            3,
+            f"{DIRECTORY_LINE}\n",
+            "ungenerated: there is no migration yet and no migration records it "
+            f"(new models: {names}); run `ferro migrate new <name>` and commit "
+            "the migration it writes\n",
+        )

@@ -91,6 +91,15 @@ class Problem:
     """An ``ungenerated`` problem's change summary, as data: what the
     migration ``ferro migrate new`` would write changes. Empty for every
     other kind."""
+    headline: str | None = None
+    """An ``ungenerated`` problem's message without the summary and notes it
+    quotes (``the models changed since 0001_initial and no migration records
+    it; run ...``), as the core builds it: what a terminal prints above the
+    summary it lays out from :attr:`changes`. ``None`` for every other
+    problem."""
+    notes: tuple[str, ...] = ()
+    """The notes an ``ungenerated`` problem's message quotes after its
+    summary, as ``new`` prints them. Empty for every other problem."""
 
 
 @dataclass(frozen=True)
@@ -521,7 +530,11 @@ async def check(
     )
     problems = [
         Problem(
-            p["kind"], p["message"], tuple(Change.from_json(c) for c in p["changes"])
+            p["kind"],
+            p["message"],
+            tuple(Change.from_json(c) for c in p["changes"]),
+            p["headline"],
+            tuple(p["notes"]),
         )
         for p in raw["problems"]
     ]

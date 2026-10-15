@@ -1198,6 +1198,15 @@ pub struct Problem {
     /// An `ungenerated` problem's change summary, as data: what the
     /// migration `new` would write changes. Empty for every other kind.
     pub changes: Vec<Change>,
+    /// An `ungenerated` problem's message without the summary and notes it
+    /// quotes (`the models changed since 0001_initial and no migration
+    /// records it; run ...`): what a terminal prints above the summary it
+    /// lays out from `changes`. `None` for every other problem.
+    pub headline: Option<String>,
+    /// The notes an `ungenerated` problem's message quotes after its
+    /// summary, one per line, as `new` prints them. Empty for every other
+    /// problem.
+    pub notes: Vec<String>,
 }
 
 /// What `ferro migrate check` reports.
@@ -1216,6 +1225,29 @@ fn problem(err: &DirectoryError) -> Problem {
         kind: err.kind().to_string(),
         message: err.to_string(),
         changes: Vec::new(),
+        headline: None,
+        notes: Vec::new(),
+    }
+}
+
+/// The `ungenerated` problem for a change `since` describes and no
+/// migration records: its message quotes the summary's rendering, then
+/// each note `new` prints after it, one per line, in parentheses; its
+/// headline is the same sentence without them.
+fn ungenerated(since: &str, summary: ChangeSummary, notes: Vec<String>) -> Problem {
+    const FIX: &str = "; run `ferro migrate new <name>` and commit the migration it writes";
+    let said = std::iter::once(&summary.text)
+        .chain(&notes)
+        .filter(|line| !line.is_empty())
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join("\n");
+    Problem {
+        kind: "ungenerated".to_string(),
+        message: format!("{since} and no migration records it ({said}){FIX}"),
+        changes: summary.changes,
+        headline: Some(format!("{since} and no migration records it{FIX}")),
+        notes,
     }
 }
 
@@ -1244,22 +1276,9 @@ pub fn check_migrations(
             match generate(head_snapshot, target, dialects) {
                 Ok(None) => {}
                 Ok(Some(migration)) => {
-                    // The summary's rendering, then each note `new` prints
-                    // after it, one per line.
-                    let said = std::iter::once(&migration.summary.text)
-                        .chain(&migration.notes)
-                        .filter(|line| !line.is_empty())
-                        .map(String::as_str)
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    report.problems.push(Problem {
-                        kind: "ungenerated".to_string(),
-                        message: format!(
-                            "{since} and no migration records it ({said}); run `ferro migrate \
-                             new <name>` and commit the migration it writes"
-                        ),
-                        changes: migration.summary.changes,
-                    });
+                    report
+                        .problems
+                        .push(ungenerated(&since, migration.summary, migration.notes))
                 }
                 Err(err) => report.problems.push(Problem {
                     kind: "ungenerated".to_string(),
@@ -1268,6 +1287,8 @@ pub fn check_migrations(
                          generate it: {err}"
                     ),
                     changes: Vec::new(),
+                    headline: None,
+                    notes: Vec::new(),
                 }),
             }
         }
@@ -4596,6 +4617,46 @@ mod tests {
                 change(ChangeVerb::New, ChangeKind::EnumTypes, &["status"]),
             ]
         );
+        // The message without the summary it quotes: what a terminal prints
+        // above the summary laid out from `changes`.
+        assert_eq!(
+            report.problems[0].headline.as_deref(),
+            Some(
+                "there is no migration yet and no migration records it; run `ferro migrate \
+                 new <name>` and commit the migration it writes"
+            )
+        );
+        assert_eq!(report.problems[0].notes, Vec::<String>::new());
+    }
+
+    #[test]
+    fn an_ungenerated_headline_is_its_message_without_the_summary_and_notes() {
+        let note = "author: if \"name\" became \"full_name\", declare renamed_from=\"name\"";
+        let problem = ungenerated(
+            "the models changed since 0001_initial",
+            ChangeSummary::new(vec![change(ChangeVerb::New, ChangeKind::Models, &["Team"])]),
+            vec![note.to_string()],
+        );
+        assert_eq!(
+            problem.message,
+            format!(
+                "the models changed since 0001_initial and no migration records it (new \
+                 models: Team\n{note}); run `ferro migrate new <name>` and commit the \
+                 migration it writes"
+            )
+        );
+        assert_eq!(
+            problem.headline.as_deref(),
+            Some(
+                "the models changed since 0001_initial and no migration records it; run \
+                 `ferro migrate new <name>` and commit the migration it writes"
+            )
+        );
+        assert_eq!(problem.notes, [note]);
+        assert_eq!(
+            problem.changes,
+            [change(ChangeVerb::New, ChangeKind::Models, &["Team"])]
+        );
     }
 
     #[test]
@@ -4609,6 +4670,8 @@ mod tests {
         for problem in &report.problems {
             assert_ne!(problem.kind, "ungenerated");
             assert_eq!(problem.changes, []);
+            assert_eq!(problem.headline, None);
+            assert_eq!(problem.notes, Vec::<String>::new());
         }
     }
 

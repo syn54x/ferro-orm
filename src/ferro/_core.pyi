@@ -237,9 +237,11 @@ def _check_migrations(directory: str, target_ir_json: str, dialects: list[str]) 
     """Check a migrations directory against the declared modelset, reading files only.
 
     Returns JSON ``{"ok": bool, "head": str | None, "problems": [{"kind",
-    "message", "changes"}]}``: a malformed directory or broken snapshot chain, a
-    DDL step missing a target dialect's rendering, a model change no migration
-    records (whose ``changes`` are the change summary's entries).
+    "message", "changes", "headline", "notes"}]}``: a malformed directory or
+    broken snapshot chain, a DDL step missing a target dialect's rendering, a
+    model change no migration records (whose ``changes`` are the change
+    summary's entries, ``headline`` its message without the summary and notes
+    it quotes, and ``notes`` those notes; ``None`` and empty otherwise).
     """
     ...
 

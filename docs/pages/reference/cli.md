@@ -105,7 +105,7 @@ On a terminal the heading is bold with a green tick, and each file's stem is col
 | `--data-step MODEL` | Also add a Python data step `NN_backfill_<model>.py` over this model (its class name), to be written where it says `todo(...)`. |
 | `--data-only` | Write only the `--data-step`: no DDL, and a full copy of the previous migration's snapshot. |
 | `--no-backfill TABLE.COLUMN` | Replace the generated backfill of this column with a guard step that fails the migration while any row still needs a value. Repeatable. |
-| `--verbose` | Show every name of a long change list. A terminal otherwise folds a list past 12 names. |
+| `--verbose` | Show every name in a long list of the change summary; a terminal otherwise shows the first few (a list past 12 names shows its first 6). |
 | `--replace NNNN_NAME` | Regenerate this migration (or `NNNN`, when one migration carries the number) on top of the newest snapshot below it, carrying its data steps and hand-written SQL steps across byte for byte; the number is kept when free. Only the newest migration can be replaced. See [Two branches, one number](../guide/schema/migrations.md#two-branches-one-number). |
 
 Exit 0 when written (or nothing to write), 1 when refused. A primary-key change is refused, writing nothing:
@@ -123,7 +123,7 @@ Check, offline, that every model change has a migration and the migrations direc
 
 | Flag | What it does |
 | :--- | :--- |
-| `--verbose` | Accepted for symmetry with `new`. `check` never folds anything: each problem is its own `kind: message` line, never a list of names, so the flag changes nothing. |
+| `--verbose` | Show every name in a long list of the change summary; a terminal otherwise shows the first few (a list past 12 names shows its first 6). Piped, the summary stays inside the problem's sentence, so the flag changes nothing there. |
 
 When the models match the newest migration, `check` prints one line and exits 0:
 
@@ -141,7 +141,7 @@ default · migrations
 ungenerated: the models changed since 0001_create_author and no migration records it (changed models: Author); run `ferro migrate new <name>` and commit the migration it writes
 ```
 
-On a terminal the ok line is a green tick and a bold `models match`, with the migration dim. Problems print under a red heading (`✘ 1 problem since 0001_create_author`) on stderr, each sentence unchanged.
+On a terminal the ok line is a green tick and a bold `models match`, with the migration dim. Problems print under a red heading (`✘ 1 problem since 0001_create_author`) on stderr. An `ungenerated` problem prints its sentence without the change summary, then lays the summary out beneath it as `new` does: a count heading per change (`1 changed model`), the names in columns coloured by what happened to them, and a list past 12 names folded to its first 6 unless `--verbose`. Every other problem is its `kind: message` line, unchanged.
 
 ## `ferro migrate up`
 
