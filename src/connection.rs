@@ -655,10 +655,7 @@ mod tests {
             ("mysql://h/db", "mysql://***"),
         ] {
             assert_eq!(redacted_without(url, "s3cret"), shown, "{url}");
-            assert!(
-                !connection_failed_context(url).contains("s3cret"),
-                "{url}"
-            );
+            assert!(!connection_failed_context(url).contains("s3cret"), "{url}");
         }
     }
 

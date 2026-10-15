@@ -9,7 +9,7 @@
 use crate::migrate::parse_dialect;
 use ferro_migrate::directory::MigrationsDir;
 use ferro_migrate::snapshot::{Snapshot, encode_checksum};
-use ferro_migrate::{Dialect, GenerateOptions, check_migrations, generate_with};
+use ferro_migrate::{Dialect, GenerateOptions, check_migrations, generate_with, step_file_role};
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -20,6 +20,7 @@ use std::sync::Arc;
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_generate_migration, m)?)?;
     m.add_function(wrap_pyfunction!(_check_migrations, m)?)?;
+    m.add_function(wrap_pyfunction!(_step_file_role, m)?)?;
     m.add_function(wrap_pyfunction!(_read_migrations_dir, m)?)?;
     m.add_function(wrap_pyfunction!(_load_snapshot, m)?)?;
     m.add_function(wrap_pyfunction!(_open_tracked, m)?)?;
@@ -133,6 +134,25 @@ pub fn _check_migrations(
     let dialects = parse_dialects(&dialects)?;
     let target = parse_target(&target_ir_json)?;
     to_json(&check_migrations(Path::new(&directory), &target, &dialects))
+}
+
+/// What a step file's name says it is, read by the directory reader's own
+/// parse. Returns JSON `{"kind": "ddl" | "data" | "portable_sql",
+/// "direction": "up" | "down", "dialect": "postgres" | "sqlite" |
+/// "portable"}`.
+///
+/// # Errors
+/// `ValueError` when `name` is not a step file's name (`ir.json` included).
+#[pyfunction]
+#[pyo3(name = "_step_file_role")]
+pub fn _step_file_role(name: String) -> PyResult<String> {
+    let role = step_file_role(&name).ok_or_else(|| {
+        PyValueError::new_err(format!(
+            "{name} is not a migration step file: a step file is named \
+             NN_<name>.<up|down>.<postgres|sqlite>.sql, NN_<name>.<up|down>.sql or NN_<name>.py"
+        ))
+    })?;
+    to_json(&role)
 }
 
 /// Read and verify a migrations directory. Returns the JSON of the

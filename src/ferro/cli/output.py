@@ -39,9 +39,10 @@ report's text apart.
 
 from __future__ import annotations
 
+import json
 import sys
 from collections.abc import Iterator, Sequence
-from typing import TYPE_CHECKING, TextIO
+from typing import TYPE_CHECKING, NamedTuple, TextIO
 
 from datetime import UTC, datetime
 
@@ -65,6 +66,7 @@ __all__ = [
     "STATE_GLYPH",
     "STATE_STYLE",
     "Output",
+    "StepFileRole",
     "applied_at_short",
     "kind_of_file",
     "print_baseline",
@@ -81,6 +83,7 @@ __all__ = [
     "print_run_failure",
     "print_status",
     "print_step",
+    "step_file_role",
 ]
 
 GLYPHS: dict[str, tuple[str, str]] = {
@@ -482,13 +485,15 @@ def _file_rows(migration: GeneratedMigration) -> Iterator[tuple[str, str, str, s
 
 
 def _role(step: GeneratedStep, name: str) -> str:
+    """A file's role words: a data step's by the role the generator gave
+    it; a SQL file's by its direction and dialect, as the core reads its
+    name (:func:`step_file_role`)."""
     if step.kind == "data":
         return DATA_ROLE.get(step.role or "data_step", "data step")
-    direction = "down" if ".down." in name else "up"
+    role = step_file_role(name)
     if step.kind == "portable_sql":
-        return f"SQL step, {direction}"
-    dialect = name.rsplit(".", 2)[-2]
-    return f"schema step, {direction} ({dialect})"
+        return f"SQL step, {role.direction}"
+    return f"schema step, {role.direction} ({role.dialect})"
 
 
 def _became(migration: GeneratedMigration, name: str) -> str:
@@ -553,22 +558,35 @@ def applied_at_short(iso: str | None) -> str:
     return datetime.fromisoformat(iso).astimezone(UTC).strftime("%Y-%m-%d %H:%MZ")
 
 
+class StepFileRole(NamedTuple):
+    """What a step file's name says it is, as the core reads it."""
+
+    kind: str
+    """``ddl``, ``data`` or ``portable_sql``."""
+    direction: str
+    """``up`` or ``down``."""
+    dialect: str
+    """``postgres``, ``sqlite`` or ``portable``."""
+
+
+def step_file_role(name: str) -> StepFileRole:
+    """The kind, direction and dialect a step file's name says, read by the
+    directory reader's own parse (``_core._step_file_role``); ``ValueError``
+    for a name that is not a step file's."""
+    from .._core import _step_file_role
+
+    return StepFileRole(**json.loads(_step_file_role(name)))
+
+
 def kind_of_file(name: str) -> str:
-    """A step file's kind (a key of :data:`KIND_STYLE`), read from its
-    suffix the way the generator names it: ``.py`` is ``data``,
-    ``.up.<dialect>.sql`` / ``.down.<dialect>.sql`` is ``ddl``, a bare
-    ``.up.sql`` / ``.down.sql`` is ``portable_sql``, ``ir.json`` is
-    ``snapshot``."""
+    """A step file's kind (a key of :data:`KIND_STYLE`): the core's reading
+    of its name (:func:`step_file_role`), or ``snapshot`` for ``ir.json``;
+    ``ValueError`` for any other name."""
     from ..migrations.layout import SNAPSHOT_FILE
 
     if name == SNAPSHOT_FILE:
         return "snapshot"
-    parts = name.split(".")[1:]
-    if parts == ["py"]:
-        return "data"
-    if len(parts) in (2, 3) and parts[0] in ("up", "down") and parts[-1] == "sql":
-        return "portable_sql" if len(parts) == 2 else "ddl"
-    raise ValueError(f"{name} is not a migration step file")
+    return step_file_role(name).kind
 
 
 def _state_key(word: str) -> str:

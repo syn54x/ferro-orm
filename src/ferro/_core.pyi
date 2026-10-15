@@ -243,6 +243,15 @@ def _check_migrations(directory: str, target_ir_json: str, dialects: list[str]) 
     """
     ...
 
+def _step_file_role(name: str) -> str:
+    """What a step file's name says it is, by the directory reader's own parse.
+
+    Returns JSON ``{"kind": "ddl" | "data" | "portable_sql", "direction":
+    "up" | "down", "dialect": "postgres" | "sqlite" | "portable"}``; raises
+    ``ValueError`` for a name that is not a step file's (``ir.json`` included).
+    """
+    ...
+
 def _read_migrations_dir(directory: str, replacing: str | None = None) -> str:
     """Read and verify a migrations directory; returns the JSON of its migrations.
 
