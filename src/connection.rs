@@ -75,8 +75,18 @@ const MASK: &str = "***";
 /// past a non-empty authority (in its path, query or fragment): that is
 /// where the delimiter of a password holding a raw `/`, `?` or `#` lands
 /// (`u:9/s3cret@h` reads as host `u`, port `9`), and the string cannot tell
-/// the two apart; written as `%40`, the `@` shows.
+/// the two apart; written as `%40`, the `@` shows. A Postgres URL with no
+/// host and an `@` anywhere is masked whole for the same reason, and so is
+/// every URL whose scheme Ferro does not connect to
+/// (`postgresql:/u:s3cret@h/db`, `mysql://…`): the error refusing it quotes
+/// it, and nothing about its parse says where a secret sits.
 pub(crate) fn redact_connection_url(url: &str) -> String {
+    // A scheme Ferro does not connect to is masked whole before anything
+    // else reads it: its parse says nothing about where a secret sits
+    // (`postgresql:/u:s3cret@h/db` parses with no host and no password).
+    let Ok(dialect) = dialect_from_url(url) else {
+        return masked_whole(readable_scheme(url));
+    };
     let Ok(mut parsed) = url::Url::parse(url) else {
         return masked_whole(readable_scheme(url));
     };
@@ -85,7 +95,11 @@ pub(crate) fn redact_connection_url(url: &str) -> String {
         .into_iter()
         .flatten()
         .any(|part| part.contains('@'));
-    if has_authority && at_past_authority {
+    // Past a non-empty authority, an `@` may be a password's delimiter; with
+    // no authority at all, a Postgres URL's `@` anywhere may be one too (a
+    // SQLite URL has no userinfo: its `@` is a path character).
+    let hostless_at = !has_authority && dialect == Dialect::Postgres && url.contains('@');
+    if (has_authority && at_past_authority) || hostless_at {
         return masked_whole(Some(parsed.scheme()));
     }
     let is_secret_pair = |pair: &str| {
@@ -626,6 +640,40 @@ mod tests {
         assert_eq!(
             redacted_without("postgresql://h/db?app=me@x&password=s3cret", "s3cret"),
             "postgresql://***"
+        );
+    }
+
+    #[test]
+    fn redact_masks_a_scheme_ferro_does_not_connect_to_whole() {
+        // `postgresql:/u:...` and `postgresql:u:...` parse with no host, so
+        // no password is read; their scheme is not one Ferro accepts, and
+        // the error text quoting them must never carry the secret.
+        for (url, shown) in [
+            ("postgresql:/u:s3cret@h/db", "postgresql://***"),
+            ("postgresql:u:s3cret@h/db", "postgresql://***"),
+            ("mysql://u:s3cret@h/db", "mysql://***"),
+            ("mysql://h/db", "mysql://***"),
+        ] {
+            assert_eq!(redacted_without(url, "s3cret"), shown, "{url}");
+            assert!(
+                !connection_failed_context(url).contains("s3cret"),
+                "{url}"
+            );
+        }
+    }
+
+    #[test]
+    fn redact_masks_a_hostless_postgres_url_holding_an_at_sign_whole() {
+        for (url, shown) in [
+            ("postgresql:///u:s3cret@h/db", "postgresql://***"),
+            ("postgres:///db?app=x@s3cret", "postgres://***"),
+        ] {
+            assert_eq!(redacted_without(url, "s3cret"), shown, "{url}");
+        }
+        // A host-less postgres URL with no `@` (a Unix socket) is shown as given.
+        assert_eq!(
+            redact_connection_url("postgresql:///db?host=/var/run/postgresql"),
+            "postgresql:///db?host=/var/run/postgresql"
         );
     }
 
