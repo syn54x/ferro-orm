@@ -59,7 +59,7 @@ def test_before_any_run_everything_is_pending_and_nothing_is_created(
     assert run("migrate", "status", "--url", db.url) == 3
 
     assert capsys.readouterr().out == (
-        f"{header(db)}\n\n0001_create_author  pending\n0002_second         pending\n"
+        f"{db.line}\n{header(db)}\n\n0001_create_author  pending\n0002_second         pending\n"
     )
     assert "_ferro_migrations" not in db.tables()
     assert "_ferro_migrations_format" not in db.tables()
@@ -77,7 +77,7 @@ def test_after_up_everything_is_installed_and_steps_expand_on_request(
 
     assert run("migrate", "status", "--url", db.url) == 0
     assert capsys.readouterr().out == (
-        f"{header(db)}\n\n0001_create_author  applied\n0002_second         applied\n"
+        f"{db.line}\n{header(db)}\n\n0001_create_author  applied\n0002_second         applied\n"
     )
 
     # Every step's class after its flags (ADR-0054): the generated table
@@ -87,7 +87,7 @@ def test_after_up_everything_is_installed_and_steps_expand_on_request(
     up_file = f"01_schema.up.{db.backend}.sql"
     width = len(up_file)
     assert capsys.readouterr().out == (
-        f"{header(db)}\n\n"
+        f"{db.line}\n{header(db)}\n\n"
         f"0001_create_author  applied\n"
         f"  {up_file:<{width}}  applied  expand\n"
         f"0002_second         applied\n"
@@ -127,7 +127,7 @@ def test_a_part_applied_migration_expands_and_an_interrupted_step_needs_attentio
     assert run("migrate", "status", "--url", db.url) == 4
     up_file = f"01_schema.up.{db.backend}.sql"
     assert capsys.readouterr().out == (
-        f"{header(db)}\n\n0001_create_author  partial, 0 of 1 steps\n"
+        f"{db.line}\n{header(db)}\n\n0001_create_author  partial, 0 of 1 steps\n"
         f"  {up_file}  interrupted\n"
     )
 
@@ -307,6 +307,7 @@ def test_every_core_step_state_is_read_into_where_the_database_stands():
                 "refusal_needs_attention": False,
             },
             database="default",
+            url="sqlite:app.db",
             dialect="sqlite",
             table="main._ferro_migrations",
         )

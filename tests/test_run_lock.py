@@ -217,7 +217,7 @@ async def test_lock_timeout_zero_from_the_cli_refuses_at_once_without_waiting(
     assert code == 1
     assert "longer than the lock timeout (0s)" in captured.err
     assert WAITING not in captured.err
-    assert captured.out == ""
+    assert captured.out == f"{db.line}\n"
     assert "author" not in db.tables()
 
 

@@ -24,6 +24,7 @@ import pytest
 
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     AUTHOR,
+    DIRECTORY_LINE,
     pkg,
     project,
     run,
@@ -133,7 +134,10 @@ def test_same_parent_regenerates_on_the_other_branch_and_takes_the_next_number(
     up = (migrations(project) / "0003_add_x/01_schema.up.postgres.sql").read_text()
     assert '"bio"' in up and '"nick"' not in up, up
     out = capsys.readouterr().out.splitlines()
-    assert out[0] == "migrations/0003_add_x/  (replaces 0002_add_x, now deleted)"
+    assert out[:2] == [
+        DIRECTORY_LINE,
+        "migrations/0003_add_x/  (replaces 0002_add_x, now deleted)",
+    ]
     assert (
         "  01_schema.up.postgres.sql  moved (was 0002_add_x/01_schema.up.postgres.sql)"
         in out
@@ -195,7 +199,10 @@ def test_a_free_number_is_regenerated_in_place_carrying_a_filled_in_backfill(
     [carried] = (migrations(project) / "0003_add_x").glob("*_backfill_author.py")
     assert carried.read_bytes() == FILLED.encode()
     out = capsys.readouterr().out
-    assert out.splitlines()[0] == "migrations/0003_add_x/  (regenerated in place)"
+    assert out.splitlines()[:2] == [
+        DIRECTORY_LINE,
+        "migrations/0003_add_x/  (regenerated in place)",
+    ]
     assert (
         f"  {carried.name}  carried, review it (was 0003_add_x/{backfill.name}; it "
         "wins over the regenerated step of the same name)"
@@ -577,6 +584,9 @@ def test_the_guide_quotes_what_check_and_replace_print(project, pkg, capsys):
     )
 
     assert run("migrate", "new", "add_x", "--replace", "0002_add_x") == 0
-    assert capsys.readouterr().out.splitlines() == shifted(
+    # The guide quotes what follows the database line (#654 adds it there).
+    out = capsys.readouterr().out.splitlines()
+    assert out[0] == DIRECTORY_LINE
+    assert out[1:] == shifted(
         _guide_blocks("ferro migrate new add_x --replace 0007_add_x")
     )

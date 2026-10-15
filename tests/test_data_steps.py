@@ -39,6 +39,7 @@ from ferro.migrations.steps import (
 from ferro.registry import REGISTRY
 from ferro.settings import FerroSettings
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
+    DIRECTORY_LINE,
     pkg,
     project,
     run,
@@ -134,8 +135,9 @@ def test_an_atomic_step_updates_rows_through_its_historical_model(
     assert run("migrate", "up", "--url", db.url) == 0
 
     out = capsys.readouterr().out.splitlines()
-    assert out[0].startswith("0002_add_slug  01_schema           applied (")
-    assert out[1].startswith("0002_add_slug  02_backfill_author  applied (")
+    assert out[0] == db.line
+    assert out[1].startswith("0002_add_slug  01_schema           applied (")
+    assert out[2].startswith("0002_add_slug  02_backfill_author  applied (")
     assert db.rows("SELECT name, slug FROM author ORDER BY id") == [
         ("Ann Lee", "ann-lee"),
         ("Bo", "bo"),
@@ -276,7 +278,8 @@ def test_a_column_the_migration_drops_is_dropped_by_a_contract_after_the_step(
     assert run("migrate", "up", "--url", db.url) == 0, capsys.readouterr().err
 
     out = capsys.readouterr().out.splitlines()
-    assert [line.split()[1] for line in out[:3]] == [
+    assert out[0] == db.line
+    assert [line.split()[1] for line in out[1:4]] == [
         "01_schema",
         "02_backfill_author",
         "03_contract",
@@ -543,7 +546,9 @@ def test_data_only_writes_the_step_and_a_full_copy_of_the_parent_snapshot(
     )
     capsys.readouterr()
     assert run("migrate", "check") == 0
-    assert capsys.readouterr().out == "ok: models match 0002_backfill_slugs\n"
+    assert capsys.readouterr().out == (
+        f"{DIRECTORY_LINE}\nok: models match 0002_backfill_slugs\n"
+    )
 
 
 def test_a_project_template_overrides_the_skeleton(project, pkg, db):

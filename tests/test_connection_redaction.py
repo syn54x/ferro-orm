@@ -18,8 +18,8 @@ async def test_connection_error_redacts_secret_query_params(tmp_path):
     message = str(excinfo.value)
     assert "supersecret" not in message
     assert "topsecret" not in message
-    assert "password=<redacted>" in message
-    assert "apikey=<redacted>" in message
+    assert "password=***" in message
+    assert "apikey=***" in message
 
 
 @pytest.mark.asyncio
@@ -34,5 +34,5 @@ async def test_connection_error_redacts_postgres_userinfo_and_tokens():
     message = str(excinfo.value)
     assert "supersecret" not in message
     assert "topsecret" not in message
-    assert "app_user:<redacted>@" in message
-    assert "access_token=<redacted>" in message
+    assert "app_user:***@" in message
+    assert "access_token=***" in message

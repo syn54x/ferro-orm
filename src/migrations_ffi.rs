@@ -629,6 +629,12 @@ impl TrackedDatabase {
         dialect_name(self.inner.dialect())
     }
 
+    /// The URL the connection was opened with, its secrets masked by `***`.
+    #[getter]
+    fn url(&self) -> &str {
+        self.inner.shown_url()
+    }
+
     /// `<schema>._ferro_migrations`.
     #[getter]
     fn tracking_table(&self) -> &str {
@@ -918,6 +924,12 @@ impl LockedDatabase {
     #[getter]
     fn dialect(&self) -> &'static str {
         dialect_name(self.inner.tracked().dialect())
+    }
+
+    /// The URL the connection was opened with, its secrets masked by `***`.
+    #[getter]
+    fn url(&self) -> &str {
+        self.inner.tracked().shown_url()
     }
 
     /// `<schema>._ferro_migrations`.

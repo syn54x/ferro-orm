@@ -39,7 +39,9 @@ def main() -> None:
         assert "ungenerated" in app.ferro("migrate", "check", exit_code=3)
         written = app.ferro("migrate", "new", "author_nickname")
         assert "02_idx_author_nickname.up.postgres.sql" in written
-        assert app.ferro("migrate", "check").startswith("ok: models match")
+        assert app.ferro("migrate", "check").splitlines()[-1].startswith(
+            "ok: models match"
+        )
         app.ferro("migrate", "up")
         assert "no drift against 0002_author_nickname" in app.ferro("migrate", "drift")
         app.ferro("migrate", "status")

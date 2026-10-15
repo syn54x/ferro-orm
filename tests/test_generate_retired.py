@@ -43,6 +43,7 @@ from tests.test_migrate_down import (  # noqa: F401 - fixtures
 )
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     AUTHOR,
+    DIRECTORY_LINE,
     listing,
     pkg,
     project,
@@ -160,7 +161,9 @@ def test_retiring_an_optional_column_is_no_schema_change_and_check_is_clean(
 
     assert run("migrate", "new", "retire_bio") == 0
 
-    assert capsys.readouterr().out == "no schema change: nothing written\n"
+    assert capsys.readouterr().out == (
+        f"{DIRECTORY_LINE}\nno schema change: nothing written\n"
+    )
     assert listing(project / "migrations") == before
     assert run("migrate", "check") == 0
 

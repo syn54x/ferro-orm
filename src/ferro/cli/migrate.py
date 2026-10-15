@@ -36,6 +36,7 @@ from ..settings import (
     DEFAULT_DIRECTORY,
     FERRO_TOML,
     PYPROJECT_TOML,
+    DatabaseSettings,
     FerroSettings,
     SettingsError,
 )
@@ -45,7 +46,7 @@ if TYPE_CHECKING:
     from ..migrations.errors import MigrationRefused
     from ..migrations.layout import GeneratedMigration
 
-__all__ = ["migrate"]
+__all__ = ["database_line", "migrate"]
 
 migrate = App(
     name="migrate",
@@ -214,6 +215,7 @@ def new(
     _refuse_url(glob, "new")
     settings = FerroSettings(config=glob.config)
     database = settings.database(glob.database)
+    _say_directory(database)
     migration = prepare(
         database,
         name,
@@ -299,6 +301,7 @@ def check(*, glob: Annotated[Global, Parameter(parse=False)]) -> int:
 
     _refuse_url(glob, "check")
     settings = FerroSettings(config=glob.config)
+    _say_directory(settings.database(glob.database))
     report = asyncio.run(run_check(settings, glob.database))
     if report.ok:
         head = report.head or "no migration"
@@ -503,7 +506,8 @@ def status(
     from ..migrations.runner import status as run_status
 
     settings = FerroSettings(config=glob.config)
-    report = asyncio.run(run_status(settings, glob.database, url=_url(settings, glob)))
+    url = _url(settings, glob, said=not json_)
+    report = asyncio.run(run_status(settings, glob.database, url=url))
     print(report.to_json() if json_ else report.render(steps=steps))
     return report.exit_code
 
@@ -678,10 +682,40 @@ def rerecord(
     return exit_codes.OK
 
 
-def _url(settings: FerroSettings, glob: Global) -> str:
+def database_line(name: str, where: str) -> str:
+    """The first line every ``ferro migrate`` verb prints, naming what it
+    touches: ``main · postgresql://pinch:***@db.internal:5432/pinch_prod``
+    (``where`` is the masked URL), or ``main · migrations/main`` for ``new``
+    and ``check``, which never connect (``where`` is the directory)."""
+    return f"{name} · {where}"
+
+
+def _say(line: str) -> None:
+    print(line, flush=True)
+
+
+def _url(settings: FerroSettings, glob: Global, *, said: bool = True) -> str:
     """The URL a verb works on: ``--url``, else the database's ``url_env``.
-    The CLI always opens a private connection, closed when the verb ends."""
-    return settings.database(glob.database).url_for(glob.url)
+    The CLI always opens a private connection, closed when the verb ends.
+
+    Once the URL is resolved and its scheme accepted (an unset ``url_env``
+    or an unsupported scheme is refused before anything reaches stdout),
+    the database line names it with its secrets masked, unless ``said`` is
+    false (``status --json``, whose stdout is the document alone)."""
+    from .. import _core
+
+    database = settings.database(glob.database)
+    url = database.url_for(glob.url)
+    shown = _core._redact_url(url)
+    if said:
+        _say(database_line(database.name, shown))
+    return url
+
+
+def _say_directory(database: DatabaseSettings) -> None:
+    """``new`` and ``check``'s database line: they never connect, so it
+    names the migrations directory, relative to the working directory."""
+    _say(database_line(database.name, _shown(database.directory, Path.cwd().resolve())))
 
 
 def _refuse_url(glob: Global, verb: str) -> None:

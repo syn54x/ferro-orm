@@ -179,7 +179,7 @@ def test_a_hand_set_default_is_drift_with_its_own_line_and_exit_4(
     code, out, _ = cli(capsys, "drift", "--url", db.url)
 
     assert code == 4
-    assert out == f"drift against 0001_create_author:\n  {SLUG_LINE}\n"
+    assert out == f"{db.line}\ndrift against 0001_create_author:\n  {SLUG_LINE}\n"
     report = asyncio.run(ferro.migrations.drift(url=db.url))
     assert report.lines == [SLUG_LINE]
     assert report.operations[0]["kind"] == "DropDefault"
@@ -200,6 +200,7 @@ def test_baseline_refuses_a_hand_set_default_and_records_nothing(
 
     assert code == 4
     assert out == (
+        f"{db.line}\n"
         f"drift against 0001_create_author:\n  {SLUG_LINE}\nnothing was recorded\n"
     )
     assert "_ferro_migrations" not in db.tables() or db.records() == []
@@ -297,7 +298,7 @@ def test_a_fresh_tables_key_sequence_is_never_drift_where_up_built_it(
     capsys.readouterr()
     assert cli(capsys, "drift", "--url", db.url)[:2] == (
         0,
-        "no drift against 0001_create_author\n",
+        f"{db.line}\nno drift against 0001_create_author\n",
     )
 
 
@@ -364,7 +365,9 @@ def test_sqlites_kept_literal_is_never_drift_and_baseline_records(
 
     assert code == 0, out
     assert out == (
-        "recorded 0001_create_author as baseline (1 step)\n" + NOT_COMPARED + "\n"
+        f"{db.line}\nrecorded 0001_create_author as baseline (1 step)\n"
+        + NOT_COMPARED
+        + "\n"
     )
 
 
@@ -395,7 +398,10 @@ def test_sqlite_an_expression_or_a_nullable_columns_default_is_drift(
     capsys.readouterr()
     code, out, _ = cli(capsys, "baseline", "--url", db.url)
     assert code == 4
-    assert out == f"drift against 0001_create_author:\n  {line}\nnothing was recorded\n"
+    assert out == (
+        f"{db.line}\ndrift against 0001_create_author:\n  {line}\n"
+        "nothing was recorded\n"
+    )
 
     before = db.rows('PRAGMA table_info("author")')
     report = passed(db.url, warned=True, updates=True, destructive=True)
@@ -417,5 +423,9 @@ def test_a_successful_baseline_no_longer_says_defaults_were_not_compared(
     code, out, _ = cli(capsys, "baseline", "--url", db.url)
 
     assert code == 0
-    assert out == "recorded 0001_create_author as baseline (1 step)\n" + NOT_COMPARED + "\n"
+    assert out == (
+        f"{db.line}\nrecorded 0001_create_author as baseline (1 step)\n"
+        + NOT_COMPARED
+        + "\n"
+    )
     assert "column defaults" not in out

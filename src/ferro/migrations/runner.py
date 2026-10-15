@@ -834,6 +834,7 @@ async def status_of(
     return StatusReport.from_core(
         tracked.status(keys, lock_held=held),
         database=database.name,
+        url=tracked.url,
         dialect=tracked.dialect,
         table=tracked.tracking_table,
         rows_done={
@@ -904,6 +905,7 @@ async def require_applied(
         report = StatusReport.from_core(
             tracked.status(),
             database=target.database.name,
+            url=tracked.url,
             dialect=tracked.dialect,
             table=tracked.tracking_table,
         )
