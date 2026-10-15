@@ -4,8 +4,9 @@ ADR-0043, ADR-0044).
 
 ```text
 $ ferro migrate drift
-drift against 0002_add_teams:
-  team.name column is missing
+default · sqlite:app.db
+xx 1 difference against 0002_add_teams
+  - team.name column is missing
 ```
 
 Every test builds a real project under ``tmp_path``, applies its migrations
@@ -264,7 +265,9 @@ def test_a_column_dropped_by_hand_is_one_line_and_exit_4(project, pkg, db, capsy
 
     code, out, _ = drift_cli(db, capsys)
     assert code == 4
-    assert out == f"{db.line}\ndrift against {HEAD}:\n  team.name column is missing\n"
+    assert out == (
+        f"{db.line}\nxx 1 difference against {HEAD}\n  - team.name column is missing\n"
+    )
     report = drift_api(db)
     assert not report.clean
     assert report.against == HEAD
@@ -402,7 +405,8 @@ def test_a_primary_key_moved_by_hand_is_one_line(project, pkg, db, capsys):
     code, out, _ = drift_cli(db, capsys)
     assert code == 4
     assert out == (
-        f"{db.line}\ndrift against {HEAD}:\n  team primary key is (name), snapshot says (id)\n"
+        f"{db.line}\nxx 1 difference against {HEAD}\n"
+        "  - team primary key is (name), snapshot says (id)\n"
     )
     assert [op["kind"] for op in drift_api(db).operations] == ["ChangePrimaryKey"]
 
@@ -475,7 +479,9 @@ def test_a_foreign_index_is_not_reported_and_a_ferro_named_extra_one_is(
     db.execute('CREATE INDEX "idx_team_name" ON "team" ("name")')
     code, out, _ = drift_cli(db, capsys)
     assert code == 4
-    assert out == f"{db.line}\ndrift against {HEAD}:\n  idx_team_name index is extra\n"
+    assert out == (
+        f"{db.line}\nxx 1 difference against {HEAD}\n  - idx_team_name index is extra\n"
+    )
 
 
 # -- the refusals ---------------------------------------------------------------------
@@ -757,7 +763,11 @@ def test_against_one_snapshot_gives_the_lines_drift_prints(project, pkg, db, cap
         "team.name column is missing",
     ]
     code, out, _ = drift_cli(db, capsys)
-    assert (code, out) == (4, f"{db.line}\n" + report.render() + "\n")
+    assert (code, out) == (
+        4,
+        f"{db.line}\nxx 2 differences against {HEAD}\n"
+        + "".join(f"  - {line}\n" for line in report.lines),
+    )
 
 
 def test_against_an_earlier_snapshot_reads_only_its_tables(project, pkg, db, capsys):

@@ -477,11 +477,16 @@ def status(
     import asyncio
 
     from ..migrations.runner import status as run_status
+    from .output import Output, print_status
 
     settings = FerroSettings(config=glob.config)
-    url = _url(settings, glob, said=not json_)
+    out = Output.for_streams(out=sys.stdout, err=sys.stderr)
+    url = _url(settings, glob, out=out, said=not json_)
     report = asyncio.run(run_status(settings, glob.database, url=url))
-    print(report.to_json() if json_ else report.render(steps=steps))
+    if json_:
+        print(report.to_json())
+    else:
+        print_status(out, report, steps=steps)
     return report.exit_code
 
 
@@ -498,15 +503,14 @@ def drift(*, glob: Annotated[Global, Parameter(parse=False)]) -> int:
     import asyncio
 
     from ..migrations import drift as run_drift
+    from .output import Output, print_drift
 
     settings = FerroSettings(config=glob.config)
-    report = asyncio.run(run_drift(settings, glob.database, url=_url(settings, glob)))
-    for warning in report.warnings:
-        print(f"warning: {warning}", file=sys.stderr)
-    if report.refusal is not None:
-        print(report.refusal, file=sys.stderr)
-        return exit_codes.NEEDS_ATTENTION
-    print(report.render())
+    out = Output.for_streams(out=sys.stdout, err=sys.stderr)
+    report = asyncio.run(
+        run_drift(settings, glob.database, url=_url(settings, glob, out=out))
+    )
+    print_drift(out, report)
     return exit_codes.OK if report.clean else exit_codes.NEEDS_ATTENTION
 
 
@@ -667,20 +671,30 @@ def _say(line: str) -> None:
     print(line, flush=True)
 
 
-def _url(settings: FerroSettings, glob: Global, *, said: bool = True) -> str:
+def _url(
+    settings: FerroSettings,
+    glob: Global,
+    *,
+    out: Output | None = None,
+    said: bool = True,
+) -> str:
     """The URL a verb works on: ``--url``, else the database's ``url_env``.
     The CLI always opens a private connection, closed when the verb ends.
 
     Once the URL is resolved and its scheme accepted (an unset ``url_env``
     or an unsupported scheme is refused before anything reaches stdout),
-    the database line names it with its secrets masked, unless ``said`` is
-    false (``status --json``, whose stdout is the document alone)."""
+    the database line names it with its secrets masked (through ``out``,
+    for a verb that prints through the presentation module), unless
+    ``said`` is false (``status --json``, whose stdout is the document
+    alone)."""
     from .. import _core
 
     database = settings.database(glob.database)
     url = database.url_for(glob.url)
     shown = _core._redact_url(url)
-    if said:
+    if said and out is not None:
+        out.database_line(database.name, shown)
+    elif said:
         _say(database_line(database.name, shown))
     return url
 

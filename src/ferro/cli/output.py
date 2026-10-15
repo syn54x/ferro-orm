@@ -20,15 +20,17 @@ every ``warning: …`` line on stderr byte for byte. The **TTY form** (a
 terminal, or ``FORCE_COLOR`` set) is headed: a glyph and a bold heading, the
 details indented beneath, name lists in columns sized to the terminal, a long
 change list collapsed behind ``--verbose``. ``NO_COLOR`` strips every escape
-and keeps the layout; a non-UTF-8 or dumb terminal gets the ASCII glyphs;
-``COLUMNS`` sets the width.
+and keeps the layout; a dumb terminal gets the ASCII glyphs, and a stream
+that cannot encode Unicode (``PYTHONIOENCODING=ascii``) gets ASCII
+throughout: the glyphs, and ``-``, ``->`` and ``...`` for ``·``, ``→`` and
+``…`` (:data:`ASCII_FORMS`); ``COLUMNS`` sets the width.
 
 Words carry every meaning in both forms (a file's role, a list's count
 heading, a problem's kind); colour only reinforces them. The tables below
 are the one glyph table and the one colour table every verb reads.
 
 The module reads report objects (:class:`GeneratedMigration`,
-:class:`CheckReport`) and prints; it never changes them and never takes a
+:class:`CheckReport`, :class:`StatusReport`, :class:`DriftReport`) and prints; it never changes them and never takes a
 report's text apart.
 """
 
@@ -38,21 +40,30 @@ import sys
 from collections.abc import Iterator, Sequence
 from typing import TYPE_CHECKING, TextIO
 
+from datetime import UTC, datetime
+
 from rich.console import Console
 from rich.text import Text
 
 if TYPE_CHECKING:
+    from ..migrations._drift import DriftReport
     from ..migrations.generate import CheckReport
     from ..migrations.layout import GeneratedMigration, GeneratedStep
+    from ..migrations.report import MigrationStatus, StatusReport
 
 __all__ = [
     "CHANGE_STYLE",
     "GLYPHS",
     "KIND_STYLE",
+    "STATE_GLYPH",
     "STATE_STYLE",
     "Output",
+    "applied_at_short",
+    "kind_of_file",
     "print_check",
+    "print_drift",
     "print_new",
+    "print_status",
 ]
 
 GLYPHS: dict[str, tuple[str, str]] = {
@@ -110,9 +121,33 @@ STATE_STYLE = {
     "running": "cyan",
     "reverting": "cyan",
     "nothing to reverse": "dim",
+    "partial": "yellow",
 }
 """A migration's or a step's state word, as ``status``, ``up`` and ``down``
-print it."""
+print it. ``partial`` stands for a migration's ``partial, X of N steps``,
+the one state word that carries numbers."""
+
+STATE_GLYPH = {
+    "applied": "ok",
+    "applied (baseline)": "ok",
+    "reverted": "ok",
+    "pending": "pending",
+    "failed": "error",
+    "interrupted": "error",
+    "applied (different checksum)": "error",
+    "applied, not in the directory": "error",
+    "running": "partial",
+    "reverting": "partial",
+    "nothing to reverse": "ok",
+    "partial": "partial",
+}
+"""The glyph (a key of :data:`GLYPHS`) a row opens with, by the same state
+words as :data:`STATE_STYLE`."""
+
+ASCII_FORMS = {"·": "-", "→": "->", "…": "..."}
+"""What a stream that cannot encode Unicode prints for each such character
+a line carries (the database line's separator, a rename's arrow, an
+elision); the glyphs fall back through :data:`GLYPHS`."""
 
 LONG_LIST = 12
 """A change list of up to this many names is shown whole on a TTY."""
@@ -134,7 +169,7 @@ class Output:
         self.plain: bool = not out.is_terminal
         """The plain form: stdout is not a terminal."""
         self.width: int = out.width
-        self._ascii = self.plain or out.options.ascii_only or out.is_dumb_terminal
+        self._ascii = self.plain or _ascii_only(out) or out.is_dumb_terminal
 
     @classmethod
     def for_streams(
@@ -170,11 +205,45 @@ class Output:
 
     # -- lines -------------------------------------------------------------------
 
+    def fit(self, text: str, *, err: bool = False) -> str:
+        """``text`` as the stream can carry it: itself on a stream that
+        encodes Unicode; else each :data:`ASCII_FORMS` character replaced,
+        and any other character the stream cannot encode (a name's accent)
+        written as its backslash escape (``\\xe9``), so nothing is lost and
+        nothing raises."""
+        console = self.err if err else self.out
+        if not _ascii_only(console):
+            return text
+        for char, form in ASCII_FORMS.items():
+            text = text.replace(char, form)
+        encoding = console.encoding
+        return text.encode(encoding, "backslashreplace").decode(encoding)
+
     def print(self, text: str | Text = "", *, err: bool = False) -> None:
-        """Print one line. No form wraps it: a script reads what was said,
-        and a command quoted in a note or a refusal is copied whole; a
-        terminal folds a long line on its own."""
-        (self.err if err else self.out).print(text)
+        """Print one line, through :meth:`fit`. No form wraps it: a script
+        reads what was said, and a command quoted in a note or a refusal is
+        copied whole; a terminal folds a long line on its own."""
+        console = self.err if err else self.out
+        if _ascii_only(console):
+            text = (
+                self.fit(text, err=err)
+                if isinstance(text, str)
+                else self._fit_text(text, err=err)
+            )
+        console.print(text)
+
+    def _fit_text(self, text: Text, *, err: bool) -> Text:
+        """:meth:`fit` over a styled line, each run keeping its styles."""
+        cuts = sorted(
+            {span.start for span in text.spans} | {span.end for span in text.spans}
+        )
+        fitted = Text(style=text.style, end=text.end)
+        for piece in text.divide(cuts):
+            part = Text(self.fit(piece.plain, err=err))
+            for span in piece.spans:
+                part.stylize(span.style)
+            fitted.append_text(part)
+        return fitted
 
     def heading(
         self, key: str, title: str | Text, where: str = "", *, err: bool = False
@@ -217,6 +286,7 @@ class Output:
         ``verbose``."""
         self.print(Text(f"  {label_count}", style="bold"))
         style = CHANGE_STYLE[verb]
+        names = [self.fit(name) for name in names]
         if self.plain:
             for name in names:
                 self.print(Text(f"    {name}", style=style))
@@ -266,6 +336,12 @@ class Output:
             self.heading("error", heading, err=True)
         for line in lines:
             self.print(line, err=True)
+
+
+def _ascii_only(console: Console) -> bool:
+    """The one answer to "ASCII only?": the console's stream cannot encode
+    Unicode, by the reading Rich itself uses for its box characters."""
+    return console.options.ascii_only
 
 
 def _console(file: TextIO) -> Console:
@@ -440,3 +516,169 @@ def print_check(out: Output, report: CheckReport, *, verbose: bool) -> None:
         f"{count(len(report.problems), 'problem')} since {head}",
         [f"{problem.kind}: {problem.message}" for problem in report.problems],
     )
+
+
+# -- status ---------------------------------------------------------------------
+
+
+def applied_at_short(iso: str | None) -> str:
+    """A stored finish time to the minute in UTC with an explicit ``Z``
+    (``2026-10-14T09:40:12.123Z`` is ``2026-10-14 09:40Z``); ``""`` for
+    ``None``."""
+    if iso is None:
+        return ""
+    return datetime.fromisoformat(iso).astimezone(UTC).strftime("%Y-%m-%d %H:%MZ")
+
+
+def kind_of_file(name: str) -> str:
+    """A step file's kind (a key of :data:`KIND_STYLE`), read from its
+    suffix the way the generator names it: ``.py`` is ``data``,
+    ``.up.<dialect>.sql`` / ``.down.<dialect>.sql`` is ``ddl``, a bare
+    ``.up.sql`` / ``.down.sql`` is ``portable_sql``, ``ir.json`` is
+    ``snapshot``."""
+    from ..migrations.layout import SNAPSHOT_FILE
+
+    if name == SNAPSHOT_FILE:
+        return "snapshot"
+    parts = name.split(".")[1:]
+    if parts == ["py"]:
+        return "data"
+    if len(parts) in (2, 3) and parts[0] in ("up", "down") and parts[-1] == "sql":
+        return "portable_sql" if len(parts) == 2 else "ddl"
+    raise ValueError(f"{name} is not a migration step file")
+
+
+def _state_key(word: str) -> str:
+    """The key of :data:`STATE_STYLE` and :data:`STATE_GLYPH` for a state
+    word: itself, or ``partial`` for ``partial, X of N steps``."""
+    return word if word in STATE_STYLE else "partial"
+
+
+def _status_title(report: StatusReport) -> tuple[str, str]:
+    """The heading's glyph key and its counts (``1 failed · 2 pending · 1
+    ahead``): the migrations with a step in each unfinished state, with an
+    edited applied step, with a step still to apply, and the applied
+    migrations the directory lacks. Everything applied: ``N applied``."""
+
+    def having(state: str) -> int:
+        return sum(
+            1 for m in report.migrations if any(s.state == state for s in m.steps)
+        )
+
+    counts = [
+        (having("failed"), "failed"),
+        (having("interrupted"), "interrupted"),
+        (having("reverting"), "reverting"),
+        (having("running"), "running"),
+        (having("applied (different checksum)"), "edited"),
+        (sum(1 for m in report.migrations if m.pending), "pending"),
+        (len(report.ahead), "ahead"),
+    ]
+    title = " · ".join(f"{n} {word}" for n, word in counts if n)
+    if report.needs_attention:
+        return "warning", title
+    if report.pending:
+        return "pending", title
+    return "ok", f"{len(report.migrations)} applied"
+
+
+def print_status(out: Output, report: StatusReport, *, steps: bool) -> None:
+    """Where the database stands: a heading counting what is failed,
+    pending and ahead beside the tracking table; one row per migration
+    (glyph, name, state word, ``applied_at``), never collapsed; the steps
+    of a migration that needs attention, or of every one with ``steps``;
+    the migrations applied but not in the directory; and what ``up`` would
+    refuse with, under ``needs attention``. All of it on stdout: the
+    refusal is part of the report."""
+    key, title = _status_title(report)
+    out.heading(key, title, report.table)
+    names = [m.name for m in report.migrations] + report.ahead
+    width = max((len(name) for name in names), default=0)
+    for migration in report.migrations:
+        _status_row(out, migration.name, migration.state, width, migration.applied_at)
+        if steps or migration.expands:
+            _status_steps(out, migration, steps=steps)
+    for name in report.ahead:
+        _status_row(out, name, "applied, not in the directory", width, None)
+    if report.refusal is not None:
+        out.print()
+        out.heading(
+            "error" if report.refusal_needs_attention else "warning",
+            "needs attention",
+        )
+        for line in report.refusal.splitlines():
+            out.print(f"  {line}")
+
+
+def _status_row(
+    out: Output, name: str, state: str, width: int, applied_at: str | None
+) -> None:
+    key = _state_key(state)
+    glyph = STATE_GLYPH[key]
+    line = Text("  ")
+    line.append(out.glyph(glyph), style=GLYPH_STYLE[glyph])
+    line.append(f" {name:<{width}}  ")
+    line.append(state, style=STATE_STYLE[key])
+    when = applied_at_short(applied_at)
+    if when:
+        line.append(f"  {when}", style="dim")
+    out.print(line)
+
+
+def _status_steps(out: Output, migration: MigrationStatus, *, steps: bool) -> None:
+    """A migration's steps, six spaces in: each file coloured by its kind,
+    its state, ``[flag]``s and (with ``--steps``) its class; beneath, an
+    edited step's two checksums or an unfinished step's error, where
+    :meth:`StatusReport.render` shows them."""
+    width = max((len(step.file) for step in migration.steps), default=0)
+    for step in migration.steps:
+        line = Text("      ")
+        line.append_text(out.file_name(step.file, kind=kind_of_file(step.file)))
+        line.append(" " * (width - len(step.file) + 2))
+        line.append(step.shown, style=STATE_STYLE[_state_key(step.state)])
+        for flag in step.flags:
+            line.append(f"  [{flag}]", style="bold yellow")
+        if steps:
+            line.append(f"  {step.step_class}", style="dim")
+        out.print(line)
+        if step.state == "applied (different checksum)":
+            for label, checksum in (
+                ("applied", step.applied_checksum),
+                ("on disk", step.on_disk_checksum),
+            ):
+                out.print(Text(f"        {label}  sha384:{checksum}", style="dim"))
+        elif step.error and step.state in ("failed", "running", "reverting"):
+            for error in step.error.splitlines():
+                out.print(Text(f"        {error}", style="red"))
+
+
+# -- drift ----------------------------------------------------------------------
+
+
+def print_drift(out: Output, report: DriftReport) -> None:
+    """What ``ferro migrate drift`` found. Its warnings first, on stderr;
+    then, when it refused, the refusal sentence on stderr as it is; else
+    ``no drift against NNNN`` (the plain one-liner, an ok heading on a TTY)
+    or ``N differences against NNNN`` and one bullet per finding, never
+    collapsed."""
+    for warning in report.warnings:
+        out.warning(warning)
+    if report.refusal is not None:
+        out.print(report.refusal, err=True)
+        return
+    if report.clean:
+        if out.plain:
+            out.print(f"no drift against {report.against}")
+        else:
+            out.heading(
+                "ok", Text("no drift", style="bold green"), f"against {report.against}"
+            )
+        return
+    out.heading(
+        "error", f"{count(len(report.lines), 'difference')} against {report.against}"
+    )
+    for finding in report.lines:
+        line = Text("  ")
+        line.append(out.glyph("bullet"), style="red")
+        line.append(f" {finding}")
+        out.print(line)

@@ -20,6 +20,7 @@ import pytest
 
 import ferro
 from ferro import _core
+from ferro.cli.output import applied_at_short
 from ferro.migrations.report import StatusReport
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     AUTHOR,
@@ -44,9 +45,16 @@ pytestmark = [
 ]
 
 
-def header(db) -> str:
+def table(db) -> str:
     schema = "main" if db.backend == "sqlite" else db.schema
-    return f"default ({db.backend}) · {schema}._ferro_migrations"
+    return f"{schema}._ferro_migrations"
+
+
+def applied_at(capsys, db) -> list[str]:
+    """Each migration's ``applied_at`` as ``status`` shows it, read from
+    ``status --json``."""
+    document = status_document(capsys, db)
+    return [applied_at_short(m["applied_at"]) for m in document["migrations"]]
 
 
 def test_before_any_run_everything_is_pending_and_nothing_is_created(
@@ -61,7 +69,10 @@ def test_before_any_run_everything_is_pending_and_nothing_is_created(
     assert run("migrate", "status", "--url", db.url) == 3
 
     assert capsys.readouterr().out == (
-        f"{db.line}\n{header(db)}\n\n0001_create_author  pending\n0002_second         pending\n"
+        f"{db.line}\n"
+        f"-- 2 pending  {table(db)}\n"
+        "  -- 0001_create_author  pending\n"
+        "  -- 0002_second         pending\n"
     )
     assert "_ferro_migrations" not in db.tables()
     assert "_ferro_migrations_format" not in db.tables()
@@ -75,11 +86,14 @@ def test_after_up_everything_is_installed_and_steps_expand_on_request(
     new("create_author")
     sql_step(project, "second", 'CREATE TABLE "second" ("id" integer);\n')
     assert run("migrate", "up", "--url", db.url) == 0
-    capsys.readouterr()
+    first, second = applied_at(capsys, db)
 
     assert run("migrate", "status", "--url", db.url) == 0
     assert capsys.readouterr().out == (
-        f"{db.line}\n{header(db)}\n\n0001_create_author  applied\n0002_second         applied\n"
+        f"{db.line}\n"
+        f"ok 2 applied  {table(db)}\n"
+        f"  ok 0001_create_author  applied  {first}\n"
+        f"  ok 0002_second         applied  {second}\n"
     )
 
     # Every step's class after its flags (ADR-0054): the generated table
@@ -87,13 +101,13 @@ def test_after_up_everything_is_installed_and_steps_expand_on_request(
     # contract.
     assert run("migrate", "status", "--steps", "--url", db.url) == 0
     up_file = f"01_schema.up.{db.backend}.sql"
-    width = len(up_file)
     assert capsys.readouterr().out == (
-        f"{db.line}\n{header(db)}\n\n"
-        f"0001_create_author  applied\n"
-        f"  {up_file:<{width}}  applied  expand\n"
-        f"0002_second         applied\n"
-        f"  {'01_second.up.sql':<{width}}  applied  contract\n"
+        f"{db.line}\n"
+        f"ok 2 applied  {table(db)}\n"
+        f"  ok 0001_create_author  applied  {first}\n"
+        f"      {up_file}  applied  expand\n"
+        f"  ok 0002_second         applied  {second}\n"
+        "      01_second.up.sql  applied  contract\n"
     )
 
     assert run("migrate", "status", "--json", "--url", db.url) == 0
@@ -129,8 +143,10 @@ def test_a_part_applied_migration_expands_and_an_interrupted_step_needs_attentio
     assert run("migrate", "status", "--url", db.url) == 4
     up_file = f"01_schema.up.{db.backend}.sql"
     assert capsys.readouterr().out == (
-        f"{db.line}\n{header(db)}\n\n0001_create_author  partial, 0 of 1 steps\n"
-        f"  {up_file}  interrupted\n"
+        f"{db.line}\n"
+        f"!! 1 interrupted · 1 pending  {table(db)}\n"
+        "  ~~ 0001_create_author  partial, 0 of 1 steps\n"
+        f"      {up_file}  interrupted\n"
     )
 
 
@@ -146,11 +162,11 @@ def test_an_edited_applied_step_shows_both_checksums(project, pkg, db, capsys):
 
     assert run("migrate", "status", "--url", db.url) == 4
     out = capsys.readouterr().out
+    assert "  xx 0001_create_author  applied (different checksum)  " in out
     assert (
-        f"0001_create_author  applied (different checksum)\n"
-        f"  {up_file.name}  applied (different checksum)\n"
-        f"    applied   sha384:{applied}\n"
-        f"    on disk   sha384:{sha384(up_file)}\n"
+        f"      {up_file.name}  applied (different checksum)\n"
+        f"        applied  sha384:{applied}\n"
+        f"        on disk  sha384:{sha384(up_file)}\n"
     ) in out
 
 
@@ -188,8 +204,12 @@ def test_a_baselined_step_says_so(project, pkg, db, capsys):
     db.execute("UPDATE _ferro_migrations SET origin = 'baseline'")
     capsys.readouterr()
 
+    (first,) = applied_at(capsys, db)
     assert run("migrate", "status", "--url", db.url) == 0
-    assert "0001_create_author  applied (baseline)\n" in capsys.readouterr().out
+    assert (
+        f"  ok 0001_create_author  applied (baseline)  {first}\n"
+        in capsys.readouterr().out
+    )
 
 
 # -- where the database stands -----------------------------------------------------------
