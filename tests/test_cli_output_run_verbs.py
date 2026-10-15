@@ -83,6 +83,12 @@ def two_migrations(project, pkg, db) -> None:
 # -- the events -------------------------------------------------------------------
 
 
+def said(events: list[runner.StepEvent | runner.RunNote]) -> list[str]:
+    """What ``progress`` hears of ``events``: each one's line, a failed
+    step's none (its message is the run's refusal)."""
+    return [line for event in events if (line := event.line()) is not None]
+
+
 @pytest.mark.backend_matrix
 def test_progress_receives_each_events_line(project, pkg, db):
     two_migrations(project, pkg, db)
@@ -101,7 +107,7 @@ def test_progress_receives_each_events_line(project, pkg, db):
     )
 
     assert len(events) == len(lines) == 2
-    assert [event.line() for event in events] == lines
+    assert said(events) == lines
     first, second = events
     assert isinstance(first, runner.StepEvent)
     assert (first.migration, first.file, first.outcome, first.reason) == (
@@ -130,7 +136,7 @@ def test_progress_receives_each_events_line(project, pkg, db):
             on_event=events.append,
         )
     )
-    assert [event.line() for event in events] == lines
+    assert said(events) == lines
     assert [(e.migration, e.outcome) for e in events] == [("0002_second", "reverted")]
     assert lines == [f"0002_second  01_second  reverted ({events[0].duration_ms} ms)"]
 
@@ -175,7 +181,7 @@ def test_a_resumed_edited_step_is_a_note_event(project, pkg, db):
         )
     )
 
-    assert [event.line() for event in events] == lines
+    assert said(events) == lines
     assert [type(event) for event in events] == [runner.RunNote, runner.StepEvent]
     assert events[0].text == (
         f"re-recorded 0002_fix/01_fix.up.sql (sha384:{before} → sha384:{sha384(fix)})"
@@ -202,7 +208,7 @@ async def test_a_lock_wait_is_a_note_event(project, pkg, db):
             on_event=events.append,
         )
 
-    assert [event.line() for event in events] == lines
+    assert said(events) == lines
     assert isinstance(events[0], runner.RunNote)
     assert events[0].text.startswith(
         '0003_add_slug  01_add_slug  waiting for a lock on "author" (attempt 1 of 10'
@@ -243,6 +249,39 @@ def failing_data_step(project, pkg, db) -> None:
     new("backfill", "--data-only", "--data-step", "Author")
     (step,) = migrations(project).glob("0002_*/*.py")
     step.write_text(DATA_STEP_FAILS)
+
+
+@pytest.mark.backend_matrix
+def test_a_failed_step_is_an_event_progress_never_hears(project, pkg, db):
+    failing_second_step(project, pkg, db)
+    settings, database = settings_and_database()
+    lines: list[str] = []
+    events: list[runner.StepEvent | runner.RunNote] = []
+
+    report = asyncio.run(
+        run_report(
+            runner.up(
+                settings,
+                database.name,
+                url=db.url,
+                progress=lines.append,
+                on_event=events.append,
+            )
+        )
+    )
+
+    assert said(events) == lines
+    assert len(lines) == 1 and lines[0].startswith("0001_create_author  01_schema  ")
+    failed = events[-1]
+    assert isinstance(failed, runner.StepEvent)
+    assert (failed.migration, failed.file, failed.outcome, failed.reason) == (
+        "0001_create_author",
+        "02_two_b.up.sql",
+        "failed",
+        None,
+    )
+    assert failed.duration_ms == report.failed.duration_ms
+    assert failed.line() is None
 
 
 @pytest.mark.backend_matrix
@@ -317,6 +356,8 @@ def test_a_refused_run_names_its_direction_and_no_failed_step(project, pkg, db):
 OK = sgr("1;32", "✔")
 APPLIED = sgr("32", "applied")
 REVERTED = sgr("32", "reverted")
+FAILED_GLYPH = sgr("1;31", "✘")
+FAILED = sgr("1;31", "failed")
 ROLLED_BACK = (
     "The step was rolled back; fix the file or the database and run `ferro migrate "
     "up` again to resume at it. Nothing after it ran."
@@ -444,6 +485,8 @@ def test_tty_up_a_failed_step_under_a_red_heading(project, pkg, db, capsys, tty)
     assert timed(out) == (
         f"{tty_line(db)}\n"
         f"  {OK} 0001_create_author  {sgr('36', '01_schema')}  {APPLIED}{took()}\n"
+        f"  {FAILED_GLYPH} 0001_create_author  {sgr('34', '02_two_b')}   "
+        f"{FAILED}{took()}\n"
     )
     error = "".join(
         f"{sgr('31', f'  {line}')}\n" for line in error_of(db, 1, 2).splitlines()
@@ -464,7 +507,9 @@ def test_tty_up_a_failed_chunked_step_says_its_rows(project, pkg, db, capsys, tt
 
     assert code == 1
     assert timed(out).splitlines()[1:] == [
-        f"  {OK} 0002_add_slug  {sgr('36', '01_schema')}           {APPLIED}" + took()
+        f"  {OK} 0002_add_slug  {sgr('36', '01_schema')}           {APPLIED}" + took(),
+        f"  {FAILED_GLYPH} 0002_add_slug  {sgr('35', '02_backfill_author')}  "
+        f"{FAILED}{took()}",
     ]
     assert err == (
         f"\n{sgr('1;31', '✘')} {sgr('1;31', '02_backfill_author failed')}"

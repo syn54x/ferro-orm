@@ -726,9 +726,13 @@ def print_step(
     ``progress`` receives (:meth:`StepEvent.line`); on a TTY a row two
     spaces in: the glyph, the migration, the step coloured by its kind, the
     state word and the duration in seconds, dim (``nothing to reverse``
-    gives its reason instead)."""
+    gives its reason instead). A failed step is a red row on a TTY and
+    nothing in the plain form, where its message alone says it
+    (:func:`print_run_failure`)."""
     if out.plain:
-        out.print(event.line(name_width, stem_width))
+        line = event.line(name_width, stem_width)
+        if line is not None:
+            out.print(line)
         return
     glyph = STATE_GLYPH[event.outcome]
     line = Text("  ")

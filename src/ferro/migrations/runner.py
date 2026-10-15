@@ -275,15 +275,17 @@ def _stem(file: str) -> str:
 
 @dataclass(frozen=True)
 class StepEvent:
-    """One step a run finished: applied, reverted, or reverted with
-    nothing to reverse. :meth:`line` is the line ``progress`` receives for
-    it (``0002_add_team  01_expand  applied (412 ms)``)."""
+    """One step a run finished: applied, reverted, reverted with nothing to
+    reverse, or failed. :meth:`line` is the line ``progress`` receives for
+    it (``0002_add_team  01_expand  applied (412 ms)``); a failed step's is
+    ``None``, as ``progress`` hears nothing of it (its message is the run's
+    refusal, :attr:`RunReport.failed`)."""
 
     migration: str
     """``NNNN_<name>``."""
     file: str
     """The step's file (``01_expand.up.postgres.sql``)."""
-    outcome: Literal["applied", "reverted", "nothing to reverse"]
+    outcome: Literal["applied", "reverted", "nothing to reverse", "failed"]
     duration_ms: int | None
     """How long the step ran; ``None`` when it had nothing to reverse."""
     reason: str | None
@@ -307,9 +309,13 @@ class StepEvent:
             return f"nothing to reverse: {self.reason}"
         return f"{self.outcome} ({self.duration_ms} ms)"
 
-    def line(self, name_width: int | None = None, stem_width: int | None = None) -> str:
+    def line(
+        self, name_width: int | None = None, stem_width: int | None = None
+    ) -> str | None:
         """``<migration>  <step>  <said>``, the columns padded to the run's
-        widths unless others are given."""
+        widths unless others are given; ``None`` for a failed step."""
+        if self.outcome == "failed":
+            return None
         names = self.name_width if name_width is None else name_width
         stems = self.stem_width if stem_width is None else stem_width
         return _step_prefix(self.migration, self.file, names, stems) + self.said
@@ -362,7 +368,8 @@ async def up(
     and one per attempt a step makes while it waits for a table lock under
     the database's ``ddl_lock_timeout``. ``on_event`` receives the same
     lines as data, each just before ``progress`` receives its ``line()``: a
-    :class:`StepEvent` per applied step, a :class:`RunNote` for any other.
+    :class:`StepEvent` per applied step, a :class:`RunNote` for any other;
+    a failed step is a ``StepEvent`` too, with no line for ``progress``.
 
     Returns the :class:`RunReport` of what it applied.
 
@@ -440,14 +447,15 @@ def _teller(
     on_event: Callable[[RunEvent], Any] | None,
 ) -> Callable[[RunEvent], None]:
     """Tell both hooks of one event: ``on_event`` the event, then
-    ``progress`` its ``line()``. The one place a run's lines are said, so
+    ``progress`` its ``line()`` when it has one. The one place a run's lines are said, so
     the string hook is always the event's own line."""
 
     def tell(event: RunEvent) -> None:
         if on_event is not None:
             on_event(event)
-        if progress is not None:
-            progress(event.line())
+        line = event.line()
+        if progress is not None and line is not None:
+            progress(line)
 
     return tell
 
@@ -504,6 +512,17 @@ async def _walk(
                     swaps.leave(step)
                     outcome = await run.execute(step, line)
                 if not outcome["ok"]:
+                    tell(
+                        StepEvent(
+                            migration=step.migration_name,
+                            file=step.file,
+                            outcome="failed",
+                            duration_ms=outcome["ms"],
+                            reason=None,
+                            name_width=name_width,
+                            stem_width=stem_width,
+                        )
+                    )
                     report.failed = StepFailure(
                         migration=step.migration_name,
                         file=step.file,
@@ -1273,7 +1292,7 @@ async def down(
     than reverted unseen. ``progress`` receives one line per reverted step;
     ``on_event`` receives each as data (a :class:`StepEvent`, or a
     :class:`RunNote` for any other line) just before ``progress`` receives
-    its ``line()``.
+    its ``line()``; a failed down is a ``StepEvent`` with no line.
 
     Returns the :class:`RunReport` of what it reverted (``declined`` when
     ``confirm`` said no).
