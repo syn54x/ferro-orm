@@ -50,9 +50,19 @@ class Global:
     """``--url``: the database URL, in place of the ``url_env`` variable."""
 
 
-def render_refusal(err: FerroError) -> int:
-    """Print a refusal's message to stderr and return :data:`exit_codes.REFUSED`."""
-    print(err, file=sys.stderr)
+def render_refusal(err: FerroError, verb: str | None = None) -> int:
+    """Print a refusal's message to stderr and return :data:`exit_codes.REFUSED`.
+
+    The message is printed as it is; on a terminal it sits under a red
+    heading naming what refused (``new refused``, or ``ferro refused`` when
+    no ``verb`` was running), through :meth:`Output.refusal`, the one
+    refusal path every verb prints through.
+    """
+    from .output import Output
+
+    Output.for_streams(out=sys.stdout, err=sys.stderr).refusal(
+        f"{verb or 'ferro'} refused", str(err)
+    )
     return exit_codes.REFUSED
 
 
@@ -137,7 +147,7 @@ def _build() -> "App":
         try:
             return command(*bound.args, **bound.kwargs)
         except FerroError as err:
-            return render_refusal(err)
+            return render_refusal(err, getattr(command, "__name__", None))
 
     meta = root.meta
     meta.result_action = "return_value"

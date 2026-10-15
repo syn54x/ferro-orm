@@ -662,3 +662,72 @@ def test_tty_new_and_check_print_every_line_whatever_columns_says(
     assert "Wrote migrations/0001_initial/" in out
     assert "1 new model" in out
     assert cli(capsys, "check") == (0, TTY_CHECKOK_OUT, "")
+
+
+# -- a refusal a verb raises ------------------------------------------------------
+
+
+def rekeyed(project, pkg) -> None:
+    """A primary key moved to another column: ``new`` refuses with the
+    primary-key recipe."""
+    write_config(project, pkg)
+    write_models(
+        project,
+        pkg,
+        "\nclass Keyed(Model):\n"
+        "    id: Annotated[int | None, FerroField(primary_key=True)] = None\n"
+        "    name: str\n",
+    )
+    assert run("migrate", "new", "initial") == 0
+    write_models(
+        project,
+        pkg,
+        "\nclass Keyed(Model):\n"
+        "    id: int | None = None\n"
+        "    name: Annotated[str, FerroField(primary_key=True)]\n",
+    )
+
+
+def refused_heading(verb: str) -> str:
+    return f"\x1b[1;31m✘\x1b[0m \x1b[1;31m{verb} refused\x1b[0m\n"
+
+
+def test_tty_new_refusal_sits_under_a_red_heading_naming_the_verb(
+    project, pkg, capsys, monkeypatch
+):
+    rekeyed(project, pkg)
+    code, _, plain_err = cli(capsys, "new", "rekey")
+    assert code == 1
+    assert plain_err.startswith('changing the primary key of "keyed"'), plain_err
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    monkeypatch.setenv("COLUMNS", "100")
+
+    code, out, err = cli(capsys, "new", "rekey")
+
+    assert code == 1
+    assert out == "\x1b[1mdefault\x1b[0m · \x1b[2mmigrations\x1b[0m\n"
+    assert err == refused_heading("new") + plain_err
+
+
+def test_a_settings_refusal_in_both_forms(project, capsys, monkeypatch):
+    (project / "ferro.toml").write_text("models = [\n")
+    code, out, plain_err = cli(capsys, "check")
+    assert (code, out) == (1, "")
+    assert plain_err.endswith(
+        "/ferro.toml is not valid TOML: Invalid value (at end of document); "
+        "fix the file\n"
+    ), plain_err
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    monkeypatch.setenv("COLUMNS", "100")
+
+    assert cli(capsys, "check") == (1, "", refused_heading("check") + plain_err)
+
+
+def test_a_refusal_with_no_verb_is_headed_ferro_refused(capsys, monkeypatch):
+    from ferro.cli import exit_codes, render_refusal
+    from ferro.settings import SettingsError
+
+    monkeypatch.setenv("FORCE_COLOR", "1")
+
+    assert render_refusal(SettingsError("bad")) == exit_codes.REFUSED
+    assert capsys.readouterr().err == refused_heading("ferro") + "bad\n"
