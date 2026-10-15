@@ -65,6 +65,7 @@ __all__ = [
     "GLYPHS",
     "KIND_STYLE",
     "STATE_GLYPH",
+    "STATES",
     "STATE_STYLE",
     "Output",
     "StepFileRole",
@@ -131,40 +132,31 @@ CHANGE_STYLE = {
 """A change summary's names, by the generator's verb: the colours ``git
 status`` taught. The count heading above them stays plain bold."""
 
-STATE_STYLE = {
-    "applied": "green",
-    "applied (baseline)": "green",
-    "reverted": "green",
-    "pending": "yellow",
-    "failed": "bold red",
-    "interrupted": "red",
-    "applied (different checksum)": "red",
-    "applied, not in the directory": "red",
-    "running": "cyan",
-    "reverting": "cyan",
-    "nothing to reverse": "dim",
-    "partial": "yellow",
+STATES: dict[str, tuple[str, str]] = {
+    "applied": ("ok", "green"),
+    "applied (baseline)": ("ok", "green"),
+    "reverted": ("ok", "green"),
+    "pending": ("pending", "yellow"),
+    "failed": ("error", "bold red"),
+    "interrupted": ("error", "red"),
+    "applied (different checksum)": ("error", "red"),
+    "applied, not in the directory": ("error", "red"),
+    "running": ("partial", "cyan"),
+    "reverting": ("partial", "cyan"),
+    "nothing to reverse": ("ok", "dim"),
+    "partial": ("partial", "yellow"),
 }
 """A migration's or a step's state word, as ``status``, ``up`` and ``down``
-print it. ``partial`` stands for a migration's ``partial, X of N steps``,
-the one state word that carries numbers."""
+print it: the glyph its row opens with (a key of :data:`GLYPHS`) and its
+style. ``partial`` stands for a migration's ``partial, X of N steps``, the
+one state word that carries numbers. :data:`STATE_GLYPH` and
+:data:`STATE_STYLE` are its two columns."""
 
-STATE_GLYPH = {
-    "applied": "ok",
-    "applied (baseline)": "ok",
-    "reverted": "ok",
-    "pending": "pending",
-    "failed": "error",
-    "interrupted": "error",
-    "applied (different checksum)": "error",
-    "applied, not in the directory": "error",
-    "running": "partial",
-    "reverting": "partial",
-    "nothing to reverse": "ok",
-    "partial": "partial",
-}
-"""The glyph (a key of :data:`GLYPHS`) a row opens with, by the same state
-words as :data:`STATE_STYLE`."""
+STATE_GLYPH = {word: glyph for word, (glyph, _) in STATES.items()}
+"""The glyph each state word's row opens with, from :data:`STATES`."""
+
+STATE_STYLE = {word: style for word, (_, style) in STATES.items()}
+"""Each state word's style, from :data:`STATES`."""
 
 ASCII_FORMS = {"·": "-", "→": "->", "…": "..."}
 """What a stream that cannot encode Unicode prints for each such character
@@ -296,10 +288,11 @@ class Output:
 
     def database_line(self, name: str, where: str) -> None:
         """The first line of every verb: the database's name, bold, then
-        what it touches, dim (``main · migrations/main``)."""
-        from .migrate import database_line
-
-        text = Text(database_line(name, where))
+        what it touches, dim: ``main · postgresql://pinch:***@db:5432/app``
+        (``where`` the masked URL), or ``main · migrations/main`` for
+        ``new`` and ``check``, which never connect (``where`` the
+        directory)."""
+        text = Text(f"{name} · {where}")
         text.stylize("bold", 0, len(name))
         text.stylize("dim", len(text) - len(where))
         self.print(text)

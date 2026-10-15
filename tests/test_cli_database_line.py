@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from ferro.cli.migrate import database_line
+from ferro.cli.output import Output
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     AUTHOR,
     DIRECTORY_LINE,
@@ -65,7 +65,13 @@ def author_generated(project: Path, pkg: str, db) -> None:
 
 
 def test_the_line_is_the_name_a_middle_dot_and_where():
-    assert database_line("main", "migrations/main") == "main · migrations/main"
+    import io
+
+    out = io.StringIO()
+    Output.for_streams(out=out, err=io.StringIO()).database_line(
+        "main", "migrations/main"
+    )
+    assert out.getvalue() == "main · migrations/main\n"
 
 
 # -- the verbs that connect -------------------------------------------------------

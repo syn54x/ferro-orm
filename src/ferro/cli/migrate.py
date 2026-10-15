@@ -45,7 +45,7 @@ from . import Global, exit_codes
 if TYPE_CHECKING:
     from .output import Output
 
-__all__ = ["database_line", "migrate"]
+__all__ = ["migrate"]
 
 migrate = App(
     name="migrate",
@@ -658,14 +658,6 @@ def rerecord(
     )
     print_rerecord(out, report)
     return exit_codes.OK
-
-
-def database_line(name: str, where: str) -> str:
-    """The first line every ``ferro migrate`` verb prints, naming what it
-    touches: ``main · postgresql://pinch:***@db.internal:5432/pinch_prod``
-    (``where`` is the masked URL), or ``main · migrations/main`` for ``new``
-    and ``check``, which never connect (``where`` is the directory)."""
-    return f"{name} · {where}"
 
 
 def _url(
