@@ -40,6 +40,7 @@ from tests.test_cli_output_new_check import (  # noqa: F401 - fixtures
     tty,
 )
 from tests.test_migrate_baseline import auto_migrated
+from tests.test_migrate_drift import drift_api
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     AUTHOR,
     pkg,
@@ -241,11 +242,10 @@ def test_plain_status_an_edited_file_shows_both_checksums(project, pkg, db, caps
         f"        applied  sha384:{applied}\n"
         f"        on disk  sha384:{on_disk}\n"
     )
-    if doc["refusal"] is None:
-        assert out == head
-    else:
-        shown = "".join(f"  {line}\n" for line in doc["refusal"].splitlines())
-        assert out == f"{head}\nxx needs attention\n{shown}"
+    refusal = doc["refusal"]
+    assert refusal is not None and "ferro migrate rerecord 0001:01" in refusal
+    shown = "".join(f"  {line}\n" for line in refusal.splitlines())
+    assert out == f"{head}\nxx needs attention\n{shown}"
     assert err == ""
 
 
@@ -333,8 +333,259 @@ def test_plain_drift_refusal_is_the_sentence_on_stderr(project, pkg, db, capsys)
     code, out, err = cli(capsys, "drift", "--url", db.url)
 
     assert (code, out) == (4, f"{db.line}\n")
-    assert "`ferro migrate status`" in err
-    assert not err.startswith("xx") and ESC not in err
+    assert err == f"{drift_api(db).refusal}\n"
+
+
+LEDGER = (
+    AUTHOR
+    + """
+
+class Ledger(Model):
+    __ferro_rls__ = RowSecurity(RowPolicy(column="owner_id", setting="app.owner_id"))
+
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    owner_id: int
+"""
+)
+
+FOREIGN_POLICY = (
+    "Table 'ledger' carries row policy/policies 'hand_made' that ferro does not "
+    "own (their names do not start with 'rls_'). They still filter rows and "
+    "compose with the declared policies. Ferro never alters or drops them."
+)
+
+
+def foreign_policy(project, pkg, db) -> None:
+    """A row-secured table applied, then a policy ferro does not own added by
+    hand: drift warns about it and finds no difference."""
+    configure(project, pkg, db.backend)
+    write_models(project, pkg, LEDGER)
+    new("ledger")
+    assert run("migrate", "up", "--url", db.url) == 0
+    db.execute('CREATE POLICY "hand_made" ON "ledger" USING (true)')
+
+
+@pytest.mark.postgres_only
+def test_plain_drift_warnings_go_to_stderr(project, pkg, db, capsys):
+    foreign_policy(project, pkg, db)
+
+    code, out, err = cli(capsys, "drift", "--url", db.url)
+
+    assert (code, out) == (0, f"{db.line}\nno drift against 0001_ledger\n")
+    assert err == f"warning: {FOREIGN_POLICY}\n"
+
+
+# -- the TTY form ------------------------------------------------------------------
+
+
+def sgr(codes: str, text: str) -> str:
+    return f"{ESC}{codes}m{text}{ESC}0m"
+
+
+def tty_line(db) -> str:
+    """The database line on a terminal: the name bold, the URL dim."""
+    name, where = db.line.split(" · ", 1)
+    return f"{sgr('1', name)} · {sgr('2', where)}"
+
+
+def tty_heading(glyph: str, codes: str, title: str, where: str) -> str:
+    return f"{sgr(codes, glyph)} {sgr('1', title)}{sgr('2', f'  {where}')}\n"
+
+
+@pytest.mark.backend_matrix
+def test_tty_status_before_any_run(project, pkg, db, capsys, tty):
+    two_pending(project, pkg, db)
+
+    code, out, err = cli(capsys, "status", "--url", db.url)
+
+    assert code == 3
+    pending = sgr("1;33", "○")
+    assert out == (
+        f"{tty_line(db)}\n"
+        + tty_heading("○", "1;33", "2 pending", table(db))
+        + f"  {pending} 0001_create_author  {sgr('33', 'pending')}\n"
+        f"  {pending} 0002_second         {sgr('33', 'pending')}\n"
+    )
+    assert err == ""
+
+
+@pytest.mark.backend_matrix
+def test_tty_status_after_up_with_steps(project, pkg, db, capsys, tty):
+    two_applied(project, pkg, db)
+    doc = document(capsys, db)
+
+    code, out, _ = cli(capsys, "status", "--url", db.url)
+
+    assert code == 0
+    ok = sgr("1;32", "✔")
+    applied = sgr("32", "applied")
+    first = f"  {ok} 0001_create_author  {applied}{sgr('2', f'  {at(doc, 1)}')}\n"
+    second = f"  {ok} 0002_second         {applied}{sgr('2', f'  {at(doc, 2)}')}\n"
+    head = f"{tty_line(db)}\n" + tty_heading("✔", "1;32", "2 applied", table(db))
+    assert out == head + first + second
+
+    code, out, _ = cli(capsys, "status", "--steps", "--url", db.url)
+
+    assert code == 0
+    assert out == (
+        head
+        + first
+        + f"      {sgr('36', '01_schema')}{sgr('2', f'.up.{db.backend}.sql')}"
+        f"  {applied}{sgr('2', '  expand')}\n"
+        + second
+        + f"      {sgr('34', '01_second')}{sgr('2', '.up.sql')}"
+        f"  {applied}{sgr('2', '  contract')}\n"
+    )
+
+
+@pytest.mark.backend_matrix
+def test_tty_status_a_failed_step(project, pkg, db, capsys, tty):
+    failed_second_step(project, pkg, db)
+    doc = document(capsys, db)
+    error = doc["migrations"][0]["steps"][1]["error"]
+
+    code, out, err = cli(capsys, "status", "--url", db.url)
+
+    assert code == 4
+    up_file = f"01_schema.up.{db.backend}.sql"
+    pad = " " * (len(up_file) - len("02_two_b.up.sql") + 2)
+    assert out == (
+        f"{tty_line(db)}\n"
+        + tty_heading("▲", "1;33", "1 failed · 1 pending", table(db))
+        + f"  {sgr('1;33', '◐')} 0001_create_author  "
+        f"{sgr('33', 'partial, 1 of 2 steps')}{sgr('2', f'  {at(doc, 1)}')}\n"
+        f"      {sgr('36', '01_schema')}{sgr('2', f'.up.{db.backend}.sql')}"
+        f"  {sgr('32', 'applied')}\n"
+        f"      {sgr('34', '02_two_b')}{sgr('2', '.up.sql')}{pad}"
+        f"{sgr('1;31', 'failed')}\n"
+        + "".join(f"{sgr('31', f'        {line}')}\n" for line in error.splitlines())
+    )
+    assert err == ""
+
+
+@pytest.mark.backend_matrix
+def test_tty_status_an_edited_file(project, pkg, db, capsys, tty):
+    name, applied, on_disk = edited_applied_file(project, pkg, db)
+    doc = document(capsys, db)
+
+    code, out, _ = cli(capsys, "status", "--url", db.url)
+
+    assert code == 4
+    edited = "applied (different checksum)"
+    assert out == (
+        f"{tty_line(db)}\n"
+        + tty_heading("▲", "1;33", "1 edited", table(db))
+        + f"  {sgr('1;31', '✘')} 0001_create_author  "
+        f"{sgr('31', edited)}{sgr('2', f'  {at(doc, 1)}')}\n"
+        f"      {sgr('36', '01_schema')}{sgr('2', f'.up.{db.backend}.sql')}"
+        f"  {sgr('31', edited)}\n"
+        f"{sgr('2', f'        applied  sha384:{applied}')}\n"
+        f"{sgr('2', f'        on disk  sha384:{on_disk}')}\n"
+        "\n"
+        f"{sgr('1;31', '✘')} {sgr('1;31', 'needs attention')}\n"
+        + "".join(f"  {line}\n" for line in doc["refusal"].splitlines())
+    )
+
+
+@pytest.mark.backend_matrix
+def test_tty_status_a_database_ahead_of_the_directory(project, pkg, db, capsys, tty):
+    ahead_of_the_directory(project, pkg, db)
+    doc = document(capsys, db)
+
+    code, out, _ = cli(capsys, "status", "--url", db.url)
+
+    assert code == 4
+    assert out == (
+        f"{tty_line(db)}\n"
+        + tty_heading("▲", "1;33", "1 ahead", table(db))
+        + f"  {sgr('1;32', '✔')} 0001_create_author  "
+        f"{sgr('32', 'applied')}{sgr('2', f'  {at(doc, 1)}')}\n"
+        f"  {sgr('1;31', '✘')} 0002_second         "
+        f"{sgr('31', 'applied, not in the directory')}\n"
+        "\n"
+        f"{sgr('1;31', '✘')} {sgr('1;31', 'needs attention')}\n"
+        + "".join(f"  {line}\n" for line in doc["refusal"].splitlines())
+    )
+
+
+@pytest.mark.backend_matrix
+def test_no_color_keeps_the_terminal_layout_without_escapes(
+    project, pkg, db, capsys, tty, monkeypatch
+):
+    ahead_of_the_directory(project, pkg, db)
+    doc = document(capsys, db)
+    monkeypatch.setenv("NO_COLOR", "1")
+
+    code, out, _ = cli(capsys, "status", "--url", db.url)
+
+    assert code == 4
+    assert out == (
+        f"{db.line}\n"
+        f"▲ 1 ahead  {table(db)}\n"
+        f"  ✔ 0001_create_author  applied  {at(doc, 1)}\n"
+        "  ✘ 0002_second         applied, not in the directory\n"
+        "\n"
+        "✘ needs attention\n"
+        + "".join(f"  {line}\n" for line in doc["refusal"].splitlines())
+    )
+
+
+@pytest.mark.backend_matrix
+def test_tty_drift_findings_under_a_red_heading(project, pkg, db, capsys, tty):
+    drifted(project, pkg, db)
+
+    code, out, err = cli(capsys, "drift", "--url", db.url)
+
+    assert code == 4
+    lines = out.splitlines()
+    bullet = sgr("31", "•")
+    assert lines[:2] == [
+        tty_line(db),
+        f"{sgr('1;31', '✘')} {sgr('1;31', '2 differences against 0002_second')}",
+    ]
+    assert sorted(lines[2:]) == [
+        f"  {bullet} idx_author_name index is extra",
+        f"  {bullet} idx_author_status index is extra",
+    ]
+    assert err == ""
+
+
+@pytest.mark.backend_matrix
+def test_tty_drift_clean_is_a_green_heading(project, pkg, db, capsys, tty):
+    two_applied(project, pkg, db)
+
+    code, out, err = cli(capsys, "drift", "--url", db.url)
+
+    assert (code, err) == (0, "")
+    assert out == (
+        f"{tty_line(db)}\n"
+        f"{sgr('1;32', '✔')} {sgr('1;32', 'no drift')}"
+        f"{sgr('2', '  against 0002_second')}\n"
+    )
+
+
+@pytest.mark.backend_matrix
+def test_tty_drift_refusal_is_the_unchanged_sentence(project, pkg, db, capsys, tty):
+    two_applied(project, pkg, db)
+    db.execute("UPDATE _ferro_migrations SET finished_at = NULL WHERE migration = 2")
+
+    code, out, err = cli(capsys, "drift", "--url", db.url)
+
+    assert (code, out) == (4, f"{tty_line(db)}\n")
+    assert err == f"{drift_api(db).refusal}\n"
+
+
+@pytest.mark.postgres_only
+def test_tty_drift_warnings_carry_the_warning_glyph(project, pkg, db, capsys, tty):
+    foreign_policy(project, pkg, db)
+
+    code, out, err = cli(capsys, "drift", "--url", db.url)
+
+    assert code == 0
+    assert out.splitlines()[1] == (
+        f"{sgr('1;32', '✔')} {sgr('1;32', 'no drift')}{sgr('2', '  against 0001_ledger')}"
+    )
+    assert err == f"{sgr('1;33', '▲')}{sgr('1;33', ' warning')}  {FOREIGN_POLICY}\n"
 
 
 # -- the helpers -------------------------------------------------------------------
