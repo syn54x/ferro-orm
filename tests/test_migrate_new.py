@@ -745,3 +745,27 @@ async def test_the_up_file_is_what_auto_migrate_executes(
         )
     )
     assert plan["operations"] == []
+
+
+def test_each_data_step_carries_the_role_the_generator_gave_it(project, pkg):
+    """A generated backfill, a ``--data-step`` beside it of the same name and
+    a ``--no-backfill`` guard are told apart by the generator's record, never
+    by their names or their order."""
+    from ferro import FerroSettings
+    from ferro.migrations.generate import prepare
+
+    write_config(project, pkg)
+    write_models(project, pkg, AUTHOR)
+    assert run("migrate", "new", "a") == 0
+    write_models(project, pkg, NAME_RETYPED)
+    database = FerroSettings().database(None)
+
+    hand = prepare(database, "b", data_step="Author")
+    guarded = prepare(database, "b", no_backfill=("author.full_name",))
+
+    assert [(s.name, s.role) for s in hand.steps if s.kind == "data"] == [
+        ("backfill_author", "backfill"),
+        ("backfill_author", "data_step"),
+    ]
+    assert [s.role for s in guarded.steps if s.kind == "data"] == ["guard"]
+    assert {s.role for s in hand.steps if s.kind != "data"} == {None}
