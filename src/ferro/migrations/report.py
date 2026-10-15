@@ -225,6 +225,10 @@ class StepStatus:
     step with no record, the class a run would record."""
     rows_done: int | None = None
     """The rows a chunked step's current walk has committed."""
+    finished_at: str | None = None
+    """When the step's record finished, as stored (ISO-8601 UTC, ``Z``); a
+    baseline record's is the baseline time. ``None`` for a step with no
+    finished record (pending, running, failed, interrupted)."""
 
     @property
     def shown(self) -> str:
@@ -269,6 +273,15 @@ class MigrationStatus:
     name: str
     """``NNNN_<name>``."""
     steps: list[StepStatus]
+
+    @property
+    def applied_at(self) -> str | None:
+        """When the migration was applied: the last finished step's
+        ``finished_at``, so a partial migration reports when it stopped.
+        ``None`` when no step has finished."""
+        return next(
+            (s.finished_at for s in reversed(self.steps) if s.finished_at), None
+        )
 
     @property
     def applied(self) -> bool:
@@ -407,12 +420,15 @@ class StatusReport:
         table: str,
         refusal: str | None = None,
         rows_done: dict[tuple[int, int], int] | None = None,
+        finished_at: dict[tuple[int, int], str | None] | None = None,
     ) -> StatusReport:
         """Build the report from the tracked database's ``status()``
         document; ``url`` is the database's URL, masked; ``refusal`` replaces
         its refusal when given; ``rows_done``
-        holds each chunked step's committed rows by ``(migration, step)``."""
+        holds each chunked step's committed rows by ``(migration, step)`` and
+        ``finished_at`` each step record's stored finish time."""
         rows_done = rows_done or {}
+        finished_at = finished_at or {}
         migrations = [
             MigrationStatus(
                 number=m["number"],
@@ -428,6 +444,7 @@ class StatusReport:
                         flags=list(s["flags"]),
                         step_class=s["class"],
                         rows_done=rows_done.get((m["number"], s["step"])),
+                        finished_at=finished_at.get((m["number"], s["step"])),
                     )
                     for s in m["steps"]
                 ],
@@ -492,6 +509,7 @@ class StatusReport:
                         "number": m.number,
                         "name": m.name,
                         "state": m.state,
+                        "applied_at": m.applied_at,
                         "steps": [asdict(s) for s in m.steps],
                     }
                     for m in self.migrations

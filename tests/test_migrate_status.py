@@ -27,6 +27,7 @@ from tests.test_migrate_new import (  # noqa: F401 - fixtures
     run,
     write_models,
 )
+from tests.test_migrate_baseline import auto_migrated
 from tests.test_migrate_up import (  # noqa: F401 - fixtures
     configure,
     db,
@@ -316,3 +317,105 @@ def test_every_core_step_state_is_read_into_where_the_database_stands():
         assert head.name == ("0002_b" if word in applied else "0001_a"), word
         assert (report.unfinished is not None) == (word in unfinished), word
         assert report.pending == (word not in applied), word
+
+
+# -- when each step and migration was applied (#650) -----------------------------------
+
+
+def stored_finished(db) -> dict[tuple[int, int], str | None]:
+    """The tracking table's ``finished_at`` per ``(migration, step)``, as text."""
+    return {
+        (migration, step): None if finished is None else str(finished)
+        for migration, step, finished in db.rows(
+            "SELECT migration, step, finished_at FROM _ferro_migrations"
+        )
+    }
+
+
+def status_document(capsys, db) -> dict:
+    capsys.readouterr()
+    run("migrate", "status", "--json", "--url", db.url)
+    return json.loads(capsys.readouterr().out)
+
+
+def test_after_up_every_step_and_migration_carries_the_stored_time(
+    project, pkg, db, capsys
+):
+    configure(project, pkg, db.backend)
+    write_models(project, pkg, AUTHOR)
+    new("create_author")
+    sql_step(project, "second", 'CREATE TABLE "second" ("id" integer);\n')
+    assert run("migrate", "up", "--url", db.url) == 0
+
+    stored = stored_finished(db)
+    assert all(stored.values())
+    document = status_document(capsys, db)
+    for migration in document["migrations"]:
+        for step in migration["steps"]:
+            assert step["finished_at"] == stored[(migration["number"], step["step"])]
+        assert migration["applied_at"] == migration["steps"][-1]["finished_at"]
+        assert re.fullmatch(
+            r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z", migration["applied_at"]
+        )
+    assert list(document["migrations"][0]) == [
+        "number",
+        "name",
+        "state",
+        "applied_at",
+        "steps",
+    ]
+
+
+def test_after_baseline_applied_at_is_the_baseline_time(project, pkg, db, capsys):
+    auto_migrated(project, pkg, db)
+    assert run("migrate", "baseline", "--url", db.url) == 0
+
+    stored = stored_finished(db)
+    document = status_document(capsys, db)
+    assert len(document["migrations"]) == 2
+    for migration in document["migrations"]:
+        assert migration["state"] == "applied (baseline)"
+        assert migration["applied_at"] == stored[(migration["number"], 1)]
+        assert migration["applied_at"] is not None
+
+
+def test_nothing_applied_means_no_times(project, pkg, db, capsys):
+    configure(project, pkg, db.backend)
+    write_models(project, pkg, AUTHOR)
+    new("create_author")
+    sql_step(project, "second", 'CREATE TABLE "second" ("id" integer);\n')
+
+    document = status_document(capsys, db)
+    for migration in document["migrations"]:
+        assert migration["applied_at"] is None
+        assert [s["finished_at"] for s in migration["steps"]] == [None]
+
+
+def test_a_failed_second_step_keeps_the_first_steps_time(project, pkg, db, capsys):
+    configure(project, pkg, db.backend)
+    write_models(project, pkg, AUTHOR)
+    new("create_author")
+    (folder,) = (project / "migrations").glob("0001_*")
+    (folder / "02_two_b.up.sql").write_text('INSERT INTO "missing" VALUES (1);\n')
+    (folder / "02_two_b.down.sql").write_text("SELECT 1;\n")
+    assert run("migrate", "up", "--url", db.url) == 1
+
+    stored = stored_finished(db)
+    document = status_document(capsys, db)
+    (migration,) = document["migrations"]
+    first, second = migration["steps"]
+    assert second["state"] == "failed"
+    assert first["finished_at"] == stored[(1, 1)] is not None
+    assert second["finished_at"] is None
+    assert migration["applied_at"] == first["finished_at"]
+    assert migration["state"].startswith("partial")
+
+
+def test_the_library_report_exposes_the_same_fields(project, pkg, db):
+    configure(project, pkg, db.backend)
+    write_models(project, pkg, AUTHOR)
+    new("create_author")
+    assert run("migrate", "up", "--url", db.url) == 0
+
+    migration = stands(db).migrations[0]
+    assert migration.steps[0].finished_at == migration.applied_at is not None

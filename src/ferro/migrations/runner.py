@@ -842,6 +842,9 @@ async def status_of(
             for r in tracked.records
             if r["kind"] == "chunked" and r["rows_done"] is not None
         },
+        finished_at={
+            (r["migration"], r["step"]): r["finished_at"] for r in tracked.records
+        },
     )
 
 
