@@ -24,20 +24,27 @@ A duration is matched with a regular expression.
 from __future__ import annotations
 
 import asyncio
+import io
 import re
 import shutil
+import sys
 
 import pytest
 
+from ferro.cli.output import RERECORD_NOTE
 from ferro.migrations import runner
+from ferro.migrations.rerecord import RerecordReport
+from tests.test_chunked_steps import project_with_authors
 from tests.test_cli_output_new_check import (  # noqa: F401 - fixtures
     no_bytecode,
     plain_env,
     tty,
 )
+from tests.test_cli_output_status_drift import sgr, tty_heading, tty_line
+from tests.test_migrate_baseline import BOTH, NOT_COMPARED, auto_migrated
+from tests.test_migrate_rerecord import edited_chunked
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     AUTHOR,
-    LIBRARY,
     pkg,
     project,
     run,
@@ -302,4 +309,384 @@ def test_a_refused_run_names_its_direction_and_no_failed_step(project, pkg, db):
         "down",
         None,
         True,
+    )
+
+
+# -- the verbs: helpers -------------------------------------------------------------
+
+OK = sgr("1;32", "✔")
+APPLIED = sgr("32", "applied")
+REVERTED = sgr("32", "reverted")
+ROLLED_BACK = (
+    "The step was rolled back; fix the file or the database and run `ferro migrate "
+    "up` again to resume at it. Nothing after it ran."
+)
+
+
+def timed(text: str) -> str:
+    """``text`` with every duration written ``N``: ``(N ms)`` in the plain
+    form, ``N.Ns`` on a TTY."""
+    return re.sub(r"\d+\.\ds", "N.Ns", re.sub(r"\(\d+ ms\)", "(N ms)", text))
+
+
+def took() -> str:
+    """A TTY row's duration, normalised by :func:`timed`."""
+    return sgr("2", "  N.Ns")
+
+
+DATA_STEP_PASSES = """\
+from ferro.migrations import atomic, nothing_to_reverse
+
+
+@atomic
+async def up(ctx):
+    pass
+
+
+@nothing_to_reverse("nothing was written")
+def down(ctx): ...
+"""
+
+
+def with_a_data_step(project, pkg, db) -> None:
+    """``0001_create_author`` (a schema step) and ``0002_backfill`` (one
+    data step that writes nothing)."""
+    configure(project, pkg, db.backend)
+    write_models(project, pkg, AUTHOR)
+    new("create_author")
+    new("backfill", "--data-only", "--data-step", "Author")
+    (step,) = migrations(project).glob("0002_*/*.py")
+    step.write_text(DATA_STEP_PASSES)
+
+
+def error_of(db, migration: int, step: int) -> str:
+    [(error,)] = db.rows(
+        f"SELECT error FROM _ferro_migrations WHERE migration = {migration} "
+        f"AND step = {step}"
+    )
+    return error
+
+
+AHEAD = (
+    "ferro migrate: this database has applied 0002_second, which is not in "
+    "migrations/.\nThe directory is behind the database: check out the branch "
+    "that holds it. Nothing was applied."
+)
+
+
+# -- up -------------------------------------------------------------------------
+
+
+@pytest.mark.backend_matrix
+def test_plain_up_streams_todays_lines(project, pkg, db, capsys):
+    two_migrations(project, pkg, db)
+
+    code, out, err = cli(capsys, "up", "--url", db.url)
+
+    assert (code, err) == (0, "")
+    assert timed(out) == (
+        f"{db.line}\n"
+        "0001_create_author  01_schema  applied (N ms)\n"
+        "0002_second         01_second  applied (N ms)\n"
+    )
+
+    code, out, err = cli(capsys, "up", "--url", db.url)
+    assert (code, out, err) == (
+        0,
+        f"{db.line}\nnothing to apply: the database is up to date\n",
+        "",
+    )
+
+
+@pytest.mark.backend_matrix
+def test_tty_up_rows_colour_each_step_by_kind(project, pkg, db, capsys, tty):
+    with_a_data_step(project, pkg, db)
+
+    code, out, err = cli(capsys, "up", "--url", db.url)
+
+    assert (code, err) == (0, "")
+    assert timed(out) == (
+        f"{tty_line(db)}\n"
+        f"  {OK} 0001_create_author  {sgr('36', '01_schema')}{' ' * 11}"
+        f"{APPLIED}{took()}\n"
+        f"  {OK} 0002_backfill       {sgr('35', '01_backfill_author')}  "
+        f"{APPLIED}{took()}\n"
+    )
+
+    code, out, err = cli(capsys, "up", "--url", db.url)
+    assert (code, err) == (0, "")
+    assert out == f"{tty_line(db)}\n" + tty_heading(
+        "✔", "1;32", "nothing to apply", "the database is up to date"
+    )
+
+
+@pytest.mark.backend_matrix
+def test_plain_up_a_failed_step(project, pkg, db, capsys):
+    failing_second_step(project, pkg, db)
+
+    code, out, err = cli(capsys, "up", "--url", db.url)
+
+    assert code == 1
+    assert timed(out) == f"{db.line}\n0001_create_author  01_schema  applied (N ms)\n"
+    assert err == (
+        "ferro migrate: 0001_create_author/02_two_b.up.sql failed: "
+        f"{error_of(db, 1, 2)}\n{ROLLED_BACK}\n"
+    )
+
+
+@pytest.mark.backend_matrix
+def test_tty_up_a_failed_step_under_a_red_heading(project, pkg, db, capsys, tty):
+    failing_second_step(project, pkg, db)
+
+    code, out, err = cli(capsys, "up", "--url", db.url)
+
+    assert code == 1
+    assert timed(out) == (
+        f"{tty_line(db)}\n"
+        f"  {OK} 0001_create_author  {sgr('36', '01_schema')}  {APPLIED}{took()}\n"
+    )
+    error = "".join(
+        f"{sgr('31', f'  {line}')}\n" for line in error_of(db, 1, 2).splitlines()
+    )
+    assert err == (
+        f"\n{sgr('1;31', '✘')} {sgr('1;31', '02_two_b failed')}\n"
+        f"{error}  {ROLLED_BACK}\n"
+    )
+
+
+@pytest.mark.backend_matrix
+def test_tty_up_a_failed_chunked_step_says_its_rows(project, pkg, db, capsys, tty):
+    probe = project_with_authors(project, pkg, db)
+    probe.reset()
+    probe.fail_on = ("up", 2)
+
+    code, out, err = cli(capsys, "up", "--url", db.url)
+
+    assert code == 1
+    assert timed(out).splitlines()[1:] == [
+        f"  {OK} 0002_add_slug  {sgr('36', '01_schema')}           {APPLIED}" + took()
+    ]
+    assert err == (
+        f"\n{sgr('1;31', '✘')} {sgr('1;31', '02_backfill_author failed')}"
+        f"{sgr('2', '  after 1,000 rows')}\n"
+        f"{sgr('31', '  RuntimeError: batch 2 gave up')}\n"
+        "  The failing batch was rolled back; the 1,000 rows of the batches before "
+        "it stay committed. Fix the file or the database and run `ferro migrate "
+        "up` again to resume after them. Nothing after it ran.\n"
+    )
+
+
+@pytest.mark.backend_matrix
+def test_a_refused_up_in_both_forms(project, pkg, db, capsys, monkeypatch):
+    two_migrations(project, pkg, db)
+    assert run("migrate", "up", "--url", db.url) == 0
+    shutil.rmtree(migrations(project) / "0002_second")
+
+    code, out, err = cli(capsys, "up", "--url", db.url)
+    assert (code, out, err) == (1, f"{db.line}\n", f"{AHEAD}\n")
+
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    monkeypatch.setenv("COLUMNS", "100")
+    code, out, err = cli(capsys, "up", "--url", db.url)
+    assert (code, out) == (1, f"{tty_line(db)}\n")
+    assert err == f"{sgr('1;31', '✘')} {sgr('1;31', 'up refused')}\n{AHEAD}\n"
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.parametrize("form", ["plain", "tty"])
+def test_up_streams_each_step_as_it_finishes(
+    project, pkg, db, capsys, monkeypatch, form
+):
+    """A step that prints when it runs: the row of the step before it is
+    already written, and the failure comes after it."""
+    configure(project, pkg, db.backend)
+    write_models(project, pkg, AUTHOR)
+    new("create_author")
+    new("backfill", "--data-only", "--data-step", "Author")
+    (step,) = migrations(project).glob("0002_*/*.py")
+    step.write_text(
+        DATA_STEP_FAILS.replace(
+            "    raise", '    print("<the second step runs>", flush=True)\n    raise'
+        )
+    )
+    if form == "tty":
+        monkeypatch.setenv("FORCE_COLOR", "1")
+        monkeypatch.setenv("COLUMNS", "100")
+    both = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", both)
+    monkeypatch.setattr(sys, "stderr", both)
+
+    assert run("migrate", "up", "--url", db.url) == 1
+
+    said = both.getvalue()
+    row = said.index("01_schema")
+    running = said.index("<the second step runs>")
+    failure = said.index("RuntimeError: no team for this row")
+    assert row < running < failure
+
+
+# -- down -----------------------------------------------------------------------
+
+
+@pytest.mark.backend_matrix
+def test_plain_down_prints_the_plan_then_each_step(project, pkg, db, capsys):
+    two_migrations(project, pkg, db)
+    assert run("migrate", "up", "--url", db.url) == 0
+
+    code, out, err = cli(capsys, "down", "--yes", "--url", db.url)
+
+    assert (code, err) == (0, "")
+    assert timed(out) == (
+        f"{db.line}\n"
+        "down reverts, in this order:\n"
+        "  0002_second  01_second\n"
+        "0002_second  01_second  reverted (N ms)\n"
+    )
+
+
+@pytest.mark.backend_matrix
+def test_tty_down_heads_the_plan_and_says_where_it_left_the_database(
+    project, pkg, db, capsys, tty
+):
+    with_a_data_step(project, pkg, db)
+    sql_step(project, "second", 'CREATE TABLE "second" ("id" integer);\n')
+    assert run("migrate", "up", "--url", db.url) == 0
+
+    code, out, err = cli(capsys, "down", "--to", "0001", "--yes", "--url", db.url)
+
+    assert (code, err) == (0, "")
+    data = sgr("35", "01_backfill_author")
+    assert timed(out) == (
+        f"{tty_line(db)}\n"
+        + tty_heading(
+            "▲",
+            "1;33",
+            "down reverts, newest first",
+            "0003_second, 0002_backfill, 2 steps",
+        )
+        + f"  0003_second    {sgr('34', '01_second')}\n"
+        f"  0002_backfill  {data}{sgr('2', '  nothing to reverse: nothing was written')}\n"
+        f"  {OK} 0003_second    {sgr('34', '01_second')}{' ' * 11}{REVERTED}{took()}\n"
+        f"  {OK} 0002_backfill  {data}  {sgr('2', 'nothing to reverse')}"
+        f"{sgr('2', ': nothing was written')}\n"
+        + tty_heading(
+            "✔",
+            "1;32",
+            "reverted 0003_second, 0002_backfill",
+            "2 steps, now at 0001_create_author",
+        )
+    )
+
+
+@pytest.mark.backend_matrix
+def test_tty_down_without_a_terminal_refuses_under_a_heading(
+    project, pkg, db, capsys, monkeypatch, tty
+):
+    from tests.test_migrate_down import Stdin
+
+    two_migrations(project, pkg, db)
+    assert run("migrate", "up", "--url", db.url) == 0
+    monkeypatch.setattr(sys, "stdin", Stdin(tty=False))
+
+    code, out, err = cli(capsys, "down", "--url", db.url)
+
+    assert code == 1
+    assert out == (
+        f"{tty_line(db)}\n"
+        + tty_heading("▲", "1;33", "down reverts, newest first", "0002_second, 1 step")
+        + f"  0002_second  {sgr('34', '01_second')}\n"
+    )
+    assert err == (
+        f"{sgr('1;31', '✘')} {sgr('1;31', 'down refused')}\n"
+        "Not a terminal: pass --yes to revert without a prompt. Nothing was reverted.\n"
+    )
+
+
+# -- baseline -------------------------------------------------------------------
+
+
+@pytest.mark.backend_matrix
+def test_baseline_in_both_forms(project, pkg, db, capsys, monkeypatch):
+    auto_migrated(project, pkg, db)
+    data_step = migrations(project) / "0001_create_author/02_backfill_author.py"
+    data_step.write_text(
+        "@chunked(lambda models: models.Author.select(), batch_size=100)\n"
+        "async def up(ctx, batch): ...\n\n\n"
+        '@nothing_to_reverse("derived")\n'
+        "def down(ctx): ...\n"
+    )
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    monkeypatch.setenv("COLUMNS", "100")
+
+    code, out, err = cli(capsys, "baseline", "--url", db.url)
+
+    assert (code, err) == (0, "")
+    assert out == (
+        f"{tty_line(db)}\n"
+        + tty_heading(
+            "✔", "1;32", f"recorded {BOTH} as baseline", "3 steps; 1 data step listed"
+        )
+        + f"  0001_create_author/{sgr('35', '02_backfill_author')}"
+        f"{sgr('2', '.py')}{sgr('2', '  recorded, not run')}\n"
+        f"{sgr('2', '  ' + NOT_COMPARED.rstrip())}\n"
+    )
+
+    monkeypatch.delenv("FORCE_COLOR")
+    code, out, err = cli(capsys, "baseline", "--remove", "--url", db.url)
+    assert (code, out, err) == (
+        0,
+        f"{db.line}\nremoved the baseline of {BOTH}\n",
+        "",
+    )
+
+
+# -- rerecord -------------------------------------------------------------------
+
+
+@pytest.mark.backend_matrix
+def test_rerecord_continue_in_both_forms(project, pkg, db, capsys, monkeypatch):
+    _, recorded, edited = edited_chunked(project, pkg, db)
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    monkeypatch.setenv("COLUMNS", "100")
+
+    code, out, err = cli(capsys, "rerecord", "0002:02", "--continue", "--url", db.url)
+
+    assert (code, err) == (0, "")
+    assert out == (
+        f"{tty_line(db)}\n"
+        f"{OK} {sgr('1', 're-recorded 0002_add_slug/')}{sgr('1;35', '02_backfill_author')}"
+        f"{sgr('1;2', '.py')}{sgr('2', '  nothing was run')}\n"
+        f"  sha384:{recorded} {sgr('2', '→')} sha384:{edited}\n"
+        f"{sgr('2', '  the next up continues from its cursor')}\n"
+    )
+
+
+@pytest.mark.parametrize("mode", ["record", "continue", "restart"])
+def test_the_rerecord_note_is_what_the_report_says(mode):
+    report = RerecordReport("0002_x/02_y.py", "a", "b", mode=mode)
+    note = RERECORD_NOTE[mode]
+    tail = f"; {note}; nothing was run" if note else "; nothing was run"
+    assert report.render().endswith(f"(sha384:a → sha384:b){tail}")
+
+
+# -- init -----------------------------------------------------------------------
+
+
+def test_tty_init_dims_the_block_and_heads_what_it_wrote(project, capsys, tty):
+    code, out, err = cli(
+        capsys,
+        "init",
+        "--config-file",
+        "ferro.toml",
+        "--models",
+        "app.models",
+        "--dialects",
+        "postgres",
+    )
+
+    assert (code, err) == (0, "")
+    block = (project / "ferro.toml").read_text()
+    assert out == (
+        "".join(f"{sgr('2', line)}\n" if line else "\n" for line in block.splitlines())
+        + tty_heading("✔", "1;32", "Wrote ferro.toml", "created migrations/")
     )
