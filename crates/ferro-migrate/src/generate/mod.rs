@@ -167,9 +167,9 @@ pub struct GeneratedMigration {
     pub warnings: Vec<String>,
 }
 
-/// What a [`Change`] does to the things it names.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "lowercase")]
+/// What a [`Change`] does to the things it names; serialised as
+/// [`ChangeVerb::word`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChangeVerb {
     /// Added by the migration.
     New,
@@ -196,18 +196,28 @@ impl ChangeVerb {
     }
 }
 
-/// What kind of thing a [`Change`] names.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+impl serde::Serialize for ChangeVerb {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.word())
+    }
+}
+
+/// What kind of thing a [`Change`] names; serialised as
+/// [`ChangeKind::words`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ChangeKind {
     /// Models, by class name.
-    #[serde(rename = "models")]
     Models,
     /// Enum types, by type name.
-    #[serde(rename = "enum types")]
     EnumTypes,
     /// Enum labels, as `type.label`.
-    #[serde(rename = "enum labels")]
     EnumLabels,
+}
+
+impl serde::Serialize for ChangeKind {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.words())
+    }
 }
 
 impl ChangeKind {
@@ -3586,7 +3596,11 @@ mod tests {
         assert_eq!(step_names(&migration), ["01_labels"]);
         assert_eq!(
             migration.summary.changes,
-            [change(ChangeVerb::New, ChangeKind::EnumLabels, &["status.gone"])]
+            [change(
+                ChangeVerb::New,
+                ChangeKind::EnumLabels,
+                &["status.gone"]
+            )]
         );
         assert_eq!(migration.summary.text, "new enum labels: status.gone");
         let pg = step(&migration, "01_labels", Dialect::Postgres);
@@ -4586,10 +4600,8 @@ mod tests {
 
     #[test]
     fn a_problem_other_than_ungenerated_carries_no_changes() {
-        let missing = std::env::temp_dir().join(format!(
-            "ferro-migrate-check-{}-a-file",
-            std::process::id()
-        ));
+        let missing =
+            std::env::temp_dir().join(format!("ferro-migrate-check-{}-a-file", std::process::id()));
         std::fs::write(&missing, "not a directory").expect("write");
         let report = check_migrations(&missing, &ir(vec![]), &BOTH);
         std::fs::remove_file(&missing).expect("remove");
@@ -4611,10 +4623,13 @@ mod tests {
     #[test]
     fn the_summary_renders_each_change_in_order_and_nothing_for_none() {
         assert_eq!(ChangeSummary::render(&[]), "");
-        assert_eq!(ChangeSummary::new(vec![]), ChangeSummary {
-            changes: vec![],
-            text: String::new(),
-        });
+        assert_eq!(
+            ChangeSummary::new(vec![]),
+            ChangeSummary {
+                changes: vec![],
+                text: String::new(),
+            }
+        );
         let changes = vec![
             change(ChangeVerb::New, ChangeKind::Models, &["A", "B"]),
             change(ChangeVerb::Changed, ChangeKind::Models, &["C"]),
@@ -4642,6 +4657,47 @@ mod tests {
                 "changes": [{"verb": "new", "kind": "enum types", "names": ["kind"]}],
                 "text": "new enum types: kind",
             })
+        );
+    }
+
+    #[test]
+    fn the_generator_orders_a_changed_dropped_relabelled_summary_and_renders_it() {
+        // `note` gains a column, `tag` is dropped, `status` renames `live` to
+        // `open` and removes `gone`: one entry each, in the generator's order.
+        let note = || model("Note", vec![pk()]);
+        let before = vec![
+            relabelled("status", &["draft", "gone", "live"], &[]),
+            note(),
+            model("Tag", vec![pk()]),
+        ];
+        let mut changed = note();
+        changed.columns.push(optional("body", "string"));
+        let after = vec![
+            relabelled("status", &["draft", "open"], &[("open", "live")]),
+            changed,
+        ];
+        let migration = edit(before, after, &BOTH);
+        assert_eq!(
+            migration.summary.changes,
+            [
+                change(ChangeVerb::Changed, ChangeKind::Models, &["Note"]),
+                change(ChangeVerb::Dropped, ChangeKind::Models, &["Tag"]),
+                change(
+                    ChangeVerb::Renamed,
+                    ChangeKind::EnumLabels,
+                    &["status.live → open"]
+                ),
+                change(
+                    ChangeVerb::Removed,
+                    ChangeKind::EnumLabels,
+                    &["status.gone"]
+                ),
+            ]
+        );
+        assert_eq!(
+            migration.summary.text,
+            "changed models: Note; dropped models: Tag; renamed enum labels: \
+             status.live → open; removed enum labels: status.gone"
         );
     }
 
