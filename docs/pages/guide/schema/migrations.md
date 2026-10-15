@@ -448,11 +448,11 @@ The directory is behind the database: check out the branch that holds it, or 000
 
 When the number was free and the migration was regenerated in place, the same cause follows the snapshot refusal (`0002_add_x/ir.json is not the snapshot this database applied 0002_add_x under`). Either way, a down needs the files that went up:
 
-```text
-$ git checkout <the commit that applied 0002_add_x>
-$ ferro migrate down --to 0001
-$ git checkout -
-$ ferro migrate up
+```bash
+git checkout <the commit that applied 0002_add_x>
+ferro migrate down --to 0001
+git checkout -
+ferro migrate up
 ```
 
 ## Changing a primary key

@@ -163,18 +163,24 @@ The class is recorded in each step's record when the step is applied, so a rolle
 
 Two different waits apply:
 
-- **The run lock.** One run per database at a time. A second `up`, `down`, `baseline` or `rerecord` waits for it, printing at once:
+- **The run lock.** One run per database at a time. A second `up`, `down`, `baseline` or `rerecord` waits for it, printing at once. With another run holding the lock and `ferro migrate up --lock-timeout 1s`, the wait ends in a refusal (exit 1):
 
+    <!-- output: run-lock-wait -->
     ```text
+    default · sqlite:///./app.db
     Another ferro migration run holds the lock on this database; waiting (--lock-timeout to bound it).
+    ferro migrate: another ferro migration run held the run lock on this database for longer than the lock timeout (1s). Nothing was applied; run again once it has finished, or raise --lock-timeout.
     ```
 
     `--lock-timeout` bounds the wait: `30s` (the default), `500ms`, `1m`, a number of seconds, or `0` to refuse at once. The lock dies with the process that holds it, never by a timeout, so a crashed run never leaves it stuck (ADR-0029).
-- **The DDL lock timeout.** On Postgres, each statement waits for its table lock under the database's [`ddl_lock_timeout`](../../reference/configuration.md#ddl_lock_timeout) (default `5s`), so one statement queued behind a long query never queues every other query behind itself. A statement that times out is retried with its step from the first statement, each attempt a progress line:
+- **The DDL lock timeout.** On Postgres, each statement waits for its table lock under the database's [`ddl_lock_timeout`](../../reference/configuration.md#ddl_lock_timeout) (default `5s`), so one statement queued behind a long query never queues every other query behind itself. A statement that times out is retried with its step from the first statement, each attempt a progress line. With `ddl_lock_timeout = "1s"` and another session holding `author`, a step that adds a column to it prints (Postgres only; the docs test runs this one when `FERRO_POSTGRES_URL` is set):
 
+    <!-- output: ddl-lock-retry -->
     ```text
-    0003_add_slug  01_expand  waiting for a lock on "author" (attempt 1 of 10, retry in 1s)
-    0003_add_slug  01_expand  applied (2214 ms)
+    default · postgresql://app:***@localhost/app
+    0002_author_slug  01_schema  waiting for a lock on "author" (attempt 1 of 10, retry in 1s)
+    0002_author_slug  01_schema  waiting for a lock on "author" (attempt 2 of 10, retry in 2s)
+    0002_author_slug  01_schema  applied (2214 ms)
     ```
 
     It does not apply to data steps.

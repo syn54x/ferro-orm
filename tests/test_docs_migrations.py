@@ -20,10 +20,12 @@ Five promises the pages make, each checked against the implementation:
 from __future__ import annotations
 
 import importlib
+import os
 import re
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import ModuleType
 
@@ -109,10 +111,16 @@ def _ferro(
     project: Path, *args: str, scratch: bool = False
 ) -> subprocess.CompletedProcess[str]:
     """Run ``ferro`` in ``project`` with a clean environment. ``scratch`` points
-    ``DATABASE_URL`` at the project's own SQLite file, ``app.db``."""
+    ``DATABASE_URL`` at the project's own SQLite file, ``app.db``, or at the URL
+    its ``.database_url`` file names (a Postgres scenario)."""
     env = {"PATH": "", "PYTHONDONTWRITEBYTECODE": "1"}
     if scratch:
-        env["DATABASE_URL"] = f"sqlite:{project / 'app.db'}?mode=rwc"
+        named = project / ".database_url"
+        env["DATABASE_URL"] = (
+            named.read_text()
+            if named.exists()
+            else f"sqlite:{project / 'app.db'}?mode=rwc"
+        )
         env["PYTHONIOENCODING"] = "utf-8"
     return subprocess.run(
         [
@@ -593,6 +601,90 @@ def _adopt_foreign_default(project: Path) -> None:
     )
 
 
+# The waits a second run shows: it needs a holder that outlives the setup.
+
+
+def _lock_wait(project: Path) -> None:
+    _loop_generated(project)
+
+
+@contextmanager
+def _run_lock_held(project: Path) -> Iterator[None]:
+    """Another run holds the SQLite run lock, an OS lock on ``<database>.ferro-migrate.lock``."""
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - Windows
+        pytest.skip("the SQLite run lock is held here with fcntl")
+    with open(project / "app.db.ferro-migrate.lock", "a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+
+
+def _postgres_base() -> str:
+    from tests.db_backends import get_postgres_url
+
+    base = get_postgres_url(dict(os.environ), REPO_ROOT / ".env")
+    if not base:
+        pytest.skip("FERRO_POSTGRES_URL is not set: this output needs Postgres")
+    return base
+
+
+def _ddl_lock_retry(project: Path) -> None:
+    """Postgres: ``author`` applied, and a column to add to it, in a schema of its own."""
+    import uuid
+
+    import psycopg
+
+    from tests.db_backends import build_postgres_test_url
+
+    base = _postgres_base()
+    schema = f"ferro_docs_{uuid.uuid4().hex[:12]}"
+    with psycopg.connect(base, autocommit=True) as admin:
+        admin.execute(f'CREATE SCHEMA "{schema}"')
+    (project / ".schema").write_text(schema)
+    (project / ".database_url").write_text(build_postgres_test_url(base, schema))
+    _configured(project)
+    (project / "ferro.toml").write_text(
+        'models = ["blog.models"]\ndialects = ["postgres"]\nddl_lock_timeout = "1s"\n'
+    )
+    _write_models(project, NAMED_AUTHOR)
+    _run_ok(project, "migrate", "new", "create_author")
+    _run_ok(project, "migrate", "up")
+    _write_models(project, NAMED_AUTHOR_OPTIONAL_SLUG)
+    _run_ok(project, "migrate", "new", "author_slug")
+
+
+@contextmanager
+def _author_table_locked(project: Path) -> Iterator[None]:
+    """Another session holds ``author`` until the step has waited twice."""
+    from types import SimpleNamespace
+
+    from tests.test_ddl_lock_timeout import Holder
+
+    base = _postgres_base()
+    schema = (project / ".schema").read_text()
+    with Holder(SimpleNamespace(base=base, schema=schema), "author", seconds=3.5):
+        yield
+
+
+def _drop_postgres_schemas(templates: list[Path]) -> None:
+    import psycopg
+
+    for template in templates:
+        marker = template / ".schema"
+        if marker.exists():
+            with psycopg.connect(_postgres_base(), autocommit=True) as admin:
+                admin.execute(f'DROP SCHEMA IF EXISTS "{marker.read_text()}" CASCADE')
+
+
+HELD_WHILE_RUNNING = {
+    "run-lock-wait": _run_lock_held,
+    "ddl-lock-retry": _author_table_locked,
+}
+"""The outputs that only exist while something else holds a lock: the context a
+test enters around the verb."""
+
+
 OUTPUTS = {
     # the CLI reference
     "init": (
@@ -667,6 +759,8 @@ OUTPUTS = {
     ),
     "late-row-resume": (_slug_late_row_reverted, ("migrate", "up")),
     # deploying
+    "run-lock-wait": (_lock_wait, ("migrate", "up", "--lock-timeout", "1s")),
+    "ddl-lock-retry": (_ddl_lock_retry, ("migrate", "up")),
     "ci-check": (_slug_written, ("migrate", "check")),
     "server-up": (_slug_written, ("migrate", "up")),
     "status-steps": (_slug_late_row_failed, ("migrate", "status", "--steps")),
@@ -719,6 +813,11 @@ def _normalise(text: str) -> str:
     text = re.sub(
         r"sqlite:(?://)?\S*?app\.db(?:\?mode=rwc)?", "sqlite:///./app.db", text
     )
+    text = re.sub(
+        r"postgres(?:ql)?://[^:\s/]+:\*+@\S+",
+        "postgresql://app:***@localhost/app",
+        text,
+    )
     text = re.sub(r"\(\d+ ms\)", "(N ms)", text)
     text = re.sub(r"\d{4}-\d\d-\d\d \d\d:\d\dZ", "YYYY-MM-DD HH:MMZ", text)
     text = re.sub(r"\d{4}-\d\d-\d\d \d\d:\d\d UTC", "YYYY-MM-DD HH:MM UTC", text)
@@ -736,17 +835,29 @@ def test_every_output_block_has_a_registry_entry_and_the_reverse() -> None:
     assert sorted(marked) == sorted(OUTPUTS)
 
 
+CLI_LINE = re.compile(
+    r"^\s*(?:"
+    r"\$ ferro |ferro migrate: |warning: |\S+ · "  # a command, a refusal, a warning, the database line
+    r"|(?:ok|!!|xx|--|~~) \S"  # a plain-form marker
+    r"|\d{4}_\w+ {2,}\S+ {2,}(?:applied|reverted|failed|waiting)"  # a step row
+    r"|ok: models match|no drift against|drift against |nothing to (?:apply|revert)"
+    r"|no schema change|recorded \S+ as baseline|re-recorded |removed the baseline"
+    r"|(?:ungenerated|unwritten_step|duplicate_number|broken_chain): "
+    r"|Another ferro migration run"
+    r")"
+)
+"""A line that only ``ferro migrate`` prints, whatever its block opens with."""
+
+
 def test_every_block_that_shows_ferro_output_is_marked() -> None:
-    """A ```text block that opens like ``ferro migrate`` output carries a marker."""
+    """A ```text block holding any line ``ferro migrate`` prints carries a marker."""
     unmarked = [
-        f"{page.relative_to(DOCS_PAGES)}: {first}"
+        f"{page.relative_to(DOCS_PAGES)}: {line.strip()}"
         for page in OUTPUT_PAGES
-        for kind, _id, first, _body in _quoted_blocks(page)
+        for kind, _id, _first, body in _quoted_blocks(page)
         if kind is None
-        and (
-            first.startswith(("$ ferro", "ferro migrate:"))
-            or re.match(r"^\S+ · ", first)
-        )
+        for line in body.splitlines()
+        if CLI_LINE.match(line)
     ]
     assert unmarked == []
 
@@ -768,7 +879,8 @@ def scenarios(tmp_path_factory: pytest.TempPathFactory):
         shutil.copytree(built[setup], copy)
         return copy
 
-    return make
+    yield make
+    _drop_postgres_schemas(list(built.values()))
 
 
 @pytest.mark.parametrize("output", sorted(OUTPUTS))
@@ -778,7 +890,8 @@ def test_a_quoted_output_is_what_ferro_prints_without_a_terminal(
     setup, args = OUTPUTS[output]
     project = scenarios(setup)
 
-    result = _ferro(project, *args, scratch=True)
+    with HELD_WHILE_RUNNING.get(output, lambda _project: nullcontext())(project):
+        result = _ferro(project, *args, scratch=True)
 
     printed = _normalise(result.stdout + result.stderr)
     assert printed == _normalise(_quoted_outputs()[output])

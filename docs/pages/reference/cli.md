@@ -123,7 +123,7 @@ Check, offline, that every model change has a migration and the migrations direc
 
 | Flag | What it does |
 | :--- | :--- |
-| `--verbose` | Show every name of a long list of changed models. A terminal otherwise folds a list past 12 names. |
+| `--verbose` | Accepted for symmetry with `new`. `check` never folds anything: each problem is its own `kind: message` line, never a list of names, so the flag changes nothing. |
 
 When the models match the newest migration, `check` prints one line and exits 0:
 
@@ -241,7 +241,7 @@ xx needs attention
   `ferro migrate rerecord 0001:01`. Nothing was applied.
 ```
 
-On a terminal the summary line is a coloured marker and a bold count (yellow `▲` for pending or edited, red `✘` for failed), each migration's state is coloured the same way (green applied, yellow pending, red for a failed or edited one) and the times are dim.
+On a terminal the summary line is a marker and a bold count, and each migration is a row with a marker, its state word and its time (dim). Everything applied is a green `✔`. Something pending is a yellow `○`, and a migration that is part-applied is a yellow `◐` with `partial, 3 of 4 steps`. A failed or interrupted step, or an edited file, puts a yellow `▲` on the summary (`1 failed · 1 pending`, `1 edited`); a failed step is a bold red `failed`, with its error under it in red, and an edited migration is a red `✘` row. The `needs attention` block has a red `✘` heading.
 
 ## `ferro migrate drift`
 
