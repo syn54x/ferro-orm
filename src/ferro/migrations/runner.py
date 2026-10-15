@@ -111,6 +111,7 @@ __all__ = [
     "RunNote",
     "RunReport",
     "StepEvent",
+    "StepFailure",
     "connection_dialect",
     "down",
     "parse_lock_timeout",
@@ -143,6 +144,36 @@ class AppliedStep(NamedTuple):
     ms: int
 
 
+@dataclass(frozen=True)
+class StepFailure:
+    """The step a run stopped at: its error and, apart, what the failure
+    left applied and how to resume. :attr:`RunReport.refusal` is
+    :attr:`message`."""
+
+    migration: str
+    """``NNNN_<name>``."""
+    file: str
+    """The step's file (``02_backfill_account.py``)."""
+    duration_ms: int
+    error: str
+    """What failed (``NotNullViolationError: null value in column ...``)."""
+    hint: str
+    """What stayed applied and how to resume, ending ``Nothing after it
+    ran.``"""
+    rows_done: int | None = None
+    """The rows a chunked step's committed batches did before it failed;
+    ``None`` for any other step."""
+
+    @property
+    def message(self) -> str:
+        """``ferro migrate: <migration>/<file> failed: <error>``, then the
+        hint on its own line."""
+        return (
+            f"ferro migrate: {self.migration}/{self.file} failed: {self.error}\n"
+            f"{self.hint}"
+        )
+
+
 @dataclass
 class RunReport:
     """What :func:`up` or :func:`down` did."""
@@ -166,6 +197,11 @@ class RunReport:
     """Applied migrations the directory lacks: let through by
     ``allow_ahead``, or, when they alone refused the run
     (``refused.ahead_only``), the ones that did."""
+    failed: StepFailure | None = None
+    """The step the run stopped at when one failed (``refusal`` is its
+    message); ``None`` when the run finished or was refused."""
+    direction: Literal["up", "down"] = "up"
+    """Which way the run went: :func:`up` or :func:`down`."""
 
     def _refuse(self, refused: RunRefused) -> None:
         self.refusal, self.refused = str(refused), refused
@@ -418,7 +454,7 @@ def _teller(
 async def _walk(
     run: LockedDatabase,
     plan: Plan,
-    tell: Callable[[RunEvent], None],
+    tell: Callable[[RunEvent], None] | None,
     *,
     using: str,
 ) -> RunReport:
@@ -426,13 +462,15 @@ async def _walk(
     ``run.execute`` for a SQL step, a data step in Python with its record
     moved through the run's transitions. The plan's direction decides which
     transitions settle each step and whether a step is reported ``applied``
-    or ``reverted``. Stops at the first failed step (its message is the
-    report's ``refusal``) or refusal."""
+    or ``reverted``, each line told to ``tell`` as an event (``None``:
+    to nobody). Stops at the first failed step (the report's ``failed``,
+    its message the report's ``refusal``) or refusal."""
     down = plan.direction == "down"
-    report = RunReport(ahead=list(plan.ahead))
+    report = RunReport(ahead=list(plan.ahead), direction="down" if down else "up")
     steps = plan.steps
     if not steps:
         return report
+    tell = tell or (lambda _event: None)
     done = report.reverted if down else report.applied
     try:
         loaded, reasons = _load_data_steps(steps, plan.direction)
@@ -465,6 +503,14 @@ async def _walk(
                     swaps.leave(step)
                     outcome = await run.execute(step, line)
                 if not outcome["ok"]:
+                    report.failed = StepFailure(
+                        migration=step.migration_name,
+                        file=step.file,
+                        duration_ms=outcome["ms"],
+                        error=outcome["error"],
+                        hint=outcome["hint"],
+                        rows_done=outcome.get("rows_done"),
+                    )
                     report.refusal = outcome["message"]
                     return report
                 done.append(
@@ -758,12 +804,27 @@ class _DataStep:
         log = logging.getLogger(f"ferro.migrations.{self._step.migration:04}.{stem}")
         return StepContext(models, tx, self._run.dialect, log)
 
-    def _failed(self, ms: int, error: str, after: str) -> dict[str, Any]:
+    def _failed(
+        self, ms: int, error: str, after: str, rows_done: int | None = None
+    ) -> dict[str, Any]:
+        """The outcome of a failed data step, in the SQL executor's shape:
+        its ``error``, its ``hint`` (``after`` and ``Nothing after it
+        ran.``) and the ``message`` they make."""
+        failure = StepFailure(
+            migration=self._step.migration_name,
+            file=self._step.file,
+            duration_ms=ms,
+            error=error,
+            hint=f"{after} Nothing after it ran.",
+            rows_done=rows_done,
+        )
         return {
             "ok": False,
             "ms": ms,
-            "message": f"ferro migrate: {self._shown} failed: {error}\n{after} Nothing "
-            f"after it ran.",
+            "error": failure.error,
+            "hint": failure.hint,
+            "rows_done": rows_done,
+            "message": failure.message,
         }
 
     async def up(
@@ -819,6 +880,7 @@ class _DataStep:
                 f"The failing batch was rolled back; the {failed.rows_done:,} rows of "
                 f"the batches before it stay committed. Fix the file or the database "
                 f"and run `ferro migrate up` again to resume after them.",
+                failed.rows_done,
             )
         return {"ok": True, "ms": _elapsed(clock)}
 
@@ -885,6 +947,7 @@ class _DataStep:
                 f"reverting, so `ferro migrate up` refuses until the down finishes. Fix "
                 f"the file or the database and run `ferro migrate down` again to resume "
                 f"after them.",
+                failed.rows_done,
             )
         return {"ok": True, "ms": _elapsed(clock)}
 
@@ -1220,7 +1283,7 @@ async def down(
             still ``reverting`` at its cursor. The next ``down`` resumes at it.
     """
     direction = parse_target(target, all=all)
-    report = RunReport()
+    report = RunReport(direction="down")
     where = Target.resolve(settings, database, using=using, url=url)
     timeout = where.database.lock_wait(lock_timeout)
     async with where.open() as name:

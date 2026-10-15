@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import shutil
 
 import pytest
 
@@ -201,3 +202,104 @@ async def test_a_lock_wait_is_a_note_event(project, pkg, db):
     )
     assert isinstance(events[-1], runner.StepEvent)
     assert events[-1].outcome == "applied"
+
+
+def failing_second_step(project, pkg, db) -> None:
+    """``0001`` with a second, hand-written step that fails."""
+    configure(project, pkg, db.backend)
+    write_models(project, pkg, AUTHOR)
+    new("create_author")
+    (folder,) = migrations(project).glob("0001_*")
+    (folder / "02_two_b.up.sql").write_text('INSERT INTO "missing" VALUES (1);\n')
+    (folder / "02_two_b.down.sql").write_text("SELECT 1;\n")
+
+
+DATA_STEP_FAILS = '''\
+from ferro.migrations import atomic, nothing_to_reverse
+
+
+@atomic
+async def up(ctx):
+    raise RuntimeError("no team for this row")
+
+
+@nothing_to_reverse("nothing was written")
+def down(ctx): ...
+'''
+
+
+def failing_data_step(project, pkg, db) -> None:
+    """``0001``, then ``0002`` whose one data step raises."""
+    configure(project, pkg, db.backend)
+    write_models(project, pkg, AUTHOR)
+    new("create_author")
+    new("backfill", "--data-only", "--data-step", "Author")
+    (step,) = migrations(project).glob("0002_*/*.py")
+    step.write_text(DATA_STEP_FAILS)
+
+
+@pytest.mark.backend_matrix
+def test_a_failed_sql_step_is_data_on_the_report(project, pkg, db):
+    failing_second_step(project, pkg, db)
+    settings, database = settings_and_database()
+
+    report = asyncio.run(run_report(runner.up(settings, database.name, url=db.url)))
+
+    failed = report.failed
+    assert report.direction == "up"
+    assert (failed.migration, failed.file, failed.rows_done) == (
+        "0001_create_author",
+        "02_two_b.up.sql",
+        None,
+    )
+    assert "missing" in failed.error
+    assert failed.hint == (
+        "The step was rolled back; fix the file or the database and run `ferro "
+        "migrate up` again to resume at it. Nothing after it ran."
+    )
+    assert report.refusal == (
+        f"ferro migrate: 0001_create_author/02_two_b.up.sql failed: {failed.error}\n"
+        f"{failed.hint}"
+    )
+    assert report.refused is None
+
+
+@pytest.mark.backend_matrix
+def test_a_failed_data_step_is_data_on_the_report(project, pkg, db):
+    failing_data_step(project, pkg, db)
+    settings, database = settings_and_database()
+
+    report = asyncio.run(run_report(runner.up(settings, database.name, url=db.url)))
+
+    failed = report.failed
+    (step,) = migrations(project).glob("0002_*/*.py")
+    assert (failed.migration, failed.file, failed.error) == (
+        "0002_backfill",
+        step.name,
+        "RuntimeError: no team for this row",
+    )
+    assert report.refusal == (
+        f"ferro migrate: 0002_backfill/{step.name} failed: {failed.error}\n"
+        f"{failed.hint}"
+    )
+    assert failed.hint.endswith("Nothing after it ran.")
+
+
+@pytest.mark.backend_matrix
+def test_a_refused_run_names_its_direction_and_no_failed_step(project, pkg, db):
+    two_migrations(project, pkg, db)
+    settings, database = settings_and_database()
+    asyncio.run(runner.up(settings, database.name, url=db.url))
+    shutil.rmtree(migrations(project) / "0002_second")
+
+    up = asyncio.run(run_report(runner.up(settings, database.name, url=db.url)))
+    down = asyncio.run(
+        run_report(runner.down(settings, database.name, url=db.url, target="0009"))
+    )
+
+    assert (up.direction, up.failed, up.refusal is not None) == ("up", None, True)
+    assert (down.direction, down.failed, down.refusal is not None) == (
+        "down",
+        None,
+        True,
+    )
