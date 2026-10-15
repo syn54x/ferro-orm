@@ -107,7 +107,10 @@ __all__ = [
     "AllowAhead",
     "AppliedStep",
     "DownPlan",
+    "RunEvent",
+    "RunNote",
     "RunReport",
+    "StepEvent",
     "connection_dialect",
     "down",
     "parse_lock_timeout",
@@ -229,6 +232,71 @@ def _stem(file: str) -> str:
     return _STEP_STEM.sub("", file)
 
 
+@dataclass(frozen=True)
+class StepEvent:
+    """One step a run finished: applied, reverted, or reverted with
+    nothing to reverse. :meth:`line` is the line ``progress`` receives for
+    it (``0002_add_team  01_expand  applied (412 ms)``)."""
+
+    migration: str
+    """``NNNN_<name>``."""
+    file: str
+    """The step's file (``01_expand.up.postgres.sql``)."""
+    outcome: Literal["applied", "reverted", "nothing to reverse"]
+    duration_ms: int | None
+    """How long the step ran; ``None`` when it had nothing to reverse."""
+    reason: str | None
+    """Why its down runs no statement, when ``outcome`` is ``nothing to
+    reverse``."""
+    name_width: int = 0
+    """The run's migration column width: its longest migration name."""
+    stem_width: int = 0
+    """The run's step column width: its longest step name."""
+
+    @property
+    def stem(self) -> str:
+        """The step's name, its file without the suffix (``01_expand``)."""
+        return _stem(self.file)
+
+    @property
+    def said(self) -> str:
+        """What happened, as the line ends it: ``applied (412 ms)``,
+        ``reverted (8 ms)`` or ``nothing to reverse: <reason>``."""
+        if self.outcome == "nothing to reverse":
+            return f"nothing to reverse: {self.reason}"
+        return f"{self.outcome} ({self.duration_ms} ms)"
+
+    def line(
+        self, name_width: int | None = None, stem_width: int | None = None
+    ) -> str:
+        """``<migration>  <step>  <said>``, the columns padded to the run's
+        widths unless others are given."""
+        names = self.name_width if name_width is None else name_width
+        stems = self.stem_width if stem_width is None else stem_width
+        return _step_prefix(self.migration, self.file, names, stems) + self.said
+
+
+@dataclass(frozen=True)
+class RunNote:
+    """Any other line a run says: a step waiting for a table lock
+    (``0003_add_slug  01_add_slug  waiting for a lock on "author" ...``), an
+    edited unfinished step re-recorded before it runs."""
+
+    text: str
+
+    def line(self) -> str:
+        """The line ``progress`` receives: the text itself."""
+        return self.text
+
+
+RunEvent: TypeAlias = StepEvent | RunNote
+"""What a run says: one event per line ``progress`` receives."""
+
+
+def _step_prefix(migration: str, file: str, name_width: int, stem_width: int) -> str:
+    return f"{migration:<{name_width}}  {_stem(file):<{stem_width}}  "
+
+
 async def up(
     settings: FerroSettings | None = None,
     database: str | None = None,
@@ -238,6 +306,7 @@ async def up(
     lock_timeout: str | float | None = None,
     allow_ahead: AllowAhead = False,
     progress: Callable[[str], Any] | None = None,
+    on_event: Callable[[RunEvent], Any] | None = None,
 ) -> RunReport:
     """Apply every pending step of every pending migration, in order, under
     the run lock (``ferro migrate up``).
@@ -252,7 +321,9 @@ async def up(
     ``True`` whatever they hold (:data:`AllowAhead`).
     ``progress`` receives each line as the run goes: one per applied step,
     and one per attempt a step makes while it waits for a table lock under
-    the database's ``ddl_lock_timeout``.
+    the database's ``ddl_lock_timeout``. ``on_event`` receives the same
+    lines as data, each just before ``progress`` receives its ``line()``: a
+    :class:`StepEvent` per applied step, a :class:`RunNote` for any other.
 
     Returns the :class:`RunReport` of what it applied.
 
@@ -277,6 +348,7 @@ async def up(
             lock_timeout=lock_timeout,
             allow_ahead=allow_ahead,
             progress=progress,
+            on_event=on_event,
         )
 
 
@@ -287,6 +359,7 @@ async def _up(
     lock_timeout: str | float | None = None,
     allow_ahead: AllowAhead = False,
     progress: Callable[[str], Any] | None = None,
+    on_event: Callable[[RunEvent], Any] | None = None,
     through: str | None = None,
 ) -> RunReport:
     """:func:`up` on open connection ``name``, raising as it does.
@@ -317,16 +390,35 @@ async def _up(
                 if refused.ahead_only:
                     report.ahead = list(run.status()["ahead"])
                 raise
-            report = await _walk(run, plan, progress, using=name)
+            report = await _walk(
+                run, plan, _teller(progress, on_event), using=name
+            )
     except RunRefused as refused:
         report._refuse(refused)
     return report._raise_if_refused()
 
 
+def _teller(
+    progress: Callable[[str], Any] | None,
+    on_event: Callable[[RunEvent], Any] | None,
+) -> Callable[[RunEvent], None]:
+    """Tell both hooks of one event: ``on_event`` the event, then
+    ``progress`` its ``line()``. The one place a run's lines are said, so
+    the string hook is always the event's own line."""
+
+    def tell(event: RunEvent) -> None:
+        if on_event is not None:
+            on_event(event)
+        if progress is not None:
+            progress(event.line())
+
+    return tell
+
+
 async def _walk(
     run: LockedDatabase,
     plan: Plan,
-    say: Callable[[str], Any] | None,
+    tell: Callable[[RunEvent], None],
     *,
     using: str,
 ) -> RunReport:
@@ -341,7 +433,6 @@ async def _walk(
     steps = plan.steps
     if not steps:
         return report
-    say = say or (lambda _line: None)
     done = report.reverted if down else report.applied
     try:
         loaded, reasons = _load_data_steps(steps, plan.direction)
@@ -350,7 +441,7 @@ async def _walk(
         with _HistoricalSwaps(run) as swaps:
             _check_chunked(steps, loaded, swaps, plan.direction)
             for step in steps:
-                line = _step_line(step, name_width, stem_width, say)
+                line = _step_line(step, name_width, stem_width, tell)
                 if step.edited is not None:
                     # ADR-0030: an unfinished attempt that committed nothing (or
                     # a no-transaction step, re-runnable from its first
@@ -361,7 +452,7 @@ async def _walk(
                         f"(sha384:{step.edited['recorded']} → sha384:{step.checksum})"
                     )
                     report.notes.append(note)
-                    say(note)
+                    tell(RunNote(note))
                 reason = step.nothing_to_reverse or reasons.get(_key(step))
                 if step.data:
                     this = loaded.get(_key(step))
@@ -379,12 +470,24 @@ async def _walk(
                 done.append(
                     AppliedStep(step.migration_name, _stem(step.file), outcome["ms"])
                 )
-                if not down:
-                    line(f"applied ({outcome['ms']} ms)")
-                elif reason is not None:
-                    line(f"nothing to reverse: {reason}")
-                else:
-                    line(f"reverted ({outcome['ms']} ms)")
+                nothing = down and reason is not None
+                tell(
+                    StepEvent(
+                        migration=step.migration_name,
+                        file=step.file,
+                        outcome=(
+                            "nothing to reverse"
+                            if nothing
+                            else "reverted"
+                            if down
+                            else "applied"
+                        ),
+                        duration_ms=None if nothing else outcome["ms"],
+                        reason=reason if nothing else None,
+                        name_width=name_width,
+                        stem_width=stem_width,
+                    )
+                )
     except RunRefused as refused:
         report._refuse(refused)
     return report
@@ -796,14 +899,17 @@ def _error_text(err: BaseException) -> str:
 
 
 def _step_line(
-    step: StepHandle, name_width: int, stem_width: int, say: Callable[[str], Any]
+    step: StepHandle,
+    name_width: int,
+    stem_width: int,
+    tell: Callable[[RunEvent], None],
 ) -> Callable[[str], None]:
-    """Say ``text`` as one of ``step``'s progress lines:
+    """Tell ``text`` as a note on ``step``'s row (a lock-wait attempt):
     ``<migration>  <step>  <text>``."""
-    prefix = f"{step.migration_name:<{name_width}}  {_stem(step.file):<{stem_width}}  "
+    prefix = _step_prefix(step.migration_name, step.file, name_width, stem_width)
 
     def line(text: str) -> None:
-        say(prefix + text)
+        tell(RunNote(prefix + text))
 
     return line
 
@@ -1081,6 +1187,7 @@ async def down(
     lock_timeout: str | float | None = None,
     confirm: Callable[[DownPlan], bool] | None = None,
     progress: Callable[[str], Any] | None = None,
+    on_event: Callable[[RunEvent], Any] | None = None,
 ) -> RunReport:
     """Revert every applied step above ``target``, newest first, under the
     run lock (``ferro migrate down``, ADR-0033), on the database and
@@ -1096,7 +1203,10 @@ async def down(
     ``confirm`` is shown the plan before the lock is taken; when it returns
     false nothing is reverted (``declined``). Once the lock is held the plan
     is made again, and a database that changed in between is refused rather
-    than reverted unseen. ``progress`` receives one line per reverted step.
+    than reverted unseen. ``progress`` receives one line per reverted step;
+    ``on_event`` receives each as data (a :class:`StepEvent`, or a
+    :class:`RunNote` for any other line) just before ``progress`` receives
+    its ``line()``.
 
     Returns the :class:`RunReport` of what it reverted (``declined`` when
     ``confirm`` said no).
@@ -1141,7 +1251,9 @@ async def down(
                         "down` again to see the plan as it stands now."
                     )
                     return report._raise_if_refused()
-                report = await _walk(run, plan, progress, using=name)
+                report = await _walk(
+                    run, plan, _teller(progress, on_event), using=name
+                )
                 report.notes[:0] = deferred
         except RunRefused as refused:
             report._refuse(refused)
