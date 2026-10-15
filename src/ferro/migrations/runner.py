@@ -165,6 +165,11 @@ class StepFailure:
     ``None`` for any other step."""
 
     @property
+    def stem(self) -> str:
+        """The step's name, its file without the suffix (``01_expand``)."""
+        return _stem(self.file)
+
+    @property
     def message(self) -> str:
         """``ferro migrate: <migration>/<file> failed: <error>``, then the
         hint on its own line."""
@@ -302,9 +307,7 @@ class StepEvent:
             return f"nothing to reverse: {self.reason}"
         return f"{self.outcome} ({self.duration_ms} ms)"
 
-    def line(
-        self, name_width: int | None = None, stem_width: int | None = None
-    ) -> str:
+    def line(self, name_width: int | None = None, stem_width: int | None = None) -> str:
         """``<migration>  <step>  <said>``, the columns padded to the run's
         widths unless others are given."""
         names = self.name_width if name_width is None else name_width
@@ -426,9 +429,7 @@ async def _up(
                 if refused.ahead_only:
                     report.ahead = list(run.status()["ahead"])
                 raise
-            report = await _walk(
-                run, plan, _teller(progress, on_event), using=name
-            )
+            report = await _walk(run, plan, _teller(progress, on_event), using=name)
     except RunRefused as refused:
         report._refuse(refused)
     return report._raise_if_refused()
@@ -1110,6 +1111,8 @@ class DownStep(NamedTuple):
     """``NN_<name>``."""
     nothing_to_reverse: str | None
     """Why its down runs no statement, when it runs none."""
+    file: str
+    """The step's file (``01_schema.up.postgres.sql``), which names its kind."""
 
 
 @dataclass
@@ -1189,6 +1192,7 @@ async def _preview_down(
                 step.migration_name,
                 _stem(step.file),
                 step.nothing_to_reverse or reasons.get(_key(step)),
+                step.file,
             )
             for step in plan.steps
         ]
@@ -1314,9 +1318,7 @@ async def down(
                         "down` again to see the plan as it stands now."
                     )
                     return report._raise_if_refused()
-                report = await _walk(
-                    run, plan, _teller(progress, on_event), using=name
-                )
+                report = await _walk(run, plan, _teller(progress, on_event), using=name)
                 report.notes[:0] = deferred
         except RunRefused as refused:
             report._refuse(refused)

@@ -43,7 +43,6 @@ from ..settings import (
 from . import Global, exit_codes
 
 if TYPE_CHECKING:
-    from ..migrations.errors import MigrationRefused
     from .output import Output
 
 __all__ = ["database_line", "migrate"]
@@ -134,10 +133,13 @@ def init(
     for database in databases:
         database.directory.mkdir(parents=True, exist_ok=True)
 
-    print(block, end="")
+    from .output import Output, print_init
+
     written = "[tool.ferro] to pyproject.toml" if in_pyproject else path.name
     created = " and ".join(f"{_shown(d.directory, cwd)}/" for d in databases)
-    print(f"Wrote {written} and created {created}")
+    print_init(
+        Output.for_streams(out=sys.stdout, err=sys.stderr), block, written, created
+    )
     return exit_codes.OK
 
 
@@ -321,23 +323,26 @@ def up(
 
     from ..migrations.errors import MigrationRefused
     from ..migrations.runner import up as run_up
+    from .output import Output, print_done, print_event, print_run_failure
 
     settings = FerroSettings(config=glob.config)
+    out = Output.for_streams(out=sys.stdout, err=sys.stderr)
     try:
         report = asyncio.run(
             run_up(
                 settings,
                 glob.database,
-                url=_url(settings, glob),
+                url=_url(settings, glob, out=out),
                 lock_timeout=lock_timeout,
                 allow_ahead=allow_ahead,
-                progress=lambda line: print(line, flush=True),
+                on_event=lambda event: print_event(out, event),
             )
         )
     except MigrationRefused as refused:
-        return _render_run_refusal(refused)
+        print_run_failure(out, refused)
+        return exit_codes.REFUSED
     if not report.applied:
-        print("nothing to apply: the database is up to date")
+        print_done(out, "nothing to apply", "the database is up to date")
     return exit_codes.OK
 
 
@@ -392,25 +397,35 @@ def down(
     from ..migrations.errors import MigrationRefused
     from ..migrations.runner import DownPlan, plan_down
     from ..migrations.runner import down as run_down
+    from ..migrations.runner import status as run_status
+    from .output import (
+        Output,
+        print_done,
+        print_down_plan,
+        print_event,
+        print_reverted,
+        print_run_failure,
+    )
 
     settings = FerroSettings(config=glob.config)
-    url = _url(settings, glob)
+    out = Output.for_streams(out=sys.stdout, err=sys.stderr)
+    url = _url(settings, glob, out=out)
     if not yes and not sys.stdin.isatty():
         plan = asyncio.run(
             plan_down(settings, glob.database, url=url, target=to, all=all_)
         )
         if plan.refusal is not None:
-            print(plan.refusal, file=sys.stderr)
+            out.refusal("down refused", plan.refusal)
             return exit_codes.REFUSED
         if not plan.steps:
-            print("nothing to revert")
+            print_done(out, "nothing to revert", "")
             return exit_codes.OK
-        print(plan.describe())
-        print(_NOT_A_TERMINAL, file=sys.stderr)
+        print_down_plan(out, plan)
+        out.refusal("down refused", _NOT_A_TERMINAL)
         return exit_codes.REFUSED
 
     def confirm(plan: DownPlan) -> bool:
-        print(plan.describe(), flush=True)
+        print_down_plan(out, plan)
         return yes or _confirm_revert(plan.question())
 
     try:
@@ -423,29 +438,20 @@ def down(
                 all=all_,
                 lock_timeout=lock_timeout,
                 confirm=confirm,
-                progress=lambda line: print(line, flush=True),
+                on_event=lambda event: print_event(out, event),
             )
         )
     except MigrationRefused as refused:
-        return _render_run_refusal(refused)
+        print_run_failure(out, refused)
+        return exit_codes.REFUSED
     if report.declined:
-        print("Nothing was reverted.")
+        out.print("Nothing was reverted.")
     elif not report.reverted:
-        print("nothing to revert")
+        print_done(out, "nothing to revert", "")
+    elif not out.plain:
+        standing = asyncio.run(run_status(settings, glob.database, url=url))
+        print_reverted(out, report.reverted, standing)
     return exit_codes.OK
-
-
-def _render_run_refusal(refused: MigrationRefused) -> int:
-    """A refused ``up`` or ``down``: its run report's refusal, as the
-    operator's text (the application's ``allow_ahead=`` hint names the
-    API's argument, not ``--allow-ahead``), and exit 1. A refusal with no run report (the
-    configuration, the connection) prints its own message."""
-    from ..migrations.runner import RunReport
-
-    report = refused.report
-    shown = report.refusal if isinstance(report, RunReport) else None
-    print(refused if shown is None else shown, file=sys.stderr)
-    return exit_codes.REFUSED
 
 
 def _confirm_revert(question: str) -> bool:
@@ -561,28 +567,28 @@ def baseline(
     import asyncio
 
     from ..migrations import baseline as run_baseline
-    from ..migrations._baseline import remove_baseline, render_removed
+    from ..migrations._baseline import remove_baseline
+    from .output import Output, print_baseline, print_removed
 
     if remove and target is not None:
         raise SettingsError(
             "baseline --remove removes the whole baseline; drop the target"
         )
     settings = FerroSettings(config=glob.config)
-    url = _url(settings, glob)
+    out = Output.for_streams(out=sys.stdout, err=sys.stderr)
+    url = _url(settings, glob, out=out)
     if remove:
         removed = asyncio.run(
             remove_baseline(settings, glob.database, url=url, lock_timeout=lock_timeout)
         )
-        print(render_removed(removed))
+        print_removed(out, removed)
         return exit_codes.OK
     report = asyncio.run(
         run_baseline(
             settings, glob.database, url=url, target=target, lock_timeout=lock_timeout
         )
     )
-    for warning in report.warnings:
-        print(f"warning: {warning}", file=sys.stderr)
-    print(report.render())
+    print_baseline(out, report)
     return exit_codes.OK if report.drift is None else exit_codes.NEEDS_ATTENTION
 
 
@@ -640,22 +646,24 @@ def rerecord(
 
     from ..migrations.rerecord import Mode
     from ..migrations.rerecord import rerecord as run_rerecord
+    from .output import Output, print_rerecord
 
     if continue_ and restart:
         raise SettingsError("pass --continue or --restart, not both")
     mode: Mode = "continue" if continue_ else "restart" if restart else "record"
     settings = FerroSettings(config=glob.config)
+    out = Output.for_streams(out=sys.stdout, err=sys.stderr)
     report = asyncio.run(
         run_rerecord(
             settings,
             glob.database,
-            url=_url(settings, glob),
+            url=_url(settings, glob, out=out),
             target=target,
             mode=mode,
             lock_timeout=lock_timeout,
         )
     )
-    print(report.render())
+    print_rerecord(out, report)
     return exit_codes.OK
 
 
@@ -667,15 +675,11 @@ def database_line(name: str, where: str) -> str:
     return f"{name} · {where}"
 
 
-def _say(line: str) -> None:
-    print(line, flush=True)
-
-
 def _url(
     settings: FerroSettings,
     glob: Global,
     *,
-    out: Output | None = None,
+    out: Output,
     said: bool = True,
 ) -> str:
     """The URL a verb works on: ``--url``, else the database's ``url_env``.
@@ -683,8 +687,7 @@ def _url(
 
     Once the URL is resolved and its scheme accepted (an unset ``url_env``
     or an unsupported scheme is refused before anything reaches stdout),
-    the database line names it with its secrets masked (through ``out``,
-    for a verb that prints through the presentation module), unless
+    the database line names it with its secrets masked, through ``out``, unless
     ``said`` is false (``status --json``, whose stdout is the document
     alone)."""
     from .. import _core
@@ -692,10 +695,8 @@ def _url(
     database = settings.database(glob.database)
     url = database.url_for(glob.url)
     shown = _core._redact_url(url)
-    if said and out is not None:
+    if said:
         out.database_line(database.name, shown)
-    elif said:
-        _say(database_line(database.name, shown))
     return url
 
 

@@ -214,7 +214,7 @@ def failing_second_step(project, pkg, db) -> None:
     (folder / "02_two_b.down.sql").write_text("SELECT 1;\n")
 
 
-DATA_STEP_FAILS = '''\
+DATA_STEP_FAILS = """\
 from ferro.migrations import atomic, nothing_to_reverse
 
 
@@ -225,7 +225,7 @@ async def up(ctx):
 
 @nothing_to_reverse("nothing was written")
 def down(ctx): ...
-'''
+"""
 
 
 def failing_data_step(project, pkg, db) -> None:

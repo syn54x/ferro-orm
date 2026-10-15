@@ -46,10 +46,14 @@ from rich.console import Console
 from rich.text import Text
 
 if TYPE_CHECKING:
+    from ..migrations._baseline import BaselineReport
     from ..migrations._drift import DriftReport
+    from ..migrations.errors import MigrationRefused
     from ..migrations.generate import CheckReport
     from ..migrations.layout import GeneratedMigration, GeneratedStep
     from ..migrations.report import MigrationStatus, StatusReport
+    from ..migrations.rerecord import RerecordReport
+    from ..migrations.runner import AppliedStep, DownPlan, RunEvent, StepEvent
 
 __all__ = [
     "CHANGE_STYLE",
@@ -60,10 +64,20 @@ __all__ = [
     "Output",
     "applied_at_short",
     "kind_of_file",
+    "print_baseline",
     "print_check",
+    "print_done",
+    "print_down_plan",
     "print_drift",
+    "print_event",
+    "print_init",
     "print_new",
+    "print_removed",
+    "print_rerecord",
+    "print_reverted",
+    "print_run_failure",
     "print_status",
+    "print_step",
 ]
 
 GLYPHS: dict[str, tuple[str, str]] = {
@@ -684,6 +698,11 @@ def print_drift(out: Output, report: DriftReport) -> None:
                 "ok", Text("no drift", style="bold green"), f"against {report.against}"
             )
         return
+    _drift_findings(out, report)
+
+
+def _drift_findings(out: Output, report: DriftReport) -> None:
+    """A drift report's findings: the red count heading, one bullet each."""
     out.heading(
         "error", f"{count(len(report.lines), 'difference')} against {report.against}"
     )
@@ -692,3 +711,223 @@ def print_drift(out: Output, report: DriftReport) -> None:
         line.append(out.glyph("bullet"), style="red")
         line.append(f" {finding}")
         out.print(line)
+
+
+# -- up and down ----------------------------------------------------------------
+
+
+def print_step(
+    out: Output, event: StepEvent, *, name_width: int, stem_width: int
+) -> None:
+    """One step a run finished, as it finishes. The plain form is the line
+    ``progress`` receives (:meth:`StepEvent.line`); on a TTY a row two
+    spaces in: the glyph, the migration, the step coloured by its kind, the
+    state word and the duration in seconds, dim (``nothing to reverse``
+    gives its reason instead)."""
+    if out.plain:
+        out.print(event.line(name_width, stem_width))
+        return
+    glyph = STATE_GLYPH[event.outcome]
+    line = Text("  ")
+    line.append(out.glyph(glyph), style=GLYPH_STYLE[glyph])
+    line.append(f" {event.migration:<{name_width}}  ")
+    line.append(event.stem, style=KIND_STYLE[kind_of_file(event.file)])
+    line.append(" " * (stem_width - len(event.stem) + 2))
+    line.append(event.outcome, style=STATE_STYLE[event.outcome])
+    if event.duration_ms is not None:
+        line.append(f"  {event.duration_ms / 1000:.1f}s", style="dim")
+    if event.reason is not None:
+        line.append(f": {event.reason}", style="dim")
+    out.print(line)
+
+
+def print_run_failure(out: Output, refused: MigrationRefused) -> None:
+    """Why ``up`` or ``down`` stopped, on stderr: its report's refusal (or,
+    with no run report, the exception's text) as it is in the plain form.
+    On a TTY a blank line, then a failed step under a red ``<step>
+    failed`` heading (``after N rows`` for a chunked step's committed
+    batches) with its error red and its hint plain, indented two; any other
+    refusal under ``up refused`` / ``down refused``."""
+    from ..migrations.runner import RunReport
+
+    report = refused.report
+    if not isinstance(report, RunReport) or report.refusal is None:
+        out.refusal("refused", str(refused))
+        return
+    failed = report.failed
+    if out.plain or failed is None:
+        out.refusal(f"{report.direction} refused", report.refusal)
+        return
+    out.print(err=True)
+    where = "" if failed.rows_done is None else f"after {failed.rows_done:,} rows"
+    out.heading("error", f"{failed.stem} failed", where, err=True)
+    for line in failed.error.splitlines():
+        out.print(Text(f"  {line}", style="red"), err=True)
+    for line in failed.hint.splitlines():
+        out.print(f"  {line}", err=True)
+
+
+def print_down_plan(out: Output, plan: DownPlan) -> None:
+    """What ``down`` would revert, newest first: :meth:`DownPlan.describe`
+    in the plain form; on a TTY a warning heading naming the migrations and
+    the step count, then a row per step, its stem coloured by kind and a
+    nothing-to-reverse reason dim."""
+    if out.plain:
+        out.print(plan.describe())
+        return
+    migrations = list(dict.fromkeys(step.migration for step in plan.steps))
+    out.heading(
+        "warning",
+        "down reverts, newest first",
+        f"{', '.join(migrations)}, {count(len(plan.steps), 'step')}",
+    )
+    name_width = max(len(step.migration) for step in plan.steps)
+    stem_width = max(len(step.step) for step in plan.steps)
+    for step in plan.steps:
+        line = Text(f"  {step.migration:<{name_width}}  ")
+        line.append(step.step, style=KIND_STYLE[kind_of_file(step.file)])
+        if step.nothing_to_reverse is not None:
+            line.append(" " * (stem_width - len(step.step)))
+            line.append(f"  nothing to reverse: {step.nothing_to_reverse}", style="dim")
+        out.print(line)
+
+
+def print_reverted(
+    out: Output, reverted: Sequence[AppliedStep], standing: StatusReport
+) -> None:
+    """A finished ``down``'s closing heading, on a TTY only: ``reverted
+    <migrations>  N steps, now at <the last migration standing>``, read
+    from ``standing`` (a partly applied one with its state), or ``now at
+    no migration``."""
+    if out.plain:
+        return
+    migrations = list(dict.fromkeys(step.migration for step in reverted))
+    out.heading(
+        "ok",
+        f"reverted {', '.join(migrations)}",
+        f"{count(len(reverted), 'step')}, now at {_now_at(standing)}",
+    )
+
+
+def _now_at(standing: StatusReport) -> str:
+    applied = [m for m in standing.migrations if m.state != "pending"]
+    if not applied:
+        return "no migration"
+    last = applied[-1]
+    return (
+        last.name if last.state.startswith("applied") else f"{last.name} ({last.state})"
+    )
+
+
+def print_event(out: Output, event: RunEvent) -> None:
+    """One line a run says, as it says it: a finished step through
+    :func:`print_step` at the run's widths; any other line as it is."""
+    from ..migrations.runner import StepEvent
+
+    if isinstance(event, StepEvent):
+        print_step(out, event, name_width=event.name_width, stem_width=event.stem_width)
+    else:
+        out.print(event.text)
+
+
+def print_done(out: Output, title: str, where: str) -> None:
+    """A run with nothing to do: ``<title>: <where>`` in the plain form
+    (``nothing to apply: the database is up to date``), an ok heading on a
+    TTY; ``title`` alone when ``where`` is empty (``nothing to revert``)."""
+    if out.plain:
+        out.print(f"{title}: {where}" if where else title)
+    else:
+        out.heading("ok", title, where)
+
+
+# -- baseline -------------------------------------------------------------------
+
+
+def print_baseline(out: Output, report: BaselineReport) -> None:
+    """What ``ferro migrate baseline`` did. Its warnings on stderr first.
+    The plain form is :meth:`BaselineReport.render`. On a TTY: the drift it
+    found (and that nothing was recorded); or an ok heading with the step
+    count, one line per data step it listed without running (its file
+    coloured by kind), and the not-compared note, dim."""
+    from ..migrations._baseline import NOT_COMPARED, _span
+
+    for warning in report.warnings:
+        out.warning(warning)
+    if out.plain:
+        out.print(report.render())
+        return
+    if report.drift is not None:
+        _drift_findings(out, report.drift)
+        out.print(Text("nothing was recorded", style="bold"))
+        return
+    where = count(report.steps, "step")
+    if report.data_steps_listed:
+        where += f"; {count(len(report.data_steps_listed), 'data step')} listed"
+    out.heading("ok", f"recorded {_span(report.recorded)} as baseline", where)
+    for listed in report.data_steps_listed:
+        migration, _, file = listed.rpartition("/")
+        line = Text(f"  {migration}/")
+        line.append_text(out.file_name(file, kind=kind_of_file(file)))
+        line.append("  recorded, not run", style="dim")
+        out.print(line)
+    out.print(Text(f"  {NOT_COMPARED}", style="dim"))
+
+
+def print_removed(out: Output, removed: list[str]) -> None:
+    """What ``baseline --remove`` removed: :func:`render_removed` in the
+    plain form, under an ok glyph on a TTY."""
+    from ..migrations._baseline import render_removed
+
+    if out.plain:
+        out.print(render_removed(removed))
+    else:
+        out.heading("ok", render_removed(removed))
+
+
+# -- rerecord -------------------------------------------------------------------
+
+RERECORD_NOTE = {
+    "record": "",
+    "continue": "the next up continues from its cursor",
+    "restart": (
+        "its cursor and rows_done are cleared, so the next up starts from the first row"
+    ),
+}
+"""What a re-record leaves the next ``up`` to do, by its mode, as the TTY
+form's note says it."""
+
+
+def print_rerecord(out: Output, report: RerecordReport) -> None:
+    """What ``ferro migrate rerecord`` changed: :meth:`RerecordReport.render`
+    in the plain form; on a TTY an ok heading naming the file (coloured by
+    kind) and that nothing was run, the two checksums with an arrow, and
+    what the mode leaves the next ``up``, dim."""
+    if out.plain:
+        out.print(report.render())
+        return
+    migration, _, file = report.file.rpartition("/")
+    title = Text(f"re-recorded {migration}/", style="bold")
+    title.append_text(out.file_name(file, kind=kind_of_file(file)))
+    out.heading("ok", title, "nothing was run")
+    line = Text(f"  sha384:{report.old_checksum} ")
+    line.append(out.glyph("arrow"), style=GLYPH_STYLE["arrow"])
+    line.append(f" sha384:{report.new_checksum}")
+    out.print(line)
+    note = RERECORD_NOTE[report.mode]
+    if note:
+        out.print(Text(f"  {note}", style="dim"))
+
+
+# -- init -----------------------------------------------------------------------
+
+
+def print_init(out: Output, block: str, written: str, created: str) -> None:
+    """What ``ferro migrate init`` wrote: the config ``block`` as written,
+    then ``Wrote <written> and created <created>`` in the plain form; on a
+    TTY the block dim, then an ok heading."""
+    for line in block.splitlines():
+        out.print(Text(line, style="dim") if not out.plain else line)
+    if out.plain:
+        out.print(f"Wrote {written} and created {created}")
+    else:
+        out.heading("ok", f"Wrote {written}", f"created {created}")
