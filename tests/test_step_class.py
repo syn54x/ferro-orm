@@ -261,7 +261,7 @@ def test_a_minor_0_database_reads_as_contract_and_the_next_up_classifies_it(
     # A reader treats a missing class as contract and writes nothing.
     assert run("migrate", "status", "--steps", "--url", db.url) == 0
     out = capsys.readouterr().out
-    steps = [line for line in out.splitlines() if line.startswith("  ")]
+    steps = [line for line in out.splitlines() if line.startswith("      ")]
     assert len(steps) == 3 and all(line.endswith("  contract") for line in steps), out
     assert require_applied(db) is None
     assert (
@@ -328,7 +328,7 @@ def test_a_record_written_with_0_22_columns_is_contract_until_the_next_up(
 
     assert run("migrate", "status", "--steps", "--url", db.url) == 0
     out = capsys.readouterr().out
-    shown = [line.split() for line in out.splitlines() if line.startswith("  ")]
+    shown = [line.split() for line in out.splitlines() if line.startswith("      ")]
     assert shown[1] == [f"01_schema.up.{db.backend}.sql", "applied", "contract"], out
     assert require_applied(db) is None
     assert classes(db)[1] == (2, 1, None), "readers never write"

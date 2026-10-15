@@ -216,7 +216,7 @@ def test_a_baseline_records_every_steps_class_and_status_shows_them(
 
     code, out, _ = cli(capsys, "status", "--steps", "--url", db.url)
     assert code == 0
-    steps = [line.split() for line in out.splitlines() if line.startswith("  ")]
+    steps = [line.split() for line in out.splitlines() if line.startswith("      ")]
     assert [step[-1] for step in steps] == [
         "expand",
         "expand",

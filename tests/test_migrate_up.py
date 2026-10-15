@@ -565,7 +565,9 @@ def _refused_by_up_and_status(db, capsys, expected: str) -> None:
     assert run("migrate", "up", "--url", db.url) == 1
     assert capsys.readouterr().err.rstrip("\n") == expected
     assert run("migrate", "status", "--url", db.url) == 4
-    assert expected in capsys.readouterr().out
+    # status prints the refusal under its needs attention heading, indented.
+    shown = "".join(f"  {line}\n" for line in expected.splitlines())
+    assert f"needs attention\n{shown}" in capsys.readouterr().out
 
 
 def test_an_applied_file_edited_on_disk_is_refused_naming_rerecord(
