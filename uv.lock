@@ -565,7 +565,7 @@ wheels = [
 
 [[package]]
 name = "ferro-orm"
-version = "0.21.2"
+version = "0.23.0"
 source = { editable = "." }
 dependencies = [
     { name = "pydantic" },
@@ -579,6 +579,7 @@ alembic = [
 ]
 cli = [
     { name = "cyclopts" },
+    { name = "rich" },
 ]
 
 [package.dev-dependencies]
@@ -637,6 +638,7 @@ requires-dist = [
     { name = "cyclopts", marker = "extra == 'cli'", specifier = ">=5,<6" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pydantic-settings", specifier = ">=2.0" },
+    { name = "rich", marker = "extra == 'cli'", specifier = ">=14" },
     { name = "sqlalchemy", marker = "extra == 'alembic'", specifier = ">=2.0.46" },
 ]
 provides-extras = ["alembic", "cli"]
