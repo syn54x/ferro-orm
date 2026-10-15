@@ -44,7 +44,7 @@ from . import Global, exit_codes
 
 if TYPE_CHECKING:
     from ..migrations.errors import MigrationRefused
-    from ..migrations.layout import GeneratedMigration
+    from .output import Output
 
 __all__ = ["database_line", "migrate"]
 
@@ -187,6 +187,16 @@ def new(
             negative="",
         ),
     ] = None,
+    verbose: Annotated[
+        bool,
+        Parameter(
+            help=(
+                "Show every name of a long change list; a terminal otherwise "
+                "shows the first few."
+            ),
+            negative="",
+        ),
+    ] = False,
     replace: Annotated[
         str | None,
         Parameter(
@@ -211,11 +221,13 @@ def new(
     instead, keeping its number when it is free.
     """
     from ..migrations.generate import prepare, write
+    from .output import Output, print_new
 
     _refuse_url(glob, "new")
     settings = FerroSettings(config=glob.config)
     database = settings.database(glob.database)
-    _say_directory(database)
+    out = Output.for_streams(out=sys.stdout, err=sys.stderr)
+    _say_directory(out, database)
     migration = prepare(
         database,
         name,
@@ -226,69 +238,30 @@ def new(
         replace=replace,
     )
     if migration is None:
-        print("no schema change: nothing written")
+        out.print("no schema change: nothing written")
         return exit_codes.OK
     written = write(database, migration)
 
     shown = f"{_shown(written, Path.cwd().resolve())}/"
-    if migration.replaces is None:
-        print(shown)
-        for file_name in migration.files():
-            print(f"  {file_name}")
-    else:
-        _print_replacement(shown, migration)
-    if migration.summary:
-        print(migration.summary.text)
-    for note in migration.notes:
-        print(note)
-    for warning in migration.warnings:
-        print(f"warning: {warning}", file=sys.stderr)
+    print_new(out, migration, shown, verbose=verbose)
     return exit_codes.OK
 
 
-def _print_replacement(shown: str, migration: GeneratedMigration) -> None:
-    """``new --replace``'s per-file lines: what each file of the replaced
-    migration became (kept, moved, renumbered), "carried, review it" for
-    each carried step, and every file that is new."""
-    from ..migrations.layout import SNAPSHOT_FILE, Moved
-
-    in_place = migration.replaces == migration.dir_name
-    where = (
-        "regenerated in place"
-        if in_place
-        else f"replaces {migration.replaces}, now deleted"
-    )
-    print(f"{shown}  ({where})")
-    moved = {new: (old, how) for old, new, how in migration.moves}
-    carried_over = {
-        name for step in migration.steps if step.over_namesake for name in step.files
-    }
-    for file_name in migration.files():
-        if file_name == SNAPSHOT_FILE:
-            parent = migration.chained_from or "no migration (the first)"
-            print(f"  {file_name}  new snapshot, chained from {parent}")
-            continue
-        if file_name not in moved:
-            print(f"  {file_name}  new")
-            continue
-        old, how = moved[file_name]
-        if how is Moved.CARRIED:
-            wins = (
-                "; it wins over the regenerated step of the same name"
-                if file_name in carried_over
-                else ""
-            )
-            print(f"  {file_name}  carried, review it (was {old}{wins})")
-        elif how is Moved.RENUMBERED:
-            print(f"  {file_name}  renumbered (was {old})")
-        elif in_place:
-            print(f"  {file_name}  kept")
-        else:
-            print(f"  {file_name}  moved (was {old})")
-
-
 @migrate.command
-def check(*, glob: Annotated[Global, Parameter(parse=False)]) -> int:
+def check(
+    *,
+    verbose: Annotated[
+        bool,
+        Parameter(
+            help=(
+                "Show every name of a long change list; a terminal otherwise "
+                "shows the first few."
+            ),
+            negative="",
+        ),
+    ] = False,
+    glob: Annotated[Global, Parameter(parse=False)],
+) -> int:
     """Check, offline, that every model change has a migration and the
     migrations directory is intact.
 
@@ -301,17 +274,15 @@ def check(*, glob: Annotated[Global, Parameter(parse=False)]) -> int:
 
     from ..migrations.generate import check as run_check
 
+    from .output import Output, print_check
+
     _refuse_url(glob, "check")
     settings = FerroSettings(config=glob.config)
-    _say_directory(settings.database(glob.database))
+    out = Output.for_streams(out=sys.stdout, err=sys.stderr)
+    _say_directory(out, settings.database(glob.database))
     report = asyncio.run(run_check(settings, glob.database))
-    if report.ok:
-        head = report.head or "no migration"
-        print(f"ok: models match {head}")
-        return exit_codes.OK
-    for problem in report.problems:
-        print(f"{problem.kind}: {problem.message}", file=sys.stderr)
-    return exit_codes.PENDING
+    print_check(out, report, verbose=verbose)
+    return exit_codes.OK if report.ok else exit_codes.PENDING
 
 
 @migrate.command
@@ -714,10 +685,10 @@ def _url(settings: FerroSettings, glob: Global, *, said: bool = True) -> str:
     return url
 
 
-def _say_directory(database: DatabaseSettings) -> None:
+def _say_directory(out: Output, database: DatabaseSettings) -> None:
     """``new`` and ``check``'s database line: they never connect, so it
     names the migrations directory, relative to the working directory."""
-    _say(database_line(database.name, _shown(database.directory, Path.cwd().resolve())))
+    out.database_line(database.name, _shown(database.directory, Path.cwd().resolve()))
 
 
 def _refuse_url(glob: Global, verb: str) -> None:

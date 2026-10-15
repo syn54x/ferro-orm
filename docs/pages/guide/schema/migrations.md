@@ -363,13 +363,15 @@ duplicate_number: two migrations are numbered 0007: 0007_add_x and 0007_add_y. K
 
 ```text
 $ ferro migrate new add_x --replace 0007_add_x
-migrations/0008_add_x/  (replaces 0007_add_x, now deleted)
-  01_schema.up.postgres.sql  moved (was 0007_add_x/01_schema.up.postgres.sql)
-  01_schema.down.postgres.sql  moved (was 0007_add_x/01_schema.down.postgres.sql)
-  02_fix_rows.up.sql  carried, review it (was 0007_add_x/02_fix_rows.up.sql)
-  02_fix_rows.down.sql  carried, review it (was 0007_add_x/02_fix_rows.down.sql)
-  ir.json  new snapshot, chained from 0007_add_y
-changed models: Author
+ok Wrote migrations/0008_add_x/  (replaces 0007_add_x, now deleted)
+  01_schema.up.postgres.sql    schema step, up (postgres)    moved (was 0007_add_x/01_schema.up.postgres.sql)
+  01_schema.down.postgres.sql  schema step, down (postgres)  moved (was 0007_add_x/01_schema.down.postgres.sql)
+  02_fix_rows.up.sql           SQL step, up                  carried, review it (was 0007_add_x/02_fix_rows.up.sql)
+  02_fix_rows.down.sql         SQL step, down                carried, review it (was 0007_add_x/02_fix_rows.down.sql)
+  ir.json                      snapshot                      new snapshot, chained from 0007_add_y
+
+  1 changed model
+    Author
 ```
 
 `0008_add_x` is what `new` would have written had `0007_add_y` been there first: a new schema snapshot chained from `0007_add_y`'s, and the DDL regenerated from the difference, so it adds `bio` and nothing of `nick`.

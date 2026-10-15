@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import shutil
 import warnings
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from dataclasses import replace as dataclass_replace
 from pathlib import Path
@@ -473,6 +473,7 @@ def _with_data_steps(
                 step.name,
                 "data",
                 {f"{step.ordinal:02d}_{step.name}.py": text},
+                role=_data_role(record),
             )
         )
         note = scaffold.note(
@@ -483,6 +484,16 @@ def _with_data_steps(
     return dataclass_replace(
         migration, steps=tuple(steps), notes=(*migration.notes, *notes)
     )
+
+
+def _data_role(record: Mapping[str, Any]) -> str:
+    """The generator's word for a data step it laid out: ``data_step`` for
+    the step ``--data-step`` asked for (its ``hand_model``), ``guard`` for
+    the guard ``--no-backfill`` put in a backfill's place, ``backfill``
+    otherwise."""
+    if record.get("hand_model") is not None:
+        return "data_step"
+    return "guard" if record["data"]["guard"] else "backfill"
 
 
 async def check(

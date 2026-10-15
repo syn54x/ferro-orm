@@ -42,7 +42,7 @@ def main() -> None:
 
         app.models_after()  # the three rename hints
         written = app.ferro("migrate", "new", "rename_writer")
-        assert "renamed enum labels: status.canceled → cancelled" in written
+        assert "  1 renamed enum label\n    status.canceled → cancelled\n" in written
         up = (
             app.migrations / "0002_rename_writer" / "01_schema.up.postgres.sql"
         ).read_text()

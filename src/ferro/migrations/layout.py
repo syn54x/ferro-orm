@@ -108,6 +108,11 @@ class GeneratedStep:
     over_namesake: bool = False
     """Carried, and in the place of a step of its name and kind the
     regeneration laid out, which it wins over."""
+    role: str | None = None
+    """Which kind of data step the generator laid out: ``backfill`` (a
+    generated backfill), ``guard`` (``--no-backfill``) or ``data_step``
+    (``--data-step``). ``None`` for every other step, and for a carried one,
+    whose file is a person's whatever the generator first made it."""
 
 
 def portable_sql_step(ordinal: int, name: str) -> GeneratedStep:

@@ -20,9 +20,10 @@ alembic = [
     "sqlalchemy>=2.0.46",
 ]
 # Install with: pip install "ferro-orm[cli]"
-# Enables the `ferro` command (`ferro migrate ...`).
+# Enables the `ferro` command (`ferro migrate ...`); rich draws its terminal output.
 cli = [
     "cyclopts>=5,<6",
+    "rich>=14",
 ]
 
 [project.scripts]

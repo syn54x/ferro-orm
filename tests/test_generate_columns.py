@@ -214,7 +214,7 @@ def test_an_optional_column_writes_both_dialects_with_a_drop_for_its_down(
         assert (migration / f"01_schema.down.{dialect}.sql").read_text() == (
             'ALTER TABLE "author" DROP COLUMN "bio";\n'
         )
-    assert "changed models: Author" in capsys.readouterr().out
+    assert "\n  1 changed model\n    Author\n" in capsys.readouterr().out
 
 
 # -- A1, A2: adding a column ----------------------------------------------------------
