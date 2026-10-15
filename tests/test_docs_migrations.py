@@ -1,6 +1,10 @@
 """The Schema Management docs say what the code does (#539).
 
-Four promises the pages make, each checked against the implementation:
+Five promises the pages make, each checked against the implementation:
+
+- every ``ferro migrate`` output a page quotes (a ```text block marked
+  ``<!-- output: <id> -->``) is what the verb prints with no terminal, on a
+  scratch SQLite project, once the parts that vary are normalised;
 
 - the two declaration styles of every migrations example generate the same
   migration, byte for byte (the ``_annotated`` twin's ``migrations/`` equals
@@ -16,9 +20,12 @@ Four promises the pages make, each checked against the implementation:
 from __future__ import annotations
 
 import importlib
+import os
 import re
 import subprocess
 import sys
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import ModuleType
 
@@ -100,7 +107,21 @@ class Author(Model):
 """
 
 
-def _ferro(project: Path, *args: str) -> subprocess.CompletedProcess[str]:
+def _ferro(
+    project: Path, *args: str, scratch: bool = False
+) -> subprocess.CompletedProcess[str]:
+    """Run ``ferro`` in ``project`` with a clean environment. ``scratch`` points
+    ``DATABASE_URL`` at the project's own SQLite file, ``app.db``, or at the URL
+    its ``.database_url`` file names (a Postgres scenario)."""
+    env = {"PATH": "", "PYTHONDONTWRITEBYTECODE": "1"}
+    if scratch:
+        named = project / ".database_url"
+        env["DATABASE_URL"] = (
+            named.read_text()
+            if named.exists()
+            else f"sqlite:{project / 'app.db'}?mode=rwc"
+        )
+        env["PYTHONIOENCODING"] = "utf-8"
     return subprocess.run(
         [
             sys.executable,
@@ -112,7 +133,7 @@ def _ferro(project: Path, *args: str) -> subprocess.CompletedProcess[str]:
         text=True,
         timeout=120,
         cwd=project,
-        env={"PATH": "", "PYTHONDONTWRITEBYTECODE": "1"},
+        env=env,
     )
 
 
@@ -272,3 +293,605 @@ def test_no_page_names_a_door_the_old_way(phrase: str) -> None:
         if phrase in line
     ]
     assert hits == []
+
+
+# -- the output the CLI reference and the guides quote -------------------------------
+#
+# A block marked ``<!-- output: <id> -->`` is what ``ferro migrate`` prints with no
+# terminal (a pipe, as in a CI log): the plain form. Each id names a scenario on a
+# scratch SQLite project and the verb run against it; the block must equal what the
+# verb printed (stdout, then stderr) once the parts that differ from run to run are
+# normalised the same way on both sides.
+
+OUTPUT_PAGES = [
+    CLI_REFERENCE,
+    DOCS_PAGES / "guide" / "schema" / "migrations.md",
+    DOCS_PAGES / "guide" / "schema" / "data-steps.md",
+    DOCS_PAGES / "guide" / "schema" / "deploying.md",
+    DOCS_PAGES / "howto" / "adopting-migrations.md",
+]
+
+HEAD = "from ferro import Field, Model\n\n\n"
+
+AUTHOR = (
+    HEAD
+    + """\
+class Author(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    name: str
+    email: str = Field(unique=True)
+"""
+)
+AUTHOR_NICKNAME = (
+    AUTHOR + "    nickname: str | None = Field(default=None, index=True)\n"
+)
+AUTHOR_HANDLE = AUTHOR + "    handle: str | None = Field(default=None, index=True)\n"
+
+NAMED_AUTHOR = (
+    HEAD
+    + """\
+class Author(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    name: str = Field(index=True)
+"""
+)
+NAMED_AUTHOR_SLUG = NAMED_AUTHOR + "    slug: str\n"
+NAMED_AUTHOR_OPTIONAL_SLUG = NAMED_AUTHOR + "    slug: str | None = None\n"
+
+POST = (
+    HEAD
+    + """\
+class Post(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    title: str | None = None
+"""
+)
+POST_TITLE_REQUIRED = POST.replace("title: str | None = None", "title: str")
+
+
+def _write_models(project: Path, source: str) -> None:
+    (project / "blog" / "models.py").write_text(source)
+
+
+def _database(project: Path, sql: str) -> None:
+    """Run ``sql`` on the project's SQLite database, the way an operator would."""
+    import sqlite3
+
+    connection = sqlite3.connect(project / "app.db")
+    try:
+        connection.executescript(sql)
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _run_ok(project: Path, *args: str) -> None:
+    result = _ferro(project, *args, scratch=True)
+    assert result.returncode == 0, (
+        f"ferro {' '.join(args)}\n{result.stdout}{result.stderr}"
+    )
+
+
+def _configured(project: Path) -> None:
+    (project / "ferro.toml").write_text(
+        'models = ["blog.models"]\ndialects = ["postgres", "sqlite"]\n'
+    )
+    (project / "blog").mkdir(exist_ok=True)
+    (project / "blog" / "__init__.py").write_text("")
+
+
+def _unconfigured(project: Path) -> None:
+    (project / "blog").mkdir()
+    (project / "blog" / "__init__.py").write_text("")
+    _write_models(project, AUTHOR)
+
+
+# The migrations guide's loop: an Author with a new, indexed nickname.
+
+
+def _initialised(project: Path) -> None:
+    _unconfigured(project)
+    _run_ok(
+        project, "migrate", "init", "--models", "blog.models",
+        "--dialects", "postgres,sqlite", "--config-file", "ferro.toml",
+    )  # fmt: skip
+
+
+def _loop_edited(project: Path) -> None:
+    _configured(project)
+    _write_models(project, AUTHOR)
+    _run_ok(project, "migrate", "new", "create_author")
+    _run_ok(project, "migrate", "up")
+    _write_models(project, AUTHOR_NICKNAME)
+
+
+def _loop_generated(project: Path) -> None:
+    _loop_edited(project)
+    _run_ok(project, "migrate", "new", "author_nickname")
+
+
+def _loop_applied(project: Path) -> None:
+    _loop_generated(project)
+    _run_ok(project, "migrate", "up")
+
+
+def _loop_drifted(project: Path) -> None:
+    _loop_applied(project)
+    _database(project, "DROP INDEX idx_author_nickname")
+
+
+def _loop_edited_step(project: Path) -> None:
+    """An applied step whose file was changed afterwards."""
+    _loop_applied(project)
+    step = project / "migrations" / "0001_create_author" / "01_schema.up.sqlite.sql"
+    step.write_text(step.read_text() + "\n-- edited\n")
+
+
+def _created_and_applied(project: Path) -> None:
+    _configured(project)
+    _write_models(project, AUTHOR)
+    _run_ok(project, "migrate", "new", "create_author")
+    _run_ok(project, "migrate", "up")
+
+
+def _sql_step_added(project: Path) -> None:
+    _created_and_applied(project)
+    _run_ok(project, "migrate", "new", "seed", "--sql-step", "seed_admins")
+
+
+def _before_rename(project: Path) -> None:
+    _configured(project)
+    _write_models(project, AUTHOR_NICKNAME)
+    _run_ok(project, "migrate", "new", "create_author")
+    _run_ok(project, "migrate", "up")
+    _write_models(project, AUTHOR_HANDLE)
+
+
+def _rebuild_blocked(project: Path) -> None:
+    _configured(project)
+    _write_models(project, POST)
+    _run_ok(project, "migrate", "new", "create_post")
+    _run_ok(project, "migrate", "up")
+    _database(
+        project,
+        "CREATE INDEX my_idx ON post(title);"
+        " CREATE TRIGGER t AFTER INSERT ON post BEGIN SELECT 1; END;",
+    )
+    _write_models(project, POST_TITLE_REQUIRED)
+    _run_ok(
+        project, "migrate", "new", "post_title_required", "--no-backfill", "post.title"
+    )
+
+
+# Two branches that both generated migration 0002.
+
+AUTHOR_NICK = NAMED_AUTHOR + "    nick: str | None = None\n"
+AUTHOR_BIO = NAMED_AUTHOR + "    bio: str | None = None\n"
+AUTHOR_BIO_AND_NICK = AUTHOR_NICK + "    bio: str | None = None\n"
+
+
+def _two_branches(project: Path, *, applied: bool) -> None:
+    import shutil
+
+    _configured(project)
+    _write_models(project, NAMED_AUTHOR)
+    _run_ok(project, "migrate", "new", "create_author")
+    _run_ok(project, "migrate", "up")
+    _write_models(project, AUTHOR_NICK)
+    _run_ok(project, "migrate", "new", "add_y")
+    teammate = project / "migrations" / "0002_add_y"
+    shutil.move(teammate, project / "teammate")
+    _write_models(project, AUTHOR_BIO)
+    _run_ok(project, "migrate", "new", "add_x", "--sql-step", "fix_rows")
+    if applied:
+        _run_ok(project, "migrate", "up")
+    shutil.move(project / "teammate", teammate)
+    _write_models(project, AUTHOR_BIO_AND_NICK)
+
+
+def _two_branches_unapplied(project: Path) -> None:
+    _two_branches(project, applied=False)
+
+
+def _two_branches_replaced(project: Path) -> None:
+    _two_branches(project, applied=True)
+    _run_ok(project, "migrate", "new", "add_x", "--replace", "0002_add_x")
+
+
+# A required column, a backfill, and the rows the backfill is for.
+
+
+def _slug_edited(project: Path) -> None:
+    _configured(project)
+    _write_models(project, NAMED_AUTHOR)
+    _run_ok(project, "migrate", "new", "create_author")
+    _run_ok(project, "migrate", "up")
+    _database(project, "INSERT INTO author (name) VALUES ('Ada Lovelace')")
+    _write_models(project, NAMED_AUTHOR_SLUG)
+
+
+def _slug_unwritten(project: Path) -> None:
+    _slug_edited(project)
+    _run_ok(project, "migrate", "new", "author_slug")
+
+
+TODO = 'todo("the slug for an existing author")'
+WRITTEN = 'author.name.lower().replace(" ", "-")'
+NOT_APPLICABLE = "-- ferro: not-applicable\n"
+LATE_ROW = "-- ferro: expand\nINSERT INTO author (name) VALUES ('Late');\n"
+
+
+def _slug_written(project: Path) -> None:
+    _slug_unwritten(project)
+    backfill = project / "migrations" / "0002_author_slug" / "02_backfill_author.py"
+    backfill.write_text(backfill.read_text().replace(TODO, WRITTEN))
+
+
+def _late_row_step(project: Path) -> Path:
+    return (
+        project / "migrations" / "0002_author_slug" / "03_add_constraint.up.sqlite.sql"
+    )
+
+
+def _slug_late_row(project: Path) -> None:
+    """A writer that does not know the column yet inserts a row after the backfill."""
+    _slug_written(project)
+    step = _late_row_step(project)
+    step.write_text(LATE_ROW)
+
+
+def _slug_late_row_failed(project: Path) -> None:
+    _slug_late_row(project)
+    assert _ferro(project, "migrate", "up", scratch=True).returncode == 1
+
+
+def _slug_late_row_reverted(project: Path) -> None:
+    _slug_late_row_failed(project)
+    _run_ok(project, "migrate", "down", "--to", "0002:01", "--yes")
+    step = _late_row_step(project)
+    step.write_text(NOT_APPLICABLE)
+
+
+# A database built by auto-migrate, about to be baselined.
+
+
+def _adopt_base(project: Path) -> None:
+    _configured(project)
+    _write_models(project, NAMED_AUTHOR)
+    _run_ok(project, "migrate", "new", "create_author")
+    first = project / "migrations" / "0001_create_author" / "01_schema.up.sqlite.sql"
+    _database(project, first.read_text())
+    _write_models(project, NAMED_AUTHOR_OPTIONAL_SLUG)
+    _run_ok(project, "migrate", "new", "author_slug")
+
+
+def _adopt_initial(project: Path) -> None:
+    """Models described by ``0001_initial``; the database was built by the old door."""
+    _initialised(project)
+    _run_ok(project, "migrate", "new", "initial")
+    first = project / "migrations" / "0001_initial" / "01_schema.up.sqlite.sql"
+    _database(project, first.read_text())
+
+
+def _adopt_ahead(project: Path) -> None:
+    """The database already has the ``slug`` that migration 0002 adds."""
+    _adopt_base(project)
+    _database(project, "ALTER TABLE author ADD COLUMN slug varchar")
+
+
+def _adopt_staged(project: Path) -> None:
+    _adopt_base(project)
+    _run_ok(project, "migrate", "baseline", "0001")
+
+
+def _adopt_baselined(project: Path) -> None:
+    _adopt_ahead(project)
+    _run_ok(project, "migrate", "baseline")
+
+
+def _adopt_foreign_default(project: Path) -> None:
+    _configured(project)
+    _write_models(project, NAMED_AUTHOR_SLUG)
+    _run_ok(project, "migrate", "new", "create_author")
+    _database(
+        project,
+        "CREATE TABLE author (id integer NOT NULL PRIMARY KEY AUTOINCREMENT,"
+        " name varchar NOT NULL, slug varchar NOT NULL DEFAULT (lower('unknown')));"
+        " CREATE INDEX idx_author_name ON author(name);",
+    )
+
+
+# The waits a second run shows: it needs a holder that outlives the setup.
+
+
+def _lock_wait(project: Path) -> None:
+    _loop_generated(project)
+
+
+@contextmanager
+def _run_lock_held(project: Path) -> Iterator[None]:
+    """Another run holds the SQLite run lock, an OS lock on ``<database>.ferro-migrate.lock``."""
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - Windows
+        pytest.skip("the SQLite run lock is held here with fcntl")
+    with open(project / "app.db.ferro-migrate.lock", "a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        yield
+
+
+def _postgres_base() -> str:
+    from tests.db_backends import get_postgres_url
+
+    base = get_postgres_url(dict(os.environ), REPO_ROOT / ".env")
+    if not base:
+        pytest.skip("FERRO_POSTGRES_URL is not set: this output needs Postgres")
+    return base
+
+
+def _ddl_lock_retry(project: Path) -> None:
+    """Postgres: ``author`` applied, and a column to add to it, in a schema of its own."""
+    import uuid
+
+    import psycopg
+
+    from tests.db_backends import build_postgres_test_url
+
+    base = _postgres_base()
+    schema = f"ferro_docs_{uuid.uuid4().hex[:12]}"
+    with psycopg.connect(base, autocommit=True) as admin:
+        admin.execute(f'CREATE SCHEMA "{schema}"')
+    (project / ".schema").write_text(schema)
+    (project / ".database_url").write_text(build_postgres_test_url(base, schema))
+    _configured(project)
+    (project / "ferro.toml").write_text(
+        'models = ["blog.models"]\ndialects = ["postgres"]\nddl_lock_timeout = "1s"\n'
+    )
+    _write_models(project, NAMED_AUTHOR)
+    _run_ok(project, "migrate", "new", "create_author")
+    _run_ok(project, "migrate", "up")
+    _write_models(project, NAMED_AUTHOR_OPTIONAL_SLUG)
+    _run_ok(project, "migrate", "new", "author_slug")
+
+
+@contextmanager
+def _author_table_locked(project: Path) -> Iterator[None]:
+    """Another session holds ``author`` until the step has waited twice."""
+    from types import SimpleNamespace
+
+    from tests.test_ddl_lock_timeout import Holder
+
+    base = _postgres_base()
+    schema = (project / ".schema").read_text()
+    with Holder(SimpleNamespace(base=base, schema=schema), "author", seconds=3.5):
+        yield
+
+
+def _drop_postgres_schemas(templates: list[Path]) -> None:
+    import psycopg
+
+    for template in templates:
+        marker = template / ".schema"
+        if marker.exists():
+            with psycopg.connect(_postgres_base(), autocommit=True) as admin:
+                admin.execute(f'DROP SCHEMA IF EXISTS "{marker.read_text()}" CASCADE')
+
+
+HELD_WHILE_RUNNING = {
+    "run-lock-wait": _run_lock_held,
+    "ddl-lock-retry": _author_table_locked,
+}
+"""The outputs that only exist while something else holds a lock: the context a
+test enters around the verb."""
+
+
+OUTPUTS = {
+    # the CLI reference
+    "init": (
+        _unconfigured,
+        (
+            "migrate",
+            "init",
+            "--models",
+            "blog.models",
+            "--dialects",
+            "postgres,sqlite",
+            "--config-file",
+            "ferro.toml",
+        ),
+    ),
+    "init-pyproject": (
+        _unconfigured,
+        (
+            "migrate",
+            "init",
+            "--models",
+            "blog.models",
+            "--dialects",
+            "postgres,sqlite",
+            "--config-file",
+            "pyproject.toml",
+        ),
+    ),
+    "new-small": (_loop_edited, ("migrate", "new", "author_nickname")),
+    "check-ok": (_loop_generated, ("migrate", "check")),
+    "check-problem": (_loop_edited, ("migrate", "check")),
+    "up": (_loop_generated, ("migrate", "up")),
+    "down": (_loop_applied, ("migrate", "down", "--yes")),
+    "status-pending": (_loop_generated, ("migrate", "status", "--steps")),
+    "status-applied": (_loop_applied, ("migrate", "status")),
+    "status-attention": (_loop_edited_step, ("migrate", "status")),
+    "drift-clean": (_loop_applied, ("migrate", "drift")),
+    "drift-differences": (_loop_drifted, ("migrate", "drift")),
+    "baseline": (_adopt_ahead, ("migrate", "baseline")),
+    "rerecord": (_loop_edited_step, ("migrate", "rerecord", "0001:01")),
+    # the migrations guide
+    "loop-check": (_loop_edited, ("migrate", "check")),
+    "loop-new": (_loop_edited, ("migrate", "new", "author_nickname")),
+    "loop-up": (_loop_generated, ("migrate", "up")),
+    "rename-hint": (_before_rename, ("migrate", "new", "rename_writer")),
+    "sql-step": (
+        _created_and_applied,
+        ("migrate", "new", "seed", "--sql-step", "seed_admins"),
+    ),
+    "data-step": (
+        _sql_step_added,
+        ("migrate", "new", "fix_slugs", "--data-only", "--data-step", "Author"),
+    ),
+    "rebuild-refused": (_rebuild_blocked, ("migrate", "up")),
+    "checking-drift": (_loop_drifted, ("migrate", "drift")),
+    "going-back": (_loop_applied, ("migrate", "down", "--yes")),
+    "duplicate-number": (_two_branches_unapplied, ("migrate", "check")),
+    "replace": (
+        _two_branches_unapplied,
+        ("migrate", "new", "add_x", "--replace", "0002_add_x"),
+    ),
+    "replaced-up-refused": (_two_branches_replaced, ("migrate", "up")),
+    "rekey-refused": (_primary_key_change, ("migrate", "new", "rekey")),
+    # data steps
+    "backfill-new": (_slug_edited, ("migrate", "new", "author_slug")),
+    "backfill-unwritten": (_slug_unwritten, ("migrate", "up")),
+    "backfill-up": (_slug_written, ("migrate", "up")),
+    "late-row-up": (_slug_late_row, ("migrate", "up")),
+    "late-row-down": (
+        _slug_late_row_failed,
+        ("migrate", "down", "--to", "0002:01", "--yes"),
+    ),
+    "late-row-resume": (_slug_late_row_reverted, ("migrate", "up")),
+    # deploying
+    "run-lock-wait": (_lock_wait, ("migrate", "up", "--lock-timeout", "1s")),
+    "ddl-lock-retry": (_ddl_lock_retry, ("migrate", "up")),
+    "ci-check": (_slug_written, ("migrate", "check")),
+    "server-up": (_slug_written, ("migrate", "up")),
+    "status-steps": (_slug_late_row_failed, ("migrate", "status", "--steps")),
+    "edited-up": (_loop_edited_step, ("migrate", "up")),
+    "edited-rerecord": (_loop_edited_step, ("migrate", "rerecord", "0001:01")),
+    # adopting
+    "adopt-new-initial": (_initialised, ("migrate", "new", "initial")),
+    "adopt-baseline": (_adopt_initial, ("migrate", "baseline")),
+    "adopt-up-refused": (_adopt_base, ("migrate", "up")),
+    "baseline-drift": (_adopt_ahead, ("migrate", "baseline", "0001")),
+    "baseline-foreign-default": (_adopt_foreign_default, ("migrate", "baseline")),
+    "staging-baseline": (_adopt_base, ("migrate", "baseline", "0001")),
+    "staging-up": (_adopt_staged, ("migrate", "up")),
+    "status-baselined": (_adopt_baselined, ("migrate", "status")),
+    "baseline-remove": (_adopt_baselined, ("migrate", "baseline", "--remove")),
+    "down-baselined-refused": (_adopt_baselined, ("migrate", "down", "--yes")),
+}
+
+
+def _quoted_blocks(page: Path) -> list[tuple[str | None, str | None, str, str]]:
+    """Every ```text block of ``page`` as (kind, id, first line, body), the kind and
+    id from the ``<!-- output|refusal: <id> -->`` marker above it, if any."""
+    blocks = []
+    pattern = re.compile(
+        r"^(?P<indent>[ \t]*)(?:<!-- (?P<kind>output|refusal): (?P<id>[a-z0-9-]+) -->\n"
+        r"(?P=indent))?```text\n(?P<body>.*?)^(?P=indent)```",
+        flags=re.DOTALL | re.MULTILINE,
+    )
+    for match in pattern.finditer(page.read_text()):
+        indent = match["indent"]
+        body = "".join(
+            line.removeprefix(indent)
+            for line in match["body"].splitlines(keepends=True)
+        )
+        blocks.append((match["kind"], match["id"], body.split("\n", 1)[0], body))
+    return blocks
+
+
+def _quoted_outputs() -> dict[str, str]:
+    return {
+        block_id: body
+        for page in OUTPUT_PAGES
+        for kind, block_id, _first, body in _quoted_blocks(page)
+        if kind == "output"
+    }
+
+
+def _normalise(text: str) -> str:
+    """The parts of ferro's output that differ from run to run, made equal."""
+    text = re.sub(
+        r"sqlite:(?://)?\S*?app\.db(?:\?mode=rwc)?", "sqlite:///./app.db", text
+    )
+    text = re.sub(
+        r"postgres(?:ql)?://[^:\s/]+:\*+@\S+",
+        "postgresql://app:***@localhost/app",
+        text,
+    )
+    text = re.sub(r"\(\d+ ms\)", "(N ms)", text)
+    text = re.sub(r"\d{4}-\d\d-\d\d \d\d:\d\dZ", "YYYY-MM-DD HH:MMZ", text)
+    text = re.sub(r"\d{4}-\d\d-\d\d \d\d:\d\d UTC", "YYYY-MM-DD HH:MM UTC", text)
+    return re.sub(r"sha384:[0-9a-f]+…?", "sha384:<digest>", text)
+
+
+def test_every_output_block_has_a_registry_entry_and_the_reverse() -> None:
+    marked = [
+        block_id
+        for page in OUTPUT_PAGES
+        for kind, block_id, _first, _body in _quoted_blocks(page)
+        if kind == "output"
+    ]
+    assert len(marked) == len(set(marked)), "an output id marks two blocks"
+    assert sorted(marked) == sorted(OUTPUTS)
+
+
+CLI_LINE = re.compile(
+    r"^\s*(?:"
+    r"\$ ferro |ferro migrate: |warning: |\S+ · "  # a command, a refusal, a warning, the database line
+    r"|(?:ok|!!|xx|--|~~) \S"  # a plain-form marker
+    r"|\d{4}_\w+ {2,}\S+ {2,}(?:applied|reverted|failed|waiting)"  # a step row
+    r"|ok: models match|no drift against|drift against |nothing to (?:apply|revert)"
+    r"|no schema change|recorded \S+ as baseline|re-recorded |removed the baseline"
+    r"|(?:ungenerated|unwritten_step|duplicate_number|broken_chain): "
+    r"|Another ferro migration run"
+    r")"
+)
+"""A line that only ``ferro migrate`` prints, whatever its block opens with."""
+
+
+def test_every_block_that_shows_ferro_output_is_marked() -> None:
+    """A ```text block holding any line ``ferro migrate`` prints carries a marker."""
+    unmarked = [
+        f"{page.relative_to(DOCS_PAGES)}: {line.strip()}"
+        for page in OUTPUT_PAGES
+        for kind, _id, _first, body in _quoted_blocks(page)
+        if kind is None
+        for line in body.splitlines()
+        if CLI_LINE.match(line)
+    ]
+    assert unmarked == []
+
+
+@pytest.fixture(scope="module")
+def scenarios(tmp_path_factory: pytest.TempPathFactory):
+    """Build each scenario once; hand every test its own copy of the project."""
+    import shutil
+
+    built: dict[Callable[[Path], None], Path] = {}
+
+    def make(setup: Callable[[Path], None]) -> Path:
+        if setup not in built:
+            template = tmp_path_factory.mktemp(setup.__name__.strip("_")) / "app"
+            template.mkdir()
+            setup(template)
+            built[setup] = template
+        copy = tmp_path_factory.mktemp("run") / "app"
+        shutil.copytree(built[setup], copy)
+        return copy
+
+    yield make
+    _drop_postgres_schemas(list(built.values()))
+
+
+@pytest.mark.parametrize("output", sorted(OUTPUTS))
+def test_a_quoted_output_is_what_ferro_prints_without_a_terminal(
+    output: str, scenarios
+) -> None:
+    setup, args = OUTPUTS[output]
+    project = scenarios(setup)
+
+    with HELD_WHILE_RUNNING.get(output, lambda _project: nullcontext())(project):
+        result = _ferro(project, *args, scratch=True)
+
+    printed = _normalise(result.stdout + result.stderr)
+    assert printed == _normalise(_quoted_outputs()[output])

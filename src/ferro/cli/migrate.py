@@ -36,14 +36,14 @@ from ..settings import (
     DEFAULT_DIRECTORY,
     FERRO_TOML,
     PYPROJECT_TOML,
+    DatabaseSettings,
     FerroSettings,
     SettingsError,
 )
 from . import Global, exit_codes
 
 if TYPE_CHECKING:
-    from ..migrations.errors import MigrationRefused
-    from ..migrations.layout import GeneratedMigration
+    from .output import Output
 
 __all__ = ["migrate"]
 
@@ -51,6 +51,19 @@ migrate = App(
     name="migrate",
     help="Write, apply and check schema migrations.",
 )
+
+Verbose = Annotated[
+    bool,
+    Parameter(
+        help=(
+            "Show every name in a long list of the change summary; a terminal "
+            "otherwise shows the first few."
+        ),
+        negative="",
+    ),
+]
+"""``--verbose`` on ``new`` and ``check``, the verbs that print a change
+summary."""
 
 DIALECTS = ("postgres", "sqlite")
 _DATABASE_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -133,10 +146,13 @@ def init(
     for database in databases:
         database.directory.mkdir(parents=True, exist_ok=True)
 
-    print(block, end="")
+    from .output import Output, print_init
+
     written = "[tool.ferro] to pyproject.toml" if in_pyproject else path.name
     created = " and ".join(f"{_shown(d.directory, cwd)}/" for d in databases)
-    print(f"Wrote {written} and created {created}")
+    print_init(
+        Output.for_streams(out=sys.stdout, err=sys.stderr), block, written, created
+    )
     return exit_codes.OK
 
 
@@ -186,6 +202,7 @@ def new(
             negative="",
         ),
     ] = None,
+    verbose: Verbose = False,
     replace: Annotated[
         str | None,
         Parameter(
@@ -210,10 +227,13 @@ def new(
     instead, keeping its number when it is free.
     """
     from ..migrations.generate import prepare, write
+    from .output import Output, print_new
 
     _refuse_url(glob, "new")
     settings = FerroSettings(config=glob.config)
     database = settings.database(glob.database)
+    out = Output.for_streams(out=sys.stdout, err=sys.stderr)
+    _say_directory(out, database)
     migration = prepare(
         database,
         name,
@@ -224,67 +244,21 @@ def new(
         replace=replace,
     )
     if migration is None:
-        print("no schema change: nothing written")
+        out.print("no schema change: nothing written")
         return exit_codes.OK
     written = write(database, migration)
 
     shown = f"{_shown(written, Path.cwd().resolve())}/"
-    if migration.replaces is None:
-        print(shown)
-        for file_name in migration.files():
-            print(f"  {file_name}")
-    else:
-        _print_replacement(shown, migration)
-    if migration.summary:
-        print(migration.summary)
-    for warning in migration.warnings:
-        print(f"warning: {warning}", file=sys.stderr)
+    print_new(out, migration, shown, verbose=verbose)
     return exit_codes.OK
 
 
-def _print_replacement(shown: str, migration: GeneratedMigration) -> None:
-    """``new --replace``'s per-file lines: what each file of the replaced
-    migration became (kept, moved, renumbered), "carried, review it" for
-    each carried step, and every file that is new."""
-    from ..migrations.layout import SNAPSHOT_FILE, Moved
-
-    in_place = migration.replaces == migration.dir_name
-    where = (
-        "regenerated in place"
-        if in_place
-        else f"replaces {migration.replaces}, now deleted"
-    )
-    print(f"{shown}  ({where})")
-    moved = {new: (old, how) for old, new, how in migration.moves}
-    carried_over = {
-        name for step in migration.steps if step.over_namesake for name in step.files
-    }
-    for file_name in migration.files():
-        if file_name == SNAPSHOT_FILE:
-            parent = migration.chained_from or "no migration (the first)"
-            print(f"  {file_name}  new snapshot, chained from {parent}")
-            continue
-        if file_name not in moved:
-            print(f"  {file_name}  new")
-            continue
-        old, how = moved[file_name]
-        if how is Moved.CARRIED:
-            wins = (
-                "; it wins over the regenerated step of the same name"
-                if file_name in carried_over
-                else ""
-            )
-            print(f"  {file_name}  carried, review it (was {old}{wins})")
-        elif how is Moved.RENUMBERED:
-            print(f"  {file_name}  renumbered (was {old})")
-        elif in_place:
-            print(f"  {file_name}  kept")
-        else:
-            print(f"  {file_name}  moved (was {old})")
-
-
 @migrate.command
-def check(*, glob: Annotated[Global, Parameter(parse=False)]) -> int:
+def check(
+    *,
+    verbose: Verbose = False,
+    glob: Annotated[Global, Parameter(parse=False)],
+) -> int:
     """Check, offline, that every model change has a migration and the
     migrations directory is intact.
 
@@ -297,16 +271,15 @@ def check(*, glob: Annotated[Global, Parameter(parse=False)]) -> int:
 
     from ..migrations.generate import check as run_check
 
+    from .output import Output, print_check
+
     _refuse_url(glob, "check")
     settings = FerroSettings(config=glob.config)
+    out = Output.for_streams(out=sys.stdout, err=sys.stderr)
+    _say_directory(out, settings.database(glob.database))
     report = asyncio.run(run_check(settings, glob.database))
-    if report.ok:
-        head = report.head or "no migration"
-        print(f"ok: models match {head}")
-        return exit_codes.OK
-    for problem in report.problems:
-        print(f"{problem.kind}: {problem.message}", file=sys.stderr)
-    return exit_codes.PENDING
+    print_check(out, report, verbose=verbose)
+    return exit_codes.OK if report.ok else exit_codes.PENDING
 
 
 @migrate.command
@@ -345,23 +318,26 @@ def up(
 
     from ..migrations.errors import MigrationRefused
     from ..migrations.runner import up as run_up
+    from .output import Output, print_done, print_event, print_run_failure
 
     settings = FerroSettings(config=glob.config)
+    out = Output.for_streams(out=sys.stdout, err=sys.stderr)
     try:
         report = asyncio.run(
             run_up(
                 settings,
                 glob.database,
-                url=_url(settings, glob),
+                url=_url(settings, glob, out=out),
                 lock_timeout=lock_timeout,
                 allow_ahead=allow_ahead,
-                progress=lambda line: print(line, flush=True),
+                on_event=lambda event: print_event(out, event),
             )
         )
     except MigrationRefused as refused:
-        return _render_run_refusal(refused)
+        print_run_failure(out, refused)
+        return exit_codes.REFUSED
     if not report.applied:
-        print("nothing to apply: the database is up to date")
+        print_done(out, "nothing to apply", "the database is up to date")
     return exit_codes.OK
 
 
@@ -416,25 +392,34 @@ def down(
     from ..migrations.errors import MigrationRefused
     from ..migrations.runner import DownPlan, plan_down
     from ..migrations.runner import down as run_down
+    from .output import (
+        Output,
+        print_done,
+        print_down_plan,
+        print_event,
+        print_reverted,
+        print_run_failure,
+    )
 
     settings = FerroSettings(config=glob.config)
-    url = _url(settings, glob)
+    out = Output.for_streams(out=sys.stdout, err=sys.stderr)
+    url = _url(settings, glob, out=out)
     if not yes and not sys.stdin.isatty():
         plan = asyncio.run(
             plan_down(settings, glob.database, url=url, target=to, all=all_)
         )
         if plan.refusal is not None:
-            print(plan.refusal, file=sys.stderr)
+            out.refusal("down refused", plan.refusal)
             return exit_codes.REFUSED
         if not plan.steps:
-            print("nothing to revert")
+            print_done(out, "nothing to revert", "")
             return exit_codes.OK
-        print(plan.describe())
-        print(_NOT_A_TERMINAL, file=sys.stderr)
+        print_down_plan(out, plan)
+        out.refusal("down refused", _NOT_A_TERMINAL)
         return exit_codes.REFUSED
 
     def confirm(plan: DownPlan) -> bool:
-        print(plan.describe(), flush=True)
+        print_down_plan(out, plan)
         return yes or _confirm_revert(plan.question())
 
     try:
@@ -447,29 +432,19 @@ def down(
                 all=all_,
                 lock_timeout=lock_timeout,
                 confirm=confirm,
-                progress=lambda line: print(line, flush=True),
+                on_event=lambda event: print_event(out, event),
             )
         )
     except MigrationRefused as refused:
-        return _render_run_refusal(refused)
+        print_run_failure(out, refused)
+        return exit_codes.REFUSED
     if report.declined:
-        print("Nothing was reverted.")
+        out.print("Nothing was reverted.")
     elif not report.reverted:
-        print("nothing to revert")
+        print_done(out, "nothing to revert", "")
+    else:
+        print_reverted(out, report.reverted)
     return exit_codes.OK
-
-
-def _render_run_refusal(refused: MigrationRefused) -> int:
-    """A refused ``up`` or ``down``: its run report's refusal, as the
-    operator's text (the application's ``allow_ahead=`` hint names the
-    API's argument, not ``--allow-ahead``), and exit 1. A refusal with no run report (the
-    configuration, the connection) prints its own message."""
-    from ..migrations.runner import RunReport
-
-    report = refused.report
-    shown = report.refusal if isinstance(report, RunReport) else None
-    print(refused if shown is None else shown, file=sys.stderr)
-    return exit_codes.REFUSED
 
 
 def _confirm_revert(question: str) -> bool:
@@ -501,10 +476,16 @@ def status(
     import asyncio
 
     from ..migrations.runner import status as run_status
+    from .output import Output, print_status
 
     settings = FerroSettings(config=glob.config)
-    report = asyncio.run(run_status(settings, glob.database, url=_url(settings, glob)))
-    print(report.to_json() if json_ else report.render(steps=steps))
+    out = Output.for_streams(out=sys.stdout, err=sys.stderr)
+    url = _url(settings, glob, out=out, said=not json_)
+    report = asyncio.run(run_status(settings, glob.database, url=url))
+    if json_:
+        print(report.to_json())
+    else:
+        print_status(out, report, steps=steps)
     return report.exit_code
 
 
@@ -521,15 +502,14 @@ def drift(*, glob: Annotated[Global, Parameter(parse=False)]) -> int:
     import asyncio
 
     from ..migrations import drift as run_drift
+    from .output import Output, print_drift
 
     settings = FerroSettings(config=glob.config)
-    report = asyncio.run(run_drift(settings, glob.database, url=_url(settings, glob)))
-    for warning in report.warnings:
-        print(f"warning: {warning}", file=sys.stderr)
-    if report.refusal is not None:
-        print(report.refusal, file=sys.stderr)
-        return exit_codes.NEEDS_ATTENTION
-    print(report.render())
+    out = Output.for_streams(out=sys.stdout, err=sys.stderr)
+    report = asyncio.run(
+        run_drift(settings, glob.database, url=_url(settings, glob, out=out))
+    )
+    print_drift(out, report)
     return exit_codes.OK if report.clean else exit_codes.NEEDS_ATTENTION
 
 
@@ -580,28 +560,28 @@ def baseline(
     import asyncio
 
     from ..migrations import baseline as run_baseline
-    from ..migrations._baseline import remove_baseline, render_removed
+    from ..migrations._baseline import remove_baseline
+    from .output import Output, print_baseline, print_removed
 
     if remove and target is not None:
         raise SettingsError(
             "baseline --remove removes the whole baseline; drop the target"
         )
     settings = FerroSettings(config=glob.config)
-    url = _url(settings, glob)
+    out = Output.for_streams(out=sys.stdout, err=sys.stderr)
+    url = _url(settings, glob, out=out)
     if remove:
         removed = asyncio.run(
             remove_baseline(settings, glob.database, url=url, lock_timeout=lock_timeout)
         )
-        print(render_removed(removed))
+        print_removed(out, removed)
         return exit_codes.OK
     report = asyncio.run(
         run_baseline(
             settings, glob.database, url=url, target=target, lock_timeout=lock_timeout
         )
     )
-    for warning in report.warnings:
-        print(f"warning: {warning}", file=sys.stderr)
-    print(report.render())
+    print_baseline(out, report)
     return exit_codes.OK if report.drift is None else exit_codes.NEEDS_ATTENTION
 
 
@@ -659,29 +639,56 @@ def rerecord(
 
     from ..migrations.rerecord import Mode
     from ..migrations.rerecord import rerecord as run_rerecord
+    from .output import Output, print_rerecord
 
     if continue_ and restart:
         raise SettingsError("pass --continue or --restart, not both")
     mode: Mode = "continue" if continue_ else "restart" if restart else "record"
     settings = FerroSettings(config=glob.config)
+    out = Output.for_streams(out=sys.stdout, err=sys.stderr)
     report = asyncio.run(
         run_rerecord(
             settings,
             glob.database,
-            url=_url(settings, glob),
+            url=_url(settings, glob, out=out),
             target=target,
             mode=mode,
             lock_timeout=lock_timeout,
         )
     )
-    print(report.render())
+    print_rerecord(out, report)
     return exit_codes.OK
 
 
-def _url(settings: FerroSettings, glob: Global) -> str:
+def _url(
+    settings: FerroSettings,
+    glob: Global,
+    *,
+    out: Output,
+    said: bool = True,
+) -> str:
     """The URL a verb works on: ``--url``, else the database's ``url_env``.
-    The CLI always opens a private connection, closed when the verb ends."""
-    return settings.database(glob.database).url_for(glob.url)
+    The CLI always opens a private connection, closed when the verb ends.
+
+    Once the URL is resolved and its scheme accepted (an unset ``url_env``
+    or an unsupported scheme is refused before anything reaches stdout),
+    the database line names it with its secrets masked, through ``out``, unless
+    ``said`` is false (``status --json``, whose stdout is the document
+    alone)."""
+    from .. import _core
+
+    database = settings.database(glob.database)
+    url = database.url_for(glob.url)
+    shown = _core._redact_url(url)
+    if said:
+        out.database_line(database.name, shown)
+    return url
+
+
+def _say_directory(out: Output, database: DatabaseSettings) -> None:
+    """``new`` and ``check``'s database line: they never connect, so it
+    names the migrations directory, relative to the working directory."""
+    out.database_line(database.name, _shown(database.directory, Path.cwd().resolve()))
 
 
 def _refuse_url(glob: Global, verb: str) -> None:

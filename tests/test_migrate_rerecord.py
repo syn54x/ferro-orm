@@ -135,6 +135,7 @@ def test_a_finished_step_edited_is_refused_and_rerecord_changes_only_its_checksu
     code, out, err = cli("rerecord", "0001:01", "--url", db.url, capsys=capsys)
     assert (code, err) == (0, "")
     assert out == (
+        f"{db.line}\n"
         f"re-recorded 0001_create_author/{up_file.name} (sha384:{applied} → "
         f"sha384:{edited}); nothing was run\n"
     )
@@ -148,7 +149,10 @@ def test_a_finished_step_edited_is_refused_and_rerecord_changes_only_its_checksu
     assert db.tables() == tables and "marker" not in tables, "no SQL ran"
 
     code, out, _ = cli("up", "--url", db.url, capsys=capsys)
-    assert (code, out) == (0, "nothing to apply: the database is up to date\n")
+    assert (code, out) == (
+        0,
+        f"{db.line}\nnothing to apply: the database is up to date\n",
+    )
     assert "marker" not in db.tables()
 
 
@@ -176,7 +180,8 @@ def accepted(db, capsys, shown: str, recorded: str, on_disk: str) -> str:
     and the record finishes under the new checksum."""
     code, out, err = cli("up", "--url", db.url, capsys=capsys)
     assert (code, err) == (0, ""), err
-    assert out.splitlines()[0] == (
+    assert out.splitlines()[0] == db.line
+    assert out.splitlines()[1] == (
         f"re-recorded {shown} (sha384:{recorded} → sha384:{on_disk})"
     )
     return out
@@ -335,6 +340,7 @@ def test_an_edited_chunked_step_is_refused_until_continued_from_its_cursor(
     )
     assert (code, err) == (0, "")
     assert out == (
+        f"{db.line}\n"
         f"re-recorded 0002_add_slug/02_backfill_author.py (sha384:{recorded} → "
         f"sha384:{edited}); the next up continues from its cursor; nothing was run\n"
     )
@@ -390,6 +396,7 @@ def test_restarting_an_edited_chunked_step_runs_every_row_from_the_first(
     )
     assert (code, err) == (0, "")
     assert out == (
+        f"{db.line}\n"
         f"re-recorded 0002_add_slug/02_backfill_author.py (sha384:{recorded} → "
         f"sha384:{edited}); its cursor and rows_done are cleared, so the next up "
         f"starts from the first row; nothing was run\n"
@@ -517,7 +524,11 @@ def test_a_down_file_or_another_dialects_rendering_is_not_a_mismatch(
         edited.write_bytes(edited.read_bytes() + b"-- edited\n")
 
     code, out, err = cli("up", "--url", db.url, capsys=capsys)
-    assert (code, out, err) == (0, "nothing to apply: the database is up to date\n", "")
+    assert (code, out, err) == (
+        0,
+        f"{db.line}\nnothing to apply: the database is up to date\n",
+        "",
+    )
     code, _, err = cli("rerecord", "0001:01", "--url", db.url, capsys=capsys)
     assert code == 1
     assert err.startswith("ferro migrate: nothing to re-record at 0001:01: ")
@@ -533,7 +544,8 @@ def test_status_shows_the_edited_chunked_refusal_with_its_doors(
     code, out, _ = cli("status", "--url", db.url, capsys=capsys)
 
     assert code == 4
-    assert doors().rstrip("\n") in out
+    # The refusal sits under status's needs attention heading, indented.
+    assert "".join(f"  {line}\n" for line in doors().splitlines()) in out
 
 
 def test_the_cursor_names_its_order_keys():

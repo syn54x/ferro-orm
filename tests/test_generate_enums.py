@@ -47,6 +47,7 @@ from tests.test_migrate_down import (  # noqa: F401 - fixtures
     snapshot,
 )
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
+    DIRECTORY_LINE,
     pkg,
     project,
     run,
@@ -260,7 +261,7 @@ def test_d3_a_renamed_label_relabels_every_row_both_ways(project, pkg, db):
 
     # Left in place after its migration, the hint is inert.
     code, out, _ = _new_capturing("again")
-    assert (code, out) == (0, "no schema change: nothing written\n")
+    assert (code, out) == (0, f"{DIRECTORY_LINE}\nno schema change: nothing written\n")
 
 
 def test_d3_a_hint_whose_old_label_is_still_declared_is_refused_naming_it(project, pkg):
@@ -346,7 +347,7 @@ def test_d3_a_renamed_label_on_a_text_stored_enum_updates_its_rows(
     assert run("migrate", "up", "--url", db.url) == 0
 
     code, out, _ = _new_capturing("again")
-    assert (code, out) == (0, "no schema change: nothing written\n")
+    assert (code, out) == (0, f"{DIRECTORY_LINE}\nno schema change: nothing written\n")
 
 
 # -- D4: an enum class renamed ------------------------------------------------------------

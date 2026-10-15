@@ -389,7 +389,7 @@ def test_status_shows_how_far_a_failed_chunked_step_got(project, pkg, db, capsys
     assert run("migrate", "status", "--url", db.url) == 4
 
     out = capsys.readouterr().out
-    assert re.search(r"\n  02_backfill_author\.py +failed at 1,000 rows\n", out)
+    assert re.search(r"\n      02_backfill_author\.py +failed at 1,000 rows\n", out)
     assert "    RuntimeError: batch 2 gave up\n" in out
 
 
@@ -442,7 +442,7 @@ def test_a_chunked_down_reverts_in_batches_and_an_interrupted_one_blocks_up(
     )
     assert run("migrate", "status", "--url", db.url) == 4
     assert re.search(
-        r"\n  02_backfill_author\.py +reverting\n", capsys.readouterr().out
+        r"\n      02_backfill_author\.py +reverting\n", capsys.readouterr().out
     )
 
     probe.reset()
@@ -480,7 +480,7 @@ def test_a_chunked_down_that_fails_after_a_batch_stays_reverting_with_the_error(
     capsys.readouterr()
     assert run("migrate", "status", "--url", db.url) == 4
     out = capsys.readouterr().out
-    assert re.search(r"\n  02_backfill_author\.py +reverting\n", out)
+    assert re.search(r"\n      02_backfill_author\.py +reverting\n", out)
     assert "    RuntimeError: batch 2 gave up\n" in out
 
 

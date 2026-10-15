@@ -305,6 +305,7 @@ def test_up_and_require_applied_take_no_target():
         "lock_timeout",
         "allow_ahead",
         "progress",
+        "on_event",
     ]
     assert list(inspect.signature(require_applied).parameters) == [
         "settings",

@@ -38,6 +38,8 @@ __all__ = [
     "GITATTRIBUTES",
     "SNAPSHOT_FILE",
     "SQL_STEP_PLACEHOLDER",
+    "Change",
+    "ChangeSummary",
     "GeneratedMigration",
     "GeneratedStep",
     "MigrationsDirectoryError",
@@ -106,6 +108,11 @@ class GeneratedStep:
     over_namesake: bool = False
     """Carried, and in the place of a step of its name and kind the
     regeneration laid out, which it wins over."""
+    role: str | None = None
+    """Which kind of data step the generator laid out: ``backfill`` (a
+    generated backfill), ``guard`` (``--no-backfill``) or ``data_step``
+    (``--data-step``). ``None`` for every other step, and for a carried one,
+    whose file is a person's whatever the generator first made it."""
 
 
 def portable_sql_step(ordinal: int, name: str) -> GeneratedStep:
@@ -124,6 +131,49 @@ def portable_sql_step(ordinal: int, name: str) -> GeneratedStep:
 
 
 @dataclass(frozen=True)
+class Change:
+    """One entry of a :class:`ChangeSummary`: what happened to which names
+    of one kind (``new models: Team, TeamMember``), as the generator decided
+    it."""
+
+    verb: str
+    """``new``, ``changed``, ``dropped``, ``renamed`` or ``removed``."""
+    kind: str
+    """``models``, ``enum types`` or ``enum labels``."""
+    names: tuple[str, ...]
+    """The names, sorted; an enum label is ``type.label``, a rename
+    ``old → new``."""
+
+    @classmethod
+    def from_json(cls, raw: Mapping[str, Any]) -> Change:
+        """Build from one entry of the JSON the core returns."""
+        return cls(raw["verb"], raw["kind"], tuple(raw["names"]))
+
+
+@dataclass(frozen=True)
+class ChangeSummary:
+    """What a migration adds, changes, drops or renames (ADR-0055): the
+    changes as data, in the generator's order, beside the one plain
+    rendering the Rust generator produced. Lay the changes out from
+    ``changes``; never take ``text`` apart."""
+
+    changes: tuple[Change, ...] = ()
+    text: str = ""
+    """The plain rendering (``new models: Team; changed models: Account``),
+    the one the core quotes inside ``check``'s ``ungenerated`` message and
+    so the library's error text. ``new`` (in both forms) and ``check`` on a
+    terminal lay out ``changes`` instead; nothing in Python prints this."""
+
+    def __bool__(self) -> bool:
+        return bool(self.changes)
+
+    @classmethod
+    def from_json(cls, raw: Mapping[str, Any]) -> ChangeSummary:
+        """Build from the ``summary`` the core returns."""
+        return cls(tuple(Change.from_json(c) for c in raw["changes"]), raw["text"])
+
+
+@dataclass(frozen=True)
 class GeneratedMigration:
     """A whole migration about to be written: its steps and its snapshot."""
 
@@ -132,7 +182,10 @@ class GeneratedMigration:
     steps: tuple[GeneratedStep, ...]
     snapshot_json: str
     """The ``ir.json`` text exactly as it is to be stored."""
-    summary: str = ""
+    summary: ChangeSummary = ChangeSummary()
+    notes: tuple[str, ...] = ()
+    """The lines ``new`` prints after the summary, in order: the generator's
+    rename hints, then each backfill that still needs writing."""
     warnings: tuple[str, ...] = ()
     replaces: str | None = None
     """``--replace``: the replaced migration's directory name (``NNNN_<name>``),
@@ -189,7 +242,8 @@ class GeneratedMigration:
             name=name,
             steps=tuple(steps),
             snapshot_json=raw["snapshot_json"],
-            summary=raw["summary"],
+            summary=ChangeSummary.from_json(raw["summary"]),
+            notes=tuple(raw["notes"]),
             warnings=tuple(raw["warnings"]),
         )
 

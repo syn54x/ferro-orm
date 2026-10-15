@@ -318,7 +318,7 @@ def test_down_all_leaves_no_records(project, pkg, db, capsys):
     assert not {"author", "second", "third"} & db.tables()
     capsys.readouterr()
     assert run("migrate", "down", "--yes", "--url", db.url) == 0
-    assert capsys.readouterr().out == "nothing to revert\n"
+    assert capsys.readouterr().out == f"{db.line}\nnothing to revert\n"
 
 
 def test_a_nothing_to_reverse_down_runs_nothing_and_removes_the_record(
@@ -427,7 +427,9 @@ def test_without_a_terminal_and_without_yes_down_prints_the_plan_and_refuses(
     assert run("migrate", "down", "--url", db.url) == 1
 
     captured = capsys.readouterr()
-    assert captured.out == "down reverts, in this order:\n  0003_third  01_third\n"
+    assert captured.out == (
+        f"{db.line}\ndown reverts, in this order:\n  0003_third  01_third\n"
+    )
     assert captured.err == (
         "Not a terminal: pass --yes to revert without a prompt. Nothing was reverted.\n"
     )
@@ -445,6 +447,7 @@ def test_at_a_terminal_down_asks_and_no_reverts_nothing(
 
     assert prompts == ["Revert 0003_third, 0002_second (2 steps)? [y/N] "]
     assert capsys.readouterr().out == (
+        f"{db.line}\n"
         "down reverts, in this order:\n"
         "  0003_third   01_third\n"
         "  0002_second  01_second\n"

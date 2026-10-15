@@ -59,66 +59,128 @@ fn is_secret_query_key(key: &str) -> bool {
         || key.contains("service_role")
 }
 
-fn redact_connection_url(url: &str) -> String {
-    let (without_fragment, fragment) = match url.split_once('#') {
-        Some((base, fragment)) => (base, Some(fragment)),
-        None => (url, None),
-    };
-    let (base, query) = match without_fragment.split_once('?') {
-        Some((base, query)) => (base, Some(query)),
-        None => (without_fragment, None),
-    };
+/// What a connection URL's secrets are masked with.
+const MASK: &str = "***";
 
-    let redacted_base = match base.find("://") {
-        Some(scheme_idx) => {
-            let authority_start = scheme_idx + 3;
-            let after_scheme = &base[authority_start..];
-            if let Some(at_idx) = after_scheme.find('@') {
-                let userinfo = &after_scheme[..at_idx];
-                let authority_rest = &after_scheme[at_idx..];
-                if let Some((user, _password)) = userinfo.rsplit_once(':') {
-                    format!(
-                        "{}{}:<redacted>{}",
-                        &base[..authority_start],
-                        user,
-                        authority_rest
-                    )
-                } else {
-                    base.to_string()
-                }
-            } else {
-                base.to_string()
-            }
-        }
-        None => base.to_string(),
+/// `url` with its secrets masked by `***`: the userinfo password, and the
+/// value of every query key [`is_secret_query_key`] names. The scheme, user,
+/// host, port, path, every other query pair and the fragment are kept, and a
+/// URL with nothing to mask (a SQLite URL) comes back as given, byte for
+/// byte; only a URL with a secret is rebuilt from what the parser read.
+///
+/// The URL is read with `url::Url::parse`, the parser sqlx reads connection
+/// URLs with, so the parts masked are the parts the driver connects with.
+/// What it cannot read is masked whole (`<scheme>://***`, or `***` when no
+/// scheme is readable): the driver refuses it too. So is a URL with an `@`
+/// past a non-empty authority (in its path, query or fragment): that is
+/// where the delimiter of a password holding a raw `/`, `?` or `#` lands
+/// (`u:9/s3cret@h` reads as host `u`, port `9`), and the string cannot tell
+/// the two apart; written as `%40`, the `@` shows. A Postgres URL with no
+/// host and an `@` anywhere is masked whole for the same reason, and so is
+/// every URL whose scheme Ferro does not connect to
+/// (`postgresql:/u:s3cret@h/db`, `mysql://…`): the error refusing it quotes
+/// it, and nothing about its parse says where a secret sits.
+pub(crate) fn redact_connection_url(url: &str) -> String {
+    // A scheme Ferro does not connect to is masked whole before anything
+    // else reads it: its parse says nothing about where a secret sits
+    // (`postgresql:/u:s3cret@h/db` parses with no host and no password).
+    let Ok(dialect) = dialect_from_url(url) else {
+        return masked_whole(readable_scheme(url));
     };
-
-    let redacted_query = query.map(|query| {
-        query
+    let Ok(mut parsed) = url::Url::parse(url) else {
+        return masked_whole(readable_scheme(url));
+    };
+    let has_authority = parsed.host_str().is_some_and(|host| !host.is_empty());
+    let at_past_authority = [Some(parsed.path()), parsed.query(), parsed.fragment()]
+        .into_iter()
+        .flatten()
+        .any(|part| part.contains('@'));
+    // Past a non-empty authority, an `@` may be a password's delimiter; with
+    // no authority at all, a Postgres URL's `@` anywhere may be one too (a
+    // SQLite URL has no userinfo: its `@` is a path character).
+    let hostless_at = !has_authority && dialect == Dialect::Postgres && url.contains('@');
+    if (has_authority && at_past_authority) || hostless_at {
+        return masked_whole(Some(parsed.scheme()));
+    }
+    let is_secret_pair = |pair: &str| {
+        url::form_urlencoded::parse(pair.as_bytes())
+            .next()
+            .is_some_and(|(key, _)| is_secret_query_key(&key))
+    };
+    let has_secret_pair = parsed
+        .query()
+        .is_some_and(|query| query.split('&').any(is_secret_pair));
+    if parsed.password().is_none() && !has_secret_pair {
+        // Nothing to mask: shown as given, never re-escaped by the parser.
+        return url.to_string();
+    }
+    if parsed.password().is_some() && parsed.set_password(Some(MASK)).is_err() {
+        return masked_whole(Some(parsed.scheme()));
+    }
+    if let Some(query) = parsed.query() {
+        let query = query
             .split('&')
-            .map(|pair| {
-                let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-                if is_secret_query_key(key) {
-                    format!("{key}=<redacted>")
-                } else if value.is_empty() {
-                    key.to_string()
-                } else {
-                    format!("{key}={value}")
-                }
+            .map(|pair| match pair.split_once('=') {
+                _ if !is_secret_pair(pair) => pair.to_string(),
+                Some((key, _)) => format!("{key}={MASK}"),
+                None => format!("{pair}={MASK}"),
             })
             .collect::<Vec<_>>()
-            .join("&")
-    });
-
-    let mut redacted = match redacted_query {
-        Some(query) => format!("{redacted_base}?{query}"),
-        None => redacted_base,
-    };
-    if let Some(fragment) = fragment {
-        redacted.push('#');
-        redacted.push_str(fragment);
+            .join("&");
+        parsed.set_query(Some(&query));
     }
-    redacted
+    parsed.into()
+}
+
+/// A URL masked whole: `<scheme>://***`, or `***` without a scheme.
+fn masked_whole(scheme: Option<&str>) -> String {
+    match scheme {
+        Some(scheme) => format!("{scheme}://{MASK}"),
+        None => MASK.to_string(),
+    }
+}
+
+/// The scheme `url` starts with, when it has a well-formed one (a letter,
+/// then letters, digits, `+`, `-` or `.`, then `:`).
+fn readable_scheme(url: &str) -> Option<&str> {
+    let (scheme, _) = url.split_once(':')?;
+    let mut chars = scheme.chars();
+    let first = chars.next()?;
+    (first.is_ascii_alphabetic()
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '+' | '-' | '.')))
+    .then_some(scheme)
+}
+
+/// `DB Connection failed for <url>`, the URL's secrets masked: the context
+/// every connection error carries.
+fn connection_failed_context(url: &str) -> String {
+    format!("DB Connection failed for {}", redact_connection_url(url))
+}
+
+/// The dialect `connection_url` reaches, or the `InterfaceError` every
+/// connection to an unsupported scheme fails with.
+fn accepted_dialect(connection_url: &str) -> PyResult<Dialect> {
+    dialect_from_url(connection_url).map_err(|e| {
+        crate::errors::interface_error(format!(
+            "{}: {e}",
+            connection_failed_context(connection_url)
+        ))
+    })
+}
+
+/// `url` as Ferro shows it, its secrets masked by `***` (the userinfo
+/// password and every secret query value): what `ferro migrate` prints on
+/// its database line and `status --json` carries as `url`. A URL with no
+/// secret (a SQLite URL) comes back as given.
+///
+/// # Errors
+/// `InterfaceError` when `url`'s scheme is not one Ferro connects to, the
+/// same error `connect(url)` raises, so a URL is shown only once accepted.
+#[pyfunction]
+pub fn _redact_url(url: String) -> PyResult<String> {
+    let (connection_url, _) = split_search_path(&url);
+    accepted_dialect(&connection_url)?;
+    Ok(redact_connection_url(&url))
 }
 
 fn normalized_connection_name(name: Option<String>) -> PyResult<(String, bool)> {
@@ -238,10 +300,9 @@ pub fn connect(
         .with_ddl_lock_timeout_seconds(ddl_lock_timeout_s)?
         .with_lock_timeout_seconds(lock_timeout_s)?;
     let (connection_url, search_path) = split_search_path(&url);
+    let failed_context = connection_failed_context(&connection_url);
     let redacted_url = redact_connection_url(&connection_url);
-    let backend = dialect_from_url(&connection_url).map_err(|e| {
-        crate::errors::interface_error(format!("DB Connection failed for {}: {}", redacted_url, e))
-    })?;
+    let backend = accepted_dialect(&connection_url)?;
     let (connection_name, is_implicit_default) = normalized_connection_name(name)?;
     let should_select_default = default || is_implicit_default;
 
@@ -283,10 +344,9 @@ pub fn connect(
             settings_delivery,
         )
         .await
-        .map_err(|e| {
-            crate::errors::map_db_error(&format!("DB Connection failed for {}", redacted_url), e)
-        })?
-        .with_identity_map_enabled(identity_map);
+        .map_err(|e| crate::errors::map_db_error(&failed_context, e))?
+        .with_identity_map_enabled(identity_map)
+        .with_shown_url(&url);
 
         let engine_handle = Arc::new(engine_handle);
 
@@ -492,8 +552,259 @@ pub fn set_default_connection(name: String) -> PyResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::connect_engine_handle;
+    use super::{connect_engine_handle, connection_failed_context, redact_connection_url};
     use ferro_ddl_lowering::Dialect;
+
+    #[test]
+    fn redact_masks_a_password_containing_an_at_sign() {
+        assert_eq!(
+            redact_connection_url("postgresql://u:p@ss@h:5432/db"),
+            "postgresql://u:***@h:5432/db"
+        );
+    }
+
+    #[test]
+    fn redact_masks_a_password_containing_a_colon() {
+        assert_eq!(
+            redact_connection_url("postgresql://u:p:ss@h/db"),
+            "postgresql://u:***@h/db"
+        );
+    }
+
+    /// `redact_connection_url(url)`, asserting that no piece of `secret`
+    /// (split on the characters a password may hold raw) appears in it.
+    fn redacted_without(url: &str, secret: &str) -> String {
+        let shown = redact_connection_url(url);
+        for piece in secret
+            .split(['@', ':', '/', '?', '#'])
+            .filter(|piece| !piece.is_empty())
+        {
+            assert!(!shown.contains(piece), "{piece:?} of {secret:?} in {shown}");
+        }
+        shown
+    }
+
+    #[test]
+    fn redact_masks_a_password_holding_any_raw_delimiter() {
+        // The parser reads a raw `@` or `:` inside the userinfo. A raw `/`,
+        // `?` or `#` ends the authority early, so `u:s3` is read as a host
+        // with an invalid port, the string does not parse, and it is masked
+        // whole.
+        for (raw, shown) in [
+            ("@", "postgresql://u:***@h:5432/db?sslmode=require"),
+            (":", "postgresql://u:***@h:5432/db?sslmode=require"),
+            ("/", "postgresql://***"),
+            ("?", "postgresql://***"),
+            ("#", "postgresql://***"),
+        ] {
+            let secret = format!("s3{raw}cret");
+            assert_eq!(
+                redacted_without(
+                    &format!("postgresql://u:{secret}@h:5432/db?sslmode=require"),
+                    &secret
+                ),
+                shown,
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn redact_masks_a_password_whose_raw_delimiter_leaves_a_valid_port() {
+        // `u:9/s3cret@h` parses as host `u`, port `9`, path `/s3cret@h/db`.
+        // The parser sees no password, but an `@` past a non-empty authority
+        // is where an unencoded password's delimiter lands: masked whole.
+        for (url, secret) in [
+            ("postgresql://u:9/s3cret@h/db", "9/s3cret"),
+            ("postgresql://u:9?s3cret@h/db", "9?s3cret"),
+            ("postgresql://u:9#s3cret@h/db", "9#s3cret"),
+            ("postgresql://u:pw@sx/s3cret@h/db", "pw@sx/s3cret"),
+            ("postgresql://h:5432/db@x", "5432/db"),
+        ] {
+            assert_eq!(redacted_without(url, secret), "postgresql://***", "{url}");
+        }
+    }
+
+    #[test]
+    fn redact_masks_an_at_sign_in_a_query_value_whole() {
+        // The second review's case: an `@` in a query value must never print
+        // the `password=` value after it. The string cannot be told from a
+        // password holding a raw `?`, so it is masked whole.
+        assert_eq!(
+            redacted_without(
+                "postgresql://u:pw@h/db?application_name=a@b&password=s3cret",
+                "s3cret"
+            ),
+            "postgresql://***"
+        );
+        assert_eq!(
+            redacted_without("postgresql://h/db?app=me@x&password=s3cret", "s3cret"),
+            "postgresql://***"
+        );
+    }
+
+    #[test]
+    fn redact_masks_a_scheme_ferro_does_not_connect_to_whole() {
+        // `postgresql:/u:...` and `postgresql:u:...` parse with no host, so
+        // no password is read; their scheme is not one Ferro accepts, and
+        // the error text quoting them must never carry the secret.
+        for (url, shown) in [
+            ("postgresql:/u:s3cret@h/db", "postgresql://***"),
+            ("postgresql:u:s3cret@h/db", "postgresql://***"),
+            ("mysql://u:s3cret@h/db", "mysql://***"),
+            ("mysql://h/db", "mysql://***"),
+        ] {
+            assert_eq!(redacted_without(url, "s3cret"), shown, "{url}");
+            assert!(!connection_failed_context(url).contains("s3cret"), "{url}");
+        }
+    }
+
+    #[test]
+    fn redact_masks_a_hostless_postgres_url_holding_an_at_sign_whole() {
+        for (url, shown) in [
+            ("postgresql:///u:s3cret@h/db", "postgresql://***"),
+            ("postgres:///db?app=x@s3cret", "postgres://***"),
+        ] {
+            assert_eq!(redacted_without(url, "s3cret"), shown, "{url}");
+        }
+        // A host-less postgres URL with no `@` (a Unix socket) is shown as given.
+        assert_eq!(
+            redact_connection_url("postgresql:///db?host=/var/run/postgresql"),
+            "postgresql:///db?host=/var/run/postgresql"
+        );
+    }
+
+    #[test]
+    fn redact_shows_an_at_sign_written_as_percent_40() {
+        for url in [
+            "postgresql://h:5432/db%40x",
+            "postgresql://h/db?application_name=a%40b",
+        ] {
+            assert_eq!(redact_connection_url(url), url);
+        }
+        assert_eq!(
+            redact_connection_url("postgresql://u:pw@h/db?application_name=a%40b&password=s"),
+            "postgresql://u:***@h/db?application_name=a%40b&password=***"
+        );
+    }
+
+    #[test]
+    fn redact_returns_a_url_with_nothing_to_mask_byte_for_byte() {
+        // The parser would escape these (`Jane%20Doe`, `%C3%A9`); a URL with
+        // nothing to mask is shown as the user configured it.
+        for url in [
+            "sqlite:/Users/Jane Doe/app.db",
+            "sqlite:///Users/Jane Doe/app.db?mode=rwc",
+            "sqlite:/données/café.db",
+            "sqlite::memory:",
+            "postgresql://pinch@db.internal:5432/pinch prod?application_name=Jane Doe",
+        ] {
+            assert_eq!(redact_connection_url(url), url);
+        }
+    }
+
+    #[test]
+    fn redact_masks_a_string_the_parser_rejects() {
+        assert_eq!(
+            redact_connection_url("postgresql://u:pw@h:99999/db"),
+            "postgresql://***"
+        );
+        assert_eq!(redact_connection_url("not a url: pw"), "***");
+        assert_eq!(redact_connection_url(""), "***");
+    }
+
+    #[test]
+    fn redact_masks_a_percent_escaped_password() {
+        assert_eq!(
+            redacted_without("postgresql://u:p%40ss%3A@h/db", "p%40ss%3A"),
+            "postgresql://u:***@h/db"
+        );
+    }
+
+    #[test]
+    fn redact_keeps_a_url_without_a_password() {
+        for url in [
+            "postgresql://pinch@db.internal:5432/pinch_prod?sslmode=require",
+            "postgresql://db.internal/pinch_prod",
+        ] {
+            assert_eq!(redact_connection_url(url), url);
+        }
+    }
+
+    #[test]
+    fn redact_keeps_a_sqlite_url() {
+        for url in [
+            "sqlite:///var/data/app.db?mode=rwc",
+            "sqlite:app.db",
+            "sqlite::memory:",
+            "sqlite:///tmp/odd@name:1.db",
+            "sqlite:/tmp/app.db?mode=rwc",
+        ] {
+            assert_eq!(redact_connection_url(url), url);
+        }
+    }
+
+    #[test]
+    fn redact_masks_every_secret_query_key() {
+        for key in [
+            "password",
+            "db_PASSWORD",
+            "passwd",
+            "pwd",
+            "client_secret",
+            "access_token",
+            "apikey",
+            "api_key",
+            "service_role",
+            "pass%77ord",
+        ] {
+            assert_eq!(
+                redact_connection_url(&format!("postgresql://u@h/db?{key}=hunter2")),
+                format!("postgresql://u@h/db?{key}=***"),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn redact_keeps_a_non_secret_query_key() {
+        assert_eq!(
+            redact_connection_url(
+                "postgresql://u:pw@h/db?sslmode=require&password=x&application_name=pinch"
+            ),
+            "postgresql://u:***@h/db?sslmode=require&password=***&application_name=pinch"
+        );
+    }
+
+    #[test]
+    fn redact_keeps_the_fragment() {
+        assert_eq!(
+            redact_connection_url("postgresql://u:pw@h/db?token=t#replica"),
+            "postgresql://u:***@h/db?token=***#replica"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_connection_failure_names_the_url_with_its_password_masked() {
+        let url = "postgresql://u:secret@127.0.0.1:1/db";
+        let err = match connect_engine_handle(
+            url,
+            Dialect::Postgres,
+            None,
+            1,
+            0,
+            crate::session_settings::SettingsDelivery::Transaction,
+        )
+        .await
+        {
+            Ok(_) => panic!("nothing listens on port 1"),
+            Err(err) => err,
+        };
+        let message = format!("{}: {}", connection_failed_context(url), err);
+        assert!(message.contains("u:***@"), "{message}");
+        assert!(!message.contains("secret"), "{message}");
+        assert!(!message.contains("<redacted>"), "{message}");
+    }
 
     #[tokio::test]
     async fn connect_engine_handle_uses_typed_sqlite_backend() {

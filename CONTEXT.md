@@ -422,3 +422,11 @@ _Avoid_: Stray default, hand default, unmanaged default
 **Tracked database**:
 A database whose *tracking table* holds at least one *step record*. It is adopted: `baseline` refuses it, and so does every auto-migrate flag.
 _Avoid_: Migrated database, adopted database (alone), stamped database
+
+**Database line**:
+The first line every `ferro migrate` verb prints, naming what it touches: the connection URL with its secrets replaced by `***`, or, for `new` and `check`, which never connect, the migrations directory. Absent from `--json` output, which is the document alone.
+_Avoid_: Banner, header line, connection line
+
+**Change summary**:
+What `new` and `check` say a *migration* adds, changes, drops or renames, as counted lists of names by kind (models, enum types, and so on). It is data first and prose second: one plain rendering serves `check`'s `ungenerated` message and the library's error text, and `new` (in both forms) and `check` on a terminal lay their output out from the data.
+_Avoid_: Diff, summary string, change list

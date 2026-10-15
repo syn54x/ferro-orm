@@ -107,7 +107,11 @@ __all__ = [
     "AllowAhead",
     "AppliedStep",
     "DownPlan",
+    "RunEvent",
+    "RunNote",
     "RunReport",
+    "StepEvent",
+    "StepFailure",
     "connection_dialect",
     "down",
     "parse_lock_timeout",
@@ -140,6 +144,41 @@ class AppliedStep(NamedTuple):
     ms: int
 
 
+@dataclass(frozen=True)
+class StepFailure:
+    """The step a run stopped at: its error and, apart, what the failure
+    left applied and how to resume. :attr:`RunReport.refusal` is
+    :attr:`message`."""
+
+    migration: str
+    """``NNNN_<name>``."""
+    file: str
+    """The step's file (``02_backfill_account.py``)."""
+    duration_ms: int
+    error: str
+    """What failed (``NotNullViolationError: null value in column ...``)."""
+    hint: str
+    """What stayed applied and how to resume, ending ``Nothing after it
+    ran.``"""
+    rows_done: int | None = None
+    """The rows a chunked step's committed batches did before it failed;
+    ``None`` for any other step."""
+
+    @property
+    def stem(self) -> str:
+        """The step's name, its file without the suffix (``01_expand``)."""
+        return _stem(self.file)
+
+    @property
+    def message(self) -> str:
+        """``ferro migrate: <migration>/<file> failed: <error>``, then the
+        hint on its own line."""
+        return (
+            f"ferro migrate: {self.migration}/{self.file} failed: {self.error}\n"
+            f"{self.hint}"
+        )
+
+
 @dataclass
 class RunReport:
     """What :func:`up` or :func:`down` did."""
@@ -163,6 +202,11 @@ class RunReport:
     """Applied migrations the directory lacks: let through by
     ``allow_ahead``, or, when they alone refused the run
     (``refused.ahead_only``), the ones that did."""
+    failed: StepFailure | None = None
+    """The step the run stopped at when one failed (``refusal`` is its
+    message); ``None`` when the run finished or was refused."""
+    direction: Literal["up", "down"] = "up"
+    """Which way the run went: :func:`up` or :func:`down`."""
 
     def _refuse(self, refused: RunRefused) -> None:
         self.refusal, self.refused = str(refused), refused
@@ -229,6 +273,75 @@ def _stem(file: str) -> str:
     return _STEP_STEM.sub("", file)
 
 
+@dataclass(frozen=True)
+class StepEvent:
+    """One step a run finished: applied, reverted, reverted with nothing to
+    reverse, or failed. :meth:`line` is the line ``progress`` receives for
+    it (``0002_add_team  01_expand  applied (412 ms)``); a failed step's is
+    ``None``, as ``progress`` hears nothing of it (its message is the run's
+    refusal, :attr:`RunReport.failed`)."""
+
+    migration: str
+    """``NNNN_<name>``."""
+    file: str
+    """The step's file (``01_expand.up.postgres.sql``)."""
+    outcome: Literal["applied", "reverted", "nothing to reverse", "failed"]
+    duration_ms: int | None
+    """How long the step ran; ``None`` when it had nothing to reverse."""
+    reason: str | None
+    """Why its down runs no statement, when ``outcome`` is ``nothing to
+    reverse``."""
+    name_width: int = 0
+    """The run's migration column width: its longest migration name."""
+    stem_width: int = 0
+    """The run's step column width: its longest step name."""
+
+    @property
+    def stem(self) -> str:
+        """The step's name, its file without the suffix (``01_expand``)."""
+        return _stem(self.file)
+
+    @property
+    def said(self) -> str:
+        """What happened, as the line ends it: ``applied (412 ms)``,
+        ``reverted (8 ms)`` or ``nothing to reverse: <reason>``."""
+        if self.outcome == "nothing to reverse":
+            return f"nothing to reverse: {self.reason}"
+        return f"{self.outcome} ({self.duration_ms} ms)"
+
+    def line(
+        self, name_width: int | None = None, stem_width: int | None = None
+    ) -> str | None:
+        """``<migration>  <step>  <said>``, the columns padded to the run's
+        widths unless others are given; ``None`` for a failed step."""
+        if self.outcome == "failed":
+            return None
+        names = self.name_width if name_width is None else name_width
+        stems = self.stem_width if stem_width is None else stem_width
+        return _step_prefix(self.migration, self.file, names, stems) + self.said
+
+
+@dataclass(frozen=True)
+class RunNote:
+    """Any other line a run says: a step waiting for a table lock
+    (``0003_add_slug  01_add_slug  waiting for a lock on "author" ...``), an
+    edited unfinished step re-recorded before it runs."""
+
+    text: str
+
+    def line(self) -> str:
+        """The line ``progress`` receives: the text itself."""
+        return self.text
+
+
+RunEvent: TypeAlias = StepEvent | RunNote
+"""What a run says: one event per line ``progress`` receives."""
+
+
+def _step_prefix(migration: str, file: str, name_width: int, stem_width: int) -> str:
+    return f"{migration:<{name_width}}  {_stem(file):<{stem_width}}  "
+
+
 async def up(
     settings: FerroSettings | None = None,
     database: str | None = None,
@@ -238,6 +351,7 @@ async def up(
     lock_timeout: str | float | None = None,
     allow_ahead: AllowAhead = False,
     progress: Callable[[str], Any] | None = None,
+    on_event: Callable[[RunEvent], Any] | None = None,
 ) -> RunReport:
     """Apply every pending step of every pending migration, in order, under
     the run lock (``ferro migrate up``).
@@ -252,7 +366,10 @@ async def up(
     ``True`` whatever they hold (:data:`AllowAhead`).
     ``progress`` receives each line as the run goes: one per applied step,
     and one per attempt a step makes while it waits for a table lock under
-    the database's ``ddl_lock_timeout``.
+    the database's ``ddl_lock_timeout``. ``on_event`` receives the same
+    lines as data, each just before ``progress`` receives its ``line()``: a
+    :class:`StepEvent` per applied step, a :class:`RunNote` for any other;
+    a failed step is a ``StepEvent`` too, with no line for ``progress``.
 
     Returns the :class:`RunReport` of what it applied.
 
@@ -277,6 +394,7 @@ async def up(
             lock_timeout=lock_timeout,
             allow_ahead=allow_ahead,
             progress=progress,
+            on_event=on_event,
         )
 
 
@@ -287,6 +405,7 @@ async def _up(
     lock_timeout: str | float | None = None,
     allow_ahead: AllowAhead = False,
     progress: Callable[[str], Any] | None = None,
+    on_event: Callable[[RunEvent], Any] | None = None,
     through: str | None = None,
 ) -> RunReport:
     """:func:`up` on open connection ``name``, raising as it does.
@@ -317,16 +436,34 @@ async def _up(
                 if refused.ahead_only:
                     report.ahead = list(run.status()["ahead"])
                 raise
-            report = await _walk(run, plan, progress, using=name)
+            report = await _walk(run, plan, _teller(progress, on_event), using=name)
     except RunRefused as refused:
         report._refuse(refused)
     return report._raise_if_refused()
 
 
+def _teller(
+    progress: Callable[[str], Any] | None,
+    on_event: Callable[[RunEvent], Any] | None,
+) -> Callable[[RunEvent], None]:
+    """Tell both hooks of one event: ``on_event`` the event, then
+    ``progress`` its ``line()`` when it has one. The one place a run's lines are said, so
+    the string hook is always the event's own line."""
+
+    def tell(event: RunEvent) -> None:
+        if on_event is not None:
+            on_event(event)
+        line = event.line()
+        if progress is not None and line is not None:
+            progress(line)
+
+    return tell
+
+
 async def _walk(
     run: LockedDatabase,
     plan: Plan,
-    say: Callable[[str], Any] | None,
+    tell: Callable[[RunEvent], None] | None,
     *,
     using: str,
 ) -> RunReport:
@@ -334,14 +471,15 @@ async def _walk(
     ``run.execute`` for a SQL step, a data step in Python with its record
     moved through the run's transitions. The plan's direction decides which
     transitions settle each step and whether a step is reported ``applied``
-    or ``reverted``. Stops at the first failed step (its message is the
-    report's ``refusal``) or refusal."""
+    or ``reverted``, each line told to ``tell`` as an event (``None``:
+    to nobody). Stops at the first failed step (the report's ``failed``,
+    its message the report's ``refusal``) or refusal."""
     down = plan.direction == "down"
-    report = RunReport(ahead=list(plan.ahead))
+    report = RunReport(ahead=list(plan.ahead), direction="down" if down else "up")
     steps = plan.steps
     if not steps:
         return report
-    say = say or (lambda _line: None)
+    tell = tell or (lambda _event: None)
     done = report.reverted if down else report.applied
     try:
         loaded, reasons = _load_data_steps(steps, plan.direction)
@@ -350,7 +488,7 @@ async def _walk(
         with _HistoricalSwaps(run) as swaps:
             _check_chunked(steps, loaded, swaps, plan.direction)
             for step in steps:
-                line = _step_line(step, name_width, stem_width, say)
+                line = _step_line(step, name_width, stem_width, tell)
                 if step.edited is not None:
                     # ADR-0030: an unfinished attempt that committed nothing (or
                     # a no-transaction step, re-runnable from its first
@@ -361,7 +499,7 @@ async def _walk(
                         f"(sha384:{step.edited['recorded']} → sha384:{step.checksum})"
                     )
                     report.notes.append(note)
-                    say(note)
+                    tell(RunNote(note))
                 reason = step.nothing_to_reverse or reasons.get(_key(step))
                 if step.data:
                     this = loaded.get(_key(step))
@@ -374,17 +512,48 @@ async def _walk(
                     swaps.leave(step)
                     outcome = await run.execute(step, line)
                 if not outcome["ok"]:
+                    tell(
+                        StepEvent(
+                            migration=step.migration_name,
+                            file=step.file,
+                            outcome="failed",
+                            duration_ms=outcome["ms"],
+                            reason=None,
+                            name_width=name_width,
+                            stem_width=stem_width,
+                        )
+                    )
+                    report.failed = StepFailure(
+                        migration=step.migration_name,
+                        file=step.file,
+                        duration_ms=outcome["ms"],
+                        error=outcome["error"],
+                        hint=outcome["hint"],
+                        rows_done=outcome.get("rows_done"),
+                    )
                     report.refusal = outcome["message"]
                     return report
                 done.append(
                     AppliedStep(step.migration_name, _stem(step.file), outcome["ms"])
                 )
-                if not down:
-                    line(f"applied ({outcome['ms']} ms)")
-                elif reason is not None:
-                    line(f"nothing to reverse: {reason}")
-                else:
-                    line(f"reverted ({outcome['ms']} ms)")
+                nothing = down and reason is not None
+                tell(
+                    StepEvent(
+                        migration=step.migration_name,
+                        file=step.file,
+                        outcome=(
+                            "nothing to reverse"
+                            if nothing
+                            else "reverted"
+                            if down
+                            else "applied"
+                        ),
+                        duration_ms=None if nothing else outcome["ms"],
+                        reason=reason if nothing else None,
+                        name_width=name_width,
+                        stem_width=stem_width,
+                    )
+                )
     except RunRefused as refused:
         report._refuse(refused)
     return report
@@ -655,12 +824,27 @@ class _DataStep:
         log = logging.getLogger(f"ferro.migrations.{self._step.migration:04}.{stem}")
         return StepContext(models, tx, self._run.dialect, log)
 
-    def _failed(self, ms: int, error: str, after: str) -> dict[str, Any]:
+    def _failed(
+        self, ms: int, error: str, after: str, rows_done: int | None = None
+    ) -> dict[str, Any]:
+        """The outcome of a failed data step, in the SQL executor's shape:
+        its ``error``, its ``hint`` (``after`` and ``Nothing after it
+        ran.``) and the ``message`` they make."""
+        failure = StepFailure(
+            migration=self._step.migration_name,
+            file=self._step.file,
+            duration_ms=ms,
+            error=error,
+            hint=f"{after} Nothing after it ran.",
+            rows_done=rows_done,
+        )
         return {
             "ok": False,
             "ms": ms,
-            "message": f"ferro migrate: {self._shown} failed: {error}\n{after} Nothing "
-            f"after it ran.",
+            "error": failure.error,
+            "hint": failure.hint,
+            "rows_done": rows_done,
+            "message": failure.message,
         }
 
     async def up(
@@ -716,6 +900,7 @@ class _DataStep:
                 f"The failing batch was rolled back; the {failed.rows_done:,} rows of "
                 f"the batches before it stay committed. Fix the file or the database "
                 f"and run `ferro migrate up` again to resume after them.",
+                failed.rows_done,
             )
         return {"ok": True, "ms": _elapsed(clock)}
 
@@ -782,6 +967,7 @@ class _DataStep:
                 f"reverting, so `ferro migrate up` refuses until the down finishes. Fix "
                 f"the file or the database and run `ferro migrate down` again to resume "
                 f"after them.",
+                failed.rows_done,
             )
         return {"ok": True, "ms": _elapsed(clock)}
 
@@ -796,14 +982,17 @@ def _error_text(err: BaseException) -> str:
 
 
 def _step_line(
-    step: StepHandle, name_width: int, stem_width: int, say: Callable[[str], Any]
+    step: StepHandle,
+    name_width: int,
+    stem_width: int,
+    tell: Callable[[RunEvent], None],
 ) -> Callable[[str], None]:
-    """Say ``text`` as one of ``step``'s progress lines:
+    """Tell ``text`` as a note on ``step``'s row (a lock-wait attempt):
     ``<migration>  <step>  <text>``."""
-    prefix = f"{step.migration_name:<{name_width}}  {_stem(step.file):<{stem_width}}  "
+    prefix = _step_prefix(step.migration_name, step.file, name_width, stem_width)
 
     def line(text: str) -> None:
-        say(prefix + text)
+        tell(RunNote(prefix + text))
 
     return line
 
@@ -834,12 +1023,16 @@ async def status_of(
     return StatusReport.from_core(
         tracked.status(keys, lock_held=held),
         database=database.name,
+        url=tracked.url,
         dialect=tracked.dialect,
         table=tracked.tracking_table,
         rows_done={
             (r["migration"], r["step"]): r["rows_done"]
             for r in tracked.records
             if r["kind"] == "chunked" and r["rows_done"] is not None
+        },
+        finished_at={
+            (r["migration"], r["step"]): r["finished_at"] for r in tracked.records
         },
     )
 
@@ -904,6 +1097,7 @@ async def require_applied(
         report = StatusReport.from_core(
             tracked.status(),
             database=target.database.name,
+            url=tracked.url,
             dialect=tracked.dialect,
             table=tracked.tracking_table,
         )
@@ -936,6 +1130,8 @@ class DownStep(NamedTuple):
     """``NN_<name>``."""
     nothing_to_reverse: str | None
     """Why its down runs no statement, when it runs none."""
+    file: str
+    """The step's file (``01_schema.up.postgres.sql``), which names its kind."""
 
 
 @dataclass
@@ -1015,6 +1211,7 @@ async def _preview_down(
                 step.migration_name,
                 _stem(step.file),
                 step.nothing_to_reverse or reasons.get(_key(step)),
+                step.file,
             )
             for step in plan.steps
         ]
@@ -1076,6 +1273,7 @@ async def down(
     lock_timeout: str | float | None = None,
     confirm: Callable[[DownPlan], bool] | None = None,
     progress: Callable[[str], Any] | None = None,
+    on_event: Callable[[RunEvent], Any] | None = None,
 ) -> RunReport:
     """Revert every applied step above ``target``, newest first, under the
     run lock (``ferro migrate down``, ADR-0033), on the database and
@@ -1091,7 +1289,10 @@ async def down(
     ``confirm`` is shown the plan before the lock is taken; when it returns
     false nothing is reverted (``declined``). Once the lock is held the plan
     is made again, and a database that changed in between is refused rather
-    than reverted unseen. ``progress`` receives one line per reverted step.
+    than reverted unseen. ``progress`` receives one line per reverted step;
+    ``on_event`` receives each as data (a :class:`StepEvent`, or a
+    :class:`RunNote` for any other line) just before ``progress`` receives
+    its ``line()``; a failed down is a ``StepEvent`` with no line.
 
     Returns the :class:`RunReport` of what it reverted (``declined`` when
     ``confirm`` said no).
@@ -1105,7 +1306,7 @@ async def down(
             still ``reverting`` at its cursor. The next ``down`` resumes at it.
     """
     direction = parse_target(target, all=all)
-    report = RunReport()
+    report = RunReport(direction="down")
     where = Target.resolve(settings, database, using=using, url=url)
     timeout = where.database.lock_wait(lock_timeout)
     async with where.open() as name:
@@ -1136,7 +1337,7 @@ async def down(
                         "down` again to see the plan as it stands now."
                     )
                     return report._raise_if_refused()
-                report = await _walk(run, plan, progress, using=name)
+                report = await _walk(run, plan, _teller(progress, on_event), using=name)
                 report.notes[:0] = deferred
         except RunRefused as refused:
             report._refuse(refused)

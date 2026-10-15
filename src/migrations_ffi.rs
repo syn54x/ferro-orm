@@ -9,7 +9,7 @@
 use crate::migrate::parse_dialect;
 use ferro_migrate::directory::MigrationsDir;
 use ferro_migrate::snapshot::{Snapshot, encode_checksum};
-use ferro_migrate::{Dialect, GenerateOptions, check_migrations, generate_with};
+use ferro_migrate::{Dialect, GenerateOptions, check_migrations, generate_with, step_file_role};
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -20,6 +20,7 @@ use std::sync::Arc;
 pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_generate_migration, m)?)?;
     m.add_function(wrap_pyfunction!(_check_migrations, m)?)?;
+    m.add_function(wrap_pyfunction!(_step_file_role, m)?)?;
     m.add_function(wrap_pyfunction!(_read_migrations_dir, m)?)?;
     m.add_function(wrap_pyfunction!(_load_snapshot, m)?)?;
     m.add_function(wrap_pyfunction!(_open_tracked, m)?)?;
@@ -78,6 +79,9 @@ fn snapshot_json(snapshot: &Snapshot) -> serde_json::Value {
 /// (its checksum is the new snapshot's parent link), or `None` before the
 /// first migration. Returns the JSON of the `GeneratedMigration`, or `None`
 /// when nothing renders DDL (no schema change) and no hand step is asked for.
+/// Its `summary` is the change summary as data beside its one rendering,
+/// `{"changes": [{"verb", "kind", "names"}], "text"}` (ADR-0055), and its
+/// `notes` the lines `new` prints after it.
 /// `options_json` carries `ferro migrate new`'s options:
 /// `{"no_backfill": ["<table>.<column>", ...], "data_step": "Author" | null,
 /// "sql_step": "audit" | null, "data_only": bool}`; the generator lays out
@@ -115,7 +119,10 @@ pub fn _generate_migration(
 
 /// Check a migrations directory against the declared modelset, reading files
 /// only. Returns JSON `{"ok": bool, "head": str | null, "problems":
-/// [{"kind": str, "message": str}]}`.
+/// [{"kind": str, "message": str, "changes": [{"verb", "kind", "names"}],
+/// "headline": str | null, "notes": [str]}]}`; `changes` and `notes` are
+/// empty and `headline` null for every problem but `ungenerated`, whose
+/// headline is its message without the summary and notes it quotes.
 ///
 /// # Errors
 /// `ValueError` when the target IR or a dialect is malformed.
@@ -129,6 +136,25 @@ pub fn _check_migrations(
     let dialects = parse_dialects(&dialects)?;
     let target = parse_target(&target_ir_json)?;
     to_json(&check_migrations(Path::new(&directory), &target, &dialects))
+}
+
+/// What a step file's name says it is, read by the directory reader's own
+/// parse. Returns JSON `{"kind": "ddl" | "data" | "portable_sql",
+/// "direction": "up" | "down", "dialect": "postgres" | "sqlite" |
+/// "portable"}`.
+///
+/// # Errors
+/// `ValueError` when `name` is not a step file's name (`ir.json` included).
+#[pyfunction]
+#[pyo3(name = "_step_file_role")]
+pub fn _step_file_role(name: String) -> PyResult<String> {
+    let role = step_file_role(&name).ok_or_else(|| {
+        PyValueError::new_err(format!(
+            "{name} is not a migration step file: a step file is named \
+             NN_<name>.<up|down>.<postgres|sqlite>.sql, NN_<name>.<up|down>.sql or NN_<name>.py"
+        ))
+    })?;
+    to_json(&role)
 }
 
 /// Read and verify a migrations directory. Returns the JSON of the
@@ -629,6 +655,12 @@ impl TrackedDatabase {
         dialect_name(self.inner.dialect())
     }
 
+    /// The URL the connection was opened with, its secrets masked by `***`.
+    #[getter]
+    fn url(&self) -> &str {
+        self.inner.shown_url()
+    }
+
     /// `<schema>._ferro_migrations`.
     #[getter]
     fn tracking_table(&self) -> &str {
@@ -920,6 +952,12 @@ impl LockedDatabase {
         dialect_name(self.inner.tracked().dialect())
     }
 
+    /// The URL the connection was opened with, its secrets masked by `***`.
+    #[getter]
+    fn url(&self) -> &str {
+        self.inner.tracked().shown_url()
+    }
+
     /// `<schema>._ferro_migrations`.
     #[getter]
     fn tracking_table(&self) -> &str {
@@ -1005,7 +1043,7 @@ impl LockedDatabase {
 
     /// Execute one planned SQL step, up or down, from the held bytes, and
     /// settle its record. `on_attempt(text)` hears each attempt that timed
-    /// out waiting for a lock (ADR-0044). Returns `{"ok", "ms", "error",
+    /// out waiting for a lock (ADR-0044). Returns `{"ok", "ms", "error", "hint",
     /// "message"}`.
     ///
     /// # Errors

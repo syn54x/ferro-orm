@@ -25,7 +25,8 @@ pub mod run_plan;
 pub mod snapshot;
 
 pub use directory::{
-    DirectoryError, Headers, Migration, MigrationsDir, Step, StepDialect, StepKind,
+    DirectoryError, Headers, Migration, MigrationsDir, Step, StepDialect, StepDirection,
+    StepFileRole, StepKind, step_file_role,
 };
 pub use emit::{CreateTableEmission, order_models_for_create, render_create_table};
 pub use ferro_ddl_lowering::{Dialect, InPlaceChange, Report, ReportKind, Subject};

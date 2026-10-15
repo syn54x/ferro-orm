@@ -1481,8 +1481,11 @@ pub struct StepOutcome {
     /// The error recorded on the step, when it failed.
     pub error: Option<String>,
     /// The operator's text for a failure: the step, the error, what stayed
-    /// applied and how to resume.
+    /// applied and how to resume ([`failure_message`] of `error` and `hint`).
     pub message: Option<String>,
+    /// What a failure left applied and how to resume, ending `Nothing after
+    /// it ran.`: the part of `message` after the error ([`failure_hint`]).
+    pub hint: Option<String>,
 }
 
 fn error_text(err: &sqlx::Error) -> String {
@@ -1946,8 +1949,10 @@ fn failed_down_marks_record(down: bool, mode: ExecMode) -> bool {
     !down || mode == ExecMode::NoTransaction
 }
 
-fn failure_message(step: &PlannedStep, error: &str, down: bool) -> String {
-    let after = match (step.mode, down) {
+/// What a failed step left applied and how to resume, by its mode and
+/// direction: the second line of [`failure_message`].
+fn failure_hint(mode: ExecMode, down: bool) -> String {
+    let after = match (mode, down) {
         (ExecMode::NoTransaction, false) => {
             "It runs without a transaction, so the statements before the failing one stay \
              applied; fix the file or the database and run `ferro migrate up` again: the step \
@@ -1967,10 +1972,13 @@ fn failure_message(step: &PlannedStep, error: &str, down: bool) -> String {
              database and run `ferro migrate down` again to resume at it."
         }
     };
-    format!(
-        "ferro migrate: {}/{} failed: {error}\n{after} Nothing after it ran.",
-        step.migration_name, step.file
-    )
+    format!("{after} Nothing after it ran.")
+}
+
+/// The operator's text for a failed step: `ferro migrate: <migration>/<file>
+/// failed: <error>`, then the [`failure_hint`] on its own line.
+fn failure_message(migration_name: &str, file: &str, error: &str, hint: &str) -> String {
+    format!("ferro migrate: {migration_name}/{file} failed: {error}\n{hint}")
 }
 
 // -- the run objects (ADR-0048) ----------------------------------------------------------
@@ -2024,6 +2032,11 @@ impl Tracked {
     /// The database's dialect.
     pub fn dialect(&self) -> Dialect {
         self.engine.backend()
+    }
+
+    /// The URL the connection was opened with, its secrets masked.
+    pub fn shown_url(&self) -> &str {
+        self.engine.shown_url()
     }
 
     /// `<schema>._ferro_migrations`, as `status` names it.
@@ -2786,6 +2799,7 @@ impl Locked {
                     ms,
                     error: None,
                     message: None,
+                    hint: None,
                 })
             }
             Err(failure) => {
@@ -2836,7 +2850,8 @@ impl Locked {
                     };
                     self.write(&failed, None).await?;
                 }
-                let message = failure_message(step, &error, down);
+                let hint = failure_hint(step.mode, down);
+                let message = failure_message(&step.migration_name, &step.file, &error, &hint);
                 if changed_schema && let Err(e) = self.refresh_pool().await {
                     return Err(failed_step_refresh_error(&message, e));
                 }
@@ -2845,6 +2860,7 @@ impl Locked {
                     ms,
                     message: Some(message),
                     error: Some(error),
+                    hint: Some(hint),
                 })
             }
         }
@@ -2976,6 +2992,24 @@ impl Locked {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failure_message_is_its_error_then_its_hint() {
+        let up = failure_hint(ExecMode::Transactional, false);
+        assert_eq!(
+            failure_message("0002_fix", "01_fix.up.sql", "no such table: missing", &up),
+            "ferro migrate: 0002_fix/01_fix.up.sql failed: no such table: missing\n\
+             The step was rolled back; fix the file or the database and run `ferro migrate up` \
+             again to resume at it. Nothing after it ran."
+        );
+        let down = failure_hint(ExecMode::NoTransaction, true);
+        assert_eq!(
+            failure_message("0002_fix", "01_fix.up.sql", "boom", &down),
+            format!("ferro migrate: 0002_fix/01_fix.up.sql failed: boom\n{down}")
+        );
+        assert!(down.starts_with("It runs without a transaction, so the statements"));
+        assert!(down.ends_with("re-runs from its first statement. Nothing after it ran."));
+    }
 
     #[test]
     fn the_first_failed_check_is_a_pooler_and_a_later_one_a_dropped_lock() {

@@ -150,7 +150,7 @@ def render(step: Mapping[str, Any], *, template_dir: Path | None) -> str:
 
 
 def note(step: Mapping[str, Any], *, dir_name: str, migration_name: str) -> str | None:
-    """The summary line a backfill that still needs writing adds to the
+    """The note a backfill that still needs writing adds to the
     migration (``02_backfill_author.py needs writing where it says
     todo(...); …``): where to write, and the command that regenerates the
     migration with a guard instead. ``None`` for any other step: a guard, a

@@ -18,13 +18,14 @@ async def test_connection_error_redacts_secret_query_params(tmp_path):
     message = str(excinfo.value)
     assert "supersecret" not in message
     assert "topsecret" not in message
-    assert "password=<redacted>" in message
-    assert "apikey=<redacted>" in message
+    assert "password=***" in message
+    assert "apikey=***" in message
 
 
 @pytest.mark.asyncio
-async def test_connection_error_redacts_postgres_userinfo_and_tokens():
-    """Postgres-style DSNs should redact password userinfo and token query params."""
+async def test_connection_error_masks_an_unsupported_scheme_whole():
+    """A scheme Ferro does not connect to is masked whole in the error that
+    refuses it: nothing about its parse says where a secret sits."""
     with pytest.raises(ferro.InterfaceError) as excinfo:
         await ferro.connect(
             "postgres+srv://app_user:supersecret@example.invalid/app?access_token=topsecret",
@@ -34,5 +35,5 @@ async def test_connection_error_redacts_postgres_userinfo_and_tokens():
     message = str(excinfo.value)
     assert "supersecret" not in message
     assert "topsecret" not in message
-    assert "app_user:<redacted>@" in message
-    assert "access_token=<redacted>" in message
+    assert "app_user" not in message
+    assert "DB Connection failed for postgres+srv://***: " in message

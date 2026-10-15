@@ -41,6 +41,7 @@ from tests.test_migrate_down import (  # noqa: F401 - fixtures
 )
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     AUTHOR,
+    DIRECTORY_LINE,
     LIBRARY,
     listing,
     pkg,
@@ -213,7 +214,7 @@ def test_an_optional_column_writes_both_dialects_with_a_drop_for_its_down(
         assert (migration / f"01_schema.down.{dialect}.sql").read_text() == (
             'ALTER TABLE "author" DROP COLUMN "bio";\n'
         )
-    assert "changed models: Author" in capsys.readouterr().out
+    assert "\n  1 changed model\n    Author\n" in capsys.readouterr().out
 
 
 # -- A1, A2: adding a column ----------------------------------------------------------
@@ -542,7 +543,9 @@ def test_a8_a_default_change_on_an_existing_column_is_no_schema_change(
 
     assert run("migrate", "new", "nothing") == 0
 
-    assert capsys.readouterr().out == "no schema change: nothing written\n"
+    assert capsys.readouterr().out == (
+        f"{DIRECTORY_LINE}\nno schema change: nothing written\n"
+    )
     assert listing(project / "migrations") == before
 
 

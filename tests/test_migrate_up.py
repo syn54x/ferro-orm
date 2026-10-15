@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from collections.abc import Awaitable
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -48,6 +49,13 @@ COLUMNS = (
 # -- the database, read the way an operator would -----------------------------
 
 
+def masked(url: str) -> str:
+    """``url`` with its userinfo password shown as ``***``, worked out here
+    rather than by the redactor under test."""
+    password = urlsplit(url).password
+    return url if password is None else url.replace(f":{password}@", ":***@", 1)
+
+
 class Db:
     """Plain-driver access to the database behind ``db_url``."""
 
@@ -56,6 +64,12 @@ class Db:
         self.backend = backend
         self.base = base
         self.schema = schema
+
+    @property
+    def line(self) -> str:
+        """The database line every connecting ``ferro migrate`` verb opens
+        its stdout with: the configured database, then the masked URL."""
+        return f"default · {masked(self.url)}"
 
     def _connect(self) -> Any:
         if self.backend == "sqlite":
@@ -172,8 +186,9 @@ def test_up_applies_every_step_and_writes_one_finished_record_each(
     assert run("migrate", "up", "--url", db.url) == 0
 
     out = capsys.readouterr().out.splitlines()
-    assert out[0].startswith("0001_create_author  01_schema  applied (")
-    assert out[1].startswith("0002_create_post    01_schema  applied (")
+    assert out[0] == db.line
+    assert out[1].startswith("0001_create_author  01_schema  applied (")
+    assert out[2].startswith("0002_create_post    01_schema  applied (")
     assert {"_ferro_migrations", "_ferro_migrations_format", "author", "post"} <= (
         db.tables()
     )
@@ -205,7 +220,9 @@ def test_up_applies_every_step_and_writes_one_finished_record_each(
         assert record[9] is not None and record[10] is None and record[11] is None
 
     assert run("migrate", "up", "--url", db.url) == 0
-    assert capsys.readouterr().out == "nothing to apply: the database is up to date\n"
+    assert capsys.readouterr().out == (
+        f"{db.line}\nnothing to apply: the database is up to date\n"
+    )
     assert len(db.records()) == 2
 
 
@@ -256,7 +273,9 @@ def test_a_failed_step_is_recorded_and_the_next_up_resumes_at_it(
 
     assert run("migrate", "up", "--url", db.url) == 1
     captured = capsys.readouterr()
-    assert captured.out.startswith("0001_create_author  01_schema  applied (")
+    assert captured.out.startswith(
+        f"{db.line}\n0001_create_author  01_schema  applied ("
+    )
     assert "ferro migrate: 0002_fix/01_fix.up.sql failed:" in captured.err
     assert "missing" in captured.err
     records = db.records()
@@ -546,7 +565,9 @@ def _refused_by_up_and_status(db, capsys, expected: str) -> None:
     assert run("migrate", "up", "--url", db.url) == 1
     assert capsys.readouterr().err.rstrip("\n") == expected
     assert run("migrate", "status", "--url", db.url) == 4
-    assert expected in capsys.readouterr().out
+    # status prints the refusal under its needs attention heading, indented.
+    shown = "".join(f"  {line}\n" for line in expected.splitlines())
+    assert f"needs attention\n{shown}" in capsys.readouterr().out
 
 
 def test_an_applied_file_edited_on_disk_is_refused_naming_rerecord(

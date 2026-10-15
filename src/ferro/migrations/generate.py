@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import shutil
 import warnings
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from dataclasses import replace as dataclass_replace
 from pathlib import Path
@@ -41,6 +41,7 @@ from .steps import StepRefused, scan_todos, unwritten
 from .target import Target
 from .layout import (
     SNAPSHOT_FILE,
+    Change,
     GeneratedMigration,
     GeneratedStep,
     MigrationsDirectoryError,
@@ -86,6 +87,19 @@ class Problem:
     ``duplicate_number``, ``missing_number``, ``missing_rendering``, ..."""
     message: str
     """What is wrong and how to fix it."""
+    changes: tuple[Change, ...] = ()
+    """An ``ungenerated`` problem's change summary, as data: what the
+    migration ``ferro migrate new`` would write changes. Empty for every
+    other kind."""
+    headline: str | None = None
+    """An ``ungenerated`` problem's message without the summary and notes it
+    quotes (``the models changed since 0001_initial and no migration records
+    it; run ...``), as the core builds it: what a terminal prints above the
+    summary it lays out from :attr:`changes`. ``None`` for every other
+    problem."""
+    notes: tuple[str, ...] = ()
+    """The notes an ``ungenerated`` problem's message quotes after its
+    summary, as ``new`` prints them. Empty for every other problem."""
 
 
 @dataclass(frozen=True)
@@ -444,8 +458,8 @@ def _with_data_steps(
 ) -> GeneratedMigration:
     """``migration`` with each data step's file written from the step record
     the generator produced (:func:`scaffold.render`), and each backfill that
-    still needs writing named in the summary. The step's name and place are
-    the generator's."""
+    still needs writing named in a note after the generator's. The step's
+    name and place are the generator's."""
     by_ordinal = {step["ordinal"]: step for step in generated["steps"]}
     steps: list[GeneratedStep] = []
     notes: list[str] = []
@@ -468,6 +482,7 @@ def _with_data_steps(
                 step.name,
                 "data",
                 {f"{step.ordinal:02d}_{step.name}.py": text},
+                role=_data_role(record),
             )
         )
         note = scaffold.note(
@@ -475,8 +490,19 @@ def _with_data_steps(
         )
         if note is not None:
             notes.append(note)
-    summary = "\n".join(line for line in (migration.summary, *notes) if line)
-    return dataclass_replace(migration, steps=tuple(steps), summary=summary)
+    return dataclass_replace(
+        migration, steps=tuple(steps), notes=(*migration.notes, *notes)
+    )
+
+
+def _data_role(record: Mapping[str, Any]) -> str:
+    """The generator's word for a data step it laid out: ``data_step`` for
+    the step ``--data-step`` asked for (its ``hand_model``), ``guard`` for
+    the guard ``--no-backfill`` put in a backfill's place, ``backfill``
+    otherwise."""
+    if record.get("hand_model") is not None:
+        return "data_step"
+    return "guard" if record["data"]["guard"] else "backfill"
 
 
 async def check(
@@ -502,7 +528,16 @@ async def check(
             str(chosen.directory), json.dumps(declared), list(chosen.dialects)
         )
     )
-    problems = [Problem(p["kind"], p["message"]) for p in raw["problems"]]
+    problems = [
+        Problem(
+            p["kind"],
+            p["message"],
+            tuple(Change.from_json(c) for c in p["changes"]),
+            p["headline"],
+            tuple(p["notes"]),
+        )
+        for p in raw["problems"]
+    ]
     problems += _unwritten_steps(chosen.directory)
     return CheckReport(ok=not problems, head=raw["head"], problems=problems)
 

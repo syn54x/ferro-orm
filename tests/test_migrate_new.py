@@ -102,6 +102,11 @@ def write_config(project: Path, pkg: str, dialects: str = '["postgres", "sqlite"
     )
 
 
+DIRECTORY_LINE = "default · migrations"
+"""The database line ``new`` and ``check`` open with: the configured
+database, then its migrations directory relative to the working directory."""
+
+
 def run(*argv: str) -> int:
     from ferro.cli import main
 
@@ -114,6 +119,13 @@ def listing(directory: Path) -> list[str]:
         for path in directory.rglob("*")
         if path.is_file()
     )
+
+
+def words(out: str) -> list[str]:
+    """Each line of ``out`` with its runs of spaces made one: a file line
+    read without the column padding (``01_schema.up.sqlite.sql schema step,
+    up (sqlite) kept``)."""
+    return [" ".join(line.split()) for line in out.splitlines()]
 
 
 def statements(sql_file: Path) -> list[str]:
@@ -171,8 +183,8 @@ def test_the_first_migration_renders_every_target_dialect_and_a_root_snapshot(
         'DROP TABLE "author";\n'
     )
     out = capsys.readouterr().out
-    assert "migrations/0001_create_author/" in out
-    assert "new models: Author" in out
+    assert "ok Wrote migrations/0001_create_author/\n" in out
+    assert "\n  1 new model\n    Author\n  1 new enum type\n    status\n" in out
 
 
 def test_a_child_model_chains_to_the_parent_snapshot_and_creates_its_type_first(
@@ -376,7 +388,9 @@ def test_an_edit_that_renders_no_ddl_writes_nothing(project, pkg, capsys, edit):
 
     assert run("migrate", "new", "nothing") == 0
 
-    assert capsys.readouterr().out == "no schema change: nothing written\n"
+    assert capsys.readouterr().out == (
+        f"{DIRECTORY_LINE}\nno schema change: nothing written\n"
+    )
     assert listing(project / "migrations") == before
 
 
@@ -400,6 +414,172 @@ def test_a_change_new_cannot_generate_yet_is_refused_naming_its_ticket(
         "converts in place: add a column of the new type"
     ) in capsys.readouterr().err
     assert listing(project / "migrations") == before
+
+
+# -- the change summary (ADR-0055) ------------------------------------------------
+
+LABEL_RENAMED = AUTHOR.replace(
+    '    LIVE = "live"\n',
+    '    OPEN = "open"\n    __ferro_renamed_labels__ = {"open": "live"}\n',
+)
+LABEL_REMOVED = AUTHOR.replace('    LIVE = "live"\n', "")
+NAME_RETYPED = AUTHOR.replace(
+    "    name: Annotated[str, FerroField(unique=True)]\n", "    full_name: str\n"
+)
+"""``name`` dropped and a required ``full_name`` added: a rename hint (the
+generator's note) and a backfill to write (``new``'s own note)."""
+
+FOUR_SCHEMA_FILES = (
+    "  01_schema.up.postgres.sql\n  01_schema.down.postgres.sql\n"
+    "  01_schema.up.sqlite.sql\n  01_schema.down.sqlite.sql\n  ir.json\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "flags", "files", "said", "changes"),
+    [
+        pytest.param(
+            None,
+            AUTHOR,
+            (),
+            FOUR_SCHEMA_FILES,
+            "new models: Author; new enum types: status\n",
+            (("new", "models", ("Author",)), ("new", "enum types", ("status",))),
+            id="first",
+        ),
+        pytest.param(
+            AUTHOR,
+            AUTHOR + "    bio: str | None = None\n",
+            (),
+            FOUR_SCHEMA_FILES,
+            "changed models: Author\n",
+            (("changed", "models", ("Author",)),),
+            id="change",
+        ),
+        pytest.param(
+            LIBRARY,
+            AUTHOR,
+            (),
+            FOUR_SCHEMA_FILES,
+            "dropped models: Post; dropped enum types: kind\n",
+            (("dropped", "models", ("Post",)), ("dropped", "enum types", ("kind",))),
+            id="drop",
+        ),
+        pytest.param(
+            AUTHOR,
+            LABEL_RENAMED,
+            (),
+            FOUR_SCHEMA_FILES,
+            "renamed enum labels: status.live → open\n",
+            (("renamed", "enum labels", ("status.live → open",)),),
+            id="label-rename",
+        ),
+        pytest.param(
+            AUTHOR,
+            LABEL_REMOVED,
+            (),
+            "  01_backfill_author.py\n"
+            "  02_contract.up.postgres.sql\n  02_contract.down.postgres.sql\n"
+            "  02_contract.up.sqlite.sql\n  02_contract.down.sqlite.sql\n  ir.json\n",
+            "removed enum labels: status.live\n"
+            "01_backfill_author.py needs writing where it says todo(...); if no "
+            "author needs a value, delete 0002_b/ and run: ferro migrate new b "
+            "--no-backfill author.status\n",
+            (("removed", "enum labels", ("status.live",)),),
+            id="label-removal",
+        ),
+        pytest.param(
+            AUTHOR,
+            NAME_RETYPED,
+            ("--data-step", "Author"),
+            "  01_expand.up.postgres.sql\n  01_expand.down.postgres.sql\n"
+            "  01_expand.up.sqlite.sql\n  01_expand.down.sqlite.sql\n"
+            "  02_backfill_author.py\n"
+            "  03_add_constraint.up.postgres.sql\n"
+            "  03_add_constraint.down.postgres.sql\n"
+            "  03_add_constraint.up.sqlite.sql\n  03_add_constraint.down.sqlite.sql\n"
+            "  04_backfill_author.py\n"
+            "  05_contract.up.postgres.sql\n  05_contract.down.postgres.sql\n"
+            "  05_contract.up.sqlite.sql\n  05_contract.down.sqlite.sql\n  ir.json\n",
+            "changed models: Author\n"
+            'author: if "name" became "full_name", declare renamed_from="name"\n'
+            "02_backfill_author.py needs writing where it says todo(...); if no "
+            "author needs a value, delete 0002_b/ and run: ferro migrate new b "
+            "--no-backfill author.full_name\n",
+            (("changed", "models", ("Author",)),),
+            id="data-step-two-notes",
+        ),
+    ],
+)
+def test_new_prints_each_change_list_then_each_note(
+    project, pkg, capsys, before, after, flags, files, said, changes
+):
+    """``said`` is the summary's plain rendering and the notes, one a line,
+    as the library holds them; ``new`` prints the summary's lists under
+    their count headings, one name a line in the plain form, then each
+    note behind a bullet. Golden text for both forms is in
+    ``tests/test_cli_output_new_check.py``."""
+    from ferro import FerroSettings
+    from ferro.migrations.generate import prepare
+    from ferro.migrations.layout import Change, ChangeSummary
+
+    write_config(project, pkg)
+    number = "0001"
+    if before is not None:
+        write_models(project, pkg, before)
+        assert run("migrate", "new", "a") == 0
+        number = "0002"
+    write_models(project, pkg, after)
+    data_step = flags[1] if flags else None
+    migration = prepare(FerroSettings().database(None), "b", data_step=data_step)
+    capsys.readouterr()
+
+    assert run("migrate", "new", "b", *flags) == 0
+
+    out = capsys.readouterr().out.splitlines()
+    names = [line.strip() for line in files.splitlines()]
+    assert out[:2] == [DIRECTORY_LINE, f"ok Wrote migrations/{number}_b/"]
+    assert [line.split()[0] for line in out[2 : 2 + len(names)]] == names
+    lists = []
+    for verb, kind, listed in changes:
+        noun = kind.removesuffix("s") + ("" if len(listed) == 1 else "s")
+        lists += [f"  {len(listed)} {verb} {noun}", *(f"    {n}" for n in listed)]
+    notes = [f"  - {note}" for note in said.splitlines()[1:]]
+    assert out[2 + len(names) :] == ["", *lists, *notes]
+    assert isinstance(migration.summary, ChangeSummary)
+    assert migration.summary.changes == tuple(
+        Change(verb, kind, names) for verb, kind, names in changes
+    )
+    assert migration.summary.text == said.splitlines()[0]
+    assert migration.notes == tuple(said.splitlines()[1:])
+
+
+def test_a_summary_without_changes_is_false(project, pkg):
+    from ferro.migrations.layout import Change, ChangeSummary
+
+    assert not ChangeSummary((), "")
+    assert ChangeSummary((Change("new", "models", ("Author",)),), "new models: Author")
+
+
+def test_the_generator_json_carries_the_summary_as_data_and_no_notes(project, pkg):
+    from ferro import FerroSettings
+    from ferro._core import _generate_migration
+    from ferro.migrations.generate import declared_modelset
+
+    write_config(project, pkg)
+    write_models(project, pkg, AUTHOR)
+    declared = declared_modelset(FerroSettings().database(None))
+
+    raw = json.loads(_generate_migration(None, json.dumps(declared), ["postgres", "sqlite"]))
+
+    assert raw["summary"] == {
+        "changes": [
+            {"verb": "new", "kind": "models", "names": ["Author"]},
+            {"verb": "new", "kind": "enum types", "names": ["status"]},
+        ],
+        "text": "new models: Author; new enum types: status",
+    }
+    assert raw["notes"] == []
 
 
 def test_a_backfill_to_write_names_the_command_that_skips_it(project, pkg, capsys):
@@ -458,7 +638,7 @@ def test_replace_composes_with_data_step_and_data_only(project, pkg, capsys):
         "02_backfill_author.py",
         "ir.json",
     ]
-    assert "  02_backfill_author.py  new" in capsys.readouterr().out.splitlines()
+    assert "02_backfill_author.py data step new" in words(capsys.readouterr().out)
 
     # --data-only regenerates it as that data step alone; the one it had is
     # carried across, winning over the rescaffolded one of its name.
@@ -484,9 +664,10 @@ def test_replace_composes_with_data_step_and_data_only(project, pkg, capsys):
     assert (migrations / "0002_b/01_backfill_author.py").read_text() == "# filled in\n"
     out = capsys.readouterr().out
     assert (
-        "  01_backfill_author.py  carried, review it (was 0002_b/02_backfill_author.py; "
-        "it wins over the regenerated step of the same name)"
-    ) in out.splitlines(), out
+        "01_backfill_author.py data step carried, review it (was "
+        "0002_b/02_backfill_author.py; it wins over the regenerated step of the "
+        "same name)"
+    ) in words(out), out
 
 
 def test_a_gap_in_the_numbers_is_refused_naming_it(project, pkg, capsys):
@@ -584,3 +765,27 @@ async def test_the_up_file_is_what_auto_migrate_executes(
         )
     )
     assert plan["operations"] == []
+
+
+def test_each_data_step_carries_the_role_the_generator_gave_it(project, pkg):
+    """A generated backfill, a ``--data-step`` beside it of the same name and
+    a ``--no-backfill`` guard are told apart by the generator's record, never
+    by their names or their order."""
+    from ferro import FerroSettings
+    from ferro.migrations.generate import prepare
+
+    write_config(project, pkg)
+    write_models(project, pkg, AUTHOR)
+    assert run("migrate", "new", "a") == 0
+    write_models(project, pkg, NAME_RETYPED)
+    database = FerroSettings().database(None)
+
+    hand = prepare(database, "b", data_step="Author")
+    guarded = prepare(database, "b", no_backfill=("author.full_name",))
+
+    assert [(s.name, s.role) for s in hand.steps if s.kind == "data"] == [
+        ("backfill_author", "backfill"),
+        ("backfill_author", "data_step"),
+    ]
+    assert [s.role for s in guarded.steps if s.kind == "data"] == ["guard"]
+    assert {s.role for s in hand.steps if s.kind != "data"} == {None}

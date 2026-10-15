@@ -155,12 +155,135 @@ pub struct GeneratedMigration {
     pub snapshot: Snapshot,
     /// The snapshot's `ir.json` text, exactly as it is to be stored.
     pub snapshot_json: String,
-    /// What changed, in words: the models added and dropped, the enum types
-    /// introduced and retired.
-    pub summary: String,
+    /// What changed: the models added, changed and dropped, the enum types
+    /// and labels introduced, renamed and retired, as data beside its one
+    /// plain rendering (ADR-0055).
+    pub summary: ChangeSummary,
+    /// The lines `new` prints after the summary, each once: a hint to declare
+    /// a rename where a column was dropped and another added (ADR-0032).
+    pub notes: Vec<String>,
     /// Warnings rendering raised (a backend limitation a dialect skips, such as
     /// row security on SQLite), each once.
     pub warnings: Vec<String>,
+}
+
+/// What a [`Change`] does to the things it names; serialised as
+/// [`ChangeVerb::word`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChangeVerb {
+    /// Added by the migration.
+    New,
+    /// Altered in place (a model whose table an op edits).
+    Changed,
+    /// Dropped by the migration.
+    Dropped,
+    /// Renamed (`old → new`).
+    Renamed,
+    /// Removed (an enum label).
+    Removed,
+}
+
+impl ChangeVerb {
+    /// The word the plain rendering opens a change with.
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::New => "new",
+            Self::Changed => "changed",
+            Self::Dropped => "dropped",
+            Self::Renamed => "renamed",
+            Self::Removed => "removed",
+        }
+    }
+}
+
+impl serde::Serialize for ChangeVerb {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.word())
+    }
+}
+
+/// What kind of thing a [`Change`] names; serialised as
+/// [`ChangeKind::words`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChangeKind {
+    /// Models, by class name.
+    Models,
+    /// Enum types, by type name.
+    EnumTypes,
+    /// Enum labels, as `type.label`.
+    EnumLabels,
+}
+
+impl serde::Serialize for ChangeKind {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.words())
+    }
+}
+
+impl ChangeKind {
+    /// The words the plain rendering names the kind with.
+    pub fn words(self) -> &'static str {
+        match self {
+            Self::Models => "models",
+            Self::EnumTypes => "enum types",
+            Self::EnumLabels => "enum labels",
+        }
+    }
+}
+
+/// One entry of a [`ChangeSummary`]: what happened to which names of one
+/// kind (`new models: Team, TeamMember`).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct Change {
+    /// What happened.
+    pub verb: ChangeVerb,
+    /// To what kind of thing.
+    pub kind: ChangeKind,
+    /// The names, sorted; never empty.
+    pub names: Vec<String>,
+}
+
+/// What a migration adds, changes, drops or renames (ADR-0055): the changes
+/// as data, in the generator's order, beside the one plain rendering `new`,
+/// `check` and the library's error text print. A reader lays the changes out
+/// from the data; none takes the text apart.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct ChangeSummary {
+    /// Every change, in the order the rendering names them.
+    pub changes: Vec<Change>,
+    /// [`ChangeSummary::render`] of `changes`.
+    pub text: String,
+}
+
+impl ChangeSummary {
+    /// The summary of `changes`, with its rendering.
+    pub fn new(changes: Vec<Change>) -> Self {
+        let text = Self::render(&changes);
+        Self { changes, text }
+    }
+
+    /// The plain rendering: each change as `<verb> <kind>: <names>`, names
+    /// joined with `, ` and changes with `; ` (`new models: Team; changed
+    /// models: Account`); empty for no change.
+    pub fn render(changes: &[Change]) -> String {
+        changes
+            .iter()
+            .map(|change| {
+                format!(
+                    "{} {}: {}",
+                    change.verb.word(),
+                    change.kind.words(),
+                    change.names.join(", ")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+
+    /// Whether nothing changed.
+    pub fn is_empty(&self) -> bool {
+        self.changes.is_empty()
+    }
 }
 
 /// Why `new` writes nothing.
@@ -491,15 +614,15 @@ fn short_model_name(model_name: &str) -> &str {
     model_name.rsplit('.').next().unwrap_or(model_name)
 }
 
-/// What the up ops change, in words, over every dialect, beside the enum
-/// labels the models add (`type.label`; a dialect that keeps labels as text
-/// has no op for them).
+/// What the up ops change over every dialect, beside the enum labels the
+/// models add (`type.label`; a dialect that keeps labels as text has no op
+/// for them).
 fn summarize(
     ups: &[Vec<MigrationOp>],
     labels: &BTreeSet<String>,
     parent: &IrEnvelope<SchemaIrPayload>,
     target: &IrEnvelope<SchemaIrPayload>,
-) -> String {
+) -> ChangeSummary {
     let model_of = |ir: &IrEnvelope<SchemaIrPayload>, table: &str| {
         ir.payload
             .models
@@ -557,27 +680,29 @@ fn summarize(
             }
         }
     }
-    [
-        ("new models", added),
-        ("changed models", changed),
-        ("dropped models", dropped),
-        ("new enum types", types_added),
-        ("dropped enum types", types_dropped),
-        ("renamed enum types", types_renamed),
-        ("new enum labels", labels_added),
-        ("renamed enum labels", labels_renamed),
-        ("removed enum labels", labels_removed),
-    ]
-    .into_iter()
-    .filter(|(_, names)| !names.is_empty())
-    .map(|(label, names)| {
-        format!(
-            "{label}: {}",
-            names.into_iter().collect::<Vec<_>>().join(", ")
-        )
-    })
-    .collect::<Vec<_>>()
-    .join("; ")
+    use ChangeKind::{EnumLabels, EnumTypes, Models};
+    use ChangeVerb::{Changed, Dropped, New, Removed, Renamed};
+    ChangeSummary::new(
+        [
+            (New, Models, added),
+            (Changed, Models, changed),
+            (Dropped, Models, dropped),
+            (New, EnumTypes, types_added),
+            (Dropped, EnumTypes, types_dropped),
+            (Renamed, EnumTypes, types_renamed),
+            (New, EnumLabels, labels_added),
+            (Renamed, EnumLabels, labels_renamed),
+            (Removed, EnumLabels, labels_removed),
+        ]
+        .into_iter()
+        .filter(|(_, _, names)| !names.is_empty())
+        .map(|(verb, kind, names)| Change {
+            verb,
+            kind,
+            names: names.into_iter().collect(),
+        })
+        .collect(),
+    )
 }
 
 /// The migration that turns `parent` (the head snapshot; `None` before the
@@ -963,11 +1088,8 @@ pub fn generate_with(
         steps,
         snapshot,
         snapshot_json,
-        summary: std::iter::once(summarize(&changes, &layout.labels_added, parent_ir, target))
-            .chain(suggestions)
-            .filter(|line| !line.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n"),
+        summary: summarize(&changes, &layout.labels_added, parent_ir, target),
+        notes: suggestions,
         warnings,
     }))
 }
@@ -1073,6 +1195,18 @@ pub struct Problem {
     pub kind: String,
     /// What is wrong and how to fix it.
     pub message: String,
+    /// An `ungenerated` problem's change summary, as data: what the
+    /// migration `new` would write changes. Empty for every other kind.
+    pub changes: Vec<Change>,
+    /// An `ungenerated` problem's message without the summary and notes it
+    /// quotes (`the models changed since 0001_initial and no migration
+    /// records it; run ...`): what a terminal prints above the summary it
+    /// lays out from `changes`. `None` for every other problem.
+    pub headline: Option<String>,
+    /// The notes an `ungenerated` problem's message quotes after its
+    /// summary, one per line, as `new` prints them. Empty for every other
+    /// problem.
+    pub notes: Vec<String>,
 }
 
 /// What `ferro migrate check` reports.
@@ -1090,6 +1224,30 @@ fn problem(err: &DirectoryError) -> Problem {
     Problem {
         kind: err.kind().to_string(),
         message: err.to_string(),
+        changes: Vec::new(),
+        headline: None,
+        notes: Vec::new(),
+    }
+}
+
+/// The `ungenerated` problem for a change `since` describes and no
+/// migration records: its message quotes the summary's rendering, then
+/// each note `new` prints after it, one per line, in parentheses; its
+/// headline is the same sentence without them.
+fn ungenerated(since: &str, summary: ChangeSummary, notes: Vec<String>) -> Problem {
+    const FIX: &str = "; run `ferro migrate new <name>` and commit the migration it writes";
+    let said = std::iter::once(&summary.text)
+        .chain(&notes)
+        .filter(|line| !line.is_empty())
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join("\n");
+    Problem {
+        kind: "ungenerated".to_string(),
+        message: format!("{since} and no migration records it ({said}){FIX}"),
+        changes: summary.changes,
+        headline: Some(format!("{since} and no migration records it{FIX}")),
+        notes,
     }
 }
 
@@ -1117,20 +1275,20 @@ pub fn check_migrations(
             let head_snapshot = dir.head().map(|head| &head.snapshot);
             match generate(head_snapshot, target, dialects) {
                 Ok(None) => {}
-                Ok(Some(migration)) => report.problems.push(Problem {
-                    kind: "ungenerated".to_string(),
-                    message: format!(
-                        "{since} and no migration records it ({}); run `ferro migrate new \
-                         <name>` and commit the migration it writes",
-                        migration.summary
-                    ),
-                }),
+                Ok(Some(migration)) => {
+                    report
+                        .problems
+                        .push(ungenerated(&since, migration.summary, migration.notes))
+                }
                 Err(err) => report.problems.push(Problem {
                     kind: "ungenerated".to_string(),
                     message: format!(
                         "{since} and no migration records it, and `ferro migrate new` cannot \
                          generate it: {err}"
                     ),
+                    changes: Vec::new(),
+                    headline: None,
+                    notes: Vec::new(),
                 }),
             }
         }
@@ -1326,7 +1484,14 @@ mod tests {
             Snapshot::store(&target, None).expect("store").as_slice()
         );
         assert_eq!(
-            migration.summary,
+            migration.summary.changes,
+            [
+                change(ChangeVerb::New, ChangeKind::Models, &["Author"]),
+                change(ChangeVerb::New, ChangeKind::EnumTypes, &["status"]),
+            ]
+        );
+        assert_eq!(
+            migration.summary.text,
             "new models: Author; new enum types: status"
         );
         assert!(migration.warnings.is_empty());
@@ -1352,7 +1517,11 @@ mod tests {
         let pg = rendering(&migration, StepDialect::Postgres);
         assert_eq!(pg.up, file(&create_pass(&post(), Dialect::Postgres), ""));
         assert_eq!(pg.down, "DROP TABLE \"post\";\n");
-        assert_eq!(migration.summary, "new models: Post");
+        assert_eq!(
+            migration.summary.changes,
+            [change(ChangeVerb::New, ChangeKind::Models, &["Post"])]
+        );
+        assert_eq!(migration.summary.text, "new models: Post");
     }
 
     #[test]
@@ -1378,7 +1547,15 @@ mod tests {
         down.push("DROP TABLE \"tag\"".to_string());
         assert_eq!(pg.down, file(&down, "-- ferro: data-dependent\n"));
         assert_eq!(
-            migration.summary,
+            migration.summary.changes,
+            [
+                change(ChangeVerb::New, ChangeKind::Models, &["Tag"]),
+                change(ChangeVerb::Dropped, ChangeKind::Models, &["Author", "Post"]),
+                change(ChangeVerb::Dropped, ChangeKind::EnumTypes, &["status"]),
+            ]
+        );
+        assert_eq!(
+            migration.summary.text,
             "new models: Tag; dropped models: Author, Post; dropped enum types: status"
         );
     }
@@ -1418,7 +1595,8 @@ mod tests {
                 .expect("store")
                 .as_slice()
         );
-        assert_eq!(migration.summary, "");
+        assert_eq!(migration.summary.changes, []);
+        assert_eq!(migration.summary.text, "");
         // With a data step too, the SQL step goes right before it.
         let both = GenerateOptions {
             data_step: Some("Author".into()),
@@ -1723,7 +1901,11 @@ mod tests {
         let after = unique_name(&author());
         let migration = edit(vec![author()], vec![after.clone()], &BOTH);
         assert_eq!(step_names(&migration), ["01_uq_author_name"]);
-        assert_eq!(migration.summary, "changed models: Author");
+        assert_eq!(
+            migration.summary.changes,
+            [change(ChangeVerb::Changed, ChangeKind::Models, &["Author"])]
+        );
+        assert_eq!(migration.summary.text, "changed models: Author");
         // Postgres: built concurrently outside a transaction, exact from the
         // top; a duplicate fails it, so it is the data-dependent step.
         let pg = step(&migration, "01_uq_author_name", Dialect::Postgres);
@@ -2580,7 +2762,11 @@ mod tests {
                 guard: false,
             })
         );
-        assert_eq!(migration.summary, "changed models: Author");
+        assert_eq!(
+            migration.summary.changes,
+            [change(ChangeVerb::Changed, ChangeKind::Models, &["Author"])]
+        );
+        assert_eq!(migration.summary.text, "changed models: Author");
     }
 
     fn data_of<'a>(migration: &'a GeneratedMigration, name: &str) -> &'a backfill::DataStep {
@@ -3429,7 +3615,15 @@ mod tests {
         let added = relabelled("status", &["draft", "live", "gone"], &[]);
         let migration = edit(vec![author()], vec![added.clone()], &BOTH);
         assert_eq!(step_names(&migration), ["01_labels"]);
-        assert_eq!(migration.summary, "new enum labels: status.gone");
+        assert_eq!(
+            migration.summary.changes,
+            [change(
+                ChangeVerb::New,
+                ChangeKind::EnumLabels,
+                &["status.gone"]
+            )]
+        );
+        assert_eq!(migration.summary.text, "new enum labels: status.gone");
         let pg = step(&migration, "01_labels", Dialect::Postgres);
         // The pass's statement, through the one renderer (I-1 item 11).
         let up = pass(&ir(vec![author()]), &ir(vec![added]), Dialect::Postgres);
@@ -3517,7 +3711,18 @@ mod tests {
         let after = relabelled("status", &["draft", "open"], &[("open", "live")]);
         let migration = edit(vec![author()], vec![after.clone()], &BOTH);
         assert_eq!(step_names(&migration), ["01_schema"]);
-        assert_eq!(migration.summary, "renamed enum labels: status.live → open");
+        assert_eq!(
+            migration.summary.changes,
+            [change(
+                ChangeVerb::Renamed,
+                ChangeKind::EnumLabels,
+                &["status.live → open"]
+            )]
+        );
+        assert_eq!(
+            migration.summary.text,
+            "renamed enum labels: status.live → open"
+        );
         let pg = step(&migration, "01_schema", Dialect::Postgres);
         assert_eq!(
             pg.up,
@@ -3684,7 +3889,15 @@ mod tests {
         let migration = edit(vec![author()], vec![after], &BOTH);
         assert_eq!(step_names(&migration), ["01_schema"]);
         assert_eq!(
-            migration.summary,
+            migration.summary.changes,
+            [change(
+                ChangeVerb::Renamed,
+                ChangeKind::EnumTypes,
+                &["status → authorstatus"]
+            )]
+        );
+        assert_eq!(
+            migration.summary.text,
             "renamed enum types: status → authorstatus"
         );
         let pg = step(&migration, "01_schema", Dialect::Postgres);
@@ -3754,7 +3967,15 @@ mod tests {
             step_names(&migration),
             ["01_backfill_author", "02_contract"]
         );
-        assert_eq!(migration.summary, "removed enum labels: status.gone");
+        assert_eq!(
+            migration.summary.changes,
+            [change(
+                ChangeVerb::Removed,
+                ChangeKind::EnumLabels,
+                &["status.gone"]
+            )]
+        );
+        assert_eq!(migration.summary.text, "removed enum labels: status.gone");
         let data = data_of(&migration, "01_backfill_author");
         assert_eq!(
             data.columns,
@@ -4383,10 +4604,180 @@ mod tests {
         assert_eq!(report.head, None);
         assert_eq!(report.problems.len(), 1);
         assert_eq!(report.problems[0].kind, "ungenerated");
-        assert!(
-            report.problems[0].message.contains("new models: Author"),
-            "{}",
-            report.problems[0].message
+        assert_eq!(
+            report.problems[0].message,
+            "there is no migration yet and no migration records it (new models: Author; new \
+             enum types: status); run `ferro migrate new <name>` and commit the migration it \
+             writes"
+        );
+        assert_eq!(
+            report.problems[0].changes,
+            [
+                change(ChangeVerb::New, ChangeKind::Models, &["Author"]),
+                change(ChangeVerb::New, ChangeKind::EnumTypes, &["status"]),
+            ]
+        );
+        // The message without the summary it quotes: what a terminal prints
+        // above the summary laid out from `changes`.
+        assert_eq!(
+            report.problems[0].headline.as_deref(),
+            Some(
+                "there is no migration yet and no migration records it; run `ferro migrate \
+                 new <name>` and commit the migration it writes"
+            )
+        );
+        assert_eq!(report.problems[0].notes, Vec::<String>::new());
+    }
+
+    #[test]
+    fn an_ungenerated_headline_is_its_message_without_the_summary_and_notes() {
+        let note = "author: if \"name\" became \"full_name\", declare renamed_from=\"name\"";
+        let problem = ungenerated(
+            "the models changed since 0001_initial",
+            ChangeSummary::new(vec![change(ChangeVerb::New, ChangeKind::Models, &["Team"])]),
+            vec![note.to_string()],
+        );
+        assert_eq!(
+            problem.message,
+            format!(
+                "the models changed since 0001_initial and no migration records it (new \
+                 models: Team\n{note}); run `ferro migrate new <name>` and commit the \
+                 migration it writes"
+            )
+        );
+        assert_eq!(
+            problem.headline.as_deref(),
+            Some(
+                "the models changed since 0001_initial and no migration records it; run \
+                 `ferro migrate new <name>` and commit the migration it writes"
+            )
+        );
+        assert_eq!(problem.notes, [note]);
+        assert_eq!(
+            problem.changes,
+            [change(ChangeVerb::New, ChangeKind::Models, &["Team"])]
+        );
+    }
+
+    #[test]
+    fn a_problem_other_than_ungenerated_carries_no_changes() {
+        let missing =
+            std::env::temp_dir().join(format!("ferro-migrate-check-{}-a-file", std::process::id()));
+        std::fs::write(&missing, "not a directory").expect("write");
+        let report = check_migrations(&missing, &ir(vec![]), &BOTH);
+        std::fs::remove_file(&missing).expect("remove");
+        assert!(!report.problems.is_empty());
+        for problem in &report.problems {
+            assert_ne!(problem.kind, "ungenerated");
+            assert_eq!(problem.changes, []);
+            assert_eq!(problem.headline, None);
+            assert_eq!(problem.notes, Vec::<String>::new());
+        }
+    }
+
+    fn change(verb: ChangeVerb, kind: ChangeKind, names: &[&str]) -> Change {
+        Change {
+            verb,
+            kind,
+            names: names.iter().map(|name| (*name).to_string()).collect(),
+        }
+    }
+
+    #[test]
+    fn the_summary_renders_each_change_in_order_and_nothing_for_none() {
+        assert_eq!(ChangeSummary::render(&[]), "");
+        assert_eq!(
+            ChangeSummary::new(vec![]),
+            ChangeSummary {
+                changes: vec![],
+                text: String::new(),
+            }
+        );
+        let changes = vec![
+            change(ChangeVerb::New, ChangeKind::Models, &["A", "B"]),
+            change(ChangeVerb::Changed, ChangeKind::Models, &["C"]),
+            change(ChangeVerb::Dropped, ChangeKind::EnumTypes, &["kind"]),
+            change(ChangeVerb::Renamed, ChangeKind::EnumLabels, &["s.a → b"]),
+            change(ChangeVerb::Removed, ChangeKind::EnumLabels, &["s.c"]),
+        ];
+        assert_eq!(
+            ChangeSummary::render(&changes),
+            "new models: A, B; changed models: C; dropped enum types: kind; renamed enum \
+             labels: s.a → b; removed enum labels: s.c"
+        );
+    }
+
+    #[test]
+    fn the_summary_serialises_as_its_changes_and_text() {
+        let summary = ChangeSummary::new(vec![change(
+            ChangeVerb::New,
+            ChangeKind::EnumTypes,
+            &["kind"],
+        )]);
+        assert_eq!(
+            serde_json::to_value(&summary).expect("json"),
+            serde_json::json!({
+                "changes": [{"verb": "new", "kind": "enum types", "names": ["kind"]}],
+                "text": "new enum types: kind",
+            })
+        );
+    }
+
+    #[test]
+    fn the_generator_orders_a_changed_dropped_relabelled_summary_and_renders_it() {
+        // `note` gains a column, `tag` is dropped, `status` renames `live` to
+        // `open` and removes `gone`: one entry each, in the generator's order.
+        let note = || model("Note", vec![pk()]);
+        let before = vec![
+            relabelled("status", &["draft", "gone", "live"], &[]),
+            note(),
+            model("Tag", vec![pk()]),
+        ];
+        let mut changed = note();
+        changed.columns.push(optional("body", "string"));
+        let after = vec![
+            relabelled("status", &["draft", "open"], &[("open", "live")]),
+            changed,
+        ];
+        let migration = edit(before, after, &BOTH);
+        assert_eq!(
+            migration.summary.changes,
+            [
+                change(ChangeVerb::Changed, ChangeKind::Models, &["Note"]),
+                change(ChangeVerb::Dropped, ChangeKind::Models, &["Tag"]),
+                change(
+                    ChangeVerb::Renamed,
+                    ChangeKind::EnumLabels,
+                    &["status.live → open"]
+                ),
+                change(
+                    ChangeVerb::Removed,
+                    ChangeKind::EnumLabels,
+                    &["status.gone"]
+                ),
+            ]
+        );
+        assert_eq!(
+            migration.summary.text,
+            "changed models: Note; dropped models: Tag; renamed enum labels: \
+             status.live → open; removed enum labels: status.gone"
+        );
+    }
+
+    #[test]
+    fn a_rename_hint_is_a_note_beside_the_summary_never_in_it() {
+        let mut after = author();
+        let name = after
+            .columns
+            .iter_mut()
+            .find(|column| column.name == "name")
+            .expect("name");
+        name.name = "full_name".into();
+        let migration = edit(vec![author()], vec![after], &BOTH);
+        assert_eq!(migration.summary.text, "changed models: Author");
+        assert_eq!(
+            migration.notes,
+            ["author: if \"name\" became \"full_name\", declare renamed_from=\"name\""]
         );
     }
 }

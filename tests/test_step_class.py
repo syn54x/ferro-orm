@@ -261,7 +261,7 @@ def test_a_minor_0_database_reads_as_contract_and_the_next_up_classifies_it(
     # A reader treats a missing class as contract and writes nothing.
     assert run("migrate", "status", "--steps", "--url", db.url) == 0
     out = capsys.readouterr().out
-    steps = [line for line in out.splitlines() if line.startswith("  ")]
+    steps = [line for line in out.splitlines() if line.startswith("      ")]
     assert len(steps) == 3 and all(line.endswith("  contract") for line in steps), out
     assert require_applied(db) is None
     assert (
@@ -275,7 +275,8 @@ def test_a_minor_0_database_reads_as_contract_and_the_next_up_classifies_it(
     assert db.rows("SELECT format, minor FROM _ferro_migrations_format") == [(1, 1)]
     assert classes(db) == [(1, 1, "expand"), (2, 1, "expand"), (2, 2, "expand")]
     assert run("migrate", "status", "--steps", "--url", db.url) == 0
-    assert "contract" not in capsys.readouterr().out
+    # The database line names the SQLite file, after this test.
+    assert "contract" not in capsys.readouterr().out.split("\n", 1)[1]
 
     # A second run finds nothing to classify.
     assert up(db).applied == []
@@ -327,7 +328,7 @@ def test_a_record_written_with_0_22_columns_is_contract_until_the_next_up(
 
     assert run("migrate", "status", "--steps", "--url", db.url) == 0
     out = capsys.readouterr().out
-    shown = [line.split() for line in out.splitlines() if line.startswith("  ")]
+    shown = [line.split() for line in out.splitlines() if line.startswith("      ")]
     assert shown[1] == [f"01_schema.up.{db.backend}.sql", "applied", "contract"], out
     assert require_applied(db) is None
     assert classes(db)[1] == (2, 1, None), "readers never write"

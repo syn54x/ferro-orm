@@ -699,6 +699,44 @@ fn parse_step_file_name(file_name: &str) -> Option<StepFileName> {
     })
 }
 
+/// Which way a step file runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StepDirection {
+    /// `.up.` (and every data step: its `down()` lives in the same file).
+    Up,
+    /// `.down.`
+    Down,
+}
+
+/// What a step file's name says it is: `01_expand.down.postgres.sql` is a
+/// `ddl` step's `down` file for `postgres`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct StepFileRole {
+    /// The step's kind.
+    pub kind: StepKind,
+    /// Which way the file runs.
+    pub direction: StepDirection,
+    /// The dialect the file serves.
+    pub dialect: StepDialect,
+}
+
+/// The kind, direction and dialect a step file's name says, or `None` for a
+/// name that is not a step file's (`ir.json` included): the one reading of a
+/// step file's name, shared by the directory reader and `ferro migrate`'s
+/// output.
+pub fn step_file_role(file_name: &str) -> Option<StepFileRole> {
+    parse_step_file_name(file_name).map(|parsed| StepFileRole {
+        kind: parsed.kind,
+        direction: if parsed.down {
+            StepDirection::Down
+        } else {
+            StepDirection::Up
+        },
+        dialect: parsed.dialect,
+    })
+}
+
 fn ignored(name: &str) -> bool {
     name.starts_with('.') || name.starts_with('_')
 }
@@ -1180,6 +1218,60 @@ mod tests {
         dir
     }
 
+    #[test]
+    fn a_step_files_name_says_its_kind_direction_and_dialect() {
+        let role = |kind, direction, dialect| StepFileRole {
+            kind,
+            direction,
+            dialect,
+        };
+        for (name, expected) in [
+            (
+                "01_expand.up.postgres.sql",
+                role(StepKind::Ddl, StepDirection::Up, StepDialect::Postgres),
+            ),
+            (
+                "01_expand.down.sqlite.sql",
+                role(StepKind::Ddl, StepDirection::Down, StepDialect::Sqlite),
+            ),
+            (
+                "02_fix.up.sql",
+                role(
+                    StepKind::PortableSql,
+                    StepDirection::Up,
+                    StepDialect::Portable,
+                ),
+            ),
+            (
+                "02_fix.down.sql",
+                role(
+                    StepKind::PortableSql,
+                    StepDirection::Down,
+                    StepDialect::Portable,
+                ),
+            ),
+            (
+                "03_backfill_author.py",
+                role(StepKind::Data, StepDirection::Up, StepDialect::Portable),
+            ),
+        ] {
+            assert_eq!(step_file_role(name), Some(expected), "{name}");
+        }
+        for name in [
+            SNAPSHOT_FILE,
+            "01_expand.sideways.sql",
+            "01_expand.up.mysql.sql",
+            "expand.up.sql",
+            "01_expand.up.postgres.sql.bak",
+        ] {
+            assert_eq!(step_file_role(name), None, "{name}");
+        }
+        assert_eq!(
+            serde_json::to_value(step_file_role("01_e.down.postgres.sql")).expect("serialises"),
+            serde_json::json!({"kind": "ddl", "direction": "down", "dialect": "postgres"})
+        );
+    }
+
     fn empty_ir() -> IrEnvelope<SchemaIrPayload> {
         IrEnvelope {
             ir_kind: "schema".into(),
@@ -1393,8 +1485,11 @@ CREATE INDEX i ON t (c);
             );
         }
         // Renumbered and complete: the aside names its replacement.
-        std::fs::rename(root.join(".0002_b.replaced"), root.join(".0002_b.0002_c.replaced"))
-            .expect("rename");
+        std::fs::rename(
+            root.join(".0002_b.replaced"),
+            root.join(".0002_b.0002_c.replaced"),
+        )
+        .expect("rename");
         migration(&root, "0002_c", Some(&first));
         let err = MigrationsDir::read(&root).expect_err("aside");
         assert_eq!(
@@ -1405,7 +1500,10 @@ CREATE INDEX i ON t (c);
         );
         // The aside comes first; the partial once it is gone.
         migration(&root, ".0003_d.partial", None);
-        assert_eq!(MigrationsDir::read(&root).expect_err("aside").kind(), "interrupted_replace");
+        assert_eq!(
+            MigrationsDir::read(&root).expect_err("aside").kind(),
+            "interrupted_replace"
+        );
         std::fs::remove_dir_all(root.join(".0002_b.0002_c.replaced")).expect("rm");
         let err = MigrationsDir::read(&root).expect_err("partial");
         assert_eq!(err.kind(), "interrupted_write");
@@ -1416,7 +1514,10 @@ CREATE INDEX i ON t (c);
              migrate new` again"
         );
         std::fs::remove_dir_all(root.join(".0003_d.partial")).expect("rm");
-        assert_eq!(MigrationsDir::read(&root).expect("clean").migrations.len(), 2);
+        assert_eq!(
+            MigrationsDir::read(&root).expect("clean").migrations.len(),
+            2
+        );
     }
 
     #[test]

@@ -24,9 +24,11 @@ import pytest
 
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     AUTHOR,
+    DIRECTORY_LINE,
     pkg,
     project,
     run,
+    words,
     write_config,
     write_models,
 )
@@ -132,13 +134,16 @@ def test_same_parent_regenerates_on_the_other_branch_and_takes_the_next_number(
     )
     up = (migrations(project) / "0003_add_x/01_schema.up.postgres.sql").read_text()
     assert '"bio"' in up and '"nick"' not in up, up
-    out = capsys.readouterr().out.splitlines()
-    assert out[0] == "migrations/0003_add_x/  (replaces 0002_add_x, now deleted)"
+    out = capsys.readouterr().out
+    assert out.splitlines()[:2] == [
+        DIRECTORY_LINE,
+        "ok Wrote migrations/0003_add_x/  (replaces 0002_add_x, now deleted)",
+    ]
     assert (
-        "  01_schema.up.postgres.sql  moved (was 0002_add_x/01_schema.up.postgres.sql)"
-        in out
-    )
-    assert "  ir.json  new snapshot, chained from 0002_add_y" in out
+        "01_schema.up.postgres.sql schema step, up (postgres) moved (was "
+        "0002_add_x/01_schema.up.postgres.sql)"
+    ) in words(out), out
+    assert "ir.json snapshot new snapshot, chained from 0002_add_y" in words(out)
 
     assert run("migrate", "check") == 0
 
@@ -195,12 +200,15 @@ def test_a_free_number_is_regenerated_in_place_carrying_a_filled_in_backfill(
     [carried] = (migrations(project) / "0003_add_x").glob("*_backfill_author.py")
     assert carried.read_bytes() == FILLED.encode()
     out = capsys.readouterr().out
-    assert out.splitlines()[0] == "migrations/0003_add_x/  (regenerated in place)"
+    assert out.splitlines()[:2] == [
+        DIRECTORY_LINE,
+        "ok Wrote migrations/0003_add_x/  (regenerated in place)",
+    ]
     assert (
-        f"  {carried.name}  carried, review it (was 0003_add_x/{backfill.name}; it "
-        "wins over the regenerated step of the same name)"
-    ) in out.splitlines(), out
-    assert "  01_expand.up.postgres.sql  kept" in out.splitlines(), out
+        f"{carried.name} data step carried, review it (was 0003_add_x/"
+        f"{backfill.name}; it wins over the regenerated step of the same name)"
+    ) in words(out), out
+    assert "01_expand.up.postgres.sql schema step, up (postgres) kept" in words(out)
     assert run("migrate", "check") == 0
 
 
@@ -229,8 +237,10 @@ def test_a_carried_sql_step_keeps_its_body_and_moves_to_its_new_place(
     assert int(up.name[:2]) > 2, sorted(p.name for p in new_dir.iterdir())
     [extra] = new_dir.glob("*_extra.up.sql")
     assert int(extra.name[:2]) == int(up.name[:2]) + 1  # beside the carried one
-    out = capsys.readouterr().out.splitlines()
-    assert f"  {up.name}  carried, review it (was 0002_add_x/02_fix_rows.up.sql)" in out
+    out = words(capsys.readouterr().out)
+    assert (
+        f"{up.name} SQL step, up carried, review it (was 0002_add_x/02_fix_rows.up.sql)"
+    ) in out
 
 
 # -- the target and the refusals ---------------------------------------------------
@@ -535,48 +545,3 @@ def test_a_migration_replaced_in_place_meets_the_snapshot_mismatch_naming_it(
         "applied (check out the commit that applied it, `ferro migrate down --to "
         "0001`), then `up`. Nothing was applied."
     ) in err, err
-
-
-# -- the guide ----------------------------------------------------------------------
-
-GUIDE = Path(__file__).resolve().parents[1] / "docs/pages/guide/schema/migrations.md"
-
-
-def _guide_blocks(command: str) -> list[str]:
-    """The lines of the guide's "Two branches, one number" text block that
-    ``$ <command>`` opens, without the prompt."""
-    text = GUIDE.read_text()
-    section = text.split("## Two branches, one number\n", 1)[1].split("\n## ", 1)[0]
-    block = section.split(f"$ {command}\n", 1)[1].split("```", 1)[0]
-    return block.splitlines()
-
-
-def test_the_guide_quotes_what_check_and_replace_print(project, pkg, capsys):
-    # The guide's 0006 / 0007 / 0008 are this project's 0001 / 0002 / 0003.
-    def shifted(lines: list[str]) -> list[str]:
-        return [
-            line.replace("0008", "0003").replace("0007", "0002").replace("0006", "0001")
-            for line in lines
-        ]
-
-    write_config(project, pkg, '["postgres"]')
-    write_models(project, pkg, AUTHOR)
-    new("create_author")
-    write_models(project, pkg, X)
-    new("add_x", "--sql-step", "fix_rows")
-    hidden = aside(project, "0002_add_x")
-    write_models(project, pkg, Y)
-    new("add_y")
-    back(project, hidden, "0002_add_x")
-    write_models(project, pkg, XY)
-    capsys.readouterr()
-
-    assert run("migrate", "check") == 3
-    assert capsys.readouterr().err.splitlines() == shifted(
-        _guide_blocks("ferro migrate check")
-    )
-
-    assert run("migrate", "new", "add_x", "--replace", "0002_add_x") == 0
-    assert capsys.readouterr().out.splitlines() == shifted(
-        _guide_blocks("ferro migrate new add_x --replace 0007_add_x")
-    )

@@ -202,6 +202,12 @@ def _plan_from_ir(
     """
     ...
 
+def _redact_url(url: str) -> str:
+    """``url`` with its secrets masked by ``***`` (the userinfo password and
+    every secret query value); raises ``InterfaceError``, as ``connect(url)``
+    does, when its scheme is not one Ferro connects to."""
+    ...
+
 def _generate_migration(
     parent_ir_json: str | None,
     target_ir_json: str,
@@ -216,7 +222,8 @@ def _generate_migration(
     envelope; ``dialects`` are the target dialects. Returns the JSON of the
     generated migration — ``{"steps": [{"ordinal", "name", "kind",
     "renderings": {<dialect>: {"up", "down", "headers", "down_headers"}}}],
-    "snapshot": {...}, "snapshot_json", "summary", "warnings"}`` — or ``None``
+    "snapshot": {...}, "snapshot_json", "summary": {"changes": [{"verb",
+    "kind", "names"}], "text"}, "notes", "warnings"}`` — or ``None``
     when nothing renders DDL (no schema change) and no hand step is asked
     for. ``options_json`` is ``{"no_backfill": [...], "data_step": str | None,
     "sql_step": str | None, "data_only": bool}``: the generator lays out the
@@ -230,8 +237,20 @@ def _check_migrations(directory: str, target_ir_json: str, dialects: list[str]) 
     """Check a migrations directory against the declared modelset, reading files only.
 
     Returns JSON ``{"ok": bool, "head": str | None, "problems": [{"kind",
-    "message"}]}``: a malformed directory or broken snapshot chain, a DDL step
-    missing a target dialect's rendering, a model change no migration records.
+    "message", "changes", "headline", "notes"}]}``: a malformed directory or
+    broken snapshot chain, a DDL step missing a target dialect's rendering, a
+    model change no migration records (whose ``changes`` are the change
+    summary's entries, ``headline`` its message without the summary and notes
+    it quotes, and ``notes`` those notes; ``None`` and empty otherwise).
+    """
+    ...
+
+def _step_file_role(name: str) -> str:
+    """What a step file's name says it is, by the directory reader's own parse.
+
+    Returns JSON ``{"kind": "ddl" | "data" | "portable_sql", "direction":
+    "up" | "down", "dialect": "postgres" | "sqlite" | "portable"}``; raises
+    ``ValueError`` for a name that is not a step file's (``ir.json`` included).
     """
     ...
 
@@ -383,6 +402,10 @@ class TrackedDatabase:
     @property
     def dialect(self) -> str: ...
     @property
+    def url(self) -> str:
+        """The URL the connection was opened with, its secrets masked by ``***``."""
+        ...
+    @property
     def tracking_table(self) -> str: ...
     @property
     def records(self) -> list[dict[str, Any]]: ...
@@ -429,6 +452,10 @@ class LockedDatabase:
     @property
     def dialect(self) -> str: ...
     @property
+    def url(self) -> str:
+        """The URL the connection was opened with, its secrets masked by ``***``."""
+        ...
+    @property
     def tracking_table(self) -> str: ...
     @property
     def records(self) -> list[dict[str, Any]]: ...
@@ -452,7 +479,7 @@ class LockedDatabase:
     async def execute(
         self, step: StepHandle, on_attempt: Callable[[str], object] | None = None
     ) -> dict[str, Any]:
-        """Run a SQL step from the held bytes; ``{"ok", "ms", "error",
+        """Run a SQL step from the held bytes; ``{"ok", "ms", "error", "hint",
         "message"}``."""
         ...
     async def start(self, step: StepHandle, kind: str) -> None: ...

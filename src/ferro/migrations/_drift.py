@@ -390,6 +390,7 @@ async def _audit(name: str, database: DatabaseSettings) -> DriftReport:
     status = StatusReport.from_core(
         tracked.status(lock_held=held),
         database=database.name,
+        url=tracked.url,
         dialect=tracked.dialect,
         table=tracked.tracking_table,
     )

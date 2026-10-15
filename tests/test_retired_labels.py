@@ -27,6 +27,7 @@ from tests.test_generate_enum_removal import (
     text,
     write_value,
 )
+from tests.test_migrate_new import DIRECTORY_LINE
 from tests.test_generate_enum_removal import (  # noqa: F401 - fixtures
     keys,
     listing,
@@ -256,7 +257,9 @@ def test_retiring_a_label_is_no_schema_change_and_the_type_keeps_it(
 
     assert run("migrate", "new", "retire_canceled") == 0
 
-    assert capsys.readouterr().out == "no schema change: nothing written\n"
+    assert capsys.readouterr().out == (
+        f"{DIRECTORY_LINE}\nno schema change: nothing written\n"
+    )
     assert listing(project / "migrations") == before
     assert run("migrate", "check") == 0
     if db.backend == "postgres":
@@ -272,7 +275,9 @@ def test_retiring_a_label_leaves_the_db_check_listing_it(project, pkg, db, capsy
 
     assert run("migrate", "new", "retire_canceled") == 0
 
-    assert capsys.readouterr().out == "no schema change: nothing written\n"
+    assert capsys.readouterr().out == (
+        f"{DIRECTORY_LINE}\nno schema change: nothing written\n"
+    )
     assert listing(project / "migrations") == before
     assert run("migrate", "check") == 0
     if db.backend == "postgres":
@@ -295,7 +300,7 @@ def test_deleting_the_member_and_the_declaration_is_the_existing_removal(
 
     new("drop_canceled")
 
-    assert "removed enum labels: rmlorderstatus.canceled" in capsys.readouterr().out
+    assert "\n  1 removed enum label\n    rmlorderstatus.canceled\n" in capsys.readouterr().out
     migration = migration_dir(project, 2)
     write_value(migration, "01_backfill_rmlorder.py", '"refunded"')
     assert run("migrate", "up", "--url", db.url) == 0
