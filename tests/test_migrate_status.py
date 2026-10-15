@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -323,9 +324,15 @@ def test_every_core_step_state_is_read_into_where_the_database_stands():
 
 
 def stored_finished(db) -> dict[tuple[int, int], str | None]:
-    """The tracking table's ``finished_at`` per ``(migration, step)``, as text."""
+    """The tracking table's ``finished_at`` per ``(migration, step)`` in the
+    form the runner writes it (SQLite keeps that text; psycopg hands Postgres's
+    ``timestamptz`` back as a ``datetime`` of the same instant)."""
     return {
-        (migration, step): None if finished is None else str(finished)
+        (migration, step): (
+            finished.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+            if isinstance(finished, datetime)
+            else finished
+        )
         for migration, step, finished in db.rows(
             "SELECT migration, step, finished_at FROM _ferro_migrations"
         )
