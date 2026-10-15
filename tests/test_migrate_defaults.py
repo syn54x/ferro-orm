@@ -179,7 +179,9 @@ def test_a_hand_set_default_is_drift_with_its_own_line_and_exit_4(
     code, out, _ = cli(capsys, "drift", "--url", db.url)
 
     assert code == 4
-    assert out == f"{db.line}\ndrift against 0001_create_author:\n  {SLUG_LINE}\n"
+    assert out == (
+        f"{db.line}\nxx 1 difference against 0001_create_author\n  - {SLUG_LINE}\n"
+    )
     report = asyncio.run(ferro.migrations.drift(url=db.url))
     assert report.lines == [SLUG_LINE]
     assert report.operations[0]["kind"] == "DropDefault"

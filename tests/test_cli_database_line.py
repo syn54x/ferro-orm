@@ -46,9 +46,9 @@ pytestmark = pytest.mark.usefixtures("isolated_imports", "clean_registry")
 SECRET = "hunter2-secret"
 
 
-def header(db) -> str:
+def table(db) -> str:
     schema = "main" if db.backend == "sqlite" else db.schema
-    return f"default ({db.backend}) · {schema}._ferro_migrations"
+    return f"{schema}._ferro_migrations"
 
 
 def cli(capsys, *argv: str) -> tuple[int, str, str]:
@@ -78,7 +78,9 @@ def test_status_opens_with_the_database_line(project, pkg, db, capsys):
     code, out, _ = cli(capsys, "status", "--url", db.url)
 
     assert code == 3
-    assert out == (f"{db.line}\n{header(db)}\n\n0001_create_author  pending\n")
+    assert out == (
+        f"{db.line}\n-- 1 pending  {table(db)}\n  -- 0001_create_author  pending\n"
+    )
 
 
 @pytest.mark.backend_matrix

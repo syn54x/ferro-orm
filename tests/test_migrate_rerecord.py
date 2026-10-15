@@ -544,7 +544,8 @@ def test_status_shows_the_edited_chunked_refusal_with_its_doors(
     code, out, _ = cli("status", "--url", db.url, capsys=capsys)
 
     assert code == 4
-    assert doors().rstrip("\n") in out
+    # The refusal sits under status's needs attention heading, indented.
+    assert "".join(f"  {line}\n" for line in doors().splitlines()) in out
 
 
 def test_the_cursor_names_its_order_keys():
