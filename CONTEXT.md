@@ -428,5 +428,5 @@ The first line every `ferro migrate` verb prints, naming what it touches: the co
 _Avoid_: Banner, header line, connection line
 
 **Change summary**:
-What `new` and `check` say a *migration* adds, changes, drops or renames, as counted lists of names by kind (models, enum types, and so on). It is data first and prose second: one plain rendering serves `new`, `check` and the library's error text, and the terminal layout is built from the data.
+What `new` and `check` say a *migration* adds, changes, drops or renames, as counted lists of names by kind (models, enum types, and so on). It is data first and prose second: one plain rendering serves `check`'s `ungenerated` message and the library's error text, and `new` (in both forms) and `check` on a terminal lay their output out from the data.
 _Avoid_: Diff, summary string, change list
