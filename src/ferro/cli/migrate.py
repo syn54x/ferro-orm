@@ -238,7 +238,9 @@ def new(
     else:
         _print_replacement(shown, migration)
     if migration.summary:
-        print(migration.summary)
+        print(migration.summary.text)
+    for note in migration.notes:
+        print(note)
     for warning in migration.warnings:
         print(f"warning: {warning}", file=sys.stderr)
     return exit_codes.OK

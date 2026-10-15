@@ -41,6 +41,7 @@ from .steps import StepRefused, scan_todos, unwritten
 from .target import Target
 from .layout import (
     SNAPSHOT_FILE,
+    Change,
     GeneratedMigration,
     GeneratedStep,
     MigrationsDirectoryError,
@@ -86,6 +87,10 @@ class Problem:
     ``duplicate_number``, ``missing_number``, ``missing_rendering``, ..."""
     message: str
     """What is wrong and how to fix it."""
+    changes: tuple[Change, ...] = ()
+    """An ``ungenerated`` problem's change summary, as data: what the
+    migration ``ferro migrate new`` would write changes. Empty for every
+    other kind."""
 
 
 @dataclass(frozen=True)
@@ -444,8 +449,8 @@ def _with_data_steps(
 ) -> GeneratedMigration:
     """``migration`` with each data step's file written from the step record
     the generator produced (:func:`scaffold.render`), and each backfill that
-    still needs writing named in the summary. The step's name and place are
-    the generator's."""
+    still needs writing named in a note after the generator's. The step's
+    name and place are the generator's."""
     by_ordinal = {step["ordinal"]: step for step in generated["steps"]}
     steps: list[GeneratedStep] = []
     notes: list[str] = []
@@ -475,8 +480,9 @@ def _with_data_steps(
         )
         if note is not None:
             notes.append(note)
-    summary = "\n".join(line for line in (migration.summary, *notes) if line)
-    return dataclass_replace(migration, steps=tuple(steps), summary=summary)
+    return dataclass_replace(
+        migration, steps=tuple(steps), notes=(*migration.notes, *notes)
+    )
 
 
 async def check(
@@ -502,7 +508,12 @@ async def check(
             str(chosen.directory), json.dumps(declared), list(chosen.dialects)
         )
     )
-    problems = [Problem(p["kind"], p["message"]) for p in raw["problems"]]
+    problems = [
+        Problem(
+            p["kind"], p["message"], tuple(Change.from_json(c) for c in p["changes"])
+        )
+        for p in raw["problems"]
+    ]
     problems += _unwritten_steps(chosen.directory)
     return CheckReport(ok=not problems, head=raw["head"], problems=problems)
 

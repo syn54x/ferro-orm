@@ -242,6 +242,65 @@ def test_an_unwritten_data_step_exits_3_naming_each_todo(project, pkg, capsys):
     )
 
 
+def test_an_unwritten_step_problem_carries_no_changes(project, pkg):
+    from ferro.migrations.generate import check
+
+    _generated(project, pkg)
+    assert run("migrate", "new", "backfill", "--data-step", "Author") == 0
+
+    report = asyncio.run(check(FerroSettings()))
+
+    assert [p.kind for p in report.problems] == ["unwritten_step"] * 2
+    assert [p.changes for p in report.problems] == [(), ()]
+
+
+def test_an_ungenerated_problem_keeps_its_line_and_carries_the_changes(
+    project, pkg, capsys
+):
+    from ferro.migrations.generate import check
+    from ferro.migrations.layout import Change
+
+    _generated(project, pkg)
+    write_models(project, pkg, LIBRARY)
+    capsys.readouterr()
+
+    assert run("migrate", "check") == 3
+
+    assert capsys.readouterr().err == (
+        "ungenerated: the models changed since 0001_create_author and no migration "
+        "records it (new models: Post; new enum types: kind); run `ferro migrate "
+        "new <name>` and commit the migration it writes\n"
+    )
+    report = asyncio.run(check(FerroSettings()))
+    (problem,) = report.problems
+    assert problem.changes == (
+        Change("new", "models", ("Post",)),
+        Change("new", "enum types", ("kind",)),
+    )
+
+
+def test_an_ungenerated_problem_says_the_rename_hint_as_before(project, pkg, capsys):
+    _generated(project, pkg)
+    write_models(
+        project,
+        pkg,
+        AUTHOR.replace(
+            "    name: Annotated[str, FerroField(unique=True)]\n",
+            "    full_name: str\n",
+        ),
+    )
+    capsys.readouterr()
+
+    assert run("migrate", "check") == 3
+
+    assert capsys.readouterr().err == (
+        "ungenerated: the models changed since 0001_create_author and no migration "
+        "records it (changed models: Author\n"
+        'author: if "name" became "full_name", declare renamed_from="name"); run '
+        "`ferro migrate new <name>` and commit the migration it writes\n"
+    )
+
+
 def test_a_config_without_dialects_is_refused_with_the_line_to_add(
     project, pkg, capsys
 ):

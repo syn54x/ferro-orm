@@ -19,7 +19,7 @@
 //! side of them: the two refusals as a [`GenerateError`], which renames run
 //! natively before everything else in their step (a table's and a column's —
 //! the rest of the step, a SQLite rebuild included, reads the table under its
-//! new names), and the summary line a hintless drop and add earns.
+//! new names), and the note a hintless drop and add earns.
 
 use super::GenerateError;
 use crate::MigrationOp;

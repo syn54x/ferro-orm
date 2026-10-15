@@ -78,6 +78,9 @@ fn snapshot_json(snapshot: &Snapshot) -> serde_json::Value {
 /// (its checksum is the new snapshot's parent link), or `None` before the
 /// first migration. Returns the JSON of the `GeneratedMigration`, or `None`
 /// when nothing renders DDL (no schema change) and no hand step is asked for.
+/// Its `summary` is the change summary as data beside its one rendering,
+/// `{"changes": [{"verb", "kind", "names"}], "text"}` (ADR-0055), and its
+/// `notes` the lines `new` prints after it.
 /// `options_json` carries `ferro migrate new`'s options:
 /// `{"no_backfill": ["<table>.<column>", ...], "data_step": "Author" | null,
 /// "sql_step": "audit" | null, "data_only": bool}`; the generator lays out
@@ -115,7 +118,8 @@ pub fn _generate_migration(
 
 /// Check a migrations directory against the declared modelset, reading files
 /// only. Returns JSON `{"ok": bool, "head": str | null, "problems":
-/// [{"kind": str, "message": str}]}`.
+/// [{"kind": str, "message": str, "changes": [{"verb", "kind", "names"}]}]}`;
+/// `changes` is empty for every problem but `ungenerated`.
 ///
 /// # Errors
 /// `ValueError` when the target IR or a dialect is malformed.
