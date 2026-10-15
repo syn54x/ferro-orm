@@ -222,7 +222,8 @@ def _generate_migration(
     envelope; ``dialects`` are the target dialects. Returns the JSON of the
     generated migration — ``{"steps": [{"ordinal", "name", "kind",
     "renderings": {<dialect>: {"up", "down", "headers", "down_headers"}}}],
-    "snapshot": {...}, "snapshot_json", "summary", "warnings"}`` — or ``None``
+    "snapshot": {...}, "snapshot_json", "summary": {"changes": [{"verb",
+    "kind", "names"}], "text"}, "notes", "warnings"}`` — or ``None``
     when nothing renders DDL (no schema change) and no hand step is asked
     for. ``options_json`` is ``{"no_backfill": [...], "data_step": str | None,
     "sql_step": str | None, "data_only": bool}``: the generator lays out the
@@ -236,8 +237,9 @@ def _check_migrations(directory: str, target_ir_json: str, dialects: list[str]) 
     """Check a migrations directory against the declared modelset, reading files only.
 
     Returns JSON ``{"ok": bool, "head": str | None, "problems": [{"kind",
-    "message"}]}``: a malformed directory or broken snapshot chain, a DDL step
-    missing a target dialect's rendering, a model change no migration records.
+    "message", "changes"}]}``: a malformed directory or broken snapshot chain, a
+    DDL step missing a target dialect's rendering, a model change no migration
+    records (whose ``changes`` are the change summary's entries).
     """
     ...
 
