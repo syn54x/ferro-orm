@@ -8,20 +8,21 @@ A migration is a numbered directory of steps that changes a database from one ve
 pip install "ferro-orm[cli]"
 ```
 
-`ferro migrate init` writes the [project configuration](../../reference/configuration.md) and creates the migrations directory. It asks for what its flags do not answer:
+`ferro migrate init` writes the [project configuration](../../reference/configuration.md) and creates the migrations directory. On a terminal it asks for what its flags do not answer (the config file, the models module, the target dialects, whether there is another database); with every answer given as a flag it asks nothing and prints what it wrote:
 
+`ferro migrate init --models blog.models --dialects postgres,sqlite --config-file pyproject.toml`
+
+<!-- output: init-pyproject -->
 ```text
-$ ferro migrate init
-Config file [pyproject.toml]:
-Models module (dotted) [blog.models]:
-Target dialects [postgres]: postgres,sqlite
-Another database (separate tables, own migration history)? [y/N]:
 [tool.ferro]
 models = ["blog.models"]
 dialects = ["postgres", "sqlite"]
 Wrote [tool.ferro] to pyproject.toml and created migrations/
 ```
 
+The questions, and what each answer means:
+
+- **Config file**: `pyproject.toml` (a `[tool.ferro]` table, the default when the project has one) or `ferro.toml`.
 - **Models module**: the dotted module(s) defining your models. Ferro imports them to read the models; a model belongs to a database by the module that defines it.
 - **Target dialects**: every dialect this project's databases run on. Each generated step gets one rendering per dialect, so a project that uses SQLite locally and Postgres in production lists both.
 - **Another database**: answer `y` only for a second set of tables with its own migration history (a separate service's database, say). Several servers running the same schema, such as SQLite locally and Postgres in production, are still one database.
@@ -45,25 +46,40 @@ Edit a model, generate, read, apply, commit. Starting from an `Author` with `id`
     --8<-- "docs/examples/migrations_quickstart_annotated.py:models"
     ```
 
+`check` notices the edit, offline, and says what to run:
+
+<!-- output: loop-check -->
 ```text
-$ ferro migrate check
+default · migrations
 ungenerated: the models changed since 0001_create_author and no migration records it (changed models: Author); run `ferro migrate new <name>` and commit the migration it writes
+```
 
-$ ferro migrate new author_nickname
-migrations/0002_author_nickname/
-  01_schema.up.postgres.sql
-  01_schema.down.postgres.sql
-  01_schema.up.sqlite.sql
-  01_schema.down.sqlite.sql
-  02_idx_author_nickname.up.postgres.sql
-  02_idx_author_nickname.down.postgres.sql
-  02_idx_author_nickname.up.sqlite.sql
-  02_idx_author_nickname.down.sqlite.sql
-  ir.json
-changed models: Author
+`ferro migrate new author_nickname` writes the migration, one file per step and dialect, and lists what changed:
 
-$ ferro migrate up
-0002_author_nickname  01_schema               applied (1 ms)
+<!-- output: loop-new -->
+```text
+default · migrations
+ok Wrote migrations/0002_author_nickname/
+  01_schema.up.postgres.sql                 schema step, up (postgres)
+  01_schema.down.postgres.sql               schema step, down (postgres)
+  01_schema.up.sqlite.sql                   schema step, up (sqlite)
+  01_schema.down.sqlite.sql                 schema step, down (sqlite)
+  02_idx_author_nickname.up.postgres.sql    schema step, up (postgres)
+  02_idx_author_nickname.down.postgres.sql  schema step, down (postgres)
+  02_idx_author_nickname.up.sqlite.sql      schema step, up (sqlite)
+  02_idx_author_nickname.down.sqlite.sql    schema step, down (sqlite)
+  ir.json                                   snapshot
+
+  1 changed model
+    Author
+```
+
+`ferro migrate up` applies it, one line per step:
+
+<!-- output: loop-up -->
+```text
+default · sqlite:///./app.db
+0002_author_nickname  01_schema               applied (0 ms)
 0002_author_nickname  02_idx_author_nickname  applied (0 ms)
 ```
 
@@ -142,12 +158,25 @@ On a Postgres table that already exists, a generated migration never scans the t
 
 ## Renames
 
-Without a hint, a renamed column is a dropped column and an added one, and `new` writes exactly that, marked destructive, and says what it saw:
+Without a hint, a renamed column is a dropped column and an added one, and `new` writes exactly that, marked destructive, and says what it saw. With `nickname` renamed to `handle` and no hint, `ferro migrate new rename_writer` ends with the line that names the fix:
 
+<!-- output: rename-hint -->
 ```text
-$ ferro migrate new rename_writer
-...
-author: if "nickname" became "handle", declare renamed_from="nickname"
+default · migrations
+ok Wrote migrations/0002_rename_writer/
+  01_schema.up.postgres.sql               schema step, up (postgres)
+  01_schema.down.postgres.sql             schema step, down (postgres)
+  01_schema.up.sqlite.sql                 schema step, up (sqlite)
+  01_schema.down.sqlite.sql               schema step, down (sqlite)
+  02_idx_author_handle.up.postgres.sql    schema step, up (postgres)
+  02_idx_author_handle.down.postgres.sql  schema step, down (postgres)
+  02_idx_author_handle.up.sqlite.sql      schema step, up (sqlite)
+  02_idx_author_handle.down.sqlite.sql    schema step, down (sqlite)
+  ir.json                                 snapshot
+
+  1 changed model
+    Author
+  - author: if "nickname" became "handle", declare renamed_from="nickname"
 ```
 
 With a hint, it writes a rename and every row keeps its value. A hint says what a column, a table or an enum label was called before:
@@ -264,17 +293,25 @@ Adding a required column to a table with rows, making a column required, or remo
 
 `new` can add a step for what the generator does not write:
 
-```text
-$ ferro migrate new seed --sql-step seed_admins
-migrations/0004_seed/
-  01_seed_admins.up.sql
-  01_seed_admins.down.sql
-  ir.json
+`ferro migrate new seed --sql-step seed_admins` writes a SQL step beside the snapshot:
 
-$ ferro migrate new fix_slugs --data-only --data-step Author
-migrations/0003_fix_slugs/
-  01_backfill_author.py
-  ir.json
+<!-- output: sql-step -->
+```text
+default · migrations
+ok Wrote migrations/0002_seed/
+  01_seed_admins.up.sql    SQL step, up
+  01_seed_admins.down.sql  SQL step, down
+  ir.json                  snapshot
+```
+
+`ferro migrate new fix_slugs --data-only --data-step Author` writes a data step and nothing else:
+
+<!-- output: data-step -->
+```text
+default · migrations
+ok Wrote migrations/0003_fix_slugs/
+  01_backfill_author.py  data step
+  ir.json                snapshot
 ```
 
 - `--sql-step <name>` adds `NN_<name>.up.sql` / `.down.sql` without a dialect suffix: one file serves every dialect, so write portable SQL. The files start as `-- write this step`.
@@ -301,9 +338,13 @@ DROP TABLE "author";
 ALTER TABLE "_ferro_new_author" RENAME TO "author";
 ```
 
-The copy carries only what the schema snapshot declares, so before a rebuild runs, the runner refuses a live table that holds anything else, naming each object and its fix:
+The copy carries only what the schema snapshot declares, so before a rebuild runs, the runner refuses a live table that holds anything else, naming each object and its fix. Here `Post.title` became required while the table holds an index and a trigger ferro never declared; the steps before the rebuild have run, the rebuild has not:
 
+<!-- output: rebuild-refused -->
 ```text
+default · sqlite:///./app.db
+0002_post_title_required  01_guard_post      applied (2 ms)
+0002_post_title_required  02_add_constraint  applied (0 ms)
 ferro migrate: a SQLite rebuild of table "post" copies only the columns and recreates only the indexes the schema snapshot declares, and the live table also holds:
   - index "my_idx": drop it, or declare it on the model in a migration (ferro builds the indexes it declares, named idx_/uq_)
   - trigger "t": drop it; a rebuild's DROP TABLE would drop it, and ferro cannot carry it across
@@ -320,22 +361,29 @@ An undeclared column is refused the same way (`declare it on the model in a migr
 | `ferro migrate status` | yes | Which migrations this database has applied. Exit 0 up to date, 3 pending, 4 needs attention. |
 | `ferro migrate drift` | yes | Does the live schema match the snapshot of the last migration applied? Exit 0, or 4 with one line per difference. |
 
+With the index `up` built dropped by hand, `ferro migrate drift` exits 4 and lists the difference:
+
+<!-- output: checking-drift -->
 ```text
-$ ferro migrate drift
-drift against 0002_rename_writer:
-  idx_writer_handle index is missing
+default · sqlite:///./app.db
+xx 1 difference against 0002_author_nickname
+  - idx_author_nickname index is missing
 ```
 
 Drift is reported, never repaired: write the fix as a migration, or put the object back. Tables the migrations never declared are not drift. `check` belongs in CI and in a [pre-commit hook](deploying.md#a-pre-commit-hook).
 
 ## Going back
 
+`ferro migrate down` prints what it will revert and, on a terminal, asks `Revert 0002_author_nickname (2 steps)? [y/N]`. With `--yes` it goes straight on:
+
+<!-- output: going-back -->
 ```text
-$ ferro migrate down
+default · sqlite:///./app.db
 down reverts, in this order:
-  0002_rename_writer  01_schema
-Revert 0002_rename_writer (1 step)? [y/N] y
-0002_rename_writer  01_schema  reverted (1 ms)
+  0002_author_nickname  02_idx_author_nickname
+  0002_author_nickname  01_schema
+0002_author_nickname  02_idx_author_nickname  reverted (0 ms)
+0002_author_nickname  01_schema               reverted (0 ms)
 ```
 
 - With no flag, `down` reverts the latest applied migration; `--to 0005` leaves `0005` fully applied, `--to 0007:02` leaves steps `01`–`02` of `0007` applied, `--to 0000` (or `--all`) reverts everything.
@@ -349,62 +397,73 @@ A migration no database has applied is yours to change: edit it, or delete its d
 
 ## Two branches, one number
 
-Your branch adds `bio` to `Author` and generates `0007_add_x`, with a hand-written step `02_fix_rows` you filled in. Meanwhile a teammate merges `0007_add_y`, which adds `nick`. Both were generated on top of `0006`, so after you rebase, the directory holds two `0007`s, and every command refuses it:
+Your branch adds `bio` to `Author` and generates `0002_add_x`, with a hand-written step `02_fix_rows` you filled in. Meanwhile a teammate merges `0002_add_y`, which adds `nick`. Both were generated on top of `0001`, so after you rebase, the directory holds two `0002`s, and every command refuses it:
 
+<!-- output: duplicate-number -->
 ```text
-$ ferro migrate check
-duplicate_number: two migrations are numbered 0007: 0007_add_x and 0007_add_y. Keep the one that is applied anywhere and regenerate the other on top of it:
-  ferro migrate new add_x --replace 0007_add_x
-  ferro migrate new add_y --replace 0007_add_y
+default · migrations
+duplicate_number: two migrations are numbered 0002: 0002_add_x and 0002_add_y. Keep the one that is applied anywhere and regenerate the other on top of it:
+  ferro migrate new add_x --replace 0002_add_x
+  ferro migrate new add_y --replace 0002_add_y
 (each line regenerates the migration it names)
 ```
 
-`0007_add_y` is on main, so keep it and regenerate yours:
+`0002_add_y` is on main, so keep it and regenerate yours:
 
+`ferro migrate new add_x --replace 0002_add_x` writes:
+
+<!-- output: replace -->
 ```text
-$ ferro migrate new add_x --replace 0007_add_x
-ok Wrote migrations/0008_add_x/  (replaces 0007_add_x, now deleted)
-  01_schema.up.postgres.sql    schema step, up (postgres)    moved (was 0007_add_x/01_schema.up.postgres.sql)
-  01_schema.down.postgres.sql  schema step, down (postgres)  moved (was 0007_add_x/01_schema.down.postgres.sql)
-  02_fix_rows.up.sql           SQL step, up                  carried, review it (was 0007_add_x/02_fix_rows.up.sql)
-  02_fix_rows.down.sql         SQL step, down                carried, review it (was 0007_add_x/02_fix_rows.down.sql)
-  ir.json                      snapshot                      new snapshot, chained from 0007_add_y
+default · migrations
+ok Wrote migrations/0003_add_x/  (replaces 0002_add_x, now deleted)
+  01_schema.up.postgres.sql    schema step, up (postgres)    moved (was 0002_add_x/01_schema.up.postgres.sql)
+  01_schema.down.postgres.sql  schema step, down (postgres)  moved (was 0002_add_x/01_schema.down.postgres.sql)
+  01_schema.up.sqlite.sql      schema step, up (sqlite)      moved (was 0002_add_x/01_schema.up.sqlite.sql)
+  01_schema.down.sqlite.sql    schema step, down (sqlite)    moved (was 0002_add_x/01_schema.down.sqlite.sql)
+  02_fix_rows.up.sql           SQL step, up                  carried, review it (was 0002_add_x/02_fix_rows.up.sql)
+  02_fix_rows.down.sql         SQL step, down                carried, review it (was 0002_add_x/02_fix_rows.down.sql)
+  ir.json                      snapshot                      new snapshot, chained from 0002_add_y
 
   1 changed model
     Author
 ```
 
-`0008_add_x` is what `new` would have written had `0007_add_y` been there first: a new schema snapshot chained from `0007_add_y`'s, and the DDL regenerated from the difference, so it adds `bio` and nothing of `nick`.
+`0003_add_x` is what `new` would have written had `0002_add_y` been there first: a new schema snapshot chained from `0002_add_y`'s, and the DDL regenerated from the difference, so it adds `bio` and nothing of `nick`.
 
 - **What is carried.** Every data step (`NN_<name>.py`) and hand-written SQL step (`NN_<name>.up.sql` / `.down.sql`, headers included) keeps its body byte for byte, under the number its place in the regenerated migration gives it. A carried step wins over a step of the same name the regeneration scaffolds again (a backfill's `todo`), and the line says so. The DDL steps, the files with a dialect suffix, are regenerated. Read every step marked `carried, review it`: it was written against the old parent.
-- **The number.** It is kept when it is free, and the next one is taken when it is not. A lone `0007_add_x` whose parent changed is regenerated in place as `0007_add_x`.
+- **The number.** It is kept when it is free, and the next one is taken when it is not. A lone `0002_add_x` whose parent changed is regenerated in place as `0002_add_x`.
 - **Naming the migration.** `--replace` takes `NNNN_<name>`, or `NNNN` when one directory carries the number. A number two directories share is refused, naming both.
 - **Only the newest.** A migration a later one chains from is refused: `replace the later one first, or delete it`. A regeneration that holds nothing (the models add nothing it does not already hold, and nothing is carried) is refused too: delete the directory.
 - **Offline.** Like `new`, it reads the models and the directory, never a database; `--url` is refused. `--sql-step`, `--data-step`, `--data-only` and `--no-backfill` mean what they mean to `new`.
-- **Interrupted.** Until the new directory is written, the old one waits under a hidden name: `.0007_add_x.0008_add_x.replaced` (`.0007_add_x.replaced` when the number is kept). A run killed in between leaves it there, and every command refuses the directory, naming it and what to do: rename it back to `0007_add_x` when the replacement was never written, delete it when the replacement is complete.
+- **Interrupted.** Until the new directory is written, the old one waits under a hidden name: `.0002_add_x.0003_add_x.replaced` (`.0002_add_x.replaced` when the number is kept). A run killed in between leaves it there, and every command refuses the directory, naming it and what to do: rename it back to `0002_add_x` when the replacement was never written, delete it when the replacement is complete.
 
-A database that applied the old `0007_add_x` meets the replaced migration as a changed one. `up` refuses it, naming the replacement as the second cause:
+A database that applied the old `0002_add_x` meets the replaced migration as a changed one. `up` refuses it, naming the replacement as the second cause:
 
+<!-- output: replaced-up-refused -->
 ```text
-ferro migrate: this database has applied 0007_add_x, which is not in migrations/.
-The directory is behind the database: check out the branch that holds it, or 0007 was replaced: revert it with the files that were applied (check out the commit that applied it, `ferro migrate down --to 0006`), then `up`. Nothing was applied.
+default · sqlite:///./app.db
+ferro migrate: this database has applied 0002_add_x, which is not in migrations/.
+The directory is behind the database: check out the branch that holds it, or 0002 was replaced: revert it with the files that were applied (check out the commit that applied it, `ferro migrate down --to 0001`), then `up`. Nothing was applied.
 ```
 
-When the number was free and the migration was regenerated in place, the same cause follows the snapshot refusal (`0007_add_x/ir.json is not the snapshot this database applied 0007_add_x under`). Either way, a down needs the files that went up:
+When the number was free and the migration was regenerated in place, the same cause follows the snapshot refusal (`0002_add_x/ir.json is not the snapshot this database applied 0002_add_x under`). Either way, a down needs the files that went up:
 
-```text
-$ git checkout <the commit that applied 0007_add_x>
-$ ferro migrate down --to 0006
-$ git checkout -
-$ ferro migrate up
+```bash
+git checkout <the commit that applied 0002_add_x>
+ferro migrate down --to 0001
+git checkout -
+ferro migrate up
 ```
 
 ## Changing a primary key
 
 No door changes a primary key in place: the key moved to another column, the key column's type changed, or a key made composite. `new` refuses it before writing anything, on every dialect:
 
+`ferro migrate new rekey` writes nothing and says:
+
+<!-- output: rekey-refused -->
 ```text
-$ ferro migrate new rekey
+default · migrations
 changing the primary key of "author" is not generated: write it as a new table (ferro migrate new --data-step …), a backfill of parent and children, and a drop; see the Migrations docs § Changing a primary key
 ```
 
@@ -412,16 +471,11 @@ The recipe, for an `author` table keyed by an integer `id` that should be keyed 
 
 1. **Add the new table beside the old one.** Declare a new model (`Writer`) with the new key, and give each child a nullable relation to it (`Book.writer`). Generate the migration with a data step over the new model, and write the step so it copies each parent row and points each child at its copy:
 
-    ```text
-    $ ferro migrate new add_writer --data-step Writer
-    migrations/0002_add_writer/
-      01_schema.up.postgres.sql
-      ...
-      02_validate.up.postgres.sql
-      ...
-      03_backfill_writer.py
-      ir.json
+    ```bash
+    ferro migrate new add_writer --data-step Writer
     ```
+
+    The data step lands after the generated schema steps, as `03_backfill_writer.py` here, with `todo(...)` where you write the copy.
 
     ```python
     # migrations/0002_add_writer/03_backfill_writer.py
@@ -448,8 +502,8 @@ The recipe, for an `author` table keyed by an integer `id` that should be keyed 
 
 2. **Drop the old table.** Remove `Author` and `Book.author`, and make `Book.writer` required. Every book already has a writer, so generate the change with a guard rather than a backfill:
 
-    ```text
-    $ ferro migrate new drop_author --no-backfill book.writer_id
+    ```bash
+    ferro migrate new drop_author --no-backfill book.writer_id
     ```
 
     The drop is marked `-- ferro: destructive`. Its down restores the schema, not the rows: if reverting past it must be impossible, declare its down `-- ferro: irreversible <reason>`.

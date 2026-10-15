@@ -7,20 +7,36 @@ Your database already exists: `connect(url, migrate_updates=True)` built it, or 
 1. **Bring the database to the old door's head.** One last start with `migrate_updates=True`, or `alembic upgrade head`, so it matches the models you are about to describe.
 2. **Generate the first migration from the models.** `0001` comes from the models, never from the database:
 
+    ```bash
+    ferro migrate init
+    ferro migrate new initial
+    ```
+
+    `new` prints the files it wrote:
+
+    <!-- output: adopt-new-initial -->
     ```text
-    $ ferro migrate init
-    $ ferro migrate new initial
-    migrations/0001_initial/
-      01_schema.up.postgres.sql
-      ...
+    default · migrations
+    ok Wrote migrations/0001_initial/
+      01_schema.up.postgres.sql    schema step, up (postgres)
+      01_schema.down.postgres.sql  schema step, down (postgres)
+      01_schema.up.sqlite.sql      schema step, up (sqlite)
+      01_schema.down.sqlite.sql    schema step, down (sqlite)
+      ir.json                      snapshot
+
+      1 new model
+        Author
     ```
 
     Commit it. Run `ferro migrate up` on a fresh database and you get the same schema the old door built.
 
 3. **Baseline each existing database.**
 
+    `ferro migrate baseline` records it:
+
+    <!-- output: adopt-baseline -->
     ```text
-    $ ferro migrate baseline
+    default · sqlite:///./app.db
     recorded 0001_initial as baseline (1 step)
     baseline checked what `ferro migrate drift` checks: objects ferro does not own (functions, triggers) were not compared
     ```
@@ -31,7 +47,9 @@ Your database already exists: `connect(url, migrate_updates=True)` built it, or 
 
 Until it is baselined, `ferro migrate up` refuses to run `0001` over tables that already exist:
 
+<!-- output: adopt-up-refused -->
 ```text
+default · sqlite:///./app.db
 This database has no ferro migration records, but table "author" from 0001 already exists. If it was built by auto-migrate or Alembic, run "ferro migrate baseline 0001". up will not run 0001 over it.
 ```
 
@@ -39,8 +57,9 @@ This database has no ferro migration records, but table "author" from 0001 alrea
 
 Baseline compares the database with the target migration's schema snapshot exactly as `ferro migrate drift` does. Any difference and it records nothing, prints each one and exits 4:
 
+<!-- output: baseline-drift -->
 ```text
-$ ferro migrate baseline 0001
+default · sqlite:///./app.db
 drift against 0001_create_author:
   author.slug column is extra
 nothing was recorded
@@ -53,10 +72,13 @@ Each line is a piece of work, and there is no flag that records past them (ADR-0
 - **Someone changed the database by hand**: put it back, or declare the change on the models and generate a migration, then baseline that one.
 - **A column has a server default nobody declared** (a *foreign default*; Ferro persists none of its own):
 
+    On SQLite a literal default is not reported; a default that is an expression is, as here:
+
+    <!-- output: baseline-foreign-default -->
     ```text
-    $ ferro migrate baseline
+    default · sqlite:///./app.db
     drift against 0001_create_author:
-      author.slug has default '' in the database, none declared
+      author.slug has default lower('unknown') in the database, none declared
     nothing was recorded
     ```
 
@@ -74,23 +96,33 @@ Tables the snapshot does not declare (`alembic_version`, another application's t
 
 Every database is baselined at the migration it actually matches. A production database at the head takes `ferro migrate baseline`; a staging copy restored from an older dump takes `ferro migrate baseline 0001`, then `ferro migrate up` applies the rest:
 
+`ferro migrate baseline 0001 --url "$STAGING_URL"` records the one migration the staging copy matches:
+
+<!-- output: staging-baseline -->
 ```text
-$ ferro migrate baseline 0001 --url "$STAGING_URL"
+default · sqlite:///./app.db
 recorded 0001_create_author as baseline (1 step)
-...
-$ ferro migrate up --url "$STAGING_URL"
-0002_author_slug  01_expand  applied (0 ms)
-...
+baseline checked what `ferro migrate drift` checks: objects ferro does not own (functions, triggers) were not compared
+```
+
+`ferro migrate up --url "$STAGING_URL"` then applies the rest:
+
+<!-- output: staging-up -->
+```text
+default · sqlite:///./app.db
+0002_author_slug  01_schema  applied (0 ms)
 ```
 
 `status` shows what each database was baselined at:
 
-```text
-$ ferro migrate status
-default (sqlite) · main._ferro_migrations
+A production database baselined at the head shows both migrations as `applied (baseline)`:
 
-0001_create_author  applied (baseline)
-0002_author_slug    applied (baseline)
+<!-- output: status-baselined -->
+```text
+default · sqlite:///./app.db
+ok 2 applied  main._ferro_migrations
+  ok 0001_create_author  applied (baseline)  2026-10-15 04:30Z
+  ok 0002_author_slug    applied (baseline)  2026-10-15 04:30Z
 ```
 
 Baseline is refused on a database that already has migration records; `status` says where it stands.
@@ -119,14 +151,19 @@ The baseline still checks the file. A file that matches neither (an even older b
 
 ## Undoing a baseline
 
+`ferro migrate baseline --remove` prints:
+
+<!-- output: baseline-remove -->
 ```text
-$ ferro migrate baseline --remove
+default · sqlite:///./app.db
 removed the baseline of 0001_create_author … 0002_author_slug
 ```
 
 It deletes the records the baseline wrote, and nothing else: the migrations are pending again. It is refused while a migration a run applied stands above the baseline (revert that one with `ferro migrate down` first); in code, `remove_baseline()` raises `AppliedAboveBaselineError`, whose `above` names each such migration. `down` itself never reverts a baselined migration, whose down would drop tables it never created:
 
+<!-- output: down-baselined-refused -->
 ```text
+default · sqlite:///./app.db
 ferro migrate: 0002 was recorded by `baseline` and created nothing here; `down` can go no lower than 0002. Nothing was reverted.
 ```
 
