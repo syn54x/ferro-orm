@@ -715,3 +715,38 @@ def test_an_ascii_terminal_gets_ascii_from_new_and_status(project, pkg, tmp_path
     assert lines[:2] == [f"default - {url}", "ok 1 applied  main._ferro_migrations"]
     assert lines[2].startswith("  ok 0001_initial  applied  ")
     assert status.stdout.isascii() and status.stderr.isascii()
+
+
+# -- a step file's kind -----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("name", "role", "kind"),
+    [
+        ("01_expand.up.postgres.sql", ("ddl", "up", "postgres"), "ddl"),
+        ("01_expand.down.sqlite.sql", ("ddl", "down", "sqlite"), "ddl"),
+        ("02_fix.up.sql", ("portable_sql", "up", "portable"), "portable_sql"),
+        ("02_fix.down.sql", ("portable_sql", "down", "portable"), "portable_sql"),
+        ("03_backfill_author.py", ("data", "up", "portable"), "data"),
+    ],
+)
+def test_a_step_files_kind_is_the_cores_reading_of_its_name(name, role, kind):
+    """The core reads a step file's name once (the directory reader's own
+    parse); the output colours by what it says, never by a second parse."""
+    import json
+
+    from ferro._core import _step_file_role
+    from ferro.cli.output import kind_of_file
+
+    said = json.loads(_step_file_role(name))
+    assert (said["kind"], said["direction"], said["dialect"]) == role
+    assert kind_of_file(name) == kind
+
+
+def test_a_name_that_is_no_step_file_is_refused_and_ir_json_is_the_snapshot():
+    from ferro.cli.output import kind_of_file
+
+    assert kind_of_file("ir.json") == "snapshot"
+    for name in ("01_expand.sideways.sql", "01_expand.up.mysql.sql", "notes.txt"):
+        with pytest.raises(ValueError, match="is not a migration step file"):
+            kind_of_file(name)

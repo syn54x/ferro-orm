@@ -45,12 +45,25 @@ from . import Global, exit_codes
 if TYPE_CHECKING:
     from .output import Output
 
-__all__ = ["database_line", "migrate"]
+__all__ = ["migrate"]
 
 migrate = App(
     name="migrate",
     help="Write, apply and check schema migrations.",
 )
+
+Verbose = Annotated[
+    bool,
+    Parameter(
+        help=(
+            "Show every name in a long list of the change summary; a terminal "
+            "otherwise shows the first few."
+        ),
+        negative="",
+    ),
+]
+"""``--verbose`` on ``new`` and ``check``, the verbs that print a change
+summary."""
 
 DIALECTS = ("postgres", "sqlite")
 _DATABASE_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -189,16 +202,7 @@ def new(
             negative="",
         ),
     ] = None,
-    verbose: Annotated[
-        bool,
-        Parameter(
-            help=(
-                "Show every name of a long change list; a terminal otherwise "
-                "shows the first few."
-            ),
-            negative="",
-        ),
-    ] = False,
+    verbose: Verbose = False,
     replace: Annotated[
         str | None,
         Parameter(
@@ -252,16 +256,7 @@ def new(
 @migrate.command
 def check(
     *,
-    verbose: Annotated[
-        bool,
-        Parameter(
-            help=(
-                "Show every name of a long change list; a terminal otherwise "
-                "shows the first few."
-            ),
-            negative="",
-        ),
-    ] = False,
+    verbose: Verbose = False,
     glob: Annotated[Global, Parameter(parse=False)],
 ) -> int:
     """Check, offline, that every model change has a migration and the
@@ -663,14 +658,6 @@ def rerecord(
     )
     print_rerecord(out, report)
     return exit_codes.OK
-
-
-def database_line(name: str, where: str) -> str:
-    """The first line every ``ferro migrate`` verb prints, naming what it
-    touches: ``main · postgresql://pinch:***@db.internal:5432/pinch_prod``
-    (``where`` is the masked URL), or ``main · migrations/main`` for ``new``
-    and ``check``, which never connect (``where`` is the directory)."""
-    return f"{name} · {where}"
 
 
 def _url(

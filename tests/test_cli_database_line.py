@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 
-from ferro.cli.migrate import database_line
+from ferro.cli.output import Output
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     AUTHOR,
     DIRECTORY_LINE,
@@ -65,7 +65,13 @@ def author_generated(project: Path, pkg: str, db) -> None:
 
 
 def test_the_line_is_the_name_a_middle_dot_and_where():
-    assert database_line("main", "migrations/main") == "main · migrations/main"
+    import io
+
+    out = io.StringIO()
+    Output.for_streams(out=out, err=io.StringIO()).database_line(
+        "main", "migrations/main"
+    )
+    assert out.getvalue() == "main · migrations/main\n"
 
 
 # -- the verbs that connect -------------------------------------------------------
@@ -313,6 +319,28 @@ def test_an_unsupported_scheme_prints_nothing_on_stdout(project, pkg, capsys):
     assert code == 1
     assert out == ""
     assert err == (
-        "DB Connection failed for mysql://u:***@h/db: Unsupported database URL "
+        "DB Connection failed for mysql://***: Unsupported database URL "
         "scheme 'mysql'. Supported schemes: sqlite, postgres, postgresql\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [f"postgresql:/u:{SECRET}@h/db", f"postgresql:u:{SECRET}@h/db"],
+    ids=["one-slash", "no-slash"],
+)
+def test_a_hostless_postgres_url_never_shows_its_password(project, pkg, capsys, url):
+    """Both shapes parse with no host, so no password is read from them; the
+    scheme is refused, and the refusal masks the URL whole."""
+    configure(project, pkg, "postgres")
+    write_models(project, pkg, AUTHOR)
+
+    code, out, err = cli(capsys, "status", "--url", url)
+
+    assert code == 1
+    assert out == ""
+    assert SECRET not in out + err
+    assert err == (
+        "DB Connection failed for postgresql://***: Unsupported database URL "
+        "scheme 'postgresql'. Supported schemes: sqlite, postgres, postgresql\n"
     )

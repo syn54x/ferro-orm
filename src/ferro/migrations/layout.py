@@ -160,7 +160,9 @@ class ChangeSummary:
     changes: tuple[Change, ...] = ()
     text: str = ""
     """The plain rendering (``new models: Team; changed models: Account``),
-    printed by ``new`` and inside ``check``'s ``ungenerated`` message."""
+    the one the core quotes inside ``check``'s ``ungenerated`` message and
+    so the library's error text. ``new`` (in both forms) and ``check`` on a
+    terminal lay out ``changes`` instead; nothing in Python prints this."""
 
     def __bool__(self) -> bool:
         return bool(self.changes)

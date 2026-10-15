@@ -338,9 +338,9 @@ def test_verbose_changes_nothing_in_a_pipe(project, pkg, capsys):
 
     assert code == 0
     assert (loud, loud_err) == (quiet, quiet_err)
-    _, check_quiet, _ = cli(capsys, "check")
-    _, check_loud, _ = cli(capsys, "check", "--verbose")
-    assert check_loud == check_quiet
+    _, check_quiet, check_quiet_err = cli(capsys, "check")
+    _, check_loud, check_loud_err = cli(capsys, "check", "--verbose")
+    assert (check_loud, check_loud_err) == (check_quiet, check_quiet_err)
 
 
 def test_colour_never_carries_meaning_alone(project, pkg, capsys, monkeypatch):
@@ -475,8 +475,10 @@ TTY_PROBLEMS_OUT = "\x1b[1mdefault\x1b[0m · \x1b[2mmigrations\x1b[0m\n"
 TTY_PROBLEMS_ERR = (
     "\x1b[1;31m✘\x1b[0m \x1b[1;31m2 problems since 0002_add_slug\x1b[0m\n"
     "ungenerated: the models changed since 0002_add_slug and no migration "
-    "records it (new models: Team); run `ferro migrate new <name>` and "
-    "commit the migration it writes\n"
+    "records it; run `ferro migrate new <name>` and commit the migration it "
+    "writes\n"
+    "\x1b[1m  1 new model\x1b[0m\n"
+    "    \x1b[32mTeam\x1b[0m\n"
     "unwritten_step: 0002_add_slug/02_backfill_author.py:15: not written "
     "yet: the slug for an existing author\n"
 )
@@ -628,3 +630,164 @@ def test_a_dumb_terminal_gets_the_ascii_glyphs(project, pkg, capsys, tty, monkey
     assert code == 0
     assert lines[1] == "ok Wrote migrations/0001_initial/"
     assert lines[-1] == "    ... and 7 more (--verbose shows them all)"
+
+
+# -- a width nobody can use ---------------------------------------------------------
+
+
+@pytest.mark.parametrize("columns", ["0", "abc"])
+def test_plain_check_prints_every_line_whatever_columns_says(
+    project, pkg, capsys, monkeypatch, columns
+):
+    """The plain form never asks the width whether to print a line: a pipe
+    under ``COLUMNS=0`` prints the same bytes as without it."""
+    monkeypatch.setenv("COLUMNS", columns)
+    two_problems(project, pkg)
+
+    assert cli(capsys, "check") == (3, f"{DIRECTORY_LINE}\n", CHECK_PROBLEMS)
+
+
+@pytest.mark.parametrize("columns", ["0", "abc"])
+def test_tty_new_and_check_print_every_line_whatever_columns_says(
+    project, pkg, capsys, monkeypatch, columns
+):
+    """On a terminal a width below one is no width: the layout falls back to
+    eighty columns, the width Rich assumes when it cannot tell."""
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    monkeypatch.setenv("COLUMNS", columns)
+    write_config(project, pkg)
+    write_models(project, pkg, AUTHOR)
+
+    code, out, err = cli(capsys, "new", "initial")
+
+    assert (code, err) == (0, "")
+    assert "Wrote migrations/0001_initial/" in out
+    assert "1 new model" in out
+    assert cli(capsys, "check") == (0, TTY_CHECKOK_OUT, "")
+
+
+# -- a refusal a verb raises ------------------------------------------------------
+
+
+def rekeyed(project, pkg) -> None:
+    """A primary key moved to another column: ``new`` refuses with the
+    primary-key recipe."""
+    write_config(project, pkg)
+    write_models(
+        project,
+        pkg,
+        "\nclass Keyed(Model):\n"
+        "    id: Annotated[int | None, FerroField(primary_key=True)] = None\n"
+        "    name: str\n",
+    )
+    assert run("migrate", "new", "initial") == 0
+    write_models(
+        project,
+        pkg,
+        "\nclass Keyed(Model):\n"
+        "    id: int | None = None\n"
+        "    name: Annotated[str, FerroField(primary_key=True)]\n",
+    )
+
+
+def refused_heading(verb: str) -> str:
+    return f"\x1b[1;31m✘\x1b[0m \x1b[1;31m{verb} refused\x1b[0m\n"
+
+
+def test_tty_new_refusal_sits_under_a_red_heading_naming_the_verb(
+    project, pkg, capsys, monkeypatch
+):
+    rekeyed(project, pkg)
+    code, _, plain_err = cli(capsys, "new", "rekey")
+    assert code == 1
+    assert plain_err.startswith('changing the primary key of "keyed"'), plain_err
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    monkeypatch.setenv("COLUMNS", "100")
+
+    code, out, err = cli(capsys, "new", "rekey")
+
+    assert code == 1
+    assert out == "\x1b[1mdefault\x1b[0m · \x1b[2mmigrations\x1b[0m\n"
+    assert err == refused_heading("new") + plain_err
+
+
+def test_a_settings_refusal_in_both_forms(project, capsys, monkeypatch):
+    (project / "ferro.toml").write_text("models = [\n")
+    code, out, plain_err = cli(capsys, "check")
+    assert (code, out) == (1, "")
+    assert plain_err.endswith(
+        "/ferro.toml is not valid TOML: Invalid value (at end of document); "
+        "fix the file\n"
+    ), plain_err
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    monkeypatch.setenv("COLUMNS", "100")
+
+    assert cli(capsys, "check") == (1, "", refused_heading("check") + plain_err)
+
+
+def test_a_refusal_with_no_verb_is_headed_ferro_refused(capsys, monkeypatch):
+    from ferro.cli import exit_codes, render_refusal
+    from ferro.settings import SettingsError
+
+    monkeypatch.setenv("FORCE_COLOR", "1")
+
+    assert render_refusal(SettingsError("bad")) == exit_codes.REFUSED
+    assert capsys.readouterr().err == refused_heading("ferro") + "bad\n"
+
+
+# -- check lays out its change summary on a terminal --------------------------------
+
+TTY_CHECK_THIRTEEN_HEAD = (
+    "\x1b[1;31m✘\x1b[0m \x1b[1;31m1 problem since no migration\x1b[0m\n"
+    "ungenerated: there is no migration yet and no migration records it; run "
+    "`ferro migrate new <name>` and commit the migration it writes\n"
+    "\x1b[1m  13 new models\x1b[0m\n"
+)
+TTY_CHECK_THIRTEEN_ERR = TTY_CHECK_THIRTEEN_HEAD + (
+    "    \x1b[32mItem00\x1b[0m  \x1b[32mItem01\x1b[0m  \x1b[32mItem02\x1b[0m"
+    "  \x1b[32mItem03\x1b[0m  \x1b[32mItem04\x1b[0m  \x1b[32mItem05\x1b[0m\n"
+    "\x1b[2m    … and 7 more (--verbose shows them all)\x1b[0m\n"
+)
+TTY_CHECK_THIRTEEN_VERBOSE_ERR = TTY_CHECK_THIRTEEN_HEAD + (
+    "    \x1b[32mItem00\x1b[0m  \x1b[32mItem02\x1b[0m  \x1b[32mItem04\x1b[0m"
+    "  \x1b[32mItem06\x1b[0m  \x1b[32mItem08\x1b[0m  \x1b[32mItem10\x1b[0m  "
+    "\x1b[32mItem12\x1b[0m\n"
+    "    \x1b[32mItem01\x1b[0m  \x1b[32mItem03\x1b[0m  \x1b[32mItem05\x1b[0m"
+    "  \x1b[32mItem07\x1b[0m  \x1b[32mItem09\x1b[0m  \x1b[32mItem11\x1b[0m\n"
+)
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected"),
+    [
+        pytest.param((), TTY_CHECK_THIRTEEN_ERR, id="collapsed"),
+        pytest.param(("--verbose",), TTY_CHECK_THIRTEEN_VERBOSE_ERR, id="verbose"),
+    ],
+)
+def test_tty_check_lays_out_its_change_summary_as_new_does(
+    project, pkg, capsys, tty, flags, expected
+):
+    """An ``ungenerated`` problem's sentence, then the summary laid out from
+    its data as ``new`` lays it out: a list longer than twelve collapses
+    unless ``--verbose``."""
+    write_config(project, pkg, '["postgres"]')
+    write_models(project, pkg, many_models(13))
+
+    assert cli(capsys, "check", *flags) == (3, TTY_PROBLEMS_OUT, expected)
+
+
+def test_plain_check_keeps_the_summary_sentence_whatever_the_list(
+    project, pkg, capsys
+):
+    write_config(project, pkg, '["postgres"]')
+    write_models(project, pkg, many_models(13))
+    names = ", ".join(f"Item{i:02d}" for i in range(13))
+
+    for flags in ((), ("--verbose",)):
+        assert cli(capsys, "check", *flags) == (
+            3,
+            f"{DIRECTORY_LINE}\n",
+            "ungenerated: there is no migration yet and no migration records it "
+            f"(new models: {names}); run `ferro migrate new <name>` and commit "
+            "the migration it writes\n",
+        )

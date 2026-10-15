@@ -19,7 +19,7 @@ keeps the one-liners (``ok: models match 0001_initial``), every refusal and
 every ``warning: …`` line on stderr byte for byte. The **TTY form** (a
 terminal, or ``FORCE_COLOR`` set) is headed: a glyph and a bold heading, the
 details indented beneath, name lists in columns sized to the terminal, a long
-change list collapsed behind ``--verbose``. ``NO_COLOR`` strips every escape
+list of the change summary collapsed behind ``--verbose``. ``NO_COLOR`` strips every escape
 and keeps the layout; a dumb terminal gets the ASCII glyphs, and a stream
 that cannot encode Unicode (``PYTHONIOENCODING=ascii``) gets ASCII
 throughout: the glyphs, and ``-``, ``->`` and ``...`` for ``·``, ``→`` and
@@ -39,9 +39,10 @@ report's text apart.
 
 from __future__ import annotations
 
+import json
 import sys
 from collections.abc import Iterator, Sequence
-from typing import TYPE_CHECKING, TextIO
+from typing import TYPE_CHECKING, NamedTuple, TextIO
 
 from datetime import UTC, datetime
 
@@ -53,6 +54,7 @@ if TYPE_CHECKING:
     from ..migrations._drift import DriftReport
     from ..migrations.errors import MigrationRefused
     from ..migrations.generate import CheckReport
+    from ..migrations.layout import Change
     from ..migrations.layout import GeneratedMigration, GeneratedStep
     from ..migrations.report import MigrationStatus, StatusReport
     from ..migrations.rerecord import RerecordReport
@@ -63,11 +65,14 @@ __all__ = [
     "GLYPHS",
     "KIND_STYLE",
     "STATE_GLYPH",
+    "STATES",
     "STATE_STYLE",
     "Output",
+    "StepFileRole",
     "applied_at_short",
     "kind_of_file",
     "print_baseline",
+    "print_changes",
     "print_check",
     "print_done",
     "print_down_plan",
@@ -81,6 +86,7 @@ __all__ = [
     "print_run_failure",
     "print_status",
     "print_step",
+    "step_file_role",
 ]
 
 GLYPHS: dict[str, tuple[str, str]] = {
@@ -126,40 +132,31 @@ CHANGE_STYLE = {
 """A change summary's names, by the generator's verb: the colours ``git
 status`` taught. The count heading above them stays plain bold."""
 
-STATE_STYLE = {
-    "applied": "green",
-    "applied (baseline)": "green",
-    "reverted": "green",
-    "pending": "yellow",
-    "failed": "bold red",
-    "interrupted": "red",
-    "applied (different checksum)": "red",
-    "applied, not in the directory": "red",
-    "running": "cyan",
-    "reverting": "cyan",
-    "nothing to reverse": "dim",
-    "partial": "yellow",
+STATES: dict[str, tuple[str, str]] = {
+    "applied": ("ok", "green"),
+    "applied (baseline)": ("ok", "green"),
+    "reverted": ("ok", "green"),
+    "pending": ("pending", "yellow"),
+    "failed": ("error", "bold red"),
+    "interrupted": ("error", "red"),
+    "applied (different checksum)": ("error", "red"),
+    "applied, not in the directory": ("error", "red"),
+    "running": ("partial", "cyan"),
+    "reverting": ("partial", "cyan"),
+    "nothing to reverse": ("ok", "dim"),
+    "partial": ("partial", "yellow"),
 }
 """A migration's or a step's state word, as ``status``, ``up`` and ``down``
-print it. ``partial`` stands for a migration's ``partial, X of N steps``,
-the one state word that carries numbers."""
+print it: the glyph its row opens with (a key of :data:`GLYPHS`) and its
+style. ``partial`` stands for a migration's ``partial, X of N steps``, the
+one state word that carries numbers. :data:`STATE_GLYPH` and
+:data:`STATE_STYLE` are its two columns."""
 
-STATE_GLYPH = {
-    "applied": "ok",
-    "applied (baseline)": "ok",
-    "reverted": "ok",
-    "pending": "pending",
-    "failed": "error",
-    "interrupted": "error",
-    "applied (different checksum)": "error",
-    "applied, not in the directory": "error",
-    "running": "partial",
-    "reverting": "partial",
-    "nothing to reverse": "ok",
-    "partial": "partial",
-}
-"""The glyph (a key of :data:`GLYPHS`) a row opens with, by the same state
-words as :data:`STATE_STYLE`."""
+STATE_GLYPH = {word: glyph for word, (glyph, _) in STATES.items()}
+"""The glyph each state word's row opens with, from :data:`STATES`."""
+
+STATE_STYLE = {word: style for word, (_, style) in STATES.items()}
+"""Each state word's style, from :data:`STATES`."""
 
 ASCII_FORMS = {"·": "-", "→": "->", "…": "..."}
 """What a stream that cannot encode Unicode prints for each such character
@@ -167,7 +164,8 @@ a line carries (the database line's separator, a rename's arrow, an
 elision); the glyphs fall back through :data:`GLYPHS`."""
 
 LONG_LIST = 12
-"""A change list of up to this many names is shown whole on a TTY."""
+"""A list of the change summary of up to this many names is shown whole on
+a TTY."""
 SHOWN_FIRST = 6
 """A longer one shows its first names, then how many more ``--verbose``
 shows."""
@@ -239,8 +237,18 @@ class Output:
     def print(self, text: str | Text = "", *, err: bool = False) -> None:
         """Print one line, through :meth:`fit`. No form wraps it: a script
         reads what was said, and a command quoted in a note or a refusal is
-        copied whole; a terminal folds a long line on its own."""
+        copied whole; a terminal folds a long line on its own.
+
+        A stream that is not a terminal gets the line's text written to it
+        as it is, never laid out by Rich: no width (``COLUMNS=0`` included)
+        decides whether a line prints, and a tab or a carriage return in a
+        refusal reaches the pipe unchanged."""
         console = self.err if err else self.out
+        if not console.is_terminal:
+            line = text if isinstance(text, str) else text.plain
+            console.file.write(self.fit(line, err=err) + "\n")
+            console.file.flush()
+            return
         if _ascii_only(console):
             text = (
                 self.fit(text, err=err)
@@ -280,10 +288,11 @@ class Output:
 
     def database_line(self, name: str, where: str) -> None:
         """The first line of every verb: the database's name, bold, then
-        what it touches, dim (``main · migrations/main``)."""
-        from .migrate import database_line
-
-        text = Text(database_line(name, where))
+        what it touches, dim: ``main · postgresql://pinch:***@db:5432/app``
+        (``where`` the masked URL), or ``main · migrations/main`` for
+        ``new`` and ``check``, which never connect (``where`` the
+        directory)."""
+        text = Text(f"{name} · {where}")
         text.stylize("bold", 0, len(name))
         text.stylize("dim", len(text) - len(where))
         self.print(text)
@@ -295,44 +304,47 @@ class Output:
         *,
         verb: str,
         verbose: bool,
+        err: bool = False,
     ) -> None:
-        """One change list: its count heading (``2 new models``), plain
+        """One list of the change summary: its count heading (``2 new models``), plain
         bold, then its names coloured by ``verb``. One name per line in the
         plain form; columns on a TTY, where a list longer than
         :data:`LONG_LIST` shows its first :data:`SHOWN_FIRST` unless
         ``verbose``."""
-        self.print(Text(f"  {label_count}", style="bold"))
+        self.print(Text(f"  {label_count}", style="bold"), err=err)
         style = CHANGE_STYLE[verb]
-        names = [self.fit(name) for name in names]
+        names = [self.fit(name, err=err) for name in names]
         if self.plain:
             for name in names:
-                self.print(Text(f"    {name}", style=style))
+                self.print(Text(f"    {name}", style=style), err=err)
             return
         shown, hidden = list(names), 0
         if not verbose and len(names) > LONG_LIST:
             shown, hidden = shown[:SHOWN_FIRST], len(names) - SHOWN_FIRST
-        for row in _columns(shown, self.width - len(NAME_INDENT)):
+        width = (self.err if err else self.out).width
+        for row in _columns(shown, width - len(NAME_INDENT)):
             line = Text(NAME_INDENT)
-            for at, (name, width) in enumerate(row):
+            for at, (name, column) in enumerate(row):
                 line.append(name, style=style)
                 if at < len(row) - 1:
-                    line.append(" " * (width - len(name) + NAME_GAP))
-            self.print(line)
+                    line.append(" " * (column - len(name) + NAME_GAP))
+            self.print(line, err=err)
         if hidden:
             dots = "..." if self._ascii else "…"
             self.print(
                 Text(
                     f"    {dots} and {hidden} more (--verbose shows them all)",
                     style="dim",
-                )
+                ),
+                err=err,
             )
 
-    def note(self, text: str) -> None:
+    def note(self, text: str, *, err: bool = False) -> None:
         """A note after a result, behind a bullet."""
         line = Text("  ")
         line.append(self.glyph("bullet"), style=GLYPH_STYLE["bullet"])
         line.append(f" {text}")
-        self.print(line)
+        self.print(line, err=err)
 
     def warning(self, text: str) -> None:
         """A warning, on stderr: ``warning: <text>`` in the plain form, the
@@ -386,7 +398,17 @@ def _console(file: TextIO) -> Console:
             soft_wrap=True,
             color_system=None,
         )
+    if console.width < 1:
+        # A width below one (``COLUMNS=0``, a pseudo-terminal reporting no
+        # size) is no width at all: Rich would render nothing. Lay out at
+        # the width Rich assumes when it cannot tell.
+        console.width = FALLBACK_WIDTH
     return console
+
+
+FALLBACK_WIDTH = 80
+"""The terminal width the TTY form lays out at when the reported one is
+below one column."""
 
 
 NAME_INDENT = "    "
@@ -447,18 +469,28 @@ def print_new(
 
     if migration.summary or migration.notes:
         out.print()
-    for change in migration.summary.changes:
+    print_changes(out, migration.summary.changes, verbose=verbose)
+    for note in migration.notes:
+        out.note(note)
+    for warning in migration.warnings:
+        out.warning(warning)
+
+
+def print_changes(
+    out: Output, changes: Sequence[Change], *, verbose: bool, err: bool = False
+) -> None:
+    """A change summary laid out from its data, as ``new`` and ``check``
+    print it: each change's count heading (``2 new models``), then its
+    names (:meth:`Output.names`)."""
+    for change in changes:
         noun = f"{change.verb} {change.kind.removesuffix('s')}"
         out.names(
             count(len(change.names), noun),
             change.names,
             verb=change.verb,
             verbose=verbose,
+            err=err,
         )
-    for note in migration.notes:
-        out.note(note)
-    for warning in migration.warnings:
-        out.warning(warning)
 
 
 DATA_ROLE = {"backfill": "backfill", "guard": "guard", "data_step": "data step"}
@@ -482,13 +514,15 @@ def _file_rows(migration: GeneratedMigration) -> Iterator[tuple[str, str, str, s
 
 
 def _role(step: GeneratedStep, name: str) -> str:
+    """A file's role words: a data step's by the role the generator gave
+    it; a SQL file's by its direction and dialect, as the core reads its
+    name (:func:`step_file_role`)."""
     if step.kind == "data":
         return DATA_ROLE.get(step.role or "data_step", "data step")
-    direction = "down" if ".down." in name else "up"
+    role = step_file_role(name)
     if step.kind == "portable_sql":
-        return f"SQL step, {direction}"
-    dialect = name.rsplit(".", 2)[-2]
-    return f"schema step, {direction} ({dialect})"
+        return f"SQL step, {role.direction}"
+    return f"schema step, {role.direction} ({role.dialect})"
 
 
 def _became(migration: GeneratedMigration, name: str) -> str:
@@ -524,10 +558,13 @@ def _became(migration: GeneratedMigration, name: str) -> str:
 
 def print_check(out: Output, report: CheckReport, *, verbose: bool) -> None:
     """What ``ferro migrate check`` found: ``ok: models match NNNN`` (the
-    plain one-liner) or a heading on a TTY; else every problem on stderr as
-    ``kind: message``, never collapsed. ``verbose`` is accepted for the
-    shape every list-printing verb shares; no problem is ever hidden."""
-    del verbose
+    plain one-liner) or a heading on a TTY; else every problem on stderr,
+    never dropped. In the plain form each problem is ``kind: message``, the
+    change summary inside the sentence as the core wrote it. On a TTY the
+    problems sit under a red heading, and an ``ungenerated`` problem prints
+    its sentence without the summary, then the summary laid out from its
+    data as ``new`` lays it out (:func:`print_changes`: a long list
+    collapses unless ``verbose``), then its notes."""
     head = report.head or "no migration"
     if report.ok:
         if out.plain:
@@ -535,10 +572,21 @@ def print_check(out: Output, report: CheckReport, *, verbose: bool) -> None:
         else:
             out.heading("ok", "models match", head)
         return
-    out.problems(
-        f"{count(len(report.problems), 'problem')} since {head}",
-        [f"{problem.kind}: {problem.message}" for problem in report.problems],
+    if out.plain:
+        for problem in report.problems:
+            out.print(f"{problem.kind}: {problem.message}", err=True)
+        return
+    out.heading(
+        "error", f"{count(len(report.problems), 'problem')} since {head}", err=True
     )
+    for problem in report.problems:
+        if problem.headline is None:
+            out.print(f"{problem.kind}: {problem.message}", err=True)
+            continue
+        out.print(f"{problem.kind}: {problem.headline}", err=True)
+        print_changes(out, problem.changes, verbose=verbose, err=True)
+        for note in problem.notes:
+            out.note(note, err=True)
 
 
 # -- status ---------------------------------------------------------------------
@@ -553,22 +601,35 @@ def applied_at_short(iso: str | None) -> str:
     return datetime.fromisoformat(iso).astimezone(UTC).strftime("%Y-%m-%d %H:%MZ")
 
 
+class StepFileRole(NamedTuple):
+    """What a step file's name says it is, as the core reads it."""
+
+    kind: str
+    """``ddl``, ``data`` or ``portable_sql``."""
+    direction: str
+    """``up`` or ``down``."""
+    dialect: str
+    """``postgres``, ``sqlite`` or ``portable``."""
+
+
+def step_file_role(name: str) -> StepFileRole:
+    """The kind, direction and dialect a step file's name says, read by the
+    directory reader's own parse (``_core._step_file_role``); ``ValueError``
+    for a name that is not a step file's."""
+    from .._core import _step_file_role
+
+    return StepFileRole(**json.loads(_step_file_role(name)))
+
+
 def kind_of_file(name: str) -> str:
-    """A step file's kind (a key of :data:`KIND_STYLE`), read from its
-    suffix the way the generator names it: ``.py`` is ``data``,
-    ``.up.<dialect>.sql`` / ``.down.<dialect>.sql`` is ``ddl``, a bare
-    ``.up.sql`` / ``.down.sql`` is ``portable_sql``, ``ir.json`` is
-    ``snapshot``."""
+    """A step file's kind (a key of :data:`KIND_STYLE`): the core's reading
+    of its name (:func:`step_file_role`), or ``snapshot`` for ``ir.json``;
+    ``ValueError`` for any other name."""
     from ..migrations.layout import SNAPSHOT_FILE
 
     if name == SNAPSHOT_FILE:
         return "snapshot"
-    parts = name.split(".")[1:]
-    if parts == ["py"]:
-        return "data"
-    if len(parts) in (2, 3) and parts[0] in ("up", "down") and parts[-1] == "sql":
-        return "portable_sql" if len(parts) == 2 else "ddl"
-    raise ValueError(f"{name} is not a migration step file")
+    return step_file_role(name).kind
 
 
 def _state_key(word: str) -> str:
