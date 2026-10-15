@@ -28,6 +28,7 @@ from tests.test_migrate_new import (  # noqa: F401 - fixtures
     pkg,
     project,
     run,
+    words,
     write_config,
     write_models,
 )
@@ -133,16 +134,16 @@ def test_same_parent_regenerates_on_the_other_branch_and_takes_the_next_number(
     )
     up = (migrations(project) / "0003_add_x/01_schema.up.postgres.sql").read_text()
     assert '"bio"' in up and '"nick"' not in up, up
-    out = capsys.readouterr().out.splitlines()
-    assert out[:2] == [
+    out = capsys.readouterr().out
+    assert out.splitlines()[:2] == [
         DIRECTORY_LINE,
-        "migrations/0003_add_x/  (replaces 0002_add_x, now deleted)",
+        "ok Wrote migrations/0003_add_x/  (replaces 0002_add_x, now deleted)",
     ]
     assert (
-        "  01_schema.up.postgres.sql  moved (was 0002_add_x/01_schema.up.postgres.sql)"
-        in out
-    )
-    assert "  ir.json  new snapshot, chained from 0002_add_y" in out
+        "01_schema.up.postgres.sql schema step, up (postgres) moved (was "
+        "0002_add_x/01_schema.up.postgres.sql)"
+    ) in words(out), out
+    assert "ir.json snapshot new snapshot, chained from 0002_add_y" in words(out)
 
     assert run("migrate", "check") == 0
 
@@ -201,13 +202,13 @@ def test_a_free_number_is_regenerated_in_place_carrying_a_filled_in_backfill(
     out = capsys.readouterr().out
     assert out.splitlines()[:2] == [
         DIRECTORY_LINE,
-        "migrations/0003_add_x/  (regenerated in place)",
+        "ok Wrote migrations/0003_add_x/  (regenerated in place)",
     ]
     assert (
-        f"  {carried.name}  carried, review it (was 0003_add_x/{backfill.name}; it "
-        "wins over the regenerated step of the same name)"
-    ) in out.splitlines(), out
-    assert "  01_expand.up.postgres.sql  kept" in out.splitlines(), out
+        f"{carried.name} data step carried, review it (was 0003_add_x/"
+        f"{backfill.name}; it wins over the regenerated step of the same name)"
+    ) in words(out), out
+    assert "01_expand.up.postgres.sql schema step, up (postgres) kept" in words(out)
     assert run("migrate", "check") == 0
 
 
@@ -236,8 +237,10 @@ def test_a_carried_sql_step_keeps_its_body_and_moves_to_its_new_place(
     assert int(up.name[:2]) > 2, sorted(p.name for p in new_dir.iterdir())
     [extra] = new_dir.glob("*_extra.up.sql")
     assert int(extra.name[:2]) == int(up.name[:2]) + 1  # beside the carried one
-    out = capsys.readouterr().out.splitlines()
-    assert f"  {up.name}  carried, review it (was 0002_add_x/02_fix_rows.up.sql)" in out
+    out = words(capsys.readouterr().out)
+    assert (
+        f"{up.name} SQL step, up carried, review it (was 0002_add_x/02_fix_rows.up.sql)"
+    ) in out
 
 
 # -- the target and the refusals ---------------------------------------------------

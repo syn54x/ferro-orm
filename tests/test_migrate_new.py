@@ -121,6 +121,13 @@ def listing(directory: Path) -> list[str]:
     )
 
 
+def words(out: str) -> list[str]:
+    """Each line of ``out`` with its runs of spaces made one: a file line
+    read without the column padding (``01_schema.up.sqlite.sql schema step,
+    up (sqlite) kept``)."""
+    return [" ".join(line.split()) for line in out.splitlines()]
+
+
 def statements(sql_file: Path) -> list[str]:
     """The statements of a step file: its body split on the ``;`` that ends
     each statement, headers dropped."""
@@ -176,8 +183,8 @@ def test_the_first_migration_renders_every_target_dialect_and_a_root_snapshot(
         'DROP TABLE "author";\n'
     )
     out = capsys.readouterr().out
-    assert "migrations/0001_create_author/" in out
-    assert "new models: Author" in out
+    assert "ok Wrote migrations/0001_create_author/\n" in out
+    assert "\n  1 new model\n    Author\n  1 new enum type\n    status\n" in out
 
 
 def test_a_child_model_chains_to_the_parent_snapshot_and_creates_its_type_first(
@@ -504,9 +511,14 @@ FOUR_SCHEMA_FILES = (
         ),
     ],
 )
-def test_new_prints_the_summary_then_each_note_as_before(
+def test_new_prints_each_change_list_then_each_note(
     project, pkg, capsys, before, after, flags, files, said, changes
 ):
+    """``said`` is the summary's plain rendering and the notes, one a line,
+    as the library holds them; ``new`` prints the summary's lists under
+    their count headings, one name a line in the plain form, then each
+    note behind a bullet. Golden text for both forms is in
+    ``tests/test_cli_output_new_check.py``."""
     from ferro import FerroSettings
     from ferro.migrations.generate import prepare
     from ferro.migrations.layout import Change, ChangeSummary
@@ -524,9 +536,16 @@ def test_new_prints_the_summary_then_each_note_as_before(
 
     assert run("migrate", "new", "b", *flags) == 0
 
-    assert capsys.readouterr().out == (
-        f"{DIRECTORY_LINE}\nmigrations/{number}_b/\n{files}{said}"
-    )
+    out = capsys.readouterr().out.splitlines()
+    names = [line.strip() for line in files.splitlines()]
+    assert out[:2] == [DIRECTORY_LINE, f"ok Wrote migrations/{number}_b/"]
+    assert [line.split()[0] for line in out[2 : 2 + len(names)]] == names
+    lists = []
+    for verb, kind, listed in changes:
+        noun = kind.removesuffix("s") + ("" if len(listed) == 1 else "s")
+        lists += [f"  {len(listed)} {verb} {noun}", *(f"    {n}" for n in listed)]
+    notes = [f"  - {note}" for note in said.splitlines()[1:]]
+    assert out[2 + len(names) :] == ["", *lists, *notes]
     assert isinstance(migration.summary, ChangeSummary)
     assert migration.summary.changes == tuple(
         Change(verb, kind, names) for verb, kind, names in changes
@@ -619,7 +638,7 @@ def test_replace_composes_with_data_step_and_data_only(project, pkg, capsys):
         "02_backfill_author.py",
         "ir.json",
     ]
-    assert "  02_backfill_author.py  new" in capsys.readouterr().out.splitlines()
+    assert "02_backfill_author.py data step new" in words(capsys.readouterr().out)
 
     # --data-only regenerates it as that data step alone; the one it had is
     # carried across, winning over the rescaffolded one of its name.
@@ -645,9 +664,10 @@ def test_replace_composes_with_data_step_and_data_only(project, pkg, capsys):
     assert (migrations / "0002_b/01_backfill_author.py").read_text() == "# filled in\n"
     out = capsys.readouterr().out
     assert (
-        "  01_backfill_author.py  carried, review it (was 0002_b/02_backfill_author.py; "
-        "it wins over the regenerated step of the same name)"
-    ) in out.splitlines(), out
+        "01_backfill_author.py data step carried, review it (was "
+        "0002_b/02_backfill_author.py; it wins over the regenerated step of the "
+        "same name)"
+    ) in words(out), out
 
 
 def test_a_gap_in_the_numbers_is_refused_naming_it(project, pkg, capsys):

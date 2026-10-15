@@ -148,7 +148,7 @@ def test_new_and_check_name_the_migrations_directory(project, pkg, capsys):
 
     code, out, _ = cli(capsys, "new", "initial")
     assert code == 0
-    assert out.splitlines()[:2] == [DIRECTORY_LINE, "migrations/0001_initial/"]
+    assert out.splitlines()[:2] == [DIRECTORY_LINE, "ok Wrote migrations/0001_initial/"]
 
     code, out, _ = cli(capsys, "check")
     assert (code, out) == (0, f"{DIRECTORY_LINE}\nok: models match 0001_initial\n")
@@ -165,7 +165,7 @@ def test_a_named_database_shows_its_own_directory(project, pkg, capsys):
     assert code == 0
     assert out.splitlines()[:2] == [
         "main · migrations/main",
-        "migrations/main/0001_initial/",
+        "ok Wrote migrations/main/0001_initial/",
     ]
 
     code, out, _ = cli(capsys, "check")
