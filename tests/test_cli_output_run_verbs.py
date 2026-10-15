@@ -31,8 +31,7 @@ import sys
 
 import pytest
 
-from ferro.cli.output import RERECORD_NOTE
-from ferro.migrations import runner
+from ferro.migrations import baseline, runner
 from ferro.migrations.rerecord import RerecordReport
 from tests.test_chunked_steps import project_with_authors
 from tests.test_cli_output_new_check import (  # noqa: F401 - fixtures
@@ -42,6 +41,7 @@ from tests.test_cli_output_new_check import (  # noqa: F401 - fixtures
 )
 from tests.test_cli_output_status_drift import sgr, tty_heading, tty_line
 from tests.test_migrate_baseline import BOTH, NOT_COMPARED, auto_migrated
+from tests.test_migrate_drift import SQUADS
 from tests.test_migrate_rerecord import edited_chunked
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     AUTHOR,
@@ -545,9 +545,7 @@ def test_plain_down_prints_the_plan_then_each_step(project, pkg, db, capsys):
 
 
 @pytest.mark.backend_matrix
-def test_tty_down_heads_the_plan_and_says_where_it_left_the_database(
-    project, pkg, db, capsys, tty
-):
+def test_tty_down_heads_the_plan_and_what_it_reverted(project, pkg, db, capsys, tty):
     with_a_data_step(project, pkg, db)
     sql_step(project, "second", 'CREATE TABLE "second" ("id" integer);\n')
     assert run("migrate", "up", "--url", db.url) == 0
@@ -573,7 +571,7 @@ def test_tty_down_heads_the_plan_and_says_where_it_left_the_database(
             "✔",
             "1;32",
             "reverted 0003_second, 0002_backfill",
-            "2 steps, now at 0001_create_author",
+            "2 steps",
         )
     )
 
@@ -640,6 +638,36 @@ def test_baseline_in_both_forms(project, pkg, db, capsys, monkeypatch):
     )
 
 
+@pytest.mark.backend_matrix
+def test_tty_baseline_that_finds_drift_heads_the_differences(
+    project, pkg, db, capsys, tty
+):
+    auto_migrated(project, pkg, db)
+    write_models(project, pkg, SQUADS)
+    new("rename_team")
+
+    code, out, err = cli(capsys, "baseline", "--url", db.url)
+
+    lines = [
+        "team table is named squad in the snapshot",
+        "idx_team_size index is named idx_squad_size in the snapshot",
+        "ck_team_size_ok check is named ck_squad_size_ok in the snapshot",
+    ]
+    if db.backend == "sqlite":
+        lines += ["ck_squad_size_ok check is missing", "ck_team_size_ok check is extra"]
+    report = asyncio.run(baseline(url=db.url))
+    warned = sgr("1;33", "▲") + sgr("1;33", " warning")
+    assert code == 4
+    assert err == "".join(f"{warned}  {warning}\n" for warning in report.warnings)
+    differences = f"{len(lines)} differences against 0003_rename_team"
+    assert out == (
+        f"{tty_line(db)}\n"
+        f"{sgr('1;31', '✘')} {sgr('1;31', differences)}\n"
+        + "".join(f"  {sgr('31', '•')} {line}\n" for line in lines)
+        + f"{sgr('1', 'nothing was recorded')}\n"
+    )
+
+
 # -- rerecord -------------------------------------------------------------------
 
 
@@ -661,12 +689,26 @@ def test_rerecord_continue_in_both_forms(project, pkg, db, capsys, monkeypatch):
     )
 
 
-@pytest.mark.parametrize("mode", ["record", "continue", "restart"])
-def test_the_rerecord_note_is_what_the_report_says(mode):
+@pytest.mark.parametrize(
+    ("mode", "note"),
+    [
+        ("record", None),
+        ("continue", "the next up continues from its cursor"),
+        (
+            "restart",
+            "its cursor and rows_done are cleared, so the next up starts from the "
+            "first row",
+        ),
+    ],
+)
+def test_a_rerecord_reports_what_it_leaves_the_next_up(mode, note):
     report = RerecordReport("0002_x/02_y.py", "a", "b", mode=mode)
-    note = RERECORD_NOTE[mode]
-    tail = f"; {note}; nothing was run" if note else "; nothing was run"
-    assert report.render().endswith(f"(sha384:a → sha384:b){tail}")
+
+    assert report.note == note
+    tail = f"; {note}" if note else ""
+    assert report.render() == (
+        f"re-recorded 0002_x/02_y.py (sha384:a → sha384:b){tail}; nothing was run"
+    )
 
 
 # -- init -----------------------------------------------------------------------

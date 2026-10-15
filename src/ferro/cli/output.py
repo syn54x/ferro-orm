@@ -795,30 +795,18 @@ def print_down_plan(out: Output, plan: DownPlan) -> None:
         out.print(line)
 
 
-def print_reverted(
-    out: Output, reverted: Sequence[AppliedStep], standing: StatusReport
-) -> None:
+def print_reverted(out: Output, reverted: Sequence[AppliedStep]) -> None:
     """A finished ``down``'s closing heading, on a TTY only: ``reverted
-    <migrations>  N steps, now at <the last migration standing>``, read
-    from ``standing`` (a partly applied one with its state), or ``now at
-    no migration``."""
+    <migrations>  N steps``. Where the database now stands is ``status``'s
+    to say: neither the plan nor the run report names the migration below
+    the lowest step reverted."""
     if out.plain:
         return
     migrations = list(dict.fromkeys(step.migration for step in reverted))
     out.heading(
         "ok",
         f"reverted {', '.join(migrations)}",
-        f"{count(len(reverted), 'step')}, now at {_now_at(standing)}",
-    )
-
-
-def _now_at(standing: StatusReport) -> str:
-    applied = [m for m in standing.migrations if m.state != "pending"]
-    if not applied:
-        return "no migration"
-    last = applied[-1]
-    return (
-        last.name if last.state.startswith("applied") else f"{last.name} ({last.state})"
+        count(len(reverted), "step"),
     )
 
 
@@ -889,16 +877,6 @@ def print_removed(out: Output, removed: list[str]) -> None:
 
 # -- rerecord -------------------------------------------------------------------
 
-RERECORD_NOTE = {
-    "record": "",
-    "continue": "the next up continues from its cursor",
-    "restart": (
-        "its cursor and rows_done are cleared, so the next up starts from the first row"
-    ),
-}
-"""What a re-record leaves the next ``up`` to do, by its mode, as the TTY
-form's note says it."""
-
 
 def print_rerecord(out: Output, report: RerecordReport) -> None:
     """What ``ferro migrate rerecord`` changed: :meth:`RerecordReport.render`
@@ -916,9 +894,8 @@ def print_rerecord(out: Output, report: RerecordReport) -> None:
     line.append(out.glyph("arrow"), style=GLYPH_STYLE["arrow"])
     line.append(f" sha384:{report.new_checksum}")
     out.print(line)
-    note = RERECORD_NOTE[report.mode]
-    if note:
-        out.print(Text(f"  {note}", style="dim"))
+    if report.note is not None:
+        out.print(Text(f"  {report.note}", style="dim"))
 
 
 # -- init -----------------------------------------------------------------------

@@ -397,7 +397,6 @@ def down(
     from ..migrations.errors import MigrationRefused
     from ..migrations.runner import DownPlan, plan_down
     from ..migrations.runner import down as run_down
-    from ..migrations.runner import status as run_status
     from .output import (
         Output,
         print_done,
@@ -448,9 +447,8 @@ def down(
         out.print("Nothing was reverted.")
     elif not report.reverted:
         print_done(out, "nothing to revert", "")
-    elif not out.plain:
-        standing = asyncio.run(run_status(settings, glob.database, url=url))
-        print_reverted(out, report.reverted, standing)
+    else:
+        print_reverted(out, report.reverted)
     return exit_codes.OK
 
 

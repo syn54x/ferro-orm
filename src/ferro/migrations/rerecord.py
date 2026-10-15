@@ -68,16 +68,23 @@ class RerecordReport:
     """Warnings taking the lock gave: the records of a migration that does
     not regenerate keep no class (ADR-0054)."""
 
-    def render(self) -> str:
-        """The line ``ferro migrate rerecord`` prints."""
-        done = {
-            "record": "",
-            "continue": "; the next up continues from its cursor",
+    @property
+    def note(self) -> str | None:
+        """What the re-record leaves the next ``up`` to do, by its mode
+        (``the next up continues from its cursor``); ``None`` for a plain
+        ``record``."""
+        return {
+            "record": None,
+            "continue": "the next up continues from its cursor",
             "restart": (
-                "; its cursor and rows_done are cleared, so the next up starts from "
+                "its cursor and rows_done are cleared, so the next up starts from "
                 "the first row"
             ),
         }[self.mode]
+
+    def render(self) -> str:
+        """The line ``ferro migrate rerecord`` prints."""
+        done = "" if self.note is None else f"; {self.note}"
         return (
             f"re-recorded {self.file} (sha384:{self.old_checksum} → "
             f"sha384:{self.new_checksum}){done}; nothing was run"
