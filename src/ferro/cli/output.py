@@ -30,7 +30,10 @@ heading, a problem's kind); colour only reinforces them. The tables below
 are the one glyph table and the one colour table every verb reads.
 
 The module reads report objects (:class:`GeneratedMigration`,
-:class:`CheckReport`, :class:`StatusReport`, :class:`DriftReport`) and prints; it never changes them and never takes a
+:class:`CheckReport`, :class:`StatusReport`, :class:`DriftReport`,
+:class:`BaselineReport`, :class:`RerecordReport`, :class:`DownPlan`) and a run's
+events (:class:`StepEvent`, :class:`RunNote`, a :class:`RunReport`'s
+:class:`StepFailure`) and prints; it never changes them and never takes a
 report's text apart.
 """
 
