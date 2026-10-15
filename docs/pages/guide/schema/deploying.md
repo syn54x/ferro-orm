@@ -6,8 +6,9 @@ Migrations reach a database in one of two ways: a deploy step runs `ferro migrat
 
 `ferro migrate check` reads the models and the migrations directory and nothing else, so it needs no database and no credentials:
 
+<!-- output: ci-check -->
 ```text
-$ ferro migrate check
+default · migrations
 ok: models match 0002_author_slug
 ```
 
@@ -33,12 +34,13 @@ repos:
 
 The deploy step applies every pending migration, in order, under the run lock:
 
+<!-- output: server-up -->
 ```text
-$ ferro migrate up
+default · sqlite:///./app.db
 0002_author_slug  01_expand           applied (0 ms)
-0002_author_slug  02_backfill_author  applied (1 ms)
+0002_author_slug  02_backfill_author  applied (0 ms)
 0002_author_slug  03_add_constraint   applied (0 ms)
-0002_author_slug  04_contract         applied (0 ms)
+0002_author_slug  04_contract         applied (1 ms)
 ```
 
 It exits 0 when it applied everything (or there was nothing to apply), 1 when it refused or a step failed; the message says why and how to go on, and the next `up` resumes at the failed step. The URL comes from `$DATABASE_URL` (or the variable the configuration's `url_env` names), or `--url`.
@@ -179,22 +181,23 @@ Two different waits apply:
 
 ## Where a database stands
 
-`ferro migrate status` reads the tracking table without a lock and changes nothing:
+`ferro migrate status` reads the tracking table without a lock and changes nothing. Here a contract step failed on a [late row](data-steps.md#when-a-late-row-arrives), so `0002_author_slug` is `partial` and the failed step carries its error:
 
+<!-- output: status-steps -->
 ```text
-$ ferro migrate status --steps
-default (sqlite) · main._ferro_migrations
-
-0001_create_author  applied
-  01_schema.up.sqlite.sql          applied  expand
-0002_author_slug    partial, 1 of 4 steps
-  01_expand.up.sqlite.sql          applied  expand
-  02_backfill_author.py            pending  expand
-  03_add_constraint.up.sqlite.sql  pending  expand
-  04_contract.up.sqlite.sql        pending  [data-dependent]  contract
+default · sqlite:///./app.db
+!! 1 failed · 1 pending  main._ferro_migrations
+  ok 0001_create_author  applied  2026-10-15 04:30Z
+      01_schema.up.sqlite.sql  applied  expand
+  ~~ 0002_author_slug    partial, 3 of 4 steps  2026-10-15 04:30Z
+      01_expand.up.sqlite.sql          applied  expand
+      02_backfill_author.py            applied  expand
+      03_add_constraint.up.sqlite.sql  applied  expand
+      04_contract.up.sqlite.sql        failed  [data-dependent]  contract
+        1 row still has NULL "slug" in "author"; run ferro migrate down --to 0002:01 then ferro migrate up to re-run the backfill
 ```
 
-With `--steps`, each step's [class](#rolling-deploys-and-the-two-release-contract) follows its flags.
+With `--steps`, each step's [class](#rolling-deploys-and-the-two-release-contract) follows its flags. Without it, only the migrations that need a look list their steps.
 
 | Exit code | Meaning |
 | :--- | :--- |
@@ -216,16 +219,24 @@ Every step record holds the checksum of the file this database ran (the up file,
 | Never run | Free to edit. |
 | `ir.json`, the schema snapshot | Never re-recorded: later migrations and historical models are built from it. Restore the file. |
 
+`ferro migrate up` refuses an applied step whose file was edited, and says what to do:
+
+<!-- output: edited-up -->
 ```text
-$ ferro migrate up
+default · sqlite:///./app.db
 ferro migrate: 0001_create_author/01_schema.up.sqlite.sql was edited after it was applied to this database.
-  applied   sha384:3dbe7e62…  (2026-10-07 15:55 UTC)
-  on disk   sha384:db7cd673…
+  applied   sha384:54bff2e2e0d1888fbb5345bd7e14b23b7c7655239d2c135bbcbe5c6208d2e33a6efc69481d2c6d1d38af59928353af73  (2026-10-15 04:30 UTC)
+  on disk   sha384:945a3b7670384946155bbbe7e25fc6a3d2f418e245587351c4684a24a6b6c7b95b9f08ceae04ef0ff33bb61176dcfd63
 An applied step is never run again. Restore the file, or accept a deliberate edit with
 `ferro migrate rerecord 0001:01`. Nothing was applied.
+```
 
-$ ferro migrate rerecord 0001:01
-re-recorded 0001_create_author/01_schema.up.sqlite.sql (sha384:3dbe7e62… → sha384:db7cd673…); nothing was run
+`ferro migrate rerecord 0001:01` accepts the edit:
+
+<!-- output: edited-rerecord -->
+```text
+default · sqlite:///./app.db
+re-recorded 0001_create_author/01_schema.up.sqlite.sql (sha384:54bff2e2e0d1888fbb5345bd7e14b23b7c7655239d2c135bbcbe5c6208d2e33a6efc69481d2c6d1d38af59928353af73 → sha384:945a3b7670384946155bbbe7e25fc6a3d2f418e245587351c4684a24a6b6c7b95b9f08ceae04ef0ff33bb61176dcfd63); nothing was run
 ```
 
 `rerecord` changes the record and nothing else. `--continue` is offered only while the edited query pages over the same order-key columns as the cursor; otherwise the cursor is no position in the new query and only `--restart` is accepted. A fixed `down` file or another dialect's rendering is not an edit to this database's record.

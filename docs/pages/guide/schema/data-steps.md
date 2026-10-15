@@ -14,25 +14,30 @@ Some changes need more than DDL. Add a required `slug` to a table that already h
     --8<-- "docs/examples/migrations_backfill_annotated.py:models"
     ```
 
+`ferro migrate new author_slug` writes the migration in four steps and says what is left for you:
+
+<!-- output: backfill-new -->
 ```text
-$ ferro migrate new author_slug
-migrations/0002_author_slug/
-  01_expand.up.postgres.sql
-  01_expand.down.postgres.sql
-  01_expand.up.sqlite.sql
-  01_expand.down.sqlite.sql
-  02_backfill_author.py
-  03_add_constraint.up.postgres.sql
-  03_add_constraint.down.postgres.sql
-  03_add_constraint.up.sqlite.sql
-  03_add_constraint.down.sqlite.sql
-  04_contract.up.postgres.sql
-  04_contract.down.postgres.sql
-  04_contract.up.sqlite.sql
-  04_contract.down.sqlite.sql
-  ir.json
-changed models: Author
-02_backfill_author.py needs writing where it says todo(...); if no author needs a value, delete 0002_author_slug/ and run: ferro migrate new author_slug --no-backfill author.slug
+default · migrations
+ok Wrote migrations/0002_author_slug/
+  01_expand.up.postgres.sql            schema step, up (postgres)
+  01_expand.down.postgres.sql          schema step, down (postgres)
+  01_expand.up.sqlite.sql              schema step, up (sqlite)
+  01_expand.down.sqlite.sql            schema step, down (sqlite)
+  02_backfill_author.py                backfill
+  03_add_constraint.up.postgres.sql    schema step, up (postgres)
+  03_add_constraint.down.postgres.sql  schema step, down (postgres)
+  03_add_constraint.up.sqlite.sql      schema step, up (sqlite)
+  03_add_constraint.down.sqlite.sql    schema step, down (sqlite)
+  04_contract.up.postgres.sql          schema step, up (postgres)
+  04_contract.down.postgres.sql        schema step, down (postgres)
+  04_contract.up.sqlite.sql            schema step, up (sqlite)
+  04_contract.down.sqlite.sql          schema step, down (sqlite)
+  ir.json                              snapshot
+
+  1 changed model
+    Author
+  - 02_backfill_author.py needs writing where it says todo(...); if no author needs a value, delete 0002_author_slug/ and run: ferro migrate new author_slug --no-backfill author.slug
 ```
 
 This whole page runs in [`docs/examples/migrations_backfill.py`](https://github.com/syn54x/ferro-orm/blob/main/docs/examples/migrations_backfill.py): the guard refusing, the backfill written, the recovery from a late row.
@@ -107,8 +112,11 @@ def down(ctx): ...
 
 Until you replace the `todo(...)`, `up` refuses the migration before running any of it, naming the file and line:
 
+`ferro migrate up` prints:
+
+<!-- output: backfill-unwritten -->
 ```text
-$ ferro migrate up
+default · sqlite:///./app.db
 0002_author_slug/02_backfill_author.py:15: not written yet: the slug for an existing author
 Write each step where it says todo(...), then run `ferro migrate up` again. Nothing was applied.
 ```
@@ -119,10 +127,11 @@ Write the value in place of the `todo(...)`, then run `up` again:
 author.slug = author.name.lower().replace(" ", "-")
 ```
 
+<!-- output: backfill-up -->
 ```text
-$ ferro migrate up
+default · sqlite:///./app.db
 0002_author_slug  01_expand           applied (0 ms)
-0002_author_slug  02_backfill_author  applied (1 ms)
+0002_author_slug  02_backfill_author  applied (2 ms)
 0002_author_slug  03_add_constraint   applied (0 ms)
 0002_author_slug  04_contract         applied (0 ms)
 ```
@@ -239,10 +248,13 @@ It has no way to open, commit or leave the step's transaction. A nested `ferro.t
 
 A backfill fills the rows that exist when it runs. On a live database, a writer that does not know the column yet (code from before this release) can insert a `NULL` after the backfill and before the contract. The contract then fails loudly and says how to recover:
 
+`ferro migrate up` applies the first three steps and stops at the contract:
+
+<!-- output: late-row-up -->
 ```text
-$ ferro migrate up
+default · sqlite:///./app.db
 0002_author_slug  01_expand           applied (0 ms)
-0002_author_slug  02_backfill_author  applied (1 ms)
+0002_author_slug  02_backfill_author  applied (0 ms)
 0002_author_slug  03_add_constraint   applied (0 ms)
 ferro migrate: 0002_author_slug/04_contract.up.sqlite.sql failed: 1 row still has NULL "slug" in "author"; run ferro migrate down --to 0002:01 then ferro migrate up to re-run the backfill
 The step was rolled back; fix the file or the database and run `ferro migrate up` again to resume at it. Nothing after it ran.
@@ -250,14 +262,28 @@ The step was rolled back; fix the file or the database and run `ferro migrate up
 
 `down --to 0002:01` leaves the expand step applied and reverts the rest; `up` re-runs the backfill (which selects only the rows still missing a value) and the contract:
 
+`ferro migrate down --to 0002:01 --yes` reverts what the migration did after its first step:
+
+<!-- output: late-row-down -->
 ```text
-$ ferro migrate down --to 0002:01 --yes
+default · sqlite:///./app.db
 down reverts, in this order:
   0002_author_slug  04_contract  (nothing to reverse: its up never finished, and a transactional step that does not finish leaves nothing behind)
   0002_author_slug  03_add_constraint
   0002_author_slug  02_backfill_author  (nothing to reverse: 01_expand.down.sql drops the column)
-...
-$ ferro migrate up
+0002_author_slug  04_contract         nothing to reverse: its up never finished, and a transactional step that does not finish leaves nothing behind
+0002_author_slug  03_add_constraint   reverted (0 ms)
+0002_author_slug  02_backfill_author  nothing to reverse: 01_expand.down.sql drops the column
+```
+
+Then `ferro migrate up` runs the rest again:
+
+<!-- output: late-row-resume -->
+```text
+default · sqlite:///./app.db
+0002_author_slug  02_backfill_author  applied (0 ms)
+0002_author_slug  03_add_constraint   applied (0 ms)
+0002_author_slug  04_contract         applied (0 ms)
 ```
 
 On Postgres the add-constraint step already refuses new `NULL`s, so the window is between the backfill and that step. To close it entirely, ship the change as two releases: see [the two-release contract](deploying.md#rolling-deploys-and-the-two-release-contract).
