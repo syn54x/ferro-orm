@@ -337,6 +337,12 @@ class Output:
         for line in lines:
             self.print(line, err=True)
 
+    def refusal(self, heading: str, sentence: str) -> None:
+        """A verb's refusal, on stderr: the sentence as it is, under a red
+        ``heading`` naming what refused (``drift refused``) on a TTY, alone
+        in the plain form. The one refusal path every verb prints through."""
+        self.problems(heading, [sentence])
+
 
 def _ascii_only(console: Console) -> bool:
     """The one answer to "ASCII only?": the console's stream cannot encode
@@ -558,7 +564,8 @@ def _status_title(report: StatusReport) -> tuple[str, str]:
     """The heading's glyph key and its counts (``1 failed · 2 pending · 1
     ahead``): the migrations with a step in each unfinished state, with an
     edited applied step, with a step still to apply, and the applied
-    migrations the directory lacks. Everything applied: ``N applied``."""
+    migrations the directory lacks. A refusal with nothing to count:
+    ``needs attention``. Everything applied: ``N applied``."""
 
     def having(state: str) -> int:
         return sum(
@@ -575,8 +582,10 @@ def _status_title(report: StatusReport) -> tuple[str, str]:
         (len(report.ahead), "ahead"),
     ]
     title = " · ".join(f"{n} {word}" for n, word in counts if n)
-    if report.needs_attention:
-        return "warning", title
+    if report.needs_attention or (report.refusal is not None and not title):
+        # A refusal with nothing to count (a directory status cannot read,
+        # a newer tracking format) still heads the report.
+        return "warning", title or "needs attention"
     if report.pending:
         return "pending", title
     return "ok", f"{len(report.migrations)} applied"
@@ -657,14 +666,15 @@ def _status_steps(out: Output, migration: MigrationStatus, *, steps: bool) -> No
 
 def print_drift(out: Output, report: DriftReport) -> None:
     """What ``ferro migrate drift`` found. Its warnings first, on stderr;
-    then, when it refused, the refusal sentence on stderr as it is; else
+    then, when it refused, the refusal sentence on stderr as it is (under a
+    red ``drift refused`` heading on a TTY, :meth:`Output.refusal`); else
     ``no drift against NNNN`` (the plain one-liner, an ok heading on a TTY)
     or ``N differences against NNNN`` and one bullet per finding, never
     collapsed."""
     for warning in report.warnings:
         out.warning(warning)
     if report.refusal is not None:
-        out.print(report.refusal, err=True)
+        out.refusal("drift refused", report.refusal)
         return
     if report.clean:
         if out.plain:

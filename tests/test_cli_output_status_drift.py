@@ -272,6 +272,38 @@ def test_plain_status_a_database_ahead_of_the_directory(project, pkg, db, capsys
     assert err == ""
 
 
+def unreadable_directory(project, pkg, db) -> None:
+    """Both migrations applied, then an empty ``0003_empty/`` in the
+    directory: status cannot read the directory, so it lists nothing and
+    only the refusal says why."""
+    two_applied(project, pkg, db)
+    (migrations(project) / "0003_empty").mkdir()
+
+
+@pytest.mark.backend_matrix
+def test_plain_status_with_only_a_refusal_heads_it_needs_attention(
+    project, pkg, db, capsys
+):
+    unreadable_directory(project, pkg, db)
+    doc = document(capsys, db)
+    assert doc["migrations"] == [] and doc["ahead"] == []
+    refusal = doc["refusal"]
+    assert refusal is not None
+
+    code, out, err = cli(capsys, "status", "--url", db.url)
+
+    assert code == 4
+    shown = "".join(f"  {line}\n" for line in refusal.splitlines())
+    assert out == (
+        f"{db.line}\n"
+        f"!! needs attention  {table(db)}\n"
+        "\n"
+        "xx needs attention\n"
+        f"{shown}"
+    )
+    assert err == ""
+
+
 @pytest.mark.backend_matrix
 def test_plain_status_a_baseline(project, pkg, db, capsys):
     auto_migrated(project, pkg, db)
@@ -509,6 +541,25 @@ def test_tty_status_a_database_ahead_of_the_directory(project, pkg, db, capsys, 
 
 
 @pytest.mark.backend_matrix
+def test_tty_status_with_only_a_refusal_heads_it_needs_attention(
+    project, pkg, db, capsys, tty
+):
+    unreadable_directory(project, pkg, db)
+    doc = document(capsys, db)
+
+    code, out, _ = cli(capsys, "status", "--url", db.url)
+
+    assert code == 4
+    assert out == (
+        f"{tty_line(db)}\n"
+        + tty_heading("▲", "1;33", "needs attention", table(db))
+        + "\n"
+        f"{sgr('1;31', '✘')} {sgr('1;31', 'needs attention')}\n"
+        + "".join(f"  {line}\n" for line in doc["refusal"].splitlines())
+    )
+
+
+@pytest.mark.backend_matrix
 def test_no_color_keeps_the_terminal_layout_without_escapes(
     project, pkg, db, capsys, tty, monkeypatch
 ):
@@ -572,7 +623,10 @@ def test_tty_drift_refusal_is_the_unchanged_sentence(project, pkg, db, capsys, t
     code, out, err = cli(capsys, "drift", "--url", db.url)
 
     assert (code, out) == (4, f"{tty_line(db)}\n")
-    assert err == f"{drift_api(db).refusal}\n"
+    assert err == (
+        f"{sgr('1;31', '✘')} {sgr('1;31', 'drift refused')}\n"
+        f"{drift_api(db).refusal}\n"
+    )
 
 
 @pytest.mark.postgres_only
