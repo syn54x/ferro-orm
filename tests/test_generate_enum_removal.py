@@ -178,7 +178,7 @@ def test_d2_a_removed_label_is_backfilled_then_contracted_and_round_trips(
     capsys.readouterr()
     new("drop_canceled")
     out = capsys.readouterr().out
-    assert "removed enum labels: rmlorderstatus.canceled" in out, out
+    assert "\n  1 removed enum label\n    rmlorderstatus.canceled\n" in out, out
     migration = migration_dir(project, 2)
 
     assert listing(migration) == sorted(

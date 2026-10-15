@@ -300,7 +300,7 @@ def test_deleting_the_member_and_the_declaration_is_the_existing_removal(
 
     new("drop_canceled")
 
-    assert "removed enum labels: rmlorderstatus.canceled" in capsys.readouterr().out
+    assert "\n  1 removed enum label\n    rmlorderstatus.canceled\n" in capsys.readouterr().out
     migration = migration_dir(project, 2)
     write_value(migration, "01_backfill_rmlorder.py", '"refunded"')
     assert run("migrate", "up", "--url", db.url) == 0
