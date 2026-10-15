@@ -349,11 +349,13 @@ def print_new(
     if migration.summary or migration.notes:
         out.print()
     for change in migration.summary.changes:
-        noun = change.kind.removesuffix("s")
-        label = f"{len(change.names)} {change.verb} {noun}"
-        if len(change.names) != 1:
-            label += "s"
-        out.names(label, change.names, verb=change.verb, verbose=verbose)
+        noun = f"{change.verb} {change.kind.removesuffix('s')}"
+        out.names(
+            count(len(change.names), noun),
+            change.names,
+            verb=change.verb,
+            verbose=verbose,
+        )
     for note in migration.notes:
         out.note(note)
     for warning in migration.warnings:
