@@ -316,7 +316,7 @@ A *migration* or *step* the project's migrations directory holds and a database'
 _Avoid_: Unapplied, outstanding, out of date
 
 **Squash**:
-Replacing a run of *migrations* at the head of the directory with the one migration the generator would have written across them: planned once from the *schema snapshot* below the first to the snapshot of the last, never by stitching their steps together. The replaced migrations' *data steps* and hand-written SQL steps are carried into it in order; their DDL is regenerated. A squash reads snapshots, never the models in the codebase, and never opens a database.
+Replacing a run of *migrations* at the head of the directory with the one migration the generator would have written across them: planned once from the *schema snapshot* below the first to the snapshot of the last, never by stitching their steps together. The replaced migrations' *data steps* and hand-written SQL steps are carried into it in order, except a generated *backfill* still byte for byte as the generator scaffolded it that the squashed plan does not scaffold again, which is dropped with a note; their DDL is regenerated. A squash reads snapshots, never the models in the codebase, and never opens a database.
 _Avoid_: Merge, collapse, combine, flatten
 
 **Witness** (of a squash):
