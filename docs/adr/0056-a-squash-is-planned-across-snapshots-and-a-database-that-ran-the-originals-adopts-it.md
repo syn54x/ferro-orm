@@ -25,6 +25,8 @@ The run is always a tail of the directory, `--from NNNN[_name]` through the head
 
 Every data step and hand-written SQL step of the run is carried in chain order, byte for byte, placed by `--replace`'s rule (a data step before the contract, a SQL step before the data steps or last; a carried step wins over a rescaffolded namesake) and marked `carried, review it`, since a step written after an intermediate contract now runs before the one contract. The squash takes `--replace`'s four options. A name that existed only inside the run (a table, column, enum label or constraint the run added and then removed) is a refusal when a carried data step's declaration (ADR-0035: its model, and a chunked step's query and order keys) names it, with the fix named (delete the step, or start the range after its migration), and a per-name note in the output otherwise, because a name-level fact cannot be tied to a step the squash cannot read. An unwritten step is carried and listed as still needing writing; the squashed migration refuses to load until it is written, as today.
 
+Amended 2026-10-18: a carried step that is still the generator's unwritten scaffold is dropped with a note when the squashed plan does not re-scaffold it; a step with any hand-written byte is carried.
+
 `squash` and `--replace` are one mechanism (`read_replacing` and the generator's `carry`, generalised from one migration to a tail). They differ in what they read, models against snapshots, and in adoption: a replacement is reverted with the files that went up; a squash is adopted.
 
 ## The run's rename hints are composed into the squashed snapshot
