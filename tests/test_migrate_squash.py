@@ -620,6 +620,83 @@ def test_a_run_that_does_not_reach_the_head_is_refused_naming_both_fixes(
     assert tree(project) == before
 
 
+LEDGER = """
+
+class Ledger(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    total: int = 0
+"""
+
+
+def two_branches_at_0002(project: Path, pkg: str, *, add_bio: bool = False) -> None:
+    """``0001_create_author``; main's ``0002_other`` creates ``ledger``; the
+    epic's ``0002_add_tmp``, generated without it, adds ``tmp`` (and with
+    ``add_bio`` its ``0003_add_bio`` adds ``bio``)."""
+    write_config(project, pkg)
+    write_models(project, pkg, AUTHOR)
+    new("create_author")
+    write_models(project, pkg, AUTHOR + LEDGER)
+    new("other")
+    hidden = migrations(project) / "_0002_other"
+    (migrations(project) / "0002_other").rename(hidden)
+    write_models(project, pkg, TMP)
+    new("add_tmp")
+    if add_bio:
+        write_models(project, pkg, TMP_BIO)
+        new("add_bio")
+    hidden.rename(migrations(project) / "0002_other")
+
+
+SIBLING_REFUSAL = (
+    "ferro migrate squash: 0002_other shares 0002_add_tmp's number and is not in "
+    "the range: two branches each generated 0002. Regenerate one on top of the "
+    "other first (ferro migrate new NAME --replace 0002_other, or --replace "
+    "0002_add_tmp), then squash. Nothing was written.\n"
+)
+
+
+def test_a_sibling_at_the_froms_number_is_refused_not_planned_from(
+    project, pkg, capsys
+):
+    # Panel F1 on #690: the squash took 0002_other as its parent and wrote
+    # 0003_epic, whose DDL dropped ledger.
+    two_branches_at_0002(project, pkg)
+    before = tree(project)
+
+    err = refused(capsys, "epic", "--from", "0002_add_tmp")
+
+    assert err == SIBLING_REFUSAL, err
+    assert tree(project) == before
+    assert hidden_entries(project) == [".gitattributes"]
+
+
+def test_a_sibling_below_a_longer_run_is_refused_the_same_way(project, pkg, capsys):
+    two_branches_at_0002(project, pkg, add_bio=True)
+    before = tree(project)
+
+    err = refused(capsys, "epic", "--from", "0002_add_tmp")
+
+    assert err == SIBLING_REFUSAL, err
+    assert tree(project) == before
+    assert hidden_entries(project) == [".gitattributes"]
+
+
+def test_the_generation_api_raises_the_sibling_refusal(project, pkg):
+    from ferro import FerroSettings
+    from ferro.migrations.generate import squash as generate_squash
+    from ferro.migrations.layout import MigrationsDirectoryError
+
+    two_branches_at_0002(project, pkg)
+    before = tree(project)
+
+    with pytest.raises(MigrationsDirectoryError) as raised:
+        generate_squash(FerroSettings().database(None), "epic", "0002_add_tmp")
+
+    assert str(raised.value) + "\n" == SIBLING_REFUSAL
+    assert tree(project) == before
+    assert hidden_entries(project) == [".gitattributes"]
+
+
 def test_an_empty_squash_is_refused_naming_the_directories_to_delete(
     project, pkg, capsys
 ):
