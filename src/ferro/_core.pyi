@@ -281,7 +281,9 @@ def _read_migrations_dir(
     share, and a migration a later one chains from.
 
     With ``run_from`` (same target forms), the directory below that migration
-    plus the run from it through the head, in chain order, as ``"replaced"``.
+    plus the run from it in chain order as ``"replaced"``, following snapshot
+    links (it need not reach the head), and ``"reaches_head"`` (bool) and
+    ``"off_run"`` (the later ``NNNN_<name>`` migrations the run leaves).
     Naming both ``replacing`` and ``run_from`` raises ``ValueError``.
     """
     ...
