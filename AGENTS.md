@@ -155,7 +155,7 @@ For a single model, every emitter must agree on:
     pass-side parity pin. The item is carried by pins **(e)** and **(f)**
     below.
 
-### The seven pins
+### The nine pins
 
 `tests/test_cross_emitter_parity.py` pins the migrations door, the bridge and
 the pass itself against the one planner over every casebook change
@@ -190,7 +190,21 @@ on both dialects:
   `schema` statements equal `_core._plan_from_ir(..., render=True)` for the
   same live read, grouped by table (or enum type) and in order within each,
   the create pass standing in for each `AddTable`; its warnings equal the
-  plan's reports by kind and subject, never by sentence.
+  plan's reports by kind and subject, never by sentence.;
+- **(h)** a squash is `new` across its ends: on a copy of the migrations
+  directory, `ferro migrate squash NAME --from 0001` writes the one `0001`
+  that `ferro migrate new NAME` writes from the after models alone, file for
+  file and byte for byte, bar `ir.json`, whose payload is the same once the
+  squash's witness and the composed rename hints are removed;
+- **(i)** an adopted database is the squashed one: a database taken through
+  `0001` and `0002` and then adopted by `ferro migrate up` against the squashed
+  directory (it runs no statement) has the same live schema as one that ran
+  the squashed `0001` from empty, reading every fact pin (e) reads (columns,
+  types, nullability, indexes, constraints, policies, and the server default
+  of every column, `column_defaults`), the same `_ferro_migrations` rows bar
+  origin, `ferro_version` and times, no drift on either, and
+  `ferro migrate down --all` leaves both with no table of the models and no
+  record.
 
 A pin that says "the same live schema" must list the catalog facts it reads,
 because a fact it does not read is a gap it cannot see. Pin (e) compared
@@ -227,7 +241,7 @@ Phantom diffs are the canonical symptom that this invariant has been broken.
   table_lower, col_name)` and the helpers in `composite_index_name` /
   `composite_unique_index_name`.
 - `tests/test_cross_emitter_parity.py` holds the bridge sentinel (autogenerate
-  against an auto-migrated database is empty) and the seven pins; `tests/test_db_type_cross_emitter_parity.py` pins every type token;
+  against an auto-migrated database is empty) and the nine pins; `tests/test_db_type_cross_emitter_parity.py` pins every type token;
   `tests/test_alembic_autogenerate.py` and `tests/test_schema_constraints.py`
   pin the names (`test_index_name_matches_rust_runtime_*`).
 - `docs/solutions/patterns/cross-emitter-ddl-parity.md` documents the rule and
@@ -258,7 +272,7 @@ If you add a new schema feature (e.g. partial indexes, exclusion constraints):
    `MigrationOp` and render it in `Plan::render`, so every door gets it in the
    same PR; give the bridge's `translate.py` its op (Alembic's own, or the
    pass's statement).
-3. Add a casebook case (`tests/_casebook.py`) so pins (a)–(g) cover it, and a
+3. Add a casebook case (`tests/_casebook.py`) so pins (a)–(i) cover it, and a
    parity test that asserts the names match.
 4. Do not edit `CHANGELOG.md` manually — release tooling records entries at
    release time (see I-10).
