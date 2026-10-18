@@ -177,6 +177,7 @@ _STATES = (
         attention=True,
     ),
     _State("applied_baseline", "applied (baseline)", applied=True, whole=True),
+    _State("applied_adopted", "applied (adopted)", applied=True, whole=True),
     _State("pending", "pending", whole=True),
     _State("running", "running", unfinished=True, running=True),
     _State("failed", "failed", unfinished=True, attention=True),
@@ -210,8 +211,8 @@ class StepStatus:
     """The file this database executes (or executed)."""
     state: str
     """``applied``, ``applied (different checksum)``, ``applied
-    (baseline)``, ``pending``, ``running``, ``failed``, ``interrupted`` or
-    ``reverting``."""
+    (baseline)``, ``applied (adopted)``, ``pending``, ``running``,
+    ``failed``, ``interrupted`` or ``reverting``."""
     error: str | None = None
     """The last attempt's error, when recorded."""
     applied_checksum: str | None = None
@@ -241,7 +242,8 @@ class StepStatus:
     @property
     def applied(self) -> bool:
         """The step has a finished step record (``applied``, ``applied
-        (different checksum)`` or ``applied (baseline)``)."""
+        (different checksum)``, ``applied (baseline)`` or ``applied
+        (adopted)``)."""
         return _state(shown=self.state).applied
 
     @property
@@ -323,7 +325,8 @@ class MigrationStatus:
 
     @property
     def state(self) -> str:
-        """``applied`` / ``applied (baseline)`` / ``pending`` when every
+        """``applied`` / ``applied (baseline)`` / ``applied (adopted)`` /
+        ``pending`` when every
         step agrees; ``running`` while a run is in it; ``applied (different
         checksum)`` when every step is applied and one changed; else
         ``partial, X of N steps``."""

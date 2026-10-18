@@ -36,17 +36,18 @@ use crate::ddl_exec::{
 use crate::state::TransactionConnection;
 use ferro_ddl_lowering::{Dialect, quote_ident};
 use ferro_migrate::run_plan::{
-    AllowAhead, Direction, ExecMode, HeldDirectory, OrderKeys, Origin, PlannedStep,
+    AdoptionPlan, AllowAhead, Direction, ExecMode, HeldDirectory, OrderKeys, Origin, PlannedStep,
     RebuildExpectation, RecordKind, RerecordAction, RerecordMode, RunPlan, RunStatus, StepClass,
-    StepRecord, TRACKING_FORMAT, TRACKING_MINOR, Unclassified, check_adoption, check_format,
-    rerecord_plan, run_lock_key, run_status, split_statements, unclassified,
+    StepRecord, TRACKING_FORMAT, TRACKING_MINOR, Unclassified, adoption, adoption_data_steps,
+    check_adoption, check_format, rerecord_plan, run_lock_key, run_status, split_statements,
+    unclassified,
 };
 use ferro_migrate::snapshot::encode_checksum;
 use ferro_schema_ir::SchemaModel;
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
 use sqlx::{Connection, Row};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -2121,8 +2122,60 @@ impl Tracked {
         if let Some(refusal) = &self.state.refusal {
             return Err(refused(refusal.clone()));
         }
+        self.plan_over(&self.state.records, direction, allow_ahead, order_keys)
+            .await
+    }
+
+    /// [`Tracked::plan`] as the run would plan once it had adopted
+    /// (ADR-0056): over the records [`adoption`] leaves, each data step of an
+    /// adopted squash under the kind `kinds` holds for it. What a `down`
+    /// shows before it takes the lock, since the run adopts first. Nothing
+    /// is written.
+    ///
+    /// # Errors
+    /// [`Tracked::plan`]'s, and [`adoption`]'s partial-witness refusal.
+    pub async fn plan_adopted(
+        &self,
+        direction: Direction,
+        allow_ahead: AllowAhead,
+        order_keys: Option<&OrderKeys>,
+        kinds: &BTreeMap<(u16, u8), RecordKind>,
+    ) -> PyResult<RunPlan> {
+        if let Some(refusal) = &self.state.refusal {
+            return Err(refused(refusal.clone()));
+        }
         let held = self.held()?;
-        let records = &self.state.records;
+        let adopted = adoption(
+            &held.dir,
+            &self.state.records,
+            self.dialect(),
+            kinds,
+            &now_iso(),
+            FERRO_VERSION,
+        )
+        .map_err(|refusal| refused_by(&refusal))?;
+        self.plan_over(&adopted.records, direction, allow_ahead, order_keys)
+            .await
+    }
+
+    /// Each data step of every squash a run would adopt on these records,
+    /// `(migration, step, file)` ([`adoption_data_steps`]); empty when the
+    /// directory does not read.
+    pub fn adoption_data_steps(&self) -> Vec<(u16, u8, PathBuf)> {
+        match self.held.as_ref() {
+            Ok(held) => adoption_data_steps(&held.dir, &self.state.records),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    async fn plan_over(
+        &self,
+        records: &[StepRecord],
+        direction: Direction,
+        allow_ahead: AllowAhead,
+        order_keys: Option<&OrderKeys>,
+    ) -> PyResult<RunPlan> {
+        let held = self.held()?;
         let plan = held
             .plan(records, self.dialect(), direction, allow_ahead, order_keys)
             .map_err(|refusal| refused_by(&refusal))?;
@@ -2183,6 +2236,7 @@ impl Tracked {
             id: NEXT_LOCKED.fetch_add(1, Ordering::Relaxed),
             refresh_fault: AtomicBool::new(false),
             class_warnings: Vec::new(),
+            adopted: std::sync::OnceLock::new(),
         };
         match locked.bring_up_to_minor(classes).await {
             Ok(locked) => Ok(locked),
@@ -2192,6 +2246,52 @@ impl Tracked {
             }
         }
     }
+}
+
+/// A squash a run adopted ([`Locked::adopt`]).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct Adopted {
+    /// `NNNN_<name>` of the squash.
+    pub squash: String,
+    /// `NNNN_<name>` of each migration whose records it replaced, in chain
+    /// order: what the database had applied.
+    pub replaced: Vec<String>,
+}
+
+/// Write an adoption ([`adoption`]) in one transaction: delete every
+/// witnessed record, insert the squash's. Called under the run lock.
+///
+/// # Errors
+/// A database error, after which nothing is written.
+async fn write_adoption(
+    engine: &EngineHandle,
+    tracking_schema: Option<&str>,
+    plan: &AdoptionPlan,
+) -> PyResult<()> {
+    let dialect = engine.backend();
+    let upsert = upsert_sql(dialect, &Tracking::new(dialect, tracking_schema));
+    let mut conn = engine
+        .begin_transaction_connection()
+        .await
+        .map_err(|e| db_error("adopting the squashed migration's records", e))?;
+    let result: Result<(), sqlx::Error> = async {
+        for (migration, step) in &plan.removed {
+            let (sql, binds) = remove_record_statement(dialect, tracking_schema, *migration, *step);
+            conn.fetch_all_sql_unprepared_with_binds(&sql, &binds)
+                .await?;
+        }
+        for record in &plan.inserted {
+            conn.fetch_all_sql_unprepared_with_binds(&upsert, &record_binds(record))
+                .await?;
+        }
+        conn.commit().await
+    }
+    .await;
+    if let Err(err) = result {
+        let _ = conn.rollback().await;
+        return Err(db_error("adopting the squashed migration's records", err));
+    }
+    Ok(())
 }
 
 /// Whether a verb taking the run lock decides step classes (ADR-0054).
@@ -2228,6 +2328,9 @@ pub struct Locked {
     /// One warning per migration whose records the lock left without a class
     /// (a verb that reads none, [`ClassNeed::Defers`]).
     class_warnings: Vec<String>,
+    /// The reads as of the records re-read after [`Locked::adopt`] adopted
+    /// something (ADR-0056); unset until then.
+    adopted: std::sync::OnceLock<Tracked>,
 }
 
 /// A chunked step's position as a transition records it: the cursor
@@ -2243,8 +2346,9 @@ fn poisoned() -> PyErr {
 
 impl Locked {
     /// The reads, as of the records re-read under the lock.
+    /// After [`Locked::adopt`] swapped records, the records re-read then.
     pub fn tracked(&self) -> &Tracked {
-        &self.tracked
+        self.adopted.get().unwrap_or(&self.tracked)
     }
 
     /// This locked run's identity: a step planned by another run (or by a
@@ -2351,6 +2455,77 @@ impl Locked {
     /// reads no class ([`ClassNeed::Defers`]); empty otherwise.
     pub fn class_warnings(&self) -> &[String] {
         &self.class_warnings
+    }
+
+    /// Adopt every squash whose witness the records read under the lock
+    /// hold (ADR-0056), before the run plans: in one transaction, delete
+    /// the witnessed records and insert one finished record per step of the
+    /// squash, origin `adopted` ([`adoption`]); then re-read the records, so
+    /// [`Locked::tracked`] and the plan see them. Runs no statement of any
+    /// step. `kinds` holds each adopted data step's declared kind (its
+    /// files: [`Tracked::adoption_data_steps`]). Returns what it adopted;
+    /// nothing when there is nothing to adopt, or when the directory does
+    /// not read (the plan refuses on it).
+    ///
+    /// # Errors
+    /// `RunRefused`: the newer-format refusal, the partial-witness refusal
+    /// (nothing is written), a squash step this dialect cannot run; the
+    /// lock's refusals; `ValueError` for an adopted data step without its
+    /// kind; a database error, after which nothing is written.
+    pub async fn adopt(&self, kinds: &BTreeMap<(u16, u8), RecordKind>) -> PyResult<Vec<Adopted>> {
+        let tracked = self.tracked();
+        if let Some(refusal) = tracked.format_refusal() {
+            return Err(refused(refusal));
+        }
+        let Ok(held) = tracked.held.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let plan = adoption(
+            &held.dir,
+            tracked.records(),
+            self.dialect(),
+            kinds,
+            &now_iso(),
+            FERRO_VERSION,
+        )
+        .map_err(|refusal| refused_by(&refusal))?;
+        if plan.adoptions.is_empty() {
+            return Ok(Vec::new());
+        }
+        if let Some((migration, step, path)) = tracked
+            .adoption_data_steps()
+            .into_iter()
+            .find(|(migration, step, _)| !kinds.contains_key(&(*migration, *step)))
+        {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "adopt needs the declared kind (atomic or chunked) of data step \
+                 {migration:04}:{step:02} ({})",
+                path.display()
+            )));
+        }
+        self.ready_to_write().await?;
+        write_adoption(self.engine(), self.tracking_schema(), &plan).await?;
+        let state = read_records(self.engine(), self.tracking_schema()).await?;
+        let after = Tracked {
+            engine: Arc::clone(&tracked.engine),
+            tracking_schema: tracked.tracking_schema.clone(),
+            state,
+            held: Arc::clone(&tracked.held),
+        };
+        if self.adopted.set(after).is_err() {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(
+                "ferro migrate: this locked run adopted twice; its records were re-read after \
+                 the first adoption, so the second found records another writer left",
+            ));
+        }
+        Ok(plan
+            .adoptions
+            .into_iter()
+            .map(|a| Adopted {
+                squash: a.squash,
+                replaced: a.replaced,
+            })
+            .collect())
     }
 
     /// Release the run lock. Every write after it refuses.
@@ -2656,7 +2831,7 @@ impl Locked {
         let dialect = engine.backend();
         let tracking_schema = self.tracking_schema();
         let shown = format!("{}/{}", step.migration_name, step.file);
-        let held = self.tracked.held()?;
+        let held = self.tracked().held()?;
         let text = |step: &PlannedStep| held.text(&step.path).map_err(|r| refused_by(&r));
         let statements = if down && step.nothing_to_reverse.is_some() {
             if step.headers.nothing_to_reverse.is_some()
@@ -2877,14 +3052,14 @@ impl Locked {
     /// `RunRefused`: the newer-format refusal, the directory's, and
     /// [`plan_baseline`]'s.
     pub fn plan_baseline(&self, target: Option<&str>) -> PyResult<BaselinePlan> {
-        if let Some(refusal) = self.tracked.format_refusal() {
+        if let Some(refusal) = self.tracked().format_refusal() {
             return Err(refused(refusal));
         }
-        let held = self.tracked.held()?;
+        let held = self.tracked().held()?;
         plan_baseline_now(
             &held.dir,
-            self.tracked.records(),
-            self.tracked.dialect(),
+            self.tracked().records(),
+            self.tracked().dialect(),
             target,
             FERRO_VERSION,
         )
@@ -2948,16 +3123,16 @@ impl Locked {
         mode: RerecordMode,
         order_keys: &OrderKeys,
     ) -> PyResult<RerecordAction> {
-        if let Some(refusal) = self.tracked.format_refusal() {
+        if let Some(refusal) = self.tracked().format_refusal() {
             return Err(refused(refusal));
         }
-        let held = self.tracked.held()?;
+        let held = self.tracked().held()?;
         rerecord_plan(
             &held.dir,
-            self.tracked.records(),
+            self.tracked().records(),
             target,
             mode,
-            self.tracked.dialect(),
+            self.tracked().dialect(),
             order_keys,
         )
         .map_err(|refusal| refused_by(&refusal))
@@ -3417,13 +3592,13 @@ pub fn plan_baseline_now(
 /// `down` that reverts it: removing the baseline under them would leave
 /// applied migrations above pending ones.
 pub fn baseline_removal(records: &[StepRecord]) -> Result<Vec<(u16, u8)>, RunRefusal> {
-    let baselined = || records.iter().filter(|r| r.origin == Origin::Baseline);
+    let baselined = || records.iter().filter(|r| r.origin.is_baseline());
     let Some(floor) = baselined().max_by_key(|r| r.migration) else {
         return Ok(Vec::new());
     };
     let above: std::collections::BTreeSet<&str> = records
         .iter()
-        .filter(|r| r.origin == Origin::Run && r.migration > floor.migration)
+        .filter(|r| !r.origin.is_baseline() && r.migration > floor.migration)
         .map(|r| r.migration_name.as_str())
         .collect();
     if !above.is_empty() {
@@ -3884,6 +4059,22 @@ mod baseline_tests {
             "ferro migrate baseline --remove: 0003_add_orgs was applied by a run above the \
              baseline at 0002_add_teams. Revert it first with `ferro migrate down --to 0002`, \
              then remove the baseline. Nothing was removed."
+        );
+    }
+
+    #[test]
+    fn an_adopted_migration_above_the_baseline_blocks_its_removal_as_a_run_does() {
+        let dir = three();
+        let mut standing = records(&dir, "0002");
+        let mut above = records(&dir, "0003").remove(3);
+        above.origin = Origin::Adopted;
+        standing.push(above);
+        assert_eq!(
+            baseline_removal(&standing),
+            Err(RunRefusal::AppliedAboveBaseline {
+                above: vec!["0003_add_orgs".into()],
+                floor: "0002_add_teams".into(),
+            })
         );
     }
 }

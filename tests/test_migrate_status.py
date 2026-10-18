@@ -314,7 +314,12 @@ def test_every_core_step_state_is_read_into_where_the_database_stands():
     """A ``StepState`` the core adds without a reading here fails, rather
     than leaving drift, the harness and ``status`` to disagree about it."""
     words = step_state_words()
-    applied = {"applied", "applied_different_checksum", "applied_baseline"}
+    applied = {
+        "applied",
+        "applied_different_checksum",
+        "applied_baseline",
+        "applied_adopted",
+    }
     unfinished = {"running", "failed", "interrupted", "reverting"}
     assert set(words) == applied | unfinished | {"pending"}
     for word in words:

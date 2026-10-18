@@ -501,6 +501,39 @@ def test_baseline_on_a_database_up_migrated_is_already_tracked(project, pkg, db)
 # -- undoing a baseline, and down ------------------------------------------------------
 
 
+def test_remove_is_refused_under_an_adopted_squash_as_under_a_run(
+    project, pkg, db, capsys
+):
+    # 0003_add_orgs ran above the baseline, and was then squashed: the
+    # adopted record stands for steps a run applied (ADR-0056).
+    auto_migrated(project, pkg, db)
+    assert cli(capsys, "baseline", "--url", db.url)[0] == 0
+    write_models(project, pkg, ORGS)
+    new("add_orgs")
+    assert cli(capsys, "up", "--url", db.url)[0] == 0
+    assert cli(capsys, "squash", "orgs_epic", "--from", "0003")[0] == 0
+    code, out, _ = cli(capsys, "up", "--url", db.url)
+    assert (code, out.splitlines()[1]) == (
+        0,
+        "adopted 0003_orgs_epic: this database had applied 0003_add_orgs; "
+        "nothing was run",
+    )
+    before = db.records()
+
+    with pytest.raises(AppliedAboveBaselineError) as raised:
+        asyncio.run(remove_baseline(url=db.url))
+
+    assert raised.value.above == ["0003_orgs_epic"]
+    assert str(raised.value) == (
+        "ferro migrate baseline --remove: 0003_orgs_epic was applied by a run above "
+        "the baseline at 0002_add_teams. Revert it first with `ferro migrate down "
+        "--to 0002`, then remove the baseline. Nothing was removed."
+    )
+    assert db.records() == before
+    code, out, _ = cli(capsys, "status", "--url", db.url)
+    assert "applied (baseline)" in out and "applied (adopted)" in out, out
+
+
 def test_remove_is_refused_under_a_run_and_undoes_the_baseline_after_down(
     project, pkg, db, capsys
 ):

@@ -58,7 +58,13 @@ if TYPE_CHECKING:
     from ..migrations.layout import GeneratedMigration, GeneratedStep
     from ..migrations.report import MigrationStatus, StatusReport
     from ..migrations.rerecord import RerecordReport
-    from ..migrations.runner import AppliedStep, DownPlan, RunEvent, StepEvent
+    from ..migrations.runner import (
+        AdoptedEvent,
+        AppliedStep,
+        DownPlan,
+        RunEvent,
+        StepEvent,
+    )
 
 __all__ = [
     "CHANGE_STYLE",
@@ -71,6 +77,7 @@ __all__ = [
     "StepFileRole",
     "applied_at_short",
     "kind_of_file",
+    "print_adopted",
     "print_baseline",
     "print_changes",
     "print_check",
@@ -135,6 +142,7 @@ status`` taught. The count heading above them stays plain bold."""
 STATES: dict[str, tuple[str, str]] = {
     "applied": ("ok", "green"),
     "applied (baseline)": ("ok", "green"),
+    "applied (adopted)": ("ok", "green"),
     "reverted": ("ok", "green"),
     "pending": ("pending", "yellow"),
     "failed": ("error", "bold red"),
@@ -888,13 +896,34 @@ def print_reverted(out: Output, reverted: Sequence[AppliedStep]) -> None:
     )
 
 
+def print_adopted(out: Output, event: AdoptedEvent) -> None:
+    """A squash the run adopted, before any step (ADR-0056): the line
+    ``progress`` receives in the plain form (``adopted 0005_teams_epic: this
+    database had applied 0005_add_teams … 0009_fix_rows; nothing was
+    run``); on a TTY an ok heading, ``adopted <squash>`` bold and the rest
+    dim."""
+    if out.plain:
+        out.print(event.line())
+        return
+    names = event.replaced
+    span = names[0] if len(names) == 1 else f"{names[0]} … {names[-1]}"
+    out.heading(
+        "ok",
+        f"adopted {event.squash}",
+        f"this database had applied {span}; nothing was run",
+    )
+
+
 def print_event(out: Output, event: RunEvent) -> None:
     """One line a run says, as it says it: a finished step through
-    :func:`print_step` at the run's widths; any other line as it is."""
-    from ..migrations.runner import StepEvent
+    :func:`print_step` at the run's widths, an adopted squash through
+    :func:`print_adopted`; any other line as it is."""
+    from ..migrations.runner import AdoptedEvent, StepEvent
 
     if isinstance(event, StepEvent):
         print_step(out, event, name_width=event.name_width, stem_width=event.stem_width)
+    elif isinstance(event, AdoptedEvent):
+        print_adopted(out, event)
     else:
         out.print(event.text)
 
