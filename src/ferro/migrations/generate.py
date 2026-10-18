@@ -855,8 +855,9 @@ def _shared_number(first: str, sibling: str) -> str:
     return (
         f"ferro migrate squash: {sibling} shares {first}'s number and is not in "
         f"the range: two branches each generated {first[:4]}. Regenerate one on "
-        f"top of the other first (ferro migrate new NAME --replace {sibling}, or "
-        f"--replace {first}), then squash. Nothing was written."
+        f"top of the other first (ferro migrate new {sibling[5:]} --replace "
+        f"{sibling}, or ferro migrate new {first[5:]} --replace {first}), then "
+        f"squash. Nothing was written."
     )
 
 

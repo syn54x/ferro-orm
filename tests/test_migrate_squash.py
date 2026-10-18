@@ -710,8 +710,8 @@ def two_branches_at_0002(project: Path, pkg: str, *, add_bio: bool = False) -> N
 SIBLING_REFUSAL = (
     "ferro migrate squash: 0002_other shares 0002_add_tmp's number and is not in "
     "the range: two branches each generated 0002. Regenerate one on top of the "
-    "other first (ferro migrate new NAME --replace 0002_other, or --replace "
-    "0002_add_tmp), then squash. Nothing was written.\n"
+    "other first (ferro migrate new other --replace 0002_other, or ferro migrate "
+    "new add_tmp --replace 0002_add_tmp), then squash. Nothing was written.\n"
 )
 
 
