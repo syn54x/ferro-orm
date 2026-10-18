@@ -365,7 +365,7 @@ pub enum DirectoryError {
         /// by one rename, so present means complete.
         complete: bool,
     },
-    /// The run a `ferro migrate squash` set aside, one directory at a time,
+    /// The range a `ferro migrate squash` set aside, one directory at a time,
     /// under one hidden name naming both ends and the replacement
     /// (`.<first>..<last>.<replacement>.squashed`), and never deleted: the
     /// squash was killed between moving the first original and deleting the
@@ -373,9 +373,9 @@ pub enum DirectoryError {
     SquashedAside {
         /// The hidden directory.
         aside: PathBuf,
-        /// The run's first migration (`NNNN_<name>`).
+        /// The range's first migration (`NNNN_<name>`).
         first: String,
-        /// The run's last migration (`NNNN_<name>`).
+        /// The range's last migration (`NNNN_<name>`).
         last: String,
         /// The squashed migration's directory name (`NNNN_<name>`).
         replacement: String,
@@ -607,14 +607,14 @@ impl std::fmt::Display for DirectoryError {
             } => {
                 let name = split_numbered(replacement, 4)
                     .map_or_else(|| replacement.clone(), |(_, name)| name);
-                let run = if first == last {
+                let range = if first == last {
                     first.clone()
                 } else {
                     format!("{first} through {last}")
                 };
                 write!(
                     f,
-                    "{} holds {run}, set aside by an interrupted `ferro migrate squash \
+                    "{} holds {range}, set aside by an interrupted `ferro migrate squash \
                      {name} --from {first}`; ",
                     show(aside)
                 )?;
@@ -906,7 +906,7 @@ impl MigrationsDir {
     /// replaced number (two branches each generated it); the replaced
     /// migration's own parent link is not checked, since its parent moving
     /// under it is why it is replaced. It shares its target resolution with
-    /// [`MigrationsDir::read_run`], and refuses what a run of more than one
+    /// [`MigrationsDir::read_range`], and refuses what a range of more than one
     /// would hold.
     ///
     /// # Errors
@@ -938,44 +938,44 @@ impl MigrationsDir {
 
     /// Read the migrations directory at `path` for a squash: the directory
     /// below the migration `from` names, read and verified as
-    /// [`MigrationsDir::read`] reads it, and the run that starts there, each
+    /// [`MigrationsDir::read`] reads it, and the range that starts there, each
     /// migration read whole. `from` is `NNNN_<name>`, or `NNNN` when one
     /// migration carries the number. A migration at `from`'s number other
     /// than `from` is a sibling (two branches each generated the number): no
-    /// run descends from it, so it is never below the run, and
-    /// [`Run::siblings`] names it for the caller to refuse. The unchecked
-    /// parent link of the run's first migration is
+    /// range descends from it, so it is never below the range, and
+    /// [`Range::siblings`] names it for the caller to refuse. The unchecked
+    /// parent link of the range's first migration is
     /// [`MigrationsDir::read_replacing`]'s.
     ///
-    /// The run follows snapshot links: it continues through each next number
+    /// The range follows snapshot links: it continues through each next number
     /// whose `ir.json` names the migration before it as its parent, and ends
     /// where none does. It need not reach the directory head (a sibling
     /// chain at `from`'s number, or a fork after it, leaves migrations off
-    /// the run); [`Run::reaches_head`] says whether it does and
-    /// [`Run::off_run`] and [`Run::siblings`] name what it leaves, for the
-    /// caller to refuse. The migrations off the run and the siblings are not
+    /// the range); [`Range::reaches_head`] says whether it does and
+    /// [`Range::off_range`] and [`Range::siblings`] name what it leaves, for the
+    /// caller to refuse. The migrations off the range and the siblings are not
     /// read or verified.
     ///
     /// # Errors
     /// [`DirectoryError::AmbiguousNumber`] for a bare number two migrations
     /// share, [`DirectoryError::NoSuchMigration`] for a target the directory
     /// does not hold, and what [`MigrationsDir::read`] raises for the
-    /// directory below the run and for the run's own files.
-    pub fn read_run(path: &Path, from: &str) -> Result<(MigrationsDir, Run), DirectoryError> {
+    /// directory below the range and for the range's own files.
+    pub fn read_range(path: &Path, from: &str) -> Result<(MigrationsDir, Range), DirectoryError> {
         let root = path;
         let (first, dirs) = open_target(root, from)?;
         let number = first.number;
         let named = snapshot_names(&first, &dirs);
         let mut migrations = vec![first];
         let mut below = Vec::new();
-        let mut off_run = Vec::new();
+        let mut off_range = Vec::new();
         let mut siblings = Vec::new();
         for entry in dirs {
             let tip = &migrations[migrations.len() - 1];
             if entry.0 < number {
                 below.push(entry);
             } else if entry.0 == number {
-                // Its schema is in none of the run's snapshots: a squash
+                // Its schema is in none of the range's snapshots: a squash
                 // planned from it would drop every object it made.
                 siblings.push(format!("{:04}_{}", entry.0, entry.1));
             } else if entry.0 == tip.number + 1 && links_to(&entry.2, tip) {
@@ -987,7 +987,7 @@ impl MigrationsDir {
                     .and_then(|bytes| Snapshot::load(&bytes).ok())
                     .and_then(|s| s.parent_checksum)
                     .and_then(|parent| named.get(&parent).cloned());
-                off_run.push(OffRun {
+                off_range.push(OffRange {
                     migration: format!("{:04}_{}", entry.0, entry.1),
                     chains_from,
                 });
@@ -996,9 +996,9 @@ impl MigrationsDir {
         let dir = assemble(root, unique_numbers(root, below)?)?;
         Ok((
             dir,
-            Run {
+            Range {
                 migrations,
-                off_run,
+                off_range,
                 siblings,
             },
         ))
@@ -1010,35 +1010,35 @@ impl MigrationsDir {
     }
 }
 
-/// A run of migrations: a tail of the directory, from a named migration
+/// A range of migrations: a tail of the directory, from a named migration
 /// along the snapshot links, in chain order.
 #[derive(Debug)]
-pub struct Run {
-    /// The run's migrations, the named one first, in chain order.
+pub struct Range {
+    /// The range's migrations, the named one first, in chain order.
     pub migrations: Vec<Migration>,
-    /// The later migrations the run does not hold, in name order: a sibling
+    /// The later migrations the range does not hold, in name order: a sibling
     /// chain's, or a fork's other branch, each with the migration its
-    /// snapshot chains from. Empty when the run reaches the head.
-    pub off_run: Vec<OffRun>,
-    /// The other migrations at the run's first number (`NNNN_<name>`), in
-    /// name order: two branches each generated that number. Neither the run
+    /// snapshot chains from. Empty when the range reaches the head.
+    pub off_range: Vec<OffRange>,
+    /// The other migrations at the range's first number (`NNNN_<name>`), in
+    /// name order: two branches each generated that number. Neither the range
     /// nor the directory below it holds them.
     pub siblings: Vec<String>,
 }
 
-impl Run {
-    /// Whether the run's last migration is the directory's head: nothing
-    /// later is off the run and no sibling shares its first number.
+impl Range {
+    /// Whether the range's last migration is the directory's head: nothing
+    /// later is off the range and no sibling shares its first number.
     pub fn reaches_head(&self) -> bool {
-        self.off_run.is_empty() && self.siblings.is_empty()
+        self.off_range.is_empty() && self.siblings.is_empty()
     }
 }
 
-/// A later migration a [`Run`] does not hold, and what it chains from: the
-/// facts a refusal of the run names, so no caller reads a snapshot link
+/// A later migration a [`Range`] does not hold, and what it chains from: the
+/// facts a refusal of the range names, so no caller reads a snapshot link
 /// itself.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
-pub struct OffRun {
+pub struct OffRange {
     /// The migration (`NNNN_<name>`).
     pub migration: String,
     /// The migration (`NNNN_<name>`) whose stored `ir.json` its snapshot's
@@ -1227,7 +1227,7 @@ fn interrupted_writes(root: &Path) -> Result<(), DirectoryError> {
 /// not hold yet and whether the replacement was written; `None` for a hidden
 /// name of another shape, which stays ignored. An original is a directory
 /// numbered from `first` through `last` (at `first`'s number, `first`
-/// itself: a sibling there is not of the run). The replacement takes
+/// itself: a sibling there is not of the range). The replacement takes
 /// `first`'s number and may take its name too: a directory of that name is
 /// the replacement once `first` is in the aside, and `first` before.
 fn squashed_aside(
@@ -1896,7 +1896,7 @@ CREATE INDEX i ON t (c);
         for err in [
             MigrationsDir::read(&root).expect_err("aside"),
             MigrationsDir::read_replacing(&root, "0001_a").expect_err("aside"),
-            MigrationsDir::read_run(&root, "0001_a").expect_err("aside"),
+            MigrationsDir::read_range(&root, "0001_a").expect_err("aside"),
         ] {
             assert_eq!(err.kind(), "squashed_aside");
             assert_eq!(
@@ -2065,29 +2065,29 @@ CREATE INDEX i ON t (c);
 
     #[test]
     fn a_run_reads_from_the_named_migration_through_the_head_in_chain_order() {
-        let root = scratch("run");
+        let root = scratch("range");
         let a = migration(&root, "0001_a", None);
         let b = migration(&root, "0002_b", Some(&a));
         let c = migration(&root, "0003_c", Some(&b));
         migration(&root, "0004_d", Some(&c));
 
-        let (dir, run) = MigrationsDir::read_run(&root, "0002_b").expect("run");
+        let (dir, range) = MigrationsDir::read_range(&root, "0002_b").expect("range");
         let names = |ms: &[Migration]| ms.iter().map(Migration::dir_name).collect::<Vec<_>>();
         assert_eq!(names(&dir.migrations), ["0001_a"]);
-        assert_eq!(names(&run.migrations), ["0002_b", "0003_c", "0004_d"]);
+        assert_eq!(names(&range.migrations), ["0002_b", "0003_c", "0004_d"]);
 
-        // A run of one is the head; a bare number names it too.
-        let (dir, run) = MigrationsDir::read_run(&root, "0004").expect("run of one");
+        // A range of one is the head; a bare number names it too.
+        let (dir, range) = MigrationsDir::read_range(&root, "0004").expect("range of one");
         assert_eq!(dir.migrations.len(), 3);
-        assert_eq!(names(&run.migrations), ["0004_d"]);
+        assert_eq!(names(&range.migrations), ["0004_d"]);
 
-        // The run from the first migration leaves the directory empty.
-        let (dir, run) = MigrationsDir::read_run(&root, "0001_a").expect("whole");
+        // The range from the first migration leaves the directory empty.
+        let (dir, range) = MigrationsDir::read_range(&root, "0001_a").expect("whole");
         assert!(dir.migrations.is_empty());
-        assert_eq!(run.migrations.len(), 4);
-        assert!(run.reaches_head());
+        assert_eq!(range.migrations.len(), 4);
+        assert!(range.reaches_head());
 
-        // Replacing still refuses a longer run, naming the next migration.
+        // Replacing still refuses a longer range, naming the next migration.
         let err = MigrationsDir::read_replacing(&root, "0002_b").expect_err("later");
         assert_eq!(err.kind(), "later_migration");
         assert!(
@@ -2100,25 +2100,25 @@ CREATE INDEX i ON t (c);
 
     #[test]
     fn a_run_refuses_a_shared_bare_number_and_an_absent_target() {
-        let root = scratch("run-refusals");
+        let root = scratch("range-refusals");
         let a = migration(&root, "0001_a", None);
         migration(&root, "0002_x", Some(&a));
         migration(&root, "0002_y", Some(&a));
-        let err = MigrationsDir::read_run(&root, "0002").expect_err("ambiguous");
+        let err = MigrationsDir::read_range(&root, "0002").expect_err("ambiguous");
         assert_eq!(err.kind(), "ambiguous_number");
         let message = err.to_string();
         assert!(
             message.contains("0002_x") && message.contains("0002_y"),
             "{message}"
         );
-        let err = MigrationsDir::read_run(&root, "0009").expect_err("absent");
+        let err = MigrationsDir::read_range(&root, "0009").expect_err("absent");
         assert_eq!(err.kind(), "no_such_migration");
         assert!(err.to_string().contains("0009"), "{err}");
     }
 
     #[test]
     fn a_malformed_file_inside_a_run_is_refused_naming_it() {
-        let root = scratch("run-malformed");
+        let root = scratch("range-malformed");
         let a = migration(&root, "0001_a", None);
         let b = migration(&root, "0002_b", Some(&a));
         migration(&root, "0003_c", Some(&b));
@@ -2126,7 +2126,7 @@ CREATE INDEX i ON t (c);
             &root.join("0003_c/01_schema.up.postgres.sql"),
             "-- ferro: not a header\nSELECT 1;\n",
         );
-        let err = MigrationsDir::read_run(&root, "0002_b").expect_err("malformed");
+        let err = MigrationsDir::read_range(&root, "0002_b").expect_err("malformed");
         assert_eq!(err.kind(), "unparseable_header");
         assert!(
             err.to_string().contains("0003_c/01_schema.up.postgres.sql"),
@@ -2165,8 +2165,8 @@ CREATE INDEX i ON t (c);
         assert_eq!(names, ["0001_a", "0002_y", "0003_after_y"]);
     }
 
-    fn off(migration: &str, chains_from: Option<&str>) -> OffRun {
-        OffRun {
+    fn off(migration: &str, chains_from: Option<&str>) -> OffRange {
+        OffRange {
             migration: migration.to_string(),
             chains_from: chains_from.map(str::to_string),
         }
@@ -2174,75 +2174,75 @@ CREATE INDEX i ON t (c);
 
     #[test]
     fn a_run_reports_whether_it_reaches_the_head() {
-        let root = scratch("run-reach");
+        let root = scratch("range-reach");
         let a = migration(&root, "0001_a", None);
         migration(&root, "0002_x", Some(b"a stale parent"));
         let y = migration(&root, "0002_y", Some(&a));
         migration(&root, "0003_after_y", Some(&y));
-        let (dir, run) = MigrationsDir::read_run(&root, "0002_x").expect("run");
-        assert_eq!(run.migrations.len(), 1);
-        assert!(!run.reaches_head());
-        assert_eq!(run.off_run, [off("0003_after_y", Some("0002_y"))]);
-        assert_eq!(run.siblings, ["0002_y"]);
+        let (dir, range) = MigrationsDir::read_range(&root, "0002_x").expect("range");
+        assert_eq!(range.migrations.len(), 1);
+        assert!(!range.reaches_head());
+        assert_eq!(range.off_range, [off("0003_after_y", Some("0002_y"))]);
+        assert_eq!(range.siblings, ["0002_y"]);
         let names: Vec<String> = dir.migrations.iter().map(Migration::dir_name).collect();
         assert_eq!(names, ["0001_a"]);
 
-        // A fork leaves its second branch off the run, not a "gap".
-        let root = scratch("run-fork");
+        // A fork leaves its second branch off the range, not a "gap".
+        let root = scratch("range-fork");
         let a = migration(&root, "0001_a", None);
         let b = migration(&root, "0002_b", Some(&a));
         migration(&root, "0003_p", Some(&b));
         migration(&root, "0003_q", Some(&b));
-        let (dir, run) = MigrationsDir::read_run(&root, "0002_b").expect("run");
-        assert_eq!(run.migrations.len(), 2);
-        assert!(!run.reaches_head());
-        assert_eq!(run.off_run, [off("0003_q", Some("0002_b"))]);
+        let (dir, range) = MigrationsDir::read_range(&root, "0002_b").expect("range");
+        assert_eq!(range.migrations.len(), 2);
+        assert!(!range.reaches_head());
+        assert_eq!(range.off_range, [off("0003_q", Some("0002_b"))]);
 
-        // An off-run migration whose parent link names no snapshot in the
+        // An off-range migration whose parent link names no snapshot in the
         // directory chains from nothing.
-        let root = scratch("run-off-run-orphan");
+        let root = scratch("range-off-range-orphan");
         let a = migration(&root, "0001_a", None);
         migration(&root, "0002_b", Some(&a));
         migration(&root, "0003_lost", Some(b"a stale parent"));
-        let (_, run) = MigrationsDir::read_run(&root, "0002_b").expect("run");
-        assert_eq!(run.off_run, [off("0003_lost", None)]);
+        let (_, range) = MigrationsDir::read_range(&root, "0002_b").expect("range");
+        assert_eq!(range.off_range, [off("0003_lost", None)]);
         assert_eq!(dir.migrations.len(), 1);
 
-        let root = scratch("run-head");
+        let root = scratch("range-head");
         let a = migration(&root, "0001_a", None);
         migration(&root, "0002_b", Some(&a));
-        let (_, run) = MigrationsDir::read_run(&root, "0001_a").expect("run");
-        assert!(run.reaches_head());
-        assert!(run.off_run.is_empty());
+        let (_, range) = MigrationsDir::read_range(&root, "0001_a").expect("range");
+        assert!(range.reaches_head());
+        assert!(range.off_range.is_empty());
     }
 
     #[test]
     fn a_sibling_at_the_runs_number_is_never_below_it() {
         // Panel F1 on #690: a lone sibling with no children was read as the
-        // run's parent, and the squash planned its tables as drops.
-        let root = scratch("run-lone-sibling");
+        // range's parent, and the squash planned its tables as drops.
+        let root = scratch("range-lone-sibling");
         let a = migration(&root, "0001_a", None);
         migration(&root, "0002_other", Some(&a));
         migration(&root, "0002_add_tmp", Some(&a));
-        let (dir, run) = MigrationsDir::read_run(&root, "0002_add_tmp").expect("run");
-        assert_eq!(run.migrations.len(), 1);
-        assert!(!run.reaches_head());
-        assert!(run.off_run.is_empty());
-        assert_eq!(run.siblings, ["0002_other"]);
+        let (dir, range) = MigrationsDir::read_range(&root, "0002_add_tmp").expect("range");
+        assert_eq!(range.migrations.len(), 1);
+        assert!(!range.reaches_head());
+        assert!(range.off_range.is_empty());
+        assert_eq!(range.siblings, ["0002_other"]);
         let names: Vec<String> = dir.migrations.iter().map(Migration::dir_name).collect();
         assert_eq!(names, ["0001_a"]);
 
-        // The run continuing past the sibling's number changes nothing.
-        let root = scratch("run-sibling-below-a-longer-run");
+        // The range continuing past the sibling's number changes nothing.
+        let root = scratch("range-sibling-below-a-longer-range");
         let a = migration(&root, "0001_a", None);
         migration(&root, "0002_other", Some(&a));
         let x = migration(&root, "0002_x", Some(&a));
         migration(&root, "0003_after_x", Some(&x));
-        let (dir, run) = MigrationsDir::read_run(&root, "0002_x").expect("run");
-        assert_eq!(run.migrations.len(), 2);
-        assert!(!run.reaches_head());
-        assert!(run.off_run.is_empty());
-        assert_eq!(run.siblings, ["0002_other"]);
+        let (dir, range) = MigrationsDir::read_range(&root, "0002_x").expect("range");
+        assert_eq!(range.migrations.len(), 2);
+        assert!(!range.reaches_head());
+        assert!(range.off_range.is_empty());
+        assert_eq!(range.siblings, ["0002_other"]);
         assert_eq!(dir.migrations.len(), 1);
     }
 
@@ -2470,8 +2470,8 @@ CREATE INDEX i ON t (c);
             assert_eq!(err.kind(), "witness_names_present");
             assert_eq!(err.to_string(), text);
             for target in ["0001_epic", "0001", left] {
-                let err = MigrationsDir::read_run(&root, target).expect_err("run");
-                assert_eq!(err, expected, "read_run {target}: {err}");
+                let err = MigrationsDir::read_range(&root, target).expect_err("range");
+                assert_eq!(err, expected, "read_range {target}: {err}");
                 let err = MigrationsDir::read_replacing(&root, target).expect_err("replace");
                 assert_eq!(err, expected, "read_replacing {target}: {err}");
             }

@@ -39,7 +39,7 @@ mod stages;
 pub(crate) mod staging;
 
 pub use backfill::{STAGED_NOT_NULL_PREFIX, staged_not_null_name};
-pub use compose::{ComposeError, Composed, DeadKind, DeadName, compose_run};
+pub use compose::{ComposeError, Composed, DeadKind, DeadName, compose_range};
 pub use rebuild::{NEW_TABLE_PREFIX, new_table_name};
 
 use crate::directory::{DirectoryError, Headers, MigrationsDir, StepDialect, StepKind};
@@ -761,7 +761,7 @@ pub struct GenerateOptions {
     #[serde(default)]
     pub carry: Vec<CarriedStep>,
     /// `ferro migrate squash`: the squash's witness, one entry per
-    /// migration of the run it replaces, in chain order (ADR-0056), stored
+    /// migration of the range it replaces, in chain order (ADR-0056), stored
     /// beside the parent link in the snapshot. Empty for every other
     /// migration (`new`, `--replace`), whose snapshot carries none. Read as
     /// the snapshot loader reads one, so a malformed witness is refused

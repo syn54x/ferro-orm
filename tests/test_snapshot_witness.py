@@ -234,7 +234,7 @@ def test_an_original_left_beside_its_squash_is_refused_by_every_verb_naming_both
         _core._read_migrations_dir(str(migrations(project)))
     assert str(refused.value) == refusal
     for target in ("0001_library", left):
-        for keyword in ("replacing", "run_from"):
+        for keyword in ("replacing", "range_from"):
             with pytest.raises(ValueError) as refused:
                 _core._read_migrations_dir(
                     str(migrations(project)), **{keyword: target}

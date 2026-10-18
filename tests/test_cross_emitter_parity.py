@@ -1528,7 +1528,7 @@ def _assert_the_dead_step_refusal(case_id: str, project: Path, *, cwd: Path) -> 
         code, out = _cli_output("migrate", "squash", SQUASH_NAME, "--from", "0001")
     assert code == 1, out
     assert DEAD_STEP_REFUSALS[case_id] in out, out
-    assert "which existed only inside the run" in out, out
+    assert "which existed only inside the range" in out, out
     assert "delete the step, or start the range at" in out, out
     assert "Nothing was written." in out, out
     after = {

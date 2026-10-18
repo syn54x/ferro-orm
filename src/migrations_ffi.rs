@@ -10,8 +10,8 @@ use crate::migrate::parse_dialect;
 use ferro_migrate::directory::{MigrationsDir, serialize_snapshot};
 use ferro_migrate::snapshot::{CURRENT_SCHEMA_IR_VERSION, Snapshot};
 use ferro_migrate::{
-    ComposeError, DeadKind, Dialect, GenerateOptions, check_migrations, compose_run, generate_with,
-    step_file_role,
+    ComposeError, DeadKind, Dialect, GenerateOptions, check_migrations, compose_range,
+    generate_with, step_file_role,
 };
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -26,7 +26,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_step_file_role, m)?)?;
     m.add_function(wrap_pyfunction!(_read_migrations_dir, m)?)?;
     m.add_function(wrap_pyfunction!(_load_snapshot, m)?)?;
-    m.add_function(wrap_pyfunction!(_compose_run, m)?)?;
+    m.add_function(wrap_pyfunction!(_compose_range, m)?)?;
     m.add_function(wrap_pyfunction!(_open_tracked, m)?)?;
     m.add_function(wrap_pyfunction!(_tracking_tables_for, m)?)?;
     m.add_function(wrap_pyfunction!(_allow_ahead, m)?)?;
@@ -180,29 +180,29 @@ pub fn _step_file_role(name: String) -> PyResult<String> {
 /// migration itself as the one entry of `"replaced"`
 /// (`MigrationsDir::read_replacing`); `ValueError` also for a target it does
 /// not hold, a bare number two migrations share, or a migration a later one
-/// chains from. With `run_from`, the directory below that migration and the
-/// run from it through the head, in chain order, as `"replaced"`
-/// (`MigrationsDir::read_run`), plus `"reaches_head"` (whether the run ends
-/// at the directory head), `"off_run"` (the later migrations it leaves, each
+/// chains from. With `range_from`, the directory below that migration and the
+/// range from it through the head, in chain order, as `"replaced"`
+/// (`MigrationsDir::read_range`), plus `"reaches_head"` (whether the range ends
+/// at the directory head), `"off_range"` (the later migrations it leaves, each
 /// `{"migration", "chains_from"}`, both `NNNN_<name>`, `chains_from` `None`
-/// when its parent link names no migration) and `"siblings"` (the other migrations at the run's first
+/// when its parent link names no migration) and `"siblings"` (the other migrations at the range's first
 /// number, which it never stands on). Naming both is a `ValueError`.
 #[pyfunction]
 #[pyo3(name = "_read_migrations_dir")]
-#[pyo3(signature = (directory, replacing = None, run_from = None))]
+#[pyo3(signature = (directory, replacing = None, range_from = None))]
 pub fn _read_migrations_dir(
     directory: String,
     replacing: Option<String>,
-    run_from: Option<String>,
+    range_from: Option<String>,
 ) -> PyResult<String> {
     let refused = |err: ferro_migrate::DirectoryError| PyValueError::new_err(err.to_string());
     let path = Path::new(&directory);
-    let mut reach: Option<(bool, Vec<ferro_migrate::directory::OffRun>, Vec<String>)> = None;
-    let (dir, replaced) = match (replacing, run_from) {
+    let mut reach: Option<(bool, Vec<ferro_migrate::directory::OffRange>, Vec<String>)> = None;
+    let (dir, replaced) = match (replacing, range_from) {
         (None, None) => return to_json(&MigrationsDir::read(path).map_err(refused)?),
         (Some(_), Some(_)) => {
             return Err(PyValueError::new_err(
-                "name either replacing or run_from, not both",
+                "name either replacing or range_from, not both",
             ));
         }
         (Some(target), None) => {
@@ -210,19 +210,19 @@ pub fn _read_migrations_dir(
             (dir, vec![replaced])
         }
         (None, Some(from)) => {
-            let (dir, run) = MigrationsDir::read_run(path, &from).map_err(refused)?;
-            reach = Some((run.reaches_head(), run.off_run, run.siblings));
-            (dir, run.migrations)
+            let (dir, range) = MigrationsDir::read_range(path, &from).map_err(refused)?;
+            reach = Some((range.reaches_head(), range.off_range, range.siblings));
+            (dir, range.migrations)
         }
     };
     let mut json = serde_json::to_value(&dir)
         .map_err(|err| PyValueError::new_err(format!("the migrations directory: {err}")))?;
     json["replaced"] = serde_json::to_value(&replaced)
         .map_err(|err| PyValueError::new_err(format!("the replaced migrations: {err}")))?;
-    if let Some((reaches_head, off_run, siblings)) = reach {
+    if let Some((reaches_head, off_range, siblings)) = reach {
         json["reaches_head"] = serde_json::Value::Bool(reaches_head);
-        json["off_run"] = serde_json::to_value(&off_run)
-            .map_err(|err| PyValueError::new_err(format!("the off-run migrations: {err}")))?;
+        json["off_range"] = serde_json::to_value(&off_range)
+            .map_err(|err| PyValueError::new_err(format!("the off-range migrations: {err}")))?;
         json["siblings"] = serde_json::to_value(&siblings)
             .map_err(|err| PyValueError::new_err(format!("the sibling migrations: {err}")))?;
     }
@@ -242,45 +242,48 @@ pub fn _load_snapshot(ir_json: String) -> PyResult<String> {
     to_json(&snapshot_json(&snapshot)?)
 }
 
-/// Compose a squash's target from the snapshots of the run it replaces
+/// Compose a squash's target from the snapshots of the range it replaces
 /// (ADR-0056): `parent_json` is the `ir.json` text of the migration below
-/// the run (`None` for a run from `0001`), `run_json` each run migration's
+/// the range (`None` for a range from `0001`), `range_json` each range migration's
 /// `ir.json` text in chain order. Returns JSON `{"target": <schema IR
 /// envelope>, "dead_names": [{"kind", "name", "appeared", "vanished"}]}`:
-/// the last snapshot's payload with the run's rename hints composed into it,
+/// the last snapshot's payload with the range's rename hints composed into it,
 /// in a current-version envelope (the squash is written by this ferro), and
-/// every name born and gone inside the run (`kind` one of `table`, `column`,
-/// `enum_label`, `constraint`; `appeared` / `vanished` indexes into the run).
+/// every name born and gone inside the range (`kind` one of `table`, `column`,
+/// `enum_label`, `constraint`; `appeared` / `vanished` indexes into the range).
 ///
 /// # Errors
 /// `ValueError` for a snapshot that does not load, and for every
 /// `ComposeError`, with its text. A compose refusal's exception carries
 /// `kind` (`uncomposable`, `old_name_re_added`, `new_name_held_by_parent` or
-/// `refused_hint`) and `from_index`: the index into the run of the migration a
+/// `refused_hint`) and `from_index`: the index into the range of the migration a
 /// squash can start from instead (the one that declares the conflicting name,
 /// or the one after the migration the refusal names), or `None` when there is
 /// none.
 #[pyfunction]
-#[pyo3(name = "_compose_run")]
-#[pyo3(signature = (parent_json, run_json))]
-pub fn _compose_run(
+#[pyo3(name = "_compose_range")]
+#[pyo3(signature = (parent_json, range_json))]
+pub fn _compose_range(
     py: Python<'_>,
     parent_json: Option<String>,
-    run_json: Vec<String>,
+    range_json: Vec<String>,
 ) -> PyResult<String> {
     let parent = parent_json
         .map(|json| load_snapshot(json.as_bytes(), "the parent snapshot"))
         .transpose()?;
-    let run = run_json
+    let range = range_json
         .iter()
         .enumerate()
         .map(|(at, json)| {
-            load_snapshot(json.as_bytes(), &format!("the run's snapshot #{}", at + 1))
+            load_snapshot(
+                json.as_bytes(),
+                &format!("the range's snapshot #{}", at + 1),
+            )
         })
         .collect::<PyResult<Vec<Snapshot>>>()?;
     let parent_payload = parent.as_ref().map(|snapshot| &snapshot.ir.payload);
-    let payloads: Vec<&SchemaIrPayload> = run.iter().map(|s| &s.ir.payload).collect();
-    let composed = match compose_run(parent_payload, &payloads) {
+    let payloads: Vec<&SchemaIrPayload> = range.iter().map(|s| &s.ir.payload).collect();
+    let composed = match compose_range(parent_payload, &payloads) {
         Ok(composed) => composed,
         Err(refusal) => {
             let from_index = compose_restart(parent_payload, &payloads, &refusal);
@@ -321,22 +324,22 @@ pub fn _compose_run(
     to_json(&serde_json::json!({"target": target, "dead_names": dead_names}))
 }
 
-/// The index into `run` of the migration a squash could start from to leave
+/// The index into `range` of the migration a squash could start from to leave
 /// `refusal`'s cause below its range, or `None` when no later start avoids
-/// it. A disagreeing declaration is in the first prefix of the run that
+/// it. A disagreeing declaration is in the first prefix of the range that
 /// fails to compose that way, so the migration ending that prefix declares
 /// it; a re-added name is re-added at `re_added_at`; a freed name and a
 /// refused hint are left below by starting after their migration.
 fn compose_restart(
     parent: Option<&SchemaIrPayload>,
-    run: &[&SchemaIrPayload],
+    range: &[&SchemaIrPayload],
     refusal: &ComposeError,
 ) -> Option<usize> {
-    let after = |at: usize| (at + 1 < run.len()).then_some(at + 1);
+    let after = |at: usize| (at + 1 < range.len()).then_some(at + 1);
     match refusal {
-        ComposeError::Uncomposable { .. } => (2..=run.len()).find_map(|end| {
+        ComposeError::Uncomposable { .. } => (2..=range.len()).find_map(|end| {
             matches!(
-                compose_run(parent, &run[..end]),
+                compose_range(parent, &range[..end]),
                 Err(ComposeError::Uncomposable { .. })
             )
             .then_some(end - 1)

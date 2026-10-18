@@ -1,11 +1,11 @@
 # ruff: noqa: F811 - pytest fixtures imported from a sibling module are redefined as arguments
-"""``ferro migrate squash`` (#669): a run of migrations becomes one.
+"""``ferro migrate squash`` (#669): a range of migrations becomes one.
 
 A feature branch wrote ``0002_add_tmp``, ``0003_add_bio`` (with a filled-in
 data step and a hand-written SQL step) and ``0004_drop_tmp``.
 ``ferro migrate squash epic --from 0002`` replaces the three with
 ``0002_epic``: planned once by the one planner from ``0001``'s snapshot to
-the run's composed target (ADR-0056), the run's data steps and hand-written
+the range's composed target (ADR-0056), the range's data steps and hand-written
 SQL steps carried byte for byte, and the three directories deleted. It reads
 snapshots and the directory only: the models are never imported, no
 database is opened.
@@ -278,7 +278,7 @@ def test_a_rename_whose_hint_a_later_migration_deleted_squashes_to_a_rename(
     assert run("migrate", "check") == 0
 
 
-def test_a_run_from_the_first_migration_has_no_parent(project, pkg):
+def test_a_range_from_the_first_migration_has_no_parent(project, pkg):
     feature_branch(project, pkg)
 
     assert squash("all", "--from", "0001") == 0
@@ -332,7 +332,7 @@ def test_squash_composes_with_the_options_new_takes(project, pkg, capsys):
     capsys.readouterr()
 
     # --no-backfill puts a guard in the generated backfill's place, as on
-    # `new`; the run's own backfill step, written by hand, is carried beside
+    # `new`; the range's own backfill step, written by hand, is carried beside
     # it.
     assert squash("epic", "--from", "0002", "--no-backfill", "author.slug") == 0
 
@@ -377,7 +377,7 @@ def test_squash_with_data_step_sql_step_and_data_only(project, pkg, capsys):
 
 def test_data_only_over_a_run_that_renders_ddl_is_refused(project, pkg, capsys):
     # Panel F2 on #690: --data-only planned parent -> parent, so the squash's
-    # snapshot said the run's DDL never ran while its witness let every
+    # snapshot said the range's DDL never ran while its witness let every
     # database that ran it inherit the squash.
     feature_branch(project, pkg)
     before = tree(project)
@@ -418,8 +418,8 @@ def test_data_only_over_one_migration_that_renders_ddl_names_it(project, pkg, ca
 def test_data_only_over_a_run_that_renders_no_ddl_squashes_into_the_data_step(
     project, pkg
 ):
-    # 0003 adds tmp and 0004 drops it again: the run renders no DDL, so
-    # --data-only drops nothing a database ran, and keeps carrying the run's
+    # 0003 adds tmp and 0004 drops it again: the range renders no DDL, so
+    # --data-only drops nothing a database ran, and keeps carrying the range's
     # data step over the rescaffolded one of its name.
     write_config(project, pkg)
     write_models(project, pkg, AUTHOR)
@@ -672,7 +672,7 @@ def test_a_run_that_does_not_reach_the_head_is_refused_naming_both_fixes(
     err = refused(capsys, "epic", "--from", "0002_x")
 
     assert err == (
-        "the run from 0002_x does not reach the head: 0003_z chains from 0002_y; "
+        "the range from 0002_x does not reach the head: 0003_z chains from 0002_y; "
         "squash from a migration the head descends from (--from 0002_y), or "
         "regenerate 0002_x on top of the head with ferro migrate new x "
         "--replace 0002_x. Nothing was written.\n"
@@ -896,7 +896,7 @@ def test_a_name_readded_after_its_rename_is_refused_with_the_from_to_pass(
     err = refused(capsys, "epic", "--from", "0002")
 
     assert err.startswith(
-        'squash --from 0002: the run renames column author."bio" -> "blurb", then '
+        'squash --from 0002: the range renames column author."bio" -> "blurb", then '
         'declares "bio" again from migration #2 of the range'
     ), err
     assert err.endswith(
@@ -960,7 +960,7 @@ def test_disagreeing_renames_are_refused_with_the_from_to_pass(project, pkg, cap
 
 def test_a_snapshot_whose_hint_the_planner_refuses_is_refused(project, pkg, capsys):
     feature_branch(project, pkg)
-    # A hand-edited snapshot inside the run (no generator writes this): a
+    # A hand-edited snapshot inside the range (no generator writes this): a
     # column renamed from a name its own model still declares.
     path = migrations(project) / "0003_add_bio/ir.json"
     document = json.loads(path.read_text())
@@ -1120,7 +1120,7 @@ def down(ctx): ...
 
 CHUNKED_ON_ID = CHUNKED_ON_TMP.replace(".order_by(lambda author: author.tmp)\n    ", "")
 
-CHUNKED_ON_GHOST = '''"""Page a table the run added and dropped."""
+CHUNKED_ON_GHOST = '''"""Page a table the range added and dropped."""
 
 from ferro.migrations import chunked, nothing_to_reverse
 
@@ -1174,7 +1174,7 @@ def test_a_chunked_step_ordering_by_a_dead_column_is_refused_with_both_fixes(
 
     assert err == (
         "ferro migrate squash: 0003_add_bio/02_backfill_author.py names author.tmp, "
-        "which existed only inside the run (added by 0002_add_tmp, removed by "
+        "which existed only inside the range (added by 0002_add_tmp, removed by "
         "0004_drop_tmp): delete the step, or start the range at 0004_drop_tmp, the "
         "migration that removed it (pass --from 0004_drop_tmp). Nothing was written.\n"
     ), err
@@ -1186,7 +1186,7 @@ def test_a_chunked_step_over_a_dead_table_is_refused_naming_the_table(
     project, pkg, capsys
 ):
     dead_run(project, pkg, CHUNKED_ON_GHOST, extra=GHOST)
-    # the run adds Ghost in 0002 and 0004's models (BIO) drop it
+    # the range adds Ghost in 0002 and 0004's models (BIO) drop it
     before, hidden = tree(project), hidden_entries(project)
 
     err = refused(capsys, "epic", "--from", "0002")
@@ -1206,7 +1206,7 @@ def test_a_run_whose_steps_touch_nothing_dead_notes_each_dead_name(
 
     out = capsys.readouterr().out
     assert (
-        "author.tmp existed only inside the run (0002_add_tmp through 0004_drop_tmp): "
+        "author.tmp existed only inside the range (0002_add_tmp through 0004_drop_tmp): "
         "review the carried steps for it"
     ) in out
     assert "carried, review it" in out
@@ -1223,7 +1223,7 @@ def test_a_dead_name_only_a_sql_step_could_touch_is_a_note_not_a_refusal(
 
     assert squash("epic", "--from", "0002") == 0
 
-    assert "author.tmp existed only inside the run" in capsys.readouterr().out
+    assert "author.tmp existed only inside the range" in capsys.readouterr().out
 
 
 def test_a_run_with_no_dead_names_prints_no_such_note(project, pkg, capsys):
@@ -1238,7 +1238,7 @@ def test_a_run_with_no_dead_names_prints_no_such_note(project, pkg, capsys):
 
     assert squash("epic", "--from", "0002") == 0
 
-    assert "existed only inside the run" not in capsys.readouterr().out
+    assert "existed only inside the range" not in capsys.readouterr().out
 
 
 def test_the_generation_api_raises_the_same_text(project, pkg, capsys):
@@ -1279,11 +1279,11 @@ def test_a_dead_enum_label_and_a_dead_check_are_noted_when_no_declaration_names_
 
     out = capsys.readouterr().out
     assert (
-        "author.status:gone existed only inside the run (0002_add_gone through "
+        "author.status:gone existed only inside the range (0002_add_gone through "
         "0003_drop_gone): review the carried steps for it"
     ) in out
     assert (
-        "author.ck_author_mood existed only inside the run (0002_add_gone through "
+        "author.ck_author_mood existed only inside the range (0002_add_gone through "
         "0003_drop_gone): review the carried steps for it"
     ) in out
 
@@ -1309,7 +1309,7 @@ def test_a_step_filtering_on_a_dead_enum_label_is_refused_naming_the_label(
     rewrite.write_text(rewrite.read_text() + "\n")
     err = refused(capsys, "epic", "--from", "0002")
 
-    assert "names author.status:gone, which existed only inside the run" in err
+    assert "names author.status:gone, which existed only inside the range" in err
 
 
 def test_a_run_whose_historical_models_cannot_be_built_is_refused_when_a_data_step_is_carried(

@@ -39,8 +39,8 @@ pub use ferro_ddl_lowering::{Dialect, InPlaceChange, Report, ReportKind, Subject
 pub use generate::{
     CheckReport, ComposeError, Composed, DeadKind, DeadName, GenerateError, GenerateOptions,
     GeneratedMigration, GeneratedStep, NEW_TABLE_PREFIX, Problem, Rendering,
-    STAGED_NOT_NULL_PREFIX, check_migrations, compose_run, generate, generate_with, new_table_name,
-    staged_not_null_name,
+    STAGED_NOT_NULL_PREFIX, check_migrations, compose_range, generate, generate_with,
+    new_table_name, staged_not_null_name,
 };
 pub use order::order_by_dependencies;
 pub use plan::{

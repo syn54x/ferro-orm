@@ -34,7 +34,7 @@ from typing import TYPE_CHECKING, Any
 
 from .._core import (
     _check_migrations,
-    _compose_run,
+    _compose_range,
     _generate_migration,
 )
 from . import scaffold
@@ -55,7 +55,7 @@ from .layout import (
     ensure_gitattributes,
     read_migrations,
     read_replacing,
-    read_run_reach,
+    read_range_reach,
     portable_sql_step,
     write_migration,
 )
@@ -272,16 +272,16 @@ def squash(
     data_only: bool = False,
     no_backfill: Sequence[str] = (),
 ) -> Path:
-    """Replace the run from the migration ``from_`` names through the head
+    """Replace the range from the migration ``from_`` names through the head
     with the one migration ``new`` would have written across it (``ferro
     migrate squash <name> --from <from_>``, ADR-0056), and return its
     directory.
 
     A feature branch wrote ``0005_add_teams`` through ``0009_fix_rows``;
     ``squash(db, "teams_epic", "0005")`` writes ``0005_teams_epic``, planned
-    once by the one planner from the snapshot below the run (none for a run
-    from ``0001``) to the run's composed target, with every data step and
-    hand-written SQL step of the run carried byte for byte in chain order,
+    once by the one planner from the snapshot below the range (none for a range
+    from ``0001``) to the range's composed target, with every data step and
+    hand-written SQL step of the range carried byte for byte in chain order,
     and deletes the five. Its snapshot stores the composed target under the
     parent's checksum, with the witness naming each replaced migration.
     ``from_`` is ``NNNN_<name>``, or ``NNNN`` when one migration carries the
@@ -291,8 +291,8 @@ def squash(
 
     Raises:
         MigrationsDirectoryError: ``from_`` is not in the directory or is a
-            number two migrations share; the run does not reach the head;
-            the run's rename hints do not compose; the squash renders nothing
+            number two migrations share; the range does not reach the head;
+            the range's rename hints do not compose; the squash renders nothing
             and carries nothing ("delete the directories"); an aside of an
             earlier squash or replace is present; or what :func:`new` raises.
     """
@@ -324,7 +324,7 @@ def write(database: DatabaseSettings, migration: GeneratedMigration) -> Path:
     name with its recovery (panel F6): rename it back while the replacement
     is absent, delete it once the replacement is in place.
 
-    A squash moves the run's directories one by one into one aside named
+    A squash moves the range's directories one by one into one aside named
     after both ends and the replacement
     (``.0005_add_teams..0009_fix_rows.0005_teams_epic.squashed``), writes the
     new migration, and deletes the aside; a write that raises moves them
@@ -488,17 +488,17 @@ def _prepare_squash(
     from_: str,
     options: dict[str, Any],
 ) -> GeneratedMigration:
-    """:func:`prepare` for :func:`squash`: the run read, its snapshots
-    composed into the target (``_core._compose_run``), the migration planned
+    """:func:`prepare` for :func:`squash`: the range read, its snapshots
+    composed into the target (``_core._compose_range``), the migration planned
     once from the parent snapshot to that target through the generator ``new``
-    uses, carrying the run's data steps and hand-written SQL steps and
+    uses, carrying the range's data steps and hand-written SQL steps and
     recording the witness."""
     directory = database.directory
-    read = read_run_reach(directory, from_)
-    below, run = read["below"], read["run"]
-    names = [_dir_name(m) for m in run]
-    if read["off_run"]:
-        raise MigrationsDirectoryError(_short_of_the_head(names[0], read["off_run"]))
+    read = read_range_reach(directory, from_)
+    below, range_ = read["below"], read["range"]
+    names = [_dir_name(m) for m in range_]
+    if read["off_range"]:
+        raise MigrationsDirectoryError(_short_of_the_head(names[0], read["off_range"]))
     if read["siblings"]:
         raise MigrationsDirectoryError(_shared_number(names[0], read["siblings"][0]))
     written = f"{len(below) + 1:04d}_{name}"
@@ -508,16 +508,16 @@ def _prepare_squash(
             "migration it replaces, and every reader would then take the squash "
             "for the original it replaced; pick another name. Nothing was written."
         )
-    squash_of = _witnessed(below + run).get(written)
+    squash_of = _witnessed(below + range_).get(written)
     if squash_of is not None:
         raise MigrationsDirectoryError(_witnessed_name("squash", written, squash_of))
-    carry = _carried_steps(directory, run)
+    carry = _carried_steps(directory, range_)
     parent = _head_snapshot_text(below)
     try:
         composed = json.loads(
-            _compose_run(
+            _compose_range(
                 parent,
-                [_text(directory, Path(m["dir"]) / SNAPSHOT_FILE) for m in run],
+                [_text(directory, Path(m["dir"]) / SNAPSHOT_FILE) for m in range_],
             )
         )
     except ValueError as err:
@@ -533,7 +533,7 @@ def _prepare_squash(
             "steps": [step["ordinal"] for step in m["steps"]],
             "replaces": m["replaces"],
         }
-        for m in run
+        for m in range_
     ]
 
     def generate(carry: list[dict[str, Any]]) -> GeneratedMigration:
@@ -572,7 +572,7 @@ def _prepare_squash(
 
     migration = generate(carry)
     dropped = _unneeded_scaffolds(
-        migration, carry, run, below, directory, list(database.dialects)
+        migration, carry, range_, below, directory, list(database.dialects)
     )
     if dropped:
         # Regenerated without them, so the steps after renumber densely.
@@ -589,13 +589,13 @@ def _prepare_squash(
         witness=witness,
         dead_names=composed["dead_names"],
     )
-    return _with_dead_name_notes(squashed, carry, run, below, composed, names)
+    return _with_dead_name_notes(squashed, carry, range_, below, composed, names)
 
 
 def _unneeded_scaffolds(
     migration: GeneratedMigration,
     carry: list[dict[str, Any]],
-    run: list[dict[str, Any]],
+    range_: list[dict[str, Any]],
     below: list[dict[str, Any]],
     directory: Path,
     dialects: list[str],
@@ -618,7 +618,7 @@ def _unneeded_scaffolds(
         for step in migration.steps
         if step.carry is not None and step.kind == "data" and not step.over_namesake
     )
-    at_of = {_dir_name(m): at for at, m in enumerate(run)}
+    at_of = {_dir_name(m): at for at, m in enumerate(range_)}
     scaffolds: dict[int, dict[str, tuple[str, str]]] = {}
     dropped: dict[int, str] = {}
     for index in candidates:
@@ -626,7 +626,7 @@ def _unneeded_scaffolds(
         original = Path(entry["old"][0])
         at = at_of[original.parent.name]
         if at not in scaffolds:
-            scaffolds[at] = _original_backfills(run, below, at, directory, dialects)
+            scaffolds[at] = _original_backfills(range_, below, at, directory, dialects)
         scaffold = scaffolds[at].get(entry["name"])
         if scaffold is None or scaffold[0] != entry["body"]:
             continue
@@ -639,19 +639,19 @@ def _unneeded_scaffolds(
 
 
 def _original_backfills(
-    run: list[dict[str, Any]],
+    range_: list[dict[str, Any]],
     below: list[dict[str, Any]],
     at: int,
     directory: Path,
     dialects: list[str],
 ) -> dict[str, tuple[str, str]]:
-    """The backfills the generator scaffolds for the run's migration ``at``
+    """The backfills the generator scaffolds for the range's migration ``at``
     alone, by step name: the scaffold's text, as ``new`` writes it, and the
     columns it fills (``author.bio``)."""
     try:
         raw = _generate_migration(
-            _head_snapshot_text(run[:at] or below),
-            json.dumps(run[at]["snapshot"]["ir"]),
+            _head_snapshot_text(range_[:at] or below),
+            json.dumps(range_[at]["snapshot"]["ir"]),
             dialects,
         )
     except ValueError:
@@ -661,7 +661,7 @@ def _original_backfills(
     generated = json.loads(raw)
     regenerated = _with_data_steps(
         GeneratedMigration.from_generated(
-            generated, number=run[at]["number"], name=run[at]["name"]
+            generated, number=range_[at]["number"], name=range_[at]["name"]
         ),
         generated,
         directory / TEMPLATES_DIR,
@@ -684,13 +684,13 @@ def _original_backfills(
 def _with_dead_name_notes(
     migration: GeneratedMigration,
     carry: list[dict[str, Any]],
-    run: list[dict[str, Any]],
+    range_: list[dict[str, Any]],
     below: list[dict[str, Any]],
     composed: dict[str, Any],
     names: list[str],
 ) -> GeneratedMigration:
     """``migration`` with a note for each dead name (a table, column, enum
-    label or constraint that existed only inside the run, ADR-0056) no carried
+    label or constraint that existed only inside the range, ADR-0056) no carried
     data step's declaration touches, or the refusal of the first carried step
     whose declaration does.
 
@@ -698,7 +698,7 @@ def _with_dead_name_notes(
     step declares (ADR-0035): a chunked step's query, built over the
     historical models of the squashed migration widened by the dead names. The
     query's table, the columns its filter and order keys read and the enum
-    labels its filter compares are names the step provably touches. A run
+    labels its filter compares are names the step provably touches. A range
     that carries nothing has nothing to review, so it gets no note.
 
     Raises:
@@ -709,7 +709,7 @@ def _with_dead_name_notes(
     dead = migration.dead_names
     touched: dict[str, str] = {}
     if any(entry["kind"] == "data" for entry in carry):
-        models = _widened_models(run, below, composed, names)
+        models = _widened_models(range_, below, composed, names)
         for entry in carry:
             if entry["kind"] != "data":
                 continue
@@ -723,7 +723,7 @@ def _with_dead_name_notes(
                 _dead_name_refusal(item, touched[item["name"]], names)
             )
     notes = [
-        f"{item['name']} existed only inside the run "
+        f"{item['name']} existed only inside the range "
         f"({names[item['appeared']]} through {names[item['vanished']]}): "
         f"review the carried steps for it"
         for item in dead
@@ -737,25 +737,25 @@ def _dead_name_refusal(item: dict[str, Any], step: str, names: list[str]) -> str
     fix = f"start the range at {removed}, the migration that removed it (pass --from {removed})"
     return (
         f"ferro migrate squash: {step} names {item['name']}, which existed only "
-        f"inside the run (added by {names[item['appeared']]}, removed by "
+        f"inside the range (added by {names[item['appeared']]}, removed by "
         f"{removed}): delete the step, or {fix}. Nothing was written."
     )
 
 
 def _widened_models(
-    run: list[dict[str, Any]],
+    range_: list[dict[str, Any]],
     below: list[dict[str, Any]],
     composed: dict[str, Any],
     names: list[str],
 ) -> HistoricalModels:
-    """The squashed migration's historical models (the snapshot below the run
+    """The squashed migration's historical models (the snapshot below the range
     over the composed target, ADR-0025) plus every table and column any
-    snapshot of the run held that the parent does not, so a declaration
+    snapshot of the range held that the parent does not, so a declaration
     naming a dead name still builds and can be read.
 
     Raises:
         MigrationsDirectoryError: the squashed migration's historical models
-            cannot be built (a column's storage changes inside the run), so a
+            cannot be built (a column's storage changes inside the range), so a
             carried data step could not run against it.
     """
     parent = below[-1]["snapshot"]["ir"] if below else None
@@ -767,7 +767,7 @@ def _widened_models(
         historical.build(parent, composed["target"], rev=names[-1])
         widened = copy.deepcopy(composed["target"])
         tables = {m["table_name"]: m for m in widened["payload"]["models"]}
-        for migration in run:
+        for migration in range_:
             for model in migration["snapshot"]["ir"]["payload"]["models"]:
                 table = model["table_name"]
                 held = tables.get(table)
@@ -849,8 +849,8 @@ def _node_names(node: Any, table: str, touched: set[str]) -> None:
 
 
 def _shared_number(first: str, sibling: str) -> str:
-    """The refusal of a run whose first number another migration shares: no
-    run descends from that sibling, so a squash planned on top of it would
+    """The refusal of a range whose first number another migration shares: no
+    range descends from that sibling, so a squash planned on top of it would
     drop what it made. The fix is ``new --replace`` on either one."""
     return (
         f"ferro migrate squash: {sibling} shares {first}'s number and is not in "
@@ -860,15 +860,15 @@ def _shared_number(first: str, sibling: str) -> str:
     )
 
 
-def _short_of_the_head(first: str, off_run: list[dict[str, Any]]) -> str:
-    """The refusal of a run that stops short of the head: the first
+def _short_of_the_head(first: str, off_range: list[dict[str, Any]]) -> str:
+    """The refusal of a range that stops short of the head: the first
     migration it leaves, what that one chains from (the core's read of each
-    off-run migration's link), and the two fixes."""
-    chains_from = {off["migration"]: off["chains_from"] for off in off_run}
-    off = off_run[0]["migration"]
-    # The head's own ancestor at the run's number: where a squash reaching
-    # the head can start. Above that number every ancestor off the run is
-    # an off-run migration; one on the run means the head descends from
+    off-range migration's link), and the two fixes."""
+    chains_from = {off["migration"]: off["chains_from"] for off in off_range}
+    off = off_range[0]["migration"]
+    # The head's own ancestor at the range's number: where a squash reaching
+    # the head can start. Above that number every ancestor off the range is
+    # an off-range migration; one on the range means the head descends from
     # ``first`` itself.
     number = first[:4]
     ancestor: str | None = max(chains_from)
@@ -880,7 +880,7 @@ def _short_of_the_head(first: str, off_run: list[dict[str, Any]]) -> str:
         else ""
     )
     return (
-        f"the run from {first} does not reach the head: {off} chains from "
+        f"the range from {first} does not reach the head: {off} chains from "
         f"{chains_from[off] or 'no migration'}; {start}regenerate {first} on top of "
         f"the head with ferro migrate new {first[5:]} --replace {first}. Nothing was "
         f"written."
@@ -920,10 +920,10 @@ def _refuse_data_only_over_ddl(
     name: str,
     options: dict[str, Any],
 ) -> None:
-    """Refuse ``squash --data-only`` over a run that renders DDL (panel F2
-    on #690): ``--data-only`` writes the snapshot below the run, while the
+    """Refuse ``squash --data-only`` over a range that renders DDL (panel F2
+    on #690): ``--data-only`` writes the snapshot below the range, while the
     witness lets every database that ran the originals inherit it, so they
-    would stand on a snapshot that says the run's DDL never ran. A run that
+    would stand on a snapshot that says the range's DDL never ran. A range that
     renders none (what it adds it drops again) loses nothing.
 
     Raises:
@@ -950,7 +950,7 @@ def _refuse_data_only_over_ddl(
 
 
 def _compose_refusal(from_: str, err: ValueError, names: list[str]) -> str:
-    """A refusal of ``_compose_run``, its text kept as the core wrote it,
+    """A refusal of ``_compose_range``, its text kept as the core wrote it,
     then the ``--from`` a squash can pass instead, when there is one."""
     text = f"squash --from {from_}: {err}"
     at = getattr(err, "from_index", None)
@@ -969,7 +969,7 @@ def _empty_squash(
     directory: Path, from_: str, names: list[str], below: str | None
 ) -> str:
     """The refusal of a squash that renders nothing and carries nothing."""
-    run = names[0] if len(names) == 1 else f"{names[0]} through {names[-1]}"
+    range_ = names[0] if len(names) == 1 else f"{names[0]} through {names[-1]}"
     verb = "changes" if len(names) == 1 else "change"
     carry = "carries" if len(names) == 1 else "carry"
     paths = [str(directory / name) for name in names]
@@ -978,7 +978,7 @@ def _empty_squash(
     else:
         delete = f"the directories {', '.join(paths[:-1])} and {paths[-1]}"
     return (
-        f"squash --from {from_}: on top of {below or 'no migration'}, {run} {verb} "
+        f"squash --from {from_}: on top of {below or 'no migration'}, {range_} {verb} "
         f"nothing that renders DDL and {carry} no data step or hand-written SQL "
         f"step, so the squashed migration would be empty; delete {delete} instead. "
         f"Nothing was written."
@@ -994,7 +994,7 @@ def _with_squash_moves(
     witness: list[dict[str, Any]],
     dead_names: list[dict[str, Any]],
 ) -> GeneratedMigration:
-    """``migration`` as the squash of the run ``names``: each carried file
+    """``migration`` as the squash of the range ``names``: each carried file
     and the original it was (``<migration>/<file>``), each generated DDL
     file regenerated, and a note for each carried data step still holding
     ``todo(...)``. A step asked for now (``--sql-step``, ``--data-step``)
@@ -1049,14 +1049,16 @@ def _dir_name(migration: dict[str, Any]) -> str:
     return f"{migration['number']:04d}_{migration['name']}"
 
 
-def _carried_steps(directory: Path, run: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Every data step and hand-written SQL step of the ``run``'s migrations,
+def _carried_steps(
+    directory: Path, range_: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Every data step and hand-written SQL step of the ``range_``'s migrations,
     in chain order and, within a migration, step order,
     as the generator's ``carry`` option takes them (plus each one's ``old``
     files, for the per-file lines). A dialect-suffixed SQL file is generated
     DDL: it is regenerated, never carried."""
     carry: list[dict[str, Any]] = []
-    for migration in run:
+    for migration in range_:
         for step in migration["steps"]:
             if step["kind"] not in ("data", "portable_sql"):
                 continue

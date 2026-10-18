@@ -267,8 +267,8 @@ def squash(
         Parameter(
             name="--from",
             help=(
-                "The first migration of the run to squash (NNNN_<name>, or NNNN "
-                "when one migration carries the number); the run goes from it "
+                "The first migration of the range to squash (NNNN_<name>, or NNNN "
+                "when one migration carries the number); the range goes from it "
                 "through the newest migration."
             ),
         ),
@@ -295,8 +295,8 @@ def squash(
         bool,
         Parameter(
             help=(
-                "Write only the --data-step and the steps the run carries: no DDL, "
-                "and a full copy of the snapshot below the run."
+                "Write only the --data-step and the steps the range carries: no DDL, "
+                "and a full copy of the snapshot below the range."
             ),
             negative="",
         ),
@@ -315,13 +315,13 @@ def squash(
     verbose: Verbose = False,
     glob: Annotated[Global, Parameter(parse=False)],
 ) -> int:
-    """Replace a run of migrations, from --from through the newest, with one.
+    """Replace a range of migrations, from --from through the newest, with one.
 
-    Writes the migration `new` would have written across the run: planned
-    once from the snapshot below the run to the run's last snapshot (its
+    Writes the migration `new` would have written across the range: planned
+    once from the snapshot below the range to the range's last snapshot (its
     renames composed), carrying every data step and hand-written SQL step of
-    the run byte for byte, under the first migration's number. Deletes the
-    run's directories. Reads the migrations directory only: never the
+    the range byte for byte, under the first migration's number. Deletes the
+    range's directories. Reads the migrations directory only: never the
     models, never a database.
     """
     from ..migrations.generate import prepare, write
