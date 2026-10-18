@@ -92,6 +92,7 @@ from .steps import (
     NothingToReverse,
     StepRefused,
     chunked_query,
+    declared_up_kind,
     load_step,
     unwritten,
 )
@@ -104,6 +105,8 @@ if TYPE_CHECKING:
 
 __all__ = [
     "MAX_LOCK_TIMEOUT_S",
+    "AdoptedEvent",
+    "AdoptedMigration",
     "AllowAhead",
     "AppliedStep",
     "DownPlan",
@@ -179,10 +182,35 @@ class StepFailure:
         )
 
 
+@dataclass(frozen=True)
+class AdoptedMigration:
+    """A squash a run adopted before it planned (ADR-0056): the database had
+    applied every migration it replaced, so the run swapped their step
+    records for the squash's and ran nothing."""
+
+    squash: str
+    """``NNNN_<name>`` of the squash."""
+    replaced: list[str]
+    """``NNNN_<name>`` of each migration whose records it replaced, in chain
+    order: what the database had applied."""
+
+    @property
+    def line(self) -> str:
+        """``adopted <squash>: this database had applied <first> … <last>;
+        nothing was run``."""
+        names = self.replaced
+        span = names[0] if len(names) == 1 else f"{names[0]} … {names[-1]}"
+        return (
+            f"adopted {self.squash}: this database had applied {span}; nothing was run"
+        )
+
+
 @dataclass
 class RunReport:
     """What :func:`up` or :func:`down` did."""
 
+    adopted: list[AdoptedMigration] = field(default_factory=list)
+    """The squashes the run adopted before anything else, in order."""
     applied: list[AppliedStep] = field(default_factory=list)
     """The steps applied, in order."""
     reverted: list[AppliedStep] = field(default_factory=list)
@@ -334,8 +362,50 @@ class RunNote:
         return self.text
 
 
-RunEvent: TypeAlias = StepEvent | RunNote
+@dataclass(frozen=True)
+class AdoptedEvent:
+    """A squash the run adopted, said before any step
+    (``adopted 0005_teams_epic: this database had applied 0005_add_teams …
+    0009_fix_rows; nothing was run``)."""
+
+    squash: str
+    """``NNNN_<name>`` of the squash."""
+    replaced: list[str]
+    """``NNNN_<name>`` of each migration whose records it replaced."""
+
+    def line(self) -> str:
+        """The line ``progress`` receives (:attr:`AdoptedMigration.line`)."""
+        return AdoptedMigration(self.squash, list(self.replaced)).line
+
+
+RunEvent: TypeAlias = StepEvent | RunNote | AdoptedEvent
 """What a run says: one event per line ``progress`` receives."""
+
+
+def _declared_kind(path: Path) -> str:
+    """The shape (``atomic`` / ``chunked``) an adopted data step's ``up``
+    declares, read from its syntax tree: adoption runs no step, so its
+    record holds the declaration, as a baseline's does (ADR-0056)."""
+    try:
+        return declared_up_kind(Path(path))
+    except StepRefused as refused:
+        raise RunRefused(f"{refused}. Nothing was changed.") from None
+
+
+async def _adopt(
+    run: LockedDatabase, tell: Callable[[RunEvent], None]
+) -> list[AdoptedMigration]:
+    """Adopt, on ``run``, every squash whose witness its records hold, before
+    anything is planned (ADR-0056), telling ``tell`` one event per squash
+    adopted. Raises ``RunRefused`` (``partial_witness``) on a squash the
+    records hold part of, with nothing written."""
+    adopted = [
+        AdoptedMigration(entry["squash"], list(entry["replaced"]))
+        for entry in await run.adopt(_declared_kind)
+    ]
+    for migration in adopted:
+        tell(AdoptedEvent(migration.squash, list(migration.replaced)))
+    return adopted
 
 
 def _step_prefix(migration: str, file: str, name_width: int, stem_width: int) -> str:
@@ -424,9 +494,11 @@ async def _up(
     if through is not None:
         direction["through"] = through
     report = RunReport()
+    tell = _teller(progress, on_event)
     tracked = await open_tracked(name, database)
     try:
         async with tracked.locked(timeout, say_waiting) as run:
+            report.adopted = await _adopt(run, tell)
             keys = _order_keys_for(run, "applied")
             try:
                 plan = await run.plan(
@@ -436,7 +508,9 @@ async def _up(
                 if refused.ahead_only:
                     report.ahead = list(run.status()["ahead"])
                 raise
-            report = await _walk(run, plan, _teller(progress, on_event), using=name)
+            walked = await _walk(run, plan, tell, using=name)
+            walked.adopted = report.adopted
+            report = walked
     except RunRefused as refused:
         report._refuse(refused)
     return report._raise_if_refused()
@@ -1191,10 +1265,11 @@ def parse_target(target: str | None = None, *, all: bool = False) -> dict[str, A
 async def _preview_down(
     tracked: TrackedDatabase, direction: dict[str, Any]
 ) -> tuple[Plan, DownPlan]:
-    """What a ``down`` would revert, planned on ``tracked`` with no lock: a
-    data step's down declares itself in Python, so an irreversible one
-    refuses here too (before any lock), and a nothing-to-reverse one says
-    so.
+    """What a ``down`` would revert, planned on ``tracked`` with no lock, as
+    the run plans it once it has adopted every squash whose witness the
+    records hold (ADR-0056): a data step's down declares itself in Python,
+    so an irreversible one refuses here too (before any lock), and a
+    nothing-to-reverse one says so.
 
     Raises:
         RunRefused: the down would be refused.
@@ -1203,7 +1278,7 @@ async def _preview_down(
         keys = order_keys_on_disk(tracked)
     except MigrationRefused as refused:
         raise RunRefused(f"{refused}. Nothing was reverted.") from None
-    plan = await tracked.plan(direction, order_keys=keys)
+    plan = await tracked.plan(direction, order_keys=keys, adopting=_declared_kind)
     _, reasons = _load_data_steps(plan.steps, "down")
     shown = DownPlan(
         steps=[
@@ -1240,18 +1315,28 @@ async def plan_down(
             return DownPlan(refusal=str(refused))
 
 
+_ADOPTION_STAMP = ("started_at", "finished_at", "ferro_version")
+"""What an adopted record holds of the moment it was adopted: the preview
+plans over the records adoption would write, the run over the ones it
+wrote a moment later (ADR-0056)."""
+
+
 def _records_as_shown(locked: list[Any], shown: list[Any]) -> bool:
     """Whether the steps planned under the lock stand on the records the
     preview showed. Taking the lock gives a record an older ferro wrote
     without a class the class ADR-0054 decides for it; that fills a gap and
     changes nothing the plan was shown, so a class the preview read as
-    missing is not compared."""
+    missing is not compared. An adopted record is compared without the time
+    and version it was adopted at (:data:`_ADOPTION_STAMP`)."""
 
     def standing(step: Any, missing_class: bool) -> dict[str, Any] | None:
         record = step.standing
-        if record is None or not missing_class:
+        if record is None:
             return record
-        return {key: value for key, value in record.items() if key != "class"}
+        skipped = ("class",) if missing_class else ()
+        if record.get("origin") == "adopted":
+            skipped += _ADOPTION_STAMP
+        return {key: value for key, value in record.items() if key not in skipped}
 
     if len(locked) != len(shown):
         return False
@@ -1327,6 +1412,8 @@ async def down(
             ) as run:
                 deferred = warn_unclassified(run)
                 report.notes.extend(deferred)
+                tell = _teller(progress, on_event)
+                report.adopted = await _adopt(run, tell)
                 plan = await run.plan(
                     direction, order_keys=_order_keys_for(run, "reverted")
                 )
@@ -1337,7 +1424,9 @@ async def down(
                         "down` again to see the plan as it stands now."
                     )
                     return report._raise_if_refused()
-                report = await _walk(run, plan, _teller(progress, on_event), using=name)
+                adopted = report.adopted
+                report = await _walk(run, plan, tell, using=name)
+                report.adopted = adopted
                 report.notes[:0] = deferred
         except RunRefused as refused:
             report._refuse(refused)

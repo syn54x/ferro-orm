@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, Literal, Optional
 
 class RouteHandle:
@@ -465,8 +466,11 @@ class TrackedDatabase:
         *,
         allow_ahead: bool | Literal["expand-only"] = False,
         order_keys: Any = None,
+        adopting: Callable[[Path], str] | None = None,
     ) -> Plan:
-        """A preview: its steps cannot be executed."""
+        """A preview: its steps cannot be executed. With ``adopting`` (a data
+        step file's declared kind), planned as the run plans once it has
+        adopted every squash whose witness the records hold (ADR-0056)."""
         ...
     def locked(
         self,
@@ -514,6 +518,13 @@ class LockedDatabase:
         allow_ahead: bool | Literal["expand-only"] = False,
         order_keys: Any = None,
     ) -> Plan: ...
+    async def adopt(self, declared_kind: Callable[[Path], str]) -> list[dict[str, Any]]:
+        """Adopt every squash whose witness the records hold, in one
+        transaction, running nothing (ADR-0056); ``[{"squash", "replaced"}]``.
+        ``declared_kind(path)`` is an adopted data step's ``atomic`` /
+        ``chunked``. Raises ``RunRefused`` (``partial_witness``) on a squash
+        the records hold part of, writing nothing."""
+        ...
     async def execute(
         self, step: StepHandle, on_attempt: Callable[[str], object] | None = None
     ) -> dict[str, Any]:
