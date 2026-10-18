@@ -312,11 +312,13 @@ def read_replacing(
 def read_run_reach(directory: Path, from_: str) -> dict[str, Any]:
     """For a squash: :func:`read_run`'s answer with what the run leaves off.
 
-    Returns ``{"below", "run", "reaches_head", "off_run"}``: ``run`` follows
-    snapshot links from the migration ``from_`` names and need not reach the
-    directory head. ``reaches_head`` says whether it does, and ``off_run``
-    names (``NNNN_<name>``) the later migrations it leaves (a sibling chain's,
-    or a fork's other branch), which the caller refuses with its own fix.
+    Returns ``{"below", "run", "reaches_head", "off_run", "siblings"}``:
+    ``run`` follows snapshot links from the migration ``from_`` names and need
+    not reach the directory head. ``reaches_head`` says whether it does,
+    ``off_run`` names (``NNNN_<name>``) the later migrations it leaves (a
+    sibling chain's, or a fork's other branch), and ``siblings`` the other
+    migrations at ``from_``'s number (two branches each generated it), which
+    are never in ``below``; the caller refuses each with its own fix.
 
     Raises:
         MigrationsDirectoryError: ``from_`` is not in the directory or is a
@@ -332,6 +334,7 @@ def read_run_reach(directory: Path, from_: str) -> dict[str, Any]:
         "run": read["replaced"],
         "reaches_head": read["reaches_head"],
         "off_run": read["off_run"],
+        "siblings": read["siblings"],
     }
 
 

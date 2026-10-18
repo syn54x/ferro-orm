@@ -160,7 +160,7 @@ Exit 0 when written, 1 when refused, writing nothing. A run whose changes cancel
 squash --from 0002: on top of 0001_create_author, 0002_add_bio through 0003_drop_bio change nothing that renders DDL and carry no data step or hand-written SQL step, so the squashed migration would be empty; delete the directories /srv/app/migrations/0002_add_bio and /srv/app/migrations/0003_drop_bio instead. Nothing was written.
 ```
 
-Also refused: a `--from` the directory lacks, or a bare number two migrations share; renames inside the run that cannot be composed into one (the refusal names the `--from` to pass instead); `--url`. A squash killed halfway leaves its originals in a hidden `.<first>..<last>.<new>.squashed` directory, which every verb refuses, naming the recovery: move its contents back while the new migration is absent, delete it once the new migration is in place.
+Also refused: a `--from` the directory lacks, or a bare number two migrations share; a run that does not reach the newest migration (the refusal names the `--from` the head descends from, or `new --replace` on the first migration); a run whose first number another migration shares, because two branches each generated it (regenerate one on top of the other with `ferro migrate new NAME --replace`, then squash); renames inside the run that cannot be composed into one (the refusal names the `--from` to pass instead); `--url`. A squash killed halfway leaves its originals in a hidden `.<first>..<last>.<new>.squashed` directory, which every verb refuses, naming the recovery: move its contents back while the new migration is absent, delete it once the new migration is in place.
 
 ## `ferro migrate check`
 

@@ -940,8 +940,11 @@ impl MigrationsDir {
     /// below the migration `from` names, read and verified as
     /// [`MigrationsDir::read`] reads it, and the run that starts there, each
     /// migration read whole. `from` is `NNNN_<name>`, or `NNNN` when one
-    /// migration carries the number. The duplicate admitted at `from`'s
-    /// number and the unchecked parent link of the run's first migration are
+    /// migration carries the number. A migration at `from`'s number other
+    /// than `from` is a sibling (two branches each generated the number): no
+    /// run descends from it, so it is never below the run, and
+    /// [`Run::siblings`] names it for the caller to refuse. The unchecked
+    /// parent link of the run's first migration is
     /// [`MigrationsDir::read_replacing`]'s.
     ///
     /// The run follows snapshot links: it continues through each next number
@@ -949,8 +952,9 @@ impl MigrationsDir {
     /// where none does. It need not reach the directory head (a sibling
     /// chain at `from`'s number, or a fork after it, leaves migrations off
     /// the run); [`Run::reaches_head`] says whether it does and
-    /// [`Run::off_run`] names what it leaves, for the caller to refuse. The
-    /// migrations off the run are not read or verified.
+    /// [`Run::off_run`] and [`Run::siblings`] name what it leaves, for the
+    /// caller to refuse. The migrations off the run and the siblings are not
+    /// read or verified.
     ///
     /// # Errors
     /// [`DirectoryError::AmbiguousNumber`] for a bare number two migrations
@@ -964,10 +968,15 @@ impl MigrationsDir {
         let mut migrations = vec![first];
         let mut below = Vec::new();
         let mut off_run = Vec::new();
+        let mut siblings = Vec::new();
         for entry in dirs {
             let tip = &migrations[migrations.len() - 1];
-            if entry.0 <= number {
+            if entry.0 < number {
                 below.push(entry);
+            } else if entry.0 == number {
+                // Its schema is in none of the run's snapshots: a squash
+                // planned from it would drop every object it made.
+                siblings.push(format!("{:04}_{}", entry.0, entry.1));
             } else if entry.0 == tip.number + 1 && links_to(&entry.2, tip) {
                 let (n, name, dir) = entry;
                 migrations.push(read_migration(root, n, name, dir)?);
@@ -981,6 +990,7 @@ impl MigrationsDir {
             Run {
                 migrations,
                 off_run,
+                siblings,
             },
         ))
     }
@@ -1001,12 +1011,17 @@ pub struct Run {
     /// order: a sibling chain's, or a fork's other branch. Empty when the
     /// run reaches the head.
     pub off_run: Vec<String>,
+    /// The other migrations at the run's first number (`NNNN_<name>`), in
+    /// name order: two branches each generated that number. Neither the run
+    /// nor the directory below it holds them.
+    pub siblings: Vec<String>,
 }
 
 impl Run {
-    /// Whether the run's last migration is the directory's head.
+    /// Whether the run's last migration is the directory's head: nothing
+    /// later is off the run and no sibling shares its first number.
     pub fn reaches_head(&self) -> bool {
-        self.off_run.is_empty()
+        self.off_run.is_empty() && self.siblings.is_empty()
     }
 }
 
@@ -2115,8 +2130,9 @@ CREATE INDEX i ON t (c);
         assert_eq!(run.migrations.len(), 1);
         assert!(!run.reaches_head());
         assert_eq!(run.off_run, ["0003_after_y"]);
+        assert_eq!(run.siblings, ["0002_y"]);
         let names: Vec<String> = dir.migrations.iter().map(Migration::dir_name).collect();
-        assert_eq!(names, ["0001_a", "0002_y"]);
+        assert_eq!(names, ["0001_a"]);
 
         // A fork leaves its second branch off the run, not a "gap".
         let root = scratch("run-fork");
@@ -2136,6 +2152,36 @@ CREATE INDEX i ON t (c);
         let (_, run) = MigrationsDir::read_run(&root, "0001_a").expect("run");
         assert!(run.reaches_head());
         assert!(run.off_run.is_empty());
+    }
+
+    #[test]
+    fn a_sibling_at_the_runs_number_is_never_below_it() {
+        // Panel F1 on #690: a lone sibling with no children was read as the
+        // run's parent, and the squash planned its tables as drops.
+        let root = scratch("run-lone-sibling");
+        let a = migration(&root, "0001_a", None);
+        migration(&root, "0002_other", Some(&a));
+        migration(&root, "0002_add_tmp", Some(&a));
+        let (dir, run) = MigrationsDir::read_run(&root, "0002_add_tmp").expect("run");
+        assert_eq!(run.migrations.len(), 1);
+        assert!(!run.reaches_head());
+        assert!(run.off_run.is_empty());
+        assert_eq!(run.siblings, ["0002_other"]);
+        let names: Vec<String> = dir.migrations.iter().map(Migration::dir_name).collect();
+        assert_eq!(names, ["0001_a"]);
+
+        // The run continuing past the sibling's number changes nothing.
+        let root = scratch("run-sibling-below-a-longer-run");
+        let a = migration(&root, "0001_a", None);
+        migration(&root, "0002_other", Some(&a));
+        let x = migration(&root, "0002_x", Some(&a));
+        migration(&root, "0003_after_x", Some(&x));
+        let (dir, run) = MigrationsDir::read_run(&root, "0002_x").expect("run");
+        assert_eq!(run.migrations.len(), 2);
+        assert!(!run.reaches_head());
+        assert!(run.off_run.is_empty());
+        assert_eq!(run.siblings, ["0002_other"]);
+        assert_eq!(dir.migrations.len(), 1);
     }
 
     #[test]
