@@ -828,10 +828,8 @@ impl MigrationsDir {
         }
         interrupted_writes(root)?;
         let dirs = migration_dirs(root)?;
-        let present = present_names(&dirs, None);
-        let dir = assemble(root, unique_numbers(root, dirs)?)?;
-        witness_names_present(&present, &dir.migrations)?;
-        Ok(dir)
+        witness_names_present(&dirs)?;
+        assemble(root, unique_numbers(root, dirs)?)
     }
 
     /// Read the migrations directory at `path` for `ferro migrate new
@@ -868,9 +866,7 @@ impl MigrationsDir {
                 later: format!("{:04}_{}", later.0, later.1),
             });
         }
-        let present = present_names(&dirs, Some(&replaced));
         let dir = assemble(root, unique_numbers(root, dirs)?)?;
-        witness_names_present(&present, dir.migrations.iter().chain([&replaced]))?;
         Ok((dir, replaced))
     }
 
@@ -898,7 +894,6 @@ impl MigrationsDir {
     pub fn read_run(path: &Path, from: &str) -> Result<(MigrationsDir, Run), DirectoryError> {
         let root = path;
         let (first, dirs) = open_target(root, from)?;
-        let present = present_names(&dirs, Some(&first));
         let number = first.number;
         let mut migrations = vec![first];
         let mut below = Vec::new();
@@ -915,7 +910,6 @@ impl MigrationsDir {
             }
         }
         let dir = assemble(root, unique_numbers(root, below)?)?;
-        witness_names_present(&present, dir.migrations.iter().chain(&migrations))?;
         Ok((
             dir,
             Run {
@@ -959,21 +953,15 @@ fn links_to(dir: &Path, parent: &Migration) -> bool {
         .is_some_and(|s| s.parent_checksum == Some(parent.snapshot.checksum))
 }
 
-/// Every migration directory name (`NNNN_<name>`) of `dirs`, and `target`'s.
-fn present_names(dirs: &[MigrationDirEntry], target: Option<&Migration>) -> BTreeSet<String> {
-    dirs.iter()
-        .map(|(number, name, _)| format!("{number:04}_{name}"))
-        .chain(target.map(Migration::dir_name))
-        .collect()
-}
-
-/// Refuse a squash whose witness, at any depth, names a migration of
-/// `present` (every migration directory's name): the witness is read
-/// against the directory only, never a database.
-fn witness_names_present<'a>(
-    present: &BTreeSet<String>,
-    migrations: impl IntoIterator<Item = &'a Migration>,
-) -> Result<(), DirectoryError> {
+/// Refuse a squash whose witness, at any depth, names a migration directory
+/// of `dirs` (every migration directory of the root). It runs once every
+/// directory is listed and before any other check of them: a squash takes
+/// its first original's number and parent, so an original left beside it
+/// would otherwise be refused as a duplicate number or a broken chain, each
+/// naming the wrong fix. The witness is read against the directory only,
+/// never a database; a snapshot that does not load is left to the full read
+/// of its migration, which refuses it naming the file.
+fn witness_names_present(dirs: &[MigrationDirEntry]) -> Result<(), DirectoryError> {
     fn first_present<'w>(
         present: &BTreeSet<String>,
         witness: &'w [WitnessEntry],
@@ -986,10 +974,18 @@ fn witness_names_present<'a>(
             }
         })
     }
-    for migration in migrations {
-        if let Some(named) = first_present(present, &migration.witness) {
+    let name = |(number, name, _): &MigrationDirEntry| format!("{number:04}_{name}");
+    let present: BTreeSet<String> = dirs.iter().map(name).collect();
+    for entry in dirs {
+        let Some(snapshot) = std::fs::read(entry.2.join(SNAPSHOT_FILE))
+            .ok()
+            .and_then(|bytes| Snapshot::load(&bytes).ok())
+        else {
+            continue;
+        };
+        if let Some(named) = first_present(&present, &snapshot.replaces) {
             return Err(DirectoryError::WitnessNamesPresent {
-                squash: migration.dir_name(),
+                squash: name(entry),
                 named: named.to_string(),
             });
         }
@@ -1016,6 +1012,7 @@ fn open_target(root: &Path, target: &str) -> Result<OpenedTarget, DirectoryError
     }
     interrupted_writes(root)?;
     let mut dirs = migration_dirs(root)?;
+    witness_names_present(&dirs)?;
     let full = |(number, name, _): &MigrationDirEntry| format!("{number:04}_{name}");
     let matching: Vec<usize> = match target.parse::<u16>() {
         Ok(number) if target.len() == 4 && target.chars().all(|c| c.is_ascii_digit()) => dirs
@@ -2095,39 +2092,69 @@ CREATE INDEX i ON t (c);
         assert_eq!(first["replaces"], serde_json::json!([]));
     }
 
-    #[test]
-    fn a_witness_naming_a_migration_still_present_is_refused_naming_both() {
-        for nested in [false, true] {
-            let root = scratch("witness-present");
-            let a = migration(&root, "0001_a", None);
-            let witness = if nested {
-                vec![entry("0002_squashed", vec![entry("0001_a", vec![])])]
-            } else {
-                vec![entry("0001_a", vec![])]
-            };
-            squash(&root, "0002_epic", Some(&a), &witness);
-            let err = MigrationsDir::read(&root).expect_err("names a present migration");
-            assert_eq!(err.kind(), "witness_names_present");
-            assert_eq!(
-                err,
-                DirectoryError::WitnessNamesPresent {
-                    squash: "0002_epic".into(),
-                    named: "0001_a".into(),
-                }
-            );
-            let message = err.to_string();
-            assert!(
-                message.contains("0002_epic/ir.json")
-                    && message.contains("0001_a")
-                    && message.contains("delete it, or delete the squash"),
-                "{message}"
-            );
-
-            let err = MigrationsDir::read_run(&root, "0002_epic").expect_err("run");
-            assert_eq!(err.kind(), "witness_names_present", "{err}");
-            let err = MigrationsDir::read_replacing(&root, "0002_epic").expect_err("replace");
-            assert_eq!(err.kind(), "witness_names_present", "{err}");
+    /// The originals `0001_a` and `0002_b` squashed into `0001_epic` (a
+    /// squash takes its first original's number and its parent), with the
+    /// original `left` still in the directory; `nested` wraps the two
+    /// originals in an earlier squash of theirs.
+    fn squash_beside_an_original(left: &str, nested: bool) -> PathBuf {
+        let root = scratch("witness-present");
+        let a = migration(&root, "0001_a", None);
+        migration(&root, "0002_b", Some(&a));
+        let originals = vec![entry("0001_a", vec![]), entry("0002_b", vec![])];
+        let witness = if nested {
+            vec![entry("0001_earlier", originals)]
+        } else {
+            originals
+        };
+        squash(&root, "0001_epic", None, &witness);
+        for original in ["0001_a", "0002_b"] {
+            if original != left {
+                std::fs::remove_dir_all(root.join(original)).expect("rm original");
+            }
         }
+        root
+    }
+
+    #[test]
+    fn an_original_left_beside_its_squash_is_refused_by_the_witness_before_any_other_check() {
+        // `0002_b` left behind breaks no number but would break the chain;
+        // `0001_a` left behind shares the squash's number. Either way the
+        // refusal is the witness's, with its fix.
+        for (left, nested) in [
+            ("0002_b", false),
+            ("0001_a", false),
+            ("0002_b", true),
+            ("0001_a", true),
+        ] {
+            let root = squash_beside_an_original(left, nested);
+            let expected = DirectoryError::WitnessNamesPresent {
+                squash: "0001_epic".into(),
+                named: left.into(),
+            };
+            let text = format!(
+                "0001_epic/ir.json records that the squash 0001_epic replaces {left}, but \
+                 {left} is still in the migrations directory; delete it, or delete the squash \
+                 0001_epic"
+            );
+            let err = MigrationsDir::read(&root).expect_err("an original is left");
+            assert_eq!(err, expected, "{left} nested={nested}: {err}");
+            assert_eq!(err.kind(), "witness_names_present");
+            assert_eq!(err.to_string(), text);
+            for target in ["0001_epic", "0001", left] {
+                let err = MigrationsDir::read_run(&root, target).expect_err("run");
+                assert_eq!(err, expected, "read_run {target}: {err}");
+                let err = MigrationsDir::read_replacing(&root, target).expect_err("replace");
+                assert_eq!(err, expected, "read_replacing {target}: {err}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_squash_alone_reads_whole() {
+        let root = squash_beside_an_original("none", false);
+        let read = MigrationsDir::read(&root).expect("the originals are gone");
+        assert_eq!(read.migrations.len(), 1);
+        assert_eq!(read.migrations[0].witness.len(), 2);
     }
 
     #[test]

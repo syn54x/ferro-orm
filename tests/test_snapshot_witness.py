@@ -195,25 +195,62 @@ def _refused_by_every_verb(db, capsys, kind: str, *needles: str) -> None:
         assert needle in out, out
 
 
+def squash_with_an_original_left(project: Path, pkg: str, backend: str, left: str):
+    """The originals ``0001_create_author`` and ``0002_create_post`` replaced
+    by the squash ``0001_library`` (a squash takes its first original's
+    number and parent), its witness naming both, with the original ``left``
+    put back beside it."""
+    two_migrations(project, pkg, dialect_list(backend))
+    aside = project / "aside"
+    aside.mkdir()
+    originals = []
+    for name in ("0001_create_author", "0002_create_post"):
+        original = migrations(project) / name
+        originals.append(entry(name, sha384(original / "ir.json"), [1]))
+        original.rename(aside / name)
+    new("library")
+    add_witness(migrations(project) / "0001_library/ir.json", originals)
+    (aside / left).rename(migrations(project) / left)
+
+
 @pytest.mark.backend_matrix
-def test_a_witness_naming_a_present_migration_is_refused_by_every_verb(
-    project, pkg, db, capsys
+@pytest.mark.parametrize(
+    "left",
+    # 0002_create_post shares no number but would break the chain;
+    # 0001_create_author shares the squash's number.
+    ["0002_create_post", "0001_create_author"],
+)
+def test_an_original_left_beside_its_squash_is_refused_by_every_verb_naming_both(
+    project, pkg, db, capsys, left
 ):
-    two_migrations(project, pkg, dialect_list(db.backend))
-    first = migrations(project) / "0001_create_author/ir.json"
-    add_witness(
-        migrations(project) / "0002_create_post/ir.json",
-        [entry("0001_create_author", sha384(first), [1])],
+    squash_with_an_original_left(project, pkg, db.backend, left)
+    refusal = (
+        f"0001_library/ir.json records that the squash 0001_library replaces {left}, "
+        f"but {left} is still in the migrations directory; delete it, or delete the "
+        f"squash 0001_library"
     )
 
-    _refused_by_every_verb(
-        db,
-        capsys,
-        "witness_names_present",
-        "0002_create_post/ir.json",
-        "replaces 0001_create_author",
-        "delete it, or delete the squash 0002_create_post",
-    )
+    with pytest.raises(ValueError) as refused:
+        _core._read_migrations_dir(str(migrations(project)))
+    assert str(refused.value) == refusal
+    for target in ("0001_library", left):
+        for keyword in ("replacing", "run_from"):
+            with pytest.raises(ValueError) as refused:
+                _core._read_migrations_dir(
+                    str(migrations(project)), **{keyword: target}
+                )
+            assert str(refused.value) == refusal, (keyword, target)
+
+    capsys.readouterr()
+    assert run("migrate", "check") == 3
+    assert capsys.readouterr().err == f"witness_names_present: {refusal}\n"
+
+    expected = f"ferro migrate: {refusal}. Nothing was applied."
+    assert run("migrate", "up", "--url", db.url) == 1
+    assert capsys.readouterr().err == expected + "\n"
+
+    assert run("migrate", "status", "--url", db.url) == 4
+    assert f"needs attention\n  {expected}\n" in capsys.readouterr().out
 
 
 @pytest.mark.backend_matrix
