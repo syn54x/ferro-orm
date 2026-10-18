@@ -574,7 +574,12 @@ mod tests {
     /// Nullable `date` with explicit `db_type` must hydrate as `datetime.date`.
     #[test]
     fn explicit_db_type_date_anyof_uses_date_codec() {
-        let plan = plan_for_columns(vec![ir_col_db_type("paid_date", "date", "date", Some("date"))]);
+        let plan = plan_for_columns(vec![ir_col_db_type(
+            "paid_date",
+            "date",
+            "date",
+            Some("date"),
+        )]);
         assert_eq!(plan.codec("paid_date"), Some(&ColumnCodec::Date));
     }
 

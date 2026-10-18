@@ -1177,7 +1177,7 @@ impl QueryPlan {
 
 #[cfg(test)]
 mod tests {
-    use super::{exclusive_stepwise_compare, JoinPlan, QueryPlan, StepwiseKey};
+    use super::{JoinPlan, QueryPlan, StepwiseKey, exclusive_stepwise_compare};
     use crate::state::Dialect;
     use sea_query::{
         Alias, Expr, PostgresQueryBuilder, Query, SqliteQueryBuilder, Value as SeaValue,
