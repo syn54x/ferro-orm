@@ -50,6 +50,8 @@ Amended 2026-10-08 (the pass's lock wait, #577 panel F18): the guard runs once *
 
 **A database ahead of the code is refused by default.** When the tracking table holds records for migrations the directory does not have, `up()` and `require_applied()` raise `DatabaseAheadError` naming them. `allow_ahead=True` on either call turns that off.
 
+Amended by ADR-0056 (2026-10-18): adoptable is recognised before *ahead*. A database whose records name migrations the directory lacks is first matched against the witness of every squashed migration in the directory; one that witnesses a squash whole is not ahead but **pending (adoptable)**, which `status` and `require_applied()` report naming `ferro migrate up`, and which every run (`up` and `down`) resolves first by adopting, running nothing. Pending keeps its one meaning (ADR-0040): `allow_ahead`, in either form, never admits an adoptable database, so an application that pulls a squash refuses to start against an un-adopted development database until that `up`. A partial witness (the originals applied in part) stays ahead, its refusal naming how to finish the run on the commit that holds it and, second, how to revert it. In the other direction nothing changes: a pre-squash checkout meeting an adopted database is ahead by the squashed migration, whose recorded classes `"expand-only"` reads.
+
 ## Considered options
 
 - **`connect(url, migrate=True)` or `migrations="apply"`.** Rejected: three `connect()` parameters would contain "migrate", two meaning "from the models" and one meaning "run the files", with nothing in the names to tell them apart. The door's own arguments would also have to land on `connect()`.

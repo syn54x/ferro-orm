@@ -1,0 +1,77 @@
+# A squash is planned across snapshots, composes the run's rename hints, and a database that ran the originals adopts it
+
+An epic's integration branch accumulates one migration per task: `0005_add_teams`, `0006_team_slug`, `0007_backfill_slug`, `0008_drop_tmp`, `0009_fix_rows`. Before the branch merges, `ferro migrate squash teams_epic --from 0005` replaces the five with `0005_teams_epic`, and every developer's epic database, which applied the five, is brought across by its next `ferro migrate up` without running anything:
+
+```text
+$ ferro migrate squash teams_epic --from 0005
+ok Wrote migrations/0005_teams_epic/  (replaces 0005_add_teams … 0009_fix_rows, now deleted)
+  01_expand.up.postgres.sql    schema step, up (postgres)   regenerated
+  02_backfill_slug.py          data step                    carried, review it (was 0007_backfill_slug/01_backfill_slug.py)
+  03_fix_rows.up.sql           SQL step, up                 carried, review it (was 0009_fix_rows/01_fix_rows.up.sql)
+  04_contract.up.postgres.sql  schema step, up (postgres)   regenerated
+  ir.json                      snapshot                     0009_fix_rows's, chained from 0004_…, replaces 0005…0009
+
+$ ferro migrate up        # on a database that applied 0005..0009
+adopted 0005_teams_epic: this database had applied 0005_add_teams … 0009_fix_rows; nothing was run
+```
+
+We decided three things.
+
+## A squash is the migration `new` would have written across the run
+
+The squashed migration is planned once, by the one planner, from the schema snapshot below the first migration of the run to the last migration's snapshot payload, exactly as `new` plans from a parent snapshot to the models (I-1). A column 0006 added and 0008 dropped never appears; five `ALTER TABLE`s on one table become one; there is one expand and one contract. The squash reads snapshots and the directory only: the models are never imported (an ungenerated model change stays `new`'s and `check`'s business) and no database is opened (`--url` is refused, ADR-0023). Its `ir.json` is the last snapshot's payload under a new `parent_checksum`, with the rename hints rewritten as below.
+
+The run is always a tail of the directory, `--from NNNN[_name]` through the head, because a later migration's `parent_checksum` is the stored file's checksum and is never rewritten (ADR-0023, ADR-0030); a middle range is refused naming the fix. The squashed migration takes the first migration's number and a name given on the command line. A run of one is ordinary. A squash whose plan renders nothing and carries nothing is refused: delete the directories.
+
+Every data step and hand-written SQL step of the run is carried in chain order, byte for byte, placed by `--replace`'s rule (a data step before the contract, a SQL step before the data steps or last; a carried step wins over a rescaffolded namesake) and marked `carried, review it`, since a step written after an intermediate contract now runs before the one contract. The squash takes `--replace`'s four options. A name that existed only inside the run (a table, column, enum label or constraint the run added and then removed) is a refusal when a carried data step's declaration (ADR-0035: its model, and a chunked step's query and order keys) names it, with the fix named (delete the step, or start the range after its migration), and a per-name note in the output otherwise, because a name-level fact cannot be tied to a step the squash cannot read. An unwritten step is carried and listed as still needing writing; the squashed migration refuses to load until it is written, as today.
+
+`squash` and `--replace` are one mechanism (`read_replacing` and the generator's `carry`, generalised from one migration to a tail). They differ in what they read, models against snapshots, and in adoption: a replacement is reverted with the files that went up; a squash is adopted.
+
+## The run's rename hints are composed into the squashed snapshot
+
+The planner reads rename hints from the target payload only (`live_hints`), and a hint is inert once its migration is generated (ADR-0032). Planned across the run, a rename made in 0006 whose hint was deleted before 0009 would become a drop and an add: data loss where the chain had a rename, a parity bug under I-1. So the squash composes the hints of every snapshot in the run with one pure function in the core and writes the result into the squashed snapshot's own `renamed_from` and `enum_renamed_labels` fields, for tables, columns, foreign keys and enum labels alike:
+
+- `a→b` in 0006 and `b→c` in 0008 compose to `a→c`.
+- `a→b` and then `b` dropped is a drop of `a`, no hint.
+- `x` added in 0006 and renamed to `y` in 0008 is an add of `y`, no hint.
+- `a→b` and then `b→a` is nothing.
+- A hint already inert against the parent snapshot is dropped, as `live_hints` would drop it.
+- A column hint composes through its table's own rename, since a column hint is read inside its model.
+
+A pair the function cannot compose is a refusal naming both hints, never a silent drop. A rename whose old name the run later re-adds (`a→b` in 0006, a new `a` in 0008) composes, but the planner refuses a hint whose old name the target still declares (ADR-0032), so the squash refuses it naming the fix: end the range before 0008.
+
+## A database that ran the originals adopts the squash from its tracking table alone
+
+The squashed snapshot's envelope carries `replaces`, the squash's **witness**: for each replaced migration its directory name, its snapshot checksum and the ordinals of its steps. A replaced migration that was itself a squash contributes its own witness, so the record nests; nothing ever trims it, since no file knows that every database has adopted.
+
+Every *run*, `up` and `down`, under the run lock and before anything else, **adopts** a squashed migration when the tracking table holds, for every migration in its witness (recursively: an entry is witnessed by its own records or by all of its replaced ones), a finished record for exactly the recorded ordinals, each under the recorded snapshot checksum, and no other record of that migration. Baseline records count, and so do records whose up-file checksum differs: the snapshot checksum on every step record is already the proof that the database stood at that snapshot (ADR-0030), and the squashed migration's end state is that snapshot. The tracking table is the whole witness; no live-schema check is made, `ferro migrate drift` remaining the verb for doubting the live schema. Adoption deletes the witnessed records and inserts one finished record per squashed step in one transaction, with this dialect's squashed up-file checksum, the squashed snapshot checksum, the step's class (ADR-0054) and origin `adopted`, which `status` prints as `applied (adopted)`. An adopted step's down runs normally, unlike a baselined one, and every rule written for origin `run` means "not baseline" and is implemented so. There is no flag and no prompt: the consent is the committed squash.
+
+A partial witness (a database that applied 0005..0007 and not 0008..0009, or whose last step failed) is not adopted; it is *ahead*, and the refusal names the non-destructive fix first (check out the commit that holds the missing migrations, finish the run there, then `up` here adopts) and the revert second (`ferro migrate down --to 0004` on the commit that applied them, then `up`), because a revert drops the epic's rows and fails on an irreversible step (ADR-0033). Adoptable is recognised before *ahead* (ADR-0038): readers, which never write, report the squashed migration `pending (adoptable)` and name `ferro migrate up`, and pending refuses regardless of `allow_ahead` (ADR-0040), so an application that pulls the squash refuses to start against an un-adopted development database until an `up` that runs nothing. A squash is pre-release, so a production database never meets one.
+
+The envelope key is carried by schema IR version 3 (v2 plus an optional `replaces`), with one writer version as every bump before it: `CURRENT_SCHEMA_IR_VERSION` becomes 3, every snapshot this ferro writes is v3, the loader reads 1 through 3 and refuses a v1 or v2 envelope carrying `replaces` as it refuses a v1 carrying a hint, and a v3 golden vector is added. A 0.24 checkout refuses the first v3 snapshot with the upgrade message, the ordinary consequence of a bump; without the bump it would read the key as nothing and report an adoptable database *ahead* with the wrong fix.
+
+The directory reader refuses a witness that names a migration still in the directory ("delete it, or delete the squash"), a malformed checksum, an empty ordinal set or a nested entry repeating an outer one ("restore the file"), so every verb refuses the directory naming the file; the reader never checks a witness against a database. The originals move one by one into one hidden aside directory named after both ends and the replacement (`.0005_add_teams..0009_fix_rows.0005_teams_epic.squashed/`), and every reader refuses the aside by name with the two-way recovery (move its contents back while the replacement is absent, delete it once the replacement is in place).
+
+## Considered options
+
+- **Concatenate the original steps into one directory.** Rejected: it produces a migration no planner would write, N expand/contract pairs, and `check` could not tell it from a hand-edited one; it stitches SQL where I-1 requires the one planner.
+- **The models as the squash's target, as `--replace` reads them.** Rejected: an ungenerated model change would be folded silently into the squash, `check` would mean something different before and after, and the squash would need the project importable.
+- **Revert only: a database that applied the originals reverts with them (`--replace`'s policy).** Rejected by the maintainer: every task's database and the integration database would revert the whole epic, dropping its tables and seeded rows, and a revert fails outright on an irreversible step. Django's `replaces` is the precedent for adoption (docs/research/migration-prior-art.md).
+- **Up-file checksums in the witness.** Rejected: it would refuse a database whose edited step was never `rerecord`ed, and after the squash `rerecord` has no file to accept; the snapshot checksum already pins that database's declared end state.
+- **A live-schema check at adoption, as a baseline is verified (ADR-0031).** Rejected: the records say the database ran every step to the last snapshot, which is the squash's end state; a baseline verifies because nothing ran.
+- **A flattened witness (originals only) across a squash of a squash.** Rejected: it strands every database that adopted the earlier squash. Nesting is one recursive function over data the file already holds.
+- **A witness in a separate file or a step header.** Rejected: a file nothing checksums that every reader and tool must learn; a header puts directory structure into a dialect rendering. The envelope already carries chain metadata (`parent_checksum`), and the snapshot checksum on every step record pins the witness with it.
+- **Writing v3 only for a squashed snapshot and v2 otherwise.** Rejected: two writers to keep in agreement, against the precedent of one writer version; the blast radius it saves is the one every earlier bump accepted.
+- **Only `up` adopts; `down` refuses until an `up` that runs nothing.** Rejected: adoption is the run recognising the witness, and a down fits a database standing at the last snapshot (ADR-0050).
+- **Letting `allow_ahead` admit an adoptable database.** Rejected: it would treat a migration in the directory with no record as not pending, the undeclared in-between state ADR-0040 refused.
+- **Refuse every carried step that may be dead, or none.** Rejected both ways: a name-level fact cannot be tied to a step the squash cannot read, so the refusal is limited to what a data step's declaration proves (I-6: fail loudly where it can be proved, note where it cannot).
+
+## Consequences
+
+- `squash` and `--replace` share one implementation; `--replace` is a tail of one that reads models and is not adopted.
+- The tracking table gains origin `adopted` beside `run` and `baseline`; `status` prints `applied (adopted)`, and `remove_baseline` is blocked by an adopted record as by a run's.
+- Schema IR is at version 3; `Snapshot::load` reads 1..3; the v3 golden vector is in the vectors; `IrEnvelope` gains `replaces`.
+- The directory reader learns the witness checks and the `.squashed` aside beside the `.replaced` one.
+- The guide gains "Squashing an epic's migrations" beside "Two branches, one number", with the line that a squash is pre-release and a development database meets it once and runs `up`; the CLI reference gains `squash`.
+- Pinned over the casebook on both dialects in `tests/test_cross_emitter_parity.py`: a squash equals `new` across its ends file for file, bar the witness and the composed hints; and a database taken through the originals and then adopted has the same live schema as one that ran the squash (every fact pin (e) reads, server defaults included), the same tracking-table end state bar origin, no drift, and a working `down`. The composition table, the dead-step refusal, the partial-witness refusals, the reader refusals and the refused v2-with-`replaces` envelope are unit tests. Any pin that fails against merged behaviour is a `FINDINGS` entry (AGENTS.md I-1).
+- Amends ADR-0023 (the envelope carries `replaces`; version 3), ADR-0030 (origin `adopted`; the consent for the re-record is the committed squash), ADR-0031 (the tracking table is a second valid witness beside the live-schema check a baseline uses) and ADR-0038 (adoptable is recognised before ahead).

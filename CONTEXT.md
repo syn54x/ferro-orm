@@ -315,8 +315,20 @@ _Avoid_: Schema mismatch, out-of-sync, dirty database
 A *migration* or *step* the project's migrations directory holds and a database's *tracking table* has no finished *step record* for. A database with anything pending is behind, which is not *drift*; an application can refuse to start on it or apply it.
 _Avoid_: Unapplied, outstanding, out of date
 
+**Squash**:
+Replacing a run of *migrations* at the head of the directory with the one migration the generator would have written across them: planned once from the *schema snapshot* below the first to the snapshot of the last, never by stitching their steps together. The replaced migrations' *data steps* and hand-written SQL steps are carried into it in order; their DDL is regenerated. A squash reads snapshots, never the models in the codebase, and never opens a database.
+_Avoid_: Merge, collapse, combine, flatten
+
+**Witness** (of a squash):
+What a squashed migration records about each migration it replaces, so a database that ran the originals can be recognised: the migration's name, its *schema snapshot*'s checksum and the ordinals of its steps. A witness for a migration that was itself a squash carries that squash's witnesses, so the record nests. It is kept with the snapshot and never expires.
+_Avoid_: Replaces list, lineage record, provenance
+
+**Adoption**:
+What a *run* does with a squashed migration on a database whose *tracking table* shows every replaced migration finished whole under the snapshot its *witness* names: it swaps those *step records* for the squashed migration's own and runs nothing. Decided from the tracking table alone, with no flag and no prompt. Not a *baseline* (the database really ran the steps, and an adopted step's *down* runs) and not a rerecord (no file was edited). A database that ran only part of the run is not adopted; it is *ahead*, and the refusal names how to finish or revert the run.
+_Avoid_: Fast-forward, stamp, fake-apply, replaces resolution
+
 **Ahead**:
-A database whose *tracking table* holds *step records* for migrations the running code's migrations directory does not have: an older build of the application meeting a newer schema. Refused by default, and allowed only when the application says so.
+A database whose *tracking table* holds *step records* for migrations the running code's migrations directory does not have: an older build of the application meeting a newer schema. Refused by default, and allowed only when the application says so. A database whose records are, whole, the *witness* of a *squash* in the directory is not ahead but pending its *adoption*; one that holds a witness in part is ahead.
 _Avoid_: Newer database, future migration, unknown migration
 
 **Migration test harness**:
