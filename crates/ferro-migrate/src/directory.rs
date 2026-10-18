@@ -965,6 +965,7 @@ impl MigrationsDir {
         let root = path;
         let (first, dirs) = open_target(root, from)?;
         let number = first.number;
+        let named = snapshot_names(&first, &dirs);
         let mut migrations = vec![first];
         let mut below = Vec::new();
         let mut off_run = Vec::new();
@@ -981,7 +982,15 @@ impl MigrationsDir {
                 let (n, name, dir) = entry;
                 migrations.push(read_migration(root, n, name, dir)?);
             } else {
-                off_run.push(format!("{:04}_{}", entry.0, entry.1));
+                let chains_from = std::fs::read(entry.2.join(SNAPSHOT_FILE))
+                    .ok()
+                    .and_then(|bytes| Snapshot::load(&bytes).ok())
+                    .and_then(|s| s.parent_checksum)
+                    .and_then(|parent| named.get(&parent).cloned());
+                off_run.push(OffRun {
+                    migration: format!("{:04}_{}", entry.0, entry.1),
+                    chains_from,
+                });
             }
         }
         let dir = assemble(root, unique_numbers(root, below)?)?;
@@ -1007,10 +1016,10 @@ impl MigrationsDir {
 pub struct Run {
     /// The run's migrations, the named one first, in chain order.
     pub migrations: Vec<Migration>,
-    /// The later migrations the run does not hold (`NNNN_<name>`), in name
-    /// order: a sibling chain's, or a fork's other branch. Empty when the
-    /// run reaches the head.
-    pub off_run: Vec<String>,
+    /// The later migrations the run does not hold, in name order: a sibling
+    /// chain's, or a fork's other branch, each with the migration its
+    /// snapshot chains from. Empty when the run reaches the head.
+    pub off_run: Vec<OffRun>,
     /// The other migrations at the run's first number (`NNNN_<name>`), in
     /// name order: two branches each generated that number. Neither the run
     /// nor the directory below it holds them.
@@ -1023,6 +1032,43 @@ impl Run {
     pub fn reaches_head(&self) -> bool {
         self.off_run.is_empty() && self.siblings.is_empty()
     }
+}
+
+/// A later migration a [`Run`] does not hold, and what it chains from: the
+/// facts a refusal of the run names, so no caller reads a snapshot link
+/// itself.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct OffRun {
+    /// The migration (`NNNN_<name>`).
+    pub migration: String,
+    /// The migration (`NNNN_<name>`) whose stored `ir.json` its snapshot's
+    /// `parent_checksum` names; `None` for no parent, a link no snapshot in
+    /// the directory matches, or a snapshot that does not load.
+    pub chains_from: Option<String>,
+}
+
+/// Every migration directory's snapshot checksum (SHA-384 of the stored
+/// `ir.json`), and the migration (`NNNN_<name>`) holding it: the first in
+/// name order when two hold the same bytes. A snapshot that does not load
+/// names nothing.
+fn snapshot_names(first: &Migration, dirs: &[MigrationDirEntry]) -> BTreeMap<[u8; 48], String> {
+    let mut all: Vec<(String, [u8; 48])> = dirs
+        .iter()
+        .filter_map(|(number, name, dir)| {
+            let checksum = std::fs::read(dir.join(SNAPSHOT_FILE))
+                .ok()
+                .and_then(|bytes| Snapshot::load(&bytes).ok())?
+                .checksum;
+            Some((format!("{number:04}_{name}"), checksum))
+        })
+        .collect();
+    all.push((first.dir_name(), first.snapshot.checksum));
+    all.sort();
+    let mut named = BTreeMap::new();
+    for (name, checksum) in all {
+        named.entry(checksum).or_insert(name);
+    }
+    named
 }
 
 /// Whether the migration directory `dir`'s snapshot names `parent` as its
@@ -2119,6 +2165,13 @@ CREATE INDEX i ON t (c);
         assert_eq!(names, ["0001_a", "0002_y", "0003_after_y"]);
     }
 
+    fn off(migration: &str, chains_from: Option<&str>) -> OffRun {
+        OffRun {
+            migration: migration.to_string(),
+            chains_from: chains_from.map(str::to_string),
+        }
+    }
+
     #[test]
     fn a_run_reports_whether_it_reaches_the_head() {
         let root = scratch("run-reach");
@@ -2129,7 +2182,7 @@ CREATE INDEX i ON t (c);
         let (dir, run) = MigrationsDir::read_run(&root, "0002_x").expect("run");
         assert_eq!(run.migrations.len(), 1);
         assert!(!run.reaches_head());
-        assert_eq!(run.off_run, ["0003_after_y"]);
+        assert_eq!(run.off_run, [off("0003_after_y", Some("0002_y"))]);
         assert_eq!(run.siblings, ["0002_y"]);
         let names: Vec<String> = dir.migrations.iter().map(Migration::dir_name).collect();
         assert_eq!(names, ["0001_a"]);
@@ -2143,7 +2196,16 @@ CREATE INDEX i ON t (c);
         let (dir, run) = MigrationsDir::read_run(&root, "0002_b").expect("run");
         assert_eq!(run.migrations.len(), 2);
         assert!(!run.reaches_head());
-        assert_eq!(run.off_run, ["0003_q"]);
+        assert_eq!(run.off_run, [off("0003_q", Some("0002_b"))]);
+
+        // An off-run migration whose parent link names no snapshot in the
+        // directory chains from nothing.
+        let root = scratch("run-off-run-orphan");
+        let a = migration(&root, "0001_a", None);
+        migration(&root, "0002_b", Some(&a));
+        migration(&root, "0003_lost", Some(b"a stale parent"));
+        let (_, run) = MigrationsDir::read_run(&root, "0002_b").expect("run");
+        assert_eq!(run.off_run, [off("0003_lost", None)]);
         assert_eq!(dir.migrations.len(), 1);
 
         let root = scratch("run-head");

@@ -540,7 +540,7 @@ ALTER TABLE "author" RENAME COLUMN "nickname" TO "handle";
 ALTER TABLE "author" ADD COLUMN "bio" varchar;
 ```
 
-`a→b` then `b→c` is `a→c`; a renamed column the run later drops is a drop of the old name; a column added and then renamed is an add of the new name. A rename whose old name a later task adds again cannot be one migration, and is refused naming the `--from` that ends the range before it. The example runs end to end, adoption and revert included, in [`docs/examples/migrations_squash.py`](https://github.com/syn54x/ferro-orm/blob/main/docs/examples/migrations_squash.py).
+`a→b` then `b→c` is `a→c`; a renamed column the run later drops is a drop of the old name; a column added and then renamed is an add of the new name. A rename whose old name a later task adds again cannot be one migration, and is refused naming the `--from` that starts the range at the task that adds it again, leaving the rename below the squash. The example runs end to end, adoption and revert included, in [`docs/examples/migrations_squash.py`](https://github.com/syn54x/ferro-orm/blob/main/docs/examples/migrations_squash.py).
 
 ### Every database that applied the originals adopts the squash
 

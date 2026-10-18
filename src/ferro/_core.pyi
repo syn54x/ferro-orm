@@ -313,7 +313,10 @@ def _read_migrations_dir(
     With ``run_from`` (same target forms), the directory below that migration
     plus the run from it in chain order as ``"replaced"``, following snapshot
     links (it need not reach the head), ``"reaches_head"`` (bool),
-    ``"off_run"`` (the later ``NNNN_<name>`` migrations the run leaves) and
+    ``"off_run"`` (the later migrations the run leaves, each
+    ``{"migration", "chains_from"}``: its ``NNNN_<name>`` and the
+    ``NNNN_<name>`` its snapshot's parent link names, ``None`` when it names
+    none) and
     ``"siblings"`` (the other ``NNNN_<name>`` migrations at the run's first
     number, never below it).
     Naming both ``replacing`` and ``run_from`` raises ``ValueError``.

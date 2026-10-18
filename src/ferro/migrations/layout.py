@@ -315,8 +315,10 @@ def read_run_reach(directory: Path, from_: str) -> dict[str, Any]:
     Returns ``{"below", "run", "reaches_head", "off_run", "siblings"}``:
     ``run`` follows snapshot links from the migration ``from_`` names and need
     not reach the directory head. ``reaches_head`` says whether it does,
-    ``off_run`` names (``NNNN_<name>``) the later migrations it leaves (a
-    sibling chain's, or a fork's other branch), and ``siblings`` the other
+    ``off_run`` names the later migrations it leaves (a sibling chain's, or
+    a fork's other branch), each ``{"migration", "chains_from"}``: its
+    ``NNNN_<name>`` and the migration its snapshot chains from (``None`` for
+    none in the directory), and ``siblings`` the other
     migrations at ``from_``'s number (two branches each generated it), which
     are never in ``below``; the caller refuses each with its own fix.
 

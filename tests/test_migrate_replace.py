@@ -545,3 +545,29 @@ def test_a_migration_replaced_in_place_meets_the_snapshot_mismatch_naming_it(
         "applied (check out the commit that applied it, `ferro migrate down --to "
         "0001`), then `up`. Nothing was applied."
     ) in err, err
+
+
+def test_replace_refuses_a_name_a_squash_replaced(project, pkg, capsys):
+    # Panel F5 on #690: --replace writes NNNN_<name> too, so it refuses a
+    # name a squash's witness records, as new does.
+    write_config(project, pkg)
+    write_models(project, pkg, AUTHOR)
+    new("create_author")
+    write_models(project, pkg, X)
+    new("add_bio")
+    write_models(project, pkg, XY)
+    new("add_nick")
+    assert run("migrate", "squash", "epic", "--from", "0002") == 0
+    write_models(project, pkg, XY + "    rank: int | None = None\n")
+    new("add_rank")
+    before = tree(project)
+    capsys.readouterr()
+
+    assert run("migrate", "new", "add_nick", "--replace", "0003_add_rank") == 1
+
+    assert capsys.readouterr().err == (
+        "ferro migrate new: 0003_add_nick is the name of a migration the squash "
+        "0002_epic replaces, and every reader would then take it for the replaced "
+        "original; pick another name. Nothing was written.\n"
+    )
+    assert tree(project) == before
