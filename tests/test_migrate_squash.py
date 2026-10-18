@@ -484,9 +484,7 @@ def test_an_untouched_scaffold_the_squash_does_not_rescaffold_is_dropped_with_a_
     assert run("migrate", "check") == 0
 
 
-def test_a_scaffold_changed_by_one_byte_is_hand_work_and_carried(
-    project, pkg, capsys
-):
+def test_a_scaffold_changed_by_one_byte_is_hand_work_and_carried(project, pkg, capsys):
     scaffold = required_bio_run(project, pkg)
     edited = scaffold.read_text().replace("todo(", "todo (", 1)
     assert len(edited) == len(scaffold.read_text()) + 1
@@ -572,8 +570,7 @@ def test_replace_carries_an_untouched_scaffold_as_before(project, pkg, capsys):
     assert step.read_bytes() == body
     out = capsys.readouterr().out
     assert (
-        f"{step.name} data step carried, review it (was 0002_add_bio/"
-        f"{scaffold.name})"
+        f"{step.name} data step carried, review it (was 0002_add_bio/{scaffold.name})"
     ) in words(out), out
     assert "dropped" not in out, out
 

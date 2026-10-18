@@ -524,6 +524,7 @@ def _prepare_squash(
         }
         for m in run
     ]
+
     def generate(carry: list[dict[str, Any]]) -> GeneratedMigration:
         try:
             raw = _generate_migration(
