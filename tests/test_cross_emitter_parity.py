@@ -878,9 +878,6 @@ class Finding:
     dialects: frozenset[str] = frozenset(DIALECTS)
 
 
-_CARRIED_SCAFFOLD = "pin (h): the run's data step (0002's backfill scaffold) is carried byte for byte into the squash (ADR-0056: a data step of the run is carried, marked `carried, review it`), but `new` from the after models alone writes no backfill for a table it creates, so the squashed directory holds a `02_backfill_*.py` file `new`'s does not: the pin's file-for-file definition has no allowance for a carried step"
-
-
 FINDINGS: dict[str, Finding] = {
     "C2-drop-a-foreign-key-column": Finding(
         reason=(
@@ -893,26 +890,6 @@ FINDINGS: dict[str, Finding] = {
         raises=OperationalError,
         pins=frozenset({"g"}),
         dialects=frozenset({"sqlite"}),
-    ),
-    "A2b-required-column-with-a-factory": Finding(
-        reason=(_CARRIED_SCAFFOLD,),
-        raises=AssertionError,
-        pins=frozenset({"h"}),
-    ),
-    "A3-required-column-without-a-default": Finding(
-        reason=(_CARRIED_SCAFFOLD,),
-        raises=AssertionError,
-        pins=frozenset({"h"}),
-    ),
-    "A7a-make-a-column-required": Finding(
-        reason=(_CARRIED_SCAFFOLD,),
-        raises=AssertionError,
-        pins=frozenset({"h"}),
-    ),
-    "C1-add-a-required-foreign-key": Finding(
-        reason=(_CARRIED_SCAFFOLD,),
-        raises=AssertionError,
-        pins=frozenset({"h"}),
     ),
 }
 
@@ -1460,9 +1437,10 @@ def live_schema(url: str, declared: dict, extra: frozenset[str] = frozenset()) -
 
 # -- pin (h): a squash is `new` across its ends --------------------------------------
 
-SQUASH_NAME = "create"
+SQUASH_NAME = "squashed"
 """The one name both sides use, so the two ``0001_<name>`` directories hold
-files of the same names."""
+files of the same names. No original's name: a squash refuses a name that
+would rewrite a replaced original (``0001_create``, #684)."""
 
 _NOT_THE_SQUASH = ("parent_checksum", "replaces")
 
@@ -1528,8 +1506,11 @@ DEAD_STEP_REFUSALS = {
 }
 """Cases whose carried backfill declares a name that existed only inside the
 run (a label ``0001`` added and ``0002`` removed): ADR-0056's dead-step rule
-refuses the squash, by design (#670), naming the name and the fix. Pins (h)
-and (i) assert the refusal, not an equality: it is not a finding."""
+refuses the squash, by design (#670), naming the name and the fix. Pin (i),
+whose backfills are written, asserts the refusal, not an equality: it is not
+a finding. Pin (h)'s backfills are the generator's untouched scaffolds, which
+the squash drops when its plan needs no backfill (ADR-0056 amended, #687), so
+pin (h) holds its equality for these cases too."""
 
 
 def _assert_the_dead_step_refusal(case_id: str, project: Path, *, cwd: Path) -> None:
@@ -1573,10 +1554,6 @@ def test_pin_h_a_squash_is_new_across_its_ends(
     payload is the same once the squash's hints and witness are removed."""
     expect_finding(request, case_id, dialect, "h")
     door = doors(case_id)
-    if case_id in DEAD_STEP_REFUSALS:
-        copy = _copy_of_the_project(door, tmp_path)
-        _assert_the_dead_step_refusal(case_id, copy, cwd=copy)
-        return
     copy = _squash_a_copy(door, tmp_path)
     squashed = migration_dir(copy, 1)
     fresh = _new_from_the_after_models(door.case, tmp_path)
