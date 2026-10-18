@@ -300,18 +300,18 @@ def test_a_run_of_one_is_new_replace_of_it_but_the_witness(project, pkg, tmp_pat
     copy = tmp_path / "copy"
     shutil.copytree(project, copy)
 
-    assert squash("drop_tmp", "--from", "0004_drop_tmp") == 0
+    assert squash("drop_tmp2", "--from", "0004_drop_tmp") == 0
 
     import os
 
     here = Path.cwd()
     try:
         os.chdir(copy)
-        new("drop_tmp", "--replace", "0004_drop_tmp")
+        new("drop_tmp2", "--replace", "0004_drop_tmp")
     finally:
         os.chdir(here)
-    squashed = files(migrations(project) / "0004_drop_tmp")
-    replaced = files(migrations(copy) / "0004_drop_tmp")
+    squashed = files(migrations(project) / "0004_drop_tmp2")
+    replaced = files(migrations(copy) / "0004_drop_tmp2")
     ir = json.loads(squashed.pop("ir.json"))
     assert squashed == {k: v for k, v in replaced.items() if k != "ir.json"}
     witness = ir.pop("replaces")
