@@ -12,10 +12,11 @@ from ferro import BackRef, Field, ManyToMany, Model, Relation, clear_registry
 VECTORS_DIR = Path(__file__).parent / "fixtures" / "ir_vectors"
 SUPPORTED_DOMAINS = {"schema", "query", "codec"}
 # `query` is on ir_version 14 (#395 — optional `before` position bound);
-# `codec` remains v1. `schema` is on v2 (rename hints, ADR-0032), and every
-# shipped v1 schema vector keeps loading (ADR-0023).
-SUPPORTED_IR_VERSIONS = {"schema": {1, 2}, "query": {14}, "codec": {1}}
-CURRENT_SCHEMA_IR_VERSION = 2
+# `codec` remains v1. `schema` is on v3 (a squash's witness, `replaces`,
+# ADR-0056; v2 added the rename hints, ADR-0032), and every shipped v1 and v2
+# schema vector keeps loading (ADR-0023).
+SUPPORTED_IR_VERSIONS = {"schema": {1, 2, 3}, "query": {14}, "codec": {1}}
+CURRENT_SCHEMA_IR_VERSION = 3
 QUERY_OPERATORS = {"==", "!=", "<", "<=", ">", ">=", "IN", "LIKE", "AND", "OR"}
 MATERIALIZATION_KINDS = {"root_instances", "record", "instances"}
 AGGREGATE_FNS = {"count", "sum", "avg", "min", "max"}
@@ -496,7 +497,7 @@ def test_phase1_schema_compiler_matches_snapshot(clean_model_registry: None) -> 
     snapshot = _load_vector(VECTORS_DIR / "schema_phase1_fixture_models_v1.json")
 
     # Hint-free models compile to the shipped v1 payload byte for byte; schema
-    # v2 changed only the envelope's version (ADR-0023).
+    # v2 and v3 changed only the envelope's version (ADR-0023).
     assert compiled["ir_version"] == CURRENT_SCHEMA_IR_VERSION
     as_v1 = {**compiled, "ir_version": 1}
     assert as_v1 == snapshot["ir"]
@@ -519,6 +520,10 @@ def test_rename_hint_schema_compiler_matches_v2_vector(
     compiled = compile_registry_schema_ir()
     vector = _load_vector(VECTORS_DIR / "schema_rename_hints_v2.json")
 
+    # Schema v3 changed only the envelope's version for a modelset (its
+    # `replaces` is a squash's, never the compiler's).
+    assert compiled["ir_version"] == CURRENT_SCHEMA_IR_VERSION
+    compiled = {**compiled, "ir_version": 2}
     assert compiled == vector["ir"]
     assert schema_ir_fingerprint(compiled) == vector["fingerprint"]
     book = next(m for m in compiled["payload"]["models"] if m["table_name"] == "book")
@@ -550,6 +555,8 @@ def test_retired_column_schema_compiler_matches_v2_vector(
     compiled = compile_registry_schema_ir()
     vector = _load_vector(VECTORS_DIR / "schema_retired_column_v2.json")
 
+    assert compiled["ir_version"] == CURRENT_SCHEMA_IR_VERSION
+    compiled = {**compiled, "ir_version": 2}
     assert compiled == vector["ir"]
     assert schema_ir_fingerprint(compiled) == vector["fingerprint"]
     author = next(
@@ -752,7 +759,7 @@ def test_raw_path_non_integer_pk_autoincrement_false_unified(
 
     fixture = _load_vector(VECTORS_DIR / "schema_raw_str_pk_autoincrement_v1.json")
     # A model with no rename hint compiles to the v1 payload unchanged; only
-    # the envelope's version moved (schema v2 added the hints).
+    # the envelope's version moved (schema v2 added the hints, v3 the witness).
     assert ir["ir_version"] == CURRENT_SCHEMA_IR_VERSION
     assert {**ir, "ir_version": 1} == fixture["ir"]
 

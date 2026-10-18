@@ -17,8 +17,8 @@
 
 use crate::Dialect;
 use crate::plan::and_list;
-use crate::snapshot::{Snapshot, SnapshotError, encode_checksum, sha384};
-use std::collections::BTreeMap;
+use crate::snapshot::{Snapshot, SnapshotError, WitnessEntry, encode_checksum, sha384};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// The snapshot file inside every migration.
@@ -214,6 +214,11 @@ pub struct Migration {
     pub dir: PathBuf,
     /// Its steps, by ordinal.
     pub steps: Vec<Step>,
+    /// When it is a squash, its witness: the migrations it replaced, as its
+    /// `ir.json` records them (ADR-0056); empty otherwise. None of them is
+    /// in the directory.
+    #[serde(rename = "replaces")]
+    pub witness: Vec<WitnessEntry>,
     /// Its `ir.json`.
     #[serde(serialize_with = "serialize_snapshot")]
     pub snapshot: Snapshot,
@@ -369,6 +374,14 @@ pub enum DirectoryError {
         /// The migration it was becoming (`NNNN_<name>`).
         migration: String,
     },
+    /// A squash's witness names a migration that is still in the directory:
+    /// the squash replaced it, so the two cannot both be read.
+    WitnessNamesPresent {
+        /// The squash (`NNNN_<name>`).
+        squash: String,
+        /// The migration its witness names (`NNNN_<name>`).
+        named: String,
+    },
     /// A DDL step with no rendering for a target dialect.
     MissingRendering {
         /// The migration.
@@ -402,6 +415,7 @@ impl DirectoryError {
             DirectoryError::MissingRendering { .. } => "missing_rendering",
             DirectoryError::InterruptedReplace { .. } => "interrupted_replace",
             DirectoryError::InterruptedWrite { .. } => "interrupted_write",
+            DirectoryError::WitnessNamesPresent { .. } => "witness_names_present",
         }
     }
 }
@@ -469,7 +483,12 @@ impl std::fmt::Display for DirectoryError {
                 show(migration)
             ),
             DirectoryError::UnreadableSnapshot { path, error } => {
-                write!(f, "{} {error}; restore it from version control", show(path))
+                write!(
+                    f,
+                    "{} {error}; a snapshot is never re-recorded, so restore the file from \
+                     version control",
+                    show(path)
+                )
             }
             DirectoryError::BrokenChain {
                 parent: Some(parent),
@@ -564,6 +583,12 @@ impl std::fmt::Display for DirectoryError {
                 show(partial),
                 show(partial)
             ),
+            DirectoryError::WitnessNamesPresent { squash, named } => write!(
+                f,
+                "{squash}/{SNAPSHOT_FILE} records that the squash {squash} replaces {named}, \
+                 but {named} is still in the migrations directory; delete it, or delete the \
+                 squash {squash}"
+            ),
             DirectoryError::MissingRendering {
                 migration,
                 step,
@@ -623,7 +648,9 @@ fn serialize_optional_checksum<S: serde::Serializer>(
     }
 }
 
-pub(crate) fn serialize_snapshot<S: serde::Serializer>(
+/// A snapshot's JSON: `{"checksum", "parent_checksum", "replaces", "ir"}`,
+/// checksums in hex: the one shape every reader of a snapshot is handed.
+pub fn serialize_snapshot<S: serde::Serializer>(
     snapshot: &Snapshot,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
@@ -631,6 +658,7 @@ pub(crate) fn serialize_snapshot<S: serde::Serializer>(
     serde_json::json!({
         "checksum": encode_checksum(&snapshot.checksum),
         "parent_checksum": snapshot.parent_checksum.as_ref().map(encode_checksum),
+        "replaces": snapshot.replaces,
         "ir": snapshot.ir,
     })
     .serialize(serializer)
@@ -799,7 +827,11 @@ impl MigrationsDir {
             });
         }
         interrupted_writes(root)?;
-        assemble(root, unique_numbers(root, migration_dirs(root)?)?)
+        let dirs = migration_dirs(root)?;
+        let present = present_names(&dirs, None);
+        let dir = assemble(root, unique_numbers(root, dirs)?)?;
+        witness_names_present(&present, &dir.migrations)?;
+        Ok(dir)
     }
 
     /// Read the migrations directory at `path` for `ferro migrate new
@@ -836,7 +868,9 @@ impl MigrationsDir {
                 later: format!("{:04}_{}", later.0, later.1),
             });
         }
+        let present = present_names(&dirs, Some(&replaced));
         let dir = assemble(root, unique_numbers(root, dirs)?)?;
+        witness_names_present(&present, dir.migrations.iter().chain([&replaced]))?;
         Ok((dir, replaced))
     }
 
@@ -864,6 +898,7 @@ impl MigrationsDir {
     pub fn read_run(path: &Path, from: &str) -> Result<(MigrationsDir, Run), DirectoryError> {
         let root = path;
         let (first, dirs) = open_target(root, from)?;
+        let present = present_names(&dirs, Some(&first));
         let number = first.number;
         let mut migrations = vec![first];
         let mut below = Vec::new();
@@ -880,6 +915,7 @@ impl MigrationsDir {
             }
         }
         let dir = assemble(root, unique_numbers(root, below)?)?;
+        witness_names_present(&present, dir.migrations.iter().chain(&migrations))?;
         Ok((
             dir,
             Run {
@@ -921,6 +957,44 @@ fn links_to(dir: &Path, parent: &Migration) -> bool {
         .ok()
         .and_then(|bytes| Snapshot::load(&bytes).ok())
         .is_some_and(|s| s.parent_checksum == Some(parent.snapshot.checksum))
+}
+
+/// Every migration directory name (`NNNN_<name>`) of `dirs`, and `target`'s.
+fn present_names(dirs: &[MigrationDirEntry], target: Option<&Migration>) -> BTreeSet<String> {
+    dirs.iter()
+        .map(|(number, name, _)| format!("{number:04}_{name}"))
+        .chain(target.map(Migration::dir_name))
+        .collect()
+}
+
+/// Refuse a squash whose witness, at any depth, names a migration of
+/// `present` (every migration directory's name): the witness is read
+/// against the directory only, never a database.
+fn witness_names_present<'a>(
+    present: &BTreeSet<String>,
+    migrations: impl IntoIterator<Item = &'a Migration>,
+) -> Result<(), DirectoryError> {
+    fn first_present<'w>(
+        present: &BTreeSet<String>,
+        witness: &'w [WitnessEntry],
+    ) -> Option<&'w str> {
+        witness.iter().find_map(|entry| {
+            if present.contains(&entry.migration) {
+                Some(entry.migration.as_str())
+            } else {
+                first_present(present, &entry.replaces)
+            }
+        })
+    }
+    for migration in migrations {
+        if let Some(named) = first_present(present, &migration.witness) {
+            return Err(DirectoryError::WitnessNamesPresent {
+                squash: migration.dir_name(),
+                named: named.to_string(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// One migration directory under the root: its number, its name and its path.
@@ -1170,6 +1244,7 @@ fn read_migration(
         name,
         dir,
         steps,
+        witness: snapshot.replaces.clone(),
         snapshot,
     })
 }
@@ -1965,5 +2040,123 @@ CREATE INDEX i ON t (c);
             message.contains("0001_a/01_schema") && message.contains("sqlite"),
             "{message}"
         );
+    }
+
+    /// A witness entry for `migration`, with `nested` under it.
+    fn entry(migration: &str, nested: Vec<WitnessEntry>) -> WitnessEntry {
+        WitnessEntry {
+            migration: migration.to_string(),
+            snapshot_checksum: sha384(migration.as_bytes()),
+            steps: vec![1],
+            replaces: nested,
+        }
+    }
+
+    /// Write a squash: [`migration`] whose v3 `ir.json` carries `replaces`.
+    fn squash(
+        root: &Path,
+        dir_name: &str,
+        parent: Option<&[u8]>,
+        replaces: &[WitnessEntry],
+    ) -> Vec<u8> {
+        migration(root, dir_name, parent);
+        let mut ir = empty_ir();
+        ir.ir_version = 3;
+        let bytes = Snapshot::store(&ir, parent.map(sha384), replaces).expect("store");
+        std::fs::write(root.join(dir_name).join(SNAPSHOT_FILE), &bytes).expect("ir.json");
+        bytes
+    }
+
+    #[test]
+    fn a_well_formed_witness_is_read_with_its_migration() {
+        let root = scratch("witness");
+        let a = migration(&root, "0001_a", None);
+        let witness = [
+            entry("0002_squashed", vec![entry("0002_b", vec![])]),
+            entry("0003_c", vec![]),
+        ];
+        squash(&root, "0002_epic", Some(&a), &witness);
+        let read = MigrationsDir::read(&root).expect("a well-formed witness loads");
+        assert_eq!(read.migrations[0].witness, []);
+        assert_eq!(read.migrations[1].witness, witness);
+        assert_eq!(read.migrations[1].snapshot.replaces, witness);
+
+        let json = serde_json::to_value(&read.migrations[1]).expect("serialises");
+        assert_eq!(json["replaces"][0]["migration"], "0002_squashed");
+        assert_eq!(json["replaces"][0]["replaces"][0]["migration"], "0002_b");
+        assert_eq!(json["replaces"][1]["replaces"], serde_json::json!([]));
+        assert_eq!(json["replaces"][1]["steps"], serde_json::json!([1]));
+        assert_eq!(
+            json["replaces"][1]["snapshot_checksum"],
+            encode_checksum(&sha384(b"0003_c"))
+        );
+        assert_eq!(json["snapshot"]["replaces"], json["replaces"]);
+        let first = serde_json::to_value(&read.migrations[0]).expect("serialises");
+        assert_eq!(first["replaces"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn a_witness_naming_a_migration_still_present_is_refused_naming_both() {
+        for nested in [false, true] {
+            let root = scratch("witness-present");
+            let a = migration(&root, "0001_a", None);
+            let witness = if nested {
+                vec![entry("0002_squashed", vec![entry("0001_a", vec![])])]
+            } else {
+                vec![entry("0001_a", vec![])]
+            };
+            squash(&root, "0002_epic", Some(&a), &witness);
+            let err = MigrationsDir::read(&root).expect_err("names a present migration");
+            assert_eq!(err.kind(), "witness_names_present");
+            assert_eq!(
+                err,
+                DirectoryError::WitnessNamesPresent {
+                    squash: "0002_epic".into(),
+                    named: "0001_a".into(),
+                }
+            );
+            let message = err.to_string();
+            assert!(
+                message.contains("0002_epic/ir.json")
+                    && message.contains("0001_a")
+                    && message.contains("delete it, or delete the squash"),
+                "{message}"
+            );
+
+            let err = MigrationsDir::read_run(&root, "0002_epic").expect_err("run");
+            assert_eq!(err.kind(), "witness_names_present", "{err}");
+            let err = MigrationsDir::read_replacing(&root, "0002_epic").expect_err("replace");
+            assert_eq!(err.kind(), "witness_names_present", "{err}");
+        }
+    }
+
+    #[test]
+    fn a_malformed_witness_is_refused_naming_its_ir_json_and_restore_the_file() {
+        let root = scratch("witness-malformed");
+        let a = migration(&root, "0001_a", None);
+        let witness = [entry("0002_b", vec![])];
+        let good = squash(&root, "0002_epic", Some(&a), &witness);
+        let good = String::from_utf8(good).expect("utf-8");
+        let hex = encode_checksum(&witness[0].snapshot_checksum);
+        let nested_repeat = {
+            let mut value: serde_json::Value = serde_json::from_str(&good).expect("json");
+            value["replaces"][0]["replaces"] = serde_json::to_value(&witness).expect("json");
+            serde_json::to_string_pretty(&value).expect("json")
+        };
+        for broken in [
+            good.replace(&hex, &hex[..95]),
+            good.replace("\"steps\": [\n        1\n      ]", "\"steps\": []"),
+            nested_repeat,
+        ] {
+            assert_ne!(broken, good, "the edit applies");
+            std::fs::write(root.join("0002_epic/ir.json"), &broken).expect("write");
+            let err = MigrationsDir::read(&root).expect_err("malformed witness");
+            assert_eq!(err.kind(), "unreadable_snapshot");
+            let message = err.to_string();
+            assert!(
+                message.contains("0002_epic/ir.json") && message.contains("restore the file"),
+                "{message}"
+            );
+        }
     }
 }

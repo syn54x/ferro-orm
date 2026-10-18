@@ -3604,6 +3604,7 @@ mod baseline_tests {
                 name: name.to_string(),
                 dir: PathBuf::from(format!("/migrations/{:04}_{name}", i + 1)),
                 steps,
+                witness: Vec::new(),
                 snapshot: Snapshot::load(&bytes).expect("load"),
             });
         }

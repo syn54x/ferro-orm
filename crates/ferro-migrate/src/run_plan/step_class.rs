@@ -710,6 +710,7 @@ mod tests {
                 name: format!("m{number}"),
                 dir: format!("/migrations/{number:04}_m{number}").into(),
                 steps,
+                witness: Vec::new(),
                 snapshot: Snapshot::load(&bytes).expect("load"),
             });
         }
@@ -788,6 +789,7 @@ mod tests {
                     })
                     .collect(),
             }],
+            witness: Vec::new(),
             snapshot: Snapshot::load(&bytes).expect("load"),
         });
         let refusal =

@@ -3279,6 +3279,7 @@ mod tests {
                 name: name.to_string(),
                 dir: PathBuf::from(format!("/migrations/{:04}_{name}", i + 1)),
                 steps,
+                witness: Vec::new(),
                 snapshot: Snapshot::load(&bytes).expect("load"),
             });
         }
@@ -5076,6 +5077,7 @@ mod tests {
                 name: "init".into(),
                 dir: PathBuf::from("/proj/migrations/0001_init"),
                 steps: vec![step("schema", file("0001_init", "schema", create, DOWN))],
+                witness: Vec::new(),
                 snapshot: first,
             },
             Migration {
@@ -5083,6 +5085,7 @@ mod tests {
                 name: "slug".into(),
                 dir: PathBuf::from("/proj/migrations/0002_slug"),
                 steps: vec![step("rebuild", file("0002_slug", "rebuild", REBUILD, undo))],
+                witness: Vec::new(),
                 snapshot: second,
             },
         ];
