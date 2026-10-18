@@ -1386,12 +1386,19 @@ async def down(
     ``confirm`` is shown the plan before the lock is taken; when it returns
     false nothing is reverted (``declined``). Once the lock is held the plan
     is made again, and a database that changed in between is refused rather
-    than reverted unseen. ``progress`` receives one line per reverted step;
-    ``on_event`` receives each as data (a :class:`StepEvent`, or a
-    :class:`RunNote` for any other line) just before ``progress`` receives
-    its ``line()``; a failed down is a ``StepEvent`` with no line.
+    than reverted unseen. Under the lock and before it plans, a ``down``
+    adopts every squash whose witness the records hold, as ``up`` does
+    (ADR-0056). ``progress`` receives one line per squash adopted, then one
+    per reverted step; ``on_event`` receives each as data just before
+    ``progress`` receives its ``line()``: an :class:`AdoptedEvent` per
+    squash adopted (its ``squash`` and the ``replaced`` migrations, with no
+    ``.text`` or ``.step``), a :class:`StepEvent` per reverted step, a
+    :class:`RunNote` for any other line; a failed down is a ``StepEvent``
+    with no line.
 
-    Returns the :class:`RunReport` of what it reverted (``declined`` when
+    Returns the :class:`RunReport` of what it did: ``.adopted`` the squashes
+    it adopted, in order (an :class:`AdoptedMigration` each), then
+    ``.reverted`` the steps it reverted, newest first (``.declined`` when
     ``confirm`` said no).
 
     Raises:
