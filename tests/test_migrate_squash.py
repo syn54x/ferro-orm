@@ -435,6 +435,123 @@ def test_an_unwritten_step_is_carried_and_listed_as_still_needing_writing(
     assert run("migrate", "check") == 3  # the unwritten step, as before
 
 
+# -- an unwritten scaffold the squashed plan does not need (#687) ------------------
+
+REQUIRED_BIO = AUTHOR + "    bio: str\n"
+
+DROPPED = (
+    "02_backfill_author.py from 0002_add_bio was the generator's unwritten "
+    "scaffold and the squashed plan needs no backfill of author.bio: dropped"
+)
+
+
+def required_bio_run(project: Path, pkg: str) -> Path:
+    """``0001_create_author``; ``0002_add_bio`` adds the required ``bio``,
+    its generated backfill left as the generator wrote it. Returns that
+    backfill."""
+    write_config(project, pkg)
+    write_models(project, pkg, AUTHOR)
+    new("create_author")
+    write_models(project, pkg, REQUIRED_BIO)
+    new("add_bio")
+    [scaffold] = (migrations(project) / "0002_add_bio").glob("*_backfill_author.py")
+    assert "todo(" in scaffold.read_text()
+    return scaffold
+
+
+def test_an_untouched_scaffold_the_squash_does_not_rescaffold_is_dropped_with_a_note(
+    project, pkg, tmp_path, capsys
+):
+    required_bio_run(project, pkg)
+    expected = from_scratch(project, pkg, tmp_path, [])
+    capsys.readouterr()
+
+    assert squash("epic", "--from", "0001") == 0
+
+    assert dirs(project) == ["0001_epic"]
+    squashed = files(migrations(project) / "0001_epic")
+    assert not [n for n in squashed if n.endswith(".py")], sorted(squashed)
+    squashed.pop("ir.json")
+    written = files(expected)
+    written.pop("ir.json")
+    assert squashed == written
+    out = capsys.readouterr().out
+    assert f"- {DROPPED}" in words(out), out
+    assert "still needs writing" not in out, out
+    assert run("migrate", "check") == 0
+
+
+def test_a_scaffold_changed_by_one_byte_is_hand_work_and_carried(
+    project, pkg, capsys
+):
+    scaffold = required_bio_run(project, pkg)
+    edited = scaffold.read_text().replace("todo(", "todo (", 1)
+    assert len(edited) == len(scaffold.read_text()) + 1
+    scaffold.write_text(edited)
+    capsys.readouterr()
+
+    assert squash("epic", "--from", "0001") == 0
+
+    [step] = (migrations(project) / "0001_epic").glob("*_backfill_author.py")
+    assert step.read_text() == edited
+    out = capsys.readouterr().out
+    lines = words(out)
+    assert (
+        f"{step.name} data step carried, review it (was "
+        "0002_add_bio/02_backfill_author.py)"
+    ) in lines, out
+    assert (
+        f"- {step.name} still needs writing where it says todo(...) (carried from "
+        "0002_add_bio/02_backfill_author.py)"
+    ) in lines, out
+    assert "dropped" not in out, out
+
+
+def test_an_untouched_scaffold_the_squash_rescaffolds_is_carried_over_its_namesake(
+    project, pkg, capsys
+):
+    write_config(project, pkg)
+    write_models(project, pkg, AUTHOR)
+    new("create_author")
+    write_models(project, pkg, TMP)
+    new("add_tmp")
+    write_models(project, pkg, TMP + "    bio: str\n")
+    new("add_bio")
+    [scaffold] = (migrations(project) / "0003_add_bio").glob("*_backfill_author.py")
+    body = scaffold.read_bytes()
+    capsys.readouterr()
+
+    assert squash("epic", "--from", "0002") == 0
+
+    [step] = (migrations(project) / "0002_epic").glob("*_backfill_author.py")
+    assert step.read_bytes() == body
+    out = capsys.readouterr().out
+    assert (
+        f"{step.name} data step carried, review it (was 0003_add_bio/"
+        f"{scaffold.name}; it wins over the regenerated step of the same name)"
+    ) in words(out), out
+    assert "dropped" not in out, out
+
+
+def test_replace_carries_an_untouched_scaffold_as_before(project, pkg, capsys):
+    scaffold = required_bio_run(project, pkg)
+    body = scaffold.read_bytes()
+    # The column is no longer required: the regeneration scaffolds no backfill.
+    write_models(project, pkg, BIO)
+    capsys.readouterr()
+
+    assert run("migrate", "new", "add_bio_v2", "--replace", "0002_add_bio") == 0
+
+    [step] = (migrations(project) / "0002_add_bio_v2").glob("*_backfill_author.py")
+    assert step.read_bytes() == body
+    out = capsys.readouterr().out
+    assert (
+        f"{step.name} data step carried, review it (was 0002_add_bio/"
+        f"{scaffold.name})"
+    ) in words(out), out
+    assert "dropped" not in out, out
+
+
 def test_squash_reads_no_models(project, pkg):
     feature_branch(project, pkg)
     # Models that do not even import: a squash never reads them.
