@@ -495,8 +495,10 @@ def _prepare_squash(
     read = read_run_reach(directory, from_)
     below, run = read["below"], read["run"]
     names = [_dir_name(m) for m in run]
-    if not read["reaches_head"]:
+    if read["off_run"]:
         raise MigrationsDirectoryError(_short_of_the_head(directory, names[0], read))
+    if read["siblings"]:
+        raise MigrationsDirectoryError(_shared_number(names[0], read["siblings"][0]))
     written = f"{len(below) + 1:04d}_{name}"
     if written in names:
         raise MigrationsDirectoryError(
@@ -836,6 +838,18 @@ def _node_names(node: Any, table: str, touched: set[str]) -> None:
     for item in value if isinstance(value, list | tuple | set) else [value]:
         if isinstance(item, str | Enum):
             touched.add(f"{column}:{getattr(item, 'value', item)}")
+
+
+def _shared_number(first: str, sibling: str) -> str:
+    """The refusal of a run whose first number another migration shares: no
+    run descends from that sibling, so a squash planned on top of it would
+    drop what it made. The fix is ``new --replace`` on either one."""
+    return (
+        f"ferro migrate squash: {sibling} shares {first}'s number and is not in "
+        f"the range: two branches each generated {first[:4]}. Regenerate one on "
+        f"top of the other first (ferro migrate new NAME --replace {sibling}, or "
+        f"--replace {first}), then squash. Nothing was written."
+    )
 
 
 def _short_of_the_head(directory: Path, first: str, read: dict[str, Any]) -> str:

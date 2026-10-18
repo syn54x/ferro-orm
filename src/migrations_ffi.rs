@@ -183,8 +183,9 @@ pub fn _step_file_role(name: String) -> PyResult<String> {
 /// chains from. With `run_from`, the directory below that migration and the
 /// run from it through the head, in chain order, as `"replaced"`
 /// (`MigrationsDir::read_run`), plus `"reaches_head"` (whether the run ends
-/// at the directory head) and `"off_run"` (the later migrations it leaves,
-/// `NNNN_<name>`). Naming both is a `ValueError`.
+/// at the directory head), `"off_run"` (the later migrations it leaves,
+/// `NNNN_<name>`) and `"siblings"` (the other migrations at the run's first
+/// number, which it never stands on). Naming both is a `ValueError`.
 #[pyfunction]
 #[pyo3(name = "_read_migrations_dir")]
 #[pyo3(signature = (directory, replacing = None, run_from = None))]
@@ -195,7 +196,7 @@ pub fn _read_migrations_dir(
 ) -> PyResult<String> {
     let refused = |err: ferro_migrate::DirectoryError| PyValueError::new_err(err.to_string());
     let path = Path::new(&directory);
-    let mut off_run: Option<Vec<String>> = None;
+    let mut reach: Option<(bool, Vec<String>, Vec<String>)> = None;
     let (dir, replaced) = match (replacing, run_from) {
         (None, None) => return to_json(&MigrationsDir::read(path).map_err(refused)?),
         (Some(_), Some(_)) => {
@@ -209,7 +210,7 @@ pub fn _read_migrations_dir(
         }
         (None, Some(from)) => {
             let (dir, run) = MigrationsDir::read_run(path, &from).map_err(refused)?;
-            off_run = Some(run.off_run);
+            reach = Some((run.reaches_head(), run.off_run, run.siblings));
             (dir, run.migrations)
         }
     };
@@ -217,10 +218,12 @@ pub fn _read_migrations_dir(
         .map_err(|err| PyValueError::new_err(format!("the migrations directory: {err}")))?;
     json["replaced"] = serde_json::to_value(&replaced)
         .map_err(|err| PyValueError::new_err(format!("the replaced migrations: {err}")))?;
-    if let Some(off_run) = off_run {
-        json["reaches_head"] = serde_json::Value::Bool(off_run.is_empty());
+    if let Some((reaches_head, off_run, siblings)) = reach {
+        json["reaches_head"] = serde_json::Value::Bool(reaches_head);
         json["off_run"] = serde_json::to_value(&off_run)
             .map_err(|err| PyValueError::new_err(format!("the off-run migrations: {err}")))?;
+        json["siblings"] = serde_json::to_value(&siblings)
+            .map_err(|err| PyValueError::new_err(format!("the sibling migrations: {err}")))?;
     }
     to_json(&json)
 }
