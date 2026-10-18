@@ -145,6 +145,7 @@ STATES: dict[str, tuple[str, str]] = {
     "applied (adopted)": ("ok", "green"),
     "reverted": ("ok", "green"),
     "pending": ("pending", "yellow"),
+    "pending (adoptable)": ("pending", "yellow"),
     "failed": ("error", "bold red"),
     "interrupted": ("error", "red"),
     "applied (different checksum)": ("error", "red"),
@@ -703,7 +704,14 @@ def print_status(out: Output, report: StatusReport, *, steps: bool) -> None:
     names = [m.name for m in report.migrations] + report.ahead
     width = max((len(name) for name in names), default=0)
     for migration in report.migrations:
-        _status_row(out, migration.name, migration.state, width, migration.applied_at)
+        _status_row(
+            out,
+            migration.name,
+            migration.state,
+            width,
+            migration.applied_at,
+            hint=migration.hint,
+        )
         if steps or migration.expands:
             _status_steps(out, migration, steps=steps)
     for name in report.ahead:
@@ -719,8 +727,17 @@ def print_status(out: Output, report: StatusReport, *, steps: bool) -> None:
 
 
 def _status_row(
-    out: Output, name: str, state: str, width: int, applied_at: str | None
+    out: Output,
+    name: str,
+    state: str,
+    width: int,
+    applied_at: str | None,
+    *,
+    hint: str | None = None,
 ) -> None:
+    """One migration's row: glyph, name, state word, then its ``applied_at``
+    dim, or the migration's hint plain (a squash pending adoption names
+    ``ferro migrate up``)."""
     key = _state_key(state)
     glyph = STATE_GLYPH[key]
     line = Text("  ")
@@ -730,6 +747,8 @@ def _status_row(
     when = applied_at_short(applied_at)
     if when:
         line.append(f"  {when}", style="dim")
+    if hint:
+        line.append(f"  {hint}")
     out.print(line)
 
 
@@ -902,15 +921,15 @@ def print_adopted(out: Output, event: AdoptedEvent) -> None:
     database had applied 0005_add_teams … 0009_fix_rows; nothing was
     run``); on a TTY an ok heading, ``adopted <squash>`` bold and the rest
     dim."""
+    from ..migrations.report import migration_span
+
     if out.plain:
         out.print(event.line())
         return
-    names = event.replaced
-    span = names[0] if len(names) == 1 else f"{names[0]} … {names[-1]}"
     out.heading(
         "ok",
         f"adopted {event.squash}",
-        f"this database had applied {span}; nothing was run",
+        f"this database had applied {migration_span(event.replaced)}; nothing was run",
     )
 
 

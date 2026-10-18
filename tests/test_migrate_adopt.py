@@ -29,7 +29,14 @@ from pathlib import Path
 import pytest
 
 from ferro import _core, connect
-from ferro.migrations import MigrationRefused, runner, status
+from ferro.cli.output import applied_at_short
+from ferro.migrations import (
+    MigrationRefused,
+    PendingMigrationsError,
+    runner,
+    status,
+)
+from ferro.migrations.report import StatusReport
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     AUTHOR,
     pkg,
@@ -418,3 +425,182 @@ def test_two_concurrent_ups_adopt_once(project, pkg, db):
     rows = names(db)
     assert len(rows) == len(set(rows))
     assert {name for name, _, _ in rows} == {"0001_create_author", "0002_epic"}
+
+
+# -- the readers report what the run will do (#672) ----------------------------------
+
+HINT = (
+    "run `ferro migrate up`; this database applied 0002_add_tmp … 0004_drop_tmp "
+    "and nothing will be run"
+)
+
+
+def stands(db) -> StatusReport:
+    """``ferro.migrations.status()``: it takes no lock and writes nothing."""
+    return asyncio.run(status(url=db.url))
+
+
+def require(db, allow_ahead: runner.AllowAhead = False) -> None:
+    asyncio.run(runner.require_applied(url=db.url, allow_ahead=allow_ahead))
+
+
+def tracking_table(db) -> str:
+    schema = "main" if db.backend == "sqlite" else db.schema
+    return f"{schema}._ferro_migrations"
+
+
+def test_status_reports_an_adoptable_squash_pending_with_the_up_hint_and_nothing_ahead(
+    project, pkg, db, capsys
+):
+    squashed(project, pkg, db)
+    before = records(db)
+
+    code, out, _ = cli(capsys, "status", "--json", "--url", db.url)
+    document = json.loads(out)
+
+    assert code == 3
+    assert document["adoptable"] == ["0002_epic"]
+    assert document["ahead"] == [] and document["refusal"] is None
+    assert document["pending"] is True and document["needs_attention"] is False
+    assert [(m["name"], m["state"]) for m in document["migrations"]] == [
+        ("0001_create_author", "applied"),
+        ("0002_epic", "pending (adoptable)"),
+    ]
+    assert {s["state"] for s in document["migrations"][1]["steps"]} == {
+        "pending (adoptable)"
+    }
+
+    code, out, err = cli(capsys, "status", "--url", db.url)
+
+    when = applied_at_short(document["migrations"][0]["applied_at"])
+    assert (code, err) == (3, "")
+    assert out == (
+        f"{db.line}\n"
+        f"-- 1 pending  {tracking_table(db)}\n"
+        f"  ok 0001_create_author  applied  {when}\n"
+        f"  -- 0002_epic           pending (adoptable)  {HINT}\n"
+    )
+
+    report = stands(db)
+    assert report.adoptable == ["0002_epic"]
+    assert report.pending is True and report.ahead == []
+    [squash_] = [m for m in report.migrations if m.name == "0002_epic"]
+    assert squash_.state == "pending (adoptable)"
+    assert squash_.adopts == ORIGINALS
+    assert squash_.hint == HINT
+    assert report.render().splitlines()[-1].endswith(f"pending (adoptable)  {HINT}")
+    # The readers wrote nothing.
+    assert records(db) == before
+
+
+def test_status_steps_lists_each_squashed_step_pending_adoptable(
+    project, pkg, db, capsys
+):
+    squashed(project, pkg, db)
+
+    code, out, _ = cli(capsys, "status", "--steps", "--url", db.url)
+
+    assert code == 3
+    lines = out.splitlines()
+    row = next(i for i, line in enumerate(lines) if "0002_epic" in line)
+    assert lines[row].endswith(f"pending (adoptable)  {HINT}")
+    steps = lines[row + 1 :]
+    [outer] = [m for m in stands(db).migrations if m.name == "0002_epic"]
+    assert len(steps) == len(outer.steps) > 1
+    assert all(" pending (adoptable)  " in step for step in steps), steps
+
+
+@pytest.mark.parametrize("allow_ahead", [False, True, "expand-only"])
+def test_require_applied_raises_pending_on_an_adoptable_database_whatever_allow_ahead(
+    project, pkg, db, allow_ahead
+):
+    squashed(project, pkg, db)
+
+    with pytest.raises(MigrationRefused) as raised:
+        require(db, allow_ahead)
+
+    assert type(raised.value) is PendingMigrationsError
+    assert raised.value.pending == ["0002_epic"]
+    assert raised.value.refusals == []
+    assert "ferro migrate up" in str(raised.value)
+
+
+def test_an_adoptable_squash_below_a_pending_migration_is_pending_with_it(
+    project, pkg, db
+):
+    squashed(project, pkg, db)
+    write_models(project, pkg, TITLE)
+    new("add_title")
+
+    report = stands(db)
+
+    assert [(m.name, m.state) for m in report.migrations] == [
+        ("0001_create_author", "applied"),
+        ("0002_epic", "pending (adoptable)"),
+        ("0003_add_title", "pending"),
+    ]
+    assert report.adoptable == ["0002_epic"]
+    assert report.ahead == [] and report.refusal is None
+    with pytest.raises(PendingMigrationsError) as raised:
+        require(db)
+    assert raised.value.pending == ["0002_epic", "0003_add_title"]
+
+
+def test_a_partial_witness_is_ahead_by_the_originals_it_holds_with_the_runs_refusal(
+    project, pkg, db, capsys
+):
+    squashed(project, pkg, db, apply_through=3)
+
+    report = stands(db)
+
+    assert report.adoptable == []
+    assert report.ahead == ["0002_add_tmp", "0003_add_bio"]
+    assert report.refusal == PARTIAL
+    assert [(m.name, m.state) for m in report.migrations][1] == ("0002_epic", "pending")
+    code, out, _ = cli(capsys, "status", "--url", db.url)
+    assert code == 4
+    assert "  xx 0003_add_bio        applied, not in the directory\n" in out
+    for allow_ahead in (False, True, "expand-only"):
+        with pytest.raises(MigrationRefused) as raised:
+            require(db, allow_ahead)
+        assert type(raised.value) is PendingMigrationsError
+        assert raised.value.pending == ["0002_epic"]
+        assert raised.value.refusals == [PARTIAL]
+
+
+def test_after_up_status_reads_applied_adopted_and_require_applied_returns(
+    project, pkg, db, capsys
+):
+    squashed(project, pkg, db)
+    assert cli(capsys, "up", "--url", db.url)[0] == 0
+
+    report = stands(db)
+
+    [squash_] = [m for m in report.migrations if m.name == "0002_epic"]
+    assert {step.state for step in squash_.steps} == {"applied (adopted)"}
+    assert squash_.hint is None
+    assert report.adoptable == [] and report.ahead == [] and not report.pending
+    require(db)
+
+
+@pytest.mark.parametrize("adopted_first", [True, False], ids=["adopted", "originals"])
+def test_a_squash_of_a_squash_reads_adoptable_from_either_generation(
+    project, pkg, db, capsys, adopted_first
+):
+    epic(project, pkg, db)
+    assert squash("bio_epic", "--from", "0003") == 0
+    if adopted_first:
+        assert cli(capsys, "up", "--url", db.url)[0] == 0
+    assert squash("epic", "--from", "0002") == 0
+
+    report = stands(db)
+
+    [outer] = [m for m in report.migrations if m.name == "0002_epic"]
+    assert outer.state == "pending (adoptable)"
+    assert outer.adopts == (
+        ["0002_add_tmp", "0003_bio_epic"] if adopted_first else ORIGINALS
+    )
+    assert report.adoptable == ["0002_epic"] and report.ahead == []
+    with pytest.raises(PendingMigrationsError) as raised:
+        require(db)
+    assert raised.value.pending == ["0002_epic"]

@@ -84,7 +84,7 @@ from .chunked import BatchFailed, order_keys, run_chunked
 from .context import HistoricalModels, StepContext
 from .errors import DatabaseAheadError, MigrationRefused, PendingMigrationsError
 from .historical import HistoricalModelError
-from .report import RunRefused, StatusReport
+from .report import RunRefused, StatusReport, migration_span
 from .steps import (
     Chunked,
     Irreversible,
@@ -198,10 +198,9 @@ class AdoptedMigration:
     def line(self) -> str:
         """``adopted <squash>: this database had applied <first> … <last>;
         nothing was run``."""
-        names = self.replaced
-        span = names[0] if len(names) == 1 else f"{names[0]} … {names[-1]}"
         return (
-            f"adopted {self.squash}: this database had applied {span}; nothing was run"
+            f"adopted {self.squash}: this database had applied "
+            f"{migration_span(self.replaced)}; nothing was run"
         )
 
 
@@ -1094,20 +1093,22 @@ async def status_of(
         # edited-chunked refusal offers --continue on its condition.
         keys = None
     held = await tracked.lock_held() if lock_held is None else lock_held
+    raw = tracked.status(keys, lock_held=held)
+    # A step's own records only: a squash's originals share its numbers.
+    names = {m["name"] for m in raw["migrations"]}
+    own = [r for r in tracked.records if r["migration_name"] in names]
     return StatusReport.from_core(
-        tracked.status(keys, lock_held=held),
+        raw,
         database=database.name,
         url=tracked.url,
         dialect=tracked.dialect,
         table=tracked.tracking_table,
         rows_done={
             (r["migration"], r["step"]): r["rows_done"]
-            for r in tracked.records
+            for r in own
             if r["kind"] == "chunked" and r["rows_done"] is not None
         },
-        finished_at={
-            (r["migration"], r["step"]): r["finished_at"] for r in tracked.records
-        },
+        finished_at={(r["migration"], r["step"]): r["finished_at"] for r in own},
     )
 
 
@@ -1152,7 +1153,10 @@ async def require_applied(
     classifies it.
 
     The answer is the run planner's: the plan ``up`` would make, read with
-    no lock.
+    no lock, after the adoption it would make first (ADR-0056). A database
+    that applied a squash's originals is pending that squash, never ahead
+    by them, whatever ``allow_ahead`` says (ADR-0040); one that applied
+    them in part carries the run's ``partial_witness`` refusal.
 
     Raises:
         PendingMigrationsError: a migration is pending (``.pending``), or the
@@ -1179,7 +1183,9 @@ async def require_applied(
         if tracked.refusal is not None:
             raise PendingMigrationsError(pending, [tracked.refusal])
         try:
-            await tracked.plan({"direction": "up"}, allow_ahead=allow_ahead)
+            await tracked.plan(
+                {"direction": "up"}, allow_ahead=allow_ahead, adopting=_declared_kind
+            )
         except RunRefused as refused:
             if refused.ahead_only:
                 raise DatabaseAheadError(

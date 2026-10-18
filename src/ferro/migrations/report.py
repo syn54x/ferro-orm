@@ -179,6 +179,7 @@ _STATES = (
     _State("applied_baseline", "applied (baseline)", applied=True, whole=True),
     _State("applied_adopted", "applied (adopted)", applied=True, whole=True),
     _State("pending", "pending", whole=True),
+    _State("pending_adoptable", "pending (adoptable)", whole=True),
     _State("running", "running", unfinished=True, running=True),
     _State("failed", "failed", unfinished=True, attention=True),
     _State("interrupted", "interrupted", unfinished=True, attention=True),
@@ -202,6 +203,12 @@ def _state(*, word: str | None = None, shown: str | None = None) -> _State:
 _RUNNING = next(state for state in _STATES if state.running)
 
 
+def migration_span(names: Sequence[str]) -> str:
+    """``<first> … <last>`` of migration names in chain order, or the one
+    name: how an adoption names what the database applied."""
+    return names[0] if len(names) == 1 else f"{names[0]} … {names[-1]}"
+
+
 @dataclass(frozen=True)
 class StepStatus:
     """One step of one migration."""
@@ -211,7 +218,8 @@ class StepStatus:
     """The file this database executes (or executed)."""
     state: str
     """``applied``, ``applied (different checksum)``, ``applied
-    (baseline)``, ``applied (adopted)``, ``pending``, ``running``,
+    (baseline)``, ``applied (adopted)``, ``pending``, ``pending
+    (adoptable)`` (a squash the next run adopts, ADR-0056), ``running``,
     ``failed``, ``interrupted`` or ``reverting``."""
     error: str | None = None
     """The last attempt's error, when recorded."""
@@ -275,6 +283,22 @@ class MigrationStatus:
     name: str
     """``NNNN_<name>``."""
     steps: list[StepStatus]
+    adopts: list[str] = field(default_factory=list)
+    """For a squash pending its adoption, ``NNNN_<name>`` of each migration
+    whose records witness it, in chain order: what the database applied.
+    Empty otherwise."""
+
+    @property
+    def hint(self) -> str | None:
+        """What to do about this migration, when ``status`` says it on its
+        row: for a squash pending adoption, ``run `ferro migrate up`; this
+        database applied <first> … <last> and nothing will be run``."""
+        if not self.adopts:
+            return None
+        return (
+            f"run `ferro migrate up`; this database applied "
+            f"{migration_span(self.adopts)} and nothing will be run"
+        )
 
     @property
     def applied_at(self) -> str | None:
@@ -326,7 +350,7 @@ class MigrationStatus:
     @property
     def state(self) -> str:
         """``applied`` / ``applied (baseline)`` / ``applied (adopted)`` /
-        ``pending`` when every
+        ``pending`` / ``pending (adoptable)`` when every
         step agrees; ``running`` while a run is in it; ``applied (different
         checksum)`` when every step is applied and one changed; else
         ``partial, X of N steps``."""
@@ -367,7 +391,11 @@ class StatusReport:
     """``<schema>._ferro_migrations``."""
     migrations: list[MigrationStatus]
     ahead: list[str] = field(default_factory=list)
-    """Migrations this database has applied that the directory lacks."""
+    """Migrations this database has applied that the directory lacks. Never
+    the originals of a squash it is pending the adoption of (ADR-0038)."""
+    adoptable: list[str] = field(default_factory=list)
+    """Each squash the next run adopts (``NNNN_<name>``), running nothing
+    (ADR-0056): pending, whatever ``allow_ahead`` says."""
     refusal: str | None = None
     """What ``up`` would refuse with, when it would."""
     refusal_needs_attention: bool = False
@@ -451,6 +479,7 @@ class StatusReport:
                     )
                     for s in m["steps"]
                 ],
+                adopts=list(m.get("adopts", ())),
             )
             for m in raw["migrations"]
         ]
@@ -461,6 +490,7 @@ class StatusReport:
             table=table,
             migrations=migrations,
             ahead=list(raw["ahead"]),
+            adoptable=list(raw.get("adoptable", ())),
             refusal=refusal if refusal is not None else raw["refusal"],
             refusal_needs_attention=(
                 True if refusal is not None else raw["refusal_needs_attention"]
@@ -476,7 +506,8 @@ class StatusReport:
         expanded = [m for m in self.migrations if steps or m.expands]
         file_width = max((len(s.file) for m in expanded for s in m.steps), default=0)
         for migration in self.migrations:
-            lines.append(f"{migration.name:<{name_width}}  {migration.state}")
+            hint = f"  {migration.hint}" if migration.hint else ""
+            lines.append(f"{migration.name:<{name_width}}  {migration.state}{hint}")
             if migration not in expanded:
                 continue
             for step in migration.steps:
@@ -518,6 +549,7 @@ class StatusReport:
                     for m in self.migrations
                 ],
                 "ahead": self.ahead,
+                "adoptable": self.adoptable,
                 "refusal": self.refusal,
             },
             indent=2,
