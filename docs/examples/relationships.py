@@ -3,7 +3,16 @@
 import asyncio
 from typing import Annotated
 
-from ferro import BackRef, Field, ForeignKey, ManyToMany, Model, Relation, connect, engines
+from ferro import (
+    BackRef,
+    Field,
+    ForeignKey,
+    ManyToMany,
+    Model,
+    Relation,
+    connect,
+    engines,
+)
 
 
 # --8<-- [start:one-to-many]
@@ -17,6 +26,8 @@ class Player(Model):
     id: int | None = Field(default=None, primary_key=True)
     name: str
     team: Annotated[Team, ForeignKey(related_name="members")]
+
+
 # --8<-- [end:one-to-many]
 
 
@@ -31,6 +42,8 @@ class Profile(Model):
     id: int | None = Field(default=None, primary_key=True)
     bio: str
     user: Annotated[User, ForeignKey(related_name="profile", unique=True)]
+
+
 # --8<-- [end:one-to-one]
 
 
@@ -45,6 +58,8 @@ class Course(Model):
     id: int | None = Field(default=None, primary_key=True)
     title: str
     students: Relation[list["Student"]] = BackRef()
+
+
 # --8<-- [end:many-to-many]
 
 
@@ -52,8 +67,12 @@ class Course(Model):
 class Employee(Model):
     id: int | None = Field(default=None, primary_key=True)
     name: str
-    manager: Annotated["Employee", ForeignKey(related_name="reports", nullable=True)] = None
+    manager: Annotated[
+        "Employee", ForeignKey(related_name="reports", nullable=True)
+    ] = None
     reports: Relation[list["Employee"]] = BackRef()
+
+
 # --8<-- [end:self-referential]
 
 
@@ -67,7 +86,11 @@ class Library(Model):
 class Document(Model):
     id: int | None = Field(default=None, primary_key=True)
     title: str
-    library: Annotated[Library, ForeignKey(related_name="documents", on_delete="CASCADE")]
+    library: Annotated[
+        Library, ForeignKey(related_name="documents", on_delete="CASCADE")
+    ]
+
+
 # --8<-- [end:on-delete]
 
 

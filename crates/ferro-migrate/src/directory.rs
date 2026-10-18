@@ -923,13 +923,17 @@ fn links_to(dir: &Path, parent: &Migration) -> bool {
         .is_some_and(|s| s.parent_checksum == Some(parent.snapshot.checksum))
 }
 
+/// One migration directory under the root: its number, its name and its path.
+type MigrationDirEntry = (u16, String, PathBuf);
+
+/// A resolved target read whole, and every other migration directory, in name
+/// order.
+type OpenedTarget = (Migration, Vec<MigrationDirEntry>);
+
 /// Resolve `target` (`NNNN_<name>`, or `NNNN` when one migration carries the
 /// number) against the directory at `root`, and read that migration whole;
 /// returns it and every other migration directory, in name order.
-fn open_target(
-    root: &Path,
-    target: &str,
-) -> Result<(Migration, Vec<(u16, String, PathBuf)>), DirectoryError> {
+fn open_target(root: &Path, target: &str) -> Result<OpenedTarget, DirectoryError> {
     let no_such = || DirectoryError::NoSuchMigration {
         target: target.to_string(),
     };
@@ -938,7 +942,7 @@ fn open_target(
     }
     interrupted_writes(root)?;
     let mut dirs = migration_dirs(root)?;
-    let full = |(number, name, _): &(u16, String, PathBuf)| format!("{number:04}_{name}");
+    let full = |(number, name, _): &MigrationDirEntry| format!("{number:04}_{name}");
     let matching: Vec<usize> = match target.parse::<u16>() {
         Ok(number) if target.len() == 4 && target.chars().all(|c| c.is_ascii_digit()) => dirs
             .iter()
@@ -1018,7 +1022,7 @@ fn interrupted_writes(root: &Path) -> Result<(), DirectoryError> {
 
 /// Every migration directory under `root` as `(number, name, path)`, in
 /// name order; any other entry is refused.
-fn migration_dirs(root: &Path) -> Result<Vec<(u16, String, PathBuf)>, DirectoryError> {
+fn migration_dirs(root: &Path) -> Result<Vec<MigrationDirEntry>, DirectoryError> {
     let mut out = Vec::new();
     for (name, entry) in entries(root, root)? {
         if !entry.is_dir() {
@@ -1041,7 +1045,7 @@ fn migration_dirs(root: &Path) -> Result<Vec<(u16, String, PathBuf)>, DirectoryE
 /// `dirs` by number, refusing two that share one.
 fn unique_numbers(
     root: &Path,
-    dirs: Vec<(u16, String, PathBuf)>,
+    dirs: Vec<MigrationDirEntry>,
 ) -> Result<BTreeMap<u16, (String, PathBuf)>, DirectoryError> {
     let mut numbered: BTreeMap<u16, (String, PathBuf)> = BTreeMap::new();
     for (number, name, entry) in dirs {

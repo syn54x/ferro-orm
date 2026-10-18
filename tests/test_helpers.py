@@ -17,7 +17,6 @@ async def test_create_helper(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         user = await HelperUser.create(username="taylor")
         assert user.id is not None
         assert user.username == "taylor"
@@ -38,7 +37,6 @@ async def test_exists_helper(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         await HelperUser.create(username="exists_check")
 
         assert (
@@ -62,7 +60,6 @@ async def test_bulk_create_helper(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         users = [
             HelperUser(username="user1"),
             HelperUser(username="user2"),
@@ -88,7 +85,6 @@ async def test_get_or_create(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         # 1. Create case
         user1, created = await HelperUser.get_or_create(
             username="new_user", defaults={"is_active": False}
@@ -115,7 +111,6 @@ async def test_update_or_create(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         # 1. Create case
         user1, created = await HelperUser.update_or_create(
             username="up_user", defaults={"is_active": True}

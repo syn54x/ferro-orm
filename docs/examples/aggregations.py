@@ -24,9 +24,9 @@ class Transaction(Model):
     amount: int
     price: Decimal | None = Field(default=None)
     memo: str
-    account: Annotated[
-        Account | None, ForeignKey(related_name="transactions")
-    ] = None
+    account: Annotated[Account | None, ForeignKey(related_name="transactions")] = None
+
+
 # --8<-- [end:schema]
 
 
@@ -86,9 +86,7 @@ async def main() -> None:
         # count. No hidden COALESCE — "sum of no rows" and "sum of rows
         # totaling zero" stay distinguishable.
         row = await (
-            Transaction.select(
-                lambda t: {"n": t.id.count(), "total": t.amount.sum()}
-            )
+            Transaction.select(lambda t: {"n": t.id.count(), "total": t.amount.sum()})
             .where(lambda t: t.amount > 10_000)
             .first()
         )

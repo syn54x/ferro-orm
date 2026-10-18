@@ -159,9 +159,7 @@ def resolve_relationships():
                 ),
             )
             composite_uniques = ((source_col, target_col),)
-            composite_indexes = (
-                ((target_col, source_col),) if rel.reverse_index else ()
-            )
+            composite_indexes = ((target_col, source_col),) if rel.reverse_index else ()
             register_model_with_ir(
                 join_table,
                 join_columns,

@@ -188,7 +188,9 @@ def test_custom_table_name_round_trips_both_emitters():
 
     envelope = compile_registry_schema_ir()
     model = next(
-        m for m in envelope["payload"]["models"] if m["table_name"] == "billing_accounts"
+        m
+        for m in envelope["payload"]["models"]
+        if m["table_name"] == "billing_accounts"
     )
     assert _ddl_single_unique_name("billing_accounts", "email") in {
         u["name"] for u in model["uniques"]

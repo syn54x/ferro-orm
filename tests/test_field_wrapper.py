@@ -27,7 +27,6 @@ async def test_ferro_field_wrapper_sets_metadata_and_pydantic_schema(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-
         user = WrappedUser(email="one@example.com")
         await user.save()
         assert user.id is not None
@@ -66,9 +65,7 @@ async def test_annotation_field_pattern_persists_like_assignment(db_url):
 
     class AnnotatedUser(Model):
         id: Annotated[int | None, Field(default=None, primary_key=True)]
-        email: Annotated[
-            str, Field(unique=True, index=True, description="Login email")
-        ]
+        email: Annotated[str, Field(unique=True, index=True, description="Login email")]
 
     assert AnnotatedUser.ferro_fields["id"].primary_key is True
     assert AnnotatedUser.ferro_fields["email"].unique is True
@@ -77,7 +74,6 @@ async def test_annotation_field_pattern_persists_like_assignment(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-
         user = AnnotatedUser(email="ann@example.com")
         await user.save()
         assert user.id is not None
@@ -91,7 +87,6 @@ async def test_optional_patterned_string_roundtrip(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-
         item = await WrappedInventory.create(code="SKU-123")
         fetched = await WrappedInventory.get(item.id)
 

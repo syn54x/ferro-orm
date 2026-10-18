@@ -1630,7 +1630,7 @@ fn a_move_to_or_from_a_native_enum_type_reports_the_generators_recipe() {
         assert_eq!(refusal.to_string(), recipe.text);
         let rendered = plan.render().expect("render");
         assert!(rendered[0].statements.is_empty());
-        assert_eq!(rendered[0].reports, [recipe.clone()]);
+        assert_eq!(rendered[0].reports, std::slice::from_ref(&recipe));
         assert!(recipe.blocks());
     }
 }

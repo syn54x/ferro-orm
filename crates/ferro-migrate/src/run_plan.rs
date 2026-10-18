@@ -886,7 +886,7 @@ fn thousands(n: i64) -> String {
     let digits = n.unsigned_abs().to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
@@ -988,7 +988,7 @@ impl std::fmt::Display for RunRefusal {
                         key_list(keys_recorded),
                         keys_on_disk
                             .as_deref()
-                            .map_or_else(|| "not read".to_string(), |keys| key_list(keys)),
+                            .map_or_else(|| "not read".to_string(), key_list),
                     )?,
                 }
                 write!(f, "Nothing was applied.")
@@ -1484,12 +1484,8 @@ fn sql_files(dir: &MigrationsDir) -> impl Iterator<Item = (&PathBuf, &[u8; 48])>
         .filter(|step| step.kind != StepKind::Data)
         .flat_map(|step| step.files.values())
         .flat_map(|file| {
-            std::iter::once((&file.up, &file.up_checksum)).chain(
-                file.down
-                    .as_ref()
-                    .zip(file.down_checksum.as_ref())
-                    .into_iter(),
-            )
+            std::iter::once((&file.up, &file.up_checksum))
+                .chain(file.down.as_ref().zip(file.down_checksum.as_ref()))
         })
 }
 
@@ -2853,15 +2849,12 @@ pub fn unclassified(dir: &MigrationsDir, records: &[StepRecord], dialect: Dialec
                     }
                 }
             });
-            class = match decided {
-                Some(classes) => Some(
-                    classes
-                        .get(&record.step)
-                        .copied()
-                        .unwrap_or(StepClass::Contract),
-                ),
-                None => None,
-            };
+            class = decided.as_ref().map(|classes| {
+                classes
+                    .get(&record.step)
+                    .copied()
+                    .unwrap_or(StepClass::Contract)
+            });
         }
         if let Some(class) = class {
             out.classes.push((record.migration, record.step, class));
@@ -4076,7 +4069,7 @@ mod tests {
         let (dir, _) = applied(&step);
         let plan = plan_run(
             &dir,
-            &[record.clone()],
+            std::slice::from_ref(&record),
             Dialect::Postgres,
             Direction::Up { through: None },
             false,

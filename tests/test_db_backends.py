@@ -93,13 +93,16 @@ def test_backends_for_test_respects_markers_and_available_postgres():
         has_postgres_url=True,
     ) == ("sqlite",)
 
-    assert db_backends.backends_for_test(
-        ("sqlite", "postgres"),
-        is_backend_matrix=False,
-        is_sqlite_only=False,
-        is_postgres_only=True,
-        has_postgres_url=False,
-    ) == ()
+    assert (
+        db_backends.backends_for_test(
+            ("sqlite", "postgres"),
+            is_backend_matrix=False,
+            is_sqlite_only=False,
+            is_postgres_only=True,
+            has_postgres_url=False,
+        )
+        == ()
+    )
 
 
 def test_build_postgres_test_url_sets_search_path():

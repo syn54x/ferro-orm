@@ -9,7 +9,16 @@ The queries themselves declare no fields, so they live only in traversal.py.
 import asyncio
 from typing import Annotated
 
-from ferro import BackRef, Field, ForeignKey, ManyToMany, Model, Relation, connect, engines
+from ferro import (
+    BackRef,
+    Field,
+    ForeignKey,
+    ManyToMany,
+    Model,
+    Relation,
+    connect,
+    engines,
+)
 
 
 # --8<-- [start:schema]
@@ -38,6 +47,8 @@ class Transaction(Model):
     id: Annotated[int | None, Field(default=None, primary_key=True)]
     amount: int
     account: Annotated[Account, ForeignKey(related_name="transactions")]
+
+
 # --8<-- [end:schema]
 
 
@@ -46,6 +57,8 @@ class Note(Model):
     id: Annotated[int | None, Field(default=None, primary_key=True)]
     body: str
     account: Annotated[Account | None, ForeignKey(related_name="notes")] = None
+
+
 # --8<-- [end:note-model]
 
 
@@ -61,6 +74,8 @@ class Flight(Model):
     id: Annotated[int | None, Field(default=None, primary_key=True)]
     origin: Annotated[Airport, ForeignKey(related_name="departures")]
     destination: Annotated[Airport, ForeignKey(related_name="arrivals")]
+
+
 # --8<-- [end:two-fk-model]
 
 
@@ -68,8 +83,12 @@ class Flight(Model):
 class Employee(Model):
     id: Annotated[int | None, Field(default=None, primary_key=True)]
     name: str
-    manager: Annotated["Employee", ForeignKey(related_name="reports", nullable=True)] = None
+    manager: Annotated[
+        "Employee", ForeignKey(related_name="reports", nullable=True)
+    ] = None
     reports: Relation[list["Employee"]] = BackRef()
+
+
 # --8<-- [end:self-fk-model]
 
 
@@ -91,6 +110,8 @@ class Post(Model):
     id: Annotated[int | None, Field(default=None, primary_key=True)]
     title: str
     tags: Relation[list["Tag"]] = ManyToMany(related_name="posts")
+
+
 # --8<-- [end:m2m-model]
 
 

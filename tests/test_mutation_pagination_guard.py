@@ -16,33 +16,49 @@ class PaginationGuardItem(Model):
 @pytest.mark.asyncio
 async def test_delete_with_limit_raises_value_error():
     with pytest.raises(ValueError, match=r"delete\(\) does not support limit/offset"):
-        await PaginationGuardItem.where(lambda item: item.flagged == True).limit(  # noqa: E712
-            5
-        ).delete()
+        await (
+            PaginationGuardItem.where(lambda item: item.flagged == True)  # noqa: E712
+            .limit(  # noqa: E712
+                5
+            )
+            .delete()
+        )
 
 
 @pytest.mark.asyncio
 async def test_delete_with_offset_raises_value_error():
     with pytest.raises(ValueError, match=r"delete\(\) does not support limit/offset"):
-        await PaginationGuardItem.where(lambda item: item.flagged == True).offset(  # noqa: E712
-            2
-        ).delete()
+        await (
+            PaginationGuardItem.where(lambda item: item.flagged == True)  # noqa: E712
+            .offset(  # noqa: E712
+                2
+            )
+            .delete()
+        )
 
 
 @pytest.mark.asyncio
 async def test_update_with_limit_raises_value_error():
     with pytest.raises(ValueError, match=r"update\(\) does not support limit/offset"):
-        await PaginationGuardItem.where(lambda item: item.flagged == True).limit(  # noqa: E712
-            5
-        ).update(name="renamed")
+        await (
+            PaginationGuardItem.where(lambda item: item.flagged == True)  # noqa: E712
+            .limit(  # noqa: E712
+                5
+            )
+            .update(name="renamed")
+        )
 
 
 @pytest.mark.asyncio
 async def test_update_with_offset_raises_value_error():
     with pytest.raises(ValueError, match=r"update\(\) does not support limit/offset"):
-        await PaginationGuardItem.where(lambda item: item.flagged == True).offset(  # noqa: E712
-            2
-        ).update(name="renamed")
+        await (
+            PaginationGuardItem.where(lambda item: item.flagged == True)  # noqa: E712
+            .offset(  # noqa: E712
+                2
+            )
+            .update(name="renamed")
+        )
 
 
 @pytest.mark.asyncio
@@ -76,7 +92,6 @@ async def test_failed_paginated_mutation_touches_no_rows(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-
         for label in ("a", "b", "c"):
             await GuardedRow(label=label).save()
 
@@ -98,7 +113,6 @@ async def test_first_then_delete_on_same_query_still_allowed(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-
         await FirstThenDelete(label="only").save()
 
         query = FirstThenDelete.where(lambda row: row.label == "only")

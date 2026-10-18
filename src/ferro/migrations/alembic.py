@@ -264,7 +264,9 @@ def _build_sa_table_from_ir(metadata: "sa.MetaData", model_ir: Dict[str, Any]) -
         sa.Index(name, *(table.columns[c] for c in cols), unique=unique)
 
 
-def _sa_type_from_ir_column(col_name: str, col: Dict[str, Any]) -> "sa.types.TypeEngine":
+def _sa_type_from_ir_column(
+    col_name: str, col: Dict[str, Any]
+) -> "sa.types.TypeEngine":
     """Mechanical consumer of the shared derived-type decision table (FF-B B2).
 
     The storage decision — explicit ``db_type`` wins, then enum values select

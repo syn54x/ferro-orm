@@ -165,7 +165,7 @@ if TYPE_CHECKING:
         email: str = ""
 
     # Lambda predicates type-check as Predicate[Model]
-    _pred: Predicate[_StaticUser] = lambda t: t.archived == False  # noqa: E712
+    _pred: Predicate[_StaticUser] = lambda t: t.archived == False  # noqa: E712, E731 - an annotated lambda is the case under test
     assert_type(_pred(QueryProxy[_StaticUser](_StaticUser)), QueryNode)
 
     # FieldProxy comparisons resolve to QueryNode (the lambda mechanism)

@@ -48,7 +48,6 @@ async def test_insert_with_none_for_each_nullable_primitive(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         row = await Mixed.create()
         assert row.id is not None
         assert row.count is None
@@ -79,7 +78,6 @@ async def test_insert_with_value_round_trips_for_each_type(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         row = await Mixed.create(count=42, active=True, ratio=3.14, name="ferro")
         fetched = await Mixed.get(row.id)
         assert fetched is not None
@@ -104,7 +102,6 @@ async def test_insert_with_none_for_uuid(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         null_row = await WithUuid.create()
         fetched_null = await WithUuid.get(null_row.id)
         assert fetched_null is not None
@@ -140,7 +137,6 @@ async def test_uuid_pk_round_trips_through_bind_layer(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         target = uuid.uuid4()
         created = await UuidPk.create(id=target)
         assert created.id == target
@@ -168,7 +164,6 @@ async def test_uuid_pk_filter_by_string_does_not_send_text(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         target = uuid.uuid4()
         await UuidProfile.create(id=target, name="alice")
 
@@ -192,7 +187,6 @@ async def test_insert_with_none_for_decimal(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         null_row = await WithDecimal.create()
         fetched = await WithDecimal.get(null_row.id)
         assert fetched is not None
@@ -217,7 +211,6 @@ async def test_issue_38_exact_regression(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         row = await Scorecard.create()
         assert row.id is not None
         assert row.bench_level is None
@@ -245,7 +238,6 @@ async def test_update_to_none_succeeds_on_postgres(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         row = await Mixed.create(count=99, active=True, name="initial")
         updated = await Mixed.where(lambda m: m.id == row.id).update(
             count=None, active=None, name=None
@@ -276,7 +268,6 @@ async def test_update_to_none_executes_without_error(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         row = await Mixed.create(count=99)
         updated = await Mixed.where(lambda m: m.id == row.id).update(count=None)
         assert updated == 1
@@ -296,7 +287,6 @@ async def test_filter_by_none_does_not_reproduce_38(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         with_value = await Filterable.create(count=1)
         null_row = await Filterable.create()  # count = None
 
@@ -325,9 +315,12 @@ async def test_lambda_predicate_null_filter_datetime_and_json(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
-        null_dt = await Pending.create(name="null-dt", attached_at=None, payload=[{"x": 1}])
-        null_json = await Pending.create(name="null-json", attached_at=datetime.now(UTC))
+        null_dt = await Pending.create(
+            name="null-dt", attached_at=None, payload=[{"x": 1}]
+        )
+        null_json = await Pending.create(
+            name="null-json", attached_at=datetime.now(UTC)
+        )
         with_values = await Pending.create(
             name="set",
             attached_at=datetime.now(UTC),
@@ -368,7 +361,6 @@ async def test_invalid_uuid_raises_pyvalueerror_or_pydantic_error(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         with pytest.raises((ValueError, TypeError)) as exc_info:
             await WithUuid.create(run_id="not-a-uuid")
 
@@ -390,7 +382,9 @@ async def test_temporal_update_to_none_uses_unified_codec_path(db_url):
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
         row = await TemporalUpdate.create(attached_at=datetime.now(UTC))
-        updated = await TemporalUpdate.where(lambda t: t.id == row.id).update(attached_at=None)
+        updated = await TemporalUpdate.where(lambda t: t.id == row.id).update(
+            attached_at=None
+        )
         assert updated == 1
 
         fetched = await TemporalUpdate.get(row.id)

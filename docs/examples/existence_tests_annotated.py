@@ -3,7 +3,16 @@
 import asyncio
 from typing import Annotated
 
-from ferro import BackRef, Field, ForeignKey, ManyToMany, Model, Relation, connect, engines
+from ferro import (
+    BackRef,
+    Field,
+    ForeignKey,
+    ManyToMany,
+    Model,
+    Relation,
+    connect,
+    engines,
+)
 
 
 # --8<-- [start:schema]
@@ -44,6 +53,8 @@ class SplitLine(Model):
         Category | None, ForeignKey(related_name="lines", on_delete="SET NULL")
     ] = None
     amount: int = 0
+
+
 # --8<-- [end:schema]
 
 
@@ -58,6 +69,8 @@ class User(Model):
     id: Annotated[int | None, Field(default=None, primary_key=True)]
     username: str
     tags: Relation[list["Tag"]] = BackRef()
+
+
 # --8<-- [end:m2m-schema]
 
 
@@ -79,8 +92,10 @@ async def main() -> None:
         await SplitLine.create(txn=split, category=groceries, amount=-70)
 
         line_aware = await Transaction.where(
-            lambda t: t.category_id.in_([groceries.id])
-            | t.lines.exists(lambda line: line.category_id.in_([groceries.id]))
+            lambda t: (
+                t.category_id.in_([groceries.id])
+                | t.lines.exists(lambda line: line.category_id.in_([groceries.id]))
+            )
         ).all()
         assert {t.amount for t in line_aware} == {-70}
 

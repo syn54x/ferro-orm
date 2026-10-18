@@ -19,13 +19,21 @@ async def get_page(page: int, per_page: int = 20) -> list[Article]:
         .offset((page - 1) * per_page)
         .all()
     )
+
+
 # --8<-- [end:offset]
 
 
 # --8<-- [start:keyset]
 async def get_after(after_id: int | None, limit: int = 20) -> list[Article]:
-    query = Article.select() if after_id is None else Article.where(lambda article: article.id > after_id)
+    query = (
+        Article.select()
+        if after_id is None
+        else Article.where(lambda article: article.id > after_id)
+    )
     return await query.order_by(lambda article: article.id).limit(limit).all()
+
+
 # --8<-- [end:keyset]
 
 

@@ -200,9 +200,7 @@ def test_plain_status_json_is_the_whole_of_stdout(project, pkg, db, capsys):
 
 
 @pytest.mark.backend_matrix
-def test_plain_status_a_failed_step_needs_attention_on_stdout(
-    project, pkg, db, capsys
-):
+def test_plain_status_a_failed_step_needs_attention_on_stdout(project, pkg, db, capsys):
     failed_second_step(project, pkg, db)
     doc = document(capsys, db)
     failed = doc["migrations"][0]["steps"][1]
@@ -295,11 +293,7 @@ def test_plain_status_with_only_a_refusal_heads_it_needs_attention(
     assert code == 4
     shown = "".join(f"  {line}\n" for line in refusal.splitlines())
     assert out == (
-        f"{db.line}\n"
-        f"!! needs attention  {table(db)}\n"
-        "\n"
-        "xx needs attention\n"
-        f"{shown}"
+        f"{db.line}\n!! needs attention  {table(db)}\n\nxx needs attention\n{shown}"
     )
     assert err == ""
 
@@ -624,8 +618,7 @@ def test_tty_drift_refusal_is_the_unchanged_sentence(project, pkg, db, capsys, t
 
     assert (code, out) == (4, f"{tty_line(db)}\n")
     assert err == (
-        f"{sgr('1;31', '✘')} {sgr('1;31', 'drift refused')}\n"
-        f"{drift_api(db).refusal}\n"
+        f"{sgr('1;31', '✘')} {sgr('1;31', 'drift refused')}\n{drift_api(db).refusal}\n"
     )
 
 

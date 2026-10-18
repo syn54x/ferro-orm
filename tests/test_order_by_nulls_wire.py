@@ -74,9 +74,7 @@ def test_compile_query_nulls_with_traversal_path():
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         author: Annotated[WireAuthor, ForeignKey(related_name="wire_posts")]
 
-    query = WirePost.select().order_by(
-        lambda p: p.author.name, "asc", nulls="first"
-    )
+    query = WirePost.select().order_by(lambda p: p.author.name, "asc", nulls="first")
     payload = compile_query(query, "fetch").payload.to_ir_dict()
     assert payload["order_by"] == [
         {

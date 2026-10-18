@@ -5,6 +5,7 @@ from typing import ClassVar
 
 from ferro import Check, CheckViolationError, Field, Model, connect, engines
 
+
 # --8<-- [start:models]
 class Pair(Model):
     __ferro_checks__: ClassVar[tuple[Check, ...]] = (

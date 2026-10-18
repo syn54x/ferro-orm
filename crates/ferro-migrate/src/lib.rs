@@ -14,6 +14,12 @@
 //! the generator ([`generate`]), which renders the planner's ops into a
 //! migration's step files.
 
+// The crate's error types (`RunRefusal`, `ComposeError`, `DirectoryError`, ...)
+// are refusals that carry their whole text and the hints or records they name,
+// built once per command and handed to Python, never returned in a loop, so
+// boxing them would buy nothing and cost every refusal site a `Box::new`.
+#![allow(clippy::result_large_err)]
+
 pub mod directory;
 mod emit;
 pub mod generate;

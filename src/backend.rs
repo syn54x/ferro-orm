@@ -695,6 +695,10 @@ impl EngineHandle {
         }
     }
 
+    /// Execute `sql` on a pooled connection through the prepared path. The
+    /// unit tests seed and inspect databases with it; runtime code uses the
+    /// unprepared or bound executors below.
+    #[cfg(test)]
     pub async fn execute_sql(&self, sql: &str) -> Result<u64, sqlx::Error> {
         self.acquire_nontx_connection()
             .await?

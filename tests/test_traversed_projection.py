@@ -60,9 +60,7 @@ class TPAccount(Model):
 class TPTransaction(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     amount: int = 0
-    account: Annotated[
-        TPAccount | None, ForeignKey(related_name="transactions")
-    ] = None
+    account: Annotated[TPAccount | None, ForeignKey(related_name="transactions")] = None
 
 
 _JOINED = datetime(2026, 2, 1, 9, 0, 0, tzinfo=timezone.utc)
@@ -73,7 +71,10 @@ async def _seed():
     """Owner alice <- account a1 <- txns 1/2 (10, 20); txn 3 (30) has NO
     account (NULL FK); account a2 (owner bob) <- txn 4 (40)."""
     alice = TPOwner(
-        id=1, email="alice@x.io", tier=TPTier.PRO, joined_at=_JOINED,
+        id=1,
+        email="alice@x.io",
+        tier=TPTier.PRO,
+        joined_at=_JOINED,
         external_id=_OWNER_UID,
     )
     bob = TPOwner(id=2, email="bob@x.io", tier=TPTier.FREE)
@@ -418,9 +419,9 @@ async def test_traversed_rows_are_records_not_instances(db_url):
     async with ferro.engines.session():
         await _seed()
 
-        row = await (
-            TPTransaction.select(lambda t: {"account_name": t.account.name}).first()
-        )
+        row = await TPTransaction.select(
+            lambda t: {"account_name": t.account.name}
+        ).first()
 
         assert isinstance(row, Row)
         assert not isinstance(row, Model)

@@ -128,7 +128,9 @@ async def test_rows_is_list_like_and_pydantic_shaped(db_url):
     async with ferro.engines.session():
         await _seed_transactions()
 
-        rows = await PSTransaction.select(lambda t: (t.id, t.amount)).order_by("id").all()
+        rows = (
+            await PSTransaction.select(lambda t: (t.id, t.amount)).order_by("id").all()
+        )
 
         assert len(rows) == 3
         assert rows[0].id == 1
@@ -380,7 +382,9 @@ async def test_order_by_unselected_column(db_url):
     async with ferro.engines.session():
         await _seed_transactions()
 
-        rows = await PSTransaction.select(lambda t: t.id).order_by("amount", "desc").all()
+        rows = (
+            await PSTransaction.select(lambda t: t.id).order_by("amount", "desc").all()
+        )
 
         assert [row.id for row in rows] == [3, 2, 1]
         assert "amount" not in rows[0].model_dump()
@@ -466,7 +470,9 @@ async def test_row_construction_never_runs_pydantic_init(db_url, monkeypatch):
     async with ferro.engines.session():
         await _seed_transactions()
 
-        rows = await PSTransaction.select(lambda t: (t.id, t.amount)).order_by("id").all()
+        rows = (
+            await PSTransaction.select(lambda t: (t.id, t.amount)).order_by("id").all()
+        )
 
         assert len(rows) == 3
         assert rows[0].amount == 10

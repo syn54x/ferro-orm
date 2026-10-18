@@ -38,8 +38,8 @@ async def test_refetch_returns_fresh_values_with_identity_preserved(db_url):
         )
 
         again = await RefUser.get(u.id)
-        assert again is u          # identity preserved
-        assert u.name == "new"     # FAILS today: stale "old"
+        assert again is u  # identity preserved
+        assert u.name == "new"  # FAILS today: stale "old"
         assert u.score == 2
 
 

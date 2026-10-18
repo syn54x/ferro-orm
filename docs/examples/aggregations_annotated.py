@@ -24,9 +24,9 @@ class Transaction(Model):
     amount: int
     price: Annotated[Decimal | None, Field(default=None)]
     memo: str
-    account: Annotated[
-        Account | None, ForeignKey(related_name="transactions")
-    ] = None
+    account: Annotated[Account | None, ForeignKey(related_name="transactions")] = None
+
+
 # --8<-- [end:schema]
 
 

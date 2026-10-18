@@ -228,10 +228,7 @@ async def test_model_using_routes_helper_writes_to_named_connection(tmp_path):
     assert updated_created is False
     assert updated_row.label == "updated"
     assert [
-        (row.id, row.label)
-        for row in await service_model.select()
-        .order_by("id")
-        .all()
+        (row.id, row.label) for row in await service_model.select().order_by("id").all()
     ] == [
         (10, "updated"),
         (11, "created"),

@@ -42,9 +42,9 @@ async def main() -> None:
 
         # --8<-- [start:refresh]
         # Reload an instance from the database, discarding local state
-        await Customer.where(lambda customer: customer.email == "alice@example.com").update(
-            name="Alice L."
-        )
+        await Customer.where(
+            lambda customer: customer.email == "alice@example.com"
+        ).update(name="Alice L.")
         await customer.refresh()
         assert customer.name == "Alice L."
         # --8<-- [end:refresh]
@@ -118,7 +118,9 @@ async def main() -> None:
             print(exc.driver_message)  # original driver text, for logs
         # --8<-- [end:handling-errors]
 
-        dora = await Customer.create(email="dora@example.com")  # plan defaults to "free"
+        dora = await Customer.create(
+            email="dora@example.com"
+        )  # plan defaults to "free"
 
         # --8<-- [start:recipe-update]
         await Customer.where(lambda customer: customer.id == dora.id).update(
@@ -138,7 +140,9 @@ async def main() -> None:
             # then mutate by primary-key set:
             doomed = await free.limit(10).all()
             ids = [customer.id for customer in doomed]
-            removed = await Customer.where(lambda customer: customer.id.in_(ids)).delete()
+            removed = await Customer.where(
+                lambda customer: customer.id.in_(ids)
+            ).delete()
             assert removed == 1
         # --8<-- [end:mutation-guard]
 

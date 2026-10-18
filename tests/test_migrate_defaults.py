@@ -141,7 +141,9 @@ def sqlite_set_default(db, table: str, column: str, default: str) -> None:
 def set_default(db, table: str, column: str, default: str) -> None:
     """The hand edit: ``table.column`` gets the server default ``default``."""
     if db.backend == "postgres":
-        db.execute(f'ALTER TABLE "{table}" ALTER COLUMN "{column}" SET DEFAULT {default}')
+        db.execute(
+            f'ALTER TABLE "{table}" ALTER COLUMN "{column}" SET DEFAULT {default}'
+        )
     else:
         sqlite_set_default(db, table, column, default)
 
@@ -256,7 +258,9 @@ def test_autogenerate_drops_it_with_alembics_alter_column_and_cannot_put_it_back
     project, pkg, db
 ):
     if db.backend != "postgres":
-        pytest.skip("SQLite drops a default only by a rebuild, which a revision refuses")
+        pytest.skip(
+            "SQLite drops a default only by a rebuild, which a revision refuses"
+        )
     from tests._alembic_harness import autogenerate, run_revision
 
     generated(project, pkg, db)
@@ -266,8 +270,10 @@ def test_autogenerate_drops_it_with_alembics_alter_column_and_cannot_put_it_back
     upgrade, downgrade = autogenerate(db.url, db.base, db.schema)
 
     flat = re.sub(r"\s+", " ", upgrade)
-    assert "op.alter_column('author', 'slug', existing_type=sa.String(), " \
-        "server_default=None, existing_nullable=False)" in flat, upgrade
+    assert (
+        "op.alter_column('author', 'slug', existing_type=sa.String(), "
+        "server_default=None, existing_nullable=False)" in flat
+    ), upgrade
     assert "DROP DEFAULT" not in upgrade, upgrade
     assert "raise RuntimeError(" in downgrade, downgrade
     assert "set outside ferro" in downgrade, downgrade

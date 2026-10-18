@@ -17,7 +17,6 @@ async def test_count_operation(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-
         await AggProduct(name="Item 1", price=10.0, category="A").save()
         await AggProduct(name="Item 2", price=20.0, category="A").save()
         await AggProduct(name="Item 3", price=30.0, category="B").save()
@@ -43,17 +42,12 @@ async def test_order_by_operation(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-
         await AggProduct(name="Z", price=100.0, category="X").save()
         await AggProduct(name="A", price=50.0, category="Y").save()
         await AggProduct(name="M", price=75.0, category="X").save()
 
         # Sort by price ascending
-        results = (
-            await AggProduct.where(lambda p: p.id >= 0)
-            .order_by("price")
-            .all()
-        )
+        results = await AggProduct.where(lambda p: p.id >= 0).order_by("price").all()
         assert [r.name for r in results] == ["A", "M", "Z"]
 
         # Sort by name descending

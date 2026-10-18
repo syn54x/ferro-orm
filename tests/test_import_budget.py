@@ -6,7 +6,6 @@ old per-class compile_registry_schema_ir() recompiled every registered model
 on every class definition — ~N²/2 builds for N models.
 """
 
-
 from ferro import Model
 
 

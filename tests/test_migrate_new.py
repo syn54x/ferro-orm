@@ -570,7 +570,9 @@ def test_the_generator_json_carries_the_summary_as_data_and_no_notes(project, pk
     write_models(project, pkg, AUTHOR)
     declared = declared_modelset(FerroSettings().database(None))
 
-    raw = json.loads(_generate_migration(None, json.dumps(declared), ["postgres", "sqlite"]))
+    raw = json.loads(
+        _generate_migration(None, json.dumps(declared), ["postgres", "sqlite"])
+    )
 
     assert raw["summary"] == {
         "changes": [

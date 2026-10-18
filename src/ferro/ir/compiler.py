@@ -396,7 +396,10 @@ def compile_schema_ir_payload(
         )
     for cols in composite_uniques:
         uniques.append(
-            {"name": _composite_unique_name(resolved_table_name, list(cols)), "columns": list(cols)}
+            {
+                "name": _composite_unique_name(resolved_table_name, list(cols)),
+                "columns": list(cols),
+            }
         )
 
     model_payload = {

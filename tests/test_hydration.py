@@ -39,7 +39,6 @@ async def test_direct_injection_bypasses_init(db_url):
 
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         # 1. Create a record normally (this WILL call __init__)
         global INIT_CALLED_COUNT
         INIT_CALLED_COUNT = 0
@@ -51,7 +50,6 @@ async def test_direct_injection_bypasses_init(db_url):
     ferro.reset_engine()
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         # 3. Fetch the record
         INIT_CALLED_COUNT = 0
         fetched_user = await HydrationTestUser.get(1)
@@ -80,7 +78,6 @@ async def test_hydrated_row_initializes_pydantic_slots(db_url):
     ferro.reset_engine()
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         row = await SlotCheckUser.get(1)
         assert row is not None
         _assert_pydantic_slots(
@@ -112,7 +109,6 @@ async def test_hydrated_extra_allow_starts_with_empty_extra_dict(db_url):
     ferro.reset_engine()
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         row = await ExtraAllowUser.get(1)
         assert row is not None
         _assert_pydantic_slots(
@@ -136,7 +132,6 @@ async def test_hydration_slots_match_across_get_all_and_first(db_url):
     ferro.reset_engine()
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         by_get = await SlotPathUser.get(1)
         by_all = (await SlotPathUser.all())[0]
         by_first = await SlotPathUser.where(lambda u: u.id == 1).first()
@@ -167,7 +162,6 @@ async def test_hydrated_extra_forbid_initializes_slots(db_url):
     ferro.reset_engine()
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         row = await ExtraForbidUser.get(1)
         assert row is not None
         _assert_pydantic_slots(

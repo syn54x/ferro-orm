@@ -15,7 +15,6 @@ async def test_unique_constraint(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-
         # Save first user
         await UniqueUser(email="test@example.com").save()
 

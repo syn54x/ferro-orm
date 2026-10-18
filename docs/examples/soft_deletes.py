@@ -36,6 +36,8 @@ class Invoice(SoftDeleteMixin, Model):
     number: str
     is_deleted: bool = False
     deleted_at: datetime | None = None
+
+
 # --8<-- [end:model]
 
 

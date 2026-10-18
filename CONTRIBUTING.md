@@ -95,7 +95,7 @@ uv run prek run --all-files
 uv run ruff check .        # Python linting
 uv run ruff format .       # Python formatting
 cargo fmt                  # Rust formatting
-cargo clippy               # Rust linting
+cargo clippy --workspace --all-targets -- -D warnings   # Rust linting
 ```
 
 ### Building Documentation

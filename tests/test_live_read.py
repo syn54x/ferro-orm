@@ -72,9 +72,7 @@ def _relations(db) -> dict[str, str]:
 @pytest.mark.parametrize(
     "body", [AUTHOR, PLAIN_AUTHOR], ids=["with_unique", "without_index"]
 )
-def test_a_view_named_like_a_model_is_not_its_table_on_the_pass(
-    project, pkg, db, body
-):
+def test_a_view_named_like_a_model_is_not_its_table_on_the_pass(project, pkg, db, body):
     """The create pass sees that a view, not a table, holds ``author``, and
     refuses before any DDL, naming the view. It does not let
     ``CREATE TABLE IF NOT EXISTS`` skip over the view, with or without an

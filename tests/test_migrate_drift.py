@@ -166,7 +166,9 @@ def migrate_updates_statements(url: str, table: str) -> list[str]:
     reported for ``table``."""
     ferro.reset_engine()
     report = asyncio.run(auto_migrate(url, updates=True))
-    return [s.sql for s in report.statements if s.role == "schema" and s.subject == table]
+    return [
+        s.sql for s in report.statements if s.role == "schema" and s.subject == table
+    ]
 
 
 def test_a_text_comparison_check_is_not_drift_after_up(project, pkg, db, capsys):

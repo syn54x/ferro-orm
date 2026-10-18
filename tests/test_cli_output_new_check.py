@@ -776,9 +776,7 @@ def test_tty_check_lays_out_its_change_summary_as_new_does(
     assert cli(capsys, "check", *flags) == (3, TTY_PROBLEMS_OUT, expected)
 
 
-def test_plain_check_keeps_the_summary_sentence_whatever_the_list(
-    project, pkg, capsys
-):
+def test_plain_check_keeps_the_summary_sentence_whatever_the_list(project, pkg, capsys):
     write_config(project, pkg, '["postgres"]')
     write_models(project, pkg, many_models(13))
     names = ", ".join(f"Item{i:02d}" for i in range(13))

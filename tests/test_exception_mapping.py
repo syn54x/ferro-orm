@@ -35,7 +35,6 @@ async def test_unique_violation_is_typed(db_url, db_backend):
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-
         await UniqueUser(email="a@b.com").save()
 
         with pytest.raises(UniqueViolationError) as excinfo:
@@ -58,7 +57,6 @@ async def test_not_null_violation_is_typed(db_url, db_backend):
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-
         note = NotNullNote(body="text")
         await note.save()
         pk = note.id
@@ -91,7 +89,6 @@ async def test_check_violation_is_typed(db_url, db_backend):
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-
         doc = CheckedDoc(format=DocFormat.MARKDOWN)
         await doc.save()
         pk = doc.id
@@ -122,7 +119,6 @@ async def test_foreign_key_violation_is_typed(db_url, db_backend):
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-
         with pytest.raises(ForeignKeyViolationError) as excinfo:
             await FkBook(title="Ghost", author_id=99999).save()
 

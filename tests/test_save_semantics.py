@@ -233,7 +233,6 @@ async def test_save_rejects_unknown_on_conflict_value(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         with pytest.raises(ValueError):
             await BadOnConflictDoc(id=1, label="a").save(on_conflict="ignore")
 

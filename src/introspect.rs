@@ -453,7 +453,7 @@ async fn sqlite_table_foreign_keys(
     Ok(rows
         .iter()
         .filter(|row| row_opt_i64(row, "seq").unwrap_or(0) == 0)
-        .filter(|row| row_opt_i64(row, "id").map_or(true, |id| !multi_column.contains(&id)))
+        .filter(|row| row_opt_i64(row, "id").is_none_or(|id| !multi_column.contains(&id)))
         .filter_map(|row| {
             Some(LiveForeignKey {
                 name: None,

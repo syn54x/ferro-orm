@@ -96,9 +96,7 @@ async def test_unnamed_session_binds_default_connection(tmp_path):
         assert session.connection_name == "default"
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always", DeprecationWarning)
-            exists = await SessionMarker.where(
-                lambda t: t.label == "missing"
-            ).exists()
+            exists = await SessionMarker.where(lambda t: t.label == "missing").exists()
             created = await SessionMarker.create(id=20, label="session-bound")
 
         session_warnings = [

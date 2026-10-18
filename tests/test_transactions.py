@@ -1,5 +1,4 @@
 import pytest
-import uuid
 import sqlite3
 from contextlib import closing
 from typing import Annotated
@@ -72,7 +71,6 @@ async def test_relationships_loaded_inside_transaction_inherit_transaction(db_ur
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-
         parent = await TxRelationParent.create(id=1, label="parent")
         await TxRelationChild.create(id=1, label="child", parent=parent)
         student = await TxRelationStudent.create(id=1, label="student")
@@ -143,7 +141,9 @@ async def test_instance_methods_loaded_inside_transaction_inherit_transaction(db
 
 @pytest.mark.asyncio
 @pytest.mark.sqlite_only
-async def test_instance_methods_loaded_inside_named_transaction_keep_identity_scope(tmp_path):
+async def test_instance_methods_loaded_inside_named_transaction_keep_identity_scope(
+    tmp_path,
+):
     """Service transaction instance methods should not evict or register app objects."""
 
     class TxNamedInstanceMethodUser(Model):
@@ -250,7 +250,6 @@ async def test_transaction_commit(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-
         async with transaction():
             await TxUser.create(username="alice")
             await TxUser.create(username="bob")
@@ -270,7 +269,6 @@ async def test_transaction_rollback(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-
         try:
             async with transaction():
                 await TxUser.create(username="charlie")
@@ -292,7 +290,6 @@ async def test_transaction_atomicity(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-
         # Create initial user
         await TxUser.create(username="dave")
 
@@ -332,7 +329,6 @@ async def test_nested_transaction_rolls_back_with_outer(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-
         try:
             async with transaction():
                 await TxUser.create(username="outer")
@@ -358,7 +354,6 @@ async def test_bulk_create_participates_in_transaction(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-
         rows = [TxUser(username="bulk_a"), TxUser(username="bulk_b")]
 
         try:
@@ -383,7 +378,6 @@ async def test_nested_transaction_inner_rollback_allows_outer_commit(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-
         async with transaction():
             await TxUser.create(username="outer_before")
 

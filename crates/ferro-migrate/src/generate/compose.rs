@@ -206,9 +206,6 @@ fn new_of(hint: &Hint) -> &str {
 /// [`ComposeError`]: a snapshot of the run whose hints the planner refuses,
 /// a later declaration that disagrees with an earlier rename, and a composed
 /// hint the planner would refuse or ignore against the parent.
-// The refusal carries its hints whole, as the squash prints them; it is
-// returned once per squash, never in a loop.
-#[allow(clippy::result_large_err)]
 pub fn compose_run(
     parent: Option<&SchemaIrPayload>,
     run: &[&SchemaIrPayload],
@@ -443,8 +440,6 @@ impl Lineage {
     /// Refuse a declaration that claims an old name an earlier live hint
     /// already renamed away, for something else than what that rename
     /// became: the run renamed one way and declares another.
-    // The refusal carries both hints whole (see `compose_run`).
-    #[allow(clippy::result_large_err)]
     fn refuse_disagreeing_declarations(
         &self,
         sides: &[&SchemaIrPayload],
@@ -548,8 +543,6 @@ impl Lineage {
     /// The last side with its hint fields rewritten: each object present on
     /// the parent and on the last side under another name carries one hint
     /// from its parent name.
-    // The refusal carries both hints whole (see `compose_run`).
-    #[allow(clippy::result_large_err)]
     fn composed_target(&self, sides: &[&SchemaIrPayload]) -> Result<SchemaIrPayload, ComposeError> {
         let last = sides.len() - 1;
         let mut target = without_hints(sides[last]);
@@ -677,8 +670,6 @@ impl Lineage {
     /// Refuse a composed hint whose old name the last side declares again,
     /// naming the migration that re-declared it: the planner refuses such a
     /// hint (ADR-0032, [`refuse_hints`]).
-    // The refusal carries the hint whole (see `compose_run`).
-    #[allow(clippy::result_large_err)]
     fn refuse_re_added(
         &self,
         sides: &[&SchemaIrPayload],
@@ -776,8 +767,6 @@ impl Lineage {
     /// Refuse a composed hint onto a name the parent holds for another
     /// object: against the parent the hint is inert, and the planner would
     /// drop the object the run renamed.
-    // The refusal carries the hint whole (see `compose_run`).
-    #[allow(clippy::result_large_err)]
     fn refuse_held_by_parent(&self, target: &SchemaIrPayload) -> Result<(), ComposeError> {
         let held = |key: Key, hint: Hint| match self.id(0, &key) {
             Some(id) => {
