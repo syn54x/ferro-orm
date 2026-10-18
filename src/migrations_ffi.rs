@@ -170,23 +170,51 @@ pub fn _step_file_role(name: String) -> PyResult<String> {
 ///
 /// With `replacing` (`ferro migrate new --replace <target>`), the directory
 /// without that migration, admitting the duplicate at its number, and the
-/// migration itself under `"replaced"` (`MigrationsDir::read_replacing`);
-/// `ValueError` also for a target it does not hold, a bare number two
-/// migrations share, or a migration a later one chains from.
+/// migration itself as the one entry of `"replaced"`
+/// (`MigrationsDir::read_replacing`); `ValueError` also for a target it does
+/// not hold, a bare number two migrations share, or a migration a later one
+/// chains from. With `run_from`, the directory below that migration and the
+/// run from it through the head, in chain order, as `"replaced"`
+/// (`MigrationsDir::read_run`), plus `"reaches_head"` (whether the run ends
+/// at the directory head) and `"off_run"` (the later migrations it leaves,
+/// `NNNN_<name>`). Naming both is a `ValueError`.
 #[pyfunction]
 #[pyo3(name = "_read_migrations_dir")]
-#[pyo3(signature = (directory, replacing = None))]
-pub fn _read_migrations_dir(directory: String, replacing: Option<String>) -> PyResult<String> {
+#[pyo3(signature = (directory, replacing = None, run_from = None))]
+pub fn _read_migrations_dir(
+    directory: String,
+    replacing: Option<String>,
+    run_from: Option<String>,
+) -> PyResult<String> {
     let refused = |err: ferro_migrate::DirectoryError| PyValueError::new_err(err.to_string());
-    let Some(target) = replacing else {
-        return to_json(&MigrationsDir::read(Path::new(&directory)).map_err(refused)?);
+    let path = Path::new(&directory);
+    let mut off_run: Option<Vec<String>> = None;
+    let (dir, replaced) = match (replacing, run_from) {
+        (None, None) => return to_json(&MigrationsDir::read(path).map_err(refused)?),
+        (Some(_), Some(_)) => {
+            return Err(PyValueError::new_err(
+                "name either replacing or run_from, not both",
+            ));
+        }
+        (Some(target), None) => {
+            let (dir, replaced) = MigrationsDir::read_replacing(path, &target).map_err(refused)?;
+            (dir, vec![replaced])
+        }
+        (None, Some(from)) => {
+            let (dir, run) = MigrationsDir::read_run(path, &from).map_err(refused)?;
+            off_run = Some(run.off_run);
+            (dir, run.migrations)
+        }
     };
-    let (dir, replaced) =
-        MigrationsDir::read_replacing(Path::new(&directory), &target).map_err(refused)?;
     let mut json = serde_json::to_value(&dir)
         .map_err(|err| PyValueError::new_err(format!("the migrations directory: {err}")))?;
     json["replaced"] = serde_json::to_value(&replaced)
-        .map_err(|err| PyValueError::new_err(format!("the replaced migration: {err}")))?;
+        .map_err(|err| PyValueError::new_err(format!("the replaced migrations: {err}")))?;
+    if let Some(off_run) = off_run {
+        json["reaches_head"] = serde_json::Value::Bool(off_run.is_empty());
+        json["off_run"] = serde_json::to_value(&off_run)
+            .map_err(|err| PyValueError::new_err(format!("the off-run migrations: {err}")))?;
+    }
     to_json(&json)
 }
 

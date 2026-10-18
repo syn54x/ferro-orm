@@ -809,7 +809,9 @@ impl MigrationsDir {
     /// migration carries the number. The one duplicate admitted is at the
     /// replaced number (two branches each generated it); the replaced
     /// migration's own parent link is not checked, since its parent moving
-    /// under it is why it is replaced.
+    /// under it is why it is replaced. It shares its target resolution with
+    /// [`MigrationsDir::read_run`], and refuses what a run of more than one
+    /// would hold.
     ///
     /// # Errors
     /// [`DirectoryError::AmbiguousNumber`] for a bare number two migrations
@@ -822,63 +824,147 @@ impl MigrationsDir {
         target: &str,
     ) -> Result<(MigrationsDir, Migration), DirectoryError> {
         let root = path;
-        let no_such = || DirectoryError::NoSuchMigration {
-            target: target.to_string(),
-        };
-        if !root.exists() {
-            return Err(no_such());
-        }
-        interrupted_writes(root)?;
-        let mut dirs = migration_dirs(root)?;
-        let full = |(number, name, _): &(u16, String, PathBuf)| format!("{number:04}_{name}");
-        let matching: Vec<usize> = match target.parse::<u16>() {
-            Ok(number) if target.len() == 4 && target.chars().all(|c| c.is_ascii_digit()) => dirs
-                .iter()
-                .enumerate()
-                .filter(|(_, (n, _, _))| *n == number)
-                .map(|(at, _)| at)
-                .collect(),
-            _ => dirs
-                .iter()
-                .enumerate()
-                .filter(|(_, dir)| full(dir) == target)
-                .map(|(at, _)| at)
-                .collect(),
-        };
-        let at = match matching.as_slice() {
-            [] => return Err(no_such()),
-            [at] => *at,
-            several => {
-                return Err(DirectoryError::AmbiguousNumber {
-                    number: dirs[several[0]].0,
-                    names: several.iter().map(|at| full(&dirs[*at])).collect(),
-                });
-            }
-        };
-        let (number, name, dir) = dirs.remove(at);
-        let replaced = read_migration(root, number, name, dir)?;
+        let (replaced, dirs) = open_target(root, target)?;
         // A later migration whose snapshot links to the replaced one would
         // be left chained to a snapshot that no longer exists.
-        for later in dirs.iter().filter(|(n, _, _)| *n > number) {
-            let linked = std::fs::read(later.2.join(SNAPSHOT_FILE))
-                .ok()
-                .and_then(|bytes| Snapshot::load(&bytes).ok())
-                .is_some_and(|s| s.parent_checksum == Some(replaced.snapshot.checksum));
-            if linked {
-                return Err(DirectoryError::LaterMigration {
-                    replaced: replaced.dir_name(),
-                    later: full(later),
-                });
-            }
+        if let Some(later) = dirs
+            .iter()
+            .find(|later| later.0 > replaced.number && links_to(&later.2, &replaced))
+        {
+            return Err(DirectoryError::LaterMigration {
+                replaced: replaced.dir_name(),
+                later: format!("{:04}_{}", later.0, later.1),
+            });
         }
         let dir = assemble(root, unique_numbers(root, dirs)?)?;
         Ok((dir, replaced))
+    }
+
+    /// Read the migrations directory at `path` for a squash: the directory
+    /// below the migration `from` names, read and verified as
+    /// [`MigrationsDir::read`] reads it, and the run that starts there, each
+    /// migration read whole. `from` is `NNNN_<name>`, or `NNNN` when one
+    /// migration carries the number. The duplicate admitted at `from`'s
+    /// number and the unchecked parent link of the run's first migration are
+    /// [`MigrationsDir::read_replacing`]'s.
+    ///
+    /// The run follows snapshot links: it continues through each next number
+    /// whose `ir.json` names the migration before it as its parent, and ends
+    /// where none does. It need not reach the directory head (a sibling
+    /// chain at `from`'s number, or a fork after it, leaves migrations off
+    /// the run); [`Run::reaches_head`] says whether it does and
+    /// [`Run::off_run`] names what it leaves, for the caller to refuse. The
+    /// migrations off the run are not read or verified.
+    ///
+    /// # Errors
+    /// [`DirectoryError::AmbiguousNumber`] for a bare number two migrations
+    /// share, [`DirectoryError::NoSuchMigration`] for a target the directory
+    /// does not hold, and what [`MigrationsDir::read`] raises for the
+    /// directory below the run and for the run's own files.
+    pub fn read_run(path: &Path, from: &str) -> Result<(MigrationsDir, Run), DirectoryError> {
+        let root = path;
+        let (first, dirs) = open_target(root, from)?;
+        let number = first.number;
+        let mut migrations = vec![first];
+        let mut below = Vec::new();
+        let mut off_run = Vec::new();
+        for entry in dirs {
+            let tip = &migrations[migrations.len() - 1];
+            if entry.0 <= number {
+                below.push(entry);
+            } else if entry.0 == tip.number + 1 && links_to(&entry.2, tip) {
+                let (n, name, dir) = entry;
+                migrations.push(read_migration(root, n, name, dir)?);
+            } else {
+                off_run.push(format!("{:04}_{}", entry.0, entry.1));
+            }
+        }
+        let dir = assemble(root, unique_numbers(root, below)?)?;
+        Ok((
+            dir,
+            Run {
+                migrations,
+                off_run,
+            },
+        ))
     }
 
     /// The newest migration, when there is one.
     pub fn head(&self) -> Option<&Migration> {
         self.migrations.last()
     }
+}
+
+/// A run of migrations: a tail of the directory, from a named migration
+/// along the snapshot links, in chain order.
+#[derive(Debug)]
+pub struct Run {
+    /// The run's migrations, the named one first, in chain order.
+    pub migrations: Vec<Migration>,
+    /// The later migrations the run does not hold (`NNNN_<name>`), in name
+    /// order: a sibling chain's, or a fork's other branch. Empty when the
+    /// run reaches the head.
+    pub off_run: Vec<String>,
+}
+
+impl Run {
+    /// Whether the run's last migration is the directory's head.
+    pub fn reaches_head(&self) -> bool {
+        self.off_run.is_empty()
+    }
+}
+
+/// Whether the migration directory `dir`'s snapshot names `parent` as its
+/// parent (an unreadable snapshot links to nothing).
+fn links_to(dir: &Path, parent: &Migration) -> bool {
+    std::fs::read(dir.join(SNAPSHOT_FILE))
+        .ok()
+        .and_then(|bytes| Snapshot::load(&bytes).ok())
+        .is_some_and(|s| s.parent_checksum == Some(parent.snapshot.checksum))
+}
+
+/// Resolve `target` (`NNNN_<name>`, or `NNNN` when one migration carries the
+/// number) against the directory at `root`, and read that migration whole;
+/// returns it and every other migration directory, in name order.
+fn open_target(
+    root: &Path,
+    target: &str,
+) -> Result<(Migration, Vec<(u16, String, PathBuf)>), DirectoryError> {
+    let no_such = || DirectoryError::NoSuchMigration {
+        target: target.to_string(),
+    };
+    if !root.exists() {
+        return Err(no_such());
+    }
+    interrupted_writes(root)?;
+    let mut dirs = migration_dirs(root)?;
+    let full = |(number, name, _): &(u16, String, PathBuf)| format!("{number:04}_{name}");
+    let matching: Vec<usize> = match target.parse::<u16>() {
+        Ok(number) if target.len() == 4 && target.chars().all(|c| c.is_ascii_digit()) => dirs
+            .iter()
+            .enumerate()
+            .filter(|(_, (n, _, _))| *n == number)
+            .map(|(at, _)| at)
+            .collect(),
+        _ => dirs
+            .iter()
+            .enumerate()
+            .filter(|(_, dir)| full(dir) == target)
+            .map(|(at, _)| at)
+            .collect(),
+    };
+    let at = match matching.as_slice() {
+        [] => return Err(no_such()),
+        [at] => *at,
+        several => {
+            return Err(DirectoryError::AmbiguousNumber {
+                number: dirs[several[0]].0,
+                names: several.iter().map(|at| full(&dirs[*at])).collect(),
+            });
+        }
+    };
+    let (number, name, dir) = dirs.remove(at);
+    Ok((read_migration(root, number, name, dir)?, dirs))
 }
 
 /// Refuse what an interrupted `ferro migrate new` left under a hidden name
@@ -1617,6 +1703,142 @@ CREATE INDEX i ON t (c);
                 && message.contains("replace the later one first, or delete it"),
             "{message}"
         );
+    }
+
+    #[test]
+    fn a_run_reads_from_the_named_migration_through_the_head_in_chain_order() {
+        let root = scratch("run");
+        let a = migration(&root, "0001_a", None);
+        let b = migration(&root, "0002_b", Some(&a));
+        let c = migration(&root, "0003_c", Some(&b));
+        migration(&root, "0004_d", Some(&c));
+
+        let (dir, run) = MigrationsDir::read_run(&root, "0002_b").expect("run");
+        let names = |ms: &[Migration]| ms.iter().map(Migration::dir_name).collect::<Vec<_>>();
+        assert_eq!(names(&dir.migrations), ["0001_a"]);
+        assert_eq!(names(&run.migrations), ["0002_b", "0003_c", "0004_d"]);
+
+        // A run of one is the head; a bare number names it too.
+        let (dir, run) = MigrationsDir::read_run(&root, "0004").expect("run of one");
+        assert_eq!(dir.migrations.len(), 3);
+        assert_eq!(names(&run.migrations), ["0004_d"]);
+
+        // The run from the first migration leaves the directory empty.
+        let (dir, run) = MigrationsDir::read_run(&root, "0001_a").expect("whole");
+        assert!(dir.migrations.is_empty());
+        assert_eq!(run.migrations.len(), 4);
+        assert!(run.reaches_head());
+
+        // Replacing still refuses a longer run, naming the next migration.
+        let err = MigrationsDir::read_replacing(&root, "0002_b").expect_err("later");
+        assert_eq!(err.kind(), "later_migration");
+        assert!(
+            err.to_string().contains("0003_c chains from 0002_b"),
+            "{err}"
+        );
+        let (_, replaced) = MigrationsDir::read_replacing(&root, "0004_d").expect("head");
+        assert_eq!(replaced.dir_name(), "0004_d");
+    }
+
+    #[test]
+    fn a_run_refuses_a_shared_bare_number_and_an_absent_target() {
+        let root = scratch("run-refusals");
+        let a = migration(&root, "0001_a", None);
+        migration(&root, "0002_x", Some(&a));
+        migration(&root, "0002_y", Some(&a));
+        let err = MigrationsDir::read_run(&root, "0002").expect_err("ambiguous");
+        assert_eq!(err.kind(), "ambiguous_number");
+        let message = err.to_string();
+        assert!(
+            message.contains("0002_x") && message.contains("0002_y"),
+            "{message}"
+        );
+        let err = MigrationsDir::read_run(&root, "0009").expect_err("absent");
+        assert_eq!(err.kind(), "no_such_migration");
+        assert!(err.to_string().contains("0009"), "{err}");
+    }
+
+    #[test]
+    fn a_malformed_file_inside_a_run_is_refused_naming_it() {
+        let root = scratch("run-malformed");
+        let a = migration(&root, "0001_a", None);
+        let b = migration(&root, "0002_b", Some(&a));
+        migration(&root, "0003_c", Some(&b));
+        write(
+            &root.join("0003_c/01_schema.up.postgres.sql"),
+            "-- ferro: not a header\nSELECT 1;\n",
+        );
+        let err = MigrationsDir::read_run(&root, "0002_b").expect_err("malformed");
+        assert_eq!(err.kind(), "unparseable_header");
+        assert!(
+            err.to_string().contains("0003_c/01_schema.up.postgres.sql"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn replacing_a_fork_refuses_naming_the_first_later_migration() {
+        // Oracle: `read_replacing` at 8d30029 on this directory.
+        let root = scratch("replacing-fork");
+        let a = migration(&root, "0001_a", None);
+        let b = migration(&root, "0002_b", Some(&a));
+        migration(&root, "0003_p", Some(&b));
+        migration(&root, "0003_q", Some(&b));
+        let err = MigrationsDir::read_replacing(&root, "0002_b").expect_err("fork");
+        assert_eq!(err.kind(), "later_migration");
+        assert_eq!(
+            err.to_string(),
+            "0003_p chains from 0002_b, and only the newest migration can be replaced: \
+             replace the later one first, or delete it. Nothing was written"
+        );
+    }
+
+    #[test]
+    fn replacing_one_of_two_siblings_reads_the_other_chain_below() {
+        // Oracle: `read_replacing` at 8d30029 on this directory.
+        let root = scratch("replacing-siblings");
+        let a = migration(&root, "0001_a", None);
+        migration(&root, "0002_x", Some(b"a stale parent"));
+        let y = migration(&root, "0002_y", Some(&a));
+        migration(&root, "0003_after_y", Some(&y));
+        let (dir, replaced) = MigrationsDir::read_replacing(&root, "0002_x").expect("read");
+        assert_eq!(replaced.dir_name(), "0002_x");
+        let names: Vec<String> = dir.migrations.iter().map(Migration::dir_name).collect();
+        assert_eq!(names, ["0001_a", "0002_y", "0003_after_y"]);
+    }
+
+    #[test]
+    fn a_run_reports_whether_it_reaches_the_head() {
+        let root = scratch("run-reach");
+        let a = migration(&root, "0001_a", None);
+        migration(&root, "0002_x", Some(b"a stale parent"));
+        let y = migration(&root, "0002_y", Some(&a));
+        migration(&root, "0003_after_y", Some(&y));
+        let (dir, run) = MigrationsDir::read_run(&root, "0002_x").expect("run");
+        assert_eq!(run.migrations.len(), 1);
+        assert!(!run.reaches_head());
+        assert_eq!(run.off_run, ["0003_after_y"]);
+        let names: Vec<String> = dir.migrations.iter().map(Migration::dir_name).collect();
+        assert_eq!(names, ["0001_a", "0002_y"]);
+
+        // A fork leaves its second branch off the run, not a "gap".
+        let root = scratch("run-fork");
+        let a = migration(&root, "0001_a", None);
+        let b = migration(&root, "0002_b", Some(&a));
+        migration(&root, "0003_p", Some(&b));
+        migration(&root, "0003_q", Some(&b));
+        let (dir, run) = MigrationsDir::read_run(&root, "0002_b").expect("run");
+        assert_eq!(run.migrations.len(), 2);
+        assert!(!run.reaches_head());
+        assert_eq!(run.off_run, ["0003_q"]);
+        assert_eq!(dir.migrations.len(), 1);
+
+        let root = scratch("run-head");
+        let a = migration(&root, "0001_a", None);
+        migration(&root, "0002_b", Some(&a));
+        let (_, run) = MigrationsDir::read_run(&root, "0001_a").expect("run");
+        assert!(run.reaches_head());
+        assert!(run.off_run.is_empty());
     }
 
     #[test]

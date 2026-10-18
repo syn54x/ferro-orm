@@ -288,7 +288,49 @@ def read_replacing(
     except ValueError as err:
         raise MigrationsDirectoryError(f"{directory}: {err}") from None
     read = json.loads(raw)
-    return read["migrations"], read["replaced"]
+    return read["migrations"], read["replaced"][0]
+
+
+def read_run_reach(directory: Path, from_: str) -> dict[str, Any]:
+    """For a squash: :func:`read_run`'s answer with what the run leaves off.
+
+    Returns ``{"below", "run", "reaches_head", "off_run"}``: ``run`` follows
+    snapshot links from the migration ``from_`` names and need not reach the
+    directory head. ``reaches_head`` says whether it does, and ``off_run``
+    names (``NNNN_<name>``) the later migrations it leaves (a sibling chain's,
+    or a fork's other branch), which the caller refuses with its own fix.
+
+    Raises:
+        MigrationsDirectoryError: ``from_`` is not in the directory or is a
+            number two migrations share; or the directory is malformed.
+    """
+    try:
+        raw = _read_migrations_dir(str(directory), run_from=from_)
+    except ValueError as err:
+        raise MigrationsDirectoryError(f"{directory}: {err}") from None
+    read = json.loads(raw)
+    return {
+        "below": read["migrations"],
+        "run": read["replaced"],
+        "reaches_head": read["reaches_head"],
+        "off_run": read["off_run"],
+    }
+
+
+def read_run(
+    directory: Path, from_: str
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """For a squash: every migration in ``directory`` below the one ``from_``
+    names (``NNNN_<name>``, or ``NNNN`` when one migration carries the
+    number), and the run from it in chain order, each read and verified by
+    the Rust core. See :func:`read_run_reach` for whether the run reaches the
+    head.
+
+    Raises:
+        MigrationsDirectoryError: as :func:`read_run_reach`.
+    """
+    read = read_run_reach(directory, from_)
+    return read["below"], read["run"]
 
 
 def next_number(directory: Path) -> int:

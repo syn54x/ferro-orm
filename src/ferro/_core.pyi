@@ -254,7 +254,9 @@ def _step_file_role(name: str) -> str:
     """
     ...
 
-def _read_migrations_dir(directory: str, replacing: str | None = None) -> str:
+def _read_migrations_dir(
+    directory: str, replacing: str | None = None, run_from: str | None = None
+) -> str:
     """Read and verify a migrations directory; returns the JSON of its migrations.
 
     ``{"path", "migrations": [{"number", "name", "dir", "steps": [{"ordinal",
@@ -274,9 +276,15 @@ def _read_migrations_dir(directory: str, replacing: str | None = None) -> str:
     With ``replacing`` (``ferro migrate new --replace``: ``NNNN_<name>``, or
     ``NNNN`` when one migration carries the number), the directory without
     that migration, admitting the duplicate at its number only, plus the
-    migration itself under ``"replaced"``. Also raises for a target the
-    directory does not hold, a bare number two migrations share, and a
-    migration a later one chains from.
+    migration itself as the one entry of the list ``"replaced"``. Also raises
+    for a target the directory does not hold, a bare number two migrations
+    share, and a migration a later one chains from.
+
+    With ``run_from`` (same target forms), the directory below that migration
+    plus the run from it in chain order as ``"replaced"``, following snapshot
+    links (it need not reach the head), and ``"reaches_head"`` (bool) and
+    ``"off_run"`` (the later ``NNNN_<name>`` migrations the run leaves).
+    Naming both ``replacing`` and ``run_from`` raises ``ValueError``.
     """
     ...
 
