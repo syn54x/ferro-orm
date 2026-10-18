@@ -21,12 +21,15 @@ does every model change have a migration, and is the directory intact?
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import shutil
+import tempfile
 import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from enum import Enum
 from dataclasses import replace as dataclass_replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -39,7 +42,9 @@ from .._core import (
 from . import scaffold
 from .errors import MigrationRefused
 from .scaffold import TEMPLATES_DIR
-from .steps import StepRefused, scan_todos, unwritten
+from . import historical
+from .historical import HistoricalModelError
+from .steps import Chunked, StepRefused, load_step, scan_todos, unwritten
 from .target import Target
 from .layout import (
     SNAPSHOT_FILE,
@@ -59,6 +64,7 @@ from .layout import (
 
 if TYPE_CHECKING:
     from ..settings import DatabaseSettings, FerroSettings
+    from .context import HistoricalModels
 
 __all__ = [
     "CheckReport",
@@ -543,7 +549,7 @@ def _prepare_squash(
         generated,
         directory / TEMPLATES_DIR,
     )
-    return _with_squash_moves(
+    squashed = _with_squash_moves(
         migration,
         carry,
         names,
@@ -551,6 +557,148 @@ def _prepare_squash(
         witness=witness,
         dead_names=composed["dead_names"],
     )
+    return _with_dead_name_notes(squashed, carry, run, below, composed, names)
+
+
+def _with_dead_name_notes(
+    migration: GeneratedMigration,
+    carry: list[dict[str, Any]],
+    run: list[dict[str, Any]],
+    below: list[dict[str, Any]],
+    composed: dict[str, Any],
+    names: list[str],
+) -> GeneratedMigration:
+    """``migration`` with a note for each dead name (a table, column, enum
+    label or constraint that existed only inside the run, ADR-0056) no carried
+    data step's declaration touches, or the refusal of the first carried step
+    whose declaration does.
+
+    A squash cannot read what a step's body does, but it can read what the
+    step declares (ADR-0035): a chunked step's query, built over the
+    historical models of the squashed migration widened by the dead names. The
+    query's table, the columns its filter and order keys read and the enum
+    labels its filter compares are names the step provably touches. A run
+    that carries nothing has nothing to review, so it gets no note.
+
+    Raises:
+        MigrationsDirectoryError: a carried step's declaration names a dead
+            name.
+    """
+    dead = migration.dead_names
+    if not dead or not carry:
+        return migration
+    touched: dict[str, str] = {}
+    models = _widened_models(run, below, composed, names)
+    if models is not None:
+        for entry in carry:
+            if entry["kind"] != "data":
+                continue
+            for name in _declared_names(entry, models):
+                touched.setdefault(name, _from_migration(entry["old"][0]))
+    for item in dead:
+        if item["name"] in touched:
+            raise MigrationsDirectoryError(
+                _dead_name_refusal(item, touched[item["name"]], names)
+            )
+    notes = [
+        f"{item['name']} existed only inside the run "
+        f"({names[item['appeared']]} through {names[item['vanished']]}): "
+        f"review the carried steps for it"
+        for item in dead
+    ]
+    return dataclass_replace(migration, notes=(*migration.notes, *notes))
+
+
+def _dead_name_refusal(item: dict[str, Any], step: str, names: list[str]) -> str:
+    """The refusal of a carried step whose declaration names a dead name."""
+    removed = names[item["vanished"]]
+    fix = f"start the range at {removed}, the migration that removed it (pass --from {removed})"
+    return (
+        f"ferro migrate squash: {step} names {item['name']}, which existed only "
+        f"inside the run (added by {names[item['appeared']]}, removed by "
+        f"{removed}): delete the step, or {fix}. Nothing was written."
+    )
+
+
+def _widened_models(
+    run: list[dict[str, Any]],
+    below: list[dict[str, Any]],
+    composed: dict[str, Any],
+    names: list[str],
+) -> HistoricalModels | None:
+    """The squashed migration's historical models (the snapshot below the run
+    over the composed target, ADR-0025) plus every table and column any
+    snapshot of the run held, so a declaration naming a dead name still
+    builds and can be read. ``None`` when the snapshots do not union (a
+    column's storage changed across the run): no declaration is read then."""
+    widened = copy.deepcopy(composed["target"])
+    tables = {m["table_name"]: m for m in widened["payload"]["models"]}
+    for migration in run:
+        for model in migration["snapshot"]["ir"]["payload"]["models"]:
+            held = tables.get(model["table_name"])
+            if held is None:
+                tables[model["table_name"]] = copy.deepcopy(model)
+                widened["payload"]["models"].append(tables[model["table_name"]])
+                continue
+            have = {c["name"] for c in held["columns"]}
+            held["columns"] += [
+                copy.deepcopy(c) for c in model["columns"] if c["name"] not in have
+            ]
+    parent = below[-1]["snapshot"]["ir"] if below else None
+    try:
+        return historical.build(parent, widened, rev=names[-1])
+    except HistoricalModelError:
+        return None
+
+
+def _declared_names(entry: dict[str, Any], models: HistoricalModels) -> set[str]:
+    """The names a carried data step's declaration touches: for each
+    ``@chunked`` shape of its ``up`` and ``down``, the query's table, the
+    ``table.column`` of each column its filter and order keys read and the
+    ``table.column:label`` of each value its filter compares. A step that does
+    not load, declares no query, or whose query does not build over the
+    widened models declares nothing here (``check`` and the runner name that
+    file)."""
+    first = entry["old"][0]
+    with tempfile.TemporaryDirectory() as scratch:
+        path = Path(scratch) / first.parent.name / first.name
+        path.parent.mkdir()
+        path.write_text(entry["body"], encoding="utf-8")
+        try:
+            loaded = load_step(path, None)
+        except StepRefused:
+            return set()
+    touched: set[str] = set()
+    for declared in (loaded.up, loaded.down):
+        if not isinstance(declared.shape, Chunked):
+            continue
+        try:
+            query = declared.shape.query(models)
+        except Exception:
+            continue
+        table = getattr(query.model_cls, "__ferro_table__", None)
+        if table is None:
+            continue
+        touched.add(table)
+        touched.update(f"{table}.{key.column}" for key in query.order_by_clause)
+        for node in query.where_clause:
+            _node_names(node, table, touched)
+    return touched
+
+
+def _node_names(node: Any, table: str, touched: set[str]) -> None:
+    """Add the root-table columns (and compared enum labels) ``node`` reads."""
+    for child in (node.left, node.right, node.child):
+        if child is not None:
+            _node_names(child, table, touched)
+    if node.column is None or node.path:
+        return
+    column = f"{table}.{node.column}"
+    touched.add(column)
+    value = node.value
+    for item in value if isinstance(value, list | tuple | set) else [value]:
+        if isinstance(item, str | Enum):
+            touched.add(f"{column}:{getattr(item, 'value', item)}")
 
 
 def _short_of_the_head(directory: Path, first: str, read: dict[str, Any]) -> str:

@@ -756,3 +756,213 @@ def test_a_squash_killed_before_its_cleanup_names_the_aside_to_delete(
 
     shutil.rmtree(root / ASIDE)
     assert run("migrate", "check") == 0
+
+
+# -- dead names (#670) ----------------------------------------------------------------
+
+CHUNKED_ON_TMP = '''"""Page the authors that still hold a tmp."""
+
+from ferro.migrations import chunked, nothing_to_reverse
+
+
+@chunked(
+    lambda models: models.Author.where(lambda author: author.id != None)
+    .order_by(lambda author: author.tmp)
+    .order_by(lambda author: author.id),
+    batch_size=10,
+)
+async def up(ctx, batch): ...
+
+
+@nothing_to_reverse("nothing was changed")
+def down(ctx): ...
+'''
+
+CHUNKED_ON_ID = CHUNKED_ON_TMP.replace(".order_by(lambda author: author.tmp)\n    ", "")
+
+CHUNKED_ON_GHOST = '''"""Page a table the run added and dropped."""
+
+from ferro.migrations import chunked, nothing_to_reverse
+
+
+@chunked(
+    lambda models: models.Ghost.where(lambda ghost: ghost.id != None)
+    .order_by(lambda ghost: ghost.id),
+    batch_size=10,
+)
+async def up(ctx, batch): ...
+
+
+@nothing_to_reverse("nothing was changed")
+def down(ctx): ...
+'''
+
+GHOST = """
+
+class Ghost(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+"""
+
+
+def dead_run(project: Path, pkg: str, step: str | None, *, extra: str = "") -> None:
+    """``0001_create_author``; ``0002_add_tmp`` adds ``author.tmp`` (and
+    ``extra``, a table); ``0003_add_bio`` carries a data step reading
+    ``step``; ``0004_drop_tmp`` drops what ``0002`` added."""
+    write_config(project, pkg)
+    write_models(project, pkg, AUTHOR)
+    new("create_author")
+    write_models(project, pkg, TMP + extra)
+    new("add_tmp")
+    write_models(project, pkg, TMP_BIO + extra)
+    if step is None:
+        new("add_bio", "--sql-step", "fix_rows")
+    else:
+        new("add_bio", "--data-step", "Author")
+        [data] = (migrations(project) / "0003_add_bio").glob("*_backfill_author.py")
+        data.write_text(step)
+    write_models(project, pkg, BIO)
+    new("drop_tmp")
+
+
+def test_a_chunked_step_ordering_by_a_dead_column_is_refused_with_both_fixes(
+    project, pkg, capsys
+):
+    dead_run(project, pkg, CHUNKED_ON_TMP)
+    before, hidden = tree(project), hidden_entries(project)
+
+    err = refused(capsys, "epic", "--from", "0002")
+
+    assert err == (
+        "ferro migrate squash: 0003_add_bio/02_backfill_author.py names author.tmp, "
+        "which existed only inside the run (added by 0002_add_tmp, removed by "
+        "0004_drop_tmp): delete the step, or start the range at 0004_drop_tmp, the "
+        "migration that removed it (pass --from 0004_drop_tmp). Nothing was written.\n"
+    ), err
+    assert tree(project) == before
+    assert hidden_entries(project) == hidden
+
+
+def test_a_chunked_step_over_a_dead_table_is_refused_naming_the_table(
+    project, pkg, capsys
+):
+    dead_run(project, pkg, CHUNKED_ON_GHOST, extra=GHOST)
+    # the run adds Ghost in 0002 and 0004's models (BIO) drop it
+    before = tree(project)
+
+    err = refused(capsys, "epic", "--from", "0002")
+
+    assert "0003_add_bio/02_backfill_author.py names ghost, which existed only" in err
+    assert tree(project) == before
+
+
+def test_a_run_whose_steps_touch_nothing_dead_notes_each_dead_name(
+    project, pkg, capsys
+):
+    dead_run(project, pkg, CHUNKED_ON_ID)
+    capsys.readouterr()
+
+    assert squash("epic", "--from", "0002") == 0
+
+    out = capsys.readouterr().out
+    assert (
+        "author.tmp existed only inside the run (0002_add_tmp through 0004_drop_tmp): "
+        "review the carried steps for it"
+    ) in out
+    assert "carried, review it" in out
+
+
+def test_a_dead_name_only_a_sql_step_could_touch_is_a_note_not_a_refusal(
+    project, pkg, capsys
+):
+    dead_run(project, pkg, None)
+    sql = migrations(project) / "0003_add_bio"
+    next(sql.glob("*_fix_rows.up.sql")).write_text("UPDATE author SET tmp = NULL;\n")
+    next(sql.glob("*_fix_rows.down.sql")).write_text("SELECT 1;\n")
+    capsys.readouterr()
+
+    assert squash("epic", "--from", "0002") == 0
+
+    assert "author.tmp existed only inside the run" in capsys.readouterr().out
+
+
+def test_a_run_with_no_dead_names_prints_no_such_note(project, pkg, capsys):
+    write_config(project, pkg)
+    write_models(project, pkg, AUTHOR)
+    new("create_author")
+    write_models(project, pkg, BIO)
+    new("add_bio", "--data-step", "Author")
+    write_models(project, pkg, BIO + "    tag: str | None = None\n")
+    new("add_tag")
+    capsys.readouterr()
+
+    assert squash("epic", "--from", "0002") == 0
+
+    assert "existed only inside the run" not in capsys.readouterr().out
+
+
+def test_the_generation_api_raises_the_same_text(project, pkg, capsys):
+    from ferro import FerroSettings
+    from ferro.migrations.generate import squash as generate_squash
+    from ferro.migrations.layout import MigrationsDirectoryError
+
+    dead_run(project, pkg, CHUNKED_ON_TMP)
+    cli = refused(capsys, "epic", "--from", "0002")
+
+    with pytest.raises(MigrationsDirectoryError) as raised:
+        generate_squash(FerroSettings().database(None), "epic", "0002")
+
+    assert str(raised.value) + "\n" == cli
+
+
+def test_a_dead_enum_label_and_a_dead_check_are_noted_when_no_declaration_names_them(
+    project, pkg, capsys
+):
+    write_config(project, pkg)
+    write_models(project, pkg, AUTHOR)
+    new("create_author")
+    write_models(
+        project,
+        pkg,
+        AUTHOR.replace('LIVE = "live"', 'LIVE = "live"\n    GONE = "gone"')
+        + '    mood: Annotated[Status | None, FerroField(db_type="text", db_check=True)]'
+        + " = None\n",
+    )
+    new("add_gone")
+    write_models(project, pkg, AUTHOR)
+    new("drop_gone")
+    [rewrite] = (migrations(project) / "0003_drop_gone").glob("*_backfill_*.py")
+    rewrite.write_text(FILLED)
+    capsys.readouterr()
+
+    assert squash("epic", "--from", "0002") == 0
+
+    out = capsys.readouterr().out
+    assert (
+        "author.status:gone existed only inside the run (0002_add_gone through "
+        "0003_drop_gone): review the carried steps for it"
+    ) in out
+    assert (
+        "author.ck_author_mood existed only inside the run (0002_add_gone through "
+        "0003_drop_gone): review the carried steps for it"
+    ) in out
+
+
+def test_a_step_filtering_on_a_dead_enum_label_is_refused_naming_the_label(
+    project, pkg, capsys
+):
+    write_config(project, pkg)
+    write_models(project, pkg, AUTHOR)
+    new("create_author")
+    write_models(
+        project,
+        pkg,
+        AUTHOR.replace('LIVE = "live"', 'LIVE = "live"\n    GONE = "gone"')
+        + '    mood: Annotated[Status | None, FerroField(db_type="text", db_check=True)]'
+        + " = None\n",
+    )
+    new("add_gone")
+    write_models(project, pkg, AUTHOR)
+    new("drop_gone")
+    err = refused(capsys, "epic", "--from", "0002")
+
+    assert "names author.status:gone, which existed only inside the run" in err
