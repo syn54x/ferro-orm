@@ -131,7 +131,7 @@ ok Wrote migrations/0002_epic/  (replaces 0002_add_bio … 0003_add_team, now de
   01_schema.down.sqlite.sql    schema step, down (sqlite)    regenerated
   02_fix_rows.up.sql           SQL step, up                  carried, review it (was 0002_add_bio/02_fix_rows.up.sql)
   02_fix_rows.down.sql         SQL step, down                carried, review it (was 0002_add_bio/02_fix_rows.down.sql)
-  ir.json                      snapshot                      0003_add_team's, chained from 0001_create_author, replaces 0002_add_bio…0003_add_team
+  ir.json                      snapshot                      0003_add_team's, chained from 0001_create_author, replaces 0002_add_bio … 0003_add_team
 
   1 new model
     Team

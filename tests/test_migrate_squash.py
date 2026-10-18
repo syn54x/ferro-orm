@@ -248,7 +248,7 @@ def test_a_run_becomes_the_migration_new_would_have_written_carrying_its_steps(
     ) in lines, out
     assert (
         "ir.json snapshot 0004_drop_tmp's, chained from 0001_create_author, "
-        "replaces 0002_add_tmp…0004_drop_tmp"
+        "replaces 0002_add_tmp … 0004_drop_tmp"
     ) in lines, out
 
     assert run("migrate", "check") == 0

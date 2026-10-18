@@ -454,11 +454,11 @@ def print_new(
     """What ``ferro migrate new`` wrote: the directory, each file with its
     role (and, under ``--replace``, what became of it), the change summary,
     the notes, and the warnings on stderr."""
+    from ..migrations.report import migration_span
+
     where = ""
     if migration.squash:
-        first, last = migration.replaces[0], migration.replaces[-1]
-        run = first if first == last else f"{first} … {last}"
-        where = f"(replaces {run}, now deleted)"
+        where = f"(replaces {migration_span(migration.replaces)}, now deleted)"
     elif migration.replaces:
         [replaced_dir] = migration.replaces
         where = (
@@ -546,15 +546,16 @@ def _became(migration: GeneratedMigration, name: str) -> str:
     generated file is regenerated, a carried one names the original it was,
     and the snapshot is the run's last one's, composed."""
     from ..migrations.layout import SNAPSHOT_FILE, Moved
+    from ..migrations.report import migration_span
 
     if not migration.replaces:
         return ""
     if name == SNAPSHOT_FILE:
         parent = migration.chained_from or "no migration (the first)"
         if migration.squash:
-            first, last = migration.replaces[0], migration.replaces[-1]
-            run = first if first == last else f"{first}…{last}"
-            return f"{last}'s, chained from {parent}, replaces {run}"
+            last = migration.replaces[-1]
+            span = migration_span(migration.replaces)
+            return f"{last}'s, chained from {parent}, replaces {span}"
         return f"new snapshot, chained from {parent}"
     moved = {new: (old, how) for old, new, how in migration.moves}
     if name not in moved:
