@@ -581,20 +581,21 @@ def _with_dead_name_notes(
     that carries nothing has nothing to review, so it gets no note.
 
     Raises:
-        MigrationsDirectoryError: a carried step's declaration names a dead
-            name.
+        MigrationsDirectoryError: the squashed migration's historical models
+            cannot be built, or a carried data step does not load or its query
+            does not build over them, or its declaration names a dead name.
     """
     dead = migration.dead_names
-    if not dead or not carry:
-        return migration
     touched: dict[str, str] = {}
-    models = _widened_models(run, below, composed, names)
-    if models is not None:
+    if any(entry["kind"] == "data" for entry in carry):
+        models = _widened_models(run, below, composed, names)
         for entry in carry:
             if entry["kind"] != "data":
                 continue
             for name in _declared_names(entry, models):
                 touched.setdefault(name, _from_migration(entry["old"][0]))
+    if not carry:
+        return migration
     for item in dead:
         if item["name"] in touched:
             raise MigrationsDirectoryError(
@@ -625,40 +626,57 @@ def _widened_models(
     below: list[dict[str, Any]],
     composed: dict[str, Any],
     names: list[str],
-) -> HistoricalModels | None:
+) -> HistoricalModels:
     """The squashed migration's historical models (the snapshot below the run
     over the composed target, ADR-0025) plus every table and column any
-    snapshot of the run held, so a declaration naming a dead name still
-    builds and can be read. ``None`` when the snapshots do not union (a
-    column's storage changed across the run): no declaration is read then."""
-    widened = copy.deepcopy(composed["target"])
-    tables = {m["table_name"]: m for m in widened["payload"]["models"]}
-    for migration in run:
-        for model in migration["snapshot"]["ir"]["payload"]["models"]:
-            held = tables.get(model["table_name"])
-            if held is None:
-                tables[model["table_name"]] = copy.deepcopy(model)
-                widened["payload"]["models"].append(tables[model["table_name"]])
-                continue
-            have = {c["name"] for c in held["columns"]}
-            held["columns"] += [
-                copy.deepcopy(c) for c in model["columns"] if c["name"] not in have
-            ]
+    snapshot of the run held that the parent does not, so a declaration
+    naming a dead name still builds and can be read.
+
+    Raises:
+        MigrationsDirectoryError: the squashed migration's historical models
+            cannot be built (a column's storage changes inside the run), so a
+            carried data step could not run against it.
+    """
     parent = below[-1]["snapshot"]["ir"] if below else None
+    held_by_parent = {
+        m["table_name"]: {c["name"] for c in m["columns"]}
+        for m in (parent["payload"]["models"] if parent else [])
+    }
     try:
+        historical.build(parent, composed["target"], rev=names[-1])
+        widened = copy.deepcopy(composed["target"])
+        tables = {m["table_name"]: m for m in widened["payload"]["models"]}
+        for migration in run:
+            for model in migration["snapshot"]["ir"]["payload"]["models"]:
+                table = model["table_name"]
+                held = tables.get(table)
+                if held is None:
+                    tables[table] = copy.deepcopy(model)
+                    widened["payload"]["models"].append(tables[table])
+                    continue
+                have = {c["name"] for c in held["columns"]} | held_by_parent.get(
+                    table, set()
+                )
+                held["columns"] += [
+                    copy.deepcopy(c) for c in model["columns"] if c["name"] not in have
+                ]
         return historical.build(parent, widened, rev=names[-1])
-    except HistoricalModelError:
-        return None
+    except HistoricalModelError as err:
+        raise MigrationsDirectoryError(f"{err} Nothing was written.") from None
 
 
 def _declared_names(entry: dict[str, Any], models: HistoricalModels) -> set[str]:
     """The names a carried data step's declaration touches: for each
     ``@chunked`` shape of its ``up`` and ``down``, the query's table, the
     ``table.column`` of each column its filter and order keys read and the
-    ``table.column:label`` of each value its filter compares. A step that does
-    not load, declares no query, or whose query does not build over the
-    widened models declares nothing here (``check`` and the runner name that
-    file)."""
+    ``table.column:label`` of each value its filter compares.
+
+    Raises:
+        MigrationsDirectoryError: the step does not load, or a ``@chunked``
+            query does not build over the squashed historical models widened
+            by the dead names: the runner would refuse the squashed migration
+            on it.
+    """
     first = entry["old"][0]
     with tempfile.TemporaryDirectory() as scratch:
         path = Path(scratch) / first.parent.name / first.name
@@ -666,16 +684,25 @@ def _declared_names(entry: dict[str, Any], models: HistoricalModels) -> set[str]
         path.write_text(entry["body"], encoding="utf-8")
         try:
             loaded = load_step(path, None)
-        except StepRefused:
-            return set()
+        except StepRefused as refused:
+            raise MigrationsDirectoryError(
+                f"{refused}: {_from_migration(first)} cannot be carried as it is. "
+                f"Fix the step in its migration, or delete it, and run the command "
+                f"again. Nothing was written."
+            ) from None
     touched: set[str] = set()
     for declared in (loaded.up, loaded.down):
         if not isinstance(declared.shape, Chunked):
             continue
         try:
             query = declared.shape.query(models)
-        except Exception:
-            continue
+        except Exception as err:
+            raise MigrationsDirectoryError(
+                f"ferro migrate squash: {_from_migration(first)}: @chunked's query "
+                f"does not build over the squashed migration's models "
+                f"({type(err).__name__}: {err}). Fix the step in its migration, or "
+                f"delete it, and run the command again. Nothing was written."
+            ) from None
         table = getattr(query.model_cls, "__ferro_table__", None)
         if table is None:
             continue

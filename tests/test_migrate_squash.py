@@ -847,12 +847,13 @@ def test_a_chunked_step_over_a_dead_table_is_refused_naming_the_table(
 ):
     dead_run(project, pkg, CHUNKED_ON_GHOST, extra=GHOST)
     # the run adds Ghost in 0002 and 0004's models (BIO) drop it
-    before = tree(project)
+    before, hidden = tree(project), hidden_entries(project)
 
     err = refused(capsys, "epic", "--from", "0002")
 
     assert "0003_add_bio/02_backfill_author.py names ghost, which existed only" in err
     assert tree(project) == before
+    assert hidden_entries(project) == hidden
 
 
 def test_a_run_whose_steps_touch_nothing_dead_notes_each_dead_name(
@@ -966,3 +967,58 @@ def test_a_step_filtering_on_a_dead_enum_label_is_refused_naming_the_label(
     err = refused(capsys, "epic", "--from", "0002")
 
     assert "names author.status:gone, which existed only inside the run" in err
+
+
+def test_a_run_whose_historical_models_cannot_be_built_is_refused_when_a_data_step_is_carried(
+    project, pkg, capsys
+):
+    write_config(project, pkg)
+    write_models(project, pkg, AUTHOR)
+    new("create_author")
+    write_models(project, pkg, TMP)
+    new("add_tmp")
+    write_models(project, pkg, AUTHOR + "    tmp: int | None = None\n")
+    new("retype_tmp", "--data-step", "Author")
+    [step] = (migrations(project) / "0003_retype_tmp").glob("*_backfill_author.py")
+    step.write_text(FILLED)
+    write_models(
+        project,
+        pkg,
+        AUTHOR + "    tmp: int | None = None\n    bio: str | None = None\n",
+    )
+    new("add_bio")
+    before, hidden = tree(project), hidden_entries(project)
+
+    err = refused(capsys, "epic", "--from", "0003")
+
+    assert err.endswith(" Nothing was written.\n"), err
+    assert "a data step cannot see author.tmp as one column" in err, err
+    assert tree(project) == before
+    assert hidden_entries(project) == hidden
+
+
+def test_a_carried_step_that_does_not_build_is_refused_naming_the_step(
+    project, pkg, capsys
+):
+    dead_run(project, pkg, CHUNKED_ON_TMP.replace("author.tmp", "author.nowhere"))
+    before = tree(project)
+
+    err = refused(capsys, "epic", "--from", "0002")
+
+    assert "0003_add_bio/02_backfill_author.py: @chunked's query does not build" in err
+    assert err.endswith("Nothing was written.\n")
+    assert tree(project) == before
+
+
+def test_an_atomic_step_beside_the_chunked_one_is_carried_and_the_chunked_one_refused(
+    project, pkg, capsys
+):
+    dead_run(project, pkg, CHUNKED_ON_TMP)
+    added = migrations(project) / "0003_add_bio"
+    (added / "03_copy_name.py").write_text(FILLED)
+    before = tree(project)
+
+    err = refused(capsys, "epic", "--from", "0002")
+
+    assert "0003_add_bio/02_backfill_author.py names author.tmp" in err
+    assert tree(project) == before
