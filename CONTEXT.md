@@ -259,7 +259,7 @@ _Avoid_: Ledger, history table, version table, migration log
 
 **Step record**:
 One row of the *tracking table*: a *step* that was started on this database, the checksum of the file that was run and of its migration's *schema snapshot*, and whether it finished. A record that is started and not finished marks where the next *run* resumes; a chunked data step's record also carries its *cursor*. A chunked step being reverted keeps its record, marked as reverting and carrying the down's own cursor, until its last batch.
-A finished record is *applied*: `status` shows `applied`, `applied (different checksum)` or `applied (baseline)`.
+A finished record is *applied*: `status` shows `applied`, `applied (different checksum)`, `applied (baseline)` or `applied (adopted)` (the record an *adoption* swapped in for the replaced migrations' own). A squashed migration whose replaced migrations the database finished whole shows `pending (adoptable)`: the next `up` adopts it.
 _Avoid_: Migration row, version row, installed (for a finished step)
 
 **Baseline**:
