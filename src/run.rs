@@ -1603,7 +1603,11 @@ fn describe_fk_violations(rows: &[EngineRow]) -> String {
 /// going up, write the finished record; going down, remove it.
 enum Settle {
     Write(Box<StepRecord>),
-    Remove { migration: u16, step: u8 },
+    Remove {
+        migration: u16,
+        step: u8,
+        migration_name: String,
+    },
 }
 
 impl Settle {
@@ -1619,8 +1623,12 @@ impl Settle {
                 upsert_sql(dialect, &Tracking::new(dialect, tracking_schema)),
                 record_binds(&record),
             ),
-            Settle::Remove { migration, step } => {
-                remove_record_statement(dialect, tracking_schema, migration, step)
+            Settle::Remove {
+                migration,
+                step,
+                migration_name,
+            } => {
+                remove_record_statement(dialect, tracking_schema, migration, step, &migration_name)
             }
         }
     }
@@ -1637,7 +1645,8 @@ async fn settle(
         .map(|_| ())
 }
 
-/// Remove the record of `(migration, step)` on `tx` — inside the transaction
+/// Remove the record of `(migration, step)` named `migration_name` on `tx` —
+/// inside the transaction
 /// of the step's down, so the record goes exactly when the down commits
 /// (ADR-0033: the tracking table says where the database stands now).
 ///
@@ -1648,30 +1657,43 @@ pub async fn remove_record(
     tracking_schema: Option<&str>,
     migration: u16,
     step: u8,
+    migration_name: &str,
 ) -> Result<(), sqlx::Error> {
-    let (sql, binds) = remove_record_statement(tx.dialect(), tracking_schema, migration, step);
+    let (sql, binds) = remove_record_statement(
+        tx.dialect(),
+        tracking_schema,
+        migration,
+        step,
+        migration_name,
+    );
     tx.fetch_all_sql_unprepared_with_binds(&sql, &binds)
         .await
         .map(|_| ())
 }
 
+/// The removal of one record: by its number and step, and by its migration
+/// name, since an original and the squash that replaced it share a number
+/// (ADR-0056).
 fn remove_record_statement(
     dialect: Dialect,
     tracking_schema: Option<&str>,
     migration: u16,
     step: u8,
+    migration_name: &str,
 ) -> (String, Vec<EngineBindValue>) {
     let sql = format!(
-        "DELETE FROM {} WHERE migration = {} AND step = {}",
+        "DELETE FROM {} WHERE migration = {} AND step = {} AND migration_name = {}",
         Tracking::new(dialect, tracking_schema).table(TRACKING_TABLE),
         param(dialect, 1),
-        param(dialect, 2)
+        param(dialect, 2),
+        param(dialect, 3)
     );
     (
         sql,
         vec![
             EngineBindValue::I64(i64::from(migration)),
             EngineBindValue::I64(i64::from(step)),
+            EngineBindValue::String(migration_name.to_string()),
         ],
     )
 }
@@ -2258,40 +2280,18 @@ pub struct Adopted {
     pub replaced: Vec<String>,
 }
 
-/// Write an adoption ([`adoption`]) in one transaction: delete every
-/// witnessed record, insert the squash's. Called under the run lock.
-///
-/// # Errors
-/// A database error, after which nothing is written.
-async fn write_adoption(
-    engine: &EngineHandle,
-    tracking_schema: Option<&str>,
-    plan: &AdoptionPlan,
-) -> PyResult<()> {
-    let dialect = engine.backend();
-    let upsert = upsert_sql(dialect, &Tracking::new(dialect, tracking_schema));
-    let mut conn = engine
-        .begin_transaction_connection()
-        .await
-        .map_err(|e| db_error("adopting the squashed migration's records", e))?;
-    let result: Result<(), sqlx::Error> = async {
-        for (migration, step) in &plan.removed {
-            let (sql, binds) = remove_record_statement(dialect, tracking_schema, *migration, *step);
-            conn.fetch_all_sql_unprepared_with_binds(&sql, &binds)
-                .await?;
-        }
-        for record in &plan.inserted {
-            conn.fetch_all_sql_unprepared_with_binds(&upsert, &record_binds(record))
-                .await?;
-        }
-        conn.commit().await
+/// Why an adoption's transaction did not commit.
+enum Adopting {
+    /// The run lock was not this run's at commit time.
+    Lock(LockCheckFailed),
+    /// The database refused a statement.
+    Database(sqlx::Error),
+}
+
+impl From<sqlx::Error> for Adopting {
+    fn from(err: sqlx::Error) -> Self {
+        Adopting::Database(err)
     }
-    .await;
-    if let Err(err) = result {
-        let _ = conn.rollback().await;
-        return Err(db_error("adopting the squashed migration's records", err));
-    }
-    Ok(())
 }
 
 /// Whether a verb taking the run lock decides step classes (ADR-0054).
@@ -2457,10 +2457,64 @@ impl Locked {
         &self.class_warnings
     }
 
+    /// Write an adoption ([`adoption`]) in one transaction: delete every
+    /// witnessed record (by number, step and name), insert the squash's,
+    /// and verify the run lock on the transaction before it commits
+    /// (ADR-0029 as amended): a lock lost since the write began rolls it
+    /// all back and refuses as a lost lock.
+    ///
+    /// # Errors
+    /// The lock's refusals; a database error. Either way nothing is written.
+    async fn write_adoption(&self, plan: &AdoptionPlan) -> PyResult<()> {
+        let engine = self.engine();
+        let tracking_schema = self.tracking_schema();
+        let dialect = engine.backend();
+        let upsert = upsert_sql(dialect, &Tracking::new(dialect, tracking_schema));
+        let mut conn = engine
+            .begin_transaction_connection()
+            .await
+            .map_err(|e| db_error("adopting the squashed migration's records", e))?;
+        let result: Result<(), Adopting> = async {
+            for record in &plan.removed {
+                let (sql, binds) = remove_record_statement(
+                    dialect,
+                    tracking_schema,
+                    record.migration,
+                    record.step,
+                    &record.migration_name,
+                );
+                conn.fetch_all_sql_unprepared_with_binds(&sql, &binds)
+                    .await?;
+            }
+            for record in &plan.inserted {
+                conn.fetch_all_sql_unprepared_with_binds(&upsert, &record_binds(record))
+                    .await?;
+            }
+            self.check_lock().await.map_err(Adopting::Lock)?;
+            conn.commit().await?;
+            Ok(())
+        }
+        .await;
+        match result {
+            Ok(()) => Ok(()),
+            Err(failed) => {
+                let _ = conn.rollback().await;
+                Err(match failed {
+                    Adopting::Lock(lost) => lost.into_py(),
+                    Adopting::Database(err) => {
+                        db_error("adopting the squashed migration's records", err)
+                    }
+                })
+            }
+        }
+    }
+
     /// Adopt every squash whose witness the records read under the lock
     /// hold (ADR-0056), before the run plans: in one transaction, delete
     /// the witnessed records and insert one finished record per step of the
-    /// squash, origin `adopted` ([`adoption`]); then re-read the records, so
+    /// squash, origin `adopted`, or `baseline` when a baseline recorded the
+    /// whole witness ([`adoption`]), the lock verified on the transaction
+    /// before it commits; then re-read the records, so
     /// [`Locked::tracked`] and the plan see them. Runs no statement of any
     /// step. `kinds` holds each adopted data step's declared kind (its
     /// files: [`Tracked::adoption_data_steps`]). Returns what it adopted;
@@ -2468,10 +2522,11 @@ impl Locked {
     /// not read (the plan refuses on it).
     ///
     /// # Errors
-    /// `RunRefused`: the newer-format refusal, the partial-witness refusal
-    /// (nothing is written), a squash step this dialect cannot run; the
-    /// lock's refusals; `ValueError` for an adopted data step without its
-    /// kind; a database error, after which nothing is written.
+    /// `RunRefused`: the newer-format refusal, the partial- and
+    /// mixed-witness refusals and the undeclared-kind refusal for an
+    /// adopted data step `kinds` lacks (nothing is written), a squash step
+    /// this dialect cannot run; the lock's refusals, a lock lost before the
+    /// commit included; a database error, after which nothing is written.
     pub async fn adopt(&self, kinds: &BTreeMap<(u16, u8), RecordKind>) -> PyResult<Vec<Adopted>> {
         let tracked = self.tracked();
         if let Some(refusal) = tracked.format_refusal() {
@@ -2492,19 +2547,8 @@ impl Locked {
         if plan.adoptions.is_empty() {
             return Ok(Vec::new());
         }
-        if let Some((migration, step, path)) = tracked
-            .adoption_data_steps()
-            .into_iter()
-            .find(|(migration, step, _)| !kinds.contains_key(&(*migration, *step)))
-        {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "adopt needs the declared kind (atomic or chunked) of data step \
-                 {migration:04}:{step:02} ({})",
-                path.display()
-            )));
-        }
         self.ready_to_write().await?;
-        write_adoption(self.engine(), self.tracking_schema(), &plan).await?;
+        self.write_adoption(&plan).await?;
         let state = read_records(self.engine(), self.tracking_schema()).await?;
         let after = Tracked {
             engine: Arc::clone(&tracked.engine),
@@ -2767,9 +2811,15 @@ impl Locked {
         let conn = guard
             .live()
             .map_err(|e| db_error("removing the step record", e))?;
-        remove_record(conn, self.tracking_schema(), step.migration, step.step)
-            .await
-            .map_err(|e| db_error("removing the step record", e))
+        remove_record(
+            conn,
+            self.tracking_schema(),
+            step.migration,
+            step.step,
+            &step.migration_name,
+        )
+        .await
+        .map_err(|e| db_error("removing the step record", e))
     }
 
     /// Execute one planned SQL step in its mode from the held bytes, and
@@ -2881,6 +2931,7 @@ impl Locked {
                 Settle::Remove {
                     migration: started.migration,
                     step: started.step,
+                    migration_name: started.migration_name.clone(),
                 }
             } else {
                 Settle::Write(Box::new(StepRecord {
@@ -3188,6 +3239,28 @@ mod tests {
         );
         assert!(down.starts_with("It runs without a transaction, so the statements"));
         assert!(down.ends_with("re-runs from its first statement. Nothing after it ran."));
+    }
+
+    #[test]
+    fn a_record_is_removed_by_its_migration_name_as_well_as_its_number_and_step() {
+        // An original and the squash that replaced it share a number: a
+        // removal keyed on `(migration, step)` alone would take the other's.
+        let (sql, binds) = remove_record_statement(Dialect::Postgres, None, 2, 1, "0002_add_tmp");
+        assert_eq!(
+            sql,
+            "DELETE FROM \"_ferro_migrations\" WHERE migration = $1 AND step = $2 AND \
+             migration_name = $3"
+        );
+        assert_eq!(
+            binds,
+            [
+                EngineBindValue::I64(2),
+                EngineBindValue::I64(1),
+                EngineBindValue::String("0002_add_tmp".to_string()),
+            ]
+        );
+        let (sql, _) = remove_record_statement(Dialect::Sqlite, None, 2, 1, "0002_add_tmp");
+        assert!(sql.ends_with("AND migration_name = ?"), "{sql}");
     }
 
     #[test]

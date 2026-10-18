@@ -479,7 +479,7 @@ ok Wrote migrations/0005_teams_epic/  (replaces 0005_add_teams … 0008_fix_rows
   02_fix_rows.up.sql           SQL step, up                  carried, review it (was 0008_fix_rows/01_fix_rows.up.sql)
   02_fix_rows.down.sql         SQL step, down                carried, review it (was 0008_fix_rows/01_fix_rows.down.sql)
   03_backfill_team.py          data step                     carried, review it (was 0006_team_slug/02_backfill_team.py)
-  ir.json                      snapshot                      0008_fix_rows's, chained from 0004_author_nick, replaces 0005_add_teams…0008_fix_rows
+  ir.json                      snapshot                      0008_fix_rows's, chained from 0004_author_nick, replaces 0005_add_teams … 0008_fix_rows
 
   1 new model
     Team

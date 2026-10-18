@@ -254,10 +254,12 @@ def test_a_baselined_originals_database_adopts(project, pkg, db, capsys):
 
     code, out, _ = cli(capsys, "up", "--url", db.url)
 
+    # The squash carries the baseline through: its records are a baseline's,
+    # since its originals created nothing here (panel F3 on #690).
     assert (code, out) == (0, f"{db.line}\n{ADOPTED}\n")
     assert [(name, origin) for name, _, origin in names(db)] == [
         ("0001_create_author", "baseline"),
-        *[("0002_epic", "adopted")] * (len(records(db)) - 1),
+        *[("0002_epic", "baseline")] * (len(records(db)) - 1),
     ]
     code, out, _ = cli(capsys, "status", "--json", "--url", db.url)
     states = [
@@ -265,8 +267,61 @@ def test_a_baselined_originals_database_adopts(project, pkg, db, capsys):
         for migration in json.loads(out)["migrations"]
         for step in migration["steps"]
     ]
-    assert states[0] == "applied (baseline)"
-    assert set(states[1:]) == {"applied (adopted)"}
+    assert set(states) == {"applied (baseline)"}
+
+    # `down` goes no lower than the squash, as for the baseline it carries.
+    before = records(db)
+    code, _, err = cli(capsys, "down", "--all", "--yes", "--url", db.url)
+    assert (code, err) == (
+        1,
+        "ferro migrate: 0002 was recorded by `baseline` and created nothing here; "
+        "`down` can go no lower than 0002. Nothing was reverted.\n",
+    )
+    assert records(db) == before
+    assert "author" in db.tables()
+
+    # `baseline --remove` removes the squash's records with the rest.
+    code, _, err = cli(capsys, "baseline", "--remove", "--url", db.url)
+    assert (code, err) == (0, "")
+    assert records(db) == []
+    assert "author" in db.tables()
+
+
+MIXED = (
+    "ferro migrate: 0002_epic replaces 0002_add_tmp … 0004_drop_tmp, but this "
+    "database baselined 0002_add_tmp and ran the rest, so the squash straddles the "
+    "baseline and cannot be adopted whole. On the commit before the squash, squash "
+    "from above the baseline instead: `ferro migrate squash epic --from "
+    "0003_add_bio`. Nothing was applied."
+)
+
+
+def test_a_witness_part_baselined_and_part_run_is_refused_naming_the_fix(
+    project, pkg, db, capsys
+):
+    epic(project, pkg, db)
+    db.execute("UPDATE _ferro_migrations SET origin = 'baseline' WHERE migration <= 2")
+    assert squash("epic", "--from", "0002") == 0
+    before = records(db)
+
+    with pytest.raises(MigrationRefused) as raised:
+        asyncio.run(runner.up(url=db.url))
+
+    refused = raised.value.report.refused
+    assert refused.kind == "mixed_witness"
+    assert str(refused) == MIXED
+    assert raised.value.report.adopted == []
+    assert records(db) == before
+    code, out, err = cli(capsys, "up", "--url", db.url)
+    assert (code, out) == (1, f"{db.line}\n")
+    assert MIXED in err
+    code, _, err = cli(capsys, "down", "--to", "0001", "--yes", "--url", db.url)
+    assert code == 1 and MIXED in err
+    assert records(db) == before
+    # The readers say what the run meets.
+    report = stands(db)
+    assert report.adoptable == []
+    assert report.refusal == MIXED
 
 
 def test_an_original_edited_after_apply_and_never_rerecorded_adopts(

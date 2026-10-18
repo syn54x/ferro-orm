@@ -397,7 +397,8 @@ async def _adopt(
     """Adopt, on ``run``, every squash whose witness its records hold, before
     anything is planned (ADR-0056), telling ``tell`` one event per squash
     adopted. Raises ``RunRefused`` (``partial_witness``) on a squash the
-    records hold part of, with nothing written."""
+    records hold part of, and (``mixed_witness``) on one a baseline
+    recorded part of, with nothing written."""
     adopted = [
         AdoptedMigration(entry["squash"], list(entry["replaced"]))
         for entry in await run.adopt(_declared_kind)
@@ -433,14 +434,19 @@ async def up(
     database holding migrations the directory lacks through (ADR-0038):
     ``"expand-only"`` when every step they hold is ``expand`` (ADR-0054),
     ``True`` whatever they hold (:data:`AllowAhead`).
-    ``progress`` receives each line as the run goes: one per applied step,
-    and one per attempt a step makes while it waits for a table lock under
-    the database's ``ddl_lock_timeout``. ``on_event`` receives the same
-    lines as data, each just before ``progress`` receives its ``line()``: a
+    ``progress`` receives each line as the run goes: one per squash it
+    adopts (before any step, ADR-0056), one per applied step, and one per
+    attempt a step makes while it waits for a table lock under the
+    database's ``ddl_lock_timeout``. ``on_event`` receives the same lines as
+    data, each just before ``progress`` receives its ``line()``: an
+    :class:`AdoptedEvent` per squash adopted (its ``squash`` and the
+    ``replaced`` migrations, with no ``.text`` or ``.step``), a
     :class:`StepEvent` per applied step, a :class:`RunNote` for any other;
     a failed step is a ``StepEvent`` too, with no line for ``progress``.
 
-    Returns the :class:`RunReport` of what it applied.
+    Returns the :class:`RunReport` of what it did: ``.adopted`` the squashes
+    it adopted, in order (an :class:`AdoptedMigration` each), then
+    ``.applied`` the steps it applied.
 
     Raises:
         DatabaseAheadError: the database has applied migrations the
@@ -1380,12 +1386,19 @@ async def down(
     ``confirm`` is shown the plan before the lock is taken; when it returns
     false nothing is reverted (``declined``). Once the lock is held the plan
     is made again, and a database that changed in between is refused rather
-    than reverted unseen. ``progress`` receives one line per reverted step;
-    ``on_event`` receives each as data (a :class:`StepEvent`, or a
-    :class:`RunNote` for any other line) just before ``progress`` receives
-    its ``line()``; a failed down is a ``StepEvent`` with no line.
+    than reverted unseen. Under the lock and before it plans, a ``down``
+    adopts every squash whose witness the records hold, as ``up`` does
+    (ADR-0056). ``progress`` receives one line per squash adopted, then one
+    per reverted step; ``on_event`` receives each as data just before
+    ``progress`` receives its ``line()``: an :class:`AdoptedEvent` per
+    squash adopted (its ``squash`` and the ``replaced`` migrations, with no
+    ``.text`` or ``.step``), a :class:`StepEvent` per reverted step, a
+    :class:`RunNote` for any other line; a failed down is a ``StepEvent``
+    with no line.
 
-    Returns the :class:`RunReport` of what it reverted (``declined`` when
+    Returns the :class:`RunReport` of what it did: ``.adopted`` the squashes
+    it adopted, in order (an :class:`AdoptedMigration` each), then
+    ``.reverted`` the steps it reverted, newest first (``.declined`` when
     ``confirm`` said no).
 
     Raises:

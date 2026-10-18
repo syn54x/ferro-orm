@@ -1220,15 +1220,17 @@ impl LockedDatabase {
 
     /// Adopt every squash whose witness the records read under the lock
     /// hold (ADR-0056): one transaction swaps the witnessed records for the
-    /// squash's, origin `adopted`, and runs nothing; the plan then sees
-    /// them. `declared_kind(path)` gives each adopted data step's declared
-    /// kind (`"atomic"` / `"chunked"`). Returns `[{"squash", "replaced"}]`,
-    /// one per squash adopted.
+    /// squash's, origin `adopted` (`baseline` when a baseline recorded the
+    /// whole witness), and runs nothing; the plan then sees them.
+    /// `declared_kind(path)` gives each adopted data step's declared kind
+    /// (`"atomic"` / `"chunked"`). Returns `[{"squash", "replaced"}]`, one
+    /// per squash adopted.
     ///
     /// # Errors
-    /// `RunRefused`: the partial-witness refusal (`kind ==
-    /// "partial_witness"`, nothing written), the newer-format refusal, the
-    /// lock's; whatever `declared_kind` raises; a database error.
+    /// `RunRefused`: the partial-witness and mixed-witness refusals (`kind
+    /// == "partial_witness"` / `"mixed_witness"`, nothing written), the
+    /// newer-format refusal, the lock's (a lock lost before the commit
+    /// included); whatever `declared_kind` raises; a database error.
     fn adopt<'py>(
         &self,
         py: Python<'py>,
