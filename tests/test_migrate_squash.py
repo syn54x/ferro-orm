@@ -507,9 +507,7 @@ def test_an_empty_squash_is_refused_naming_the_directories_to_delete(
     assert tree(project) == before
 
 
-def test_a_name_that_would_rewrite_a_replaced_original_is_refused(
-    project, pkg, capsys
-):
+def test_a_name_that_would_rewrite_a_replaced_original_is_refused(project, pkg, capsys):
     write_config(project, pkg)
     write_models(project, pkg, AUTHOR)
     new("create")
