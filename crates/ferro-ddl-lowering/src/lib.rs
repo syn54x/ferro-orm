@@ -4846,7 +4846,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn postgres_in_any_array_and_text_casts_are_not_drift() {
         let check = account_role_column_check();
         let canonical = render_check_body(&check);

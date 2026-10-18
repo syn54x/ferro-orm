@@ -1246,6 +1246,8 @@ fn parse_json_or_default<T: serde::de::DeserializeOwned + Default>(
 /// unrecognized, or the plan contains an unsafe change.
 #[pyfunction]
 #[pyo3(name = "_render_migration_sql_for_test")]
+// One argument per Python keyword of this test-only FFI entry point.
+#[allow(clippy::too_many_arguments)]
 #[pyo3(signature = (name, schema_ir_json, live_columns_json, dialect, updates=true, destructive=false, live_indexes_json=String::new(), live_foreign_keys_json=String::new(), live_checks_json=String::new(), live_row_security_json=String::new()))]
 pub fn _render_migration_sql_for_test(
     name: String,

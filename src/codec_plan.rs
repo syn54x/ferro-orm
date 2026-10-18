@@ -211,6 +211,9 @@ fn scalar_codec(canonical: CanonicalType) -> ColumnCodec {
     }
 }
 
+// The CodecIR rule table below has no runtime consumer yet: it is the
+// golden-vector witness `runtime_codec_ir_tests` pins (as with `entry` above).
+#[cfg_attr(not(test), allow(dead_code))]
 impl ColumnCodec {
     /// The `logical_type` token in CodecIR vocabulary.
     pub fn logical_token(&self) -> &'static str {
@@ -314,6 +317,8 @@ impl ColumnCodec {
 /// `codec_registry_core_v1.json` is asserted to be a byte-identical subset
 /// (see `runtime_codec_ir_tests`), so the vectors pin the table that actually
 /// drives bind/decode.
+// Consumed by the golden-vector tests only (see the `impl ColumnCodec` above).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn runtime_codec_ir_payload() -> CodecIrPayload {
     let placeholder_enum = ColumnCodec::Enum {
         values: Vec::new(),

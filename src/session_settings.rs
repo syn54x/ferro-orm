@@ -38,8 +38,7 @@
 
 use crate::backend::{EngineBindValue, EngineConnection, EngineHandle};
 use crate::state::{
-    ConnectionSlot, SessionState, TransactionConnection, TransactionHandle, discard_connection,
-    session_state,
+    ConnectionSlot, SessionState, TransactionConnection, discard_connection, session_state,
 };
 use ferro_ddl_lowering::Dialect;
 use pyo3::PyResult;
@@ -1395,6 +1394,7 @@ impl Drop for OperationScope {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::TransactionHandle;
 
     fn setting(key: &str, value: &str) -> SessionSetting {
         (key.to_string(), value.to_string())

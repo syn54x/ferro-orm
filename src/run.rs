@@ -23,6 +23,10 @@
 //! I-1: the runner renders no schema DDL. The only DDL built here is the
 //! tracking tables' own (#466); every other statement comes from a step file.
 
+// `ferro_migrate::RunRefusal` is a refusal built once per verb and handed to
+// Python, never returned in a loop (the crate-level reason in `ferro-migrate`).
+#![allow(clippy::result_large_err)]
+
 use crate::backend::{
     EngineBindValue, EngineConnection, EngineHandle, EngineRow, EngineValue, NullKind,
 };

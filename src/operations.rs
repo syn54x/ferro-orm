@@ -2861,7 +2861,7 @@ pub fn save_bulk_records<'py>(
                 let mut insert_stmt = InsertStatement::new()
                     .into_table(Alias::new(&table_name))
                     .to_owned();
-                insert_stmt.columns(column_names.iter().map(|c| Alias::new(c)));
+                insert_stmt.columns(column_names.iter().map(Alias::new));
 
                 let null_input = BindInput::Json(serde_json::Value::Null);
                 for row in chunk {
@@ -4257,6 +4257,9 @@ fn set_value_bind_input(value: &QueryValueExpr, col: &str) -> PyResult<BindInput
 /// Lower one SET value expression to a SeaQuery expr. Literals bind;
 /// column refs stay column exprs; arithmetic is an operator tree;
 /// ``now`` is the portable database clock (`CURRENT_TIMESTAMP`).
+// Each argument is a distinct lookup the update lowering already holds; a
+// context struct for this one private call site would only rename them.
+#[allow(clippy::too_many_arguments)]
 fn set_value_to_expr(
     schema: &crate::state::RegisteredModel,
     table_name: &str,
@@ -4389,10 +4392,10 @@ fn py_to_json_value(value: &Bound<'_, PyAny>, col: &str) -> PyResult<serde_json:
         return Ok(serde_json::Value::Null);
     }
     // bool BEFORE int: in Python bool is a subtype of int.
-    if let Ok(b) = value.downcast::<PyBool>() {
+    if let Ok(b) = value.cast::<PyBool>() {
         return Ok(serde_json::Value::Bool(b.is_true()));
     }
-    if let Ok(i) = value.downcast::<PyInt>() {
+    if let Ok(i) = value.cast::<PyInt>() {
         if let Ok(n) = i.extract::<i64>() {
             return Ok(serde_json::Value::from(n));
         }
@@ -4403,7 +4406,7 @@ fn py_to_json_value(value: &Bound<'_, PyAny>, col: &str) -> PyResult<serde_json:
             "Integer out of range for column '{col}'"
         )));
     }
-    if let Ok(f) = value.downcast::<PyFloat>() {
+    if let Ok(f) = value.cast::<PyFloat>() {
         let n = f.extract::<f64>()?;
         return serde_json::Number::from_f64(n)
             .map(serde_json::Value::Number)
@@ -4413,17 +4416,17 @@ fn py_to_json_value(value: &Bound<'_, PyAny>, col: &str) -> PyResult<serde_json:
                 ))
             });
     }
-    if let Ok(s) = value.downcast::<PyString>() {
+    if let Ok(s) = value.cast::<PyString>() {
         return Ok(serde_json::Value::String(s.extract::<String>()?));
     }
-    if let Ok(list) = value.downcast::<PyList>() {
+    if let Ok(list) = value.cast::<PyList>() {
         let mut arr = Vec::with_capacity(list.len());
         for item in list.iter() {
             arr.push(py_to_json_value(&item, col)?);
         }
         return Ok(serde_json::Value::Array(arr));
     }
-    if let Ok(dict) = value.downcast::<PyDict>() {
+    if let Ok(dict) = value.cast::<PyDict>() {
         let mut map = serde_json::Map::new();
         for (k, v) in dict.iter() {
             let key: String = k.extract().map_err(|_| {
@@ -4447,10 +4450,10 @@ fn py_to_json_value(value: &Bound<'_, PyAny>, col: &str) -> PyResult<serde_json:
 fn bind_input_from_py(value: &Bound<'_, PyAny>, col: &str) -> PyResult<BindInput> {
     use pyo3::types::{PyByteArray, PyBytes};
 
-    if let Ok(b) = value.downcast::<PyBytes>() {
+    if let Ok(b) = value.cast::<PyBytes>() {
         return Ok(BindInput::Bytes(b.as_bytes().to_vec()));
     }
-    if let Ok(b) = value.downcast::<PyByteArray>() {
+    if let Ok(b) = value.cast::<PyByteArray>() {
         return Ok(BindInput::Bytes(b.to_vec()));
     }
     Ok(BindInput::Json(py_to_json_value(value, col)?))
@@ -5756,10 +5759,10 @@ mod raw_sql_tests {
     #[test]
     fn extracts_float() {
         Python::attach(|py| {
-            let val = PyFloat::new(py, 3.14).into_any();
+            let val = PyFloat::new(py, 1.5).into_any();
             assert_eq!(
                 python_to_engine_bind_value(&val).unwrap(),
-                EngineBindValue::F64(3.14)
+                EngineBindValue::F64(1.5)
             );
         });
     }

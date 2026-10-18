@@ -260,7 +260,7 @@ pub fn render_create_table_as(
         let action = fk_action_from_str(fk.on_delete.as_deref());
         table_stmt.foreign_key(
             ForeignKey::create()
-                .name(&fk_constraint_name(table_lower, fk))
+                .name(fk_constraint_name(table_lower, fk))
                 .from(Alias::new(table_lower), Alias::new(&fk.column))
                 .to(Alias::new(&fk.to_table), Alias::new(&fk.to_column))
                 .on_delete(action),

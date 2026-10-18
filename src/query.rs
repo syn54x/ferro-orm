@@ -169,7 +169,7 @@ fn resolve_nulls_placement(
         "first" => Ok(NullsPlacement::First),
         "last" => Ok(NullsPlacement::Last),
         "native" => {
-            let desc = direction.to_ascii_lowercase() == "desc";
+            let desc = direction.eq_ignore_ascii_case("desc");
             Ok(match (dialect, desc) {
                 (Dialect::Postgres, false) => NullsPlacement::Last,
                 (Dialect::Postgres, true) => NullsPlacement::First,
@@ -1246,7 +1246,7 @@ mod tests {
                 bound_is_null: false,
             },
         ]);
-        let flat = sql.replace('"', "").replace('`', "");
+        let flat = sql.replace(['"', '`'], "");
         assert!(
             flat.contains("a > 1") && flat.contains("a = 1") && flat.contains("b > 2"),
             "ASC exclusive compare: {sql}"
@@ -1275,7 +1275,7 @@ mod tests {
                 bound_is_null: false,
             },
         ]);
-        let flat = sql.replace('"', "").replace('`', "");
+        let flat = sql.replace(['"', '`'], "");
         assert!(
             flat.contains("a < 1") && flat.contains("a = 1") && flat.contains("b < 2"),
             "DESC exclusive compare: {sql}"
@@ -1336,7 +1336,7 @@ mod tests {
     }
 
     fn flatten_sql(sql: &str) -> String {
-        sql.replace('"', "").replace('`', "").to_lowercase()
+        sql.replace(['"', '`'], "").to_lowercase()
     }
 
     #[test]
@@ -2266,10 +2266,10 @@ mod tests {
         let join_plan = plan.build_join_plan("transaction", &[]).expect("join plan");
         let sql = plan
             .to_condition_with_joins(Dialect::Postgres, "transaction", &join_plan)
-            .and_then(|cond| {
+            .map(|cond| {
                 let mut select = Query::select();
                 select.from(Alias::new("transaction")).cond_where(cond);
-                Ok(select.to_string(PostgresQueryBuilder).to_lowercase())
+                select.to_string(PostgresQueryBuilder).to_lowercase()
             })
             .expect("condition builds");
         // Path leaf qualified by its hop alias; root leaf by the root table.
