@@ -168,11 +168,31 @@ def _primary_key_change(project: Path) -> None:
     (project / "blog" / "models.py").write_text(REKEYED)
 
 
+def _empty_squash(project: Path) -> None:
+    """``0001_create_author``, then ``0002_add_bio`` adds a column and
+    ``0003_drop_bio`` drops it: squashed from ``0002``, nothing is left."""
+    (project / "ferro.toml").write_text(
+        'models = ["blog.models"]\ndialects = ["postgres", "sqlite"]\n'
+    )
+    (project / "blog").mkdir()
+    (project / "blog" / "__init__.py").write_text("")
+    models = project / "blog" / "models.py"
+    for name, body in (
+        ("create_author", MODELS),
+        ("add_bio", MODELS + "    bio: str | None = None\n"),
+        ("drop_bio", MODELS),
+    ):
+        models.write_text(body)
+        made = _ferro(project, "migrate", "new", name)
+        assert made.returncode == 0, made.stderr
+
+
 REFUSALS = {
     "missing-dialects": (_missing_dialects, ("migrate", "check")),
     "both-config-files": (_both_config_files, ("migrate", "check")),
     "unknown-key": (_unknown_key, ("migrate", "check")),
     "primary-key-change": (_primary_key_change, ("migrate", "new", "rekey")),
+    "squash-empty": (_empty_squash, ("migrate", "squash", "bio", "--from", "0002")),
 }
 
 
@@ -425,6 +445,26 @@ def _loop_edited_step(project: Path) -> None:
     _loop_applied(project)
     step = project / "migrations" / "0001_create_author" / "01_schema.up.sqlite.sql"
     step.write_text(step.read_text() + "\n-- edited\n")
+
+
+def _feature_branch(project: Path) -> None:
+    """The CLI reference's squash: ``0002_add_bio`` with a filled-in
+    hand-written SQL step ``fix_rows``, then ``0003_add_team``."""
+    bio = AUTHOR + "    bio: str | None = None\n"
+    team = (
+        "\n\nclass Team(Model):\n"
+        "    id: int | None = Field(default=None, primary_key=True)\n"
+        "    label: str\n"
+    )
+    _configured(project)
+    _write_models(project, AUTHOR)
+    _run_ok(project, "migrate", "new", "create_author")
+    _write_models(project, bio)
+    _run_ok(project, "migrate", "new", "add_bio", "--sql-step", "fix_rows")
+    step = project / "migrations" / "0002_add_bio" / "02_fix_rows.up.sql"
+    step.write_text("UPDATE author SET bio = name;\n")
+    _write_models(project, bio + team)
+    _run_ok(project, "migrate", "new", "add_team")
 
 
 def _created_and_applied(project: Path) -> None:
@@ -714,6 +754,7 @@ OUTPUTS = {
         ),
     ),
     "new-small": (_loop_edited, ("migrate", "new", "author_nickname")),
+    "squash": (_feature_branch, ("migrate", "squash", "epic", "--from", "0002")),
     "check-ok": (_loop_generated, ("migrate", "check")),
     "check-problem": (_loop_edited, ("migrate", "check")),
     "up": (_loop_generated, ("migrate", "up")),
