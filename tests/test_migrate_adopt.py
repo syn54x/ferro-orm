@@ -386,7 +386,9 @@ def test_a_squash_of_a_squash_adopts_from_either_generation(
     code, out, _ = cli(capsys, "up", "--url", db.url)
 
     replaced = (
-        "0002_add_tmp … 0003_bio_epic" if adopted_first else "0002_add_tmp … 0004_drop_tmp"
+        "0002_add_tmp … 0003_bio_epic"
+        if adopted_first
+        else "0002_add_tmp … 0004_drop_tmp"
     )
     assert (code, out) == (
         0,

@@ -40,6 +40,7 @@ from tests.test_cli_output_new_check import (  # noqa: F401 - fixtures
     tty,
 )
 from tests.test_cli_output_status_drift import sgr, tty_heading, tty_line
+from tests.test_migrate_adopt import ADOPTED, TITLE, squashed
 from tests.test_migrate_baseline import BOTH, NOT_COMPARED, auto_migrated
 from tests.test_migrate_drift import SQUADS
 from tests.test_migrate_rerecord import edited_chunked
@@ -458,6 +459,64 @@ def test_tty_up_rows_colour_each_step_by_kind(project, pkg, db, capsys, tty):
     assert (code, err) == (0, "")
     assert out == f"{tty_line(db)}\n" + tty_heading(
         "✔", "1;32", "nothing to apply", "the database is up to date"
+    )
+
+
+def adopted_then_pending(project, pkg, db) -> None:
+    """A database that applied the originals of ``0002_epic``, the squash in
+    their place, and ``0003_add_title`` pending above it."""
+    squashed(project, pkg, db)
+    write_models(project, pkg, TITLE)
+    new("add_title")
+
+
+@pytest.mark.backend_matrix
+def test_plain_up_says_the_adoption_before_the_steps(project, pkg, db, capsys):
+    adopted_then_pending(project, pkg, db)
+
+    code, out, err = cli(capsys, "up", "--url", db.url)
+
+    assert (code, err) == (0, "")
+    assert timed(out) == (
+        f"{db.line}\n{ADOPTED}\n0003_add_title  01_schema  applied (N ms)\n"
+    )
+
+
+@pytest.mark.backend_matrix
+def test_tty_up_heads_the_adoption_before_the_steps(project, pkg, db, capsys, tty):
+    adopted_then_pending(project, pkg, db)
+
+    code, out, err = cli(capsys, "up", "--url", db.url)
+
+    assert (code, err) == (0, "")
+    assert timed(out) == (
+        f"{tty_line(db)}\n"
+        + tty_heading(
+            "✔",
+            "1;32",
+            "adopted 0002_epic",
+            "this database had applied 0002_add_tmp … 0004_drop_tmp; nothing was run",
+        )
+        + f"  {OK} 0003_add_title  {sgr('36', '01_schema')}  {APPLIED}{took()}\n"
+    )
+
+
+@pytest.mark.backend_matrix
+def test_an_up_that_only_adopts_says_nothing_more_in_either_form(
+    project, pkg, db, capsys, monkeypatch
+):
+    squashed(project, pkg, db)
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    monkeypatch.setenv("COLUMNS", "100")
+
+    code, out, err = cli(capsys, "up", "--url", db.url)
+
+    assert (code, err) == (0, "")
+    assert out == f"{tty_line(db)}\n" + tty_heading(
+        "✔",
+        "1;32",
+        "adopted 0002_epic",
+        "this database had applied 0002_add_tmp … 0004_drop_tmp; nothing was run",
     )
 
 
