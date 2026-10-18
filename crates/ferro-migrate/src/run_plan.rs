@@ -3011,6 +3011,10 @@ pub enum StepState {
     AppliedAdopted,
     /// No finished record.
     Pending,
+    /// No record, in a squash whose witness the records hold whole
+    /// (ADR-0056): pending its adoption, which the next run makes, running
+    /// nothing.
+    PendingAdoptable,
     /// Not finished, and a run holds the lock.
     Running,
     /// The last attempt's error recorded: an up that did not finish, or a
@@ -3078,6 +3082,10 @@ pub struct MigrationStatus {
     pub name: String,
     /// Its steps.
     pub steps: Vec<StepStatus>,
+    /// For a squash pending its adoption, `NNNN_<name>` of every migration
+    /// whose records witness it, in chain order ([`Adoption::replaced`]):
+    /// what the database applied. Empty otherwise.
+    pub adopts: Vec<String>,
 }
 
 /// What `ferro migrate status` reports: every migration's steps, the
@@ -3087,8 +3095,13 @@ pub struct MigrationStatus {
 pub struct RunStatus {
     /// The directory's migrations, in order.
     pub migrations: Vec<MigrationStatus>,
-    /// Applied migrations the directory lacks (`NNNN_<name>`).
+    /// Applied migrations the directory lacks (`NNNN_<name>`), never one
+    /// whose records witness an adoptable squash: adoptable is recognised
+    /// before ahead (ADR-0038). A partial witness's records are ahead.
     pub ahead: Vec<String>,
+    /// `NNNN_<name>` of every squash the next run adopts ([`adoptable`]),
+    /// in directory order: each is pending (ADR-0040).
+    pub adoptable: Vec<String>,
     /// What `up` would refuse with, when it would.
     pub refusal: Option<String>,
     /// Whether that refusal is about the database (rather than a capability
@@ -3101,6 +3114,13 @@ pub struct RunStatus {
 /// refusal `up` would meet. `lock_held` makes the first unfinished step
 /// `running`. `order_keys` are passed through to [`plan_run`] for the
 /// refusal's text.
+///
+/// Adoptable is recognised before ahead (ADR-0038, ADR-0056): a squash
+/// whose witness the records hold whole is `pending_adoptable`, its
+/// witnessed records are not ahead, and the refusal is the one the run meets
+/// after adopting. A partial witness is ahead by the originals it holds and
+/// carries the run's `partial_witness` refusal. A step is read from its own
+/// migration's records only, never from an original's of the same number.
 pub fn run_status(
     dir: &MigrationsDir,
     records: &[StepRecord],
@@ -3108,14 +3128,32 @@ pub fn run_status(
     lock_held: bool,
     order_keys: Option<&OrderKeys>,
 ) -> RunStatus {
-    let by_key: RecordMap = records.iter().map(|r| ((r.migration, r.step), r)).collect();
+    let adoptions = adoptable(dir, records);
+    let partials = partial_witnesses(dir, records);
+    let witnessed: BTreeSet<(u16, u8)> = adoptions
+        .iter()
+        .flat_map(|a| a.witnessed.iter().copied())
+        .collect();
+    let by_key: RecordMap = records
+        .iter()
+        .filter(|r| !witnessed.contains(&(r.migration, r.step)))
+        .map(|r| ((r.migration, r.step), r))
+        .collect();
     let mut running_marked = false;
     let mut migrations = Vec::new();
     for migration in &dir.migrations {
+        let name = migration.dir_name();
+        let adopts = adoptions
+            .iter()
+            .find(|a| a.squash == name)
+            .map(|a| a.replaced.clone())
+            .unwrap_or_default();
         let mut steps = Vec::new();
         let mut classes: Option<BTreeMap<u8, StepClass>> = None;
         for step in &migration.steps {
-            let record = by_key.get(&(migration.number, step.ordinal));
+            let record = by_key
+                .get(&(migration.number, step.ordinal))
+                .filter(|r| r.migration_name == name);
             let file = step_file(migration, step, dialect).ok();
             let on_disk = file.map(|f| encode_checksum(&f.up_checksum));
             let name = file
@@ -3123,6 +3161,7 @@ pub fn run_status(
                 .or_else(|| record.map(|r| r.file.clone()))
                 .unwrap_or_else(|| format!("{:02}_{}", step.ordinal, step.name));
             let mut state = match record {
+                None if !adopts.is_empty() => StepState::PendingAdoptable,
                 None => StepState::Pending,
                 Some(r) if r.reverting => StepState::Reverting,
                 // A finished step carrying an error: its down failed, and the
@@ -3178,28 +3217,41 @@ pub fn run_status(
         }
         migrations.push(MigrationStatus {
             number: migration.number,
-            name: migration.dir_name(),
+            name,
             steps,
+            adopts,
         });
     }
     let head = dir.head().map_or(0, |m| m.number);
+    let partly_witnessed: BTreeSet<&str> = partials
+        .iter()
+        .flat_map(|p| p.satisfied.iter().chain(&p.missing))
+        .map(String::as_str)
+        .collect();
     let ahead: BTreeSet<String> = records
         .iter()
-        .filter(|r| r.migration > head)
+        .filter(|r| !witnessed.contains(&(r.migration, r.step)))
+        .filter(|r| r.migration > head || partly_witnessed.contains(r.migration_name.as_str()))
         .map(|r| r.migration_name.clone())
         .collect();
-    let refusal = plan_run(
-        dir,
-        records,
-        dialect,
-        Direction::Up { through: None },
-        false,
-        order_keys,
-    )
-    .err();
+    // The refusal the run meets: its adoption's, else its plan's over the
+    // records the adoption leaves. A data step's kind decides none.
+    let refusal = adoption(dir, records, dialect, &BTreeMap::new(), "", "")
+        .and_then(|adopted| {
+            plan_run(
+                dir,
+                &adopted.records,
+                dialect,
+                Direction::Up { through: None },
+                false,
+                order_keys,
+            )
+        })
+        .err();
     RunStatus {
         migrations,
         ahead: ahead.into_iter().collect(),
+        adoptable: adoptions.into_iter().map(|a| a.squash).collect(),
         refusal_needs_attention: refusal.as_ref().is_some_and(RunRefusal::needs_attention),
         refusal: refusal.map(|r| r.to_string()),
     }
@@ -6365,5 +6417,104 @@ mod tests {
         )
         .expect("down");
         assert_eq!(keys(&reverted), [(2, 3), (2, 2), (2, 1)]);
+    }
+
+    // -- the readers on an adoptable database (#672) ----------------------------
+
+    fn states(status: &RunStatus, migration: usize) -> Vec<StepState> {
+        status.migrations[migration]
+            .steps
+            .iter()
+            .map(|s| s.state)
+            .collect()
+    }
+
+    #[test]
+    fn status_reports_a_wholly_witnessed_squash_pending_adoptable_and_nothing_ahead() {
+        let (dir, records) = originals_applied();
+        let status = run_status(&dir, &records, Dialect::Sqlite, false, None);
+        assert_eq!(states(&status, 0), [StepState::Applied]);
+        assert_eq!(states(&status, 1), [StepState::PendingAdoptable; 3]);
+        assert_eq!(status.adoptable, ["0002_teams_epic"]);
+        assert_eq!(
+            status.migrations[1].adopts,
+            ["0002_add_teams", "0003_team_slug", "0004_drop_tmp"]
+        );
+        assert!(status.migrations[0].adopts.is_empty());
+        assert!(status.ahead.is_empty(), "{:?}", status.ahead);
+        // The run adopts and then has nothing to refuse.
+        assert!(status.refusal.is_none(), "{:?}", status.refusal);
+        assert!(StepState::PendingAdoptable.is_pending());
+        assert!(!StepState::PendingAdoptable.needs_attention());
+        assert_eq!(
+            serde_json::to_value(StepState::PendingAdoptable).expect("json"),
+            "pending_adoptable"
+        );
+        // A squash step's class is the one a run would record, never an
+        // original's record of the same number and ordinal.
+        let classes =
+            migration_classes(&dir, &dir.migrations[1], Dialect::Sqlite).expect("classes");
+        for step in &status.migrations[1].steps {
+            assert_eq!(Some(step.class), classes.get(&step.step).copied());
+            assert_eq!(step.applied_checksum, None);
+        }
+    }
+
+    #[test]
+    fn status_reports_a_partial_witness_ahead_by_the_originals_it_holds_with_the_runs_refusal() {
+        let (dir, records) = originals_applied();
+        let partial: Vec<StepRecord> = records.into_iter().filter(|r| r.migration < 4).collect();
+        let status = run_status(&dir, &partial, Dialect::Sqlite, false, None);
+        assert_eq!(states(&status, 1), [StepState::Pending; 3]);
+        assert!(status.adoptable.is_empty());
+        assert!(status.migrations[1].adopts.is_empty());
+        assert_eq!(status.ahead, ["0002_add_teams", "0003_team_slug"]);
+        let refusal = adoption(&dir, &partial, Dialect::Sqlite, &no_kinds(), "now", "v")
+            .expect_err("partial");
+        assert_eq!(status.refusal, Some(refusal.to_string()));
+        assert!(status.refusal_needs_attention);
+    }
+
+    #[test]
+    fn status_reports_a_squash_of_a_squash_adoptable_from_either_generation() {
+        let originals = epic_originals();
+        let first = squashed(&originals, 3, "slug_epic");
+        let second = squashed(&first, 2, "big_epic");
+        let inner: Vec<StepRecord> = every_step(&first)
+            .into_iter()
+            .map(|r| StepRecord {
+                origin: if r.migration == 3 {
+                    Origin::Adopted
+                } else {
+                    r.origin
+                },
+                ..r
+            })
+            .collect();
+        for (records, adopts) in [
+            (inner, vec!["0002_add_teams", "0003_slug_epic"]),
+            (
+                every_step(&originals),
+                vec!["0002_add_teams", "0003_team_slug", "0004_drop_tmp"],
+            ),
+        ] {
+            let status = run_status(&second, &records, Dialect::Sqlite, false, None);
+            assert_eq!(states(&status, 1), [StepState::PendingAdoptable; 3]);
+            assert_eq!(status.adoptable, ["0002_big_epic"]);
+            assert_eq!(status.migrations[1].adopts, adopts);
+            assert!(status.ahead.is_empty(), "{:?}", status.ahead);
+            assert!(status.refusal.is_none(), "{:?}", status.refusal);
+        }
+    }
+
+    #[test]
+    fn status_after_adoption_reads_applied_adopted_with_nothing_adoptable() {
+        let (dir, records) = originals_applied();
+        let adopted =
+            adoption(&dir, &records, Dialect::Sqlite, &no_kinds(), "now", "v").expect("adopts");
+        let status = run_status(&dir, &adopted.records, Dialect::Sqlite, false, None);
+        assert_eq!(states(&status, 1), [StepState::AppliedAdopted; 3]);
+        assert!(status.adoptable.is_empty());
+        assert!(status.ahead.is_empty());
     }
 }

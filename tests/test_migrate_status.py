@@ -321,7 +321,8 @@ def test_every_core_step_state_is_read_into_where_the_database_stands():
         "applied_adopted",
     }
     unfinished = {"running", "failed", "interrupted", "reverting"}
-    assert set(words) == applied | unfinished | {"pending"}
+    pending = {"pending", "pending_adoptable"}
+    assert set(words) == applied | unfinished | pending
     for word in words:
         report = StatusReport.from_core(
             {
