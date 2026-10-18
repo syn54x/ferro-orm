@@ -8,8 +8,11 @@
 
 use crate::migrate::parse_dialect;
 use ferro_migrate::directory::{MigrationsDir, serialize_snapshot};
-use ferro_migrate::snapshot::Snapshot;
-use ferro_migrate::{Dialect, GenerateOptions, check_migrations, generate_with, step_file_role};
+use ferro_migrate::snapshot::{CURRENT_SCHEMA_IR_VERSION, Snapshot};
+use ferro_migrate::{
+    ComposeError, DeadKind, Dialect, GenerateOptions, check_migrations, compose_run, generate_with,
+    step_file_role,
+};
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -23,6 +26,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_step_file_role, m)?)?;
     m.add_function(wrap_pyfunction!(_read_migrations_dir, m)?)?;
     m.add_function(wrap_pyfunction!(_load_snapshot, m)?)?;
+    m.add_function(wrap_pyfunction!(_compose_run, m)?)?;
     m.add_function(wrap_pyfunction!(_open_tracked, m)?)?;
     m.add_function(wrap_pyfunction!(_tracking_tables_for, m)?)?;
     m.add_function(wrap_pyfunction!(_allow_ahead, m)?)?;
@@ -232,6 +236,102 @@ pub fn _read_migrations_dir(
 pub fn _load_snapshot(ir_json: String) -> PyResult<String> {
     let snapshot = load_snapshot(ir_json.as_bytes(), "the snapshot")?;
     to_json(&snapshot_json(&snapshot)?)
+}
+
+/// Compose a squash's target from the snapshots of the run it replaces
+/// (ADR-0056): `parent_json` is the `ir.json` text of the migration below
+/// the run (`None` for a run from `0001`), `run_json` each run migration's
+/// `ir.json` text in chain order. Returns JSON `{"target": <schema IR
+/// envelope>, "dead_names": [{"kind", "name", "appeared", "vanished"}]}`:
+/// the last snapshot's payload with the run's rename hints composed into it,
+/// in a current-version envelope (the squash is written by this ferro), and
+/// every name born and gone inside the run (`kind` one of `table`, `column`,
+/// `enum_label`, `constraint`; `appeared` / `vanished` indexes into the run).
+///
+/// # Errors
+/// `ValueError` for a snapshot that does not load, and for every
+/// `ComposeError`, with its text. A compose refusal's exception carries
+/// `from_index`: the index into the run of the migration a squash can start
+/// from instead (the one that declares the conflicting name, or the one after
+/// the migration the refusal names), or `None` when there is none.
+#[pyfunction]
+#[pyo3(name = "_compose_run")]
+#[pyo3(signature = (parent_json, run_json))]
+pub fn _compose_run(
+    py: Python<'_>,
+    parent_json: Option<String>,
+    run_json: Vec<String>,
+) -> PyResult<String> {
+    let parent = parent_json
+        .map(|json| load_snapshot(json.as_bytes(), "the parent snapshot"))
+        .transpose()?;
+    let run = run_json
+        .iter()
+        .enumerate()
+        .map(|(at, json)| {
+            load_snapshot(json.as_bytes(), &format!("the run's snapshot #{}", at + 1))
+        })
+        .collect::<PyResult<Vec<Snapshot>>>()?;
+    let parent_payload = parent.as_ref().map(|snapshot| &snapshot.ir.payload);
+    let payloads: Vec<&SchemaIrPayload> = run.iter().map(|s| &s.ir.payload).collect();
+    let composed = match compose_run(parent_payload, &payloads) {
+        Ok(composed) => composed,
+        Err(refusal) => {
+            let from_index = compose_restart(parent_payload, &payloads, &refusal);
+            let err = PyValueError::new_err(refusal.to_string());
+            err.value(py).setattr("from_index", from_index)?;
+            return Err(err);
+        }
+    };
+    let target = IrEnvelope {
+        ir_kind: "schema".to_string(),
+        ir_version: CURRENT_SCHEMA_IR_VERSION,
+        payload: composed.target,
+    };
+    let dead_names: Vec<serde_json::Value> = composed
+        .dead_names
+        .iter()
+        .map(|dead| {
+            serde_json::json!({
+                "kind": match dead.kind {
+                    DeadKind::Table => "table",
+                    DeadKind::Column => "column",
+                    DeadKind::EnumLabel => "enum_label",
+                    DeadKind::Constraint => "constraint",
+                },
+                "name": dead.name,
+                "appeared": dead.appeared,
+                "vanished": dead.vanished,
+            })
+        })
+        .collect();
+    to_json(&serde_json::json!({"target": target, "dead_names": dead_names}))
+}
+
+/// The index into `run` of the migration a squash could start from to leave
+/// `refusal`'s cause below its range, or `None` when no later start avoids
+/// it. A disagreeing declaration is in the first prefix of the run that
+/// fails to compose that way, so the migration ending that prefix declares
+/// it; a re-added name is re-added at `re_added_at`; a freed name and a
+/// refused hint are left below by starting after their migration.
+fn compose_restart(
+    parent: Option<&SchemaIrPayload>,
+    run: &[&SchemaIrPayload],
+    refusal: &ComposeError,
+) -> Option<usize> {
+    let after = |at: usize| (at + 1 < run.len()).then_some(at + 1);
+    match refusal {
+        ComposeError::Uncomposable { .. } => (2..=run.len()).find_map(|end| {
+            matches!(
+                compose_run(parent, &run[..end]),
+                Err(ComposeError::Uncomposable { .. })
+            )
+            .then_some(end - 1)
+        }),
+        ComposeError::OldNameReAdded { re_added_at, .. } => Some(*re_added_at),
+        ComposeError::NewNameHeldByParent { vacated_at, .. } => after(*vacated_at),
+        ComposeError::RefusedHint { position, .. } => after(*position),
+    }
 }
 
 // -- the run objects (ADR-0048) ------------------------------------------------------

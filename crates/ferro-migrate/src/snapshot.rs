@@ -242,7 +242,7 @@ fn load_v1(document: serde_json::Value) -> Result<IrEnvelope<SchemaIrPayload>, S
 /// migration once across the whole tree. Anything else is refused, never
 /// read as a shorter witness: a witness read short would report an
 /// adoptable database ahead.
-fn load_witness(value: &serde_json::Value) -> Result<Vec<WitnessEntry>, String> {
+pub(crate) fn load_witness(value: &serde_json::Value) -> Result<Vec<WitnessEntry>, String> {
     let mut seen = BTreeSet::new();
     match value.as_array() {
         Some(entries) if !entries.is_empty() => load_witness_entries(entries, &mut seen),

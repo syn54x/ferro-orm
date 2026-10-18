@@ -46,7 +46,7 @@ use crate::directory::{DirectoryError, Headers, MigrationsDir, StepDialect, Step
 use crate::plan::{HintError, renamed_snapshot};
 use crate::render::render_ops;
 use crate::run_plan::step_class::{LaidOutStep, SchemaStep, Sides, StepClass, step_class};
-use crate::snapshot::{Snapshot, SnapshotError};
+use crate::snapshot::{Snapshot, SnapshotError, WitnessEntry};
 use crate::{
     AnsweredBy, Dialect, EmissionError, Execution, MigrationOp, Plan, PlanOptions, PlannedOp,
     Refusal, RenderedOp, ReportKind, Side, plan_from_ir,
@@ -760,6 +760,27 @@ pub struct GenerateOptions {
     /// step right before the data steps, or last when there are none.
     #[serde(default)]
     pub carry: Vec<CarriedStep>,
+    /// `ferro migrate squash`: the squash's witness, one entry per
+    /// migration of the run it replaces, in chain order (ADR-0056), stored
+    /// beside the parent link in the snapshot. Empty for every other
+    /// migration (`new`, `--replace`), whose snapshot carries none. Read as
+    /// the snapshot loader reads one, so a malformed witness is refused
+    /// before anything is generated.
+    #[serde(default, deserialize_with = "deserialize_witness")]
+    pub replaces: Vec<WitnessEntry>,
+}
+
+/// [`GenerateOptions::replaces`] in its wire shape (`ir.json`'s): an empty
+/// list is no witness; any other value is read by the snapshot loader.
+fn deserialize_witness<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<WitnessEntry>, D::Error> {
+    let value = <serde_json::Value as serde::Deserialize>::deserialize(deserializer)?;
+    if value.as_array().is_some_and(Vec::is_empty) {
+        return Ok(Vec::new());
+    }
+    crate::snapshot::load_witness(&value)
+        .map_err(|why| serde::de::Error::custom(format!("the witness {why}")))
 }
 
 impl GenerateOptions {
@@ -1076,7 +1097,11 @@ pub fn generate_with(
 
     // The schema snapshot is the declared modelset the migration was
     // generated from, whether its steps are generated or a person's.
-    let bytes = Snapshot::store(target, parent.map(|snapshot| snapshot.checksum), &[])?;
+    let bytes = Snapshot::store(
+        target,
+        parent.map(|snapshot| snapshot.checksum),
+        &options.replaces,
+    )?;
     let snapshot = Snapshot::load(&bytes)?;
     let snapshot_json = String::from_utf8(bytes).map_err(|err| {
         GenerateError::Render(format!("the generated snapshot is not UTF-8: {err}"))
@@ -1625,6 +1650,40 @@ mod tests {
         assert_eq!(step_names(&migration), ["01_backfill_author"]);
         assert_eq!(migration.snapshot.ir, parent.ir);
         assert_eq!(migration.snapshot.parent_checksum, Some(parent.checksum));
+    }
+
+    #[test]
+    fn a_squash_stores_its_witness_beside_the_parent_link() {
+        let parent = snapshot_of(&ir(vec![author()]), None);
+        let mut target = ir(vec![with_columns(vec![column("bio", "string")])]);
+        target.ir_version = crate::snapshot::CURRENT_SCHEMA_IR_VERSION;
+        let witness = serde_json::json!([
+            {"migration": "0002_b", "snapshot_checksum": "ab".repeat(48), "steps": [1, 2],
+             "replaces": []},
+        ]);
+        let options: GenerateOptions =
+            serde_json::from_value(serde_json::json!({"replaces": witness})).expect("options");
+        let migration = generate_with(Some(&parent), &target, &BOTH, &options)
+            .expect("ok")
+            .expect("a migration");
+        assert_eq!(migration.snapshot.replaces, options.replaces);
+        assert_eq!(
+            migration.snapshot_json.as_bytes(),
+            Snapshot::store(&target, Some(parent.checksum), &options.replaces)
+                .expect("store")
+                .as_slice()
+        );
+        // No witness, or an empty one, stores none (`new`, `--replace`).
+        let none: GenerateOptions =
+            serde_json::from_value(serde_json::json!({"replaces": []})).expect("options");
+        assert_eq!(none, GenerateOptions::default());
+        // A malformed witness is refused as the snapshot loader refuses it.
+        let bad = serde_json::from_value::<GenerateOptions>(serde_json::json!({
+            "replaces": [{"migration": "0002_b", "snapshot_checksum": "ab", "steps": [1],
+                          "replaces": []}]
+        }))
+        .expect_err("malformed");
+        assert!(bad.to_string().contains("not a SHA-384 in hex"), "{bad}");
     }
 
     /// What the reconciliation pass executes to turn `before` into `after`
