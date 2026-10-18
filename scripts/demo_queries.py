@@ -187,7 +187,9 @@ async def run_demo():
         )
 
         # 7. MANY-TO-MANY (M2M)
-        console.print("\n[bold yellow]--- 🤝 Many-to-Many Relationships ---[/bold yellow]")
+        console.print(
+            "\n[bold yellow]--- 🤝 Many-to-Many Relationships ---[/bold yellow]"
+        )
 
         show_step(
             "M2M Setup & Mutation",

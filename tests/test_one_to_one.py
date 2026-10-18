@@ -41,7 +41,6 @@ async def test_one_to_one_relationship(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-
         # 1. Create User and Profile
         alice = await User.create(username="alice")
         p1 = await Profile.create(bio="Alice's Bio", user=alice)

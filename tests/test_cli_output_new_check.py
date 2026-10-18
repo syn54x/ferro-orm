@@ -156,6 +156,21 @@ def replaced_in_place(project, pkg) -> None:
     write_models(project, pkg, AUTHOR + "    bio: str | None = None\n" + TEAM)
 
 
+def squashable_run(project, pkg) -> None:
+    """``0001_initial``, then ``0002_add_bio`` with a hand-written SQL step
+    ``fix_rows`` (filled in) and ``0003_add_team``: the run a squash from
+    ``0002`` replaces."""
+    write_config(project, pkg, '["postgres"]')
+    write_models(project, pkg, AUTHOR)
+    assert run("migrate", "new", "initial") == 0
+    write_models(project, pkg, AUTHOR + "    bio: str | None = None\n")
+    assert run("migrate", "new", "add_bio", "--sql-step", "fix_rows") == 0
+    step = project / "migrations/0002_add_bio/02_fix_rows.up.sql"
+    step.write_text("UPDATE author SET bio = name;\n")
+    write_models(project, pkg, AUTHOR + "    bio: str | None = None\n" + TEAM)
+    assert run("migrate", "new", "add_team") == 0
+
+
 def two_problems(project, pkg) -> None:
     """An ungenerated change and a data step still holding ``todo(...)``."""
     write_config(project, pkg)
@@ -245,6 +260,34 @@ def test_plain_replace_keeps_each_files_replace_word(project, pkg, capsys):
         "  01_schema.down.postgres.sql  schema step, down (postgres)  kept\n"
         "  ir.json                      snapshot                      "
         "new snapshot, chained from 0001_initial\n"
+        "\n"
+        "  1 new model\n"
+        "    Team\n"
+        "  1 changed model\n"
+        "    Author\n"
+    )
+    assert err == ""
+
+
+def test_plain_squash_names_the_run_and_what_became_of_each_file(project, pkg, capsys):
+    squashable_run(project, pkg)
+
+    code, out, err = cli(capsys, "squash", "epic", "--from", "0002")
+
+    assert code == 0
+    assert out == (
+        f"{DIRECTORY_LINE}\n"
+        "ok Wrote migrations/0002_epic/  (replaces 0002_add_bio … 0003_add_team, "
+        "now deleted)\n"
+        "  01_schema.up.postgres.sql    schema step, up (postgres)    regenerated\n"
+        "  01_schema.down.postgres.sql  schema step, down (postgres)  regenerated\n"
+        "  02_fix_rows.up.sql           SQL step, up                  "
+        "carried, review it (was 0002_add_bio/02_fix_rows.up.sql)\n"
+        "  02_fix_rows.down.sql         SQL step, down                "
+        "carried, review it (was 0002_add_bio/02_fix_rows.down.sql)\n"
+        "  ir.json                      snapshot                      "
+        "0003_add_team's, chained from 0001_initial, replaces "
+        "0002_add_bio … 0003_add_team\n"
         "\n"
         "  1 new model\n"
         "    Team\n"
@@ -465,6 +508,30 @@ TTY_REPLACE_OUT = (
     "    \x1b[33mAuthor\x1b[0m\n"
 )
 
+TTY_SQUASH_OUT = (
+    "\x1b[1mdefault\x1b[0m · \x1b[2mmigrations\x1b[0m\n"
+    "\x1b[1;32m✔\x1b[0m \x1b[1mWrote migrations/0002_epic/\x1b[0m\x1b[2m  "
+    "(replaces 0002_add_bio … 0003_add_team, now deleted)\x1b[0m\n"
+    "  \x1b[36m01_schema\x1b[0m\x1b[2m.up.postgres.sql\x1b[0m    \x1b[2m"
+    "schema step, up (postgres)  \x1b[0m  regenerated\n"
+    "  \x1b[2;36m01_schema\x1b[0m\x1b[2m.down.postgres.sql\x1b[0m  \x1b[2m"
+    "schema step, down (postgres)\x1b[0m  regenerated\n"
+    "  \x1b[34m02_fix_rows\x1b[0m\x1b[2m.up.sql\x1b[0m           \x1b[2m"
+    "SQL step, up                \x1b[0m  carried, review it (was "
+    "0002_add_bio/02_fix_rows.up.sql)\n"
+    "  \x1b[2;34m02_fix_rows\x1b[0m\x1b[2m.down.sql\x1b[0m         \x1b[2m"
+    "SQL step, down              \x1b[0m  carried, review it (was "
+    "0002_add_bio/02_fix_rows.down.sql)\n"
+    "  \x1b[2mir\x1b[0m\x1b[2m.json\x1b[0m                      \x1b[2m"
+    "snapshot                    \x1b[0m  0003_add_team's, chained from "
+    "0001_initial, replaces 0002_add_bio … 0003_add_team\n"
+    "\n"
+    "\x1b[1m  1 new model\x1b[0m\n"
+    "    \x1b[32mTeam\x1b[0m\n"
+    "\x1b[1m  1 changed model\x1b[0m\n"
+    "    \x1b[33mAuthor\x1b[0m\n"
+)
+
 TTY_CHECKOK_OUT = (
     "\x1b[1mdefault\x1b[0m · \x1b[2mmigrations\x1b[0m\n"
     "\x1b[1;32m✔\x1b[0m \x1b[1mmodels match\x1b[0m\x1b[2m  0001_initial"
@@ -562,6 +629,18 @@ def test_tty_replace_keeps_each_files_replace_word(project, pkg, capsys, tty):
     assert cli(capsys, "new", "add_bio", "--replace", "0002_add_bio") == (
         0,
         TTY_REPLACE_OUT,
+        "",
+    )
+
+
+def test_tty_squash_names_the_run_and_what_became_of_each_file(
+    project, pkg, capsys, tty
+):
+    squashable_run(project, pkg)
+
+    assert cli(capsys, "squash", "epic", "--from", "0002") == (
+        0,
+        TTY_SQUASH_OUT,
         "",
     )
 
@@ -776,9 +855,7 @@ def test_tty_check_lays_out_its_change_summary_as_new_does(
     assert cli(capsys, "check", *flags) == (3, TTY_PROBLEMS_OUT, expected)
 
 
-def test_plain_check_keeps_the_summary_sentence_whatever_the_list(
-    project, pkg, capsys
-):
+def test_plain_check_keeps_the_summary_sentence_whatever_the_list(project, pkg, capsys):
     write_config(project, pkg, '["postgres"]')
     write_models(project, pkg, many_models(13))
     names = ", ".join(f"Item{i:02d}" for i in range(13))

@@ -23,7 +23,7 @@ from ferro import (
     engines,
     reset_engine,
 )
-from ferro._core import _render_create_table_sql_for_test, _render_table_check_body
+from ferro._core import _render_table_check_body
 from ferro.ir.compiler import compile_registry_schema_ir
 
 # Module global for ADR-0016: LOAD_GLOBAL of a non-enum name must fail, even
@@ -57,7 +57,9 @@ def _model_payload(table_name: str) -> dict:
 
 def _check_body(table_name: str, suffix: str) -> str:
     payload = _model_payload(table_name)
-    entry = next(c for c in payload["table_checks"] if c["name"] == f"ck_{table_name}_{suffix}")
+    entry = next(
+        c for c in payload["table_checks"] if c["name"] == f"ck_{table_name}_{suffix}"
+    )
     return _render_table_check_body(json.dumps(entry["predicate"]))
 
 
@@ -150,7 +152,7 @@ def test_enum_member_inlines_as_label_not_bind():
         "other": {"kind": "literal", "token": "'draft'"},
     }
     body = _check_body("ticket", "draft_only")
-    assert body == '"status" = \'draft\''
+    assert body == "\"status\" = 'draft'"
     assert "?" not in body
     assert "$" not in body
 
@@ -262,7 +264,9 @@ def test_still_rejected_predicate_forms(predicate, expected):
 
             id: int | None = Field(default=None, primary_key=True)
             amount: int = 0
-            owner: Annotated[RejectOwner | None, ForeignKey(related_name="rejects")] = None
+            owner: Annotated[RejectOwner | None, ForeignKey(related_name="rejects")] = (
+                None
+            )
             notes: Relation[list["RejectNote"]] = BackRef()
 
         class RejectNote(Model):

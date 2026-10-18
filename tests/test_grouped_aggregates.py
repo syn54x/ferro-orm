@@ -45,9 +45,9 @@ class GRPTransaction(Model):
     amount: int = 0
     price: Decimal | None = None
     note: str = ""
-    account: Annotated[
-        GRPAccount | None, ForeignKey(related_name="transactions")
-    ] = None
+    account: Annotated[GRPAccount | None, ForeignKey(related_name="transactions")] = (
+        None
+    )
 
 
 async def _seed():
@@ -356,8 +356,10 @@ class TestOrderByGuardrails:
             )
 
     def test_group_key_sort_added_before_select_is_allowed(self):
-        q = GRPTransaction.select().order_by("account_id").select(
-            lambda t: {"acct": t.account_id, "total": t.amount.sum()}
+        q = (
+            GRPTransaction.select()
+            .order_by("account_id")
+            .select(lambda t: {"acct": t.account_id, "total": t.amount.sum()})
         )
         assert q is not None
 

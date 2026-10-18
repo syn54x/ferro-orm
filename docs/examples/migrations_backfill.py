@@ -55,8 +55,10 @@ def main() -> None:
         assert "not written yet" in app.ferro("migrate", "up", exit_code=1)
         backfill.write_text(backfill.read_text().replace(TODO, WRITTEN))
         app.ferro("migrate", "up")
-        assert app.ferro("migrate", "check").splitlines()[-1].startswith(
-            "ok: models match"
+        assert (
+            app.ferro("migrate", "check")
+            .splitlines()[-1]
+            .startswith("ok: models match")
         )
         assert "no drift" in app.ferro("migrate", "drift")
         assert app.sql("SELECT slug FROM author ORDER BY id") == [

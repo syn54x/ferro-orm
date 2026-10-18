@@ -108,8 +108,7 @@ pub async fn internal_create_tables(
     // reconcile pass will add (#324).
     let existing_tables = crate::introspect::live_table_names(&engine).await?;
 
-    let model_refs: Vec<&ferro_schema_ir::SchemaModel> =
-        modelset.payload.models.iter().collect();
+    let model_refs: Vec<&ferro_schema_ir::SchemaModel> = modelset.payload.models.iter().collect();
     let held_back = tables_awaiting_rename(&model_refs, &existing_tables);
     if !reconciliation_follows {
         warn_pending_renames(&modelset.payload, &existing_tables, &held_back, report);
@@ -225,7 +224,10 @@ pub async fn internal_create_tables(
             report.warn(warning.clone());
         }
 
-        crate::log_debug(format!("✅ Ferro Engine: Table '{}' created", model.table_name));
+        crate::log_debug(format!(
+            "✅ Ferro Engine: Table '{}' created",
+            model.table_name
+        ));
     }
 
     Ok(CreatePass {
@@ -406,13 +408,9 @@ fn create_step_error(table: &str, step: &str, sql: &str, err: sqlx::Error) -> py
 /// Returns a `PyErr` if the columns JSON is invalid or if the registry is locked.
 #[pyfunction]
 #[pyo3(signature = (name, columns, table_name))]
-pub fn register_model_schema(
-    name: String,
-    columns: String,
-    table_name: String,
-) -> PyResult<()> {
-    let parsed_columns: Vec<ferro_schema_ir::SchemaColumn> =
-        serde_json::from_str(&columns).map_err(|e| {
+pub fn register_model_schema(name: String, columns: String, table_name: String) -> PyResult<()> {
+    let parsed_columns: Vec<ferro_schema_ir::SchemaColumn> = serde_json::from_str(&columns)
+        .map_err(|e| {
             pyo3::exceptions::PyValueError::new_err(format!("Invalid SchemaIR columns: {}", e))
         })?;
     if table_name.is_empty() {
@@ -508,8 +506,8 @@ pub fn _render_create_table_sql_for_test(
             )));
         }
     };
-    let payload: ferro_schema_ir::SchemaIrPayload = serde_json::from_str(&schema_json)
-        .map_err(|e| {
+    let payload: ferro_schema_ir::SchemaIrPayload =
+        serde_json::from_str(&schema_json).map_err(|e| {
             pyo3::exceptions::PyValueError::new_err(format!("Invalid SchemaIR payload: {}", e))
         })?;
     let table_lower = name.to_lowercase();
@@ -618,9 +616,7 @@ fn resolve_ref<'a>(
 }
 
 #[cfg(test)]
-fn property_json_type_and_format(
-    col_info: &serde_json::Value,
-) -> (Option<&str>, Option<&str>) {
+fn property_json_type_and_format(col_info: &serde_json::Value) -> (Option<&str>, Option<&str>) {
     let top_type = col_info.get("type").and_then(|t| t.as_str());
     let top_format = col_info.get("format").and_then(|f| f.as_str());
     if top_type.is_some() {

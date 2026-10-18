@@ -175,7 +175,9 @@ _RENDERERS: dict[str, Callable[[dict[str, Any]], str]] = {
     "RenameConstraint": lambda op: (
         f"{op['old']} {_constraint_noun(op['old'])} is named {op['new']} in the snapshot"
     ),
-    "RenamePolicy": lambda op: f"{op['old']} policy is named {op['new']} in the snapshot",
+    "RenamePolicy": lambda op: (
+        f"{op['old']} policy is named {op['new']} in the snapshot"
+    ),
     "AddColumn": lambda op: f"{_column(op)} column is missing",
     "DropColumn": lambda op: f"{_column(op)} column is extra",
     "AlterColumnType": _type,

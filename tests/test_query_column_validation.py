@@ -22,7 +22,7 @@ class TestWhereColumnValidation:
             ValUser.where(lambda u: u.nmae == "x")
         message = str(exc.value)
         assert "nmae" in message
-        assert "name" in message        # did-you-mean + valid columns list
+        assert "name" in message  # did-you-mean + valid columns list
         assert "id" in message
 
     def test_valid_columns_pass(self):
@@ -141,9 +141,7 @@ class TestOrderByValidation:
             lambda u: u.pinned_at, "desc", nulls="first"
         )
         assert q_first.order_by_clause == [
-            OrderByEntry(
-                column="pinned_at", direction="desc", path=(), nulls="first"
-            )
+            OrderByEntry(column="pinned_at", direction="desc", path=(), nulls="first")
         ]
         q_last = ObNullsUser.select().order_by("pinned_at", nulls="last")
         assert q_last.order_by_clause == [
@@ -198,9 +196,7 @@ class TestOrderByValidation:
 
         q = ObNative.select().order_by("pinned_at", "desc", nulls="native")
         assert q.order_by_clause == [
-            OrderByEntry(
-                column="pinned_at", direction="desc", path=(), nulls="native"
-            )
+            OrderByEntry(column="pinned_at", direction="desc", path=(), nulls="native")
         ]
 
     def test_order_by_omitted_nulls_defaults_to_last(self):

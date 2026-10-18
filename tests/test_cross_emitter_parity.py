@@ -19,7 +19,7 @@ connect(migrate_updates)   executes                    ALTER TABLE "author" ADD 
 alembic --autogenerate     upgrade()                   op.add_column('author', sa.Column('bio', ...))
 ```
 
-The doors are pinned by seven pins over every casebook change
+The doors are pinned by nine pins over every casebook change
 (``tests/_casebook.py``) on both dialects — (a) the generated steps are the
 pass's plan, the online shapes compared by their plain twins
 (:func:`normalize_online_shape`); (b) a rebuild's ``CREATE TABLE`` is the
@@ -27,8 +27,9 @@ create pass's; (c) a concurrent index build is the pass's statement but for
 one token; (d) the validate, label-addition and type-creation statements are
 the pass's; (e) a migrated database equals an ``auto_migrate``'d one and
 Alembic sees nothing to do against either; (f) the bridge's revision runs the
-pass's DDL; (g) the pass's ``PassReport`` is the plan it renders — at the end
-of this file.
+pass's DDL; (g) the pass's ``PassReport`` is the plan it renders; (h) a squash
+is ``new`` across its ends; (i) a database that inherits a squash is the one
+that ran it — at the end of this file.
 
 The canonical bridge test in this file is
 ``test_alembic_autogen_against_rust_migrated_db_is_idempotent``: it bootstraps
@@ -742,28 +743,36 @@ class Door:
         return [_plan(a, b, dialect) for a, b in zip(shapes, shapes[1:], strict=False)]
 
 
-def _generate(case: Case, root: Path) -> Door:
-    """Run ``ferro migrate new`` for ``case`` in a fresh project under
-    ``root``, both dialects, in this process."""
-    project = root / case.id
-    project.mkdir()
+@contextlib.contextmanager
+def scratch_project(case: Case, project: Path):
+    """``project`` as the working directory, importable, with ``case``'s
+    package forgotten and the registry rewound on the way out; yields the
+    package name. ``ferro migrate new`` output is swallowed."""
     pkg = "ferro_p538_" + re.sub(r"[^a-z0-9]", "_", case.id.lower())
-    out = io.StringIO()
-    with pytest.MonkeyPatch.context() as mp, contextlib.redirect_stdout(out):
+    with pytest.MonkeyPatch.context() as mp, contextlib.redirect_stdout(io.StringIO()):
         mp.delenv("FERRO_CONFIG", raising=False)
         mp.chdir(project)
         mp.setattr(sys, "path", [str(project), *sys.path])
         mp.setattr(sys, "dont_write_bytecode", True)
         try:
-            write_config(project, pkg)
-            write_models(project, pkg, case.before)
-            new("create")
-            write_models(project, pkg, case.after)
-            new("edit")
+            yield pkg
         finally:
             for name in [m for m in sys.modules if m == pkg or m.startswith(pkg + ".")]:
                 del sys.modules[name]
             _rewind_registry()
+
+
+def _generate(case: Case, root: Path) -> Door:
+    """Run ``ferro migrate new`` for ``case`` in a fresh project under
+    ``root``, both dialects, in this process."""
+    project = root / case.id
+    project.mkdir()
+    with scratch_project(case, project) as pkg:
+        write_config(project, pkg)
+        write_models(project, pkg, case.before)
+        new("create")
+        write_models(project, pkg, case.after)
+        new("edit")
     migration = migration_dir(project, 2)
     parent_text = (migration_dir(project, 1) / "ir.json").read_text()
     target_text = (migration / "ir.json").read_text()
@@ -1355,12 +1364,18 @@ def second_db(tmp_path: Path, db_backend: str, postgres_base_url: str | None):
             conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
 
 
-def _cli(*argv: str) -> int:
+def _cli_output(*argv: str) -> tuple[int, str]:
+    """The exit code and everything printed (stdout and stderr)."""
     from ferro.cli import main
 
     out = io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
-        return main(list(argv))
+        code = main(list(argv))
+    return code, out.getvalue()
+
+
+def _cli(*argv: str) -> int:
+    return _cli_output(*argv)[0]
 
 
 def migrate_through(
@@ -1420,6 +1435,139 @@ def live_schema(url: str, declared: dict, extra: frozenset[str] = frozenset()) -
     return _canonical({"schema": json.loads(live), "facts": json.loads(facts)})
 
 
+# -- pin (h): a squash is `new` across its ends --------------------------------------
+
+SQUASH_NAME = "squashed"
+"""The one name both sides use, so the two ``0001_<name>`` directories hold
+files of the same names. No original's name: a squash refuses a name that
+would rewrite a replaced original (``0001_create``, #684)."""
+
+_NOT_THE_SQUASH = ("parent_checksum", "replaces")
+
+
+def _strip_hints_and_witness(value):
+    """A snapshot payload with the squash's witness (``parent_checksum``,
+    ``replaces``) and every rename hint (``renamed_from``,
+    ``enum_renamed_labels``) removed."""
+    if isinstance(value, dict):
+        return {
+            k: _strip_hints_and_witness(v)
+            for k, v in value.items()
+            if k not in (*_NOT_THE_SQUASH, "renamed_from", "enum_renamed_labels")
+        }
+    if isinstance(value, list):
+        return [_strip_hints_and_witness(v) for v in value]
+    return value
+
+
+def _for_dialect(files: dict[str, bytes], dialect: str) -> dict[str, bytes]:
+    other = {d for d in DIALECTS if d != dialect}
+    return {
+        name: body
+        for name, body in files.items()
+        if not any(name.endswith(f".{o}.sql") for o in other)
+    }
+
+
+def _new_from_the_after_models(case: Case, root: Path) -> Path:
+    """``ferro migrate new SQUASH_NAME`` once, from ``case.after`` alone, in a
+    fresh project under ``root``: its ``0001``."""
+    project = root / "fresh"
+    project.mkdir()
+    with scratch_project(case, project) as pkg:
+        write_config(project, pkg)
+        write_models(project, pkg, case.after)
+        new(SQUASH_NAME)
+    return migration_dir(project, 1)
+
+
+def _copy_of_the_project(door: Door, root: Path) -> Path:
+    """A copy of the project ``door`` was generated in (the other pins keep
+    their ``0001`` and ``0002``): the copy's root."""
+    copy = root / "squashed"
+    shutil.copytree(door.migration.parent.parent, copy)
+    return copy
+
+
+def _squash_a_copy(door: Door, root: Path) -> Path:
+    """``ferro migrate squash SQUASH_NAME --from 0001`` in a copy of the
+    project ``door`` was generated in."""
+    copy = _copy_of_the_project(door, root)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.delenv("FERRO_CONFIG", raising=False)
+        mp.chdir(copy)
+        assert _cli("migrate", "squash", SQUASH_NAME, "--from", "0001") == 0
+    return copy
+
+
+DEAD_STEP_REFUSALS = {
+    "D2-remove-a-label": "status:canceled",
+    "D2-remove-a-label-of-a-column-with-a-model-default": "status:canceled",
+}
+"""Cases whose carried backfill declares a name that existed only inside the
+run (a label ``0001`` added and ``0002`` removed): ADR-0056's dead-step rule
+refuses the squash, by design (#670), naming the name and the fix. Pin (i),
+whose backfills are written, asserts the refusal, not an equality: it is not
+a finding. Pin (h)'s backfills are the generator's untouched scaffolds, which
+the squash drops when its plan needs no backfill (ADR-0056 amended, #687), so
+pin (h) holds its equality for these cases too."""
+
+
+def _assert_the_dead_step_refusal(case_id: str, project: Path, *, cwd: Path) -> None:
+    """``squash`` over ``0001``..``0002`` in ``project`` exits 1, names the
+    dead name and its fix, and leaves the migrations directory as it was."""
+    migrations = project / "migrations"
+    before = {
+        str(p.relative_to(migrations)): p.read_bytes()
+        for p in sorted(migrations.rglob("*"))
+        if p.is_file()
+    }
+    with pytest.MonkeyPatch.context() as mp:
+        mp.delenv("FERRO_CONFIG", raising=False)
+        mp.chdir(cwd)
+        code, out = _cli_output("migrate", "squash", SQUASH_NAME, "--from", "0001")
+    assert code == 1, out
+    assert DEAD_STEP_REFUSALS[case_id] in out, out
+    assert "which existed only inside the range" in out, out
+    assert "delete the step, or start the range at" in out, out
+    assert "Nothing was written." in out, out
+    after = {
+        str(p.relative_to(migrations)): p.read_bytes()
+        for p in sorted(migrations.rglob("*"))
+        if p.is_file()
+    }
+    assert after == before
+
+
+def _tree(directory: Path) -> dict[str, bytes]:
+    return {p.name: p.read_bytes() for p in sorted(directory.iterdir())}
+
+
+@pytest.mark.parametrize("dialect", DIALECTS)
+@pytest.mark.parametrize("case_id", CASE_IDS)
+def test_pin_h_a_squash_is_new_across_its_ends(
+    request, doors, tmp_path, case_id, dialect
+):
+    """``squash --from 0001`` over ``0001`` (before) and ``0002`` (after)
+    writes the one ``0001`` that ``new`` writes from the after models alone:
+    every file the same name and the same bytes, bar ``ir.json``, whose
+    payload is the same once the squash's hints and witness are removed."""
+    expect_finding(request, case_id, dialect, "h")
+    door = doors(case_id)
+    copy = _squash_a_copy(door, tmp_path)
+    squashed = migration_dir(copy, 1)
+    fresh = _new_from_the_after_models(door.case, tmp_path)
+
+    got = _for_dialect(_tree(squashed), dialect)
+    want = _for_dialect(_tree(fresh), dialect)
+    assert sorted(got) == sorted(want)
+    ir_got = json.loads(got.pop("ir.json"))
+    ir_want = json.loads(want.pop("ir.json"))
+    assert _strip_hints_and_witness(ir_got) == _strip_hints_and_witness(ir_want)
+    different = sorted(name for name in got if got[name] != want[name])
+    assert not different, different
+
+
 # -- AGENTS.md describes the emitters that ship ----------------------------------------
 
 REPO = Path(__file__).resolve().parents[1]
@@ -1431,7 +1579,7 @@ def test_agents_md_names_the_migrations_door_its_pins_and_the_one_bridge_item():
     emitters = i1[: i1.index("For a single model")]
     assert "`src/ferro/migrations/`" in emitters
     assert "`crates/ferro-migrate/src/generate/`" in emitters
-    for pin in ("(a)", "(b)", "(c)", "(d)", "(e)", "(f)", "(g)"):
+    for pin in ("(a)", "(b)", "(c)", "(d)", "(e)", "(f)", "(g)", "(h)", "(i)"):
         assert f"**{pin}**" in i1, pin
     assert "translates the one planner's ops" in i1
     # Items 11–17 are one item now: no per-family comparator, no slot rule.
@@ -1574,9 +1722,7 @@ def test_pin_e_a_migrated_database_is_the_auto_migrated_one(
         autogenerate(db_url, postgres_base_url, db_schema_name)
 
 
-def _third_db(
-    tmp_path: Path, backend: str, base: str | None
-) -> tuple[str, str | None]:
+def _third_db(tmp_path: Path, backend: str, base: str | None) -> tuple[str, str | None]:
     """A third, empty database of ``backend``: ``(url, schema)``."""
     if backend == "sqlite":
         return f"sqlite:{tmp_path / 'third.db'}?mode=rwc", None
@@ -1687,6 +1833,72 @@ def test_pin_e_a_migrated_database_holds_the_auto_migrated_server_defaults(
         ] == [1], f"{table}.{column} is NOT NULL"
 
 
+# -- pin (i): an inherited database is the squashed one --------------------------------
+
+_TRACKING = (
+    "SELECT migration, step, migration_name, file, kind, checksum, "
+    "snapshot_checksum, class, finished_at IS NOT NULL, failed_at IS NULL, error "
+    "FROM _ferro_migrations ORDER BY migration, step"
+)
+"""The tracking table's end state bar its origin and times (``origin``,
+``started_at``, ``finished_at``'s value, ``ferro_version``)."""
+
+
+@pytest.mark.parametrize("case_id", CASE_IDS)
+def test_pin_i_an_inherited_database_is_the_squashed_one(
+    request,
+    project,
+    second_db,
+    case_id,
+    db_url,
+    db_backend,
+    postgres_base_url,
+    db_schema_name,
+):
+    """A database taken through ``0001`` and ``0002`` and then inherited by
+    ``up`` against the squashed directory is the database that ran the
+    squashed ``0001`` from empty: the same live schema and facts (columns,
+    types, nullability, indexes, constraints, policies), the same server
+    default on every column (``column_defaults``), the same tracking table
+    bar origin and times, no drift on either, and ``down --all`` leaves both
+    with no table of the models and no record."""
+    expect_finding(request, case_id, db_backend, "i")
+    case = CASEBOOK[case_id]
+    if migrate_through(project, case, db_url, db_backend) is None:
+        pytest.skip("the edit changes nothing on this backend: nothing to squash")
+    inherited = Db(db_url, db_backend, postgres_base_url, db_schema_name)
+    second_url, second_schema = second_db
+    scratch = Db(second_url, db_backend, postgres_base_url, second_schema)
+    after = project.register(case.after)
+    if case_id in DEAD_STEP_REFUSALS:
+        _assert_the_dead_step_refusal(case_id, project.root, cwd=project.root)
+        return
+    before_inheritance = live_schema(db_url, after), column_defaults(inherited)
+
+    assert _cli("migrate", "squash", "squashed", "--from", "0001") == 0
+    assert _cli("migrate", "up", "--url", db_url) == 0
+    assert (
+        live_schema(db_url, after),
+        column_defaults(inherited),
+    ) == before_inheritance, "inheritance ran DDL"
+    assert _cli("migrate", "up", "--url", second_url) == 0
+
+    assert live_schema(db_url, after) == live_schema(second_url, after)
+    assert column_defaults(inherited) == column_defaults(scratch)
+    assert inherited.rows(_TRACKING) == scratch.rows(_TRACKING)
+    assert inherited.rows(_TRACKING), "the squashed migration is recorded"
+    for url in (db_url, second_url):
+        report = asyncio.run(migrations_drift(url=url))
+        assert (report.refusal, report.lines) == (None, []), report
+
+    for url in (db_url, second_url):
+        assert _cli("migrate", "down", "--all", "--yes", "--url", url) == 0
+    for db in (inherited, scratch):
+        assert db.rows("SELECT 1 FROM _ferro_migrations") == []
+        left = {t for t in db.tables() if not t.startswith(("_ferro_", "sqlite_"))}
+        assert left == set(), left
+
+
 # -- pin (f): the bridge's revision runs the pass's DDL -------------------------------
 
 
@@ -1742,7 +1954,7 @@ def _pass_declines(url: str) -> bool:
 
 ROWS_HELD = {
     "D3-rename-a-label": (
-        "INSERT INTO \"enmorder\" (\"status\") VALUES ('canceled')",
+        'INSERT INTO "enmorder" ("status") VALUES (\'canceled\')',
         'SELECT "status" FROM "enmorder"',
     ),
 }

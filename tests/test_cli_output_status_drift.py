@@ -39,6 +39,7 @@ from tests.test_cli_output_new_check import (  # noqa: F401 - fixtures
     plain_env,
     tty,
 )
+from tests.test_migrate_inherit import PARTIAL, squashed
 from tests.test_migrate_baseline import auto_migrated
 from tests.test_migrate_drift import drift_api
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
@@ -200,9 +201,7 @@ def test_plain_status_json_is_the_whole_of_stdout(project, pkg, db, capsys):
 
 
 @pytest.mark.backend_matrix
-def test_plain_status_a_failed_step_needs_attention_on_stdout(
-    project, pkg, db, capsys
-):
+def test_plain_status_a_failed_step_needs_attention_on_stdout(project, pkg, db, capsys):
     failed_second_step(project, pkg, db)
     doc = document(capsys, db)
     failed = doc["migrations"][0]["steps"][1]
@@ -295,11 +294,7 @@ def test_plain_status_with_only_a_refusal_heads_it_needs_attention(
     assert code == 4
     shown = "".join(f"  {line}\n" for line in refusal.splitlines())
     assert out == (
-        f"{db.line}\n"
-        f"!! needs attention  {table(db)}\n"
-        "\n"
-        "xx needs attention\n"
-        f"{shown}"
+        f"{db.line}\n!! needs attention  {table(db)}\n\nxx needs attention\n{shown}"
     )
     assert err == ""
 
@@ -320,6 +315,56 @@ def test_plain_status_a_baseline(project, pkg, db, capsys):
         for i, name in enumerate(names, start=1)
     )
     assert out == f"{db.line}\nok 2 applied  {table(db)}\n{rows}"
+
+
+INHERITABLE_HINT = (
+    "run `ferro migrate up`; this database applied 0002_add_tmp … 0004_drop_tmp "
+    "and nothing will be run"
+)
+
+
+@pytest.mark.backend_matrix
+def test_plain_status_a_squash_pending_inheritance_names_up(project, pkg, db, capsys):
+    squashed(project, pkg, db)
+    doc = document(capsys, db)
+    assert doc["inheritable"] == ["0002_epic"] and doc["ahead"] == []
+
+    code, out, err = cli(capsys, "status", "--url", db.url)
+
+    assert code == 3
+    assert out == (
+        f"{db.line}\n"
+        f"-- 1 pending  {table(db)}\n"
+        f"  ok 0001_create_author  applied  {at(doc, 1)}\n"
+        f"  -- 0002_epic           pending (inheritable)  {INHERITABLE_HINT}\n"
+    )
+    assert err == ""
+
+
+@pytest.mark.backend_matrix
+def test_plain_status_a_partial_witness_is_ahead_with_the_runs_refusal(
+    project, pkg, db, capsys
+):
+    squashed(project, pkg, db, apply_through=3)
+    doc = document(capsys, db)
+    assert doc["refusal"] == PARTIAL and doc["inheritable"] == []
+
+    code, out, err = cli(capsys, "status", "--url", db.url)
+
+    assert code == 4
+    shown = "".join(f"  {line}\n" for line in PARTIAL.splitlines())
+    assert out == (
+        f"{db.line}\n"
+        f"!! 1 pending · 2 ahead  {table(db)}\n"
+        f"  ok 0001_create_author  applied  {at(doc, 1)}\n"
+        "  -- 0002_epic           pending\n"
+        "  xx 0002_add_tmp        applied, not in the directory\n"
+        "  xx 0003_add_bio        applied, not in the directory\n"
+        "\n"
+        "xx needs attention\n"
+        f"{shown}"
+    )
+    assert err == ""
 
 
 # -- the plain form: drift ---------------------------------------------------------
@@ -437,6 +482,27 @@ def test_tty_status_before_any_run(project, pkg, db, capsys, tty):
         + tty_heading("○", "1;33", "2 pending", table(db))
         + f"  {pending} 0001_create_author  {sgr('33', 'pending')}\n"
         f"  {pending} 0002_second         {sgr('33', 'pending')}\n"
+    )
+    assert err == ""
+
+
+@pytest.mark.backend_matrix
+def test_tty_status_a_squash_pending_inheritance_names_up(
+    project, pkg, db, capsys, tty
+):
+    squashed(project, pkg, db)
+    doc = document(capsys, db)
+
+    code, out, err = cli(capsys, "status", "--url", db.url)
+
+    assert code == 3
+    assert out == (
+        f"{tty_line(db)}\n"
+        + tty_heading("○", "1;33", "1 pending", table(db))
+        + f"  {sgr('1;32', '✔')} 0001_create_author  {sgr('32', 'applied')}"
+        f"{sgr('2', f'  {at(doc, 1)}')}\n"
+        f"  {sgr('1;33', '○')} 0002_epic           "
+        f"{sgr('33', 'pending (inheritable)')}  {INHERITABLE_HINT}\n"
     )
     assert err == ""
 
@@ -624,8 +690,7 @@ def test_tty_drift_refusal_is_the_unchanged_sentence(project, pkg, db, capsys, t
 
     assert (code, out) == (4, f"{tty_line(db)}\n")
     assert err == (
-        f"{sgr('1;31', '✘')} {sgr('1;31', 'drift refused')}\n"
-        f"{drift_api(db).refusal}\n"
+        f"{sgr('1;31', '✘')} {sgr('1;31', 'drift refused')}\n{drift_api(db).refusal}\n"
     )
 
 

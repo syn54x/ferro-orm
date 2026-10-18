@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, Literal, Optional
 
 class RouteHandle:
@@ -226,10 +227,35 @@ def _generate_migration(
     "kind", "names"}], "text"}, "notes", "warnings"}`` — or ``None``
     when nothing renders DDL (no schema change) and no hand step is asked
     for. ``options_json`` is ``{"no_backfill": [...], "data_step": str | None,
-    "sql_step": str | None, "data_only": bool}``: the generator lays out the
-    hand steps too, and a migration of hand steps alone stores the target
-    snapshot (the parent's with ``data_only``). Raises ``ValueError`` naming
-    the refusal (``not generated yet: <op> on <table> (ticket #N)``).
+    "sql_step": str | None, "data_only": bool, "carry": [{"name", "body",
+    "kind", "down"}], "replaces": [<witness entry>]}``: the generator lays out
+    the hand steps too, and a migration of hand steps alone stores the target
+    snapshot (the parent's with ``data_only``). ``carry`` is the steps
+    ``--replace`` and ``squash`` carry across; ``replaces`` is a squash's
+    witness (``{"migration", "snapshot_checksum", "steps", "replaces"}`` per
+    replaced migration, checksum in hex), stored beside the parent link, and
+    refused when malformed as the snapshot loader refuses it. Raises
+    ``ValueError`` naming the refusal (``not generated yet: <op> on <table>
+    (ticket #N)``).
+    """
+    ...
+
+def _compose_range(parent_json: str | None, range_json: list[str]) -> str:
+    """Compose a squash's target from the ``ir.json`` texts of the range it
+    replaces, in chain order, over the parent's (``None`` for a range from
+    ``0001``).
+
+    Returns JSON ``{"target": <schema IR envelope>, "dead_names": [{"kind",
+    "name", "appeared", "vanished"}]}``: the range's last payload with its
+    rename hints composed, in a current-version envelope, and every name born
+    and gone inside the range (``kind`` one of ``table``, ``column``,
+    ``enum_label``, ``constraint``; ``appeared`` and ``vanished`` index the
+    range). Raises ``ValueError`` for a snapshot that does not load, and with
+    the core's text for a range whose hints do not compose; that error carries
+    ``kind`` (``uncomposable``, ``old_name_re_added``,
+    ``new_name_held_by_parent``, ``refused_hint``) and ``from_index`` (the
+    index into the range of the migration a squash can start from instead, or
+    ``None``).
     """
     ...
 
@@ -254,13 +280,19 @@ def _step_file_role(name: str) -> str:
     """
     ...
 
-def _read_migrations_dir(directory: str, replacing: str | None = None) -> str:
+def _read_migrations_dir(
+    directory: str, replacing: str | None = None, range_from: str | None = None
+) -> str:
     """Read and verify a migrations directory; returns the JSON of its migrations.
 
     ``{"path", "migrations": [{"number", "name", "dir", "steps": [{"ordinal",
     "name", "kind" ("ddl" | "data" | "portable_sql"), "files": {<step
-    dialect>: {"up", "down", "up_checksum", "headers"}}}], "snapshot":
-    {"checksum", "parent_checksum", "ir"}}]}``. A step dialect is
+    dialect>: {"up", "down", "up_checksum", "headers"}}}], "replaces":
+    [<witness entry>], "snapshot": {"checksum", "parent_checksum",
+    "replaces", "ir"}}]}``. ``replaces`` is a squash's witness (ADR-0056),
+    ``[]`` for any other migration; a witness entry is ``{"migration":
+    "NNNN_<name>", "snapshot_checksum": <96 hex>, "steps": [<ordinal>, ...],
+    "replaces": [<witness entry>, ...]}``. A step dialect is
     ``"postgres"``, ``"sqlite"`` or ``"portable"`` (an unsuffixed file, or a
     data step, serving every dialect); ``headers`` has ``no_transaction``,
     ``foreign_keys_off``, ``destructive``, ``data_dependent``,
@@ -274,16 +306,28 @@ def _read_migrations_dir(directory: str, replacing: str | None = None) -> str:
     With ``replacing`` (``ferro migrate new --replace``: ``NNNN_<name>``, or
     ``NNNN`` when one migration carries the number), the directory without
     that migration, admitting the duplicate at its number only, plus the
-    migration itself under ``"replaced"``. Also raises for a target the
-    directory does not hold, a bare number two migrations share, and a
-    migration a later one chains from.
+    migration itself as the one entry of the list ``"replaced"``. Also raises
+    for a target the directory does not hold, a bare number two migrations
+    share, and a migration a later one chains from.
+
+    With ``range_from`` (same target forms), the directory below that migration
+    plus the range from it in chain order as ``"replaced"``, following snapshot
+    links (it need not reach the head), ``"reaches_head"`` (bool),
+    ``"off_range"`` (the later migrations the range leaves, each
+    ``{"migration", "chains_from"}``: its ``NNNN_<name>`` and the
+    ``NNNN_<name>`` its snapshot's parent link names, ``None`` when it names
+    none) and
+    ``"siblings"`` (the other ``NNNN_<name>`` migrations at the range's first
+    number, never below it).
+    Naming both ``replacing`` and ``range_from`` raises ``ValueError``.
     """
     ...
 
 def _load_snapshot(ir_json: str) -> str:
     """Load one ``ir.json`` of any shipped ``ir_version``.
 
-    Returns JSON ``{"checksum", "parent_checksum", "ir"}`` (checksums in hex).
+    Returns JSON ``{"checksum", "parent_checksum", "replaces", "ir"}``
+    (checksums in hex; ``replaces`` the witness, ``[]`` when none).
     """
     ...
 
@@ -427,8 +471,11 @@ class TrackedDatabase:
         *,
         allow_ahead: bool | Literal["expand-only"] = False,
         order_keys: Any = None,
+        inheriting: Callable[[Path], str] | None = None,
     ) -> Plan:
-        """A preview: its steps cannot be executed."""
+        """A preview: its steps cannot be executed. With ``inheriting`` (a data
+        step file's declared kind), planned as the run plans once it has
+        inherited every squash whose witness the records hold (ADR-0056)."""
         ...
     def locked(
         self,
@@ -476,6 +523,18 @@ class LockedDatabase:
         allow_ahead: bool | Literal["expand-only"] = False,
         order_keys: Any = None,
     ) -> Plan: ...
+    async def inherit(
+        self, declared_kind: Callable[[Path], str]
+    ) -> list[dict[str, Any]]:
+        """Inherit every squash whose witness the records hold, in one
+        transaction, running nothing (ADR-0056); ``[{"squash", "replaced"}]``.
+        ``declared_kind(path)`` is an inherited data step's ``atomic`` /
+        ``chunked``. A squash whose whole witness a baseline recorded is
+        inherited with origin ``baseline``. Raises ``RunRefused``
+        (``partial_witness``) on a squash the records hold part of, and
+        (``mixed_witness``) on one part baselined and part run, writing
+        nothing."""
+        ...
     async def execute(
         self, step: StepHandle, on_attempt: Callable[[str], object] | None = None
     ) -> dict[str, Any]:

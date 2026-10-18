@@ -254,6 +254,103 @@ def new(
 
 
 @migrate.command
+def squash(
+    name: Annotated[
+        str,
+        Parameter(
+            help="The squashed migration's name: lowercase letters, digits and _."
+        ),
+    ],
+    *,
+    from_: Annotated[
+        str,
+        Parameter(
+            name="--from",
+            help=(
+                "The first migration of the range to squash (NNNN_<name>, or NNNN "
+                "when one migration carries the number); the range goes from it "
+                "through the newest migration."
+            ),
+        ),
+    ],
+    sql_step: Annotated[
+        str | None,
+        Parameter(
+            help=(
+                "Also add a hand-written SQL step NN_<name>.up.sql / .down.sql "
+                "that serves every dialect."
+            )
+        ),
+    ] = None,
+    data_step: Annotated[
+        str | None,
+        Parameter(
+            help=(
+                "Also add a Python data step NN_backfill_<model>.py over this model "
+                "(its class name), to be written where it says todo(...)."
+            )
+        ),
+    ] = None,
+    data_only: Annotated[
+        bool,
+        Parameter(
+            help=(
+                "Write only the --data-step and the steps the range carries: no DDL, "
+                "and a full copy of the snapshot below the range."
+            ),
+            negative="",
+        ),
+    ] = False,
+    no_backfill: Annotated[
+        list[str] | None,
+        Parameter(
+            help=(
+                "Replace the generated backfill of this column (<table>.<column>, "
+                "repeatable) with a guard step that fails the migration while any "
+                "row still needs a value."
+            ),
+            negative="",
+        ),
+    ] = None,
+    verbose: Verbose = False,
+    glob: Annotated[Global, Parameter(parse=False)],
+) -> int:
+    """Replace a range of migrations, from --from through the newest, with one.
+
+    Writes the migration `new` would have written across the range: planned
+    once from the snapshot below the range to the range's last snapshot (its
+    renames composed), carrying every data step and hand-written SQL step of
+    the range byte for byte, under the first migration's number. Deletes the
+    range's directories. Reads the migrations directory only: never the
+    models, never a database.
+    """
+    from ..migrations.generate import prepare, write
+    from .output import Output, print_new
+
+    _refuse_url(glob, "squash")
+    settings = FerroSettings(config=glob.config)
+    database = settings.database(glob.database)
+    out = Output.for_streams(out=sys.stdout, err=sys.stderr)
+    _say_directory(out, database)
+    migration = prepare(
+        database,
+        name,
+        sql_step=sql_step,
+        data_step=data_step,
+        data_only=data_only,
+        no_backfill=no_backfill or (),
+        squash_from=from_,
+    )
+    if migration is None:  # pragma: no cover - prepare refuses an empty squash
+        return exit_codes.REFUSED
+    written = write(database, migration)
+
+    shown = f"{_shown(written, Path.cwd().resolve())}/"
+    print_new(out, migration, shown, verbose=verbose)
+    return exit_codes.OK
+
+
+@migrate.command
 def check(
     *,
     verbose: Verbose = False,
@@ -336,7 +433,7 @@ def up(
     except MigrationRefused as refused:
         print_run_failure(out, refused)
         return exit_codes.REFUSED
-    if not report.applied:
+    if not report.applied and not report.inherited:
         print_done(out, "nothing to apply", "the database is up to date")
     return exit_codes.OK
 
@@ -692,11 +789,18 @@ def _say_directory(out: Output, database: DatabaseSettings) -> None:
 
 
 def _refuse_url(glob: Global, verb: str) -> None:
-    if glob.url is not None:
+    if glob.url is None:
+        return
+    if verb == "squash":
+        # It never imports the models either (ADR-0056).
         raise SettingsError(
-            f"{verb} reads the models and the migrations directory, never a "
-            f"database; drop --url"
+            "squash reads the migrations directory only, never the models or a "
+            "database; drop --url"
         )
+    raise SettingsError(
+        f"{verb} reads the models and the migrations directory, never a "
+        f"database; drop --url"
+    )
 
 
 # -- which file ----------------------------------------------------------------

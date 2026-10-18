@@ -17,8 +17,8 @@
 
 use crate::Dialect;
 use crate::plan::and_list;
-use crate::snapshot::{Snapshot, SnapshotError, encode_checksum, sha384};
-use std::collections::BTreeMap;
+use crate::snapshot::{Snapshot, SnapshotError, WitnessEntry, encode_checksum, sha384};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// The snapshot file inside every migration.
@@ -214,6 +214,11 @@ pub struct Migration {
     pub dir: PathBuf,
     /// Its steps, by ordinal.
     pub steps: Vec<Step>,
+    /// When it is a squash, its witness: the migrations it replaced, as its
+    /// `ir.json` records them (ADR-0056); empty otherwise. None of them is
+    /// in the directory.
+    #[serde(rename = "replaces")]
+    pub witness: Vec<WitnessEntry>,
     /// Its `ir.json`.
     #[serde(serialize_with = "serialize_snapshot")]
     pub snapshot: Snapshot,
@@ -360,6 +365,27 @@ pub enum DirectoryError {
         /// by one rename, so present means complete.
         complete: bool,
     },
+    /// The range a `ferro migrate squash` set aside, one directory at a time,
+    /// under one hidden name naming both ends and the replacement
+    /// (`.<first>..<last>.<replacement>.squashed`), and never deleted: the
+    /// squash was killed between moving the first original and deleting the
+    /// aside.
+    SquashedAside {
+        /// The hidden directory.
+        aside: PathBuf,
+        /// The range's first migration (`NNNN_<name>`).
+        first: String,
+        /// The range's last migration (`NNNN_<name>`).
+        last: String,
+        /// The squashed migration's directory name (`NNNN_<name>`).
+        replacement: String,
+        /// The originals still in the migrations directory, outside the
+        /// aside (the squash was killed while moving them), in name order.
+        outside: Vec<String>,
+        /// Whether the replacement is in the directory: it appears whole,
+        /// by one rename, after every original is in the aside.
+        complete: bool,
+    },
     /// A migration `ferro migrate new` was writing into a hidden sibling
     /// (`.NNNN_<name>.partial`) and never moved into place: the run was
     /// killed while writing it.
@@ -368,6 +394,14 @@ pub enum DirectoryError {
         partial: PathBuf,
         /// The migration it was becoming (`NNNN_<name>`).
         migration: String,
+    },
+    /// A squash's witness names a migration that is still in the directory:
+    /// the squash replaced it, so the two cannot both be read.
+    WitnessNamesPresent {
+        /// The squash (`NNNN_<name>`).
+        squash: String,
+        /// The migration its witness names (`NNNN_<name>`).
+        named: String,
     },
     /// A DDL step with no rendering for a target dialect.
     MissingRendering {
@@ -401,7 +435,9 @@ impl DirectoryError {
             DirectoryError::UnparseableHeader { .. } => "unparseable_header",
             DirectoryError::MissingRendering { .. } => "missing_rendering",
             DirectoryError::InterruptedReplace { .. } => "interrupted_replace",
+            DirectoryError::SquashedAside { .. } => "squashed_aside",
             DirectoryError::InterruptedWrite { .. } => "interrupted_write",
+            DirectoryError::WitnessNamesPresent { .. } => "witness_names_present",
         }
     }
 }
@@ -469,7 +505,12 @@ impl std::fmt::Display for DirectoryError {
                 show(migration)
             ),
             DirectoryError::UnreadableSnapshot { path, error } => {
-                write!(f, "{} {error}; restore it from version control", show(path))
+                write!(
+                    f,
+                    "{} {error}; a snapshot is never re-recorded, so restore the file from \
+                     version control",
+                    show(path)
+                )
             }
             DirectoryError::BrokenChain {
                 parent: Some(parent),
@@ -556,6 +597,50 @@ impl std::fmt::Display for DirectoryError {
                     )
                 }
             }
+            DirectoryError::SquashedAside {
+                aside,
+                first,
+                last,
+                replacement,
+                outside,
+                complete,
+            } => {
+                let name = split_numbered(replacement, 4)
+                    .map_or_else(|| replacement.clone(), |(_, name)| name);
+                let range = if first == last {
+                    first.clone()
+                } else {
+                    format!("{first} through {last}")
+                };
+                write!(
+                    f,
+                    "{} holds {range}, set aside by an interrupted `ferro migrate squash \
+                     {name} --from {first}`; ",
+                    show(aside)
+                )?;
+                if *complete {
+                    return write!(
+                        f,
+                        "its replacement {replacement} is complete. Delete {}",
+                        show(aside)
+                    );
+                }
+                write!(
+                    f,
+                    "{replacement} was never written. Move every directory in {} back into \
+                     the migrations directory",
+                    show(aside)
+                )?;
+                if !outside.is_empty() {
+                    write!(f, " (beside {}, never moved)", outside.join(", "))?;
+                }
+                write!(
+                    f,
+                    " and delete {}, then run `ferro migrate squash {name} --from {first}` \
+                     again",
+                    show(aside)
+                )
+            }
             DirectoryError::InterruptedWrite { partial, migration } => write!(
                 f,
                 "{} is part of {migration}, left by an interrupted `ferro migrate new`; \
@@ -563,6 +648,12 @@ impl std::fmt::Display for DirectoryError {
                  again",
                 show(partial),
                 show(partial)
+            ),
+            DirectoryError::WitnessNamesPresent { squash, named } => write!(
+                f,
+                "{squash}/{SNAPSHOT_FILE} records that the squash {squash} replaces {named}, \
+                 but {named} is still in the migrations directory; delete it, or delete the \
+                 squash {squash}"
             ),
             DirectoryError::MissingRendering {
                 migration,
@@ -623,7 +714,9 @@ fn serialize_optional_checksum<S: serde::Serializer>(
     }
 }
 
-pub(crate) fn serialize_snapshot<S: serde::Serializer>(
+/// A snapshot's JSON: `{"checksum", "parent_checksum", "replaces", "ir"}`,
+/// checksums in hex: the one shape every reader of a snapshot is handed.
+pub fn serialize_snapshot<S: serde::Serializer>(
     snapshot: &Snapshot,
     serializer: S,
 ) -> Result<S::Ok, S::Error> {
@@ -631,6 +724,7 @@ pub(crate) fn serialize_snapshot<S: serde::Serializer>(
     serde_json::json!({
         "checksum": encode_checksum(&snapshot.checksum),
         "parent_checksum": snapshot.parent_checksum.as_ref().map(encode_checksum),
+        "replaces": snapshot.replaces,
         "ir": snapshot.ir,
     })
     .serialize(serializer)
@@ -799,7 +893,9 @@ impl MigrationsDir {
             });
         }
         interrupted_writes(root)?;
-        assemble(root, unique_numbers(root, migration_dirs(root)?)?)
+        let dirs = migration_dirs(root)?;
+        witness_names_present(&dirs)?;
+        assemble(root, unique_numbers(root, dirs)?)
     }
 
     /// Read the migrations directory at `path` for `ferro migrate new
@@ -809,7 +905,9 @@ impl MigrationsDir {
     /// migration carries the number. The one duplicate admitted is at the
     /// replaced number (two branches each generated it); the replaced
     /// migration's own parent link is not checked, since its parent moving
-    /// under it is why it is replaced.
+    /// under it is why it is replaced. It shares its target resolution with
+    /// [`MigrationsDir::read_range`], and refuses what a range of more than one
+    /// would hold.
     ///
     /// # Errors
     /// [`DirectoryError::AmbiguousNumber`] for a bare number two migrations
@@ -822,63 +920,253 @@ impl MigrationsDir {
         target: &str,
     ) -> Result<(MigrationsDir, Migration), DirectoryError> {
         let root = path;
-        let no_such = || DirectoryError::NoSuchMigration {
-            target: target.to_string(),
-        };
-        if !root.exists() {
-            return Err(no_such());
-        }
-        interrupted_writes(root)?;
-        let mut dirs = migration_dirs(root)?;
-        let full = |(number, name, _): &(u16, String, PathBuf)| format!("{number:04}_{name}");
-        let matching: Vec<usize> = match target.parse::<u16>() {
-            Ok(number) if target.len() == 4 && target.chars().all(|c| c.is_ascii_digit()) => dirs
-                .iter()
-                .enumerate()
-                .filter(|(_, (n, _, _))| *n == number)
-                .map(|(at, _)| at)
-                .collect(),
-            _ => dirs
-                .iter()
-                .enumerate()
-                .filter(|(_, dir)| full(dir) == target)
-                .map(|(at, _)| at)
-                .collect(),
-        };
-        let at = match matching.as_slice() {
-            [] => return Err(no_such()),
-            [at] => *at,
-            several => {
-                return Err(DirectoryError::AmbiguousNumber {
-                    number: dirs[several[0]].0,
-                    names: several.iter().map(|at| full(&dirs[*at])).collect(),
-                });
-            }
-        };
-        let (number, name, dir) = dirs.remove(at);
-        let replaced = read_migration(root, number, name, dir)?;
+        let (replaced, dirs) = open_target(root, target)?;
         // A later migration whose snapshot links to the replaced one would
         // be left chained to a snapshot that no longer exists.
-        for later in dirs.iter().filter(|(n, _, _)| *n > number) {
-            let linked = std::fs::read(later.2.join(SNAPSHOT_FILE))
-                .ok()
-                .and_then(|bytes| Snapshot::load(&bytes).ok())
-                .is_some_and(|s| s.parent_checksum == Some(replaced.snapshot.checksum));
-            if linked {
-                return Err(DirectoryError::LaterMigration {
-                    replaced: replaced.dir_name(),
-                    later: full(later),
-                });
-            }
+        if let Some(later) = dirs
+            .iter()
+            .find(|later| later.0 > replaced.number && links_to(&later.2, &replaced))
+        {
+            return Err(DirectoryError::LaterMigration {
+                replaced: replaced.dir_name(),
+                later: format!("{:04}_{}", later.0, later.1),
+            });
         }
         let dir = assemble(root, unique_numbers(root, dirs)?)?;
         Ok((dir, replaced))
+    }
+
+    /// Read the migrations directory at `path` for a squash: the directory
+    /// below the migration `from` names, read and verified as
+    /// [`MigrationsDir::read`] reads it, and the range that starts there, each
+    /// migration read whole. `from` is `NNNN_<name>`, or `NNNN` when one
+    /// migration carries the number. A migration at `from`'s number other
+    /// than `from` is a sibling (two branches each generated the number): no
+    /// range descends from it, so it is never below the range, and
+    /// [`Range::siblings`] names it for the caller to refuse. The unchecked
+    /// parent link of the range's first migration is
+    /// [`MigrationsDir::read_replacing`]'s.
+    ///
+    /// The range follows snapshot links: it continues through each next number
+    /// whose `ir.json` names the migration before it as its parent, and ends
+    /// where none does. It need not reach the directory head (a sibling
+    /// chain at `from`'s number, or a fork after it, leaves migrations off
+    /// the range); [`Range::reaches_head`] says whether it does and
+    /// [`Range::off_range`] and [`Range::siblings`] name what it leaves, for the
+    /// caller to refuse. The migrations off the range and the siblings are not
+    /// read or verified.
+    ///
+    /// # Errors
+    /// [`DirectoryError::AmbiguousNumber`] for a bare number two migrations
+    /// share, [`DirectoryError::NoSuchMigration`] for a target the directory
+    /// does not hold, and what [`MigrationsDir::read`] raises for the
+    /// directory below the range and for the range's own files.
+    pub fn read_range(path: &Path, from: &str) -> Result<(MigrationsDir, Range), DirectoryError> {
+        let root = path;
+        let (first, dirs) = open_target(root, from)?;
+        let number = first.number;
+        let named = snapshot_names(&first, &dirs);
+        let mut migrations = vec![first];
+        let mut below = Vec::new();
+        let mut off_range = Vec::new();
+        let mut siblings = Vec::new();
+        for entry in dirs {
+            let tip = &migrations[migrations.len() - 1];
+            if entry.0 < number {
+                below.push(entry);
+            } else if entry.0 == number {
+                // Its schema is in none of the range's snapshots: a squash
+                // planned from it would drop every object it made.
+                siblings.push(format!("{:04}_{}", entry.0, entry.1));
+            } else if entry.0 == tip.number + 1 && links_to(&entry.2, tip) {
+                let (n, name, dir) = entry;
+                migrations.push(read_migration(root, n, name, dir)?);
+            } else {
+                let chains_from = std::fs::read(entry.2.join(SNAPSHOT_FILE))
+                    .ok()
+                    .and_then(|bytes| Snapshot::load(&bytes).ok())
+                    .and_then(|s| s.parent_checksum)
+                    .and_then(|parent| named.get(&parent).cloned());
+                off_range.push(OffRange {
+                    migration: format!("{:04}_{}", entry.0, entry.1),
+                    chains_from,
+                });
+            }
+        }
+        let dir = assemble(root, unique_numbers(root, below)?)?;
+        Ok((
+            dir,
+            Range {
+                migrations,
+                off_range,
+                siblings,
+            },
+        ))
     }
 
     /// The newest migration, when there is one.
     pub fn head(&self) -> Option<&Migration> {
         self.migrations.last()
     }
+}
+
+/// A range of migrations: a tail of the directory, from a named migration
+/// along the snapshot links, in chain order.
+#[derive(Debug)]
+pub struct Range {
+    /// The range's migrations, the named one first, in chain order.
+    pub migrations: Vec<Migration>,
+    /// The later migrations the range does not hold, in name order: a sibling
+    /// chain's, or a fork's other branch, each with the migration its
+    /// snapshot chains from. Empty when the range reaches the head.
+    pub off_range: Vec<OffRange>,
+    /// The other migrations at the range's first number (`NNNN_<name>`), in
+    /// name order: two branches each generated that number. Neither the range
+    /// nor the directory below it holds them.
+    pub siblings: Vec<String>,
+}
+
+impl Range {
+    /// Whether the range's last migration is the directory's head: nothing
+    /// later is off the range and no sibling shares its first number.
+    pub fn reaches_head(&self) -> bool {
+        self.off_range.is_empty() && self.siblings.is_empty()
+    }
+}
+
+/// A later migration a [`Range`] does not hold, and what it chains from: the
+/// facts a refusal of the range names, so no caller reads a snapshot link
+/// itself.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct OffRange {
+    /// The migration (`NNNN_<name>`).
+    pub migration: String,
+    /// The migration (`NNNN_<name>`) whose stored `ir.json` its snapshot's
+    /// `parent_checksum` names; `None` for no parent, a link no snapshot in
+    /// the directory matches, or a snapshot that does not load.
+    pub chains_from: Option<String>,
+}
+
+/// Every migration directory's snapshot checksum (SHA-384 of the stored
+/// `ir.json`), and the migration (`NNNN_<name>`) holding it: the first in
+/// name order when two hold the same bytes. A snapshot that does not load
+/// names nothing.
+fn snapshot_names(first: &Migration, dirs: &[MigrationDirEntry]) -> BTreeMap<[u8; 48], String> {
+    let mut all: Vec<(String, [u8; 48])> = dirs
+        .iter()
+        .filter_map(|(number, name, dir)| {
+            let checksum = std::fs::read(dir.join(SNAPSHOT_FILE))
+                .ok()
+                .and_then(|bytes| Snapshot::load(&bytes).ok())?
+                .checksum;
+            Some((format!("{number:04}_{name}"), checksum))
+        })
+        .collect();
+    all.push((first.dir_name(), first.snapshot.checksum));
+    all.sort();
+    let mut named = BTreeMap::new();
+    for (name, checksum) in all {
+        named.entry(checksum).or_insert(name);
+    }
+    named
+}
+
+/// Whether the migration directory `dir`'s snapshot names `parent` as its
+/// parent (an unreadable snapshot links to nothing).
+fn links_to(dir: &Path, parent: &Migration) -> bool {
+    std::fs::read(dir.join(SNAPSHOT_FILE))
+        .ok()
+        .and_then(|bytes| Snapshot::load(&bytes).ok())
+        .is_some_and(|s| s.parent_checksum == Some(parent.snapshot.checksum))
+}
+
+/// Refuse a squash whose witness, at any depth, names a migration directory
+/// of `dirs` (every migration directory of the root). It runs once every
+/// directory is listed and before any other check of them: a squash takes
+/// its first original's number and parent, so an original left beside it
+/// would otherwise be refused as a duplicate number or a broken chain, each
+/// naming the wrong fix. The witness is read against the directory only,
+/// never a database; a snapshot that does not load is left to the full read
+/// of its migration, which refuses it naming the file.
+fn witness_names_present(dirs: &[MigrationDirEntry]) -> Result<(), DirectoryError> {
+    fn first_present<'w>(
+        present: &BTreeSet<String>,
+        witness: &'w [WitnessEntry],
+    ) -> Option<&'w str> {
+        witness.iter().find_map(|entry| {
+            if present.contains(&entry.migration) {
+                Some(entry.migration.as_str())
+            } else {
+                first_present(present, &entry.replaces)
+            }
+        })
+    }
+    let name = |(number, name, _): &MigrationDirEntry| format!("{number:04}_{name}");
+    let present: BTreeSet<String> = dirs.iter().map(name).collect();
+    for entry in dirs {
+        let Some(snapshot) = std::fs::read(entry.2.join(SNAPSHOT_FILE))
+            .ok()
+            .and_then(|bytes| Snapshot::load(&bytes).ok())
+        else {
+            continue;
+        };
+        if let Some(named) = first_present(&present, &snapshot.replaces) {
+            return Err(DirectoryError::WitnessNamesPresent {
+                squash: name(entry),
+                named: named.to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// One migration directory under the root: its number, its name and its path.
+type MigrationDirEntry = (u16, String, PathBuf);
+
+/// A resolved target read whole, and every other migration directory, in name
+/// order.
+type OpenedTarget = (Migration, Vec<MigrationDirEntry>);
+
+/// Resolve `target` (`NNNN_<name>`, or `NNNN` when one migration carries the
+/// number) against the directory at `root`, and read that migration whole;
+/// returns it and every other migration directory, in name order.
+fn open_target(root: &Path, target: &str) -> Result<OpenedTarget, DirectoryError> {
+    let no_such = || DirectoryError::NoSuchMigration {
+        target: target.to_string(),
+    };
+    if !root.exists() {
+        return Err(no_such());
+    }
+    interrupted_writes(root)?;
+    let mut dirs = migration_dirs(root)?;
+    witness_names_present(&dirs)?;
+    let full = |(number, name, _): &MigrationDirEntry| format!("{number:04}_{name}");
+    let matching: Vec<usize> = match target.parse::<u16>() {
+        Ok(number) if target.len() == 4 && target.chars().all(|c| c.is_ascii_digit()) => dirs
+            .iter()
+            .enumerate()
+            .filter(|(_, (n, _, _))| *n == number)
+            .map(|(at, _)| at)
+            .collect(),
+        _ => dirs
+            .iter()
+            .enumerate()
+            .filter(|(_, dir)| full(dir) == target)
+            .map(|(at, _)| at)
+            .collect(),
+    };
+    let at = match matching.as_slice() {
+        [] => return Err(no_such()),
+        [at] => *at,
+        several => {
+            return Err(DirectoryError::AmbiguousNumber {
+                number: dirs[several[0]].0,
+                names: several.iter().map(|at| full(&dirs[*at])).collect(),
+            });
+        }
+    };
+    let (number, name, dir) = dirs.remove(at);
+    Ok((read_migration(root, number, name, dir)?, dirs))
 }
 
 /// Refuse what an interrupted `ferro migrate new` left under a hidden name
@@ -900,7 +1188,11 @@ fn interrupted_writes(root: &Path) -> Result<(), DirectoryError> {
         let Some(hidden) = file_name.strip_prefix('.') else {
             continue;
         };
-        if let Some(names) = hidden.strip_suffix(".replaced") {
+        if let Some(names) = hidden.strip_suffix(".squashed") {
+            if let Some(found) = squashed_aside(root, file_name.as_ref(), names)? {
+                asides.push(found);
+            }
+        } else if let Some(names) = hidden.strip_suffix(".replaced") {
             let (replaced, replacement) = names.split_once('.').unwrap_or((names, names));
             if let (Some(replaced), Some(replacement)) =
                 (migration_name(replaced), migration_name(replacement))
@@ -930,9 +1222,78 @@ fn interrupted_writes(root: &Path) -> Result<(), DirectoryError> {
     }
 }
 
+/// The aside a squash left (`.<first>..<last>.<replacement>.squashed`,
+/// `names` its name without the dot and suffix), with the originals it does
+/// not hold yet and whether the replacement was written; `None` for a hidden
+/// name of another shape, which stays ignored. An original is a directory
+/// numbered from `first` through `last` (at `first`'s number, `first`
+/// itself: a sibling there is not of the range). The replacement takes
+/// `first`'s number and may take its name too: a directory of that name is
+/// the replacement once `first` is in the aside, and `first` before.
+fn squashed_aside(
+    root: &Path,
+    file_name: &str,
+    names: &str,
+) -> Result<Option<DirectoryError>, DirectoryError> {
+    let migration = |name: &str| split_numbered(name, 4).map(|(number, _)| number);
+    let Some((first, rest)) = names.split_once("..") else {
+        return Ok(None);
+    };
+    let Some((last, replacement)) = rest.split_once('.') else {
+        return Ok(None);
+    };
+    let (Some(from), Some(to), Some(_)) =
+        (migration(first), migration(last), migration(replacement))
+    else {
+        return Ok(None);
+    };
+    let unreadable = |path: &Path| {
+        let path = path.to_path_buf();
+        move |err: std::io::Error| DirectoryError::Unreadable {
+            path,
+            reason: err.to_string(),
+        }
+    };
+    let names_in = |dir: &Path| -> Result<BTreeSet<String>, DirectoryError> {
+        let mut out = BTreeSet::new();
+        for entry in std::fs::read_dir(dir).map_err(unreadable(dir))? {
+            let entry = entry.map_err(unreadable(dir))?;
+            if entry.path().is_dir() {
+                out.insert(entry.file_name().to_string_lossy().into_owned());
+            }
+        }
+        Ok(out)
+    };
+    let held = names_in(&root.join(file_name))?;
+    let original = |name: &str, number: u32| name == first || (from < number && number <= to);
+    let mut outside = Vec::new();
+    let mut complete = false;
+    for name in names_in(root)? {
+        let Some(number) = migration(&name) else {
+            continue;
+        };
+        // A directory of the replacement's name is the replacement unless
+        // an original of that name has not been moved yet.
+        let is_original = original(&name, number) && !held.contains(&name);
+        if name == replacement && !is_original {
+            complete = true;
+        } else if is_original {
+            outside.push(name);
+        }
+    }
+    Ok(Some(DirectoryError::SquashedAside {
+        aside: PathBuf::from(file_name),
+        first: first.to_string(),
+        last: last.to_string(),
+        replacement: replacement.to_string(),
+        complete: complete && outside.is_empty(),
+        outside,
+    }))
+}
+
 /// Every migration directory under `root` as `(number, name, path)`, in
 /// name order; any other entry is refused.
-fn migration_dirs(root: &Path) -> Result<Vec<(u16, String, PathBuf)>, DirectoryError> {
+fn migration_dirs(root: &Path) -> Result<Vec<MigrationDirEntry>, DirectoryError> {
     let mut out = Vec::new();
     for (name, entry) in entries(root, root)? {
         if !entry.is_dir() {
@@ -955,7 +1316,7 @@ fn migration_dirs(root: &Path) -> Result<Vec<(u16, String, PathBuf)>, DirectoryE
 /// `dirs` by number, refusing two that share one.
 fn unique_numbers(
     root: &Path,
-    dirs: Vec<(u16, String, PathBuf)>,
+    dirs: Vec<MigrationDirEntry>,
 ) -> Result<BTreeMap<u16, (String, PathBuf)>, DirectoryError> {
     let mut numbered: BTreeMap<u16, (String, PathBuf)> = BTreeMap::new();
     for (number, name, entry) in dirs {
@@ -1080,6 +1441,7 @@ fn read_migration(
         name,
         dir,
         steps,
+        witness: snapshot.replaces.clone(),
         snapshot,
     })
 }
@@ -1302,7 +1664,7 @@ mod tests {
                 "-- ferro: data-dependent\n\nDROP TABLE \"t\";\n",
             );
         }
-        let ir = Snapshot::store(&empty_ir(), parent.map(sha384)).expect("store");
+        let ir = Snapshot::store(&empty_ir(), parent.map(sha384), &[]).expect("store");
         std::fs::write(dir.join(SNAPSHOT_FILE), &ir).expect("ir.json");
         ir
     }
@@ -1521,6 +1883,88 @@ CREATE INDEX i ON t (c);
     }
 
     #[test]
+    fn a_leftover_squash_aside_is_refused_by_every_read_with_its_recovery() {
+        // A squash of 0002_b..0003_c into 0002_e, killed while moving the
+        // originals: 0002_b is in the aside, 0003_c is still outside.
+        let root = scratch("squashed");
+        let first = migration(&root, "0001_a", None);
+        let b = migration(&root, "0002_b", Some(&first));
+        migration(&root, "0003_c", Some(&b));
+        let aside = root.join(".0002_b..0003_c.0002_e.squashed");
+        std::fs::create_dir(&aside).expect("aside");
+        std::fs::rename(root.join("0002_b"), aside.join("0002_b")).expect("move");
+        for err in [
+            MigrationsDir::read(&root).expect_err("aside"),
+            MigrationsDir::read_replacing(&root, "0001_a").expect_err("aside"),
+            MigrationsDir::read_range(&root, "0001_a").expect_err("aside"),
+        ] {
+            assert_eq!(err.kind(), "squashed_aside");
+            assert_eq!(
+                err.to_string(),
+                ".0002_b..0003_c.0002_e.squashed holds 0002_b through 0003_c, set aside by \
+                 an interrupted `ferro migrate squash e --from 0002_b`; 0002_e was never \
+                 written. Move every directory in .0002_b..0003_c.0002_e.squashed back into \
+                 the migrations directory (beside 0003_c, never moved) and delete \
+                 .0002_b..0003_c.0002_e.squashed, then run `ferro migrate squash e --from \
+                 0002_b` again"
+            );
+        }
+        // Every original moved, the replacement written: delete the aside.
+        std::fs::rename(root.join("0003_c"), aside.join("0003_c")).expect("move");
+        migration(&root, "0002_e", Some(&first));
+        let err = MigrationsDir::read(&root).expect_err("aside");
+        assert_eq!(
+            err,
+            DirectoryError::SquashedAside {
+                aside: PathBuf::from(".0002_b..0003_c.0002_e.squashed"),
+                first: "0002_b".to_string(),
+                last: "0003_c".to_string(),
+                replacement: "0002_e".to_string(),
+                outside: Vec::new(),
+                complete: true,
+            }
+        );
+        assert_eq!(
+            err.to_string(),
+            ".0002_b..0003_c.0002_e.squashed holds 0002_b through 0003_c, set aside by an \
+             interrupted `ferro migrate squash e --from 0002_b`; its replacement 0002_e is \
+             complete. Delete .0002_b..0003_c.0002_e.squashed"
+        );
+        std::fs::remove_dir_all(&aside).expect("rm");
+        assert_eq!(
+            MigrationsDir::read(&root).expect("clean").migrations.len(),
+            2
+        );
+    }
+
+    #[test]
+    fn a_squash_taking_its_first_originals_name_tells_the_original_from_the_replacement() {
+        let root = scratch("squashed-same-name");
+        let first = migration(&root, "0001_a", None);
+        migration(&root, "0002_b", Some(&first));
+        let aside = root.join(".0002_b..0002_b.0002_b.squashed");
+        std::fs::create_dir(&aside).expect("aside");
+        // Nothing moved yet: 0002_b is the original, outside.
+        let outside = |err: DirectoryError| match err {
+            DirectoryError::SquashedAside {
+                outside, complete, ..
+            } => (outside, complete),
+            other => panic!("{other}"),
+        };
+        assert_eq!(
+            outside(MigrationsDir::read(&root).expect_err("aside")),
+            (vec!["0002_b".to_string()], false)
+        );
+        // Moved and written: 0002_b is the replacement.
+        std::fs::rename(root.join("0002_b"), aside.join("0002_b")).expect("move");
+        migration(&root, "0002_b", Some(&first));
+        assert_eq!(
+            outside(MigrationsDir::read(&root).expect_err("aside")),
+            (Vec::new(), true)
+        );
+    }
+
+    #[test]
     fn a_duplicate_number_names_both_directories() {
         let root = scratch("dup");
         let first = migration(&root, "0001_a", None);
@@ -1617,6 +2061,189 @@ CREATE INDEX i ON t (c);
                 && message.contains("replace the later one first, or delete it"),
             "{message}"
         );
+    }
+
+    #[test]
+    fn a_run_reads_from_the_named_migration_through_the_head_in_chain_order() {
+        let root = scratch("range");
+        let a = migration(&root, "0001_a", None);
+        let b = migration(&root, "0002_b", Some(&a));
+        let c = migration(&root, "0003_c", Some(&b));
+        migration(&root, "0004_d", Some(&c));
+
+        let (dir, range) = MigrationsDir::read_range(&root, "0002_b").expect("range");
+        let names = |ms: &[Migration]| ms.iter().map(Migration::dir_name).collect::<Vec<_>>();
+        assert_eq!(names(&dir.migrations), ["0001_a"]);
+        assert_eq!(names(&range.migrations), ["0002_b", "0003_c", "0004_d"]);
+
+        // A range of one is the head; a bare number names it too.
+        let (dir, range) = MigrationsDir::read_range(&root, "0004").expect("range of one");
+        assert_eq!(dir.migrations.len(), 3);
+        assert_eq!(names(&range.migrations), ["0004_d"]);
+
+        // The range from the first migration leaves the directory empty.
+        let (dir, range) = MigrationsDir::read_range(&root, "0001_a").expect("whole");
+        assert!(dir.migrations.is_empty());
+        assert_eq!(range.migrations.len(), 4);
+        assert!(range.reaches_head());
+
+        // Replacing still refuses a longer range, naming the next migration.
+        let err = MigrationsDir::read_replacing(&root, "0002_b").expect_err("later");
+        assert_eq!(err.kind(), "later_migration");
+        assert!(
+            err.to_string().contains("0003_c chains from 0002_b"),
+            "{err}"
+        );
+        let (_, replaced) = MigrationsDir::read_replacing(&root, "0004_d").expect("head");
+        assert_eq!(replaced.dir_name(), "0004_d");
+    }
+
+    #[test]
+    fn a_run_refuses_a_shared_bare_number_and_an_absent_target() {
+        let root = scratch("range-refusals");
+        let a = migration(&root, "0001_a", None);
+        migration(&root, "0002_x", Some(&a));
+        migration(&root, "0002_y", Some(&a));
+        let err = MigrationsDir::read_range(&root, "0002").expect_err("ambiguous");
+        assert_eq!(err.kind(), "ambiguous_number");
+        let message = err.to_string();
+        assert!(
+            message.contains("0002_x") && message.contains("0002_y"),
+            "{message}"
+        );
+        let err = MigrationsDir::read_range(&root, "0009").expect_err("absent");
+        assert_eq!(err.kind(), "no_such_migration");
+        assert!(err.to_string().contains("0009"), "{err}");
+    }
+
+    #[test]
+    fn a_malformed_file_inside_a_run_is_refused_naming_it() {
+        let root = scratch("range-malformed");
+        let a = migration(&root, "0001_a", None);
+        let b = migration(&root, "0002_b", Some(&a));
+        migration(&root, "0003_c", Some(&b));
+        write(
+            &root.join("0003_c/01_schema.up.postgres.sql"),
+            "-- ferro: not a header\nSELECT 1;\n",
+        );
+        let err = MigrationsDir::read_range(&root, "0002_b").expect_err("malformed");
+        assert_eq!(err.kind(), "unparseable_header");
+        assert!(
+            err.to_string().contains("0003_c/01_schema.up.postgres.sql"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn replacing_a_fork_refuses_naming_the_first_later_migration() {
+        // Oracle: `read_replacing` at 8d30029 on this directory.
+        let root = scratch("replacing-fork");
+        let a = migration(&root, "0001_a", None);
+        let b = migration(&root, "0002_b", Some(&a));
+        migration(&root, "0003_p", Some(&b));
+        migration(&root, "0003_q", Some(&b));
+        let err = MigrationsDir::read_replacing(&root, "0002_b").expect_err("fork");
+        assert_eq!(err.kind(), "later_migration");
+        assert_eq!(
+            err.to_string(),
+            "0003_p chains from 0002_b, and only the newest migration can be replaced: \
+             replace the later one first, or delete it. Nothing was written"
+        );
+    }
+
+    #[test]
+    fn replacing_one_of_two_siblings_reads_the_other_chain_below() {
+        // Oracle: `read_replacing` at 8d30029 on this directory.
+        let root = scratch("replacing-siblings");
+        let a = migration(&root, "0001_a", None);
+        migration(&root, "0002_x", Some(b"a stale parent"));
+        let y = migration(&root, "0002_y", Some(&a));
+        migration(&root, "0003_after_y", Some(&y));
+        let (dir, replaced) = MigrationsDir::read_replacing(&root, "0002_x").expect("read");
+        assert_eq!(replaced.dir_name(), "0002_x");
+        let names: Vec<String> = dir.migrations.iter().map(Migration::dir_name).collect();
+        assert_eq!(names, ["0001_a", "0002_y", "0003_after_y"]);
+    }
+
+    fn off(migration: &str, chains_from: Option<&str>) -> OffRange {
+        OffRange {
+            migration: migration.to_string(),
+            chains_from: chains_from.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn a_run_reports_whether_it_reaches_the_head() {
+        let root = scratch("range-reach");
+        let a = migration(&root, "0001_a", None);
+        migration(&root, "0002_x", Some(b"a stale parent"));
+        let y = migration(&root, "0002_y", Some(&a));
+        migration(&root, "0003_after_y", Some(&y));
+        let (dir, range) = MigrationsDir::read_range(&root, "0002_x").expect("range");
+        assert_eq!(range.migrations.len(), 1);
+        assert!(!range.reaches_head());
+        assert_eq!(range.off_range, [off("0003_after_y", Some("0002_y"))]);
+        assert_eq!(range.siblings, ["0002_y"]);
+        let names: Vec<String> = dir.migrations.iter().map(Migration::dir_name).collect();
+        assert_eq!(names, ["0001_a"]);
+
+        // A fork leaves its second branch off the range, not a "gap".
+        let root = scratch("range-fork");
+        let a = migration(&root, "0001_a", None);
+        let b = migration(&root, "0002_b", Some(&a));
+        migration(&root, "0003_p", Some(&b));
+        migration(&root, "0003_q", Some(&b));
+        let (dir, range) = MigrationsDir::read_range(&root, "0002_b").expect("range");
+        assert_eq!(range.migrations.len(), 2);
+        assert!(!range.reaches_head());
+        assert_eq!(range.off_range, [off("0003_q", Some("0002_b"))]);
+
+        // An off-range migration whose parent link names no snapshot in the
+        // directory chains from nothing.
+        let root = scratch("range-off-range-orphan");
+        let a = migration(&root, "0001_a", None);
+        migration(&root, "0002_b", Some(&a));
+        migration(&root, "0003_lost", Some(b"a stale parent"));
+        let (_, range) = MigrationsDir::read_range(&root, "0002_b").expect("range");
+        assert_eq!(range.off_range, [off("0003_lost", None)]);
+        assert_eq!(dir.migrations.len(), 1);
+
+        let root = scratch("range-head");
+        let a = migration(&root, "0001_a", None);
+        migration(&root, "0002_b", Some(&a));
+        let (_, range) = MigrationsDir::read_range(&root, "0001_a").expect("range");
+        assert!(range.reaches_head());
+        assert!(range.off_range.is_empty());
+    }
+
+    #[test]
+    fn a_sibling_at_the_runs_number_is_never_below_it() {
+        // Panel F1 on #690: a lone sibling with no children was read as the
+        // range's parent, and the squash planned its tables as drops.
+        let root = scratch("range-lone-sibling");
+        let a = migration(&root, "0001_a", None);
+        migration(&root, "0002_other", Some(&a));
+        migration(&root, "0002_add_tmp", Some(&a));
+        let (dir, range) = MigrationsDir::read_range(&root, "0002_add_tmp").expect("range");
+        assert_eq!(range.migrations.len(), 1);
+        assert!(!range.reaches_head());
+        assert!(range.off_range.is_empty());
+        assert_eq!(range.siblings, ["0002_other"]);
+        let names: Vec<String> = dir.migrations.iter().map(Migration::dir_name).collect();
+        assert_eq!(names, ["0001_a"]);
+
+        // The range continuing past the sibling's number changes nothing.
+        let root = scratch("range-sibling-below-a-longer-range");
+        let a = migration(&root, "0001_a", None);
+        migration(&root, "0002_other", Some(&a));
+        let x = migration(&root, "0002_x", Some(&a));
+        migration(&root, "0003_after_x", Some(&x));
+        let (dir, range) = MigrationsDir::read_range(&root, "0002_x").expect("range");
+        assert_eq!(range.migrations.len(), 2);
+        assert!(!range.reaches_head());
+        assert!(range.off_range.is_empty());
+        assert_eq!(range.siblings, ["0002_other"]);
+        assert_eq!(dir.migrations.len(), 1);
     }
 
     #[test]
@@ -1739,5 +2366,153 @@ CREATE INDEX i ON t (c);
             message.contains("0001_a/01_schema") && message.contains("sqlite"),
             "{message}"
         );
+    }
+
+    /// A witness entry for `migration`, with `nested` under it.
+    fn entry(migration: &str, nested: Vec<WitnessEntry>) -> WitnessEntry {
+        WitnessEntry {
+            migration: migration.to_string(),
+            snapshot_checksum: sha384(migration.as_bytes()),
+            steps: vec![1],
+            replaces: nested,
+        }
+    }
+
+    /// Write a squash: [`migration`] whose v3 `ir.json` carries `replaces`.
+    fn squash(
+        root: &Path,
+        dir_name: &str,
+        parent: Option<&[u8]>,
+        replaces: &[WitnessEntry],
+    ) -> Vec<u8> {
+        migration(root, dir_name, parent);
+        let mut ir = empty_ir();
+        ir.ir_version = 3;
+        let bytes = Snapshot::store(&ir, parent.map(sha384), replaces).expect("store");
+        std::fs::write(root.join(dir_name).join(SNAPSHOT_FILE), &bytes).expect("ir.json");
+        bytes
+    }
+
+    #[test]
+    fn a_well_formed_witness_is_read_with_its_migration() {
+        let root = scratch("witness");
+        let a = migration(&root, "0001_a", None);
+        let witness = [
+            entry("0002_squashed", vec![entry("0002_b", vec![])]),
+            entry("0003_c", vec![]),
+        ];
+        squash(&root, "0002_epic", Some(&a), &witness);
+        let read = MigrationsDir::read(&root).expect("a well-formed witness loads");
+        assert_eq!(read.migrations[0].witness, []);
+        assert_eq!(read.migrations[1].witness, witness);
+        assert_eq!(read.migrations[1].snapshot.replaces, witness);
+
+        let json = serde_json::to_value(&read.migrations[1]).expect("serialises");
+        assert_eq!(json["replaces"][0]["migration"], "0002_squashed");
+        assert_eq!(json["replaces"][0]["replaces"][0]["migration"], "0002_b");
+        assert_eq!(json["replaces"][1]["replaces"], serde_json::json!([]));
+        assert_eq!(json["replaces"][1]["steps"], serde_json::json!([1]));
+        assert_eq!(
+            json["replaces"][1]["snapshot_checksum"],
+            encode_checksum(&sha384(b"0003_c"))
+        );
+        assert_eq!(json["snapshot"]["replaces"], json["replaces"]);
+        let first = serde_json::to_value(&read.migrations[0]).expect("serialises");
+        assert_eq!(first["replaces"], serde_json::json!([]));
+    }
+
+    /// The originals `0001_a` and `0002_b` squashed into `0001_epic` (a
+    /// squash takes its first original's number and its parent), with the
+    /// original `left` still in the directory; `nested` wraps the two
+    /// originals in an earlier squash of theirs.
+    fn squash_beside_an_original(left: &str, nested: bool) -> PathBuf {
+        let root = scratch("witness-present");
+        let a = migration(&root, "0001_a", None);
+        migration(&root, "0002_b", Some(&a));
+        let originals = vec![entry("0001_a", vec![]), entry("0002_b", vec![])];
+        let witness = if nested {
+            vec![entry("0001_earlier", originals)]
+        } else {
+            originals
+        };
+        squash(&root, "0001_epic", None, &witness);
+        for original in ["0001_a", "0002_b"] {
+            if original != left {
+                std::fs::remove_dir_all(root.join(original)).expect("rm original");
+            }
+        }
+        root
+    }
+
+    #[test]
+    fn an_original_left_beside_its_squash_is_refused_by_the_witness_before_any_other_check() {
+        // `0002_b` left behind breaks no number but would break the chain;
+        // `0001_a` left behind shares the squash's number. Either way the
+        // refusal is the witness's, with its fix.
+        for (left, nested) in [
+            ("0002_b", false),
+            ("0001_a", false),
+            ("0002_b", true),
+            ("0001_a", true),
+        ] {
+            let root = squash_beside_an_original(left, nested);
+            let expected = DirectoryError::WitnessNamesPresent {
+                squash: "0001_epic".into(),
+                named: left.into(),
+            };
+            let text = format!(
+                "0001_epic/ir.json records that the squash 0001_epic replaces {left}, but \
+                 {left} is still in the migrations directory; delete it, or delete the squash \
+                 0001_epic"
+            );
+            let err = MigrationsDir::read(&root).expect_err("an original is left");
+            assert_eq!(err, expected, "{left} nested={nested}: {err}");
+            assert_eq!(err.kind(), "witness_names_present");
+            assert_eq!(err.to_string(), text);
+            for target in ["0001_epic", "0001", left] {
+                let err = MigrationsDir::read_range(&root, target).expect_err("range");
+                assert_eq!(err, expected, "read_range {target}: {err}");
+                let err = MigrationsDir::read_replacing(&root, target).expect_err("replace");
+                assert_eq!(err, expected, "read_replacing {target}: {err}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_squash_alone_reads_whole() {
+        let root = squash_beside_an_original("none", false);
+        let read = MigrationsDir::read(&root).expect("the originals are gone");
+        assert_eq!(read.migrations.len(), 1);
+        assert_eq!(read.migrations[0].witness.len(), 2);
+    }
+
+    #[test]
+    fn a_malformed_witness_is_refused_naming_its_ir_json_and_restore_the_file() {
+        let root = scratch("witness-malformed");
+        let a = migration(&root, "0001_a", None);
+        let witness = [entry("0002_b", vec![])];
+        let good = squash(&root, "0002_epic", Some(&a), &witness);
+        let good = String::from_utf8(good).expect("utf-8");
+        let hex = encode_checksum(&witness[0].snapshot_checksum);
+        let nested_repeat = {
+            let mut value: serde_json::Value = serde_json::from_str(&good).expect("json");
+            value["replaces"][0]["replaces"] = serde_json::to_value(&witness).expect("json");
+            serde_json::to_string_pretty(&value).expect("json")
+        };
+        for broken in [
+            good.replace(&hex, &hex[..95]),
+            good.replace("\"steps\": [\n        1\n      ]", "\"steps\": []"),
+            nested_repeat,
+        ] {
+            assert_ne!(broken, good, "the edit applies");
+            std::fs::write(root.join("0002_epic/ir.json"), &broken).expect("write");
+            let err = MigrationsDir::read(&root).expect_err("malformed witness");
+            assert_eq!(err.kind(), "unreadable_snapshot");
+            let message = err.to_string();
+            assert!(
+                message.contains("0002_epic/ir.json") && message.contains("restore the file"),
+                "{message}"
+            );
+        }
     }
 }

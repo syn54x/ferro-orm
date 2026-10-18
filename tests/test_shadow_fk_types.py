@@ -100,7 +100,6 @@ async def test_uuid_fk_create_get_dump(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         parent = await UuidIssueParent.create(name="p")
         child = await UuidIssueChild.create(parent=parent)
 
@@ -142,7 +141,6 @@ async def test_uuid_fk_forward_ref_child_declared_first(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         parent = await UuidFrwParent.create(name="p")
         child = await UuidFrwChild.create(parent=parent)
         fetched = await UuidFrwChild.get(child.id)
@@ -210,7 +208,6 @@ async def test_uuid_fk_save_after_reparenting(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         parent_a = await UuidMutParent.create(name="a")
         parent_b = await UuidMutParent.create(name="b")
         child = await UuidMutChild.create(label="row", parent=parent_a)
@@ -243,7 +240,6 @@ async def test_uuid_fk_bulk_create(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         px = await UuidBulkParent.create(name="x")
         py = await UuidBulkParent.create(name="y")
 

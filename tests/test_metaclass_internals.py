@@ -199,8 +199,7 @@ class TestResolveDeferredAnnotations:
             ModelMetaclass._resolve_deferred_annotations(namespace)
         # short-circuit path adds no ferro note
         assert not any(
-            "ferro:" in note
-            for note in getattr(exc_info.value, "__notes__", [])
+            "ferro:" in note for note in getattr(exc_info.value, "__notes__", [])
         )
 
 

@@ -661,9 +661,7 @@ async def test_a_rebuilt_policy_filters_by_the_new_setting(db_url, pg_role):
 @pytest.mark.backend_matrix
 @pytest.mark.postgres_only
 @pytest.mark.asyncio
-async def test_a_policy_narrowed_to_a_role_is_rebuilt_back_to_public(
-    db_url, pg_role
-):
+async def test_a_policy_narrowed_to_a_role_is_rebuilt_back_to_public(db_url, pg_role):
     """``ALTER POLICY … TO admin_role`` is drift no expression comparison can
     see — and on a RESTRICTIVE policy it makes the table fail **open**, because
     a restrictive policy that does not apply to a role stops restricting it.

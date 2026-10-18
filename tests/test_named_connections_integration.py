@@ -12,7 +12,6 @@ class NamedSmokeMarker(ferro.Model):
 
 if TYPE_CHECKING:
     from ferro.models import ModelConnection
-    from ferro.query import Query
 
     async def _typing_assertions_for_using_interface() -> None:
         """Static type-checking regression tests for `Model.using(...)`.
@@ -70,7 +69,6 @@ async def test_named_connections_smoke_matrix_sqlite(tmp_path):
     await ferro.create_tables(using="service")
 
     async with ferro.engines.session():
-
         app_row = await NamedSmokeMarker.create(id=1, label="app")
 
         # `using="service"` conflicts with the ambient "app" session (D4)
@@ -79,7 +77,9 @@ async def test_named_connections_smoke_matrix_sqlite(tmp_path):
         # a matching ambient session while the outer "app" session (and its
         # identity map) stays open underneath.
         async with ferro.engines.session("service"):
-            service_row = await NamedSmokeMarker.using("service").create(id=1, label="service")
+            service_row = await NamedSmokeMarker.using("service").create(
+                id=1, label="service"
+            )
 
         assert app_row is not service_row
         assert (await NamedSmokeMarker.get(1)).label == "app"

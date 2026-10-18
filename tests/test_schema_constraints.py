@@ -171,9 +171,7 @@ async def test_foreign_key_index_runtime_ddl_parity(db_url):
     conn.close()
 
     matching = [row for row in indexes if row[0] == "idx_project_org_id"]
-    assert matching, (
-        f"Expected idx_project_org_id on table 'project', got: {indexes!r}"
-    )
+    assert matching, f"Expected idx_project_org_id on table 'project', got: {indexes!r}"
     assert "org_id" in (matching[0][2] or ""), (
         f"Index DDL should reference org_id column: {matching[0][2]!r}"
     )

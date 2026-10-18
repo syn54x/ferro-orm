@@ -216,13 +216,14 @@ def test_no_register_model_schema_calls_in_ferro_package() -> None:
     """Python registration paths must not call the legacy per-model Rust FFI."""
     offenders: list[str] = []
     for path in sorted(_SRC_ROOT.rglob("*.py")):
-        for lineno in _register_model_schema_call_linenos(path.read_text(encoding="utf-8")):
+        for lineno in _register_model_schema_call_linenos(
+            path.read_text(encoding="utf-8")
+        ):
             rel = path.relative_to(_SRC_ROOT)
             offenders.append(f"{rel}:{lineno}")
     assert not offenders, (
         "register_model_schema is legacy per-model Rust registration; "
-        "use Python envelope caches + bulk install instead:\n"
-        + "\n".join(offenders)
+        "use Python envelope caches + bulk install instead:\n" + "\n".join(offenders)
     )
 
 

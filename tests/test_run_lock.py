@@ -18,6 +18,7 @@ import pytest
 import ferro
 from ferro.migrations import runner
 from ferro.migrations.report import RunRefused
+from tests.test_migrate_inherit import squashed
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     AUTHOR,
     pkg,
@@ -34,6 +35,7 @@ from tests.test_migrate_up import (  # noqa: F401 - fixtures
     settings_and_database,
     sql_step,
 )
+from tests.test_migrate_squash import no_bytecode  # noqa: F401 - fixture
 
 pytestmark = [
     pytest.mark.usefixtures("isolated_imports", "clean_registry"),
@@ -351,6 +353,42 @@ async def test_a_lock_lost_inside_a_downs_transaction_is_the_lost_lock_refusal(
 
     assert "slow" in db.tables()
     assert [(r[0], r[1]) for r in db.rows(RECORDS)] == [(1, 1), (2, 1)]
+
+
+async def test_a_lock_lost_while_an_inheritance_writes_commits_nothing(
+    project, pkg, db, no_bytecode
+):
+    """An inheritance verifies the lock inside its transaction, before it
+    commits (ADR-0029 as amended, panel F4 on #690): a lock lost after the
+    write began rolls the swap back and refuses as a lost lock, so a second
+    run that took the lock never meets this run's stale swap."""
+    if db.backend != "postgres":
+        pytest.skip("only a Postgres lock lives on a connection that can drop")
+    await asyncio.to_thread(squashed, project, pkg, db)
+    _, database = settings_and_database()
+    named = "SELECT migration_name, step, origin FROM _ferro_migrations ORDER BY 1, 2"
+    before = db.rows(named)
+    # Another session holds a witnessed record, so the inheritance's delete
+    # waits on it while the lock goes.
+    import psycopg
+
+    blocker = psycopg.connect(db.base)
+    blocker.execute(f'SET search_path TO "{db.schema}"')
+    blocker.execute("SELECT 1 FROM _ferro_migrations WHERE migration = 2 FOR UPDATE")
+    tracked = await _tracked(db, database)
+    try:
+        async with tracked.locked(5.0) as run:
+            inheriting = asyncio.ensure_future(run.inherit(runner._declared_kind))
+            await asyncio.sleep(0.4)
+            assert not inheriting.done()
+            await run._close_lock_connection_for_test()
+            blocker.rollback()
+            with pytest.raises(RunRefused, match="the run lock was lost"):
+                await inheriting
+    finally:
+        blocker.close()
+
+    assert db.rows(named) == before
 
 
 async def test_a_baseline_planned_by_another_run_is_never_written(project, pkg, db):

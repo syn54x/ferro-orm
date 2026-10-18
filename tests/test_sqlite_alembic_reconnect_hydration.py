@@ -72,7 +72,9 @@ async def _reload_row[M: Model](model: type[M], uri: str, row_id: str) -> M:
     return row
 
 
-def _sqlite_typeof(db_path: Path, table: str, column: str, row_id: str) -> tuple[Any, str]:
+def _sqlite_typeof(
+    db_path: Path, table: str, column: str, row_id: str
+) -> tuple[Any, str]:
     with sqlite3.connect(db_path) as conn:
         value, affinity = conn.execute(
             f"SELECT {column}, typeof({column}) FROM {table} WHERE id = ?",
@@ -86,7 +88,9 @@ async def test_null_optional_datetime_is_none_not_zero() -> None:
     """Issue #56: NULL DATETIME must not hydrate as int(0)."""
 
     class Client(Model):
-        id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True, db_type="text")
+        id: str = Field(
+            default_factory=lambda: str(uuid4()), primary_key=True, db_type="text"
+        )
         name: str
         archived_at: datetime | None = None
 
@@ -104,8 +108,12 @@ async def test_null_optional_datetime_is_none_not_zero() -> None:
 @pytest.mark.asyncio
 async def test_non_null_datetime_round_trips() -> None:
     class Event(Model):
-        id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True, db_type="text")
-        happened_at: datetime = Field(default_factory=lambda: datetime(2026, 4, 24, 18, 30, tzinfo=UTC))
+        id: str = Field(
+            default_factory=lambda: str(uuid4()), primary_key=True, db_type="text"
+        )
+        happened_at: datetime = Field(
+            default_factory=lambda: datetime(2026, 4, 24, 18, 30, tzinfo=UTC)
+        )
 
     async with _alembic_sqlite_db() as (uri, db_path):
         await ferro.connect(uri, auto_migrate=False)
@@ -121,7 +129,9 @@ async def test_non_null_datetime_round_trips() -> None:
 @pytest.mark.asyncio
 async def test_non_null_date_round_trips() -> None:
     class Day(Model):
-        id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True, db_type="text")
+        id: str = Field(
+            default_factory=lambda: str(uuid4()), primary_key=True, db_type="text"
+        )
         on_date: date
 
     async with _alembic_sqlite_db() as (uri, db_path):
@@ -149,7 +159,9 @@ async def test_decimal_round_trips(hours: Decimal, expected: Decimal) -> None:
     """Issue #58 class: NUMERIC columns must survive SQLite affinity + reconnect."""
 
     class Widget(Model):
-        id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True, db_type="text")
+        id: str = Field(
+            default_factory=lambda: str(uuid4()), primary_key=True, db_type="text"
+        )
         hours: Decimal
 
     async with _alembic_sqlite_db() as (uri, db_path):
@@ -170,7 +182,9 @@ async def test_decimal_string_literal_round_trips() -> None:
     """String INSERT into NUMERIC may coerce affinity; value must still hydrate."""
 
     class Widget(Model):
-        id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True, db_type="text")
+        id: str = Field(
+            default_factory=lambda: str(uuid4()), primary_key=True, db_type="text"
+        )
         hours: Decimal
 
     row_id = str(uuid4())
@@ -192,7 +206,9 @@ async def test_decimal_string_literal_round_trips() -> None:
 @pytest.mark.asyncio
 async def test_optional_decimal_null_is_none() -> None:
     class Line(Model):
-        id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True, db_type="text")
+        id: str = Field(
+            default_factory=lambda: str(uuid4()), primary_key=True, db_type="text"
+        )
         amount: Decimal | None = None
 
     async with _alembic_sqlite_db() as (uri, db_path):
@@ -209,7 +225,9 @@ async def test_optional_decimal_null_is_none() -> None:
 @pytest.mark.asyncio
 async def test_bool_round_trips() -> None:
     class Flag(Model):
-        id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True, db_type="text")
+        id: str = Field(
+            default_factory=lambda: str(uuid4()), primary_key=True, db_type="text"
+        )
         is_active: bool
 
     async with _alembic_sqlite_db() as (uri, db_path):
@@ -227,7 +245,9 @@ async def test_bool_round_trips() -> None:
 @pytest.mark.asyncio
 async def test_uuid_round_trips() -> None:
     class Token(Model):
-        id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True, db_type="text")
+        id: str = Field(
+            default_factory=lambda: str(uuid4()), primary_key=True, db_type="text"
+        )
         subject_id: UUID
 
     token = uuid4()
@@ -244,7 +264,9 @@ async def test_uuid_round_trips() -> None:
 @pytest.mark.asyncio
 async def test_json_dict_round_trips() -> None:
     class Doc(Model):
-        id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True, db_type="text")
+        id: str = Field(
+            default_factory=lambda: str(uuid4()), primary_key=True, db_type="text"
+        )
         payload: dict[str, str]
 
     data = {"k": "v", "n": "2"}
@@ -265,7 +287,9 @@ async def test_non_null_int_zero_round_trips() -> None:
     """Legitimate integer 0 must not be confused with NULL (#56 regression guard)."""
 
     class Counter(Model):
-        id: str = Field(default_factory=lambda: str(uuid4()), primary_key=True, db_type="text")
+        id: str = Field(
+            default_factory=lambda: str(uuid4()), primary_key=True, db_type="text"
+        )
         score: int
 
     async with _alembic_sqlite_db() as (uri, db_path):

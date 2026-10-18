@@ -40,7 +40,6 @@ async def test_structural_types_roundtrip(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         uid = uuid.uuid4()
         raw_data = b"hello world"
         balance = Decimal("123.456")
@@ -97,7 +96,6 @@ async def test_json_column_list_of_nested_pydantic_models_roundtrip(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         empty = await JsonListParent.create(items=[])
         from ferro import evict_instance
 
@@ -134,7 +132,6 @@ async def test_structural_filtering(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         uid1 = uuid.uuid4()
         uid2 = uuid.uuid4()
 
@@ -162,7 +159,6 @@ async def test_uuid_in_filter_serializes_collection_values(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         uid1 = uuid.uuid4()
         uid2 = uuid.uuid4()
         uid3 = uuid.uuid4()
@@ -186,15 +182,14 @@ async def test_uuid_filter_serializes_for_update_and_delete_queries(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         uid1 = uuid.uuid4()
         uid2 = uuid.uuid4()
         await UuidMutationModel.create(run_id=uid1, label="old")
         await UuidMutationModel.create(run_id=uid2, label="keep")
 
-        updated = await UuidMutationModel.where(
-            lambda m: m.run_id == uid1
-        ).update(label="new")
+        updated = await UuidMutationModel.where(lambda m: m.run_id == uid1).update(
+            label="new"
+        )
         assert updated == 1
 
         fetched = await UuidMutationModel.where(lambda m: m.run_id == uid1).first()
@@ -220,7 +215,6 @@ async def test_postgres_json_and_decimal_updates_keep_typed_hydration(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         row = await PgTypedMutation.create(
             metadata={"old": "value"},
             tags=["a"],
@@ -278,7 +272,6 @@ async def test_native_postgres_enum_column_decodes_via_text_cast(
 
     await connect(db_url)
     async with ferro.engines.session():
-
         fetched = await Transcript.get(1)
         assert fetched is not None
         assert fetched.format == TranscriptFormat.PDF
@@ -286,7 +279,9 @@ async def test_native_postgres_enum_column_decodes_via_text_cast(
 
 @pytest.mark.asyncio
 @pytest.mark.postgres_only
-async def test_native_postgres_enum_where_lambda_count(db_url, postgres_base_url, db_schema_name):
+async def test_native_postgres_enum_where_lambda_count(
+    db_url, postgres_base_url, db_schema_name
+):
     """Regression for #63: filter predicates must cast enum RHS to the PG UDT."""
 
     class Color(str, Enum):
@@ -315,7 +310,6 @@ async def test_native_postgres_enum_where_lambda_count(db_url, postgres_base_url
 
     await connect(db_url, auto_migrate=False)
     async with ferro.engines.session():
-
         count = await Widget.where(lambda w, c=Color.RED: w.color == c).count()
         assert count == 1
 
@@ -355,7 +349,6 @@ async def test_native_postgres_enum_plain_str_column(
 
     await connect(db_url, auto_migrate=False)
     async with ferro.engines.session():
-
         row = await StrFieldEnumModel.create(status="active")
         fetched = await StrFieldEnumModel.get(row.id)
 
@@ -365,9 +358,7 @@ async def test_native_postgres_enum_plain_str_column(
 
 @pytest.mark.asyncio
 @pytest.mark.postgres_only
-async def test_native_uuid_null_inserts(
-    db_url, postgres_base_url, db_schema_name
-):
+async def test_native_uuid_null_inserts(db_url, postgres_base_url, db_schema_name):
     """Optional ``UUID`` columns on Postgres need ``::uuid`` casts, including for ``NULL``."""
 
     class UuidRun(Model):
@@ -390,7 +381,6 @@ async def test_native_uuid_null_inserts(
 
     await connect(db_url, auto_migrate=False)
     async with ferro.engines.session():
-
         row = await UuidRun.create()
         assert row.id is not None
         assert row.run_id is None
@@ -430,7 +420,6 @@ async def test_native_timestamp_without_time_zone_null_and_value(
 
     await connect(db_url, auto_migrate=False)
     async with ferro.engines.session():
-
         row = await RowWithTs.create()
         assert row.scrubbed_at is None
         d = datetime(2024, 1, 2, 3, 4, 5, tzinfo=UTC)

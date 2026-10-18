@@ -70,9 +70,9 @@ class INTransaction(Model):
     amount: int = 0
     note: str = ""
     account: Annotated[INAccount | None, ForeignKey(related_name="transactions")] = None
-    category: Annotated[
-        INCategory | None, ForeignKey(related_name="transactions")
-    ] = None
+    category: Annotated[INCategory | None, ForeignKey(related_name="transactions")] = (
+        None
+    )
 
 
 class INMAuthor(Model):

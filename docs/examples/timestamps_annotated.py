@@ -30,6 +30,8 @@ class Note(TimestampMixin, Model):
     text: str
     created_at: Annotated[datetime, Field(default_factory=utcnow)]
     updated_at: Annotated[datetime, Field(default_factory=utcnow)]
+
+
 # --8<-- [end:model]
 
 

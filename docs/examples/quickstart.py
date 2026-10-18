@@ -6,7 +6,16 @@ import asyncio
 from datetime import datetime
 from typing import Annotated
 
-from ferro import BackRef, Field, ForeignKey, Model, Relation, connect, engines, transaction
+from ferro import (
+    BackRef,
+    Field,
+    ForeignKey,
+    Model,
+    Relation,
+    connect,
+    engines,
+    transaction,
+)
 
 
 class Author(Model):
@@ -23,6 +32,8 @@ class Post(Model):
     published: bool = False
     created_at: datetime = Field(default_factory=datetime.now)
     author: Annotated[Author, ForeignKey(related_name="posts")]
+
+
 # --8<-- [end:models]
 
 
@@ -45,7 +56,12 @@ async def main() -> None:
         # Insert many rows in a single statement
         await Post.bulk_create(
             [
-                Post(title="Async Patterns", body="...", published=True, author_id=alice.id),
+                Post(
+                    title="Async Patterns",
+                    body="...",
+                    published=True,
+                    author_id=alice.id,
+                ),
                 Post(title="Unfinished Draft", body="...", author_id=alice.id),
             ]
         )
@@ -78,7 +94,9 @@ async def main() -> None:
         author = await same_post.author
 
         # Reverse access: the BackRef is a chainable query
-        alice_posts = await author.posts.where(lambda post: post.published == True).all()  # noqa: E712
+        alice_posts = await author.posts.where(
+            lambda post: post.published == True  # noqa: E712
+        ).all()
         # --8<-- [end:relationships]
         assert author.name == "Alice"
         assert len(alice_posts) == 2
@@ -89,10 +107,14 @@ async def main() -> None:
         await post.save()
 
         # Update many rows at once
-        updated = await Post.where(lambda post: post.published == False).update(published=True)  # noqa: E712
+        updated = await Post.where(lambda post: post.published == False).update(  # noqa: E712
+            published=True
+        )
 
         # Delete
-        deleted = await Post.where(lambda post: post.title == "Unfinished Draft").delete()
+        deleted = await Post.where(
+            lambda post: post.title == "Unfinished Draft"
+        ).delete()
         # --8<-- [end:update-delete]
         assert updated == 1
         assert deleted == 1

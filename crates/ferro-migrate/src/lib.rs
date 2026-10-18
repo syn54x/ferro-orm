@@ -14,6 +14,12 @@
 //! the generator ([`generate`]), which renders the planner's ops into a
 //! migration's step files.
 
+// The crate's error types (`RunRefusal`, `ComposeError`, `DirectoryError`, ...)
+// are refusals that carry their whole text and the hints or records they name,
+// built once per command and handed to Python, never returned in a loop, so
+// boxing them would buy nothing and cost every refusal site a `Box::new`.
+#![allow(clippy::result_large_err)]
+
 pub mod directory;
 mod emit;
 pub mod generate;
@@ -31,9 +37,10 @@ pub use directory::{
 pub use emit::{CreateTableEmission, order_models_for_create, render_create_table};
 pub use ferro_ddl_lowering::{Dialect, InPlaceChange, Report, ReportKind, Subject};
 pub use generate::{
-    CheckReport, GenerateError, GenerateOptions, GeneratedMigration, GeneratedStep,
-    NEW_TABLE_PREFIX, Problem, Rendering, STAGED_NOT_NULL_PREFIX, check_migrations, generate,
-    generate_with, new_table_name, staged_not_null_name,
+    CheckReport, ComposeError, Composed, DeadKind, DeadName, GenerateError, GenerateOptions,
+    GeneratedMigration, GeneratedStep, NEW_TABLE_PREFIX, Problem, Rendering,
+    STAGED_NOT_NULL_PREFIX, check_migrations, compose_range, generate, generate_with,
+    new_table_name, staged_not_null_name,
 };
 pub use order::order_by_dependencies;
 pub use plan::{

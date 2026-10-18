@@ -15,7 +15,6 @@ async def test_instance_delete(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-
         user = DeletableUser(username="delete_me")
         await user.save()
         user_id = user.id
@@ -44,7 +43,6 @@ async def test_query_delete(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-
         await DeletableUser(username="keep_1").save()
         await DeletableUser(username="delete_1").save()
         await DeletableUser(username="delete_2").save()
@@ -75,7 +73,6 @@ async def test_delete_evicts_identity_map(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-
         user = DeletableUser(username="evict_me")
         await user.save()
         user_id = user.id

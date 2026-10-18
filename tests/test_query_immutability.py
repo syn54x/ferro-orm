@@ -110,8 +110,8 @@ class TestTerminalsDoNotMutate:
             q = FirstImm.select()
             got = await q.first()
             assert got is not None
-            assert q._limit is None          # first() must not write _limit
-            assert len(await q.all()) == 2   # q still returns everything
+            assert q._limit is None  # first() must not write _limit
+            assert len(await q.all()) == 2  # q still returns everything
 
     @pytest.mark.asyncio
     async def test_exists_does_not_mutate(self, tmp_path):

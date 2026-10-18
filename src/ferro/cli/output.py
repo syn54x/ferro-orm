@@ -58,7 +58,13 @@ if TYPE_CHECKING:
     from ..migrations.layout import GeneratedMigration, GeneratedStep
     from ..migrations.report import MigrationStatus, StatusReport
     from ..migrations.rerecord import RerecordReport
-    from ..migrations.runner import AppliedStep, DownPlan, RunEvent, StepEvent
+    from ..migrations.runner import (
+        InheritedEvent,
+        AppliedStep,
+        DownPlan,
+        RunEvent,
+        StepEvent,
+    )
 
 __all__ = [
     "CHANGE_STYLE",
@@ -71,6 +77,7 @@ __all__ = [
     "StepFileRole",
     "applied_at_short",
     "kind_of_file",
+    "print_inherited",
     "print_baseline",
     "print_changes",
     "print_check",
@@ -135,8 +142,10 @@ status`` taught. The count heading above them stays plain bold."""
 STATES: dict[str, tuple[str, str]] = {
     "applied": ("ok", "green"),
     "applied (baseline)": ("ok", "green"),
+    "applied (inherited)": ("ok", "green"),
     "reverted": ("ok", "green"),
     "pending": ("pending", "yellow"),
+    "pending (inheritable)": ("pending", "yellow"),
     "failed": ("error", "bold red"),
     "interrupted": ("error", "red"),
     "applied (different checksum)": ("error", "red"),
@@ -445,18 +454,23 @@ def print_new(
     """What ``ferro migrate new`` wrote: the directory, each file with its
     role (and, under ``--replace``, what became of it), the change summary,
     the notes, and the warnings on stderr."""
+    from ..migrations.report import migration_span
+
     where = ""
-    if migration.replaces is not None:
+    if migration.squash:
+        where = f"(replaces {migration_span(migration.replaces)}, now deleted)"
+    elif migration.replaces:
+        [replaced_dir] = migration.replaces
         where = (
             "(regenerated in place)"
-            if migration.replaces == migration.dir_name
-            else f"(replaces {migration.replaces}, now deleted)"
+            if replaced_dir == migration.dir_name
+            else f"(replaces {replaced_dir}, now deleted)"
         )
     out.heading("ok", f"Wrote {shown_dir}", where)
 
     rows = list(_file_rows(migration))
     name_width = max(len(name) for name, *_ in rows)
-    replaced = migration.replaces is not None
+    replaced = bool(migration.replaces)
     role_width = max(len(role) for _, _, role, _ in rows)
     for name, kind, role, became in rows:
         line = Text("  ")
@@ -528,13 +542,20 @@ def _role(step: GeneratedStep, name: str) -> str:
 def _became(migration: GeneratedMigration, name: str) -> str:
     """Under ``new --replace``, what became of the replaced migration's
     file now called ``name``: kept, moved, renumbered, carried (to review),
-    new, or the new snapshot and what it chains from."""
+    new, or the new snapshot and what it chains from. Under ``squash``, a
+    generated file is regenerated, a carried one names the original it was,
+    and the snapshot is the run's last one's, composed."""
     from ..migrations.layout import SNAPSHOT_FILE, Moved
+    from ..migrations.report import migration_span
 
-    if migration.replaces is None:
+    if not migration.replaces:
         return ""
     if name == SNAPSHOT_FILE:
         parent = migration.chained_from or "no migration (the first)"
+        if migration.squash:
+            last = migration.replaces[-1]
+            span = migration_span(migration.replaces)
+            return f"{last}'s, chained from {parent}, replaces {span}"
         return f"new snapshot, chained from {parent}"
     moved = {new: (old, how) for old, new, how in migration.moves}
     if name not in moved:
@@ -546,9 +567,11 @@ def _became(migration: GeneratedMigration, name: str) -> str:
         )
         wins = "; it wins over the regenerated step of the same name" if over else ""
         return f"carried, review it (was {old}{wins})"
+    if how is Moved.REGENERATED:
+        return "regenerated"
     if how is Moved.RENUMBERED:
         return f"renumbered (was {old})"
-    if migration.replaces == migration.dir_name:
+    if migration.replaces == [migration.dir_name]:
         return "kept"
     return f"moved (was {old})"
 
@@ -682,7 +705,14 @@ def print_status(out: Output, report: StatusReport, *, steps: bool) -> None:
     names = [m.name for m in report.migrations] + report.ahead
     width = max((len(name) for name in names), default=0)
     for migration in report.migrations:
-        _status_row(out, migration.name, migration.state, width, migration.applied_at)
+        _status_row(
+            out,
+            migration.name,
+            migration.state,
+            width,
+            migration.applied_at,
+            hint=migration.hint,
+        )
         if steps or migration.expands:
             _status_steps(out, migration, steps=steps)
     for name in report.ahead:
@@ -698,8 +728,17 @@ def print_status(out: Output, report: StatusReport, *, steps: bool) -> None:
 
 
 def _status_row(
-    out: Output, name: str, state: str, width: int, applied_at: str | None
+    out: Output,
+    name: str,
+    state: str,
+    width: int,
+    applied_at: str | None,
+    *,
+    hint: str | None = None,
 ) -> None:
+    """One migration's row: glyph, name, state word, then its ``applied_at``
+    dim, or the migration's hint plain (a squash pending inheritance names
+    ``ferro migrate up``)."""
     key = _state_key(state)
     glyph = STATE_GLYPH[key]
     line = Text("  ")
@@ -709,6 +748,8 @@ def _status_row(
     when = applied_at_short(applied_at)
     if when:
         line.append(f"  {when}", style="dim")
+    if hint:
+        line.append(f"  {hint}")
     out.print(line)
 
 
@@ -875,13 +916,34 @@ def print_reverted(out: Output, reverted: Sequence[AppliedStep]) -> None:
     )
 
 
+def print_inherited(out: Output, event: InheritedEvent) -> None:
+    """A squash the run inherited, before any step (ADR-0056): the line
+    ``progress`` receives in the plain form (``inherited 0005_teams_epic: this
+    database had applied 0005_add_teams … 0009_fix_rows; nothing was
+    run``); on a TTY an ok heading, ``inherited <squash>`` bold and the rest
+    dim."""
+    from ..migrations.report import migration_span
+
+    if out.plain:
+        out.print(event.line())
+        return
+    out.heading(
+        "ok",
+        f"inherited {event.squash}",
+        f"this database had applied {migration_span(event.replaced)}; nothing was run",
+    )
+
+
 def print_event(out: Output, event: RunEvent) -> None:
     """One line a run says, as it says it: a finished step through
-    :func:`print_step` at the run's widths; any other line as it is."""
-    from ..migrations.runner import StepEvent
+    :func:`print_step` at the run's widths, an inherited squash through
+    :func:`print_inherited`; any other line as it is."""
+    from ..migrations.runner import InheritedEvent, StepEvent
 
     if isinstance(event, StepEvent):
         print_step(out, event, name_width=event.name_width, stem_width=event.stem_width)
+    elif isinstance(event, InheritedEvent):
+        print_inherited(out, event)
     else:
         out.print(event.text)
 

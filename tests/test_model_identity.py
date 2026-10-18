@@ -52,10 +52,16 @@ def test_ferro_table_rejects_non_string():
             id: int | None = None
 
 
-@pytest.mark.parametrize("bad", ["", "1starts_with_digit", "has space", "x" * 64, "users\n"])
+@pytest.mark.parametrize(
+    "bad", ["", "1starts_with_digit", "has space", "x" * 64, "users\n"]
+)
 def test_ferro_table_rejects_invalid_names(bad):
     with pytest.raises(ValueError, match="__ferro_table__"):
-        type("BadTable", (Model,), {"__ferro_table__": bad, "__annotations__": {"id": int | None}, "id": None})
+        type(
+            "BadTable",
+            (Model,),
+            {"__ferro_table__": bad, "__annotations__": {"id": int | None}, "id": None},
+        )
 
 
 def test_resolve_model_reference_short_and_qualified():

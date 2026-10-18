@@ -108,9 +108,7 @@ async def test_a_tracked_database_refuses_auto_migrate_through_the_config(
 
 
 @pytest.mark.parametrize("door", ["create_tables", "migrate"])
-async def test_the_manual_passes_refuse_a_tracked_database_too(
-    project, pkg, db, door
-):
+async def test_the_manual_passes_refuse_a_tracked_database_too(project, pkg, db, door):
     """``ferro.create_tables()`` and ``ferro.migrate()`` are the passes'
     public doors: they share the lock and the guard."""
     await track(project, pkg, db)

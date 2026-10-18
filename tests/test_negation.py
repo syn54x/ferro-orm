@@ -38,17 +38,13 @@ async def test_not_over_equality_and_inequality(db_url):
     async with engines.session():
         await _seed_products()
 
-        negated_eq = await _names(
-            NegProduct.where(lambda p: ~(p.category == "fruit"))
-        )
+        negated_eq = await _names(NegProduct.where(lambda p: ~(p.category == "fruit")))
         assert negated_eq == ["carrot", "donut"]
         assert negated_eq == await _names(
             NegProduct.where(lambda p: p.category != "fruit")
         )
 
-        negated_ne = await _names(
-            NegProduct.where(lambda p: ~(p.category != "fruit"))
-        )
+        negated_ne = await _names(NegProduct.where(lambda p: ~(p.category != "fruit")))
         assert negated_ne == ["apple", "banana"]
 
 
@@ -108,16 +104,12 @@ async def test_not_over_compounds(db_url):
         await _seed_products()
 
         not_and = await _names(
-            NegProduct.where(
-                lambda p: ~((p.category == "fruit") & (p.price >= 20))
-            )
+            NegProduct.where(lambda p: ~((p.category == "fruit") & (p.price >= 20)))
         )
         assert not_and == ["apple", "carrot", "donut"]
 
         not_or = await _names(
-            NegProduct.where(
-                lambda p: ~((p.category == "fruit") | (p.price >= 30))
-            )
+            NegProduct.where(lambda p: ~((p.category == "fruit") | (p.price >= 30)))
         )
         assert not_or == []
 
@@ -143,8 +135,9 @@ async def test_not_mixed_into_and_or_trees(db_url):
 
         rows = await _names(
             NegProduct.where(
-                lambda p: (~(p.category == "fruit") & (p.price < 40))
-                | ~(p.name.like("%o%"))
+                lambda p: (
+                    (~(p.category == "fruit") & (p.price < 40)) | ~(p.name.like("%o%"))
+                )
             )
         )
         # Left branch: carrot (non-fruit under 40). Right branch: no "o" in
@@ -205,9 +198,9 @@ class NegAccount(Model):
 class NegTxn(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     amount: float
-    account: Annotated[
-        NegAccount | None, ForeignKey(related_name="transactions")
-    ] = None
+    account: Annotated[NegAccount | None, ForeignKey(related_name="transactions")] = (
+        None
+    )
 
 
 @pytest.mark.asyncio

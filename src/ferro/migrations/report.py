@@ -177,7 +177,9 @@ _STATES = (
         attention=True,
     ),
     _State("applied_baseline", "applied (baseline)", applied=True, whole=True),
+    _State("applied_inherited", "applied (inherited)", applied=True, whole=True),
     _State("pending", "pending", whole=True),
+    _State("pending_inheritable", "pending (inheritable)", whole=True),
     _State("running", "running", unfinished=True, running=True),
     _State("failed", "failed", unfinished=True, attention=True),
     _State("interrupted", "interrupted", unfinished=True, attention=True),
@@ -201,6 +203,12 @@ def _state(*, word: str | None = None, shown: str | None = None) -> _State:
 _RUNNING = next(state for state in _STATES if state.running)
 
 
+def migration_span(names: Sequence[str]) -> str:
+    """``<first> … <last>`` of migration names in chain order, or the one
+    name: how an inheritance names what the database applied."""
+    return names[0] if len(names) == 1 else f"{names[0]} … {names[-1]}"
+
+
 @dataclass(frozen=True)
 class StepStatus:
     """One step of one migration."""
@@ -210,8 +218,9 @@ class StepStatus:
     """The file this database executes (or executed)."""
     state: str
     """``applied``, ``applied (different checksum)``, ``applied
-    (baseline)``, ``pending``, ``running``, ``failed``, ``interrupted`` or
-    ``reverting``."""
+    (baseline)``, ``applied (inherited)``, ``pending``, ``pending
+    (inheritable)`` (a squash the next run inherits, ADR-0056), ``running``,
+    ``failed``, ``interrupted`` or ``reverting``."""
     error: str | None = None
     """The last attempt's error, when recorded."""
     applied_checksum: str | None = None
@@ -241,7 +250,8 @@ class StepStatus:
     @property
     def applied(self) -> bool:
         """The step has a finished step record (``applied``, ``applied
-        (different checksum)`` or ``applied (baseline)``)."""
+        (different checksum)``, ``applied (baseline)`` or ``applied
+        (inherited)``)."""
         return _state(shown=self.state).applied
 
     @property
@@ -273,6 +283,22 @@ class MigrationStatus:
     name: str
     """``NNNN_<name>``."""
     steps: list[StepStatus]
+    inherits: list[str] = field(default_factory=list)
+    """For a squash pending its inheritance, ``NNNN_<name>`` of each migration
+    whose records witness it, in chain order: what the database applied.
+    Empty otherwise."""
+
+    @property
+    def hint(self) -> str | None:
+        """What to do about this migration, when ``status`` says it on its
+        row: for a squash pending inheritance, ``run `ferro migrate up`; this
+        database applied <first> … <last> and nothing will be run``."""
+        if not self.inherits:
+            return None
+        return (
+            f"run `ferro migrate up`; this database applied "
+            f"{migration_span(self.inherits)} and nothing will be run"
+        )
 
     @property
     def applied_at(self) -> str | None:
@@ -323,7 +349,8 @@ class MigrationStatus:
 
     @property
     def state(self) -> str:
-        """``applied`` / ``applied (baseline)`` / ``pending`` when every
+        """``applied`` / ``applied (baseline)`` / ``applied (inherited)`` /
+        ``pending`` / ``pending (inheritable)`` when every
         step agrees; ``running`` while a run is in it; ``applied (different
         checksum)`` when every step is applied and one changed; else
         ``partial, X of N steps``."""
@@ -364,7 +391,11 @@ class StatusReport:
     """``<schema>._ferro_migrations``."""
     migrations: list[MigrationStatus]
     ahead: list[str] = field(default_factory=list)
-    """Migrations this database has applied that the directory lacks."""
+    """Migrations this database has applied that the directory lacks. Never
+    the originals of a squash it is pending the inheritance of (ADR-0038)."""
+    inheritable: list[str] = field(default_factory=list)
+    """Each squash the next run inherits (``NNNN_<name>``), running nothing
+    (ADR-0056): pending, whatever ``allow_ahead`` says."""
     refusal: str | None = None
     """What ``up`` would refuse with, when it would."""
     refusal_needs_attention: bool = False
@@ -448,6 +479,7 @@ class StatusReport:
                     )
                     for s in m["steps"]
                 ],
+                inherits=list(m.get("inherits", ())),
             )
             for m in raw["migrations"]
         ]
@@ -458,6 +490,7 @@ class StatusReport:
             table=table,
             migrations=migrations,
             ahead=list(raw["ahead"]),
+            inheritable=list(raw.get("inheritable", ())),
             refusal=refusal if refusal is not None else raw["refusal"],
             refusal_needs_attention=(
                 True if refusal is not None else raw["refusal_needs_attention"]
@@ -473,7 +506,8 @@ class StatusReport:
         expanded = [m for m in self.migrations if steps or m.expands]
         file_width = max((len(s.file) for m in expanded for s in m.steps), default=0)
         for migration in self.migrations:
-            lines.append(f"{migration.name:<{name_width}}  {migration.state}")
+            hint = f"  {migration.hint}" if migration.hint else ""
+            lines.append(f"{migration.name:<{name_width}}  {migration.state}{hint}")
             if migration not in expanded:
                 continue
             for step in migration.steps:
@@ -515,6 +549,7 @@ class StatusReport:
                     for m in self.migrations
                 ],
                 "ahead": self.ahead,
+                "inheritable": self.inheritable,
                 "refusal": self.refusal,
             },
             indent=2,

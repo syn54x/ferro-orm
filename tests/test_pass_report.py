@@ -167,8 +167,10 @@ async def test_a_failed_pass_carries_what_committed_before_it(db_url):
     await ferro.connect(db_url)
     async with ferro.engines.session():
         await execute('CREATE TABLE "aaledger" ("id" serial PRIMARY KEY)')
-        await execute('CREATE TABLE "zzledger" ("id" serial PRIMARY KEY, "amount" varchar)')
-        await execute("INSERT INTO \"zzledger\" (\"amount\") VALUES ('not-a-number')")
+        await execute(
+            'CREATE TABLE "zzledger" ("id" serial PRIMARY KEY, "amount" varchar)'
+        )
+        await execute('INSERT INTO "zzledger" ("amount") VALUES (\'not-a-number\')')
 
     with pytest.raises(Exception, match="Auto-migrate DDL failed") as raised:
         await ferro.migrate()

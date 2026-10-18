@@ -9,7 +9,16 @@ rows that come back.
 import asyncio
 from typing import Annotated
 
-from ferro import BackRef, Field, ForeignKey, ManyToMany, Model, Relation, connect, engines
+from ferro import (
+    BackRef,
+    Field,
+    ForeignKey,
+    ManyToMany,
+    Model,
+    Relation,
+    connect,
+    engines,
+)
 
 
 # --8<-- [start:schema]
@@ -50,6 +59,8 @@ class SplitLine(Model):
         Category | None, ForeignKey(related_name="lines", on_delete="SET NULL")
     ] = None
     amount: int = 0
+
+
 # --8<-- [end:schema]
 
 
@@ -64,6 +75,8 @@ class User(Model):
     id: int | None = Field(default=None, primary_key=True)
     username: str
     tags: Relation[list["Tag"]] = BackRef()
+
+
 # --8<-- [end:m2m-schema]
 
 
@@ -106,8 +119,10 @@ async def main() -> None:
         # A line-less transaction survives through the OR's root branch, and
         # a transaction with several matching lines comes back exactly once.
         matching = await Transaction.where(
-            lambda t: t.category_id.in_(ids)
-            | t.lines.exists(lambda line: line.category_id.in_(ids))
+            lambda t: (
+                t.category_id.in_(ids)
+                | t.lines.exists(lambda line: line.category_id.in_(ids))
+            )
         ).all()
         # --8<-- [end:scoped]
         assert {t.amount for t in matching} == {-70, -10}
@@ -117,8 +132,10 @@ async def main() -> None:
         # predicate, ordering, and paging — nothing about the query changes.
         page = (
             await Transaction.where(
-                lambda t: t.category_id.in_(ids)
-                | t.lines.exists(lambda line: line.category_id.in_(ids))
+                lambda t: (
+                    t.category_id.in_(ids)
+                    | t.lines.exists(lambda line: line.category_id.in_(ids))
+                )
             )
             .order_by("amount", "desc")
             .limit(1)
@@ -146,8 +163,10 @@ async def main() -> None:
 
         # SOME line matches each condition (possibly different lines):
         some_line_each = await Transaction.where(
-            lambda t: t.lines.exists(lambda line: line.category_id.in_(ids))
-            & t.lines.exists(lambda line: line.amount <= -50)
+            lambda t: (
+                t.lines.exists(lambda line: line.category_id.in_(ids))
+                & t.lines.exists(lambda line: line.amount <= -50)
+            )
         ).all()
         # --8<-- [end:grouping]
         assert {t.amount for t in one_line_both} == {-55}

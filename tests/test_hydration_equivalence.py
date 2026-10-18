@@ -255,9 +255,9 @@ async def test_timestamptz_stable_under_non_utc_session_timezone(db_url):
     )
     async with ferro.engines.session():
         await execute("SET TIME ZONE 'America/Chicago'")
-        assert (
-            await ferro.raw.fetch_one("SHOW timezone")
-        )["TimeZone"] == "America/Chicago"
+        assert (await ferro.raw.fetch_one("SHOW timezone"))[
+            "TimeZone"
+        ] == "America/Chicago"
 
         row = _make_specimen(specimen_cls)
         await row.save()

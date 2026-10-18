@@ -242,7 +242,9 @@ def test_no_direct_store_writes_outside_state():
             rel = path.relative_to(_SRC_ROOT)
             offenders.append(f"{rel}:{lineno}")
     # Guard against a silently-empty scan (e.g. _SRC_ROOT drifting).
-    assert scanned >= 10, f"expected to scan the ferro package, only saw {scanned} files"
+    assert scanned >= 10, (
+        f"expected to scan the ferro package, only saw {scanned} files"
+    )
     assert not offenders, (
         "Direct per-model registry/envelope writes must route through "
         "REGISTRY.register / REGISTRY.persist_envelope / "

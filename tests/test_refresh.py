@@ -16,7 +16,6 @@ async def test_instance_refresh(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-
         # 1. Create a user
         user = await RefreshUser.create(username="taylor", points=100)
         assert user.points == 100
@@ -45,7 +44,6 @@ async def test_refresh_not_found(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-
         user = await RefreshUser.create(username="deleted_soon")
 
         # Delete it from DB

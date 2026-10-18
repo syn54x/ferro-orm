@@ -57,9 +57,7 @@ class GATransaction(Model):
     flagged: bool = False
     external_id: UUID | None = None
     payload: dict | None = None
-    account: Annotated[
-        GAAccount | None, ForeignKey(related_name="transactions")
-    ] = None
+    account: Annotated[GAAccount | None, ForeignKey(related_name="transactions")] = None
 
 
 _T1 = datetime(2026, 1, 1, 8, 0, 0, tzinfo=timezone.utc)
@@ -74,15 +72,29 @@ async def _seed():
     await a1.save()
     await a2.save()
     await GATransaction(
-        id=1, amount=10, rate=0.5, price=Decimal("1.25"), note="x",
-        happened_at=_T1, account=a1,
+        id=1,
+        amount=10,
+        rate=0.5,
+        price=Decimal("1.25"),
+        note="x",
+        happened_at=_T1,
+        account=a1,
     ).save()
     await GATransaction(
-        id=2, amount=20, rate=1.5, price=Decimal("2.75"), note=None,
-        happened_at=_T2, account=a1,
+        id=2,
+        amount=20,
+        rate=1.5,
+        price=Decimal("2.75"),
+        note=None,
+        happened_at=_T2,
+        account=a1,
     ).save()
     await GATransaction(
-        id=3, amount=30, rate=2.0, price=Decimal("6.00"), note="z",
+        id=3,
+        amount=30,
+        rate=2.0,
+        price=Decimal("6.00"),
+        note="z",
         account=a1,
     ).save()
     await GATransaction(id=4, amount=40, rate=4.0, account=a2).save()
@@ -354,9 +366,7 @@ class TestAggregateMisuse:
             GATransaction.where(lambda t: t.amount.sum())
 
     def test_iterating_a_field_proxy_names_the_sum_method(self):
-        with pytest.raises(
-            TypeError, match=r"did you mean t\.amount\.sum\(\)\?"
-        ):
+        with pytest.raises(TypeError, match=r"did you mean t\.amount\.sum\(\)\?"):
             GATransaction.select(lambda t: {"x": sum(t.amount)})  # type: ignore[arg-type]  # ty: ignore[invalid-argument-type]
 
     def test_unaliased_aggregate_in_tuple_names_the_dict_form(self):

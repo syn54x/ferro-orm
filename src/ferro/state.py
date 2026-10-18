@@ -195,4 +195,6 @@ def route_for_transaction(
     construction-site invariant holds for every route, including the one
     handed to raw SQL inside a transaction block.
     """
-    return RouteHandle(connection_name=connection_name, tx_id=tx_id, session_id=session_id)
+    return RouteHandle(
+        connection_name=connection_name, tx_id=tx_id, session_id=session_id
+    )

@@ -23,7 +23,7 @@ async def test_dropped_instances_are_released_by_the_map(db_url):
         payload: str
 
     await connect(db_url, auto_migrate=True)
-    async with engines.session() as s:
+    async with engines.session():
         created = await MemItem.create(payload="x")
         pk = created.id
         ref = weakref.ref(created)

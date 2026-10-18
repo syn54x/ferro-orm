@@ -652,7 +652,9 @@ async def test_autogenerate_proposes_the_same_add_as_the_runtime(
     _define_ledger_row()
     await connect(db_url)
 
-    runtime_statements, runtime_warnings = _render({"enabled": False, "forced": False, "policies": []})
+    runtime_statements, runtime_warnings = _render(
+        {"enabled": False, "forced": False, "policies": []}
+    )
     assert (runtime_statements, runtime_warnings) == (
         [
             'ALTER TABLE "ledgerrow" ENABLE ROW LEVEL SECURITY',
@@ -825,7 +827,9 @@ async def test_force_only_flip_proposes_a_narrow_drop_op_labeled_force(
     _rewind_registry()
 
     _define_ledger_row(force=False)
-    report = await auto_migrate(db_url, updates=True)  # warns; never clears FORCE itself
+    report = await auto_migrate(
+        db_url, updates=True
+    )  # warns; never clears FORCE itself
     assert schema_steps(report) == []
     assert warning_texts(report) == [
         "Table 'ledgerrow' has FORCE ROW LEVEL SECURITY set in the database, but the model declares force=False. Ferro never clears the flag on migrate_updates — the table owner stays bound by the policies. Clear it with migrate_destructive=True if that is what you want.",

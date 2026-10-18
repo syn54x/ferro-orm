@@ -48,6 +48,7 @@ MIGRATION_EXAMPLES = [
     "migrations_rename",
     "migrations_retire",
     "migrations_retire_label",
+    "migrations_squash",
     "migrations_testing",
 ]
 
@@ -168,11 +169,31 @@ def _primary_key_change(project: Path) -> None:
     (project / "blog" / "models.py").write_text(REKEYED)
 
 
+def _empty_squash(project: Path) -> None:
+    """``0001_create_author``, then ``0002_add_bio`` adds a column and
+    ``0003_drop_bio`` drops it: squashed from ``0002``, nothing is left."""
+    (project / "ferro.toml").write_text(
+        'models = ["blog.models"]\ndialects = ["postgres", "sqlite"]\n'
+    )
+    (project / "blog").mkdir()
+    (project / "blog" / "__init__.py").write_text("")
+    models = project / "blog" / "models.py"
+    for name, body in (
+        ("create_author", MODELS),
+        ("add_bio", MODELS + "    bio: str | None = None\n"),
+        ("drop_bio", MODELS),
+    ):
+        models.write_text(body)
+        made = _ferro(project, "migrate", "new", name)
+        assert made.returncode == 0, made.stderr
+
+
 REFUSALS = {
     "missing-dialects": (_missing_dialects, ("migrate", "check")),
     "both-config-files": (_both_config_files, ("migrate", "check")),
     "unknown-key": (_unknown_key, ("migrate", "check")),
     "primary-key-change": (_primary_key_change, ("migrate", "new", "rekey")),
+    "squash-empty": (_empty_squash, ("migrate", "squash", "bio", "--from", "0002")),
 }
 
 
@@ -427,6 +448,26 @@ def _loop_edited_step(project: Path) -> None:
     step.write_text(step.read_text() + "\n-- edited\n")
 
 
+def _feature_branch(project: Path) -> None:
+    """The CLI reference's squash: ``0002_add_bio`` with a filled-in
+    hand-written SQL step ``fix_rows``, then ``0003_add_team``."""
+    bio = AUTHOR + "    bio: str | None = None\n"
+    team = (
+        "\n\nclass Team(Model):\n"
+        "    id: int | None = Field(default=None, primary_key=True)\n"
+        "    label: str\n"
+    )
+    _configured(project)
+    _write_models(project, AUTHOR)
+    _run_ok(project, "migrate", "new", "create_author")
+    _write_models(project, bio)
+    _run_ok(project, "migrate", "new", "add_bio", "--sql-step", "fix_rows")
+    step = project / "migrations" / "0002_add_bio" / "02_fix_rows.up.sql"
+    step.write_text("UPDATE author SET bio = name;\n")
+    _write_models(project, bio + team)
+    _run_ok(project, "migrate", "new", "add_team")
+
+
 def _created_and_applied(project: Path) -> None:
     _configured(project)
     _write_models(project, AUTHOR)
@@ -496,6 +537,76 @@ def _two_branches_unapplied(project: Path) -> None:
 def _two_branches_replaced(project: Path) -> None:
     _two_branches(project, applied=True)
     _run_ok(project, "migrate", "new", "add_x", "--replace", "0002_add_x")
+
+
+# An epic's branch, one migration per task, squashed before it merges.
+
+TEAM = (
+    "\n\nclass Team(Model):\n"
+    "    id: int | None = Field(default=None, primary_key=True)\n"
+    "    name: str\n"
+)
+TEAM_TMP_CODE = "    tmp_code: str | None = None\n"
+TEAM_SLUG = "    slug: str\n"
+
+
+def _teams_epic(project: Path) -> None:
+    """Main holds ``0001``..``0004``; the epic's tasks add ``0005_add_teams`` (with
+    a ``tmp_code`` column), ``0006_team_slug`` (a required slug and its written
+    backfill), ``0007_drop_tmp`` and ``0008_fix_rows`` (a hand-written SQL step).
+    The developer's database applied every one."""
+    _configured(project)
+    models = NAMED_AUTHOR
+    for name, column in (
+        ("create_author", ""),
+        ("author_email", "    email: str | None = None\n"),
+        ("author_bio", "    bio: str | None = None\n"),
+        ("author_nick", "    nick: str | None = None\n"),
+    ):
+        models += column
+        _write_models(project, models)
+        _run_ok(project, "migrate", "new", name)
+    _write_models(project, models + TEAM + TEAM_TMP_CODE)
+    _run_ok(project, "migrate", "new", "add_teams")
+    _write_models(project, models + TEAM + TEAM_TMP_CODE + TEAM_SLUG)
+    _run_ok(project, "migrate", "new", "team_slug")
+    backfill = project / "migrations" / "0006_team_slug" / "02_backfill_team.py"
+    backfill.write_text(
+        backfill.read_text().replace(
+            'todo("the slug for an existing team")', "team.name.lower()"
+        )
+    )
+    _write_models(project, models + TEAM + TEAM_SLUG)
+    _run_ok(project, "migrate", "new", "drop_tmp")
+    _run_ok(project, "migrate", "new", "fix_rows", "--sql-step", "fix_rows")
+    fix_rows = project / "migrations" / "0008_fix_rows"
+    (fix_rows / "01_fix_rows.up.sql").write_text("UPDATE team SET name = trim(name);\n")
+    (fix_rows / "01_fix_rows.down.sql").write_text(
+        "-- ferro: nothing-to-reverse the names stay trimmed\n"
+    )
+    _run_ok(project, "migrate", "up")
+
+
+def _teams_epic_squashed(project: Path) -> None:
+    _teams_epic(project)
+    _run_ok(project, "migrate", "squash", "teams_epic", "--from", "0005")
+
+
+def _teams_epic_dead_name(project: Path) -> None:
+    """``0006_team_slug``'s backfill, a chunked step, selects its rows by
+    ``tmp_code``, a column that exists only inside the range."""
+    _teams_epic(project)
+    backfill = project / "migrations" / "0006_team_slug" / "02_backfill_team.py"
+    backfill.write_text(
+        backfill.read_text().replace("team.slug == None", "team.tmp_code == None")
+    )
+
+
+def _teams_epic_partly_applied(project: Path) -> None:
+    """A teammate's database: it applied ``0005``..``0007`` and not ``0008``."""
+    _teams_epic(project)
+    _run_ok(project, "migrate", "down", "--to", "0007", "--yes")
+    _run_ok(project, "migrate", "squash", "teams_epic", "--from", "0005")
 
 
 # A required column, a backfill, and the rows the backfill is for.
@@ -714,6 +825,7 @@ OUTPUTS = {
         ),
     ),
     "new-small": (_loop_edited, ("migrate", "new", "author_nickname")),
+    "squash": (_feature_branch, ("migrate", "squash", "epic", "--from", "0002")),
     "check-ok": (_loop_generated, ("migrate", "check")),
     "check-problem": (_loop_edited, ("migrate", "check")),
     "up": (_loop_generated, ("migrate", "up")),
@@ -747,6 +859,17 @@ OUTPUTS = {
         ("migrate", "new", "add_x", "--replace", "0002_add_x"),
     ),
     "replaced-up-refused": (_two_branches_replaced, ("migrate", "up")),
+    "squash-epic": (
+        _teams_epic,
+        ("migrate", "squash", "teams_epic", "--from", "0005"),
+    ),
+    "squash-dead-name": (
+        _teams_epic_dead_name,
+        ("migrate", "squash", "teams_epic", "--from", "0005"),
+    ),
+    "squash-status-inheritable": (_teams_epic_squashed, ("migrate", "status")),
+    "squash-up-inherits": (_teams_epic_squashed, ("migrate", "up")),
+    "squash-partial-witness": (_teams_epic_partly_applied, ("migrate", "up")),
     "rekey-refused": (_primary_key_change, ("migrate", "new", "rekey")),
     # data steps
     "backfill-new": (_slug_edited, ("migrate", "new", "author_slug")),

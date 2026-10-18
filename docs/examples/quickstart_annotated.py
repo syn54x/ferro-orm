@@ -28,6 +28,8 @@ class Post(Model):
     published: bool = False
     created_at: Annotated[datetime, Field(default_factory=datetime.now)]
     author: Annotated[Author, ForeignKey(related_name="posts")]
+
+
 # --8<-- [end:models]
 
 
@@ -36,11 +38,15 @@ async def main() -> None:
 
     async with engines.session():
         alice = await Author.create(name="Alice", email="alice@example.com")
-        post = await Post.create(title="Hello", body="...", published=True, author=alice)
+        post = await Post.create(
+            title="Hello", body="...", published=True, author=alice
+        )
 
         assert post.id is not None
         assert (await post.author).email == "alice@example.com"
-        assert len(await alice.posts.where(lambda post: post.published == True).all()) == 1  # noqa: E712
+        assert (
+            len(await alice.posts.where(lambda post: post.published == True).all()) == 1  # noqa: E712
+        )
 
     print("quickstart_annotated example ran successfully")
 

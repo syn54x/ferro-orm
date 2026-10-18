@@ -33,7 +33,9 @@ class Doc(Model):
         # RESTRICTIVE: AND-composes with everything below. No tenant scope,
         # no rows — whoever you are.
         RowPolicy(
-            name="tenant", column="tenant_id", setting="app.tenant_id",
+            name="tenant",
+            column="tenant_id",
+            setting="app.tenant_id",
             restrictive=True,
         ),
         # Permissive, unscoped by command: the owner reads and writes.
@@ -62,7 +64,9 @@ async def main() -> None:
         warnings.simplefilter("always")
         await connect("sqlite::memory:", auto_migrate=True)
 
-    skip_warnings = [str(w.message) for w in caught if "PostgreSQL-only" in str(w.message)]
+    skip_warnings = [
+        str(w.message) for w in caught if "PostgreSQL-only" in str(w.message)
+    ]
     assert len(skip_warnings) == 2, skip_warnings
     assert any("invoice" in message.lower() for message in skip_warnings)
     assert any("doc" in message.lower() for message in skip_warnings)

@@ -98,14 +98,21 @@ class Genre(StrEnum):
 """
 
 # A5: `name` carries an index; `kind` an index and a db_check.
-A5_BEFORE = IMPORTS + GENRE + """
+A5_BEFORE = (
+    IMPORTS
+    + GENRE
+    + """
 class Author(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     name: str = Field(index=True)
     kind: Annotated[Genre, FerroField(db_type="text", db_check=True, index=True)] = Genre.NOVEL
 """
+)
 
-A5_AFTER = IMPORTS + GENRE + """
+A5_AFTER = (
+    IMPORTS
+    + GENRE
+    + """
 class Author(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     full_name: str = Field(index=True, renamed_from="name")
@@ -114,6 +121,7 @@ class Author(Model):
         FerroField(db_type="text", db_check=True, index=True, renamed_from="kind"),
     ] = Genre.NOVEL
 """
+)
 
 
 def b3(table: str, backend: str, hint: bool = True) -> str:
@@ -128,8 +136,12 @@ def b3(table: str, backend: str, hint: bool = True) -> str:
         if backend == "postgres"
         else ""
     )
-    renamed = '    __ferro_renamed_from__ = "writer"\n' if hint and table != "writer" else ""
-    return IMPORTS + f"""
+    renamed = (
+        '    __ferro_renamed_from__ = "writer"\n' if hint and table != "writer" else ""
+    )
+    return (
+        IMPORTS
+        + f"""
 class Tag(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     label: str
@@ -151,6 +163,7 @@ class Book(Model):
     title: str
     writer: Annotated[{model}, ForeignKey("books")]
 """
+    )
 
 
 def _new_capturing(name: str) -> tuple[int, str, str]:
@@ -174,7 +187,7 @@ def test_a_column_rename_renames_its_index_and_check_and_round_trips_with_rows(
     project, pkg, db
 ):
     start(project, pkg, db, A5_BEFORE)
-    db.execute("INSERT INTO \"author\" (\"name\", \"kind\") VALUES ('Ann', 'poem')")
+    db.execute('INSERT INTO "author" ("name", "kind") VALUES (\'Ann\', \'poem\')')
     write_models(project, pkg, A5_AFTER)
     new("author_full_name")
 
@@ -195,16 +208,21 @@ def test_a_column_rename_renames_its_index_and_check_and_round_trips_with_rows(
         # under their new names (ADR-0046: one copy per table per step).
         assert up[:2] == renames
         assert rebuilt(up) == ["author"]
-        assert 'CREATE INDEX IF NOT EXISTS "idx_author_genre" ON "author" ("genre")' in up
+        assert (
+            'CREATE INDEX IF NOT EXISTS "idx_author_genre" ON "author" ("genre")' in up
+        )
         assert (
             'CREATE INDEX IF NOT EXISTS "idx_author_full_name" ON "author" ("full_name")'
             in up
         )
-        assert not any("idx_author_kind" in sql or "idx_author_name" in sql for sql in up)
+        assert not any(
+            "idx_author_kind" in sql or "idx_author_name" in sql for sql in up
+        )
         assert any('CONSTRAINT "ck_author_genre"' in sql for sql in up)
-        assert "-- ferro: foreign-keys-off" in schema_file(
-            project, 2, "up", db.backend
-        ).read_text()
+        assert (
+            "-- ferro: foreign-keys-off"
+            in schema_file(project, 2, "up", db.backend).read_text()
+        )
     assert "destructive" not in schema_file(project, 2, "up", db.backend).read_text()
 
     round_trip(project, db)
@@ -239,17 +257,23 @@ def test_the_down_reverses_every_rename_in_the_reverse_shape(project, pkg, db):
     assert "destructive" not in schema_file(project, 2, "down", db.backend).read_text()
 
 
-INDEXED_BEFORE = IMPORTS + """
+INDEXED_BEFORE = (
+    IMPORTS
+    + """
 class Author(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     name: str = Field(index=True)
 """
+)
 
-INDEXED_AFTER = IMPORTS + """
+INDEXED_AFTER = (
+    IMPORTS
+    + """
 class Author(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     full_name: str = Field(index=True, renamed_from="name")
 """
+)
 
 
 @backend_matrix
@@ -257,7 +281,7 @@ def test_an_index_renamed_on_a_table_no_rebuild_touches_is_dropped_and_built(
     project, pkg, db
 ):
     start(project, pkg, db, INDEXED_BEFORE)
-    db.execute("INSERT INTO \"author\" (\"name\") VALUES ('Ann')")
+    db.execute('INSERT INTO "author" ("name") VALUES (\'Ann\')')
     write_models(project, pkg, INDEXED_AFTER)
     new("author_full_name")
 
@@ -287,10 +311,10 @@ def test_a_table_rename_drags_every_owned_name_and_its_join_table_with_rows(
     project, pkg, db
 ):
     start(project, pkg, db, b3("writer", db.backend))
-    db.execute("INSERT INTO \"writer\" (\"name\") VALUES ('Ann')")
-    db.execute("INSERT INTO \"tag\" (\"label\") VALUES ('poetry')")
+    db.execute('INSERT INTO "writer" ("name") VALUES (\'Ann\')')
+    db.execute('INSERT INTO "tag" ("label") VALUES (\'poetry\')')
     db.execute('INSERT INTO "writer_tags" ("writer_id", "tag_id") VALUES (1, 1)')
-    db.execute("INSERT INTO \"book\" (\"title\", \"writer_id\") VALUES ('Odes', 1)")
+    db.execute('INSERT INTO "book" ("title", "writer_id") VALUES (\'Odes\', 1)')
     write_models(project, pkg, b3("author", db.backend))
     new("rename_writer")
 
@@ -326,7 +350,8 @@ def test_a_table_rename_drags_every_owned_name_and_its_join_table_with_rows(
         assert up[:3] == structural
         # `author`'s rebuild builds its unique under the new name.
         assert (
-            'CREATE UNIQUE INDEX IF NOT EXISTS "uq_author_name" ON "author" ("name")' in up
+            'CREATE UNIQUE INDEX IF NOT EXISTS "uq_author_name" ON "author" ("name")'
+            in up
         )
         # One rebuild per table whose constraint name moved, in one step.
         assert sorted(rebuilt(up)) == ["author", "author_tags", "book"]
@@ -417,7 +442,9 @@ def test_a_table_and_its_serial_key_renamed_together_carry_the_sequence(
 
 
 @pytest.mark.parametrize("keep_hint", [True, False], ids=["kept", "deleted"])
-def test_a_hint_after_its_migration_is_no_schema_change(project, pkg, capsys, keep_hint):
+def test_a_hint_after_its_migration_is_no_schema_change(
+    project, pkg, capsys, keep_hint
+):
     write_config(project, pkg)
     write_models(project, pkg, A5_BEFORE)
     new("create")
@@ -445,7 +472,7 @@ def test_a_hint_after_its_migration_is_no_schema_change(project, pkg, capsys, ke
 @backend_matrix
 def test_a_rename_and_a_type_change_are_one_step_rename_first(project, pkg, db):
     start(project, pkg, db, A5_BEFORE)
-    db.execute("INSERT INTO \"author\" (\"name\", \"kind\") VALUES ('Ann', 'poem')")
+    db.execute('INSERT INTO "author" ("name", "kind") VALUES (\'Ann\', \'poem\')')
     write_models(
         project,
         pkg,
@@ -520,7 +547,9 @@ def test_a_drop_and_an_add_without_a_hint_is_destructive_and_names_renamed_from(
         text = schema_file(project, 2, "up", backend).read_text()
         assert "-- ferro: destructive" in text
         up = statements(schema_file(project, 2, "up", backend))
-        assert any(sql.startswith('ALTER TABLE "author" ADD COLUMN "full_name"') for sql in up)
+        assert any(
+            sql.startswith('ALTER TABLE "author" ADD COLUMN "full_name"') for sql in up
+        )
         assert 'ALTER TABLE "author" DROP COLUMN "name"' in up
         assert not any("RENAME" in sql for sql in up)
 
@@ -535,7 +564,7 @@ def test_the_snapshot_records_every_hint(project, pkg):
     write_models(project, pkg, A5_AFTER)
     new("author_full_name")
     ir = snapshot(project, 2)
-    assert ir["ir_version"] == 2
+    assert ir["ir_version"] == 3
     (author,) = ir["payload"]["models"]
     assert {c["name"]: c.get("renamed_from") for c in author["columns"]} == {
         "full_name": "name",
@@ -561,18 +590,18 @@ def _define_passdrift(hinted: bool) -> None:
         class PassDrift(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
             full_name: Annotated[str, FerroField(renamed_from="name")]
-            kind: Annotated[PassDriftKind, FerroField(db_type="text", db_check=True)] = (
-                PassDriftKind.NOVEL
-            )
+            kind: Annotated[
+                PassDriftKind, FerroField(db_type="text", db_check=True)
+            ] = PassDriftKind.NOVEL
 
     else:
 
         class PassDrift(Model):  # noqa: F811
             id: Annotated[int | None, FerroField(primary_key=True)] = None
             name: str
-            kind: Annotated[PassDriftKind, FerroField(db_type="text", db_check=True)] = (
-                PassDriftKind.NOVEL
-            )
+            kind: Annotated[
+                PassDriftKind, FerroField(db_type="text", db_check=True)
+            ] = PassDriftKind.NOVEL
 
 
 @pytest.mark.asyncio
@@ -603,7 +632,9 @@ async def test_a_check_that_drifted_is_rebuilt_in_the_same_run_as_a_rename_on_it
 
     report = await auto_migrate(db_url, updates=True)
     executed = [
-        s.sql for s in report.statements if s.role == "schema" and s.subject == "passdrift"
+        s.sql
+        for s in report.statements
+        if s.role == "schema" and s.subject == "passdrift"
     ]
     assert any('RENAME COLUMN "name" TO "full_name"' in m for m in executed), executed
     assert any('DROP CONSTRAINT "ck_passdrift_kind"' in m for m in executed), executed

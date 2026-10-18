@@ -35,9 +35,10 @@ from ..composite_uniques import normalized_composite_uniques
 from ..registry import REGISTRY, ir_fingerprint
 from ..rowsecurity import RowSecurity, _declared_row_security, compile_row_security
 
-# Schema IR v2 records rename hints (`renamed_from`, ADR-0032); a v1 snapshot
-# is the same shape without them and keeps loading (ADR-0023).
-_IR_VERSION = 2
+# Schema IR v3 adds the optional envelope key `replaces`, a squash's witness
+# (ADR-0056), which the compiler never writes; v2 records rename hints
+# (`renamed_from`, ADR-0032). Every earlier snapshot keeps loading (ADR-0023).
+_IR_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -396,7 +397,10 @@ def compile_schema_ir_payload(
         )
     for cols in composite_uniques:
         uniques.append(
-            {"name": _composite_unique_name(resolved_table_name, list(cols)), "columns": list(cols)}
+            {
+                "name": _composite_unique_name(resolved_table_name, list(cols)),
+                "columns": list(cols),
+            }
         )
 
     model_payload = {

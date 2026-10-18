@@ -53,7 +53,6 @@ async def test_connect_with_auto_migrate(db_url):
     )
     assert not [w for w in warning_texts(report) if "automigrateduser" in w]
     async with ferro.engines.session():
-
         # We can verify it works by trying to call create_tables again
         # or by just ensuring it doesn't crash.
         # In a future step, when we have INSERT, we can verify the table exists.
@@ -161,7 +160,6 @@ async def test_m2m_join_table_created_during_auto_migrate(db_url):
     )
     assert warning_texts(report) == []
     async with ferro.engines.session():
-
         actor = await Actor.create(name="Alice")
         movie = await Movie.create(title="Matrix")
         await actor.movies.add(movie)
@@ -231,7 +229,6 @@ async def test_uuid_m2m_join_table_columns_inherit_pk_type_and_nullability(db_ur
     ]
     assert warning_texts(report) == []
     async with ferro.engines.session():
-
         import sqlite3
 
         db_path = db_url.removeprefix("sqlite:").split("?", 1)[0]
@@ -330,7 +327,6 @@ async def test_uuid_m2m_relationship_query_serializes_source_id(db_url):
     )
     assert warning_texts(report) == []
     async with ferro.engines.session():
-
         post = await UuidPost.create(title="Hello")
         tag = await UuidTag.create(name="python")
 
@@ -450,7 +446,6 @@ async def test_migrate_updates_adds_missing_columns_and_hydrates(
     )
     assert warning_texts(report) == []
     async with ferro.engines.session():
-
         rows = await MigInvoice.all()
         assert len(rows) == 1
         assert rows[0].number == "INV-1"
@@ -539,9 +534,10 @@ async def test_migrate_updates_not_null_without_default_fails_loudly(
     with pytest.raises(ValueError, match=r"migstrict\.created_at") as raised:
         await auto_migrate(db_url, updates=True)
 
-
     assert schema_steps(raised.value.report) == []
     assert warning_texts(raised.value.report) == []
+
+
 @pytest.mark.asyncio
 @pytest.mark.sqlite_only
 async def test_sqlite_type_drift_warns_and_leaves_column_untouched(
@@ -567,9 +563,9 @@ async def test_sqlite_type_drift_warns_and_leaves_column_untouched(
         ]
 
     columns = _sqlite_columns(db_url, "migdrift")
-    assert (
-        columns["count"][2].lower() == "varchar"
-    ), "no DDL may run for SQLite type drift"
+    assert columns["count"][2].lower() == "varchar", (
+        "no DDL may run for SQLite type drift"
+    )
 
 
 @pytest.mark.asyncio
@@ -598,9 +594,7 @@ async def test_sqlite_bytes_field_does_not_false_positive_blob_drift(
         ]
         assert warning_texts(report) == []
 
-    blob_warnings = [
-        str(w.message) for w in caught if "blob" in str(w.message).lower()
-    ]
+    blob_warnings = [str(w.message) for w in caught if "blob" in str(w.message).lower()]
     assert not blob_warnings, f"spurious BLOB drift warning(s): {blob_warnings}"
 
     # The column really is a BLOB — the fix did not mask a real difference.
@@ -610,9 +604,7 @@ async def test_sqlite_bytes_field_does_not_false_positive_blob_drift(
 
 @pytest.mark.asyncio
 @pytest.mark.sqlite_only
-async def test_sqlite_genuine_text_to_blob_diff_still_warns(
-    db_url, clean_registry
-):
+async def test_sqlite_genuine_text_to_blob_diff_still_warns(db_url, clean_registry):
     """Control: a pre-existing TEXT column adopted by a `bytes` model is a REAL
     difference and must still warn — the fix only silences blob==blob. (#165)"""
     await ferro.connect(db_url)
@@ -668,14 +660,10 @@ async def test_pg_bytes_field_bytea_no_drift(
         report = await auto_migrate(db_url, updates=True)  # reconnect: must be quiet
         assert schema_steps(report) == []
         assert warning_texts(report) == []
-    blob_warnings = [
-        str(w.message) for w in caught if "blob" in str(w.message).lower()
-    ]
+    blob_warnings = [str(w.message) for w in caught if "blob" in str(w.message).lower()]
     assert not blob_warnings, f"unexpected BLOB drift warning(s): {blob_warnings}"
 
-    assert (
-        _pg_live_type(postgres_base_url, db_schema_name, "docpg", "data") == "bytea"
-    )
+    assert _pg_live_type(postgres_base_url, db_schema_name, "docpg", "data") == "bytea"
 
 
 def _pg_live_type(base_url: str, schema: str, table: str, column: str) -> str:
@@ -875,7 +863,6 @@ async def test_destructive_drop_of_indexed_column_drops_index_first(
     ]
     assert warning_texts(report) == []
     async with ferro.engines.session():
-
         columns = _sqlite_columns(db_url, "migidx")
         assert "old_status" not in columns
         assert "idx_migidx_old_status" not in _sqlite_index_names(db_url, "migidx")
@@ -900,12 +887,15 @@ async def test_destructive_refuses_unique_constraint_column_on_sqlite(
         )
     ferro.reset_engine()
 
-    with pytest.raises(ValueError, match=r"miguq\.old_code.*UNIQUE.*ferro migrate new") as raised:
+    with pytest.raises(
+        ValueError, match=r"miguq\.old_code.*UNIQUE.*ferro migrate new"
+    ) as raised:
         await auto_migrate(db_url, destructive=True)
-
 
     assert schema_steps(raised.value.report) == []
     assert warning_texts(raised.value.report) == []
+
+
 @pytest.mark.asyncio
 @pytest.mark.sqlite_only
 async def test_added_indexed_and_unique_columns_get_their_indexes(
@@ -942,7 +932,6 @@ async def test_added_indexed_and_unique_columns_get_their_indexes(
     ]
     assert warning_texts(report) == []
     async with ferro.engines.session():
-
         index_names = _sqlite_index_names(db_url, "migindexed")
         assert "idx_migindexed_status" in index_names
         assert "uq_migindexed_slug" in index_names
@@ -990,24 +979,25 @@ async def test_postgres_type_and_nullability_reconciliation(db_url, clean_regist
     ]
     assert warning_texts(report) == []
     async with ferro.engines.session():
-
         rows = await fetch_all(
             "SELECT column_name, data_type, is_nullable, column_default "
             "FROM information_schema.columns "
             "WHERE table_schema = current_schema() AND table_name = 'migpg'"
         )
         by_name = {row["column_name"]: row for row in rows}
-        assert by_name["total"]["data_type"] == "bigint", "integer -> bigint via USING cast"
+        assert by_name["total"]["data_type"] == "bigint", (
+            "integer -> bigint via USING cast"
+        )
         assert by_name["status"]["is_nullable"] == "NO"
-        assert (
-            by_name["status"]["column_default"] is None
-        ), "backfill default must not linger"
+        assert by_name["status"]["column_default"] is None, (
+            "backfill default must not linger"
+        )
 
         data = await fetch_all('SELECT "total", "status" FROM "migpg"')
         assert data[0]["total"] == 41, "existing data survives the type change"
-        assert (
-            data[0]["status"] == "draft"
-        ), "existing rows backfilled with the literal default"
+        assert data[0]["status"] == "draft", (
+            "existing rows backfilled with the literal default"
+        )
 
 
 @pytest.mark.asyncio
@@ -1176,7 +1166,9 @@ async def test_a_required_column_with_a_default_keeps_the_model_literal_on_sqlit
 
 @pytest.mark.asyncio
 @pytest.mark.sqlite_only
-async def test_json_factory_is_not_a_create_table_server_default(db_url, clean_registry):
+async def test_json_factory_is_not_a_create_table_server_default(
+    db_url, clean_registry
+):
     """Field defaults stay client-side on CREATE TABLE (#373)."""
 
     class MigFreshTurns(Model):
@@ -1286,7 +1278,6 @@ async def test_index_reconcile_adds_composite_index_to_existing_table(
     ]
     assert warning_texts(report) == []
     async with ferro.engines.session():
-
         names = _live_index_names(db_url, db_backend, "idxcompmodel")
         assert "idx_idxcompmodel_col_a_col_b" in names, (
             f"expected composite index idx_idxcompmodel_col_a_col_b, got: {names}"
@@ -1340,7 +1331,6 @@ async def test_index_reconcile_adds_single_column_index_to_existing_column(
     ]
     assert warning_texts(report) == []
     async with ferro.engines.session():
-
         names = _live_index_names(db_url, db_backend, "idxsinglemodel")
         assert "idx_idxsinglemodel_status" in names, (
             f"expected idx_idxsinglemodel_status, got: {names}"
@@ -1655,7 +1645,6 @@ async def test_index_reconcile_noop_when_index_already_present(
     assert schema_steps(report) == []
     assert warning_texts(report) == []
     async with ferro.engines.session():
-
         names_after_second = _live_index_names(db_url, db_backend, "idxnoopmodel")
         assert "idx_idxnoopmodel_x_y" in names_after_second, (
             "index must survive second migrate_updates pass (no-op guard)"
@@ -1879,7 +1868,9 @@ async def test_uuid_pk_derived_second_pass_is_noop(db_url, db_backend, clean_reg
         assert warning_texts(report) == []
 
     ferro_warnings = [
-        w for w in caught if issubclass(w.category, UserWarning)
+        w
+        for w in caught
+        if issubclass(w.category, UserWarning)
         and "ferro auto-migrate" in str(w.message)
     ]
     assert ferro_warnings == [], (
@@ -1964,12 +1955,16 @@ async def test_uuid_pk_derived_drift_is_stable(db_url, db_backend, clean_registr
         assert warning_texts(report) == []
 
     drift_warnings_first = [
-        w for w in caught_first
-        if issubclass(w.category, UserWarning) and "ferro auto-migrate" in str(w.message)
+        w
+        for w in caught_first
+        if issubclass(w.category, UserWarning)
+        and "ferro auto-migrate" in str(w.message)
     ]
     drift_warnings_second = [
-        w for w in caught_second
-        if issubclass(w.category, UserWarning) and "ferro auto-migrate" in str(w.message)
+        w
+        for w in caught_second
+        if issubclass(w.category, UserWarning)
+        and "ferro auto-migrate" in str(w.message)
     ]
 
     assert drift_warnings_first == [], (
@@ -2001,7 +1996,6 @@ async def test_create_tables_pushes_modelset_for_model_defined_after_connect(
     # snapshot is empty.
     await ferro.connect(db_url, auto_migrate=False)
     async with ferro.engines.session():
-
         # Now define a model AFTER connect().
         class LateModel(Model):
             id: int = Field(json_schema_extra={"primary_key": True})
@@ -2115,7 +2109,6 @@ async def test_db_check_reconnect_is_idempotent(db_url):
     assert schema_steps(report) == []
     assert warning_texts(report) == []
     async with ferro.engines.session():
-
         rows = await fetch_all(
             "SELECT conname FROM pg_constraint "
             "WHERE conname = 'ck_reconnectdoc_status' "
@@ -2267,8 +2260,7 @@ async def test_pg_json_to_jsonb_declaration_edit_alters_in_place(
     await ferro.connect(db_url)
     async with ferro.engines.session():
         await execute(
-            'CREATE TABLE "jsonbmigrated" '
-            '("id" serial PRIMARY KEY, "payload" json)'
+            'CREATE TABLE "jsonbmigrated" ("id" serial PRIMARY KEY, "payload" json)'
         )
         await execute(
             'INSERT INTO "jsonbmigrated" ("payload") VALUES (\'{"kept": true}\')'
@@ -2382,7 +2374,8 @@ def _sqlite_query(db_url: str, sql: str) -> list[tuple]:
 
 def _sqlite_table_sql(db_url: str, table: str) -> str:
     rows = _sqlite_query(
-        db_url, f"SELECT sql FROM sqlite_master WHERE type = 'table' AND name = '{table}'"
+        db_url,
+        f"SELECT sql FROM sqlite_master WHERE type = 'table' AND name = '{table}'",
     )
     return rows[0][0]
 
@@ -2862,7 +2855,9 @@ async def test_validate_of_a_check_with_violating_rows_raises_check_violation(
     # report carried by the error lists nothing committed, and the error
     # names the statement that failed.
     assert excinfo.value.report == PassReport()
-    assert f'ALTER TABLE "vfpost" VALIDATE CONSTRAINT "{VF_CHECK}"' in str(excinfo.value)
+    assert f'ALTER TABLE "vfpost" VALIDATE CONSTRAINT "{VF_CHECK}"' in str(
+        excinfo.value
+    )
     assert excinfo.value.constraint == VF_CHECK
 
     # The failed validate rolled back with its table's plan: still NOT VALID.
@@ -3017,7 +3012,10 @@ async def test_migrate_updates_renames_a_hinted_column_with_its_index_and_check_
         report = await warned_auto_migrate(db_url, updates=True)
         assert schema_steps(report) == [
             ("passwriter", 'ALTER TABLE "passwriter" RENAME COLUMN "kind" TO "genre"'),
-            ("passwriter", 'ALTER TABLE "passwriter" RENAME COLUMN "name" TO "full_name"'),
+            (
+                "passwriter",
+                'ALTER TABLE "passwriter" RENAME COLUMN "name" TO "full_name"',
+            ),
             ("passwriter", 'DROP INDEX IF EXISTS "idx_passwriter_name"'),
             (
                 "passwriter",
@@ -3033,7 +3031,10 @@ async def test_migrate_updates_renames_a_hinted_column_with_its_index_and_check_
         report = await auto_migrate(db_url, updates=True)
         assert schema_steps(report) == [
             ("passwriter", 'ALTER TABLE "passwriter" RENAME COLUMN "kind" TO "genre"'),
-            ("passwriter", 'ALTER TABLE "passwriter" RENAME COLUMN "name" TO "full_name"'),
+            (
+                "passwriter",
+                'ALTER TABLE "passwriter" RENAME COLUMN "name" TO "full_name"',
+            ),
             (
                 "passwriter",
                 'ALTER INDEX "idx_passwriter_name" RENAME TO "idx_passwriter_full_name"',
@@ -3129,7 +3130,10 @@ async def test_migrate_updates_renames_a_hinted_column_and_then_changes_its_type
         ):
             report = await auto_migrate(db_url, updates=True)
             assert schema_steps(report) == [
-                ("pf2author", 'ALTER TABLE "pf2author" RENAME COLUMN "name" TO "full_name"'),
+                (
+                    "pf2author",
+                    'ALTER TABLE "pf2author" RENAME COLUMN "name" TO "full_name"',
+                ),
             ]
             assert warning_texts(report) == [
                 "Column 'pf2author.full_name' is declared 'int' in the database but the model expects 'varchar'. SQLite cannot change column types in place; generate a reviewed migration with `ferro migrate new` to migrate this column.",
@@ -3137,7 +3141,10 @@ async def test_migrate_updates_renames_a_hinted_column_and_then_changes_its_type
     else:
         report = await auto_migrate(db_url, updates=True)
         assert schema_steps(report) == [
-            ("pf2author", 'ALTER TABLE "pf2author" RENAME COLUMN "name" TO "full_name"'),
+            (
+                "pf2author",
+                'ALTER TABLE "pf2author" RENAME COLUMN "name" TO "full_name"',
+            ),
             (
                 "pf2author",
                 'ALTER TABLE "pf2author" ALTER COLUMN "full_name" TYPE varchar USING "full_name"::varchar',
@@ -3288,7 +3295,9 @@ async def test_a_label_rename_on_sqlite_warns_and_leaves_the_rows(
     report = await _pd3_connect(db_url, updates=updates)
     # Postgres renames the native type's label in place; SQLite changes no
     # schema and, under migrate_updates, warns about the rows.
-    renames = [("pd3status", "ALTER TYPE \"pd3status\" RENAME VALUE 'canceled' TO 'cancelled'")]
+    renames = [
+        ("pd3status", "ALTER TYPE \"pd3status\" RENAME VALUE 'canceled' TO 'cancelled'")
+    ]
     assert schema_steps(report) == on(
         db_url, sqlite=[], postgres=renames if updates else []
     )
@@ -3358,7 +3367,10 @@ async def test_a_label_rename_on_sqlite_warns_only_while_the_database_holds_the_
 # column once nothing matches, so it runs only under ``migrate_updates``, and
 # only for a column with no ``db_check`` (whose listing already answers).
 
-_PD3_PROBE = ("pd3order", 'SELECT 1 FROM "pd3order" WHERE "status" = \'canceled\' LIMIT 1')
+_PD3_PROBE = (
+    "pd3order",
+    'SELECT 1 FROM "pd3order" WHERE "status" = \'canceled\' LIMIT 1',
+)
 
 
 def _probes(report: PassReport) -> list[tuple[str, str]]:
@@ -3385,7 +3397,9 @@ async def test_a_plain_auto_migrate_connect_reads_no_rows_for_a_label_hint(
 ):
     """Plain ``auto_migrate`` reconciles nothing, so it neither probes the
     hinted column nor warns, even while a row holds the old label."""
-    report = await _pd3_live_hint(db_url, checked=False, labels="('canceled'), ('paid')")
+    report = await _pd3_live_hint(
+        db_url, checked=False, labels="('canceled'), ('paid')"
+    )
     assert schema_steps(report) == [
         (
             "pd3order",
@@ -3412,7 +3426,9 @@ async def test_a_checked_column_decides_a_label_hint_from_its_check_alone(
     still listing the old label is a live hint (one warning), a check listing
     only the new one an inert hint (silent). Either way no row is read."""
     if built_by == "parent":
-        report = await _pd3_live_hint(db_url, checked=True, labels="('canceled'), ('paid')")
+        report = await _pd3_live_hint(
+            db_url, checked=True, labels="('canceled'), ('paid')"
+        )
         assert schema_steps(report) == [
             (
                 "pd3order",
@@ -3452,7 +3468,9 @@ async def test_an_unchecked_column_probes_its_rows_for_a_label_hint(
 ):
     """With no check to read, ``migrate_updates`` probes the rows: a warning
     while one holds the old label, silence once none does."""
-    report = await _pd3_live_hint(db_url, checked=False, labels="('canceled'), ('paid')")
+    report = await _pd3_live_hint(
+        db_url, checked=False, labels="('canceled'), ('paid')"
+    )
     assert schema_steps(report) == [
         (
             "pd3order",
@@ -3548,7 +3566,9 @@ def _created(report: PassReport) -> list[str]:
 
 def _touched(report: PassReport, prefix: str) -> set[str]:
     """The tables whose name starts with ``prefix`` that the pass changed."""
-    return {subject for subject, _ in schema_steps(report) if subject.startswith(prefix)}
+    return {
+        subject for subject, _ in schema_steps(report) if subject.startswith(prefix)
+    }
 
 
 @pytest.mark.asyncio
@@ -3624,7 +3644,7 @@ async def test_a_sequence_rename_onto_a_taken_name_refuses_naming_the_holder_and
     with pytest.raises(Exception) as refused:
         await auto_migrate(db_url, updates=True)
     assert (
-        "Cannot rename sequence trnwriter_id_seq, owned by \"trnauthor\".\"id\", to "
+        'Cannot rename sequence trnwriter_id_seq, owned by "trnauthor"."id", to '
         'trnauthor_id_seq, the name a table created as "trnauthor" gives it: sequence '
         "trnauthor_id_seq already holds that name. Rename or drop that sequence, then "
         "run the change again."
@@ -4200,7 +4220,9 @@ async def test_a_table_two_references_from_a_renamed_one_waits_for_the_rename_to
 
 @pytest.mark.asyncio
 @pytest.mark.postgres_only
-async def test_a_live_label_rename_on_postgres_is_only_the_rename(db_url, clean_registry):
+async def test_a_live_label_rename_on_postgres_is_only_the_rename(
+    db_url, clean_registry
+):
     """``__ferro_renamed_labels__ = {"cancelled": "canceled"}`` on a live
     Postgres type is one ``ALTER TYPE … RENAME VALUE`` and nothing else: the
     renamed type already holds ``cancelled``, so no ``ADD VALUE 'cancelled'``
@@ -4222,7 +4244,7 @@ async def test_a_live_label_rename_on_postgres_is_only_the_rename(db_url, clean_
     ]
     assert warning_texts(report) == []
     async with ferro.engines.session():
-        await execute("INSERT INTO \"pd3order\" (\"status\") VALUES ('canceled')")
+        await execute('INSERT INTO "pd3order" ("status") VALUES (\'canceled\')')
     _rewind()
     _define_pd3_order(renamed=True)
 
@@ -4230,7 +4252,10 @@ async def test_a_live_label_rename_on_postgres_is_only_the_rename(db_url, clean_
         warnings.simplefilter("always")
         report = await auto_migrate(db_url, updates=True)
         assert schema_steps(report) == [
-            ("pd3status", "ALTER TYPE \"pd3status\" RENAME VALUE 'canceled' TO 'cancelled'"),
+            (
+                "pd3status",
+                "ALTER TYPE \"pd3status\" RENAME VALUE 'canceled' TO 'cancelled'",
+            ),
         ]
         assert warning_texts(report) == []
 
@@ -4675,7 +4700,7 @@ def _live_foreign_keys(db_url: str, db_backend: str, table: str) -> list[str]:
     """The columns of ``table`` a live foreign key constrains."""
     if db_backend == "sqlite":
         rows = _by_hand(
-            db_url, db_backend, f"PRAGMA foreign_key_list(\"{table}\")", fetch=True
+            db_url, db_backend, f'PRAGMA foreign_key_list("{table}")', fetch=True
         )
         return sorted(row[3] for row in rows)
     rows = _by_hand(

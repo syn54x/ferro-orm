@@ -18,10 +18,10 @@
 //! - Value decode/conversion failures map to `DataError`.
 
 use pyo3::prelude::*;
-use pyo3::sync::GILOnceCell;
+use pyo3::sync::PyOnceLock;
 use pyo3::types::PyDict;
 
-static EXCEPTIONS_MODULE: GILOnceCell<Py<PyAny>> = GILOnceCell::new();
+static EXCEPTIONS_MODULE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 
 /// Python exception class name for a database error, from Ferro's
 /// integrity-code table then sqlx `kind()` as fallback.

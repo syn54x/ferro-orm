@@ -33,7 +33,6 @@ async def test_str_field_with_numeric_pattern_round_trips_as_str(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-
         row = await Vehicle.create(year_code="2024")
         assert type(row.year_code) is str
 
@@ -63,7 +62,6 @@ async def test_nullable_str_field_with_leading_zero_pattern_value(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-
         row = await Part.create(serial="007207")
         fetched = await Part.get(row.id)
         assert fetched is not None

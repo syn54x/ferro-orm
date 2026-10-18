@@ -43,7 +43,9 @@ def _prop_to_spec(name: str, prop: dict) -> ColumnSpec:
     enum_values = _enum_values(prop)
     fk_info = prop.get("foreign_key")
     foreign_key = (
-        ForeignKeyRef(to_table=fk_info.get("to_table"), on_delete=fk_info.get("on_delete"))
+        ForeignKeyRef(
+            to_table=fk_info.get("to_table"), on_delete=fk_info.get("on_delete")
+        )
         if isinstance(fk_info, dict)
         else None
     )
@@ -59,7 +61,9 @@ def _prop_to_spec(name: str, prop: dict) -> ColumnSpec:
         format=prop.get("format"),
         python_type=None,
         enum_values=tuple(enum_values) if isinstance(enum_values, list) else None,
-        enum_type_name=enum_type_name if isinstance(enum_type_name, str) and enum_type_name else None,
+        enum_type_name=enum_type_name
+        if isinstance(enum_type_name, str) and enum_type_name
+        else None,
         db_type=db_type_value if db_type_explicit else None,
         db_type_explicit=db_type_explicit,
         db_check=prop.get("db_check") is True,
@@ -85,7 +89,12 @@ def _compile_schema_ir_json(schema: dict, name: str) -> str:
 
 def render(schema, live, dialect, *, updates=True, destructive=False, name="Invoice"):
     return _render_migration_sql_for_test(
-        name.lower(), _compile_schema_ir_json(schema, name.lower()), json.dumps(live), dialect, updates, destructive
+        name.lower(),
+        _compile_schema_ir_json(schema, name.lower()),
+        json.dumps(live),
+        dialect,
+        updates,
+        destructive,
     )
 
 
@@ -204,9 +213,7 @@ class TestAddColumn:
 
     def test_not_null_json_without_default_fails_loudly(self):
         """Unset json-family default (failed factory snapshot) uses today's refusal."""
-        schema = schema_with(
-            {"turns": {"type": "object", "ferro_nullable": False}}
-        )
+        schema = schema_with({"turns": {"type": "object", "ferro_nullable": False}})
         for dialect in ("sqlite", "postgres"):
             with pytest.raises(ValueError, match=r"invoice\.turns.*ferro migrate new"):
                 render(schema, PK_ONLY_LIVE, dialect)
@@ -495,7 +502,7 @@ def test_index_noop_emits_zero_ddl_when_index_already_present(dialect):
         _compile_schema_ir_json(_NOOP_SCHEMA, "idxnoopmodel"),
         json.dumps(_NOOP_LIVE_COLUMNS),
         dialect,
-        True,   # updates
+        True,  # updates
         False,  # destructive
         json.dumps(_NOOP_LIVE_INDEXES),
     )
@@ -512,20 +519,48 @@ def test_derived_uuid_column_does_not_drift_when_consuming_python_ir(dialect):
     """A derived uuid column (no explicit db_type) must produce no DDL and no warning
     when the live column has type 'uuid_text' — the storage-token comparison path
     (Task 1 fix) must handle the None db_type case correctly."""
-    schema_ir = json.dumps({
-        "ir_kind": "schema", "ir_version": 1,
-        "payload": {"dialect_agnostic": True, "models": [{
-            "model_name": "acct",
-            "table_name": "acct",
-            "columns": [{"name": "id", "logical_type": "uuid", "format": "uuid",
-                         "nullable": False, "primary_key": True,
-                         "autoincrement": False, "unique": False, "index": False,
-                         "default": None}],
-            "indexes": [], "uniques": [], "foreign_keys": [], "checks": [],
-        }]},
-    })
-    live = json.dumps([{"name": "id", "declared_type": "uuid_text",
-                        "is_nullable": False, "is_primary_key": True}])
+    schema_ir = json.dumps(
+        {
+            "ir_kind": "schema",
+            "ir_version": 1,
+            "payload": {
+                "dialect_agnostic": True,
+                "models": [
+                    {
+                        "model_name": "acct",
+                        "table_name": "acct",
+                        "columns": [
+                            {
+                                "name": "id",
+                                "logical_type": "uuid",
+                                "format": "uuid",
+                                "nullable": False,
+                                "primary_key": True,
+                                "autoincrement": False,
+                                "unique": False,
+                                "index": False,
+                                "default": None,
+                            }
+                        ],
+                        "indexes": [],
+                        "uniques": [],
+                        "foreign_keys": [],
+                        "checks": [],
+                    }
+                ],
+            },
+        }
+    )
+    live = json.dumps(
+        [
+            {
+                "name": "id",
+                "declared_type": "uuid_text",
+                "is_nullable": False,
+                "is_primary_key": True,
+            }
+        ]
+    )
     stmts, warns = _render_migration_sql_for_test("acct", schema_ir, live, dialect)
     assert stmts == [], f"unexpected DDL: {stmts}"
     assert warns == [], f"unexpected drift warning: {warns}"
@@ -584,9 +619,7 @@ class TestJsonStorageDiff:
     def test_live_json_column_with_default_declaration_upgrades_to_jsonb(self):
         """Default flip (ADR-0005): a derived json-family field now means jsonb
         on Postgres, so a pre-flip live json column upgrades with one ALTER."""
-        schema = schema_with(
-            {"payload": {"type": "object", "ferro_nullable": True}}
-        )
+        schema = schema_with({"payload": {"type": "object", "ferro_nullable": True}})
         live = PK_ONLY_LIVE + [
             {"name": "payload", "declared_type": "json", "is_nullable": True}
         ]
@@ -611,9 +644,7 @@ class TestJsonStorageDiff:
 
     def test_live_jsonb_column_with_default_declaration_no_diff(self):
         """The post-flip steady state: derived declaration + live jsonb agree."""
-        schema = schema_with(
-            {"payload": {"type": "object", "ferro_nullable": True}}
-        )
+        schema = schema_with({"payload": {"type": "object", "ferro_nullable": True}})
         live = PK_ONLY_LIVE + [
             {"name": "payload", "declared_type": "jsonb", "is_nullable": True}
         ]

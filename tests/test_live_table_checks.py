@@ -28,7 +28,9 @@ async def test_live_table_checks_ffi_reads_sqlite_inline_named_checks(db_url):
         checks = await _live_table_checks_for_test("transfer")
         assert len(checks) == 2
 
-        ferro = next(c for c in checks if c["name"] == "ck_transfer_at_most_one_outflow")
+        ferro = next(
+            c for c in checks if c["name"] == "ck_transfer_at_most_one_outflow"
+        )
         assert ferro["ferro_owned"] is True
         assert ferro["definition"] == (
             'CHECK (("outflow_transaction_id" IS NULL) OR ("outflow_activity_id" IS NULL))'
@@ -62,7 +64,9 @@ async def test_live_table_checks_reads_postgres_ferro_and_user_owned(db_url):
         checks = await _live_table_checks_for_test("transfer")
         assert len(checks) == 2
 
-        ferro = next(c for c in checks if c["name"] == "ck_transfer_at_most_one_outflow")
+        ferro = next(
+            c for c in checks if c["name"] == "ck_transfer_at_most_one_outflow"
+        )
         assert ferro["ferro_owned"] is True
         assert "CHECK" in ferro["definition"]
         assert "outflow_transaction_id" in ferro["definition"]

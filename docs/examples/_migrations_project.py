@@ -12,6 +12,10 @@ The state before the change is read off the same region: a line marked
 under it. So both declaration styles of an example describe their before
 and after with the same lines the docs page shows.
 
+An example that walks more than two model states declares each later one in
+a region of its own (``# --8<-- [start:<name>]`` … ``[end:<name>]``), which
+:meth:`Project.models_region` writes as it stands.
+
 ``python docs/examples/<example>.py <directory>`` builds the project in
 ``<directory>`` and leaves it there (the docs tests compare the two styles'
 generated migrations); with no argument it builds it in a temporary
@@ -33,16 +37,15 @@ from pathlib import Path
 __all__ = ["Project", "project"]
 
 FERRO_TOML = 'models = ["blog.models"]\ndialects = ["postgres", "sqlite"]\n'
-_START = "# --8<-- [start:models]"
-_END = "# --8<-- [end:models]"
 _BEFORE = re.compile(r"^(?P<indent>\s*).*?#\s*before:\s*(?P<text>.*)$")
 _NEW = re.compile(r"#\s*new\b")
 
 
-def _region(script: Path) -> str:
+def _region(script: Path, name: str = "models") -> str:
     source = script.read_text()
-    start = source.index(_START) + len(_START)
-    return source[start : source.index(_END)].strip("\n") + "\n"
+    opening, closing = f"# --8<-- [start:{name}]", f"# --8<-- [end:{name}]"
+    start = source.index(opening) + len(opening)
+    return source[start : source.index(closing)].strip("\n") + "\n"
 
 
 def _before(region: str) -> str:
@@ -70,6 +73,7 @@ class Project:
 
     def __init__(self, root: Path, script: Path, *, configured: bool) -> None:
         self.root = root
+        self.script = script
         self.region = _region(script)
         self.url = f"sqlite:{root / 'app.db'}?mode=rwc"
         (root / "blog").mkdir(parents=True)
@@ -88,6 +92,10 @@ class Project:
     def models_after(self) -> None:
         """``blog/models.py`` as the docs page shows it."""
         (self.root / "blog" / "models.py").write_text(self.region)
+
+    def models_region(self, name: str) -> None:
+        """``blog/models.py`` as the example's region ``name`` shows it."""
+        (self.root / "blog" / "models.py").write_text(_region(self.script, name))
 
     def ferro(self, *args: str, exit_code: int = 0) -> str:
         """Run ``ferro <args>`` in the project; return what it printed."""

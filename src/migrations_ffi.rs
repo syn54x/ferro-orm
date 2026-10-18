@@ -7,9 +7,12 @@
 //! I-3: nothing here panics.
 
 use crate::migrate::parse_dialect;
-use ferro_migrate::directory::MigrationsDir;
-use ferro_migrate::snapshot::{Snapshot, encode_checksum};
-use ferro_migrate::{Dialect, GenerateOptions, check_migrations, generate_with, step_file_role};
+use ferro_migrate::directory::{MigrationsDir, serialize_snapshot};
+use ferro_migrate::snapshot::{CURRENT_SCHEMA_IR_VERSION, Snapshot};
+use ferro_migrate::{
+    ComposeError, DeadKind, Dialect, GenerateOptions, check_migrations, compose_range,
+    generate_with, step_file_role,
+};
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -23,6 +26,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_step_file_role, m)?)?;
     m.add_function(wrap_pyfunction!(_read_migrations_dir, m)?)?;
     m.add_function(wrap_pyfunction!(_load_snapshot, m)?)?;
+    m.add_function(wrap_pyfunction!(_compose_range, m)?)?;
     m.add_function(wrap_pyfunction!(_open_tracked, m)?)?;
     m.add_function(wrap_pyfunction!(_tracking_tables_for, m)?)?;
     m.add_function(wrap_pyfunction!(_allow_ahead, m)?)?;
@@ -64,12 +68,11 @@ fn to_json<T: serde::Serialize>(value: &T) -> PyResult<String> {
         .map_err(|e| PyRuntimeError::new_err(format!("could not serialize the result: {e}")))
 }
 
-fn snapshot_json(snapshot: &Snapshot) -> serde_json::Value {
-    serde_json::json!({
-        "checksum": encode_checksum(&snapshot.checksum),
-        "parent_checksum": snapshot.parent_checksum.as_ref().map(encode_checksum),
-        "ir": snapshot.ir,
-    })
+/// A snapshot's JSON, in the one shape the directory reader hands each
+/// migration's: `{"checksum", "parent_checksum", "replaces", "ir"}`.
+fn snapshot_json(snapshot: &Snapshot) -> PyResult<serde_json::Value> {
+    serialize_snapshot(snapshot, serde_json::value::Serializer)
+        .map_err(|e| PyRuntimeError::new_err(format!("could not serialize the snapshot: {e}")))
 }
 
 /// Generate the migration that turns the head snapshot into the declared
@@ -160,38 +163,75 @@ pub fn _step_file_role(name: String) -> PyResult<String> {
 /// Read and verify a migrations directory. Returns the JSON of the
 /// `MigrationsDir`: `{"path", "migrations": [{"number", "name", "dir",
 /// "steps": [{"ordinal", "name", "kind", "files": {<dialect>: {"up", "down",
-/// "up_checksum", "headers"}}}], "snapshot": {"checksum", "parent_checksum",
-/// "ir"}}]}`.
+/// "up_checksum", "headers"}}}], "replaces": [<witness entry>], "snapshot":
+/// {"checksum", "parent_checksum", "replaces", "ir"}}]}`. A witness entry is
+/// `{"migration", "snapshot_checksum", "steps", "replaces"}` (checksum in hex,
+/// `replaces` nesting a replaced squash's own); `replaces` is `[]` for a
+/// migration that is not a squash.
 ///
 /// # Errors
 /// `ValueError` naming the problem and its fix: a duplicate or missing
 /// number, a broken snapshot chain, a step with both suffixed and unsuffixed
-/// files, an unparseable header, an unexpected entry.
+/// files, an unparseable header, an unexpected entry, a malformed witness,
+/// or a witness naming a migration still in the directory.
 ///
 /// With `replacing` (`ferro migrate new --replace <target>`), the directory
 /// without that migration, admitting the duplicate at its number, and the
-/// migration itself under `"replaced"` (`MigrationsDir::read_replacing`);
-/// `ValueError` also for a target it does not hold, a bare number two
-/// migrations share, or a migration a later one chains from.
+/// migration itself as the one entry of `"replaced"`
+/// (`MigrationsDir::read_replacing`); `ValueError` also for a target it does
+/// not hold, a bare number two migrations share, or a migration a later one
+/// chains from. With `range_from`, the directory below that migration and the
+/// range from it through the head, in chain order, as `"replaced"`
+/// (`MigrationsDir::read_range`), plus `"reaches_head"` (whether the range ends
+/// at the directory head), `"off_range"` (the later migrations it leaves, each
+/// `{"migration", "chains_from"}`, both `NNNN_<name>`, `chains_from` `None`
+/// when its parent link names no migration) and `"siblings"` (the other migrations at the range's first
+/// number, which it never stands on). Naming both is a `ValueError`.
 #[pyfunction]
 #[pyo3(name = "_read_migrations_dir")]
-#[pyo3(signature = (directory, replacing = None))]
-pub fn _read_migrations_dir(directory: String, replacing: Option<String>) -> PyResult<String> {
+#[pyo3(signature = (directory, replacing = None, range_from = None))]
+pub fn _read_migrations_dir(
+    directory: String,
+    replacing: Option<String>,
+    range_from: Option<String>,
+) -> PyResult<String> {
     let refused = |err: ferro_migrate::DirectoryError| PyValueError::new_err(err.to_string());
-    let Some(target) = replacing else {
-        return to_json(&MigrationsDir::read(Path::new(&directory)).map_err(refused)?);
+    let path = Path::new(&directory);
+    let mut reach: Option<(bool, Vec<ferro_migrate::directory::OffRange>, Vec<String>)> = None;
+    let (dir, replaced) = match (replacing, range_from) {
+        (None, None) => return to_json(&MigrationsDir::read(path).map_err(refused)?),
+        (Some(_), Some(_)) => {
+            return Err(PyValueError::new_err(
+                "name either replacing or range_from, not both",
+            ));
+        }
+        (Some(target), None) => {
+            let (dir, replaced) = MigrationsDir::read_replacing(path, &target).map_err(refused)?;
+            (dir, vec![replaced])
+        }
+        (None, Some(from)) => {
+            let (dir, range) = MigrationsDir::read_range(path, &from).map_err(refused)?;
+            reach = Some((range.reaches_head(), range.off_range, range.siblings));
+            (dir, range.migrations)
+        }
     };
-    let (dir, replaced) =
-        MigrationsDir::read_replacing(Path::new(&directory), &target).map_err(refused)?;
     let mut json = serde_json::to_value(&dir)
         .map_err(|err| PyValueError::new_err(format!("the migrations directory: {err}")))?;
     json["replaced"] = serde_json::to_value(&replaced)
-        .map_err(|err| PyValueError::new_err(format!("the replaced migration: {err}")))?;
+        .map_err(|err| PyValueError::new_err(format!("the replaced migrations: {err}")))?;
+    if let Some((reaches_head, off_range, siblings)) = reach {
+        json["reaches_head"] = serde_json::Value::Bool(reaches_head);
+        json["off_range"] = serde_json::to_value(&off_range)
+            .map_err(|err| PyValueError::new_err(format!("the off-range migrations: {err}")))?;
+        json["siblings"] = serde_json::to_value(&siblings)
+            .map_err(|err| PyValueError::new_err(format!("the sibling migrations: {err}")))?;
+    }
     to_json(&json)
 }
 
 /// Load one `ir.json` (any shipped `ir_version`). Returns JSON
-/// `{"checksum", "parent_checksum", "ir"}`.
+/// `{"checksum", "parent_checksum", "replaces", "ir"}`, `replaces` the
+/// squash's witness as `_read_migrations_dir` gives it (`[]` when none).
 ///
 /// # Errors
 /// `ValueError` when the text is not a loadable snapshot.
@@ -199,7 +239,115 @@ pub fn _read_migrations_dir(directory: String, replacing: Option<String>) -> PyR
 #[pyo3(name = "_load_snapshot")]
 pub fn _load_snapshot(ir_json: String) -> PyResult<String> {
     let snapshot = load_snapshot(ir_json.as_bytes(), "the snapshot")?;
-    to_json(&snapshot_json(&snapshot))
+    to_json(&snapshot_json(&snapshot)?)
+}
+
+/// Compose a squash's target from the snapshots of the range it replaces
+/// (ADR-0056): `parent_json` is the `ir.json` text of the migration below
+/// the range (`None` for a range from `0001`), `range_json` each range migration's
+/// `ir.json` text in chain order. Returns JSON `{"target": <schema IR
+/// envelope>, "dead_names": [{"kind", "name", "appeared", "vanished"}]}`:
+/// the last snapshot's payload with the range's rename hints composed into it,
+/// in a current-version envelope (the squash is written by this ferro), and
+/// every name born and gone inside the range (`kind` one of `table`, `column`,
+/// `enum_label`, `constraint`; `appeared` / `vanished` indexes into the range).
+///
+/// # Errors
+/// `ValueError` for a snapshot that does not load, and for every
+/// `ComposeError`, with its text. A compose refusal's exception carries
+/// `kind` (`uncomposable`, `old_name_re_added`, `new_name_held_by_parent` or
+/// `refused_hint`) and `from_index`: the index into the range of the migration a
+/// squash can start from instead (the one that declares the conflicting name,
+/// or the one after the migration the refusal names), or `None` when there is
+/// none.
+#[pyfunction]
+#[pyo3(name = "_compose_range")]
+#[pyo3(signature = (parent_json, range_json))]
+pub fn _compose_range(
+    py: Python<'_>,
+    parent_json: Option<String>,
+    range_json: Vec<String>,
+) -> PyResult<String> {
+    let parent = parent_json
+        .map(|json| load_snapshot(json.as_bytes(), "the parent snapshot"))
+        .transpose()?;
+    let range = range_json
+        .iter()
+        .enumerate()
+        .map(|(at, json)| {
+            load_snapshot(
+                json.as_bytes(),
+                &format!("the range's snapshot #{}", at + 1),
+            )
+        })
+        .collect::<PyResult<Vec<Snapshot>>>()?;
+    let parent_payload = parent.as_ref().map(|snapshot| &snapshot.ir.payload);
+    let payloads: Vec<&SchemaIrPayload> = range.iter().map(|s| &s.ir.payload).collect();
+    let composed = match compose_range(parent_payload, &payloads) {
+        Ok(composed) => composed,
+        Err(refusal) => {
+            let from_index = compose_restart(parent_payload, &payloads, &refusal);
+            let err = PyValueError::new_err(refusal.to_string());
+            let kind = match refusal {
+                ComposeError::Uncomposable { .. } => "uncomposable",
+                ComposeError::OldNameReAdded { .. } => "old_name_re_added",
+                ComposeError::NewNameHeldByParent { .. } => "new_name_held_by_parent",
+                ComposeError::RefusedHint { .. } => "refused_hint",
+            };
+            err.value(py).setattr("kind", kind)?;
+            err.value(py).setattr("from_index", from_index)?;
+            return Err(err);
+        }
+    };
+    let target = IrEnvelope {
+        ir_kind: "schema".to_string(),
+        ir_version: CURRENT_SCHEMA_IR_VERSION,
+        payload: composed.target,
+    };
+    let dead_names: Vec<serde_json::Value> = composed
+        .dead_names
+        .iter()
+        .map(|dead| {
+            serde_json::json!({
+                "kind": match dead.kind {
+                    DeadKind::Table => "table",
+                    DeadKind::Column => "column",
+                    DeadKind::EnumLabel => "enum_label",
+                    DeadKind::Constraint => "constraint",
+                },
+                "name": dead.name,
+                "appeared": dead.appeared,
+                "vanished": dead.vanished,
+            })
+        })
+        .collect();
+    to_json(&serde_json::json!({"target": target, "dead_names": dead_names}))
+}
+
+/// The index into `range` of the migration a squash could start from to leave
+/// `refusal`'s cause below its range, or `None` when no later start avoids
+/// it. A disagreeing declaration is in the first prefix of the range that
+/// fails to compose that way, so the migration ending that prefix declares
+/// it; a re-added name is re-added at `re_added_at`; a freed name and a
+/// refused hint are left below by starting after their migration.
+fn compose_restart(
+    parent: Option<&SchemaIrPayload>,
+    range: &[&SchemaIrPayload],
+    refusal: &ComposeError,
+) -> Option<usize> {
+    let after = |at: usize| (at + 1 < range.len()).then_some(at + 1);
+    match refusal {
+        ComposeError::Uncomposable { .. } => (2..=range.len()).find_map(|end| {
+            matches!(
+                compose_range(parent, &range[..end]),
+                Err(ComposeError::Uncomposable { .. })
+            )
+            .then_some(end - 1)
+        }),
+        ComposeError::OldNameReAdded { re_added_at, .. } => Some(*re_added_at),
+        ComposeError::NewNameHeldByParent { vacated_at, .. } => after(*vacated_at),
+        ComposeError::RefusedHint { position, .. } => after(*position),
+    }
 }
 
 // -- the run objects (ADR-0048) ------------------------------------------------------
@@ -615,6 +763,21 @@ fn plan_handles(
     })
 }
 
+/// Each data step's declared kind, `declared_kind(path)` for each of
+/// `steps` (`(migration, step, file)`): what an inherited data step's record
+/// holds, read from its file as a baseline reads it (ADR-0056).
+fn declared_kinds(
+    steps: Vec<(u16, u8, std::path::PathBuf)>,
+    declared_kind: &Bound<'_, PyAny>,
+) -> PyResult<std::collections::BTreeMap<(u16, u8), ferro_migrate::RecordKind>> {
+    let mut kinds = std::collections::BTreeMap::new();
+    for (migration, step, path) in steps {
+        let kind: String = declared_kind.call1((path,))?.extract()?;
+        kinds.insert((migration, step), record_kind(&kind)?);
+    }
+    Ok(kinds)
+}
+
 /// The reads both run objects carry, from `tracked`.
 mod reads {
     use super::*;
@@ -706,17 +869,23 @@ impl TrackedDatabase {
         reads::status(py, &self.inner, order_keys, lock_held)
     }
 
-    /// A preview of a run's plan: its steps cannot be executed.
+    /// A preview of a run's plan: its steps cannot be executed. With
+    /// `inheriting` (a data step file's declared kind, `declared_kind(path)
+    /// -> "atomic" | "chunked"`), planned as the run would plan once it had
+    /// inherited every squash whose witness the records hold (ADR-0056); a
+    /// partial witness refuses.
     ///
     /// # Errors
-    /// `RunRefused` for every refusal the run would meet.
-    #[pyo3(signature = (direction, *, allow_ahead=None, order_keys=None))]
+    /// `RunRefused` for every refusal the run would meet; whatever
+    /// `inheriting` raises.
+    #[pyo3(signature = (direction, *, allow_ahead=None, order_keys=None, inheriting=None))]
     fn plan<'py>(
         &self,
         py: Python<'py>,
         direction: &Bound<'py, PyAny>,
         allow_ahead: Option<&Bound<'py, PyAny>>,
         order_keys: Option<&Bound<'py, PyAny>>,
+        inheriting: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let direction = parse_direction(direction)?;
         let allow_ahead = allow_ahead
@@ -724,11 +893,23 @@ impl TrackedDatabase {
             .transpose()?
             .unwrap_or_default();
         let order_keys = order_keys_arg(order_keys)?;
+        let kinds = inheriting
+            .map(|declared_kind| declared_kinds(self.inner.inheritance_data_steps(), declared_kind))
+            .transpose()?;
         let tracked = Arc::clone(&self.inner);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let plan = tracked
-                .plan(direction, allow_ahead, order_keys.as_ref())
-                .await?;
+            let plan = match &kinds {
+                Some(kinds) => {
+                    tracked
+                        .plan_inherited(direction, allow_ahead, order_keys.as_ref(), kinds)
+                        .await?
+                }
+                None => {
+                    tracked
+                        .plan(direction, allow_ahead, order_keys.as_ref())
+                        .await?
+                }
+            };
             plan_handles(plan, tracked.records(), direction, 0)
         })
     }
@@ -1038,6 +1219,32 @@ impl LockedDatabase {
                 .plan(direction, allow_ahead, order_keys.as_ref())
                 .await?;
             plan_handles(plan, locked.tracked().records(), direction, locked.id())
+        })
+    }
+
+    /// Inherit every squash whose witness the records read under the lock
+    /// hold (ADR-0056): one transaction swaps the witnessed records for the
+    /// squash's, origin `inherited` (`baseline` when a baseline recorded the
+    /// whole witness), and runs nothing; the plan then sees them.
+    /// `declared_kind(path)` gives each inherited data step's declared kind
+    /// (`"atomic"` / `"chunked"`). Returns `[{"squash", "replaced"}]`, one
+    /// per squash inherited.
+    ///
+    /// # Errors
+    /// `RunRefused`: the partial-witness and mixed-witness refusals (`kind
+    /// == "partial_witness"` / `"mixed_witness"`, nothing written), the
+    /// newer-format refusal, the lock's (a lock lost before the commit
+    /// included); whatever `declared_kind` raises; a database error.
+    fn inherit<'py>(
+        &self,
+        py: Python<'py>,
+        declared_kind: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let kinds = declared_kinds(self.inner.tracked().inheritance_data_steps(), declared_kind)?;
+        let locked = Arc::clone(&self.inner);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let inherited = locked.inherit(&kinds).await?;
+            to_py_attached(&inherited)
         })
     }
 
