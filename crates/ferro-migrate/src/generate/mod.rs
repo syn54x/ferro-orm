@@ -30,7 +30,7 @@
 
 pub(crate) mod backfill;
 mod columns;
-pub mod compose;
+mod compose;
 mod downs;
 pub(crate) mod enums;
 pub(crate) mod rebuild;

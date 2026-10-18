@@ -154,7 +154,10 @@ impl std::fmt::Display for ComposeError {
             ComposeError::RefusedHint { position, error } => write!(
                 f,
                 "the snapshot of migration #{} of the range declares a rename hint the planner \
-                 refuses: {error}; fix that migration's snapshot with `ferro migrate rerecord`",
+                 refuses ({error}); a schema snapshot is never re-recorded (ADR-0030): restore \
+                 that migration's ir.json from version control, or start the squash range after \
+                 migration #{}",
+                position + 1,
                 position + 1
             ),
         }
@@ -1286,13 +1289,26 @@ mod tests {
             payload(vec![table("Author", &["a"])]),
             payload(vec![table("Author", &["a", "b<-a"])]),
         ];
-        match refusal(&parent, &run) {
-            ComposeError::RefusedHint {
-                position: 1,
-                error: HintError::OldStillDeclared { .. },
-            } => {}
-            other => panic!("unexpected {other:?}"),
-        }
+        let err = refusal(&parent, &run);
+        assert!(
+            matches!(
+                err,
+                ComposeError::RefusedHint {
+                    position: 1,
+                    error: HintError::OldStillDeclared { .. },
+                }
+            ),
+            "{err:?}"
+        );
+        let text = err.to_string();
+        assert!(
+            text.contains(
+                "restore that migration's ir.json from version control, or start the squash \
+                 range after migration #2"
+            ),
+            "{text}"
+        );
+        assert!(!text.contains("rerecord"), "{text}");
     }
 
     // -- tables -------------------------------------------------------------
