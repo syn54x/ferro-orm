@@ -79,8 +79,8 @@ def check_name(name: str, what: str) -> None:
 
 
 class Moved(StrEnum):
-    """What ``ferro migrate new --replace`` did with one file of the
-    migration it replaced."""
+    """What ``ferro migrate new --replace`` or ``ferro migrate squash`` did
+    with one file of the migrations it replaced."""
 
     KEPT = "kept"
     """A regenerated file under the name it had."""
@@ -88,6 +88,9 @@ class Moved(StrEnum):
     """A regenerated file of the same step under another number."""
     CARRIED = "carried"
     """A data step or hand-written SQL step written back byte for byte."""
+    REGENERATED = "regenerated"
+    """A squash's generated DDL file: planned once across the whole run,
+    so it is no one original file's counterpart."""
 
 
 @dataclass(frozen=True)
@@ -187,16 +190,31 @@ class GeneratedMigration:
     """The lines ``new`` prints after the summary, in order: the generator's
     rename hints, then each backfill that still needs writing."""
     warnings: tuple[str, ...] = ()
-    replaces: str | None = None
-    """``--replace``: the replaced migration's directory name (``NNNN_<name>``),
-    deleted once this one is written."""
+    replaces: list[str] = field(default_factory=list)
+    """``--replace`` and ``squash``: the replaced migrations' directory names
+    (``NNNN_<name>``) in chain order, deleted once this one is written; one
+    for ``--replace``, the run for a squash, empty for ``new``."""
     chained_from: str | None = None
-    """``--replace``: the directory name of the migration whose snapshot this
-    one's links to (``None`` for the first)."""
+    """``--replace`` and ``squash``: the directory name of the migration
+    whose snapshot this one's links to (``None`` for the first)."""
     moves: tuple[tuple[str, str, Moved], ...] = ()
-    """``--replace``: ``(old file, new file, what happened)`` for every file
-    of this migration the replaced one had a counterpart for, ``old file``
-    relative to the migrations directory, ``new file`` to this migration's."""
+    """``--replace`` and ``squash``: ``(old file, new file, what happened)``
+    for every file of this migration a replaced one had a counterpart for,
+    ``old file`` relative to the migrations directory, ``new file`` to this
+    migration's."""
+    witness: list[dict[str, Any]] = field(default_factory=list)
+    """``squash``: the witness its snapshot stores (ADR-0056), one entry per
+    replaced migration in chain order, ``{"migration", "snapshot_checksum",
+    "steps", "replaces"}``. Empty for ``new`` and ``--replace``."""
+    dead_names: list[dict[str, Any]] = field(default_factory=list)
+    """``squash``: the names born and gone inside the run, as
+    ``_core._compose_run`` reports them (``{"kind", "name", "appeared",
+    "vanished"}``). Empty for ``new`` and ``--replace``."""
+
+    @property
+    def squash(self) -> bool:
+        """Whether this migration squashes a run (it records a witness)."""
+        return bool(self.witness)
 
     @property
     def dir_name(self) -> str:

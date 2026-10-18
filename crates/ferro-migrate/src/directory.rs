@@ -365,6 +365,27 @@ pub enum DirectoryError {
         /// by one rename, so present means complete.
         complete: bool,
     },
+    /// The run a `ferro migrate squash` set aside, one directory at a time,
+    /// under one hidden name naming both ends and the replacement
+    /// (`.<first>..<last>.<replacement>.squashed`), and never deleted: the
+    /// squash was killed between moving the first original and deleting the
+    /// aside.
+    SquashedAside {
+        /// The hidden directory.
+        aside: PathBuf,
+        /// The run's first migration (`NNNN_<name>`).
+        first: String,
+        /// The run's last migration (`NNNN_<name>`).
+        last: String,
+        /// The squashed migration's directory name (`NNNN_<name>`).
+        replacement: String,
+        /// The originals still in the migrations directory, outside the
+        /// aside (the squash was killed while moving them), in name order.
+        outside: Vec<String>,
+        /// Whether the replacement is in the directory: it appears whole,
+        /// by one rename, after every original is in the aside.
+        complete: bool,
+    },
     /// A migration `ferro migrate new` was writing into a hidden sibling
     /// (`.NNNN_<name>.partial`) and never moved into place: the run was
     /// killed while writing it.
@@ -414,6 +435,7 @@ impl DirectoryError {
             DirectoryError::UnparseableHeader { .. } => "unparseable_header",
             DirectoryError::MissingRendering { .. } => "missing_rendering",
             DirectoryError::InterruptedReplace { .. } => "interrupted_replace",
+            DirectoryError::SquashedAside { .. } => "squashed_aside",
             DirectoryError::InterruptedWrite { .. } => "interrupted_write",
             DirectoryError::WitnessNamesPresent { .. } => "witness_names_present",
         }
@@ -574,6 +596,50 @@ impl std::fmt::Display for DirectoryError {
                         show(aside)
                     )
                 }
+            }
+            DirectoryError::SquashedAside {
+                aside,
+                first,
+                last,
+                replacement,
+                outside,
+                complete,
+            } => {
+                let name = split_numbered(replacement, 4)
+                    .map_or_else(|| replacement.clone(), |(_, name)| name);
+                let run = if first == last {
+                    first.clone()
+                } else {
+                    format!("{first} through {last}")
+                };
+                write!(
+                    f,
+                    "{} holds {run}, set aside by an interrupted `ferro migrate squash \
+                     {name} --from {first}`; ",
+                    show(aside)
+                )?;
+                if *complete {
+                    return write!(
+                        f,
+                        "its replacement {replacement} is complete. Delete {}",
+                        show(aside)
+                    );
+                }
+                write!(
+                    f,
+                    "{replacement} was never written. Move every directory in {} back into \
+                     the migrations directory",
+                    show(aside)
+                )?;
+                if !outside.is_empty() {
+                    write!(f, " (beside {}, never moved)", outside.join(", "))?;
+                }
+                write!(
+                    f,
+                    " and delete {}, then run `ferro migrate squash {name} --from {first}` \
+                     again",
+                    show(aside)
+                )
             }
             DirectoryError::InterruptedWrite { partial, migration } => write!(
                 f,
@@ -1061,7 +1127,11 @@ fn interrupted_writes(root: &Path) -> Result<(), DirectoryError> {
         let Some(hidden) = file_name.strip_prefix('.') else {
             continue;
         };
-        if let Some(names) = hidden.strip_suffix(".replaced") {
+        if let Some(names) = hidden.strip_suffix(".squashed") {
+            if let Some(found) = squashed_aside(root, file_name.as_ref(), names)? {
+                asides.push(found);
+            }
+        } else if let Some(names) = hidden.strip_suffix(".replaced") {
             let (replaced, replacement) = names.split_once('.').unwrap_or((names, names));
             if let (Some(replaced), Some(replacement)) =
                 (migration_name(replaced), migration_name(replacement))
@@ -1089,6 +1159,75 @@ fn interrupted_writes(root: &Path) -> Result<(), DirectoryError> {
         Some(err) => Err(err),
         None => Ok(()),
     }
+}
+
+/// The aside a squash left (`.<first>..<last>.<replacement>.squashed`,
+/// `names` its name without the dot and suffix), with the originals it does
+/// not hold yet and whether the replacement was written; `None` for a hidden
+/// name of another shape, which stays ignored. An original is a directory
+/// numbered from `first` through `last` (at `first`'s number, `first`
+/// itself: a sibling there is not of the run). The replacement takes
+/// `first`'s number and may take its name too: a directory of that name is
+/// the replacement once `first` is in the aside, and `first` before.
+fn squashed_aside(
+    root: &Path,
+    file_name: &str,
+    names: &str,
+) -> Result<Option<DirectoryError>, DirectoryError> {
+    let migration = |name: &str| split_numbered(name, 4).map(|(number, _)| number);
+    let Some((first, rest)) = names.split_once("..") else {
+        return Ok(None);
+    };
+    let Some((last, replacement)) = rest.split_once('.') else {
+        return Ok(None);
+    };
+    let (Some(from), Some(to), Some(_)) =
+        (migration(first), migration(last), migration(replacement))
+    else {
+        return Ok(None);
+    };
+    let unreadable = |path: &Path| {
+        let path = path.to_path_buf();
+        move |err: std::io::Error| DirectoryError::Unreadable {
+            path,
+            reason: err.to_string(),
+        }
+    };
+    let names_in = |dir: &Path| -> Result<BTreeSet<String>, DirectoryError> {
+        let mut out = BTreeSet::new();
+        for entry in std::fs::read_dir(dir).map_err(unreadable(dir))? {
+            let entry = entry.map_err(unreadable(dir))?;
+            if entry.path().is_dir() {
+                out.insert(entry.file_name().to_string_lossy().into_owned());
+            }
+        }
+        Ok(out)
+    };
+    let held = names_in(&root.join(file_name))?;
+    let original = |name: &str, number: u32| name == first || (from < number && number <= to);
+    let mut outside = Vec::new();
+    let mut complete = false;
+    for name in names_in(root)? {
+        let Some(number) = migration(&name) else {
+            continue;
+        };
+        // A directory of the replacement's name is the replacement unless
+        // an original of that name has not been moved yet.
+        let is_original = original(&name, number) && !held.contains(&name);
+        if name == replacement && !is_original {
+            complete = true;
+        } else if is_original {
+            outside.push(name);
+        }
+    }
+    Ok(Some(DirectoryError::SquashedAside {
+        aside: PathBuf::from(file_name),
+        first: first.to_string(),
+        last: last.to_string(),
+        replacement: replacement.to_string(),
+        complete: complete && outside.is_empty(),
+        outside,
+    }))
 }
 
 /// Every migration directory under `root` as `(number, name, path)`, in
@@ -1679,6 +1818,88 @@ CREATE INDEX i ON t (c);
         assert_eq!(
             MigrationsDir::read(&root).expect("clean").migrations.len(),
             2
+        );
+    }
+
+    #[test]
+    fn a_leftover_squash_aside_is_refused_by_every_read_with_its_recovery() {
+        // A squash of 0002_b..0003_c into 0002_e, killed while moving the
+        // originals: 0002_b is in the aside, 0003_c is still outside.
+        let root = scratch("squashed");
+        let first = migration(&root, "0001_a", None);
+        let b = migration(&root, "0002_b", Some(&first));
+        migration(&root, "0003_c", Some(&b));
+        let aside = root.join(".0002_b..0003_c.0002_e.squashed");
+        std::fs::create_dir(&aside).expect("aside");
+        std::fs::rename(root.join("0002_b"), aside.join("0002_b")).expect("move");
+        for err in [
+            MigrationsDir::read(&root).expect_err("aside"),
+            MigrationsDir::read_replacing(&root, "0001_a").expect_err("aside"),
+            MigrationsDir::read_run(&root, "0001_a").expect_err("aside"),
+        ] {
+            assert_eq!(err.kind(), "squashed_aside");
+            assert_eq!(
+                err.to_string(),
+                ".0002_b..0003_c.0002_e.squashed holds 0002_b through 0003_c, set aside by \
+                 an interrupted `ferro migrate squash e --from 0002_b`; 0002_e was never \
+                 written. Move every directory in .0002_b..0003_c.0002_e.squashed back into \
+                 the migrations directory (beside 0003_c, never moved) and delete \
+                 .0002_b..0003_c.0002_e.squashed, then run `ferro migrate squash e --from \
+                 0002_b` again"
+            );
+        }
+        // Every original moved, the replacement written: delete the aside.
+        std::fs::rename(root.join("0003_c"), aside.join("0003_c")).expect("move");
+        migration(&root, "0002_e", Some(&first));
+        let err = MigrationsDir::read(&root).expect_err("aside");
+        assert_eq!(
+            err,
+            DirectoryError::SquashedAside {
+                aside: PathBuf::from(".0002_b..0003_c.0002_e.squashed"),
+                first: "0002_b".to_string(),
+                last: "0003_c".to_string(),
+                replacement: "0002_e".to_string(),
+                outside: Vec::new(),
+                complete: true,
+            }
+        );
+        assert_eq!(
+            err.to_string(),
+            ".0002_b..0003_c.0002_e.squashed holds 0002_b through 0003_c, set aside by an \
+             interrupted `ferro migrate squash e --from 0002_b`; its replacement 0002_e is \
+             complete. Delete .0002_b..0003_c.0002_e.squashed"
+        );
+        std::fs::remove_dir_all(&aside).expect("rm");
+        assert_eq!(
+            MigrationsDir::read(&root).expect("clean").migrations.len(),
+            2
+        );
+    }
+
+    #[test]
+    fn a_squash_taking_its_first_originals_name_tells_the_original_from_the_replacement() {
+        let root = scratch("squashed-same-name");
+        let first = migration(&root, "0001_a", None);
+        migration(&root, "0002_b", Some(&first));
+        let aside = root.join(".0002_b..0002_b.0002_b.squashed");
+        std::fs::create_dir(&aside).expect("aside");
+        // Nothing moved yet: 0002_b is the original, outside.
+        let outside = |err: DirectoryError| match err {
+            DirectoryError::SquashedAside {
+                outside, complete, ..
+            } => (outside, complete),
+            other => panic!("{other}"),
+        };
+        assert_eq!(
+            outside(MigrationsDir::read(&root).expect_err("aside")),
+            (vec!["0002_b".to_string()], false)
+        );
+        // Moved and written: 0002_b is the replacement.
+        std::fs::rename(root.join("0002_b"), aside.join("0002_b")).expect("move");
+        migration(&root, "0002_b", Some(&first));
+        assert_eq!(
+            outside(MigrationsDir::read(&root).expect_err("aside")),
+            (Vec::new(), true)
         );
     }
 

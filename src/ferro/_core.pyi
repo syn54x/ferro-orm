@@ -226,10 +226,35 @@ def _generate_migration(
     "kind", "names"}], "text"}, "notes", "warnings"}`` — or ``None``
     when nothing renders DDL (no schema change) and no hand step is asked
     for. ``options_json`` is ``{"no_backfill": [...], "data_step": str | None,
-    "sql_step": str | None, "data_only": bool}``: the generator lays out the
-    hand steps too, and a migration of hand steps alone stores the target
-    snapshot (the parent's with ``data_only``). Raises ``ValueError`` naming
-    the refusal (``not generated yet: <op> on <table> (ticket #N)``).
+    "sql_step": str | None, "data_only": bool, "carry": [{"name", "body",
+    "kind", "down"}], "replaces": [<witness entry>]}``: the generator lays out
+    the hand steps too, and a migration of hand steps alone stores the target
+    snapshot (the parent's with ``data_only``). ``carry`` is the steps
+    ``--replace`` and ``squash`` carry across; ``replaces`` is a squash's
+    witness (``{"migration", "snapshot_checksum", "steps", "replaces"}`` per
+    replaced migration, checksum in hex), stored beside the parent link, and
+    refused when malformed as the snapshot loader refuses it. Raises
+    ``ValueError`` naming the refusal (``not generated yet: <op> on <table>
+    (ticket #N)``).
+    """
+    ...
+
+def _compose_run(parent_json: str | None, run_json: list[str]) -> str:
+    """Compose a squash's target from the ``ir.json`` texts of the run it
+    replaces, in chain order, over the parent's (``None`` for a run from
+    ``0001``).
+
+    Returns JSON ``{"target": <schema IR envelope>, "dead_names": [{"kind",
+    "name", "appeared", "vanished"}]}``: the run's last payload with its
+    rename hints composed, in a current-version envelope, and every name born
+    and gone inside the run (``kind`` one of ``table``, ``column``,
+    ``enum_label``, ``constraint``; ``appeared`` and ``vanished`` index the
+    run). Raises ``ValueError`` for a snapshot that does not load, and with
+    the core's text for a run whose hints do not compose; that error carries
+    ``kind`` (``uncomposable``, ``old_name_re_added``,
+    ``new_name_held_by_parent``, ``refused_hint``) and ``from_index`` (the
+    index into the run of the migration a squash can start from instead, or
+    ``None``).
     """
     ...
 

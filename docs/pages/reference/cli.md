@@ -16,14 +16,14 @@ Given before or after the verb (`ferro --database billing migrate up` or `ferro 
 | :--- | :--- |
 | `--config PATH` | The config file to read, in place of the [lookup](configuration.md#lookup-order). |
 | `--database NAME` | Which configured database the verb acts on. Needed when several are configured. |
-| `--url URL` | The database URL, in place of the variable `url_env` names (`DATABASE_URL` by default). Refused by the verbs that never connect (`init`, `new`, `check`). |
+| `--url URL` | The database URL, in place of the variable `url_env` names (`DATABASE_URL` by default). Refused by the verbs that never connect (`init`, `new`, `squash`, `check`). |
 | `--version`, `--help` | The installed version; the help for a verb. |
 
 The environment: `FERRO_CONFIG` names the config file (as `--config` does), and the URL is read from the variable each database's `url_env` names.
 
 ### What the output looks like
 
-Every verb but `init` opens with one line naming the database it acts on and where that is. The verbs that connect print the database's name and its URL with any password masked (`default · sqlite:///./app.db`). `new` and `check` never connect, so they name the migrations directory instead (`default · migrations`). Everything under that line is the result.
+Every verb but `init` opens with one line naming the database it acts on and where that is. The verbs that connect print the database's name and its URL with any password masked (`default · sqlite:///./app.db`). `new`, `squash` and `check` never connect, so they name the migrations directory instead (`default · migrations`). Everything under that line is the result.
 
 Ferro prints each result in one of two forms, chosen by where it is printing. The blocks on this page are the **plain form**, which is what a pipe, a file or a CI log gets: ASCII markers (`ok` done, `!!` needs a look, `xx` failed or refused, `--` pending, `~~` half applied), one item to a line, nothing collapsed and no colour. A terminal gets the same words with Unicode markers, colour and some folding, which each verb's section below describes. Every refusal sentence, and every `warning:` line on stderr, is the same in both forms.
 
@@ -116,6 +116,51 @@ changing the primary key of "author" is not generated: write it as a new table (
 ```
 
 That section is [Changing a primary key](../guide/schema/migrations.md#changing-a-primary-key).
+
+## `ferro migrate squash NAME --from TARGET`
+
+Replace a run of migrations, from `TARGET` through the newest, with the one migration `new` would have written across it. A feature branch wrote `0002_add_bio` (with a hand-written SQL step `fix_rows`) and `0003_add_team`; `ferro migrate squash epic --from 0002` writes:
+
+<!-- output: squash -->
+```text
+default · migrations
+ok Wrote migrations/0002_epic/  (replaces 0002_add_bio … 0003_add_team, now deleted)
+  01_schema.up.postgres.sql    schema step, up (postgres)    regenerated
+  01_schema.down.postgres.sql  schema step, down (postgres)  regenerated
+  01_schema.up.sqlite.sql      schema step, up (sqlite)      regenerated
+  01_schema.down.sqlite.sql    schema step, down (sqlite)    regenerated
+  02_fix_rows.up.sql           SQL step, up                  carried, review it (was 0002_add_bio/02_fix_rows.up.sql)
+  02_fix_rows.down.sql         SQL step, down                carried, review it (was 0002_add_bio/02_fix_rows.down.sql)
+  ir.json                      snapshot                      0003_add_team's, chained from 0001_create_author, replaces 0002_add_bio…0003_add_team
+
+  1 new model
+    Team
+  1 changed model
+    Author
+```
+
+The DDL is planned once, from the snapshot below the run to the run's last snapshot, with every rename the run declared composed into it: a column renamed in `0002` whose hint `0003` dropped is still a `RENAME COLUMN`, never a drop and an add. Every data step and hand-written SQL step of the run is carried byte for byte, in chain order, each marked `carried, review it` with the file it was; a carried data step still holding `todo(...)` gets a note saying it still needs writing. The squashed migration takes the first migration's number, and its `ir.json` records which migrations it replaced. The run's directories are deleted. It reads the migrations directory only: never the models, never a database. A database that applied the originals meets the squash as an edited migration until it is adopted.
+
+On a terminal the file table is laid out as `new`'s is, with the last column, what became of each file, in the default colour.
+
+| Flag | What it does |
+| :--- | :--- |
+| `NAME` | The squashed migration's name: lowercase letters, digits and `_`. |
+| `--from TARGET` | The run's first migration: `NNNN_NAME`, or `NNNN` when one migration carries the number. The run goes from it through the newest migration; a run that stops short of the newest (a sibling chain beside it) is refused, naming the `--from` that reaches it. |
+| `--sql-step NAME` | Also add a hand-written SQL step, as on `new`. |
+| `--data-step MODEL` | Also add a Python data step over this model, as on `new`. |
+| `--data-only` | Write only the `--data-step` and the steps the run carries: no DDL, and a full copy of the snapshot below the run. |
+| `--no-backfill TABLE.COLUMN` | Replace the generated backfill of this column with a guard step, as on `new`. Repeatable. |
+| `--verbose` | Show every name in a long list of the change summary, as on `new`. |
+
+Exit 0 when written, 1 when refused, writing nothing. A run whose changes cancel out and that carries no step is refused, naming the directories to delete instead:
+
+<!-- refusal: squash-empty -->
+```text
+squash --from 0002: on top of 0001_create_author, 0002_add_bio through 0003_drop_bio change nothing that renders DDL and carry no data step or hand-written SQL step, so the squashed migration would be empty; delete the directories /srv/app/migrations/0002_add_bio and /srv/app/migrations/0003_drop_bio instead. Nothing was written.
+```
+
+Also refused: a `--from` the directory lacks, or a bare number two migrations share; renames inside the run that cannot be composed into one (the refusal names the `--from` to pass instead); `--url`. A squash killed halfway leaves its originals in a hidden `.<first>..<last>.<new>.squashed` directory, which every verb refuses, naming the recovery: move its contents back while the new migration is absent, delete it once the new migration is in place.
 
 ## `ferro migrate check`
 
