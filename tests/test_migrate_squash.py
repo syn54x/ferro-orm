@@ -507,6 +507,65 @@ def test_an_empty_squash_is_refused_naming_the_directories_to_delete(
     assert tree(project) == before
 
 
+def test_a_name_that_would_rewrite_a_replaced_original_is_refused(
+    project, pkg, capsys
+):
+    write_config(project, pkg)
+    write_models(project, pkg, AUTHOR)
+    new("create")
+    write_models(project, pkg, BIO)
+    new("add_bio")
+    before = tree(project)
+
+    err = refused(capsys, "create", "--from", "0001")
+
+    assert err == (
+        "ferro migrate squash: create would write 0001_create, the name of a "
+        "migration it replaces, and every reader would then take the squash for "
+        "the original it replaced; pick another name. Nothing was written.\n"
+    ), err
+    assert tree(project) == before
+    assert dirs(project) == ["0001_create", "0002_add_bio"]
+
+
+def test_the_generation_api_raises_the_same_refusal_text(project, pkg, capsys):
+    from ferro import FerroSettings
+    from ferro.migrations.generate import squash as generate_squash
+    from ferro.migrations.layout import MigrationsDirectoryError
+
+    write_config(project, pkg)
+    write_models(project, pkg, AUTHOR)
+    new("create")
+    write_models(project, pkg, BIO)
+    new("add_bio")
+    cli = refused(capsys, "create", "--from", "0001")
+
+    with pytest.raises(MigrationsDirectoryError) as raised:
+        generate_squash(FerroSettings().database(None), "create", "0001")
+
+    assert str(raised.value) + "\n" == cli
+
+
+def test_another_name_or_a_later_originals_name_is_not_refused(project, pkg):
+    write_config(project, pkg)
+    write_models(project, pkg, AUTHOR)
+    new("create")
+    write_models(project, pkg, BIO)
+    new("add_bio")
+    assert squash("create2", "--from", "0001") == 0
+    assert dirs(project) == ["0001_create2"]
+
+
+def test_a_name_equal_to_the_last_originals_name_is_not_refused(project, pkg):
+    write_config(project, pkg)
+    write_models(project, pkg, AUTHOR)
+    new("create_author")
+    write_models(project, pkg, BIO)
+    new("add_bio")
+    assert squash("add_bio", "--from", "0001") == 0
+    assert dirs(project) == ["0001_add_bio"]
+
+
 def test_squash_with_url_is_refused_as_new_refuses_it(project, pkg, capsys):
     feature_branch(project, pkg)
     before = tree(project)
