@@ -5569,4 +5569,410 @@ mod tests {
              Nothing was recorded."
         );
     }
+
+    // -- adoption (ADR-0056) ---------------------------------------------------
+
+    use crate::snapshot::WitnessEntry;
+
+    /// `0001_create_author`, then the epic's originals: `0002_add_teams`
+    /// (a DDL step and a data step), `0003_team_slug`, `0004_drop_tmp`.
+    fn epic_originals() -> MigrationsDir {
+        dir(vec![
+            (
+                "create_author",
+                vec![ddl(1, "schema", "CREATE TABLE a (id int);\n")],
+                &["author"],
+            ),
+            (
+                "add_teams",
+                vec![
+                    ddl(1, "expand", "CREATE TABLE t (id int);\n"),
+                    data(2, "backfill_team"),
+                ],
+                &["author", "team"],
+            ),
+            (
+                "team_slug",
+                vec![ddl(1, "schema", "ALTER TABLE t ADD slug text;\n")],
+                &["author", "team", "slug"],
+            ),
+            (
+                "drop_tmp",
+                vec![ddl(1, "schema", "ALTER TABLE t DROP tmp;\n")],
+                &["author", "team", "slug", "tmp_gone"],
+            ),
+        ])
+    }
+
+    /// What a squash's witness records of `migration`.
+    fn witness_of(migration: &Migration) -> WitnessEntry {
+        WitnessEntry {
+            migration: migration.dir_name(),
+            snapshot_checksum: migration.snapshot.checksum,
+            steps: migration.steps.iter().map(|s| s.ordinal).collect(),
+            replaces: migration.witness.clone(),
+        }
+    }
+
+    /// `of` with every migration from `from` on replaced by one squash
+    /// named `name`, taking the first's number: its steps an expand, a
+    /// carried data step and a contract, its snapshot the last one's
+    /// payload chained from the migration below `from`, and its witness
+    /// each replaced migration.
+    fn squashed(of: &MigrationsDir, from: u16, name: &str) -> MigrationsDir {
+        let below: Vec<Migration> = of
+            .migrations
+            .iter()
+            .filter(|m| m.number < from)
+            .cloned()
+            .collect();
+        let witness: Vec<WitnessEntry> = of
+            .migrations
+            .iter()
+            .filter(|m| m.number >= from)
+            .map(witness_of)
+            .collect();
+        let last = of.migrations.last().expect("a head");
+        let mut ir = last.snapshot.ir.clone();
+        ir.ir_version = 3;
+        let parent = below.last().map(|m| m.snapshot.checksum);
+        let bytes = Snapshot::store(&ir, parent, &witness).expect("store");
+        let mut migrations = below;
+        migrations.push(Migration {
+            number: from,
+            name: name.to_string(),
+            dir: PathBuf::from(format!("/migrations/{from:04}_{name}")),
+            steps: vec![
+                ddl(1, "expand", &format!("-- {name}\nCREATE TABLE t (id int);\n")),
+                data(2, "backfill_team"),
+                ddl(3, "contract", &format!("-- {name}\nALTER TABLE t DROP tmp;\n")),
+            ],
+            witness,
+            snapshot: Snapshot::load(&bytes).expect("load"),
+        });
+        MigrationsDir {
+            path: of.path.clone(),
+            migrations,
+        }
+    }
+
+    /// The finished records `up` writes for every step of `dir`.
+    fn every_step(dir: &MigrationsDir) -> Vec<StepRecord> {
+        dir.migrations
+            .iter()
+            .flat_map(|m| m.steps.iter().map(move |s| (m.number, s.ordinal)))
+            .map(|(m, s)| finished(dir, m, s))
+            .collect()
+    }
+
+    /// The squash of `0002..0004`, and a database that applied the originals.
+    fn originals_applied() -> (MigrationsDir, Vec<StepRecord>) {
+        let originals = epic_originals();
+        let records = every_step(&originals);
+        (squashed(&originals, 2, "teams_epic"), records)
+    }
+
+    fn no_kinds() -> BTreeMap<(u16, u8), RecordKind> {
+        BTreeMap::new()
+    }
+
+    #[test]
+    fn a_squash_whose_witness_the_records_hold_exactly_is_adoptable() {
+        let (dir, records) = originals_applied();
+        assert_eq!(
+            adoptable(&dir, &records),
+            [Adoption {
+                squash: "0002_teams_epic".into(),
+                replaced: vec![
+                    "0002_add_teams".into(),
+                    "0003_team_slug".into(),
+                    "0004_drop_tmp".into()
+                ],
+                witnessed: vec![(2, 1), (2, 2), (3, 1), (4, 1)],
+            }]
+        );
+        assert!(partial_witnesses(&dir, &records).is_empty());
+    }
+
+    #[test]
+    fn a_squash_none_of_whose_witness_is_recorded_is_neither_adoptable_nor_partial() {
+        let (dir, records) = originals_applied();
+        let only_first: Vec<StepRecord> =
+            records.into_iter().filter(|r| r.migration == 1).collect();
+        assert!(adoptable(&dir, &only_first).is_empty());
+        assert!(partial_witnesses(&dir, &only_first).is_empty());
+        // Nor is a database that ran the squash itself.
+        let ran = every_step(&dir);
+        assert!(adoptable(&dir, &ran).is_empty());
+        assert!(partial_witnesses(&dir, &ran).is_empty());
+    }
+
+    #[test]
+    fn an_extra_record_of_a_witnessed_name_is_no_witness() {
+        let (dir, mut records) = originals_applied();
+        let mut extra = records[2].clone();
+        extra.step = 3;
+        records.push(extra);
+        assert!(adoptable(&dir, &records).is_empty());
+        let [partial] = &partial_witnesses(&dir, &records)[..] else {
+            panic!("one partial witness");
+        };
+        assert_eq!(partial.missing, ["0002_add_teams"]);
+    }
+
+    #[test]
+    fn a_missing_ordinal_is_no_witness() {
+        let (dir, records) = originals_applied();
+        let records: Vec<StepRecord> = records
+            .into_iter()
+            .filter(|r| (r.migration, r.step) != (2, 2))
+            .collect();
+        assert!(adoptable(&dir, &records).is_empty());
+        assert_eq!(
+            partial_witnesses(&dir, &records)[0].missing,
+            ["0002_add_teams"]
+        );
+    }
+
+    #[test]
+    fn a_record_under_another_snapshot_checksum_is_no_witness() {
+        let (dir, mut records) = originals_applied();
+        records[3].snapshot_checksum = "0".repeat(96);
+        assert!(adoptable(&dir, &records).is_empty());
+        assert_eq!(
+            partial_witnesses(&dir, &records)[0].missing,
+            ["0003_team_slug"]
+        );
+    }
+
+    #[test]
+    fn baseline_records_witness_the_squash() {
+        let (dir, mut records) = originals_applied();
+        for record in &mut records {
+            record.origin = Origin::Baseline;
+        }
+        assert_eq!(adoptable(&dir, &records)[0].squash, "0002_teams_epic");
+    }
+
+    #[test]
+    fn a_record_whose_up_file_changed_after_apply_still_witnesses() {
+        let (dir, mut records) = originals_applied();
+        records[3].checksum = "f".repeat(96);
+        assert_eq!(adoptable(&dir, &records)[0].squash, "0002_teams_epic");
+    }
+
+    #[test]
+    fn a_partial_witness_names_what_is_satisfied_and_what_is_missing() {
+        let (dir, records) = originals_applied();
+        // 0002 and 0003 applied, 0004 never.
+        let partial: Vec<StepRecord> = records
+            .iter()
+            .filter(|r| r.migration < 4)
+            .cloned()
+            .collect();
+        assert!(adoptable(&dir, &partial).is_empty());
+        assert_eq!(
+            partial_witnesses(&dir, &partial),
+            [PartialWitness {
+                squash: "0002_teams_epic".into(),
+                parent: "0001_create_author".into(),
+                satisfied: vec!["0002_add_teams".into(), "0003_team_slug".into()],
+                missing: vec!["0004_drop_tmp".into()],
+            }]
+        );
+        // A last step that failed is missing too.
+        let mut failed = records;
+        failed[4].finished_at = None;
+        failed[4].error = Some("boom".into());
+        assert!(adoptable(&dir, &failed).is_empty());
+        assert_eq!(
+            partial_witnesses(&dir, &failed)[0].missing,
+            ["0004_drop_tmp"]
+        );
+    }
+
+    #[test]
+    fn a_squash_of_a_squash_adopts_from_the_inner_squash_and_from_the_earliest_originals() {
+        let originals = epic_originals();
+        // The first squash took 0003..0004; the second takes 0002 and it.
+        let first = squashed(&originals, 3, "slug_epic");
+        let second = squashed(&first, 2, "big_epic");
+        assert_eq!(second.migrations[1].witness[1].replaces.len(), 2);
+
+        // A database that adopted the first squash.
+        let adopted: Vec<StepRecord> = every_step(&first)
+            .into_iter()
+            .map(|r| StepRecord {
+                origin: if r.migration == 3 {
+                    Origin::Adopted
+                } else {
+                    r.origin
+                },
+                ..r
+            })
+            .collect();
+        let [by_inner] = &adoptable(&second, &adopted)[..] else {
+            panic!("adoptable from the first squash's records");
+        };
+        assert_eq!(by_inner.squash, "0002_big_epic");
+        assert_eq!(by_inner.replaced, ["0002_add_teams", "0003_slug_epic"]);
+        assert_eq!(by_inner.witnessed, [(2, 1), (2, 2), (3, 1), (3, 2), (3, 3)]);
+
+        // A database that still holds the earliest originals.
+        let earliest = every_step(&originals);
+        let [by_originals] = &adoptable(&second, &earliest)[..] else {
+            panic!("adoptable from the earliest originals");
+        };
+        assert_eq!(
+            by_originals.replaced,
+            ["0002_add_teams", "0003_team_slug", "0004_drop_tmp"]
+        );
+        assert_eq!(by_originals.witnessed, [(2, 1), (2, 2), (3, 1), (4, 1)]);
+
+        // Half of the inner squash's originals is a partial witness, named
+        // by the originals the database holds.
+        let half: Vec<StepRecord> = earliest.into_iter().filter(|r| r.migration != 4).collect();
+        assert!(adoptable(&second, &half).is_empty());
+        let [partial] = &partial_witnesses(&second, &half)[..] else {
+            panic!("partial");
+        };
+        assert_eq!(partial.satisfied, ["0002_add_teams", "0003_team_slug"]);
+        assert_eq!(partial.missing, ["0004_drop_tmp"]);
+    }
+
+    #[test]
+    fn adoption_swaps_the_witnessed_records_for_the_squashs_own_and_then_nothing_is_pending() {
+        let (dir, records) = originals_applied();
+        let kinds = BTreeMap::from([((2, 2), RecordKind::Chunked)]);
+        let adopted = adoption(
+            &dir,
+            &records,
+            Dialect::Sqlite,
+            &kinds,
+            "2026-10-18T12:00:00.000000Z",
+            "0.25.0",
+        )
+        .expect("adopts");
+        assert_eq!(adopted.adoptions.len(), 1);
+        assert_eq!(adopted.removed, [(2, 1), (2, 2), (3, 1), (4, 1)]);
+        let squash = &dir.migrations[1];
+        let snapshot = encode_checksum(&squash.snapshot.checksum);
+        let classes = migration_classes(&dir, squash, Dialect::Sqlite).expect("classes");
+        assert_eq!(adopted.inserted.len(), 3);
+        for (record, step) in adopted.inserted.iter().zip(&squash.steps) {
+            let file = step_file(squash, step, Dialect::Sqlite).expect("file");
+            assert_eq!(record.migration_name, "0002_teams_epic");
+            assert_eq!((record.migration, record.step), (2, step.ordinal));
+            assert_eq!(record.file, file_name(&file.up));
+            assert_eq!(record.checksum, encode_checksum(&file.up_checksum));
+            assert_eq!(record.snapshot_checksum, snapshot);
+            assert_eq!(record.origin, Origin::Adopted);
+            assert_eq!(record.class, classes.get(&step.ordinal).copied());
+            assert_eq!(record.started_at, "2026-10-18T12:00:00.000000Z");
+            assert_eq!(
+                record.finished_at.as_deref(),
+                Some("2026-10-18T12:00:00.000000Z")
+            );
+            assert_eq!(record.ferro_version, "0.25.0");
+            assert_eq!(record.duration_ms, 0);
+        }
+        assert_eq!(adopted.inserted[0].kind, RecordKind::Ddl);
+        assert_eq!(adopted.inserted[1].kind, RecordKind::Chunked);
+        // The records after: 0001's, then the squash's.
+        assert_eq!(
+            adopted
+                .records
+                .iter()
+                .map(|r| (r.migration_name.as_str(), r.step))
+                .collect::<Vec<_>>(),
+            [
+                ("0001_create_author", 1),
+                ("0002_teams_epic", 1),
+                ("0002_teams_epic", 2),
+                ("0002_teams_epic", 3)
+            ]
+        );
+        assert!(up(&dir, &adopted.records).expect("plans").steps.is_empty());
+        // Adopting again finds nothing.
+        let again = adoption(&dir, &adopted.records, Dialect::Sqlite, &kinds, "now", "v")
+            .expect("nothing to adopt");
+        assert!(again.adoptions.is_empty() && again.inserted.is_empty());
+        assert_eq!(again.records, adopted.records);
+        // Its data steps are the files whose declared kind the caller reads.
+        assert_eq!(
+            adoption_data_steps(&dir, &records),
+            [(2, 2, PathBuf::from("/m/02_backfill_team.py"))]
+        );
+        assert!(adoption_data_steps(&dir, &adopted.records).is_empty());
+    }
+
+    #[test]
+    fn a_partial_witness_refuses_the_adoption_naming_the_non_destructive_fix_first() {
+        let (dir, records) = originals_applied();
+        let partial: Vec<StepRecord> = records.into_iter().filter(|r| r.migration < 4).collect();
+        let refusal = adoption(&dir, &partial, Dialect::Sqlite, &no_kinds(), "now", "v")
+            .expect_err("partial");
+        assert_eq!(refusal.kind(), "partial_witness");
+        assert_eq!(
+            refusal,
+            RunRefusal::PartialWitness {
+                squash: "0002_teams_epic".into(),
+                parent: "0001_create_author".into(),
+                satisfied: vec!["0002_add_teams".into(), "0003_team_slug".into()],
+                missing: vec!["0004_drop_tmp".into()],
+            }
+        );
+        assert_eq!(
+            refusal.to_string(),
+            "ferro migrate: 0002_teams_epic replaces migrations this database applied only \
+             part of: it applied 0002_add_teams and 0003_team_slug but not 0004_drop_tmp, so \
+             it cannot adopt 0002_teams_epic. To keep its rows, check out the commit that \
+             holds 0004_drop_tmp, run `ferro migrate up` there to finish it, then run `ferro \
+             migrate up` here, which adopts 0002_teams_epic. Or revert instead: on the commit \
+             that applied them run `ferro migrate down --to 0001`, then `ferro migrate up` \
+             here; the revert drops what they created and fails on an irreversible step. \
+             Nothing was changed."
+        );
+    }
+
+    #[test]
+    fn an_adopted_step_reads_applied_adopted_and_its_down_runs() {
+        assert_eq!(Origin::parse("adopted"), Some(Origin::Adopted));
+        assert_eq!(Origin::Adopted.as_str(), "adopted");
+        assert!(!Origin::Adopted.is_baseline() && !Origin::Run.is_baseline());
+        assert!(Origin::Baseline.is_baseline());
+        let (dir, records) = originals_applied();
+        let adopted =
+            adoption(&dir, &records, Dialect::Sqlite, &no_kinds(), "now", "v").expect("adopts");
+        let status = run_status(&dir, &adopted.records, Dialect::Sqlite, false, None);
+        assert_eq!(
+            status.migrations[1]
+                .steps
+                .iter()
+                .map(|s| s.state)
+                .collect::<Vec<_>>(),
+            [StepState::AppliedAdopted; 3]
+        );
+        assert_eq!(status.migrations[0].steps[0].state, StepState::Applied);
+        assert!(!StepState::AppliedAdopted.is_pending());
+        assert!(!StepState::AppliedAdopted.needs_attention());
+        assert_eq!(
+            serde_json::to_value(StepState::AppliedAdopted).expect("json"),
+            "applied_adopted"
+        );
+        assert!(status.refusal.is_none(), "{:?}", status.refusal);
+        // An adopted step's down runs: the floor is a baseline's alone.
+        let reverted = plan_run(
+            &dir,
+            &adopted.records,
+            Dialect::Sqlite,
+            Direction::Down {
+                target: Target::Migration(1),
+            },
+            false,
+            None,
+        )
+        .expect("down");
+        assert_eq!(keys(&reverted), [(2, 3), (2, 2), (2, 1)]);
+    }
 }
