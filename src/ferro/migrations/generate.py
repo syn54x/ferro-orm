@@ -497,6 +497,13 @@ def _prepare_squash(
     names = [_dir_name(m) for m in run]
     if not read["reaches_head"]:
         raise MigrationsDirectoryError(_short_of_the_head(directory, names[0], read))
+    written = f"{len(below) + 1:04d}_{name}"
+    if written in names:
+        raise MigrationsDirectoryError(
+            f"ferro migrate squash: {name} would write {written}, the name of a "
+            "migration it replaces, and every reader would then take the squash "
+            "for the original it replaced; pick another name. Nothing was written."
+        )
     carry = _carried_steps(directory, run)
     parent = _head_snapshot_text(below)
     try:
