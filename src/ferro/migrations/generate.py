@@ -524,38 +524,51 @@ def _prepare_squash(
         }
         for m in run
     ]
-    try:
-        raw = _generate_migration(
-            parent,
-            json.dumps(composed["target"]),
-            list(database.dialects),
-            options_json=json.dumps(
-                {
-                    **options,
-                    "carry": [
-                        {k: step[k] for k in ("name", "body", "kind", "down")}
-                        for step in carry
-                    ],
-                    "replaces": witness,
-                }
-            ),
-        )
-    except ValueError as err:
-        raise MigrationsDirectoryError(str(err)) from None
-    if raw is None:
-        raise MigrationsDirectoryError(
-            _empty_squash(
-                directory, from_, names, _dir_name(below[-1]) if below else None
+    def generate(carry: list[dict[str, Any]]) -> GeneratedMigration:
+        try:
+            raw = _generate_migration(
+                parent,
+                json.dumps(composed["target"]),
+                list(database.dialects),
+                options_json=json.dumps(
+                    {
+                        **options,
+                        "carry": [
+                            {k: step[k] for k in ("name", "body", "kind", "down")}
+                            for step in carry
+                        ],
+                        "replaces": witness,
+                    }
+                ),
             )
+        except ValueError as err:
+            raise MigrationsDirectoryError(str(err)) from None
+        if raw is None:
+            raise MigrationsDirectoryError(
+                _empty_squash(
+                    directory, from_, names, _dir_name(below[-1]) if below else None
+                )
+            )
+        generated = json.loads(raw)
+        return _with_data_steps(
+            GeneratedMigration.from_generated(
+                generated, number=len(below) + 1, name=name, carry=carry
+            ),
+            generated,
+            directory / TEMPLATES_DIR,
         )
-    generated = json.loads(raw)
-    migration = _with_data_steps(
-        GeneratedMigration.from_generated(
-            generated, number=len(below) + 1, name=name, carry=carry
-        ),
-        generated,
-        directory / TEMPLATES_DIR,
+
+    migration = generate(carry)
+    dropped = _unneeded_scaffolds(
+        migration, carry, run, below, directory, list(database.dialects)
     )
+    if dropped:
+        # Regenerated without them, so the steps after renumber densely.
+        carry = [entry for i, entry in enumerate(carry) if i not in dropped]
+        migration = generate(carry)
+        migration = dataclass_replace(
+            migration, notes=(*migration.notes, *dropped.values())
+        )
     squashed = _with_squash_moves(
         migration,
         carry,
@@ -565,6 +578,95 @@ def _prepare_squash(
         dead_names=composed["dead_names"],
     )
     return _with_dead_name_notes(squashed, carry, run, below, composed, names)
+
+
+def _unneeded_scaffolds(
+    migration: GeneratedMigration,
+    carry: list[dict[str, Any]],
+    run: list[dict[str, Any]],
+    below: list[dict[str, Any]],
+    directory: Path,
+    dialects: list[str],
+) -> dict[int, str]:
+    """The carried data steps a squash drops, by their place in ``carry``,
+    each with the note that names it (ADR-0056, amended 2026-10-18).
+
+    A carried data step is dropped when it is still, byte for byte, the
+    backfill the generator scaffolded for its original migration (that
+    original regenerated alone, from its own parent snapshot to its own
+    snapshot, through the path ``new`` takes) and the squashed ``migration``
+    lays out no step of its name: a table the squash creates has no rows to
+    backfill. A step with any byte a person wrote is carried; so is one the
+    squashed plan rescaffolds, which it wins over as before. An original the
+    generator cannot regenerate alone (one planned with an option its
+    snapshots do not record) has no scaffold to compare, so its steps are
+    carried."""
+    candidates = sorted(
+        step.carry
+        for step in migration.steps
+        if step.carry is not None and step.kind == "data" and not step.over_namesake
+    )
+    at_of = {_dir_name(m): at for at, m in enumerate(run)}
+    scaffolds: dict[int, dict[str, tuple[str, str]]] = {}
+    dropped: dict[int, str] = {}
+    for index in candidates:
+        entry = carry[index]
+        original = Path(entry["old"][0])
+        at = at_of[original.parent.name]
+        if at not in scaffolds:
+            scaffolds[at] = _original_backfills(run, below, at, directory, dialects)
+        scaffold = scaffolds[at].get(entry["name"])
+        if scaffold is None or scaffold[0] != entry["body"]:
+            continue
+        dropped[index] = (
+            f"{original.name} from {original.parent.name} was the generator's "
+            f"unwritten scaffold and the squashed plan needs no backfill of "
+            f"{scaffold[1]}: dropped"
+        )
+    return dropped
+
+
+def _original_backfills(
+    run: list[dict[str, Any]],
+    below: list[dict[str, Any]],
+    at: int,
+    directory: Path,
+    dialects: list[str],
+) -> dict[str, tuple[str, str]]:
+    """The backfills the generator scaffolds for the run's migration ``at``
+    alone, by step name: the scaffold's text, as ``new`` writes it, and the
+    columns it fills (``author.bio``)."""
+    try:
+        raw = _generate_migration(
+            _head_snapshot_text(run[:at] or below),
+            json.dumps(run[at]["snapshot"]["ir"]),
+            dialects,
+        )
+    except ValueError:
+        return {}
+    if raw is None:
+        return {}
+    generated = json.loads(raw)
+    regenerated = _with_data_steps(
+        GeneratedMigration.from_generated(
+            generated, number=run[at]["number"], name=run[at]["name"]
+        ),
+        generated,
+        directory / TEMPLATES_DIR,
+    )
+    records = {step["ordinal"]: step for step in generated["steps"]}
+    backfills: dict[str, tuple[str, str]] = {}
+    for step in regenerated.steps:
+        if step.role != "backfill":
+            continue
+        data = records[step.ordinal]["data"]
+        columns = dict.fromkeys(column["name"] for column in data["columns"])
+        [text] = step.files.values()
+        backfills[step.name] = (
+            text,
+            ", ".join(f"{data['table']}.{column}" for column in columns),
+        )
+    return backfills
 
 
 def _with_dead_name_notes(

@@ -327,10 +327,13 @@ def test_squash_composes_with_the_options_new_takes(project, pkg, capsys):
     new("add_tmp")
     write_models(project, pkg, TMP + "    slug: str\n")
     new("add_slug")
+    [backfill] = (migrations(project) / "0003_add_slug").glob("*_backfill_author.py")
+    backfill.write_text(FILLED.replace("bio", "slug"))
     capsys.readouterr()
 
     # --no-backfill puts a guard in the generated backfill's place, as on
-    # `new`; the run's own backfill step is carried beside it.
+    # `new`; the run's own backfill step, written by hand, is carried beside
+    # it.
     assert squash("epic", "--from", "0002", "--no-backfill", "author.slug") == 0
 
     lines = words(capsys.readouterr().out)
@@ -531,6 +534,29 @@ def test_an_untouched_scaffold_the_squash_rescaffolds_is_carried_over_its_namesa
         f"{scaffold.name}; it wins over the regenerated step of the same name)"
     ) in words(out), out
     assert "dropped" not in out, out
+
+
+def test_an_untouched_scaffold_a_guard_takes_the_place_of_is_dropped(
+    project, pkg, capsys
+):
+    write_config(project, pkg)
+    write_models(project, pkg, AUTHOR)
+    new("create_author")
+    write_models(project, pkg, TMP)
+    new("add_tmp")
+    write_models(project, pkg, TMP + "    slug: str\n")
+    new("add_slug")
+    capsys.readouterr()
+
+    assert squash("epic", "--from", "0002", "--no-backfill", "author.slug") == 0
+
+    names = sorted(files(migrations(project) / "0002_epic"))
+    assert [n for n in names if n.endswith(".py")] == ["02_guard_author.py"]
+    out = capsys.readouterr().out
+    assert (
+        "- 02_backfill_author.py from 0003_add_slug was the generator's unwritten "
+        "scaffold and the squashed plan needs no backfill of author.slug: dropped"
+    ) in words(out), out
 
 
 def test_replace_carries_an_untouched_scaffold_as_before(project, pkg, capsys):
@@ -1138,6 +1164,9 @@ def test_a_step_filtering_on_a_dead_enum_label_is_refused_naming_the_label(
     new("add_gone")
     write_models(project, pkg, AUTHOR)
     new("drop_gone")
+    # Reviewed by hand (one byte), so it is carried, never dropped (#687).
+    [rewrite] = (migrations(project) / "0003_drop_gone").glob("*_backfill_*.py")
+    rewrite.write_text(rewrite.read_text() + "\n")
     err = refused(capsys, "epic", "--from", "0002")
 
     assert "names author.status:gone, which existed only inside the run" in err
