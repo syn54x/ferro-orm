@@ -48,6 +48,7 @@ MIGRATION_EXAMPLES = [
     "migrations_rename",
     "migrations_retire",
     "migrations_retire_label",
+    "migrations_squash",
     "migrations_testing",
 ]
 
@@ -538,6 +539,76 @@ def _two_branches_replaced(project: Path) -> None:
     _run_ok(project, "migrate", "new", "add_x", "--replace", "0002_add_x")
 
 
+# An epic's branch, one migration per task, squashed before it merges.
+
+TEAM = (
+    "\n\nclass Team(Model):\n"
+    "    id: int | None = Field(default=None, primary_key=True)\n"
+    "    name: str\n"
+)
+TEAM_TMP_CODE = "    tmp_code: str | None = None\n"
+TEAM_SLUG = "    slug: str\n"
+
+
+def _teams_epic(project: Path) -> None:
+    """Main holds ``0001``..``0004``; the epic's tasks add ``0005_add_teams`` (with
+    a ``tmp_code`` column), ``0006_team_slug`` (a required slug and its written
+    backfill), ``0007_drop_tmp`` and ``0008_fix_rows`` (a hand-written SQL step).
+    The developer's database applied every one."""
+    _configured(project)
+    models = NAMED_AUTHOR
+    for name, column in (
+        ("create_author", ""),
+        ("author_email", "    email: str | None = None\n"),
+        ("author_bio", "    bio: str | None = None\n"),
+        ("author_nick", "    nick: str | None = None\n"),
+    ):
+        models += column
+        _write_models(project, models)
+        _run_ok(project, "migrate", "new", name)
+    _write_models(project, models + TEAM + TEAM_TMP_CODE)
+    _run_ok(project, "migrate", "new", "add_teams")
+    _write_models(project, models + TEAM + TEAM_TMP_CODE + TEAM_SLUG)
+    _run_ok(project, "migrate", "new", "team_slug")
+    backfill = project / "migrations" / "0006_team_slug" / "02_backfill_team.py"
+    backfill.write_text(
+        backfill.read_text().replace(
+            'todo("the slug for an existing team")', "team.name.lower()"
+        )
+    )
+    _write_models(project, models + TEAM + TEAM_SLUG)
+    _run_ok(project, "migrate", "new", "drop_tmp")
+    _run_ok(project, "migrate", "new", "fix_rows", "--sql-step", "fix_rows")
+    fix_rows = project / "migrations" / "0008_fix_rows"
+    (fix_rows / "01_fix_rows.up.sql").write_text("UPDATE team SET name = trim(name);\n")
+    (fix_rows / "01_fix_rows.down.sql").write_text(
+        "-- ferro: nothing-to-reverse the names stay trimmed\n"
+    )
+    _run_ok(project, "migrate", "up")
+
+
+def _teams_epic_squashed(project: Path) -> None:
+    _teams_epic(project)
+    _run_ok(project, "migrate", "squash", "teams_epic", "--from", "0005")
+
+
+def _teams_epic_dead_name(project: Path) -> None:
+    """``0006_team_slug``'s backfill, a chunked step, selects its rows by
+    ``tmp_code``, a column that exists only inside the run."""
+    _teams_epic(project)
+    backfill = project / "migrations" / "0006_team_slug" / "02_backfill_team.py"
+    backfill.write_text(
+        backfill.read_text().replace("team.slug == None", "team.tmp_code == None")
+    )
+
+
+def _teams_epic_partly_applied(project: Path) -> None:
+    """A teammate's database: it applied ``0005``..``0007`` and not ``0008``."""
+    _teams_epic(project)
+    _run_ok(project, "migrate", "down", "--to", "0007", "--yes")
+    _run_ok(project, "migrate", "squash", "teams_epic", "--from", "0005")
+
+
 # A required column, a backfill, and the rows the backfill is for.
 
 
@@ -788,6 +859,17 @@ OUTPUTS = {
         ("migrate", "new", "add_x", "--replace", "0002_add_x"),
     ),
     "replaced-up-refused": (_two_branches_replaced, ("migrate", "up")),
+    "squash-epic": (
+        _teams_epic,
+        ("migrate", "squash", "teams_epic", "--from", "0005"),
+    ),
+    "squash-dead-name": (
+        _teams_epic_dead_name,
+        ("migrate", "squash", "teams_epic", "--from", "0005"),
+    ),
+    "squash-status-adoptable":(_teams_epic_squashed, ("migrate", "status")),
+    "squash-up-adopts": (_teams_epic_squashed, ("migrate", "up")),
+    "squash-partial-witness": (_teams_epic_partly_applied, ("migrate", "up")),
     "rekey-refused": (_primary_key_change, ("migrate", "new", "rekey")),
     # data steps
     "backfill-new": (_slug_edited, ("migrate", "new", "author_slug")),

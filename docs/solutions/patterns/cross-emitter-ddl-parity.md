@@ -82,7 +82,7 @@ This invariant is enforced by paired tests in
 and `tests/test_db_type_cross_emitter_parity.py` (every canonical `db_type`
 token × dialect plus `ck_<table>_<col>` parity).
 
-## The seven pins
+## The nine pins
 
 `ferro migrate new` plans with the same planner as the pass
 (`ferro_migrate::plan_from_ir`) and renders through the same `Plan::render`;
@@ -101,6 +101,10 @@ tests' own models), on both dialects:
 | (e) | a database taken through the chain | an auto-migrated database: no drift, the same live schema and facts; autogenerate empty against it |
 | (f) | — (the bridge) | every statement the revision runs as written is the pass's, and the revision leaves the pass's schema |
 | (g) | — (the pass itself) | `ferro.migrate()`'s `PassReport`: its `schema` statements are the plan's for the same live read, grouped by table (the create pass standing in for each add); its warnings the plan's reports by kind and subject |
+| (h) | `ferro migrate squash NAME --from 0001` over a copy of the chain | `ferro migrate new NAME` from the after models alone: the same files byte for byte, bar `ir.json`, whose payload is the same once the witness and the composed rename hints are removed |
+| (i) | a database taken through the originals, then adopted by `ferro migrate up` (it runs nothing) | a database that ran the squash from empty: the same live schema (every fact pin (e) reads, server defaults included), the same tracking rows bar origin and times, no drift, and a `down --all` that empties both |
+
+Pins (h) and (i) hold `ferro migrate squash` to the door it belongs to rather than to the pass: a squash writes what `new` would have written across its ends, and a database that adopts it stands where one that ran it stands.
 
 The plain twins pin (a) compares by: a `NOT VALID` add is the plain add,
 `CONCURRENTLY` is gone (the leading crash-leftover `DROP INDEX CONCURRENTLY`
@@ -127,7 +131,7 @@ the entry.
    - Rust: add a helper next to `composite_index_name` and use it
      consistently in `src/schema.rs`.
 3. Add a casebook case to `tests/_casebook.py` (and its generator test), so
-   pins (a)–(g) cover it, and a parity test that asserts the names match.
+   pins (a)–(i) cover it, and a parity test that asserts the names match.
 4. Do not edit `CHANGELOG.md`: release tooling writes it (AGENTS.md I-10).
 
 ## Recipe: adding a new emitter
@@ -160,5 +164,5 @@ The fix is _always_ to align both emitters, never to silence the diff.
 
 - `tests/test_migrate_plan.py` — render-level auto-migrate diff matrix (Python SchemaIR producer).
 - `tests/test_cross_emitter_parity.py` — Alembic vs post-migrate database, and
-  the seven pins over the casebook.
+  the nine pins over the casebook.
 - `tests/test_db_type_cross_emitter_parity.py` — token vocabulary across emitters.
