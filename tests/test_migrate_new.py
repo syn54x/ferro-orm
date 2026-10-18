@@ -791,3 +791,78 @@ def test_each_data_step_carries_the_role_the_generator_gave_it(project, pkg):
     ]
     assert [s.role for s in guarded.steps if s.kind == "data"] == ["guard"]
     assert {s.role for s in hand.steps if s.kind != "data"} == {None}
+
+
+# -- a name a squash's witness records (panel F5 on #690) ---------------------------
+
+
+def _tree(directory: Path) -> dict[str, bytes]:
+    return {
+        str(p.relative_to(directory)): p.read_bytes()
+        for p in sorted(directory.rglob("*"))
+        if p.is_file()
+    }
+
+
+def _generate(name: str) -> None:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        assert run("migrate", "new", name) == 0
+
+
+_TMP_BIO = AUTHOR + "    tmp: str | None = None\n    bio: str | None = None\n"
+
+
+def _squashed_feature(project: Path, pkg: str) -> None:
+    """``0001_create_author``, then ``0002_add_tmp`` and ``0003_add_bio``
+    squashed into ``0002_epic``; the models then add ``rank``."""
+    write_config(project, pkg)
+    write_models(project, pkg, AUTHOR)
+    _generate("create_author")
+    write_models(project, pkg, AUTHOR + "    tmp: str | None = None\n")
+    _generate("add_tmp")
+    write_models(project, pkg, _TMP_BIO)
+    _generate("add_bio")
+    assert run("migrate", "squash", "epic", "--from", "0002") == 0
+    write_models(project, pkg, _TMP_BIO + "    rank: int | None = None\n")
+
+
+def test_new_refuses_a_name_a_squash_replaced(project, pkg, capsys):
+    _squashed_feature(project, pkg)
+    before = _tree(project / "migrations")
+    capsys.readouterr()
+
+    assert run("migrate", "new", "add_bio") == 1
+
+    assert capsys.readouterr().err == (
+        "ferro migrate new: 0003_add_bio is the name of a migration the squash "
+        "0002_epic replaces, and every reader would then take it for the replaced "
+        "original; pick another name. Nothing was written.\n"
+    )
+    assert _tree(project / "migrations") == before
+    _generate("add_rank")
+
+
+def test_new_refuses_a_name_a_nested_witness_records(project, pkg, capsys):
+    _squashed_feature(project, pkg)
+    _generate("add_rank")
+    assert run("migrate", "squash", "all", "--from", "0001") == 0
+    rank = _TMP_BIO + "    rank: int | None = None\n"
+    write_models(project, pkg, rank + "    nick: str | None = None\n")
+    _generate("add_nick")  # 0002_add_nick
+    write_models(
+        project,
+        pkg,
+        rank + "    nick: str | None = None\n    age: int | None = None\n",
+    )
+    before = _tree(project / "migrations")
+    capsys.readouterr()
+
+    assert run("migrate", "new", "add_bio") == 1
+
+    assert capsys.readouterr().err == (
+        "ferro migrate new: 0003_add_bio is the name of a migration the squash "
+        "0002_epic replaces, and every reader would then take it for the replaced "
+        "original; pick another name. Nothing was written.\n"
+    )
+    assert _tree(project / "migrations") == before

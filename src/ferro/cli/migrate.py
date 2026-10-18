@@ -789,11 +789,18 @@ def _say_directory(out: Output, database: DatabaseSettings) -> None:
 
 
 def _refuse_url(glob: Global, verb: str) -> None:
-    if glob.url is not None:
+    if glob.url is None:
+        return
+    if verb == "squash":
+        # It never imports the models either (ADR-0056).
         raise SettingsError(
-            f"{verb} reads the models and the migrations directory, never a "
-            f"database; drop --url"
+            "squash reads the migrations directory only, never the models or a "
+            "database; drop --url"
         )
+    raise SettingsError(
+        f"{verb} reads the models and the migrations directory, never a "
+        f"database; drop --url"
+    )
 
 
 # -- which file ----------------------------------------------------------------

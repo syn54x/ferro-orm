@@ -22,10 +22,8 @@ does every model change have a migration, and is the directory intact?
 from __future__ import annotations
 
 import copy
-import hashlib
 import json
 import shutil
-import tempfile
 import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -430,6 +428,10 @@ def prepare(
         carry = _carried_steps(directory, [replaced])
     parent = _head_snapshot_text(migrations)
     number = len(migrations) + 1
+    written = f"{number:04d}_{name}"
+    squash_of = _witnessed(migrations).get(written)
+    if squash_of is not None:
+        raise MigrationsDirectoryError(_witnessed_name("new", written, squash_of))
     try:
         # The generator plans once, decides the guard (ADR-0037), refusing a
         # --no-backfill it cannot honour, and lays out every step, the hand
@@ -496,7 +498,7 @@ def _prepare_squash(
     below, run = read["below"], read["run"]
     names = [_dir_name(m) for m in run]
     if read["off_run"]:
-        raise MigrationsDirectoryError(_short_of_the_head(directory, names[0], read))
+        raise MigrationsDirectoryError(_short_of_the_head(names[0], read["off_run"]))
     if read["siblings"]:
         raise MigrationsDirectoryError(_shared_number(names[0], read["siblings"][0]))
     written = f"{len(below) + 1:04d}_{name}"
@@ -506,6 +508,9 @@ def _prepare_squash(
             "migration it replaces, and every reader would then take the squash "
             "for the original it replaced; pick another name. Nothing was written."
         )
+    squash_of = _witnessed(below + run).get(written)
+    if squash_of is not None:
+        raise MigrationsDirectoryError(_witnessed_name("squash", written, squash_of))
     carry = _carried_steps(directory, run)
     parent = _head_snapshot_text(below)
     try:
@@ -517,6 +522,10 @@ def _prepare_squash(
         )
     except ValueError as err:
         raise MigrationsDirectoryError(_compose_refusal(from_, err, names)) from None
+    if options["data_only"] and options["data_step"] is not None:
+        _refuse_data_only_over_ddl(
+            parent, composed["target"], list(database.dialects), names, name, options
+        )
     witness = [
         {
             "migration": _dir_name(m),
@@ -790,18 +799,17 @@ def _declared_names(entry: dict[str, Any], models: HistoricalModels) -> set[str]
             on it.
     """
     first = entry["old"][0]
-    with tempfile.TemporaryDirectory() as scratch:
-        path = Path(scratch) / first.parent.name / first.name
-        path.parent.mkdir()
-        path.write_text(entry["body"], encoding="utf-8")
-        try:
-            loaded = load_step(path, None)
-        except StepRefused as refused:
-            raise MigrationsDirectoryError(
-                f"{refused}: {_from_migration(first)} cannot be carried as it is. "
-                f"Fix the step in its migration, or delete it, and run the command "
-                f"again. Nothing was written."
-            ) from None
+    try:
+        # The original itself, whose bytes are the carried body: every
+        # refusal of it names it as ``<migration>/<file>``.
+        loaded = load_step(first, None)
+    except StepRefused as refused:
+        reason = str(refused).removeprefix("ferro migrate: ")
+        raise MigrationsDirectoryError(
+            f"ferro migrate squash: {reason}; the squash cannot carry it as it is. "
+            f"Fix the step in its migration, or delete it, and run the command "
+            f"again. Nothing was written."
+        ) from None
     touched: set[str] = set()
     for declared in (loaded.up, loaded.down):
         if not isinstance(declared.shape, Chunked):
@@ -852,34 +860,20 @@ def _shared_number(first: str, sibling: str) -> str:
     )
 
 
-def _short_of_the_head(directory: Path, first: str, read: dict[str, Any]) -> str:
+def _short_of_the_head(first: str, off_run: list[dict[str, Any]]) -> str:
     """The refusal of a run that stops short of the head: the first
-    migration it leaves, what that one chains from, and the two fixes."""
-    off = read["off_run"][0]
-    # The reader leaves the off-run migrations unread: their links are read
-    # here, as the stored bytes say, for the refusal's words only.
-    checksums: dict[str, str] = {}
-    links: dict[str, str | None] = {}
-    for path in sorted(directory.glob(f"[0-9][0-9][0-9][0-9]_*/{SNAPSHOT_FILE}")):
-        stored = path.read_bytes()
-        checksums.setdefault(hashlib.sha384(stored).hexdigest(), path.parent.name)
-        try:
-            links[path.parent.name] = json.loads(stored).get("parent_checksum")
-        except (ValueError, AttributeError):
-            links[path.parent.name] = None
-
-    def parent_of(name: str) -> str | None:
-        link = links.get(name)
-        return checksums.get(link) if link else None
-
-    chains_from = parent_of(off)
+    migration it leaves, what that one chains from (the core's read of each
+    off-run migration's link), and the two fixes."""
+    chains_from = {off["migration"]: off["chains_from"] for off in off_run}
+    off = off_run[0]["migration"]
     # The head's own ancestor at the run's number: where a squash reaching
-    # the head can start.
+    # the head can start. Above that number every ancestor off the run is
+    # an off-run migration; one on the run means the head descends from
+    # ``first`` itself.
     number = first[:4]
-    head = max(read["off_run"])
-    ancestor: str | None = head
+    ancestor: str | None = max(chains_from)
     while ancestor is not None and ancestor[:4] > number:
-        ancestor = parent_of(ancestor)
+        ancestor = chains_from.get(ancestor)
     start = (
         f"squash from a migration the head descends from (--from {ancestor}), or "
         if ancestor is not None and ancestor[:4] == number and ancestor != first
@@ -887,8 +881,71 @@ def _short_of_the_head(directory: Path, first: str, read: dict[str, Any]) -> str
     )
     return (
         f"the run from {first} does not reach the head: {off} chains from "
-        f"{chains_from or 'no migration'}; {start}regenerate {first} on top of the "
-        f"head with ferro migrate new <name> --replace {first}. Nothing was written."
+        f"{chains_from[off] or 'no migration'}; {start}regenerate {first} on top of "
+        f"the head with ferro migrate new {first[5:]} --replace {first}. Nothing was "
+        f"written."
+    )
+
+
+def _witnessed(migrations: list[dict[str, Any]]) -> dict[str, str]:
+    """Every migration name a squash's witness among ``migrations`` records,
+    at any depth (``NNNN_<name>``), and the squash that replaced it."""
+    named: dict[str, str] = {}
+
+    def walk(squash: str, witness: list[dict[str, Any]]) -> None:
+        for entry in witness:
+            named.setdefault(entry["migration"], squash)
+            walk(entry["migration"], entry["replaces"])
+
+    for migration in migrations:
+        walk(_dir_name(migration), migration["replaces"])
+    return named
+
+
+def _witnessed_name(verb: str, written: str, squash: str) -> str:
+    """The refusal of a migration whose name a squash's witness records:
+    every reader would take it for the original the squash replaced."""
+    return (
+        f"ferro migrate {verb}: {written} is the name of a migration the squash "
+        f"{squash} replaces, and every reader would then take it for the replaced "
+        f"original; pick another name. Nothing was written."
+    )
+
+
+def _refuse_data_only_over_ddl(
+    parent: str | None,
+    target: dict[str, Any],
+    dialects: list[str],
+    names: list[str],
+    name: str,
+    options: dict[str, Any],
+) -> None:
+    """Refuse ``squash --data-only`` over a run that renders DDL (panel F2
+    on #690): ``--data-only`` writes the snapshot below the run, while the
+    witness lets every database that ran the originals adopt it, so they
+    would stand on a snapshot that says the run's DDL never ran. A run that
+    renders none (what it adds it drops again) loses nothing.
+
+    Raises:
+        MigrationsDirectoryError: the plan from the parent snapshot to the
+            composed target renders DDL.
+    """
+    try:
+        raw = _generate_migration(parent, json.dumps(target), dialects)
+    except ValueError as err:
+        raise MigrationsDirectoryError(str(err)) from None
+    if raw is None or not any(s["kind"] == "ddl" for s in json.loads(raw)["steps"]):
+        return
+    if len(names) == 1:
+        span, render, them = names[0], "renders", "it"
+    else:
+        span, render, them = f"{names[0]} \u2026 {names[-1]}", "render", "them"
+    raise MigrationsDirectoryError(
+        f"ferro migrate squash: --data-only would drop the DDL that {span} {render}, "
+        f"and every database that ran {them} would then inherit a snapshot that says "
+        f"it never happened. Squash without --data-only, then add the data step with "
+        f"ferro migrate new {name} --data-step {options['data_step']} --data-only. "
+        f"Nothing was written."
     )
 
 
@@ -901,7 +958,10 @@ def _compose_refusal(from_: str, err: ValueError, names: list[str]) -> str:
     if at is None or kind is None:
         return text
     if kind in ("uncomposable", "old_name_re_added"):
-        return f"{text}; pass --from {names[at]} to end the range before it"
+        return (
+            f"{text}; pass --from {names[at]} to start the range at it, leaving the "
+            f"rename below the squash"
+        )
     return f"{text}; pass --from {names[at]} to start the range after {names[at - 1]}"
 
 

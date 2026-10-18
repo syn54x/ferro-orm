@@ -126,16 +126,17 @@ impl std::fmt::Display for ComposeError {
                 f,
                 "cannot compose the rename hints {} and {}: the later one claims the old \
                  name the earlier one had already renamed away, for another name; correct the \
-                 later renamed_from to the name the earlier migration left, or end the squash \
-                 range before the migration that declares it",
+                 later renamed_from to the name the earlier migration left, or start the \
+                 squash range at the migration that declares it, leaving the earlier rename \
+                 below the squash",
                 describe(first),
                 describe(second)
             ),
             ComposeError::OldNameReAdded { hint, re_added_at } => write!(
                 f,
                 "the run renames {}, then declares \"{}\" again from migration #{} of the \
-                 range: one migration cannot rename a name and keep it (ADR-0032); end the \
-                 squash range before migration #{}",
+                 range: one migration cannot rename a name and keep it (ADR-0032); start the \
+                 squash range at migration #{}, leaving the rename below the squash",
                 describe(hint),
                 old_of(hint),
                 re_added_at + 1,
@@ -1198,7 +1199,13 @@ mod tests {
         let text = err.to_string();
         assert!(text.contains("author.\"a\" -> \"b\""), "{text}");
         assert!(text.contains("author.\"a\" -> \"c\""), "{text}");
-        assert!(text.contains("end the squash range before"), "{text}");
+        assert!(
+            text.ends_with(
+                "or start the squash range at the migration that declares it, leaving \
+                 the earlier rename below the squash"
+            ),
+            "{text}"
+        );
     }
 
     #[test]
@@ -1239,7 +1246,10 @@ mod tests {
         let text = err.to_string();
         assert!(text.contains("author.\"a\" -> \"b\""), "{text}");
         assert!(
-            text.contains("end the squash range before migration #3"),
+            text.ends_with(
+                "start the squash range at migration #3, leaving the rename below the \
+                 squash"
+            ),
             "{text}"
         );
     }

@@ -183,8 +183,9 @@ pub fn _step_file_role(name: String) -> PyResult<String> {
 /// chains from. With `run_from`, the directory below that migration and the
 /// run from it through the head, in chain order, as `"replaced"`
 /// (`MigrationsDir::read_run`), plus `"reaches_head"` (whether the run ends
-/// at the directory head), `"off_run"` (the later migrations it leaves,
-/// `NNNN_<name>`) and `"siblings"` (the other migrations at the run's first
+/// at the directory head), `"off_run"` (the later migrations it leaves, each
+/// `{"migration", "chains_from"}`, both `NNNN_<name>`, `chains_from` `None`
+/// when its parent link names no migration) and `"siblings"` (the other migrations at the run's first
 /// number, which it never stands on). Naming both is a `ValueError`.
 #[pyfunction]
 #[pyo3(name = "_read_migrations_dir")]
@@ -196,7 +197,7 @@ pub fn _read_migrations_dir(
 ) -> PyResult<String> {
     let refused = |err: ferro_migrate::DirectoryError| PyValueError::new_err(err.to_string());
     let path = Path::new(&directory);
-    let mut reach: Option<(bool, Vec<String>, Vec<String>)> = None;
+    let mut reach: Option<(bool, Vec<ferro_migrate::directory::OffRun>, Vec<String>)> = None;
     let (dir, replaced) = match (replacing, run_from) {
         (None, None) => return to_json(&MigrationsDir::read(path).map_err(refused)?),
         (Some(_), Some(_)) => {

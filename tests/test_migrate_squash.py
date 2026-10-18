@@ -374,12 +374,68 @@ def test_squash_with_data_step_sql_step_and_data_only(project, pkg, capsys):
     assert "02_x.up.sql SQL step, up new" in lines, lines
     assert "03_backfill_author.py data step new" in lines, lines
 
-    # --data-only squashes into the data step alone, carrying the one the
-    # run holds over the rescaffolded one of its name.
-    (migrations(project) / "0002_epic/03_backfill_author.py").write_text(FILLED)
+
+def test_data_only_over_a_run_that_renders_ddl_is_refused(project, pkg, capsys):
+    # Panel F2 on #690: --data-only planned parent -> parent, so the squash's
+    # snapshot said the run's DDL never ran while its witness let every
+    # database that ran it adopt the squash.
+    feature_branch(project, pkg)
+    before = tree(project)
+
+    err = refused(
+        capsys, "again", "--from", "0002", "--data-step", "Author", "--data-only"
+    )
+
+    assert err == (
+        "ferro migrate squash: --data-only would drop the DDL that 0002_add_tmp "
+        "\u2026 0004_drop_tmp render, and every database that ran them would then "
+        "inherit a snapshot that says it never happened. Squash without "
+        "--data-only, then add the data step with ferro migrate new again "
+        "--data-step Author --data-only. Nothing was written.\n"
+    ), err
+    assert tree(project) == before
+
+
+def test_data_only_over_one_migration_that_renders_ddl_names_it(project, pkg, capsys):
+    write_config(project, pkg)
+    write_models(project, pkg, AUTHOR)
+    new("create_author")
+    write_models(project, pkg, BIO)
+    new("add_bio")
+    before = tree(project)
+
+    err = refused(
+        capsys, "again", "--from", "0002", "--data-step", "Author", "--data-only"
+    )
+
+    assert err.startswith(
+        "ferro migrate squash: --data-only would drop the DDL that 0002_add_bio "
+        "renders, and every database that ran it would then inherit"
+    ), err
+    assert tree(project) == before
+
+
+def test_data_only_over_a_run_that_renders_no_ddl_squashes_into_the_data_step(
+    project, pkg
+):
+    # 0003 adds tmp and 0004 drops it again: the run renders no DDL, so
+    # --data-only drops nothing a database ran, and keeps carrying the run's
+    # data step over the rescaffolded one of its name.
+    write_config(project, pkg)
+    write_models(project, pkg, AUTHOR)
+    new("create_author")
+    write_models(project, pkg, TMP)
+    new("add_tmp", "--sql-step", "x")
+    write_models(project, pkg, AUTHOR)
+    new("drop_tmp", "--data-step", "Author")
+    [data] = (migrations(project) / "0003_drop_tmp").glob("*_backfill_author.py")
+    data.write_text(FILLED)
+
     assert (
         squash("again", "--from", "0002", "--data-step", "Author", "--data-only") == 0
     )
+
+    assert dirs(project) == ["0001_create_author", "0002_again"]
     assert sorted(files(migrations(project) / "0002_again")) == [
         "01_x.down.sql",
         "01_x.up.sql",
@@ -389,6 +445,10 @@ def test_squash_with_data_step_sql_step_and_data_only(project, pkg, capsys):
     assert (
         migrations(project) / "0002_again/02_backfill_author.py"
     ).read_text() == FILLED
+    assert snapshot(project, "0002_again")["parent_checksum"] == sha384(
+        migrations(project) / "0001_create_author/ir.json"
+    )
+    assert run("migrate", "check") == 0
 
 
 def test_squashing_a_run_that_holds_a_squash_nests_its_witness(project, pkg):
@@ -614,7 +674,7 @@ def test_a_run_that_does_not_reach_the_head_is_refused_naming_both_fixes(
     assert err == (
         "the run from 0002_x does not reach the head: 0003_z chains from 0002_y; "
         "squash from a migration the head descends from (--from 0002_y), or "
-        "regenerate 0002_x on top of the head with ferro migrate new <name> "
+        "regenerate 0002_x on top of the head with ferro migrate new x "
         "--replace 0002_x. Nothing was written.\n"
     ), err
     assert tree(project) == before
@@ -790,8 +850,8 @@ def test_squash_with_url_is_refused_as_new_refuses_it(project, pkg, capsys):
     )
 
     assert err == (
-        "squash reads the models and the migrations directory, never a database; "
-        "drop --url\n"
+        "squash reads the migrations directory only, never the models or a "
+        "database; drop --url\n"
     ), err
     assert tree(project) == before
 
@@ -839,7 +899,10 @@ def test_a_name_readded_after_its_rename_is_refused_with_the_from_to_pass(
         'squash --from 0002: the run renames column author."bio" -> "blurb", then '
         'declares "bio" again from migration #2 of the range'
     ), err
-    assert err.endswith("pass --from 0003_readd_bio to end the range before it\n"), err
+    assert err.endswith(
+        "pass --from 0003_readd_bio to start the range at it, leaving the rename "
+        "below the squash\n"
+    ), err
     assert tree(project) == before
 
 
@@ -888,7 +951,10 @@ def test_disagreeing_renames_are_refused_with_the_from_to_pass(project, pkg, cap
     err = refused(capsys, "epic", "--from", "0002")
 
     assert err.startswith("squash --from 0002: cannot compose the rename hints"), err
-    assert err.endswith("pass --from 0003_add_about to end the range before it\n"), err
+    assert err.endswith(
+        "pass --from 0003_add_about to start the range at it, leaving the rename "
+        "below the squash\n"
+    ), err
     assert tree(project) == before
 
 
@@ -1298,4 +1364,25 @@ def test_an_atomic_step_beside_the_chunked_one_is_carried_and_the_chunked_one_re
     err = refused(capsys, "epic", "--from", "0002")
 
     assert "0003_add_bio/02_backfill_author.py names author.tmp" in err
+    assert tree(project) == before
+
+
+def test_a_carried_step_that_does_not_parse_is_refused_naming_it_once(
+    project, pkg, capsys
+):
+    # Panel F14 on #690: the refusal named the file twice.
+    feature_branch(project, pkg)
+    [data] = (migrations(project) / "0003_add_bio").glob("*_backfill_author.py")
+    data.write_text("async def up(ctx:\n")
+    shown = f"0003_add_bio/{data.name}"
+    before = tree(project)
+
+    err = refused(capsys, "epic", "--from", "0002")
+
+    assert err.startswith(f"ferro migrate squash: {shown}:1: does not parse: "), err
+    assert err.endswith(
+        "; the squash cannot carry it as it is. Fix the step in its migration, or "
+        "delete it, and run the command again. Nothing was written.\n"
+    ), err
+    assert err.count(data.name) == 1, err
     assert tree(project) == before
