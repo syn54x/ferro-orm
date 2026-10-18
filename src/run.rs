@@ -36,11 +36,11 @@ use crate::ddl_exec::{
 use crate::state::TransactionConnection;
 use ferro_ddl_lowering::{Dialect, quote_ident};
 use ferro_migrate::run_plan::{
-    AdoptionPlan, AllowAhead, Direction, ExecMode, HeldDirectory, OrderKeys, Origin, PlannedStep,
-    RebuildExpectation, RecordKind, RerecordAction, RerecordMode, RunPlan, RunStatus, StepClass,
-    StepRecord, TRACKING_FORMAT, TRACKING_MINOR, Unclassified, adoption, adoption_data_steps,
-    check_adoption, check_format, rerecord_plan, run_lock_key, run_status, split_statements,
-    unclassified,
+    AllowAhead, Direction, ExecMode, HeldDirectory, InheritancePlan, OrderKeys, Origin,
+    PlannedStep, RebuildExpectation, RecordKind, RerecordAction, RerecordMode, RunPlan, RunStatus,
+    StepClass, StepRecord, TRACKING_FORMAT, TRACKING_MINOR, Unclassified, check_adoption,
+    check_format, inheritance, inheritance_data_steps, rerecord_plan, run_lock_key, run_status,
+    split_statements, unclassified,
 };
 use ferro_migrate::snapshot::encode_checksum;
 use ferro_schema_ir::SchemaModel;
@@ -2148,15 +2148,15 @@ impl Tracked {
             .await
     }
 
-    /// [`Tracked::plan`] as the run would plan once it had adopted
-    /// (ADR-0056): over the records [`adoption`] leaves, each data step of an
-    /// adopted squash under the kind `kinds` holds for it. What a `down`
-    /// shows before it takes the lock, since the run adopts first. Nothing
+    /// [`Tracked::plan`] as the run would plan once it had inherited
+    /// (ADR-0056): over the records [`inheritance`] leaves, each data step of an
+    /// inherited squash under the kind `kinds` holds for it. What a `down`
+    /// shows before it takes the lock, since the run inherits first. Nothing
     /// is written.
     ///
     /// # Errors
-    /// [`Tracked::plan`]'s, and [`adoption`]'s partial-witness refusal.
-    pub async fn plan_adopted(
+    /// [`Tracked::plan`]'s, and [`inheritance`]'s partial-witness refusal.
+    pub async fn plan_inherited(
         &self,
         direction: Direction,
         allow_ahead: AllowAhead,
@@ -2167,7 +2167,7 @@ impl Tracked {
             return Err(refused(refusal.clone()));
         }
         let held = self.held()?;
-        let adopted = adoption(
+        let inherited = inheritance(
             &held.dir,
             &self.state.records,
             self.dialect(),
@@ -2176,16 +2176,16 @@ impl Tracked {
             FERRO_VERSION,
         )
         .map_err(|refusal| refused_by(&refusal))?;
-        self.plan_over(&adopted.records, direction, allow_ahead, order_keys)
+        self.plan_over(&inherited.records, direction, allow_ahead, order_keys)
             .await
     }
 
-    /// Each data step of every squash a run would adopt on these records,
-    /// `(migration, step, file)` ([`adoption_data_steps`]); empty when the
+    /// Each data step of every squash a run would inherit on these records,
+    /// `(migration, step, file)` ([`inheritance_data_steps`]); empty when the
     /// directory does not read.
-    pub fn adoption_data_steps(&self) -> Vec<(u16, u8, PathBuf)> {
+    pub fn inheritance_data_steps(&self) -> Vec<(u16, u8, PathBuf)> {
         match self.held.as_ref() {
-            Ok(held) => adoption_data_steps(&held.dir, &self.state.records),
+            Ok(held) => inheritance_data_steps(&held.dir, &self.state.records),
             Err(_) => Vec::new(),
         }
     }
@@ -2258,7 +2258,7 @@ impl Tracked {
             id: NEXT_LOCKED.fetch_add(1, Ordering::Relaxed),
             refresh_fault: AtomicBool::new(false),
             class_warnings: Vec::new(),
-            adopted: std::sync::OnceLock::new(),
+            inherited: std::sync::OnceLock::new(),
         };
         match locked.bring_up_to_minor(classes).await {
             Ok(locked) => Ok(locked),
@@ -2270,9 +2270,9 @@ impl Tracked {
     }
 }
 
-/// A squash a run adopted ([`Locked::adopt`]).
+/// A squash a run inherited ([`Locked::inherit`]).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
-pub struct Adopted {
+pub struct Inherited {
     /// `NNNN_<name>` of the squash.
     pub squash: String,
     /// `NNNN_<name>` of each migration whose records it replaced, in chain
@@ -2280,17 +2280,17 @@ pub struct Adopted {
     pub replaced: Vec<String>,
 }
 
-/// Why an adoption's transaction did not commit.
-enum Adopting {
+/// Why an inheritance's transaction did not commit.
+enum Inheriting {
     /// The run lock was not this run's at commit time.
     Lock(LockCheckFailed),
     /// The database refused a statement.
     Database(sqlx::Error),
 }
 
-impl From<sqlx::Error> for Adopting {
+impl From<sqlx::Error> for Inheriting {
     fn from(err: sqlx::Error) -> Self {
-        Adopting::Database(err)
+        Inheriting::Database(err)
     }
 }
 
@@ -2328,9 +2328,9 @@ pub struct Locked {
     /// One warning per migration whose records the lock left without a class
     /// (a verb that reads none, [`ClassNeed::Defers`]).
     class_warnings: Vec<String>,
-    /// The reads as of the records re-read after [`Locked::adopt`] adopted
+    /// The reads as of the records re-read after [`Locked::inherit`] inherited
     /// something (ADR-0056); unset until then.
-    adopted: std::sync::OnceLock<Tracked>,
+    inherited: std::sync::OnceLock<Tracked>,
 }
 
 /// A chunked step's position as a transition records it: the cursor
@@ -2346,9 +2346,9 @@ fn poisoned() -> PyErr {
 
 impl Locked {
     /// The reads, as of the records re-read under the lock.
-    /// After [`Locked::adopt`] swapped records, the records re-read then.
+    /// After [`Locked::inherit`] swapped records, the records re-read then.
     pub fn tracked(&self) -> &Tracked {
-        self.adopted.get().unwrap_or(&self.tracked)
+        self.inherited.get().unwrap_or(&self.tracked)
     }
 
     /// This locked run's identity: a step planned by another run (or by a
@@ -2457,7 +2457,7 @@ impl Locked {
         &self.class_warnings
     }
 
-    /// Write an adoption ([`adoption`]) in one transaction: delete every
+    /// Write an inheritance ([`inheritance`]) in one transaction: delete every
     /// witnessed record (by number, step and name), insert the squash's,
     /// and verify the run lock on the transaction before it commits
     /// (ADR-0029 as amended): a lock lost since the write began rolls it
@@ -2465,7 +2465,7 @@ impl Locked {
     ///
     /// # Errors
     /// The lock's refusals; a database error. Either way nothing is written.
-    async fn write_adoption(&self, plan: &AdoptionPlan) -> PyResult<()> {
+    async fn write_inheritance(&self, plan: &InheritancePlan) -> PyResult<()> {
         let engine = self.engine();
         let tracking_schema = self.tracking_schema();
         let dialect = engine.backend();
@@ -2473,8 +2473,8 @@ impl Locked {
         let mut conn = engine
             .begin_transaction_connection()
             .await
-            .map_err(|e| db_error("adopting the squashed migration's records", e))?;
-        let result: Result<(), Adopting> = async {
+            .map_err(|e| db_error("inheriting the squashed migration's records", e))?;
+        let result: Result<(), Inheriting> = async {
             for record in &plan.removed {
                 let (sql, binds) = remove_record_statement(
                     dialect,
@@ -2490,7 +2490,7 @@ impl Locked {
                 conn.fetch_all_sql_unprepared_with_binds(&upsert, &record_binds(record))
                     .await?;
             }
-            self.check_lock().await.map_err(Adopting::Lock)?;
+            self.check_lock().await.map_err(Inheriting::Lock)?;
             conn.commit().await?;
             Ok(())
         }
@@ -2500,34 +2500,37 @@ impl Locked {
             Err(failed) => {
                 let _ = conn.rollback().await;
                 Err(match failed {
-                    Adopting::Lock(lost) => lost.into_py(),
-                    Adopting::Database(err) => {
-                        db_error("adopting the squashed migration's records", err)
+                    Inheriting::Lock(lost) => lost.into_py(),
+                    Inheriting::Database(err) => {
+                        db_error("inheriting the squashed migration's records", err)
                     }
                 })
             }
         }
     }
 
-    /// Adopt every squash whose witness the records read under the lock
+    /// Inherit every squash whose witness the records read under the lock
     /// hold (ADR-0056), before the run plans: in one transaction, delete
     /// the witnessed records and insert one finished record per step of the
-    /// squash, origin `adopted`, or `baseline` when a baseline recorded the
-    /// whole witness ([`adoption`]), the lock verified on the transaction
+    /// squash, origin `inherited`, or `baseline` when a baseline recorded the
+    /// whole witness ([`inheritance`]), the lock verified on the transaction
     /// before it commits; then re-read the records, so
     /// [`Locked::tracked`] and the plan see them. Runs no statement of any
-    /// step. `kinds` holds each adopted data step's declared kind (its
-    /// files: [`Tracked::adoption_data_steps`]). Returns what it adopted;
-    /// nothing when there is nothing to adopt, or when the directory does
+    /// step. `kinds` holds each inherited data step's declared kind (its
+    /// files: [`Tracked::inheritance_data_steps`]). Returns what it inherited;
+    /// nothing when there is nothing to inherit, or when the directory does
     /// not read (the plan refuses on it).
     ///
     /// # Errors
     /// `RunRefused`: the newer-format refusal, the partial- and
     /// mixed-witness refusals and the undeclared-kind refusal for an
-    /// adopted data step `kinds` lacks (nothing is written), a squash step
+    /// inherited data step `kinds` lacks (nothing is written), a squash step
     /// this dialect cannot run; the lock's refusals, a lock lost before the
     /// commit included; a database error, after which nothing is written.
-    pub async fn adopt(&self, kinds: &BTreeMap<(u16, u8), RecordKind>) -> PyResult<Vec<Adopted>> {
+    pub async fn inherit(
+        &self,
+        kinds: &BTreeMap<(u16, u8), RecordKind>,
+    ) -> PyResult<Vec<Inherited>> {
         let tracked = self.tracked();
         if let Some(refusal) = tracked.format_refusal() {
             return Err(refused(refusal));
@@ -2535,7 +2538,7 @@ impl Locked {
         let Ok(held) = tracked.held.as_ref() else {
             return Ok(Vec::new());
         };
-        let plan = adoption(
+        let plan = inheritance(
             &held.dir,
             tracked.records(),
             self.dialect(),
@@ -2544,11 +2547,11 @@ impl Locked {
             FERRO_VERSION,
         )
         .map_err(|refusal| refused_by(&refusal))?;
-        if plan.adoptions.is_empty() {
+        if plan.inheritances.is_empty() {
             return Ok(Vec::new());
         }
         self.ready_to_write().await?;
-        self.write_adoption(&plan).await?;
+        self.write_inheritance(&plan).await?;
         let state = read_records(self.engine(), self.tracking_schema()).await?;
         let after = Tracked {
             engine: Arc::clone(&tracked.engine),
@@ -2556,16 +2559,16 @@ impl Locked {
             state,
             held: Arc::clone(&tracked.held),
         };
-        if self.adopted.set(after).is_err() {
+        if self.inherited.set(after).is_err() {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(
-                "ferro migrate: this locked run adopted twice; its records were re-read after \
-                 the first adoption, so the second found records another writer left",
+                "ferro migrate: this locked run inherited twice; its records were re-read after \
+                 the first inheritance, so the second found records another writer left",
             ));
         }
         Ok(plan
-            .adoptions
+            .inheritances
             .into_iter()
-            .map(|a| Adopted {
+            .map(|a| Inherited {
                 squash: a.squash,
                 replaced: a.replaced,
             })
@@ -4136,11 +4139,11 @@ mod baseline_tests {
     }
 
     #[test]
-    fn an_adopted_migration_above_the_baseline_blocks_its_removal_as_a_run_does() {
+    fn an_inherited_migration_above_the_baseline_blocks_its_removal_as_a_run_does() {
         let dir = three();
         let mut standing = records(&dir, "0002");
         let mut above = records(&dir, "0003").remove(3);
-        above.origin = Origin::Adopted;
+        above.origin = Origin::Inherited;
         standing.push(above);
         assert_eq!(
             baseline_removal(&standing),

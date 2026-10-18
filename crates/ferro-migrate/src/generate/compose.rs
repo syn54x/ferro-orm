@@ -1,4 +1,4 @@
-//! The run's rename hints composed into the squashed schema snapshot
+//! The range's rename hints composed into the squashed schema snapshot
 //! (ADR-0056, ADR-0032).
 //!
 //! ```text
@@ -14,15 +14,15 @@
 //! snapshot, the rename of 0005 is inert (0006 dropped the hint, or it no
 //! longer matches): a drop and an add where the chain had a rename. A
 //! **squash** therefore writes the composition of every live hint along the
-//! run into the hint fields of the last snapshot, so the one planner, given
-//! the parent and [`Composed::target`], plans the run's renames as renames.
+//! range into the hint fields of the last snapshot, so the one planner, given
+//! the parent and [`Composed::target`], plans the range's renames as renames.
 //!
 //! The composition follows each table, column, enum label and constraint
-//! through the run, step by step, as the planner sees it: one step's live
+//! through the range, step by step, as the planner sees it: one step's live
 //! hints applied to the previous snapshot ([`renamed_snapshot`]) name each
 //! object as the next snapshot names it. An object present at both ends
 //! carries one hint from its parent name to its last name; anything born or
-//! gone inside the run carries none, and what existed only inside the run is
+//! gone inside the range carries none, and what existed only inside the range is
 //! a [`DeadName`].
 
 use crate::plan::{Hint, HintError, enum_declaration, live_hints, refuse_hints, renamed_snapshot};
@@ -33,9 +33,9 @@ use ferro_schema_ir::{
 };
 use std::collections::BTreeMap;
 
-/// The squashed target of a run: the last snapshot's payload with its rename
-/// hints rewritten to the composition of the run's live hints, and the names
-/// that existed only inside the run.
+/// The squashed target of a range: the last snapshot's payload with its rename
+/// hints rewritten to the composition of the range's live hints, and the names
+/// that existed only inside the range.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Composed {
     /// The last payload, byte for byte in every field but the hint fields
@@ -43,13 +43,13 @@ pub struct Composed {
     /// `enum_renamed_labels` on enum columns), which hold the composed hints.
     pub target: SchemaIrPayload,
     /// Every table, column, enum label and constraint born and gone inside
-    /// the run, in the order they appeared.
+    /// the range, in the order they appeared.
     pub dead_names: Vec<DeadName>,
 }
 
-/// A name that existed only inside the run: absent from the parent snapshot
+/// A name that existed only inside the range: absent from the parent snapshot
 /// and from the last one. A rename keeps the object: `a` renamed to `b` is
-/// one column, never a dead `a`; a dead object renamed inside the run is one
+/// one column, never a dead `a`; a dead object renamed inside the range is one
 /// entry per name it held.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeadName {
@@ -57,9 +57,9 @@ pub struct DeadName {
     pub kind: DeadKind,
     /// `table`, `table.column`, `table.column:label` or `table.constraint`.
     pub name: String,
-    /// The index into the run of the first snapshot holding it.
+    /// The index into the range of the first snapshot holding it.
     pub appeared: usize,
-    /// The index into the run of the first snapshot after that without it.
+    /// The index into the range of the first snapshot after that without it.
     pub vanished: usize,
 }
 
@@ -76,13 +76,13 @@ pub enum DeadKind {
     Constraint,
 }
 
-/// A run whose hints cannot be written as one squashed snapshot. Every
+/// A range whose hints cannot be written as one squashed snapshot. Every
 /// refusal names its fix (AGENTS.md § I-6).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ComposeError {
-    /// `second`, declared later in the run, claims the old name `first`
+    /// `second`, declared later in the range, claims the old name `first`
     /// already renamed away, but names something else than what `first`'s
-    /// rename became: the run renamed one way and declares another.
+    /// rename became: the range renamed one way and declares another.
     Uncomposable {
         /// The live hint of the earlier migration.
         first: Hint,
@@ -90,29 +90,29 @@ pub enum ComposeError {
         second: Hint,
     },
     /// The composed `hint` renames from a name the last snapshot declares
-    /// again, from the run's migration `re_added_at` on: the planner refuses
+    /// again, from the range's migration `re_added_at` on: the planner refuses
     /// a hint whose old name the target still declares (ADR-0032).
     OldNameReAdded {
         /// The composed hint.
         hint: Hint,
-        /// The index into the run of the migration that declares the old
+        /// The index into the range of the migration that declares the old
         /// name again.
         re_added_at: usize,
     },
     /// The composed `hint` renames onto a name the parent holds for another
-    /// object, which the run's migration `vacated_at` removed or renamed
+    /// object, which the range's migration `vacated_at` removed or renamed
     /// away: against the parent the hint is inert, and the planner would drop
-    /// what the run renamed.
+    /// what the range renamed.
     NewNameHeldByParent {
         /// The composed hint.
         hint: Hint,
-        /// The index into the run of the migration that freed the name.
+        /// The index into the range of the migration that freed the name.
         vacated_at: usize,
     },
-    /// The snapshot at the run's index `position` declares a hint the
+    /// The snapshot at the range's index `position` declares a hint the
     /// planner refuses ([`refuse_hints`]); no migration generator writes one.
     RefusedHint {
-        /// The index into the run of the snapshot.
+        /// The index into the range of the snapshot.
         position: usize,
         /// The planner's refusal.
         error: HintError,
@@ -134,7 +134,7 @@ impl std::fmt::Display for ComposeError {
             ),
             ComposeError::OldNameReAdded { hint, re_added_at } => write!(
                 f,
-                "the run renames {}, then declares \"{}\" again from migration #{} of the \
+                "the range renames {}, then declares \"{}\" again from migration #{} of the \
                  range: one migration cannot rename a name and keep it (ADR-0032); start the \
                  squash range at migration #{}, leaving the rename below the squash",
                 describe(hint),
@@ -144,7 +144,7 @@ impl std::fmt::Display for ComposeError {
             ),
             ComposeError::NewNameHeldByParent { hint, vacated_at } => write!(
                 f,
-                "the run renames {}, but \"{}\" named something else below the range until \
+                "the range renames {}, but \"{}\" named something else below the range until \
                  migration #{} of the range freed it: one migration cannot rename onto a name \
                  its parent holds; start the squash range after migration #{}",
                 describe(hint),
@@ -198,30 +198,30 @@ fn new_of(hint: &Hint) -> &str {
     }
 }
 
-/// Compose the rename hints of `run` (the snapshots of the squashed
-/// migrations, in chain order) over `parent` (the snapshot below the run;
-/// `None` for a run from `0001`) into the squashed target, and find the run's
-/// dead names. An empty run composes to the parent without its hints.
+/// Compose the rename hints of `range` (the snapshots of the squashed
+/// migrations, in chain order) over `parent` (the snapshot below the range;
+/// `None` for a range from `0001`) into the squashed target, and find the range's
+/// dead names. An empty range composes to the parent without its hints.
 ///
 /// # Errors
-/// [`ComposeError`]: a snapshot of the run whose hints the planner refuses,
+/// [`ComposeError`]: a snapshot of the range whose hints the planner refuses,
 /// a later declaration that disagrees with an earlier rename, and a composed
 /// hint the planner would refuse or ignore against the parent.
-pub fn compose_run(
+pub fn compose_range(
     parent: Option<&SchemaIrPayload>,
-    run: &[&SchemaIrPayload],
+    range: &[&SchemaIrPayload],
 ) -> Result<Composed, ComposeError> {
     let below = parent.cloned().unwrap_or_else(empty);
-    if run.is_empty() {
+    if range.is_empty() {
         return Ok(Composed {
             target: without_hints(&below),
             dead_names: Vec::new(),
         });
     }
-    // Side 0 is the parent, side `i + 1` the run's snapshot `i`; step `p`
+    // Side 0 is the parent, side `i + 1` the range's snapshot `i`; step `p`
     // goes from side `p - 1` to side `p`.
     let mut sides: Vec<&SchemaIrPayload> = vec![&below];
-    sides.extend(run.iter().copied());
+    sides.extend(range.iter().copied());
     let mut steps: Vec<Vec<Hint>> = vec![Vec::new()];
     for p in 1..sides.len() {
         let hints =
@@ -362,7 +362,7 @@ fn declares_label(side: &SchemaIrPayload, table: &str, column: &str, label: &str
         .is_some_and(|(_, labels)| labels.iter().any(|l| l == label))
 }
 
-/// Every object of the run followed from side to side, as the planner sees
+/// Every object of the range followed from side to side, as the planner sees
 /// one step: the previous side with the step's live hints applied
 /// ([`renamed_snapshot`]) names each object as the next side names it.
 struct Lineage {
@@ -440,7 +440,7 @@ impl Lineage {
 
     /// Refuse a declaration that claims an old name an earlier live hint
     /// already renamed away, for something else than what that rename
-    /// became: the run renamed one way and declares another.
+    /// became: the range renamed one way and declares another.
     fn refuse_disagreeing_declarations(
         &self,
         sides: &[&SchemaIrPayload],
@@ -677,7 +677,7 @@ impl Lineage {
         target: &SchemaIrPayload,
     ) -> Result<(), ComposeError> {
         let last = sides.len() - 1;
-        // The run index of the first side of the last stretch on which
+        // The range index of the first side of the last stretch on which
         // `holds` is true. The rename's own side lacks the old name, so the
         // stretch starts after the parent.
         let since = |holds: &dyn Fn(usize) -> bool| {
@@ -767,7 +767,7 @@ impl Lineage {
 
     /// Refuse a composed hint onto a name the parent holds for another
     /// object: against the parent the hint is inert, and the planner would
-    /// drop the object the run renamed.
+    /// drop the object the range renamed.
     fn refuse_held_by_parent(&self, target: &SchemaIrPayload) -> Result<(), ComposeError> {
         let held = |key: Key, hint: Hint| match self.id(0, &key) {
             Some(id) => {
@@ -827,8 +827,8 @@ impl Lineage {
         Ok(())
     }
 
-    /// Every name an object born and gone inside the run held, with the
-    /// run indexes where it appeared and vanished, in order of appearance.
+    /// Every name an object born and gone inside the range held, with the
+    /// range indexes where it appeared and vanished, in order of appearance.
     fn dead_names(&self, last: usize) -> Vec<DeadName> {
         let mut dead = Vec::new();
         for keys in &self.objects {
@@ -952,14 +952,14 @@ mod tests {
         table("Author", &["name"])
     }
 
-    fn compose(parent: &SchemaIrPayload, run: &[SchemaIrPayload]) -> Composed {
-        let run: Vec<&SchemaIrPayload> = run.iter().collect();
-        compose_run(Some(parent), &run).expect("composes")
+    fn compose(parent: &SchemaIrPayload, range: &[SchemaIrPayload]) -> Composed {
+        let range: Vec<&SchemaIrPayload> = range.iter().collect();
+        compose_range(Some(parent), &range).expect("composes")
     }
 
-    fn refusal(parent: &SchemaIrPayload, run: &[SchemaIrPayload]) -> ComposeError {
-        let run: Vec<&SchemaIrPayload> = run.iter().collect();
-        compose_run(Some(parent), &run).expect_err("refused")
+    fn refusal(parent: &SchemaIrPayload, range: &[SchemaIrPayload]) -> ComposeError {
+        let range: Vec<&SchemaIrPayload> = range.iter().collect();
+        compose_range(Some(parent), &range).expect_err("refused")
     }
 
     /// The composed target's hints, read back: `(table hint, [(column,
@@ -989,10 +989,10 @@ mod tests {
     }
 
     /// Assert the composed target is the last payload in every non-hint field.
-    fn assert_schema_is_last(composed: &Composed, run: &[SchemaIrPayload]) {
+    fn assert_schema_is_last(composed: &Composed, range: &[SchemaIrPayload]) {
         assert_eq!(
             without_hints(&composed.target),
-            without_hints(run.last().expect("a run"))
+            without_hints(range.last().expect("a range"))
         );
     }
 
@@ -1044,26 +1044,26 @@ mod tests {
     #[test]
     fn compose_a_run_without_hints_is_the_last_payload_unchanged() {
         let parent = payload(vec![author()]);
-        let run = [
+        let range = [
             payload(vec![table("Author", &["name", "bio"])]),
             payload(vec![table("Author", &["name", "bio", "email"])]),
         ];
-        let composed = compose(&parent, &run);
-        assert_eq!(composed.target, run[1]);
+        let composed = compose(&parent, &range);
+        assert_eq!(composed.target, range[1]);
         assert!(composed.dead_names.is_empty());
     }
 
     #[test]
-    fn compose_a_run_from_0001_has_no_parent() {
-        let run = [
+    fn compose_a_range_from_0001_has_no_parent() {
+        let range = [
             payload(vec![author()]),
             payload(vec![table("Author", &["full_name<-name"])]),
         ];
-        let refs: Vec<&SchemaIrPayload> = run.iter().collect();
-        let composed = compose_run(None, &refs).expect("composes");
-        // `name` was born inside the run: an add of `full_name`, no hint.
+        let refs: Vec<&SchemaIrPayload> = range.iter().collect();
+        let composed = compose_range(None, &refs).expect("composes");
+        // `name` was born inside the range: an add of `full_name`, no hint.
         assert!(no_hints(&composed.target));
-        assert_schema_is_last(&composed, &run);
+        assert_schema_is_last(&composed, &range);
     }
 
     // -- columns ----------------------------------------------------------------
@@ -1071,71 +1071,71 @@ mod tests {
     #[test]
     fn compose_column_chained_renames_compose() {
         let parent = payload(vec![author()]);
-        let run = [
+        let range = [
             payload(vec![table("Author", &["full_name<-name"])]),
             payload(vec![table("Author", &["display<-full_name"])]),
         ];
-        let composed = compose(&parent, &run);
+        let composed = compose(&parent, &range);
         assert_eq!(
             column_hint(&composed, "author", "display").as_deref(),
             Some("name")
         );
-        assert_schema_is_last(&composed, &run);
+        assert_schema_is_last(&composed, &range);
     }
 
     #[test]
     fn compose_column_chained_renames_compose_after_the_hint_is_deleted() {
         let parent = payload(vec![author()]);
-        let run = [
+        let range = [
             payload(vec![table("Author", &["full_name<-name"])]),
             payload(vec![table("Author", &["full_name"])]),
             payload(vec![table("Author", &["display<-full_name"])]),
             payload(vec![table("Author", &["display"])]),
         ];
-        let composed = compose(&parent, &run);
+        let composed = compose(&parent, &range);
         assert_eq!(
             column_hint(&composed, "author", "display").as_deref(),
             Some("name")
         );
-        assert_schema_is_last(&composed, &run);
+        assert_schema_is_last(&composed, &range);
     }
 
     #[test]
     fn compose_column_rename_then_drop_is_a_drop_with_no_hint() {
         let parent = payload(vec![author()]);
-        let run = [
+        let range = [
             payload(vec![table("Author", &["full_name<-name"])]),
             payload(vec![table("Author", &[])]),
         ];
-        let composed = compose(&parent, &run);
+        let composed = compose(&parent, &range);
         assert!(no_hints(&composed.target));
-        assert_schema_is_last(&composed, &run);
+        assert_schema_is_last(&composed, &range);
         assert!(composed.dead_names.is_empty());
     }
 
     #[test]
     fn compose_column_add_then_rename_is_an_add_with_no_hint() {
         let parent = payload(vec![table("Author", &[])]);
-        let run = [
+        let range = [
             payload(vec![table("Author", &["x"])]),
             payload(vec![table("Author", &["y<-x"])]),
         ];
-        let composed = compose(&parent, &run);
+        let composed = compose(&parent, &range);
         assert!(no_hints(&composed.target));
-        assert_schema_is_last(&composed, &run);
+        assert_schema_is_last(&composed, &range);
         assert!(composed.dead_names.is_empty());
     }
 
     #[test]
     fn compose_column_rename_and_back_is_nothing() {
         let parent = payload(vec![author()]);
-        let run = [
+        let range = [
             payload(vec![table("Author", &["full_name<-name"])]),
             payload(vec![table("Author", &["name<-full_name"])]),
         ];
-        let composed = compose(&parent, &run);
+        let composed = compose(&parent, &range);
         assert!(no_hints(&composed.target));
-        assert_schema_is_last(&composed, &run);
+        assert_schema_is_last(&composed, &range);
         assert!(composed.dead_names.is_empty());
     }
 
@@ -1143,42 +1143,42 @@ mod tests {
     fn compose_column_hint_inert_against_the_parent_is_dropped() {
         // The parent lacks the old name.
         let parent = payload(vec![table("Author", &["email"])]);
-        let run = [payload(vec![table(
+        let range = [payload(vec![table(
             "Author",
             &["email", "full_name<-name"],
         )])];
-        let composed = compose(&parent, &run);
+        let composed = compose(&parent, &range);
         assert!(no_hints(&composed.target));
-        assert_schema_is_last(&composed, &run);
+        assert_schema_is_last(&composed, &range);
 
         // The parent already holds the new one.
         let parent = payload(vec![table("Author", &["full_name"])]);
-        let run = [payload(vec![table("Author", &["full_name<-name"])])];
-        let composed = compose(&parent, &run);
+        let range = [payload(vec![table("Author", &["full_name<-name"])])];
+        let composed = compose(&parent, &range);
         assert!(no_hints(&composed.target));
-        assert_schema_is_last(&composed, &run);
+        assert_schema_is_last(&composed, &range);
     }
 
     #[test]
     fn compose_a_run_of_one_keeps_its_live_hint() {
         let parent = payload(vec![author()]);
-        let run = [payload(vec![renamed_table(
+        let range = [payload(vec![renamed_table(
             "Writer",
             "author",
             &["full_name<-name"],
         )])];
-        let composed = compose(&parent, &run);
-        assert_eq!(composed.target, run[0]);
+        let composed = compose(&parent, &range);
+        assert_eq!(composed.target, range[0]);
     }
 
     #[test]
     fn compose_column_two_hints_on_one_old_name_are_uncomposable() {
         let parent = payload(vec![table("Author", &["a"])]);
-        let run = [
+        let range = [
             payload(vec![table("Author", &["b<-a"])]),
             payload(vec![table("Author", &["c<-a"])]),
         ];
-        let err = refusal(&parent, &run);
+        let err = refusal(&parent, &range);
         let first = Hint::Column {
             table: "author".into(),
             old: "a".into(),
@@ -1211,27 +1211,27 @@ mod tests {
     #[test]
     fn compose_a_stale_hint_that_agrees_with_the_run_is_not_a_conflict() {
         // `b<-a` kept on the model after its migration, and a later hint
-        // spelling the whole chain: both agree with what the run did.
+        // spelling the whole chain: both agree with what the range did.
         let parent = payload(vec![table("Author", &["a"])]);
-        let run = [
+        let range = [
             payload(vec![table("Author", &["b<-a"])]),
             payload(vec![table("Author", &["b<-a"])]),
             payload(vec![table("Author", &["c<-b"])]),
             payload(vec![table("Author", &["c<-a"])]),
         ];
-        let composed = compose(&parent, &run);
+        let composed = compose(&parent, &range);
         assert_eq!(column_hint(&composed, "author", "c").as_deref(), Some("a"));
     }
 
     #[test]
     fn compose_column_old_name_re_added_is_refused_naming_the_migration() {
         let parent = payload(vec![table("Author", &["a"])]);
-        let run = [
+        let range = [
             payload(vec![table("Author", &["b<-a"])]),
             payload(vec![table("Author", &["b"])]),
             payload(vec![table("Author", &["b", "a"])]),
         ];
-        let err = refusal(&parent, &run);
+        let err = refusal(&parent, &range);
         assert_eq!(
             err,
             ComposeError::OldNameReAdded {
@@ -1259,11 +1259,11 @@ mod tests {
         // The parent's `b` dropped in 0, `a` renamed to `b` in 1: against the
         // parent the composed `b<-a` is inert and the planner would drop `a`.
         let parent = payload(vec![table("Author", &["a", "b"])]);
-        let run = [
+        let range = [
             payload(vec![table("Author", &["a"])]),
             payload(vec![table("Author", &["b<-a"])]),
         ];
-        let err = refusal(&parent, &run);
+        let err = refusal(&parent, &range);
         assert_eq!(
             err,
             ComposeError::NewNameHeldByParent {
@@ -1284,11 +1284,11 @@ mod tests {
     #[test]
     fn compose_a_snapshot_the_planner_refuses_is_refused_with_its_position() {
         let parent = payload(vec![table("Author", &["a"])]);
-        let run = [
+        let range = [
             payload(vec![table("Author", &["a"])]),
             payload(vec![table("Author", &["a", "b<-a"])]),
         ];
-        let err = refusal(&parent, &run);
+        let err = refusal(&parent, &range);
         assert!(
             matches!(
                 err,
@@ -1315,37 +1315,37 @@ mod tests {
     #[test]
     fn compose_table_chained_renames_compose() {
         let parent = payload(vec![author()]);
-        let run = [
+        let range = [
             payload(vec![renamed_table("Writer", "author", &["name"])]),
             payload(vec![renamed_table("Person", "writer", &["name"])]),
         ];
-        let composed = compose(&parent, &run);
+        let composed = compose(&parent, &range);
         assert_eq!(
             hints(&composed.target),
             vec![("person".into(), Some("author".into()), vec![])]
         );
-        assert_schema_is_last(&composed, &run);
+        assert_schema_is_last(&composed, &range);
     }
 
     #[test]
     fn compose_table_rename_then_drop_is_a_drop_with_no_hint() {
         let parent = payload(vec![author(), table("Book", &[])]);
-        let run = [
+        let range = [
             payload(vec![
                 renamed_table("Writer", "author", &["name"]),
                 table("Book", &[]),
             ]),
             payload(vec![table("Book", &[])]),
         ];
-        let composed = compose(&parent, &run);
+        let composed = compose(&parent, &range);
         assert!(no_hints(&composed.target));
-        assert_schema_is_last(&composed, &run);
+        assert_schema_is_last(&composed, &range);
     }
 
     #[test]
     fn compose_table_add_then_rename_and_rename_and_back() {
         let parent = payload(vec![author()]);
-        let run = [
+        let range = [
             payload(vec![
                 renamed_table("Writer", "author", &["name"]),
                 table("Tmp", &[]),
@@ -1355,20 +1355,20 @@ mod tests {
                 renamed_table("Book", "tmp", &[]),
             ]),
         ];
-        let composed = compose(&parent, &run);
+        let composed = compose(&parent, &range);
         assert!(no_hints(&composed.target));
-        assert_schema_is_last(&composed, &run);
+        assert_schema_is_last(&composed, &range);
     }
 
     #[test]
     fn compose_table_old_name_re_added_is_refused() {
         let parent = payload(vec![author()]);
-        let run = [
+        let range = [
             payload(vec![renamed_table("Writer", "author", &["name"])]),
             payload(vec![table("Writer", &["name"]), table("Author", &[])]),
         ];
         assert_eq!(
-            refusal(&parent, &run),
+            refusal(&parent, &range),
             ComposeError::OldNameReAdded {
                 hint: Hint::Table {
                     old: "author".into(),
@@ -1382,12 +1382,12 @@ mod tests {
     #[test]
     fn compose_table_two_hints_on_one_old_name_are_uncomposable() {
         let parent = payload(vec![author()]);
-        let run = [
+        let range = [
             payload(vec![renamed_table("Writer", "author", &["name"])]),
             payload(vec![renamed_table("Person", "author", &["name"])]),
         ];
         assert_eq!(
-            refusal(&parent, &run),
+            refusal(&parent, &range),
             ComposeError::Uncomposable {
                 first: Hint::Table {
                     old: "author".into(),
@@ -1404,11 +1404,11 @@ mod tests {
     #[test]
     fn compose_column_hint_composes_through_its_table_rename() {
         let parent = payload(vec![author()]);
-        let run = [
+        let range = [
             payload(vec![table("Author", &["full_name<-name"])]),
             payload(vec![renamed_table("Writer", "author", &["full_name"])]),
         ];
-        let composed = compose(&parent, &run);
+        let composed = compose(&parent, &range);
         assert_eq!(
             hints(&composed.target),
             vec![(
@@ -1417,7 +1417,7 @@ mod tests {
                 vec![("full_name".into(), "name".into())]
             )]
         );
-        assert_schema_is_last(&composed, &run);
+        assert_schema_is_last(&composed, &range);
         for dialect in [Dialect::Postgres, Dialect::Sqlite] {
             let sql = statements(&parent, &composed.target, dialect);
             assert!(
@@ -1442,18 +1442,18 @@ mod tests {
     #[test]
     fn compose_foreign_key_chained_renames_compose_with_the_shadow_column() {
         let parent = payload(vec![author(), post("author", None)]);
-        let run = [
+        let range = [
             payload(vec![author(), post("writer", Some("author"))]),
             payload(vec![author(), post("owner", Some("writer"))]),
         ];
-        let composed = compose(&parent, &run);
+        let composed = compose(&parent, &range);
         assert_eq!(
             column_hint(&composed, "post", "owner_id").as_deref(),
             Some("author_id")
         );
         let fk = &composed.target.models[1].foreign_keys[0];
         assert_eq!(fk.renamed_from.as_deref(), Some("author"));
-        assert_schema_is_last(&composed, &run);
+        assert_schema_is_last(&composed, &range);
         for dialect in [Dialect::Postgres, Dialect::Sqlite] {
             let sql = statements(&parent, &composed.target, dialect);
             assert!(
@@ -1471,13 +1471,13 @@ mod tests {
     #[test]
     fn compose_foreign_key_rename_then_drop_is_a_drop_with_no_hint() {
         let parent = payload(vec![author(), post("author", None)]);
-        let run = [
+        let range = [
             payload(vec![author(), post("writer", Some("author"))]),
             payload(vec![author(), table("Post", &[])]),
         ];
-        let composed = compose(&parent, &run);
+        let composed = compose(&parent, &range);
         assert!(no_hints(&composed.target));
-        assert_schema_is_last(&composed, &run);
+        assert_schema_is_last(&composed, &range);
     }
 
     // -- enum labels ----------------------------------------------------------
@@ -1485,11 +1485,11 @@ mod tests {
     #[test]
     fn compose_label_chained_renames_compose() {
         let parent = payload(vec![order(&["draft", "live"])]);
-        let run = [
+        let range = [
             payload(vec![order(&["pending<-draft", "live"])]),
             payload(vec![order(&["queued<-pending", "live"])]),
         ];
-        let composed = compose(&parent, &run);
+        let composed = compose(&parent, &range);
         assert_eq!(
             label_hints(&composed),
             Some(BTreeMap::from([(
@@ -1504,30 +1504,30 @@ mod tests {
                 .map(|r| r.enum_class.as_str()),
             Some("Status")
         );
-        assert_schema_is_last(&composed, &run);
+        assert_schema_is_last(&composed, &range);
     }
 
     #[test]
     fn compose_label_rename_then_drop_is_a_drop_with_no_hint() {
         let parent = payload(vec![order(&["draft", "live"])]);
-        let run = [
+        let range = [
             payload(vec![order(&["pending<-draft", "live"])]),
             payload(vec![order(&["live"])]),
         ];
-        let composed = compose(&parent, &run);
+        let composed = compose(&parent, &range);
         assert!(no_hints(&composed.target));
-        assert_schema_is_last(&composed, &run);
+        assert_schema_is_last(&composed, &range);
     }
 
     #[test]
     fn compose_label_old_name_re_added_is_refused() {
         let parent = payload(vec![order(&["draft", "live"])]);
-        let run = [
+        let range = [
             payload(vec![order(&["pending<-draft", "live"])]),
             payload(vec![order(&["pending", "live", "draft"])]),
         ];
         assert_eq!(
-            refusal(&parent, &run),
+            refusal(&parent, &range),
             ComposeError::OldNameReAdded {
                 hint: Hint::Label {
                     type_name: "status".into(),
@@ -1544,14 +1544,14 @@ mod tests {
     #[test]
     fn compose_dead_column_is_reported_with_its_positions() {
         let parent = payload(vec![table("Team", &["name"])]);
-        let run = [
+        let range = [
             payload(vec![table("Team", &["name"])]),
             payload(vec![table("Team", &["name", "tmp", "kept"])]),
             payload(vec![table("Team", &["name", "tmp", "kept"])]),
             payload(vec![table("Team", &["kept"])]),
         ];
-        let composed = compose(&parent, &run);
-        // `kept` stays to the end; the parent's `name` is dropped in the run.
+        let composed = compose(&parent, &range);
+        // `kept` stays to the end; the parent's `name` is dropped in the range.
         assert_eq!(
             composed.dead_names,
             vec![DeadName {
@@ -1572,11 +1572,11 @@ mod tests {
             values: vec!["'draft'".into(), "'live'".into(), "'held'".into()],
         });
         let parent = payload(vec![order(&["draft", "live"])]);
-        let run = [
+        let range = [
             payload(vec![with_check, table("Scratch", &[])]),
             payload(vec![order(&["draft", "live"])]),
         ];
-        let composed = compose(&parent, &run);
+        let composed = compose(&parent, &range);
         let mut found: Vec<(DeadKind, String, usize, usize)> = composed
             .dead_names
             .iter()
@@ -1597,23 +1597,23 @@ mod tests {
     #[test]
     fn compose_a_renamed_name_is_not_dead() {
         let parent = payload(vec![author()]);
-        let run = [
+        let range = [
             payload(vec![table("Author", &["full_name<-name"])]),
             payload(vec![table("Author", &["display<-full_name"])]),
         ];
-        assert!(compose(&parent, &run).dead_names.is_empty());
+        assert!(compose(&parent, &range).dead_names.is_empty());
     }
 
     #[test]
     fn compose_a_dead_column_renamed_inside_the_run_is_one_entry_per_name() {
         let parent = payload(vec![table("Team", &[])]);
-        let run = [
+        let range = [
             payload(vec![table("Team", &["x"])]),
             payload(vec![table("Team", &["y<-x"])]),
             payload(vec![table("Team", &[])]),
         ];
         assert_eq!(
-            compose(&parent, &run).dead_names,
+            compose(&parent, &range).dead_names,
             vec![
                 DeadName {
                     kind: DeadKind::Column,

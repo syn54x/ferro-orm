@@ -483,25 +483,25 @@ ok Wrote migrations/0005_teams_epic/  (replaces 0005_add_teams … 0008_fix_rows
 
   1 new model
     Team
-  - team.tmp_code existed only inside the run (0005_add_teams through 0007_drop_tmp): review the carried steps for it
+  - team.tmp_code existed only inside the range (0005_add_teams through 0007_drop_tmp): review the carried steps for it
 ```
 
 `0005_teams_epic` creates `team` with its `slug` in one `CREATE TABLE`; `tmp_code` never appears. The four directories are gone. A squash is a one-way step for older ferro releases; read [Upgrading to the release with `squash`](deploying.md#upgrading-to-the-release-with-squash) before rolling it out beside them.
 
 - **What is regenerated.** The DDL, every file with a dialect suffix, is planned once, from `0004_author_nick`'s snapshot to `0008_fix_rows`'s, by the planner `new` uses. A squash reads those snapshots and the directory: it never imports the models (an ungenerated model change is still `new`'s to write) and never opens a database (`--url` is refused). Its `ir.json` is the last snapshot under a new parent, and it records which migrations it replaced: the squash's *witness*.
-- **What is carried.** Every data step and hand-written SQL step of the run keeps its body byte for byte, in chain order, placed as `--replace` places it (a SQL step before the data steps, a data step before the contract), and is marked `carried, review it` with the file it was. Read each one: `fix_rows` now runs before the backfill it used to follow, and a step written after one task's contract now runs before the one contract. A backfill still byte for byte as the generator scaffolded it, `todo(...)` and all, that the squashed plan does not scaffold again is dropped with a note (`02_backfill_team.py from 0006_team_slug was the generator's unwritten scaffold and the squashed plan needs no backfill of team.slug: dropped`); a step with any hand-written byte is always carried, and a carried unwritten step still refuses to load until it is written.
-- **The dead-name note.** A table, column, enum label or constraint the run added and then removed (`team.tmp_code` here) does not exist in the squashed migration, so a carried step that touches it now fails. Where a carried step's declaration proves it, the squash refuses and writes nothing: a `@chunked` step whose query names the dead name in its model, order keys or filter columns or labels. Had `02_backfill_team.py` selected its rows by `tmp_code` (`lambda team: team.tmp_code == None`), the squash would say:
+- **What is carried.** Every data step and hand-written SQL step of the range keeps its body byte for byte, in chain order, placed as `--replace` places it (a SQL step before the data steps, a data step before the contract), and is marked `carried, review it` with the file it was. Read each one: `fix_rows` now runs before the backfill it used to follow, and a step written after one task's contract now runs before the one contract. A backfill still byte for byte as the generator scaffolded it, `todo(...)` and all, that the squashed plan does not scaffold again is dropped with a note (`02_backfill_team.py from 0006_team_slug was the generator's unwritten scaffold and the squashed plan needs no backfill of team.slug: dropped`); a step with any hand-written byte is always carried, and a carried unwritten step still refuses to load until it is written.
+- **The dead-name note.** A table, column, enum label or constraint the range added and then removed (`team.tmp_code` here) does not exist in the squashed migration, so a carried step that touches it now fails. Where a carried step's declaration proves it, the squash refuses and writes nothing: a `@chunked` step whose query names the dead name in its model, order keys or filter columns or labels. Had `02_backfill_team.py` selected its rows by `tmp_code` (`lambda team: team.tmp_code == None`), the squash would say:
 
     <!-- output: squash-dead-name -->
     ```text
     default · migrations
-    ferro migrate squash: 0006_team_slug/02_backfill_team.py names team.tmp_code, which existed only inside the run (added by 0005_add_teams, removed by 0007_drop_tmp): delete the step, or start the range at 0007_drop_tmp, the migration that removed it (pass --from 0007_drop_tmp). Nothing was written.
+    ferro migrate squash: 0006_team_slug/02_backfill_team.py names team.tmp_code, which existed only inside the range (added by 0005_add_teams, removed by 0007_drop_tmp): delete the step, or start the range at 0007_drop_tmp, the migration that removed it (pass --from 0007_drop_tmp). Nothing was written.
     ```
 
     An `@atomic` step declares nothing the squash can read, and a SQL step is SQL, so neither is ever refused: each dead name gets the note above instead, and reading the carried steps for it is yours.
-- **The run.** It is always a tail, `--from` through the newest migration, because the migration after a middle range would chain from a snapshot that no longer exists. The squash takes the first migration's number and the name you give it. A name that would rewrite a replaced migration's own directory (`ferro migrate squash add_teams --from 0005` writing `0005_add_teams`) is refused, since every reader would then take the squash for the original. A run that adds nothing and carries nothing is refused: delete the directories. A migration that shares the first number of the run, because two branches each generated it, is refused too: resolve the shared number with `--replace` ([two branches, one number](#two-branches-one-number)) before squashing. The [CLI reference](../../reference/cli.md#ferro-migrate-squash-name-from-target) lists every flag and refusal, and what to do with the hidden directory a squash killed halfway leaves.
+- **The range.** It is always a tail, `--from` through the newest migration, because the migration after a middle range would chain from a snapshot that no longer exists. The squash takes the first migration's number and the name you give it. A name that would rewrite a replaced migration's own directory (`ferro migrate squash add_teams --from 0005` writing `0005_add_teams`) is refused, since every reader would then take the squash for the original. A range that adds nothing and carries nothing is refused: delete the directories. A migration that shares the first number of the range, because two branches each generated it, is refused too: resolve the shared number with `--replace` ([two branches, one number](#two-branches-one-number)) before squashing. The [CLI reference](../../reference/cli.md#ferro-migrate-squash-name-from-target) lists every flag and refusal, and what to do with the hidden directory a squash killed halfway leaves.
 
-### A rename inside the run
+### A rename inside the range
 
 A column renamed in one task, whose hint a later task deleted, is still a rename after the squash. Task one renames `nickname` to `handle` and generates `0002_rename_handle`:
 
@@ -531,7 +531,7 @@ Its migration generated, the hint is inert, so task two deletes it and adds `bio
     --8<-- "docs/examples/migrations_squash_annotated.py:later"
     ```
 
-Planned from `0001` to `0003`'s models alone, `nickname` would be dropped and `handle` added, and every author's nickname lost. The squash composes the hints of every snapshot in the run into its own, so `ferro migrate squash author_profile --from 0002` writes one rename:
+Planned from `0001` to `0003`'s models alone, `nickname` would be dropped and `handle` added, and every author's nickname lost. The squash composes the hints of every snapshot in the range into its own, so `ferro migrate squash author_profile --from 0002` writes one rename:
 
 ```sql
 -- 0002_author_profile/01_schema.up.postgres.sql
@@ -540,13 +540,13 @@ ALTER TABLE "author" RENAME COLUMN "nickname" TO "handle";
 ALTER TABLE "author" ADD COLUMN "bio" varchar;
 ```
 
-`a→b` then `b→c` is `a→c`; a renamed column the run later drops is a drop of the old name; a column added and then renamed is an add of the new name. A rename whose old name a later task adds again cannot be one migration, and is refused naming the `--from` that starts the range at the task that adds it again, leaving the rename below the squash. The example runs end to end, adoption and revert included, in [`docs/examples/migrations_squash.py`](https://github.com/syn54x/ferro-orm/blob/main/docs/examples/migrations_squash.py).
+`a→b` then `b→c` is `a→c`; a renamed column the range later drops is a drop of the old name; a column added and then renamed is an add of the new name. A rename whose old name a later task adds again cannot be one migration, and is refused naming the `--from` that starts the range at the task that adds it again, leaving the rename below the squash. The example runs end to end, inheritance and revert included, in [`docs/examples/migrations_squash.py`](https://github.com/syn54x/ferro-orm/blob/main/docs/examples/migrations_squash.py).
 
-### Every database that applied the originals adopts the squash
+### Every database that applied the originals inherits the squash
 
 Your epic database applied `0005_add_teams` through `0008_fix_rows`. After you pull the squash, `status` shows the one migration it has no records for, and what `up` will do with it:
 
-<!-- output: squash-status-adoptable -->
+<!-- output: squash-status-inheritable -->
 ```text
 default · sqlite:///./app.db
 -- 1 pending  main._ferro_migrations
@@ -554,34 +554,34 @@ default · sqlite:///./app.db
   ok 0002_author_email   applied  2026-10-15 04:31Z
   ok 0003_author_bio     applied  2026-10-15 04:31Z
   ok 0004_author_nick    applied  2026-10-15 04:31Z
-  -- 0005_teams_epic     pending (adoptable)  run `ferro migrate up`; this database applied 0005_add_teams … 0008_fix_rows and nothing will be run
+  -- 0005_teams_epic     pending (inheritable)  run `ferro migrate up`; this database applied 0005_add_teams … 0008_fix_rows and nothing will be run
 ```
 
 `ferro migrate up` runs nothing:
 
-<!-- output: squash-up-adopts -->
+<!-- output: squash-up-inherits -->
 ```text
 default · sqlite:///./app.db
-adopted 0005_teams_epic: this database had applied 0005_add_teams … 0008_fix_rows; nothing was run
+inherited 0005_teams_epic: this database had applied 0005_add_teams … 0008_fix_rows; nothing was run
 ```
 
-That is *adoption*. The run reads the tracking table and finds a finished record for every step of every migration the squash's witness names, each under the snapshot the witness names; it swaps those records for the squash's own, in one transaction, and `status` shows `0005_teams_epic` as `applied (adopted)`. There is no flag and no prompt: the committed squash is the consent. Nothing checks the live schema (`ferro migrate drift` is the verb for doubting it); the records already say the database stands at the snapshot the squash ends at, and its rows are kept. `down` adopts the same way before it reverts, and an adopted step's down runs as a run's does.
+That is *inheritance*. The run reads the tracking table and finds a finished record for every step of every migration the squash's witness names, each under the snapshot the witness names; it swaps those records for the squash's own, in one transaction, and `status` shows `0005_teams_epic` as `applied (inherited)`. There is no flag and no prompt: the committed squash is the consent. Nothing checks the live schema (`ferro migrate drift` is the verb for doubting it); the records already say the database stands at the snapshot the squash ends at, and its rows are kept. `down` inherits the same way before it reverts, and an inherited step's down runs as a run's does.
 
 Until that `up`, the squashed migration is pending. `require_applied()` refuses to start with `PendingMigrationsError`, whatever `allow_ahead` says, because a migration the database has no record of is pending, never ahead. Each developer's database, and the epic's integration database, meets the squash once and runs `ferro migrate up`.
 
-A database that applied only part of the run (`0005` through `0007`, not `0008_fix_rows`) cannot be adopted: it does not stand at the squash's end. `up` and `down` refuse it, and `status` reports the same refusal under `needs attention`, naming both ways out:
+A database that applied only part of the range (`0005` through `0007`, not `0008_fix_rows`) cannot be inherited: it does not stand at the squash's end. `up` and `down` refuse it, and `status` reports the same refusal under `needs attention`, naming both ways out:
 
 <!-- output: squash-partial-witness -->
 ```text
 default · sqlite:///./app.db
-ferro migrate: 0005_teams_epic replaces migrations this database applied only part of: it applied 0005_add_teams, 0006_team_slug and 0007_drop_tmp but not 0008_fix_rows, so it cannot adopt 0005_teams_epic. To keep its rows, check out the commit that holds 0008_fix_rows, run `ferro migrate up` there to finish it, then run `ferro migrate up` here, which adopts 0005_teams_epic. Or revert instead: on the commit that applied them run `ferro migrate down --to 0004`, then `ferro migrate up` here; the revert drops what they created and fails on an irreversible step. Nothing was changed.
+ferro migrate: 0005_teams_epic replaces migrations this database applied only part of: it applied 0005_add_teams, 0006_team_slug and 0007_drop_tmp but not 0008_fix_rows, so it cannot inherit 0005_teams_epic. To keep its rows, check out the commit that holds 0008_fix_rows, run `ferro migrate up` there to finish it, then run `ferro migrate up` here, which inherits 0005_teams_epic. Or revert instead: on the commit that applied them run `ferro migrate down --to 0004`, then `ferro migrate up` here; the revert drops what they created and fails on an irreversible step. Nothing was changed.
 ```
 
-Take the first if you can: finishing the run keeps every row. The second drops the epic's tables and their rows, and stops at an irreversible step.
+Take the first if you can: finishing the range keeps every row. The second drops the epic's tables and their rows, and stops at an irreversible step.
 
 ### A squash is pre-release
 
-A squash rewrites the history of the branch's own migrations, the way a rebase rewrites its commits. Do it once, before the PR to main, not each time a task lands on the integration branch: the databases that applied the originals are your team's development databases, and each adopts it once. A production database never meets a squash, because the migrations it runs are the ones main already holds.
+A squash rewrites the history of the branch's own migrations, the way a rebase rewrites its commits. Do it once, before the PR to main, not each time a task lands on the integration branch: the databases that applied the originals are your team's development databases, and each inherits it once. A production database never meets a squash, because the migrations it runs are the ones main already holds.
 
 ### Squash or `--replace`
 
@@ -589,13 +589,13 @@ Both regenerate migrations and carry their hand-written steps; they answer diffe
 
 | | `ferro migrate squash NAME --from …` | `ferro migrate new NAME --replace …` |
 | :--- | :--- | :--- |
-| Plans | from the snapshot below the run to the run's last snapshot | from the new parent's snapshot to the models |
+| Plans | from the snapshot below the range to the range's last snapshot | from the new parent's snapshot to the models |
 | Replaces | a tail of migrations, `--from` through the newest | the newest migration |
-| A database that applied the originals | adopts the squash, running nothing | reverts with the files that went up, then runs the new migration ([two branches, one number](#two-branches-one-number)) |
+| A database that applied the originals | inherits the squash, running nothing | reverts with the files that went up, then runs the new migration ([two branches, one number](#two-branches-one-number)) |
 
-So a squash keeps what the run did and shortens it; `--replace` puts your migration back on top of someone else's.
+So a squash keeps what the range did and shortens it; `--replace` puts your migration back on top of someone else's.
 
-Two pins in `tests/test_cross_emitter_parity.py` hold a squash to this page over every casebook change on both dialects: [(h)](https://github.com/syn54x/ferro-orm/blob/main/AGENTS.md#the-nine-pins), a squash writes the files `new` writes across its ends, and [(i)](https://github.com/syn54x/ferro-orm/blob/main/AGENTS.md#the-nine-pins), a database that adopted it has the live schema and the tracking rows of one that ran it.
+Two pins in `tests/test_cross_emitter_parity.py` hold a squash to this page over every casebook change on both dialects: [(h)](https://github.com/syn54x/ferro-orm/blob/main/AGENTS.md#the-nine-pins), a squash writes the files `new` writes across its ends, and [(i)](https://github.com/syn54x/ferro-orm/blob/main/AGENTS.md#the-nine-pins), a database that inherited it has the live schema and the tracking rows of one that ran it.
 
 ## Changing a primary key
 

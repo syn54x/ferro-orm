@@ -139,7 +139,7 @@ def parse_ddl_lock_timeout(value: str) -> timedelta:
 
 MAX_LOCK_TIMEOUT_S = 60.0 * 60 * 24 * 365
 """The longest lock timeout accepted: one year, "until it is free" while
-staying far inside the runtime's range. A configured ``lock_timeout = "0"``
+staying well within the runtime's range. A configured ``lock_timeout = "0"``
 waits this long."""
 
 

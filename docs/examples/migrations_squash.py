@@ -4,7 +4,7 @@
 Two tasks on one branch: the first renames ``author.nickname`` to ``handle``
 with a rename hint, the second deletes the hint, now inert, and adds ``bio``.
 Squashed, the two migrations are one with one ``RENAME COLUMN``; a database
-that applied both adopts it and runs nothing; on SQLite.
+that applied both inherits it and runs nothing; on SQLite.
 """
 
 # --8<-- [start:models]
@@ -63,19 +63,19 @@ def main() -> None:
         assert 'ADD COLUMN "bio"' in up
         assert "DROP COLUMN" not in up
 
-        # This database applied 0002_rename_handle and 0003_add_bio: it adopts.
+        # This database applied 0002_rename_handle and 0003_add_bio: it inherits.
         status = app.ferro("migrate", "status", exit_code=3)
-        assert "0002_author_profile  pending (adoptable)" in status
-        adopted = app.ferro("migrate", "up")
+        assert "0002_author_profile  pending (inheritable)" in status
+        inherited = app.ferro("migrate", "up")
         assert (
-            "adopted 0002_author_profile: this database had applied "
+            "inherited 0002_author_profile: this database had applied "
             "0002_rename_handle … 0003_add_bio; nothing was run"
-        ) in adopted
-        assert "applied (adopted)" in app.ferro("migrate", "status")
+        ) in inherited
+        assert "applied (inherited)" in app.ferro("migrate", "status")
         assert "no drift against 0002_author_profile" in app.ferro("migrate", "drift")
         assert app.sql("SELECT handle FROM author") == [("ada",)]
 
-        # An adopted migration's down runs: the rename is reverted.
+        # An inherited migration's down runs: the rename is reverted.
         app.ferro("migrate", "down", "--yes")
         assert "no drift against 0001_create_author" in app.ferro("migrate", "drift")
         assert app.sql("SELECT nickname FROM author") == [("ada",)]

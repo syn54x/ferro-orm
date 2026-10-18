@@ -89,7 +89,7 @@ class Moved(StrEnum):
     CARRIED = "carried"
     """A data step or hand-written SQL step written back byte for byte."""
     REGENERATED = "regenerated"
-    """A squash's generated DDL file: planned once across the whole run,
+    """A squash's generated DDL file: planned once across the whole range,
     so it is no one original file's counterpart."""
 
 
@@ -193,7 +193,7 @@ class GeneratedMigration:
     replaces: list[str] = field(default_factory=list)
     """``--replace`` and ``squash``: the replaced migrations' directory names
     (``NNNN_<name>``) in chain order, deleted once this one is written; one
-    for ``--replace``, the run for a squash, empty for ``new``."""
+    for ``--replace``, the range for a squash, empty for ``new``."""
     chained_from: str | None = None
     """``--replace`` and ``squash``: the directory name of the migration
     whose snapshot this one's links to (``None`` for the first)."""
@@ -207,13 +207,13 @@ class GeneratedMigration:
     replaced migration in chain order, ``{"migration", "snapshot_checksum",
     "steps", "replaces"}``. Empty for ``new`` and ``--replace``."""
     dead_names: list[dict[str, Any]] = field(default_factory=list)
-    """``squash``: the names born and gone inside the run, as
-    ``_core._compose_run`` reports them (``{"kind", "name", "appeared",
+    """``squash``: the names born and gone inside the range, as
+    ``_core._compose_range`` reports them (``{"kind", "name", "appeared",
     "vanished"}``). Empty for ``new`` and ``--replace``."""
 
     @property
     def squash(self) -> bool:
-        """Whether this migration squashes a run (it records a witness)."""
+        """Whether this migration squashes a range (it records a witness)."""
         return bool(self.witness)
 
     @property
@@ -309,13 +309,16 @@ def read_replacing(
     return read["migrations"], read["replaced"][0]
 
 
-def read_run_reach(directory: Path, from_: str) -> dict[str, Any]:
-    """For a squash: :func:`read_run`'s answer with what the run leaves off.
+def read_range_reach(directory: Path, from_: str) -> dict[str, Any]:
+    """For a squash: every migration in ``directory`` below the one ``from_``
+    names (``NNNN_<name>``, or ``NNNN`` when one migration carries the
+    number), the range from it in chain order, each read and verified by the
+    Rust core, and what the range leaves off.
 
-    Returns ``{"below", "run", "reaches_head", "off_run", "siblings"}``:
-    ``run`` follows snapshot links from the migration ``from_`` names and need
+    Returns ``{"below", "range", "reaches_head", "off_range", "siblings"}``:
+    ``range`` follows snapshot links from the migration ``from_`` names and need
     not reach the directory head. ``reaches_head`` says whether it does,
-    ``off_run`` names the later migrations it leaves (a sibling chain's, or
+    ``off_range`` names the later migrations it leaves (a sibling chain's, or
     a fork's other branch), each ``{"migration", "chains_from"}``: its
     ``NNNN_<name>`` and the migration its snapshot chains from (``None`` for
     none in the directory), and ``siblings`` the other
@@ -327,33 +330,17 @@ def read_run_reach(directory: Path, from_: str) -> dict[str, Any]:
             number two migrations share; or the directory is malformed.
     """
     try:
-        raw = _read_migrations_dir(str(directory), run_from=from_)
+        raw = _read_migrations_dir(str(directory), range_from=from_)
     except ValueError as err:
         raise MigrationsDirectoryError(f"{directory}: {err}") from None
     read = json.loads(raw)
     return {
         "below": read["migrations"],
-        "run": read["replaced"],
+        "range": read["replaced"],
         "reaches_head": read["reaches_head"],
-        "off_run": read["off_run"],
+        "off_range": read["off_range"],
         "siblings": read["siblings"],
     }
-
-
-def read_run(
-    directory: Path, from_: str
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """For a squash: every migration in ``directory`` below the one ``from_``
-    names (``NNNN_<name>``, or ``NNNN`` when one migration carries the
-    number), and the run from it in chain order, each read and verified by
-    the Rust core. See :func:`read_run_reach` for whether the run reaches the
-    head.
-
-    Raises:
-        MigrationsDirectoryError: as :func:`read_run_reach`.
-    """
-    read = read_run_reach(directory, from_)
-    return read["below"], read["run"]
 
 
 def next_number(directory: Path) -> int:

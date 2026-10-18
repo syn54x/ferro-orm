@@ -259,7 +259,7 @@ _Avoid_: Ledger, history table, version table, migration log
 
 **Step record**:
 One row of the *tracking table*: a *step* that was started on this database, the checksum of the file that was run and of its migration's *schema snapshot*, and whether it finished. A record that is started and not finished marks where the next *run* resumes; a chunked data step's record also carries its *cursor*. A chunked step being reverted keeps its record, marked as reverting and carrying the down's own cursor, until its last batch.
-A finished record is *applied*: `status` shows `applied`, `applied (different checksum)`, `applied (baseline)` or `applied (adopted)` (the record an *adoption* swapped in for the replaced migrations' own). A squashed migration whose replaced migrations the database finished whole shows `pending (adoptable)`: the next `up` adopts it.
+A finished record is *applied*: `status` shows `applied`, `applied (different checksum)`, `applied (baseline)` or `applied (inherited)` (the record an *inheritance* swapped in for the replaced migrations' own). A squashed migration whose replaced migrations the database finished whole shows `pending (inheritable)`: the next `up` inherits it.
 _Avoid_: Migration row, version row, installed (for a finished step)
 
 **Baseline**:
@@ -316,19 +316,23 @@ A *migration* or *step* the project's migrations directory holds and a database'
 _Avoid_: Unapplied, outstanding, out of date
 
 **Squash**:
-Replacing a run of *migrations* at the head of the directory with the one migration the generator would have written across them: planned once from the *schema snapshot* below the first to the snapshot of the last, never by stitching their steps together. The replaced migrations' *data steps* and hand-written SQL steps are carried into it in order, except a generated *backfill* still byte for byte as the generator scaffolded it that the squashed plan does not scaffold again, which is dropped with a note; their DDL is regenerated. A squash reads snapshots, never the models in the codebase, and never opens a database.
+Replacing a *range* of migrations at the head of the directory with the one migration the generator would have written across them: planned once from the *schema snapshot* below the first to the snapshot of the last, never by stitching their steps together. The replaced migrations' *data steps* and hand-written SQL steps are carried into it in order, except a generated *backfill* still byte for byte as the generator scaffolded it that the squashed plan does not scaffold again, which is dropped with a note; their DDL is regenerated. A squash reads snapshots, never the models in the codebase, and never opens a database.
 _Avoid_: Merge, collapse, combine, flatten
+
+**Range** (of migrations):
+The migrations a squash replaces: a tail of the directory from the migration `--from` names through the head, following each snapshot's link to its parent. Always a tail: a migration the head does not descend from is not in it and is refused.
+_Avoid_: run (that is one invocation of the runner), span, window, set
 
 **Witness** (of a squash):
 What a squashed migration records about each migration it replaces, so a database that ran the originals can be recognised: the migration's name, its *schema snapshot*'s checksum and the ordinals of its steps. A witness for a migration that was itself a squash carries that squash's witnesses, so the record nests. It is kept with the snapshot and never expires.
 _Avoid_: Replaces list, lineage record, provenance
 
-**Adoption**:
-What a *run* does with a squashed migration on a database whose *tracking table* shows every replaced migration finished whole under the snapshot its *witness* names: it swaps those *step records* for the squashed migration's own and runs nothing. Decided from the tracking table alone, with no flag and no prompt. Not a *baseline* (the database really ran the steps, and an adopted step's *down* runs) and not a rerecord (no file was edited). A database that ran only part of the run is not adopted; it is *ahead*, and the refusal names how to finish or revert the run. A witness a *baseline* recorded whole is adopted as a baseline, so *down* still stops above it; a witness that is part baseline and part run is refused, and the fix is to squash from above the baseline instead (`ferro migrate squash <name> --from <first run-applied migration>`, on the commit before the squash).
-_Avoid_: Fast-forward, stamp, fake-apply, replaces resolution
+**Inheritance** (of a squash):
+What a *run* does with a squashed migration on a database whose *tracking table* shows every replaced migration finished whole under the snapshot its *witness* names: it swaps those *step records* for the squashed migration's own and runs nothing. Decided from the tracking table alone, with no flag and no prompt. Not a *baseline* (the database really ran the steps, and an inherited step's *down* runs) and not a rerecord (no file was edited). A database that ran only part of the *range* does not inherit it; it is *ahead*, and the refusal names how to finish or revert the range. A witness a *baseline* recorded whole is inherited as a baseline, so *down* still stops above it; a witness that is part baseline and part run is refused, and the fix is to squash from above the baseline instead (`ferro migrate squash <name> --from <first run-applied migration>`, on the commit before the squash).
+_Avoid_: Adoption (that word is the baseline cutover of a *Tracked database*), adopt, fast-forward, stamp, fake-apply, replaces resolution
 
 **Ahead**:
-A database whose *tracking table* holds *step records* for migrations the running code's migrations directory does not have: an older build of the application meeting a newer schema. Refused by default, and allowed only when the application says so. A database whose records are, whole, the *witness* of a *squash* in the directory is not ahead but pending its *adoption*; one that holds a witness in part is ahead.
+A database whose *tracking table* holds *step records* for migrations the running code's migrations directory does not have: an older build of the application meeting a newer schema. Refused by default, and allowed only when the application says so. A database whose records are, whole, the *witness* of a *squash* in the directory is not ahead but pending its *inheritance*; one that holds a witness in part is ahead.
 _Avoid_: Newer database, future migration, unknown migration
 
 **Migration test harness**:
@@ -432,7 +436,7 @@ A server default on a live column that ferro did not leave there. Ferro persists
 _Avoid_: Stray default, hand default, unmanaged default
 
 **Tracked database**:
-A database whose *tracking table* holds at least one *step record*. It is adopted: `baseline` refuses it, and so does every auto-migrate flag.
+A database whose *tracking table* holds at least one *step record*. It is adopted (not *Inheritance*, which is a squash's): `baseline` refuses it, and so does every auto-migrate flag.
 _Avoid_: Migrated database, adopted database (alone), stamped database
 
 **Database line**:

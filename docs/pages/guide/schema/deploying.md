@@ -166,12 +166,12 @@ The class is recorded in each step's record when the step is applied, so a rolle
 Take a team with two ferro versions on one migrations directory and one database during a rolling deploy: some instances still on 0.24, some on the new release. Two things in the new release are not readable by 0.24, so the old instances stop where the new ones carry on.
 
 1. **Every snapshot the new ferro writes is schema IR version 3.** A 0.24 checkout refuses the first migration it meets that carries one, with the upgrade message. Finish the rollout to the new ferro before anyone runs `ferro migrate new`.
-2. **A database that adopted a squash holds rows with `origin = adopted`.** A 0.24 reader cannot parse that value, and every verb (and `require_applied` at start-up) fails with `the tracking table holds a row ferro cannot read (origin)`. No tracking-format bump is made: a squash is pre-release, so only development databases meet one, once, under the new ferro. If a 0.24 checkout does meet one, there are three ways back, each run once on SQLite:
-    - Check out the squash commit, which reads the adopted rows. This is the ordinary path.
+2. **A database that inherited a squash holds rows with `origin = inherited`.** A 0.24 reader cannot parse that value, and every verb (and `require_applied` at start-up) fails with `the tracking table holds a row ferro cannot read (origin)`. No tracking-format bump is made: a squash is pre-release, so only development databases meet one, once, under the new ferro. If a 0.24 checkout does meet one, there are three ways back, each run once on SQLite:
+    - Check out the squash commit, which reads the inherited rows. This is the ordinary path.
     - To stay on the pre-squash commit, delete every row of the tracking table and run `ferro migrate baseline` there. The live schema matches the last original's snapshot, so the baseline records every migration through it, and `up` then has nothing to apply. The earlier migrations' records become baseline records too, so their downs no longer run.
     - For a throwaway development database, recreate it and run `up`.
 
-    Deleting only the `adopted` rows and running `up` is no recovery: it re-runs the originals' DDL on a schema that already holds it, and the run fails part-way (`column bio already exists`). [ADR-0056](https://github.com/syn54x/ferro-orm/blob/main/docs/adr/0056-a-squash-is-planned-across-snapshots-and-a-database-that-ran-the-originals-adopts-it.md) records the reasoning.
+    Deleting only the `inherited` rows and running `up` is no recovery: it re-runs the originals' DDL on a schema that already holds it, and the run fails part-way (`column bio already exists`). [ADR-0056](https://github.com/syn54x/ferro-orm/blob/main/docs/adr/0056-a-squash-is-planned-across-snapshots-and-a-database-that-ran-the-originals-inherits-it.md) records the reasoning.
 
 Before you roll out, check both places:
 
@@ -179,7 +179,7 @@ Before you roll out, check both places:
 SELECT origin, count(*) FROM _ferro_migrations GROUP BY origin;
 ```
 
-Any `adopted` row means a 0.24 binary can no longer read that database. In the repository, list which `ir.json` files are still version 1 or 2 and which carry `replaces` (a squashed migration); the version-3 ones are the files a 0.24 checkout will refuse.
+Any `inherited` row means a 0.24 binary can no longer read that database. In the repository, list which `ir.json` files are still version 1 or 2 and which carry `replaces` (a squashed migration); the version-3 ones are the files a 0.24 checkout will refuse.
 
 ## Locks and timeouts
 

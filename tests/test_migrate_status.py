@@ -318,10 +318,10 @@ def test_every_core_step_state_is_read_into_where_the_database_stands():
         "applied",
         "applied_different_checksum",
         "applied_baseline",
-        "applied_adopted",
+        "applied_inherited",
     }
     unfinished = {"running", "failed", "interrupted", "reverting"}
-    pending = {"pending", "pending_adoptable"}
+    pending = {"pending", "pending_inheritable"}
     assert set(words) == applied | unfinished | pending
     for word in words:
         report = StatusReport.from_core(

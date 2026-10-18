@@ -15,9 +15,9 @@
 //! above the [`Target`] in reverse order, each with its down file; [`run_status`] answers `ferro migrate
 //! status` from the same inputs; [`check_adoption`] and [`check_format`] are
 //! the two refusals that need a fact read from the database (its live tables,
-//! its tracking table's format number). [`adoption`] is what a run adopts
+//! its tracking table's format number). [`inheritance`] is what a run inherits
 //! before it plans: each squash whose witness the records hold
-//! ([`adoptable`]), refused on one they hold part of ([`partial_witnesses`],
+//! ([`inheritable`]), refused on one they hold part of ([`partial_witnesses`],
 //! ADR-0056). [`split_statements`] cuts a step file
 //! into the statements the executor sends one at a time, and
 //! [`run_lock_key`] is the one derivation of the Postgres run-lock key.
@@ -129,10 +129,10 @@ pub enum Origin {
     Run,
     /// `ferro migrate baseline` recorded it without running it.
     Baseline,
-    /// A run adopted it: the database had applied the migrations a squash
+    /// A run inherited it: the database had applied the migrations a squash
     /// replaced, and the run swapped their records for the squash's,
     /// running nothing (ADR-0056).
-    Adopted,
+    Inherited,
 }
 
 impl Origin {
@@ -141,12 +141,12 @@ impl Origin {
         match self {
             Origin::Run => "run",
             Origin::Baseline => "baseline",
-            Origin::Adopted => "adopted",
+            Origin::Inherited => "inherited",
         }
     }
 
     /// Whether a baseline recorded it. Every rule written for origin `run`
-    /// means "not baseline": an adopted record stands for steps a run
+    /// means "not baseline": an inherited record stands for steps a run
     /// applied, so it blocks `baseline --remove` and its `down` runs.
     pub fn is_baseline(self) -> bool {
         self == Origin::Baseline
@@ -157,7 +157,7 @@ impl Origin {
         match text {
             "run" => Some(Origin::Run),
             "baseline" => Some(Origin::Baseline),
-            "adopted" => Some(Origin::Adopted),
+            "inherited" => Some(Origin::Inherited),
             _ => None,
         }
     }
@@ -205,7 +205,7 @@ pub struct StepRecord {
     /// The ferro that last ran the step.
     #[serde(default)]
     pub ferro_version: String,
-    /// Ran, recorded by a baseline, or adopted from a squash's originals.
+    /// Ran, recorded by a baseline, or inherited from a squash's originals.
     pub origin: Origin,
     /// A chunked `down` is part-way (declared by #520; #532 drives it).
     #[serde(default)]
@@ -751,7 +751,7 @@ pub enum RunRefusal {
     },
     /// A squash whose witness the tracking table holds only part of
     /// (ADR-0056): the database applied some of the migrations it replaced
-    /// and not the rest, or a step of one did not finish. It is not adopted,
+    /// and not the rest, or a step of one did not finish. It is not inherited,
     /// and nothing runs: the database stands at no snapshot the directory
     /// holds.
     PartialWitness {
@@ -767,18 +767,18 @@ pub enum RunRefusal {
     },
     /// A squash whose witness the tracking table holds whole, part of it
     /// recorded by `baseline` and part applied by runs (ADR-0056, amended
-    /// 2026-10-18): adopted, its records would carry one origin, so `down`
+    /// 2026-10-18): inherited, its records would carry one origin, so `down`
     /// would either revert what the baseline only recorded or never revert
-    /// what the runs created. It is not adopted, and nothing runs.
+    /// what the runs created. It is not inherited, and nothing runs.
     MixedWitness {
         /// `NNNN_<name>` of the squash.
         squash: String,
         /// The replaced migrations a baseline recorded, in chain order.
         baselined: Vec<String>,
-        /// The ones runs applied (or adopted), in chain order.
+        /// The ones runs applied (or inherited), in chain order.
         ran: Vec<String>,
     },
-    /// An adopted squash's data step whose declared kind (atomic or chunked,
+    /// An inherited squash's data step whose declared kind (atomic or chunked,
     /// its `up`'s declaration) the caller did not give: its record cannot be
     /// written without one, and none is guessed.
     UndeclaredKind {
@@ -1385,9 +1385,9 @@ impl std::fmt::Display for RunRefusal {
                 write!(
                     f,
                     "ferro migrate: {squash} replaces migrations this database applied only \
-                     part of: {applied}, so it cannot adopt {squash}. To keep its rows, check \
+                     part of: {applied}, so it cannot inherit {squash}. To keep its rows, check \
                      out the commit that holds {missing_list}, run `ferro migrate up` there to \
-                     finish {them}, then run `ferro migrate up` here, which adopts {squash}. Or \
+                     finish {them}, then run `ferro migrate up` here, which inherits {squash}. Or \
                      revert instead: on the commit that applied them run `ferro migrate down \
                      --to {}`, then `ferro migrate up` here; the revert drops what they created \
                      and fails on an irreversible step. Nothing was changed.",
@@ -1413,7 +1413,7 @@ impl std::fmt::Display for RunRefusal {
                 write!(
                     f,
                     "ferro migrate: {squash} replaces {}, but this database baselined {} and \
-                     ran the rest, so the squash straddles the baseline and cannot be adopted \
+                     ran the rest, so the squash straddles the baseline and cannot be inherited \
                      whole. On the commit before the squash, squash from above the baseline \
                      instead: `ferro migrate squash {name} --from {from}`. Nothing was applied.",
                     span(&replaced),
@@ -1422,7 +1422,7 @@ impl std::fmt::Display for RunRefusal {
             }
             RunRefusal::UndeclaredKind { squash, step } => write!(
                 f,
-                "ferro migrate: adopting {squash} needs the declared kind (atomic or chunked) \
+                "ferro migrate: inheriting {squash} needs the declared kind (atomic or chunked) \
                  of its data step {step}, read from that file's `up`, and none was given; ferro \
                  guesses none. Check that {step} declares its `up` as a data step does, then \
                  run again. Nothing was changed."
@@ -2481,13 +2481,13 @@ pub fn check_format(
     })
 }
 
-// -- adoption (ADR-0056) -------------------------------------------------------
+// -- inheritance (ADR-0056) -------------------------------------------------------
 
-/// A squash a run adopts: the database applied every migration it replaced,
+/// A squash a run inherits: the database applied every migration it replaced,
 /// as its witness records them, so the run swaps their records for the
 /// squash's and runs nothing (ADR-0056).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
-pub struct Adoption {
+pub struct Inheritance {
     /// `NNNN_<name>` of the squash.
     pub squash: String,
     /// `NNNN_<name>` of every migration whose records witness it, in chain
@@ -2495,7 +2495,7 @@ pub struct Adoption {
     /// squash of a squash, when it still holds those).
     pub replaced: Vec<String>,
     /// `(migration, step)` of every witnessed record, ascending: the records
-    /// adoption deletes.
+    /// inheritance deletes.
     pub witnessed: Vec<(u16, u8)>,
     /// `NNNN_<name>` of every replaced migration whose witnessed records a
     /// baseline wrote, in chain order: all of `replaced` when the squash
@@ -2503,16 +2503,16 @@ pub struct Adoption {
     pub baselined: Vec<String>,
 }
 
-impl Adoption {
+impl Inheritance {
     /// The origin the squash's records take (ADR-0056, amended 2026-10-18):
     /// `baseline` when a baseline recorded every migration its witness
     /// holds, so `down` still stops above it and `baseline --remove` still
-    /// removes it; `adopted` when runs applied (or adopted) them all; `None`
-    /// for a witness of both, which is not adopted
+    /// removes it; `inherited` when runs applied (or inherited) them all; `None`
+    /// for a witness of both, which is not inherited
     /// ([`RunRefusal::MixedWitness`]).
     pub fn origin(&self) -> Option<Origin> {
         if self.baselined.is_empty() {
-            Some(Origin::Adopted)
+            Some(Origin::Inherited)
         } else if self.baselined == self.replaced {
             Some(Origin::Baseline)
         } else {
@@ -2537,7 +2537,7 @@ impl Adoption {
 
 /// A squash whose witness the tracking table holds only part of: some of
 /// the migrations it replaced are applied whole, the rest are not (absent,
-/// short of a step, failed, or under another snapshot). Never adopted; a run
+/// short of a step, failed, or under another snapshot). Never inherited; a run
 /// refuses on it ([`RunRefusal::PartialWitness`]).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct PartialWitness {
@@ -2623,12 +2623,12 @@ fn names_of(witnessed: &[&StepRecord]) -> Vec<String> {
 /// each under the recorded snapshot checksum, and no other record of that
 /// migration's name; or, recursively, every entry of its nested list
 /// satisfied. Baseline records count (a witness of baseline and run records
-/// both is adoptable here and refused by [`adoption`]), and so do records
+/// both is inheritable here and refused by [`inheritance`]), and so do records
 /// whose up-file
 /// checksum differs from the file: the snapshot checksum is the proof
 /// (ADR-0030). The tracking table is the whole witness; nothing live is
 /// read.
-pub fn adoptable(dir: &MigrationsDir, records: &[StepRecord]) -> Vec<Adoption> {
+pub fn inheritable(dir: &MigrationsDir, records: &[StepRecord]) -> Vec<Inheritance> {
     let records = by_name(records);
     dir.migrations
         .iter()
@@ -2648,7 +2648,7 @@ pub fn adoptable(dir: &MigrationsDir, records: &[StepRecord]) -> Vec<Adoption> {
             let mut keys: Vec<(u16, u8)> =
                 witnessed.iter().map(|r| (r.migration, r.step)).collect();
             keys.sort_unstable();
-            Some(Adoption {
+            Some(Inheritance {
                 squash: squash.dir_name(),
                 replaced,
                 witnessed: keys,
@@ -2682,17 +2682,17 @@ fn sort_witness(
 
 /// Every squash in `dir` whose witness `records` hold part of: a record
 /// names a migration it replaced, yet the witness is not wholly satisfied
-/// ([`adoptable`]). A squash none of whose replaced migrations has a record
+/// ([`inheritable`]). A squash none of whose replaced migrations has a record
 /// is not one: that database never ran the originals.
 pub fn partial_witnesses(dir: &MigrationsDir, records: &[StepRecord]) -> Vec<PartialWitness> {
     let by = by_name(records);
-    let adopted: BTreeSet<String> = adoptable(dir, records)
+    let inherited: BTreeSet<String> = inheritable(dir, records)
         .into_iter()
         .map(|a| a.squash)
         .collect();
     dir.migrations
         .iter()
-        .filter(|m| !m.witness.is_empty() && !adopted.contains(&m.dir_name()))
+        .filter(|m| !m.witness.is_empty() && !inherited.contains(&m.dir_name()))
         .filter(|m| m.witness.iter().any(|entry| touched(entry, &by)))
         .map(|squash| {
             let (mut satisfied, mut missing) = (Vec::new(), Vec::new());
@@ -2708,18 +2708,21 @@ pub fn partial_witnesses(dir: &MigrationsDir, records: &[StepRecord]) -> Vec<Par
         .collect()
 }
 
-/// Each data step of every squash a run would adopt, `(migration, step,
+/// Each data step of every squash a run would inherit, `(migration, step,
 /// file)`: the files whose `up` declaration (atomic or chunked) the caller
-/// reads for its record's kind, as a baseline does, since adoption runs
+/// reads for its record's kind, as a baseline does, since inheritance runs
 /// none of them.
-pub fn adoption_data_steps(dir: &MigrationsDir, records: &[StepRecord]) -> Vec<(u16, u8, PathBuf)> {
-    let adopted: BTreeSet<String> = adoptable(dir, records)
+pub fn inheritance_data_steps(
+    dir: &MigrationsDir,
+    records: &[StepRecord],
+) -> Vec<(u16, u8, PathBuf)> {
+    let inherited: BTreeSet<String> = inheritable(dir, records)
         .into_iter()
         .map(|a| a.squash)
         .collect();
     dir.migrations
         .iter()
-        .filter(|m| adopted.contains(&m.dir_name()))
+        .filter(|m| inherited.contains(&m.dir_name()))
         .flat_map(|m| {
             m.steps
                 .iter()
@@ -2733,50 +2736,50 @@ pub fn adoption_data_steps(dir: &MigrationsDir, records: &[StepRecord]) -> Vec<(
         .collect()
 }
 
-/// What a run's adoption does ([`adoption`]): the squashes it adopts, the
+/// What a run's inheritance does ([`inheritance`]): the squashes it inherits, the
 /// records it deletes and inserts, and the records the database holds after.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
-pub struct AdoptionPlan {
-    /// The squashes adopted, in directory order.
-    pub adoptions: Vec<Adoption>,
+pub struct InheritancePlan {
+    /// The squashes inherited, in directory order.
+    pub inheritances: Vec<Inheritance>,
     /// Every witnessed record, deleted, by migration and step: a deletion
     /// matches its migration name too, since an original and the squash
     /// that replaced it share a number.
     pub removed: Vec<StepRecord>,
-    /// One finished record per step of every adopted squash, inserted.
+    /// One finished record per step of every inherited squash, inserted.
     pub inserted: Vec<StepRecord>,
     /// The records after the swap, by migration and step: what the run
     /// plans against.
     pub records: Vec<StepRecord>,
 }
 
-/// The adoption a run makes on a `dialect` database whose tracking table
-/// holds `records` (ADR-0056): each [`adoptable`] squash's witnessed records
+/// The inheritance a run makes on a `dialect` database whose tracking table
+/// holds `records` (ADR-0056): each [`inheritable`] squash's witnessed records
 /// deleted, and one finished record inserted per step of the squash, with
 /// this dialect's up file name and checksum, the squash's snapshot checksum,
 /// the class the step-class entry point decides (ADR-0054), `now` as
-/// started and finished, `ferro_version`, the origin [`Adoption::origin`]
+/// started and finished, `ferro_version`, the origin [`Inheritance::origin`]
 /// decides (`baseline` when a baseline recorded the whole witness,
-/// `adopted` when runs applied it), and for a data step the kind `kinds`
+/// `inherited` when runs applied it), and for a data step the kind `kinds`
 /// holds for it (its `up`'s declaration, read by the caller from
-/// [`adoption_data_steps`]).
+/// [`inheritance_data_steps`]).
 ///
 /// # Errors
 /// [`RunRefusal::PartialWitness`] for the first squash whose witness the
 /// records hold part of, and [`RunRefusal::MixedWitness`] for the first
 /// whose witness is part baselined and part run, before anything is
-/// adopted; [`RunRefusal::UndeclaredKind`] for an adopted data step `kinds`
+/// inherited; [`RunRefusal::UndeclaredKind`] for an inherited data step `kinds`
 /// lacks; a squash step with no rendering for `dialect` or headers it
 /// cannot honour; a squash whose generated steps get no class
 /// ([`RunRefusal::Unclassifiable`]).
-pub fn adoption(
+pub fn inheritance(
     dir: &MigrationsDir,
     records: &[StepRecord],
     dialect: Dialect,
     kinds: &BTreeMap<(u16, u8), RecordKind>,
     now: &str,
     ferro_version: &str,
-) -> Result<AdoptionPlan, RunRefusal> {
+) -> Result<InheritancePlan, RunRefusal> {
     swap(
         dir,
         records,
@@ -2795,13 +2798,13 @@ pub fn adoption(
     )
 }
 
-/// The records a run plans against once it has adopted, for a reader that
-/// computes only the refusal the run meets ([`run_status`]): [`adoption`]'s
+/// The records a run plans against once it has inherited, for a reader that
+/// computes only the refusal the run meets ([`run_status`]): [`inheritance`]'s
 /// decision and refusals, apart from a data step's kind, which no refusal
 /// of a plan over finished records reads. Its data-step records carry the
 /// planner's own stand-in (`atomic`, as [`plan_run`]'s), so they are never
 /// written.
-fn adopted_records_for_reading(
+fn inherited_records_for_reading(
     dir: &MigrationsDir,
     records: &[StepRecord],
     dialect: Dialect,
@@ -2817,7 +2820,7 @@ fn adopted_records_for_reading(
     .map(|plan| plan.records)
 }
 
-/// [`adoption`], each data step's kind from `data_kind`.
+/// [`inheritance`], each data step's kind from `data_kind`.
 fn swap(
     dir: &MigrationsDir,
     records: &[StepRecord],
@@ -2825,7 +2828,7 @@ fn swap(
     data_kind: impl Fn(&Migration, &Step, &str) -> Result<RecordKind, RunRefusal>,
     now: &str,
     ferro_version: &str,
-) -> Result<AdoptionPlan, RunRefusal> {
+) -> Result<InheritancePlan, RunRefusal> {
     if let Some(partial) = partial_witnesses(dir, records).into_iter().next() {
         return Err(RunRefusal::PartialWitness {
             squash: partial.squash,
@@ -2834,23 +2837,23 @@ fn swap(
             missing: partial.missing,
         });
     }
-    let adoptions = adoptable(dir, records);
-    if let Some(mixed) = adoptions.iter().find_map(Adoption::mixed) {
+    let inheritances = inheritable(dir, records);
+    if let Some(mixed) = inheritances.iter().find_map(Inheritance::mixed) {
         return Err(mixed);
     }
-    let mut plan = AdoptionPlan {
+    let mut plan = InheritancePlan {
         records: records.to_vec(),
-        ..AdoptionPlan::default()
+        ..InheritancePlan::default()
     };
-    for adoption in &adoptions {
+    for inheritance in &inheritances {
         let Some(squash) = dir
             .migrations
             .iter()
-            .find(|m| m.dir_name() == adoption.squash)
+            .find(|m| m.dir_name() == inheritance.squash)
         else {
             continue;
         };
-        let origin = adoption.origin().unwrap_or(Origin::Adopted);
+        let origin = inheritance.origin().unwrap_or(Origin::Inherited);
         let snapshot_checksum = encode_checksum(&squash.snapshot.checksum);
         let classes = migration_classes(dir, squash, dialect)?;
         for step in &squash.steps {
@@ -2893,7 +2896,7 @@ fn swap(
             records
                 .iter()
                 .filter(|r| {
-                    adoption
+                    inheritance
                         .witnessed
                         .binary_search(&(r.migration, r.step))
                         .is_ok()
@@ -2905,7 +2908,7 @@ fn swap(
     plan.records.retain(|r| !plan.removed.contains(r));
     plan.records.extend(plan.inserted.iter().cloned());
     plan.records.sort_by_key(|r| (r.migration, r.step));
-    plan.adoptions = adoptions;
+    plan.inheritances = inheritances;
     Ok(plan)
 }
 
@@ -3170,15 +3173,15 @@ pub enum StepState {
     AppliedDifferentChecksum,
     /// Recorded by `ferro migrate baseline`.
     AppliedBaseline,
-    /// Adopted from the migrations a squash replaced (ADR-0056), its file
+    /// Inherited from the migrations a squash replaced (ADR-0056), its file
     /// unchanged since.
-    AppliedAdopted,
+    AppliedInherited,
     /// No finished record.
     Pending,
     /// No record, in a squash whose witness the records hold whole
-    /// (ADR-0056): pending its adoption, which the next run makes, running
+    /// (ADR-0056): pending its inheritance, which the next run makes, running
     /// nothing.
-    PendingAdoptable,
+    PendingInheritable,
     /// Not finished, and a run holds the lock.
     Running,
     /// The last attempt's error recorded: an up that did not finish, or a
@@ -3209,7 +3212,7 @@ impl StepState {
             StepState::Applied
                 | StepState::AppliedDifferentChecksum
                 | StepState::AppliedBaseline
-                | StepState::AppliedAdopted
+                | StepState::AppliedInherited
         )
     }
 }
@@ -3246,10 +3249,10 @@ pub struct MigrationStatus {
     pub name: String,
     /// Its steps.
     pub steps: Vec<StepStatus>,
-    /// For a squash pending its adoption, `NNNN_<name>` of every migration
-    /// whose records witness it, in chain order ([`Adoption::replaced`]):
+    /// For a squash pending its inheritance, `NNNN_<name>` of every migration
+    /// whose records witness it, in chain order ([`Inheritance::replaced`]):
     /// what the database applied. Empty otherwise.
-    pub adopts: Vec<String>,
+    pub inherits: Vec<String>,
 }
 
 /// What `ferro migrate status` reports: every migration's steps, the
@@ -3260,12 +3263,12 @@ pub struct RunStatus {
     /// The directory's migrations, in order.
     pub migrations: Vec<MigrationStatus>,
     /// Applied migrations the directory lacks (`NNNN_<name>`), never one
-    /// whose records witness an adoptable squash: adoptable is recognised
+    /// whose records witness an inheritable squash: inheritable is recognised
     /// before ahead (ADR-0038). A partial witness's records are ahead.
     pub ahead: Vec<String>,
-    /// `NNNN_<name>` of every squash the next run adopts ([`adoptable`]),
+    /// `NNNN_<name>` of every squash the next run inherits ([`inheritable`]),
     /// in directory order: each is pending (ADR-0040).
-    pub adoptable: Vec<String>,
+    pub inheritable: Vec<String>,
     /// What `up` would refuse with, when it would.
     pub refusal: Option<String>,
     /// Whether that refusal is about the database (rather than a capability
@@ -3279,10 +3282,10 @@ pub struct RunStatus {
 /// `running`. `order_keys` are passed through to [`plan_run`] for the
 /// refusal's text.
 ///
-/// Adoptable is recognised before ahead (ADR-0038, ADR-0056): a squash
-/// whose witness the records hold whole is `pending_adoptable`, its
+/// Inheritable is recognised before ahead (ADR-0038, ADR-0056): a squash
+/// whose witness the records hold whole is `pending_inheritable`, its
 /// witnessed records are not ahead, and the refusal is the one the run meets
-/// after adopting. A partial witness is ahead by the originals it holds and
+/// after inheriting. A partial witness is ahead by the originals it holds and
 /// carries the run's `partial_witness` refusal. A step is read from its own
 /// migration's records only, never from an original's of the same number.
 pub fn run_status(
@@ -3292,13 +3295,13 @@ pub fn run_status(
     lock_held: bool,
     order_keys: Option<&OrderKeys>,
 ) -> RunStatus {
-    // A witness part baselined and part run is not adopted: the run
+    // A witness part baselined and part run is not inherited: the run
     // refuses on it, and its originals stand ahead, as a partial witness's.
-    let (adoptions, mixed): (Vec<Adoption>, Vec<Adoption>) = adoptable(dir, records)
+    let (inheritances, mixed): (Vec<Inheritance>, Vec<Inheritance>) = inheritable(dir, records)
         .into_iter()
         .partition(|a| a.origin().is_some());
     let partials = partial_witnesses(dir, records);
-    let witnessed: BTreeSet<(u16, u8)> = adoptions
+    let witnessed: BTreeSet<(u16, u8)> = inheritances
         .iter()
         .flat_map(|a| a.witnessed.iter().copied())
         .collect();
@@ -3311,7 +3314,7 @@ pub fn run_status(
     let mut migrations = Vec::new();
     for migration in &dir.migrations {
         let name = migration.dir_name();
-        let adopts = adoptions
+        let inherits = inheritances
             .iter()
             .find(|a| a.squash == name)
             .map(|a| a.replaced.clone())
@@ -3329,7 +3332,7 @@ pub fn run_status(
                 .or_else(|| record.map(|r| r.file.clone()))
                 .unwrap_or_else(|| format!("{:02}_{}", step.ordinal, step.name));
             let mut state = match record {
-                None if !adopts.is_empty() => StepState::PendingAdoptable,
+                None if !inherits.is_empty() => StepState::PendingInheritable,
                 None => StepState::Pending,
                 Some(r) if r.reverting => StepState::Reverting,
                 // A finished step carrying an error: its down failed, and the
@@ -3339,8 +3342,8 @@ pub fn run_status(
                 Some(r) if r.is_finished() => {
                     if Some(&r.checksum) != on_disk.as_ref() || r.file != name {
                         StepState::AppliedDifferentChecksum
-                    } else if r.origin == Origin::Adopted {
-                        StepState::AppliedAdopted
+                    } else if r.origin == Origin::Inherited {
+                        StepState::AppliedInherited
                     } else {
                         StepState::Applied
                     }
@@ -3387,7 +3390,7 @@ pub fn run_status(
             number: migration.number,
             name,
             steps,
-            adopts,
+            inherits,
         });
     }
     let head = dir.head().map_or(0, |m| m.number);
@@ -3403,13 +3406,13 @@ pub fn run_status(
         .filter(|r| r.migration > head || partly_witnessed.contains(r.migration_name.as_str()))
         .map(|r| r.migration_name.clone())
         .collect();
-    // The refusal the run meets: its adoption's, else its plan's over the
-    // records the adoption leaves. A data step's kind decides none.
-    let refusal = adopted_records_for_reading(dir, records, dialect)
-        .and_then(|adopted| {
+    // The refusal the run meets: its inheritance's, else its plan's over the
+    // records the inheritance leaves. A data step's kind decides none.
+    let refusal = inherited_records_for_reading(dir, records, dialect)
+        .and_then(|inherited| {
             plan_run(
                 dir,
-                &adopted,
+                &inherited,
                 dialect,
                 Direction::Up { through: None },
                 false,
@@ -3420,7 +3423,7 @@ pub fn run_status(
     RunStatus {
         migrations,
         ahead: ahead.into_iter().collect(),
-        adoptable: adoptions.into_iter().map(|a| a.squash).collect(),
+        inheritable: inheritances.into_iter().map(|a| a.squash).collect(),
         refusal_needs_attention: refusal.as_ref().is_some_and(RunRefusal::needs_attention),
         refusal: refusal.map(|r| r.to_string()),
     }
@@ -6176,7 +6179,7 @@ mod tests {
         );
     }
 
-    // -- adoption (ADR-0056) ---------------------------------------------------
+    // -- inheritance (ADR-0056) ---------------------------------------------------
 
     /// `0001_create_author`, then the epic's originals: `0002_add_teams`
     /// (a DDL step and a data step), `0003_team_slug`, `0004_drop_tmp`.
@@ -6289,11 +6292,11 @@ mod tests {
     }
 
     #[test]
-    fn a_squash_whose_witness_the_records_hold_exactly_is_adoptable() {
+    fn a_squash_whose_witness_the_records_hold_exactly_is_inheritable() {
         let (dir, records) = originals_applied();
         assert_eq!(
-            adoptable(&dir, &records),
-            [Adoption {
+            inheritable(&dir, &records),
+            [Inheritance {
                 squash: "0002_teams_epic".into(),
                 replaced: vec![
                     "0002_add_teams".into(),
@@ -6308,15 +6311,15 @@ mod tests {
     }
 
     #[test]
-    fn a_squash_none_of_whose_witness_is_recorded_is_neither_adoptable_nor_partial() {
+    fn a_squash_none_of_whose_witness_is_recorded_is_neither_inheritable_nor_partial() {
         let (dir, records) = originals_applied();
         let only_first: Vec<StepRecord> =
             records.into_iter().filter(|r| r.migration == 1).collect();
-        assert!(adoptable(&dir, &only_first).is_empty());
+        assert!(inheritable(&dir, &only_first).is_empty());
         assert!(partial_witnesses(&dir, &only_first).is_empty());
         // Nor is a database that ran the squash itself.
         let ran = every_step(&dir);
-        assert!(adoptable(&dir, &ran).is_empty());
+        assert!(inheritable(&dir, &ran).is_empty());
         assert!(partial_witnesses(&dir, &ran).is_empty());
     }
 
@@ -6326,7 +6329,7 @@ mod tests {
         let mut extra = records[2].clone();
         extra.step = 3;
         records.push(extra);
-        assert!(adoptable(&dir, &records).is_empty());
+        assert!(inheritable(&dir, &records).is_empty());
         let [partial] = &partial_witnesses(&dir, &records)[..] else {
             panic!("one partial witness");
         };
@@ -6340,7 +6343,7 @@ mod tests {
             .into_iter()
             .filter(|r| (r.migration, r.step) != (2, 2))
             .collect();
-        assert!(adoptable(&dir, &records).is_empty());
+        assert!(inheritable(&dir, &records).is_empty());
         assert_eq!(
             partial_witnesses(&dir, &records)[0].missing,
             ["0002_add_teams"]
@@ -6351,7 +6354,7 @@ mod tests {
     fn a_record_under_another_snapshot_checksum_is_no_witness() {
         let (dir, mut records) = originals_applied();
         records[3].snapshot_checksum = "0".repeat(96);
-        assert!(adoptable(&dir, &records).is_empty());
+        assert!(inheritable(&dir, &records).is_empty());
         assert_eq!(
             partial_witnesses(&dir, &records)[0].missing,
             ["0003_team_slug"]
@@ -6364,14 +6367,14 @@ mod tests {
         for record in &mut records {
             record.origin = Origin::Baseline;
         }
-        assert_eq!(adoptable(&dir, &records)[0].squash, "0002_teams_epic");
+        assert_eq!(inheritable(&dir, &records)[0].squash, "0002_teams_epic");
     }
 
     #[test]
     fn a_record_whose_up_file_changed_after_apply_still_witnesses() {
         let (dir, mut records) = originals_applied();
         records[3].checksum = "f".repeat(96);
-        assert_eq!(adoptable(&dir, &records)[0].squash, "0002_teams_epic");
+        assert_eq!(inheritable(&dir, &records)[0].squash, "0002_teams_epic");
     }
 
     #[test]
@@ -6383,7 +6386,7 @@ mod tests {
             .filter(|r| r.migration < 4)
             .cloned()
             .collect();
-        assert!(adoptable(&dir, &partial).is_empty());
+        assert!(inheritable(&dir, &partial).is_empty());
         assert_eq!(
             partial_witnesses(&dir, &partial),
             [PartialWitness {
@@ -6397,7 +6400,7 @@ mod tests {
         let mut failed = records;
         failed[4].finished_at = None;
         failed[4].error = Some("boom".into());
-        assert!(adoptable(&dir, &failed).is_empty());
+        assert!(inheritable(&dir, &failed).is_empty());
         assert_eq!(
             partial_witnesses(&dir, &failed)[0].missing,
             ["0004_drop_tmp"]
@@ -6405,27 +6408,27 @@ mod tests {
     }
 
     #[test]
-    fn a_squash_of_a_squash_adopts_from_the_inner_squash_and_from_the_earliest_originals() {
+    fn a_squash_of_a_squash_inherits_from_the_inner_squash_and_from_the_earliest_originals() {
         let originals = epic_originals();
         // The first squash took 0003..0004; the second takes 0002 and it.
         let first = squashed(&originals, 3, "slug_epic");
         let second = squashed(&first, 2, "big_epic");
         assert_eq!(second.migrations[1].witness[1].replaces.len(), 2);
 
-        // A database that adopted the first squash.
-        let adopted: Vec<StepRecord> = every_step(&first)
+        // A database that inherited the first squash.
+        let inherited: Vec<StepRecord> = every_step(&first)
             .into_iter()
             .map(|r| StepRecord {
                 origin: if r.migration == 3 {
-                    Origin::Adopted
+                    Origin::Inherited
                 } else {
                     r.origin
                 },
                 ..r
             })
             .collect();
-        let [by_inner] = &adoptable(&second, &adopted)[..] else {
-            panic!("adoptable from the first squash's records");
+        let [by_inner] = &inheritable(&second, &inherited)[..] else {
+            panic!("inheritable from the first squash's records");
         };
         assert_eq!(by_inner.squash, "0002_big_epic");
         assert_eq!(by_inner.replaced, ["0002_add_teams", "0003_slug_epic"]);
@@ -6433,8 +6436,8 @@ mod tests {
 
         // A database that still holds the earliest originals.
         let earliest = every_step(&originals);
-        let [by_originals] = &adoptable(&second, &earliest)[..] else {
-            panic!("adoptable from the earliest originals");
+        let [by_originals] = &inheritable(&second, &earliest)[..] else {
+            panic!("inheritable from the earliest originals");
         };
         assert_eq!(
             by_originals.replaced,
@@ -6445,7 +6448,7 @@ mod tests {
         // Half of the inner squash's originals is a partial witness, named
         // by the originals the database holds.
         let half: Vec<StepRecord> = earliest.into_iter().filter(|r| r.migration != 4).collect();
-        assert!(adoptable(&second, &half).is_empty());
+        assert!(inheritable(&second, &half).is_empty());
         let [partial] = &partial_witnesses(&second, &half)[..] else {
             panic!("partial");
         };
@@ -6454,10 +6457,10 @@ mod tests {
     }
 
     #[test]
-    fn adoption_swaps_the_witnessed_records_for_the_squashs_own_and_then_nothing_is_pending() {
+    fn inheritance_swaps_the_witnessed_records_for_the_squashs_own_and_then_nothing_is_pending() {
         let (dir, records) = originals_applied();
         let kinds = BTreeMap::from([((2, 2), RecordKind::Chunked)]);
-        let adopted = adoption(
+        let inherited = inheritance(
             &dir,
             &records,
             Dialect::Sqlite,
@@ -6465,29 +6468,29 @@ mod tests {
             "2026-10-18T12:00:00.000000Z",
             "0.25.0",
         )
-        .expect("adopts");
-        assert_eq!(adopted.adoptions.len(), 1);
+        .expect("inherits");
+        assert_eq!(inherited.inheritances.len(), 1);
         assert_eq!(
-            adopted
+            inherited
                 .removed
                 .iter()
                 .map(|r| (r.migration, r.step))
                 .collect::<Vec<_>>(),
             [(2, 1), (2, 2), (3, 1), (4, 1)]
         );
-        assert_eq!(adopted.removed[3].migration_name, "0004_drop_tmp");
+        assert_eq!(inherited.removed[3].migration_name, "0004_drop_tmp");
         let squash = &dir.migrations[1];
         let snapshot = encode_checksum(&squash.snapshot.checksum);
         let classes = migration_classes(&dir, squash, Dialect::Sqlite).expect("classes");
-        assert_eq!(adopted.inserted.len(), 3);
-        for (record, step) in adopted.inserted.iter().zip(&squash.steps) {
+        assert_eq!(inherited.inserted.len(), 3);
+        for (record, step) in inherited.inserted.iter().zip(&squash.steps) {
             let file = step_file(squash, step, Dialect::Sqlite).expect("file");
             assert_eq!(record.migration_name, "0002_teams_epic");
             assert_eq!((record.migration, record.step), (2, step.ordinal));
             assert_eq!(record.file, file_name(&file.up));
             assert_eq!(record.checksum, encode_checksum(&file.up_checksum));
             assert_eq!(record.snapshot_checksum, snapshot);
-            assert_eq!(record.origin, Origin::Adopted);
+            assert_eq!(record.origin, Origin::Inherited);
             assert_eq!(record.class, classes.get(&step.ordinal).copied());
             assert_eq!(record.started_at, "2026-10-18T12:00:00.000000Z");
             assert_eq!(
@@ -6497,11 +6500,11 @@ mod tests {
             assert_eq!(record.ferro_version, "0.25.0");
             assert_eq!(record.duration_ms, 0);
         }
-        assert_eq!(adopted.inserted[0].kind, RecordKind::Ddl);
-        assert_eq!(adopted.inserted[1].kind, RecordKind::Chunked);
+        assert_eq!(inherited.inserted[0].kind, RecordKind::Ddl);
+        assert_eq!(inherited.inserted[1].kind, RecordKind::Chunked);
         // The records after: 0001's, then the squash's.
         assert_eq!(
-            adopted
+            inherited
                 .records
                 .iter()
                 .map(|r| (r.migration_name.as_str(), r.step))
@@ -6513,25 +6516,37 @@ mod tests {
                 ("0002_teams_epic", 3)
             ]
         );
-        assert!(up(&dir, &adopted.records).expect("plans").steps.is_empty());
-        // Adopting again finds nothing.
-        let again = adoption(&dir, &adopted.records, Dialect::Sqlite, &kinds, "now", "v")
-            .expect("nothing to adopt");
-        assert!(again.adoptions.is_empty() && again.inserted.is_empty());
-        assert_eq!(again.records, adopted.records);
+        assert!(
+            up(&dir, &inherited.records)
+                .expect("plans")
+                .steps
+                .is_empty()
+        );
+        // Inheriting again finds nothing.
+        let again = inheritance(
+            &dir,
+            &inherited.records,
+            Dialect::Sqlite,
+            &kinds,
+            "now",
+            "v",
+        )
+        .expect("nothing to inherit");
+        assert!(again.inheritances.is_empty() && again.inserted.is_empty());
+        assert_eq!(again.records, inherited.records);
         // Its data steps are the files whose declared kind the caller reads.
         assert_eq!(
-            adoption_data_steps(&dir, &records),
+            inheritance_data_steps(&dir, &records),
             [(2, 2, PathBuf::from("/m/02_backfill_team.py"))]
         );
-        assert!(adoption_data_steps(&dir, &adopted.records).is_empty());
+        assert!(inheritance_data_steps(&dir, &inherited.records).is_empty());
     }
 
     #[test]
-    fn a_partial_witness_refuses_the_adoption_naming_the_non_destructive_fix_first() {
+    fn a_partial_witness_refuses_the_inheritance_naming_the_non_destructive_fix_first() {
         let (dir, records) = originals_applied();
         let partial: Vec<StepRecord> = records.into_iter().filter(|r| r.migration < 4).collect();
-        let refusal = adoption(&dir, &partial, Dialect::Sqlite, &no_kinds(), "now", "v")
+        let refusal = inheritance(&dir, &partial, Dialect::Sqlite, &no_kinds(), "now", "v")
             .expect_err("partial");
         assert_eq!(refusal.kind(), "partial_witness");
         assert_eq!(
@@ -6547,9 +6562,9 @@ mod tests {
             refusal.to_string(),
             "ferro migrate: 0002_teams_epic replaces migrations this database applied only \
              part of: it applied 0002_add_teams and 0003_team_slug but not 0004_drop_tmp, so \
-             it cannot adopt 0002_teams_epic. To keep its rows, check out the commit that \
+             it cannot inherit 0002_teams_epic. To keep its rows, check out the commit that \
              holds 0004_drop_tmp, run `ferro migrate up` there to finish it, then run `ferro \
-             migrate up` here, which adopts 0002_teams_epic. Or revert instead: on the commit \
+             migrate up` here, which inherits 0002_teams_epic. Or revert instead: on the commit \
              that applied them run `ferro migrate down --to 0001`, then `ferro migrate up` \
              here; the revert drops what they created and fails on an irreversible step. \
              Nothing was changed."
@@ -6557,35 +6572,35 @@ mod tests {
     }
 
     #[test]
-    fn an_adopted_step_reads_applied_adopted_and_its_down_runs() {
-        assert_eq!(Origin::parse("adopted"), Some(Origin::Adopted));
-        assert_eq!(Origin::Adopted.as_str(), "adopted");
-        assert!(!Origin::Adopted.is_baseline() && !Origin::Run.is_baseline());
+    fn an_inherited_step_reads_applied_inherited_and_its_down_runs() {
+        assert_eq!(Origin::parse("inherited"), Some(Origin::Inherited));
+        assert_eq!(Origin::Inherited.as_str(), "inherited");
+        assert!(!Origin::Inherited.is_baseline() && !Origin::Run.is_baseline());
         assert!(Origin::Baseline.is_baseline());
         let (dir, records) = originals_applied();
-        let adopted =
-            adoption(&dir, &records, Dialect::Sqlite, &chunked_kind(), "now", "v").expect("adopts");
-        let status = run_status(&dir, &adopted.records, Dialect::Sqlite, false, None);
+        let inherited = inheritance(&dir, &records, Dialect::Sqlite, &chunked_kind(), "now", "v")
+            .expect("inherits");
+        let status = run_status(&dir, &inherited.records, Dialect::Sqlite, false, None);
         assert_eq!(
             status.migrations[1]
                 .steps
                 .iter()
                 .map(|s| s.state)
                 .collect::<Vec<_>>(),
-            [StepState::AppliedAdopted; 3]
+            [StepState::AppliedInherited; 3]
         );
         assert_eq!(status.migrations[0].steps[0].state, StepState::Applied);
-        assert!(!StepState::AppliedAdopted.is_pending());
-        assert!(!StepState::AppliedAdopted.needs_attention());
+        assert!(!StepState::AppliedInherited.is_pending());
+        assert!(!StepState::AppliedInherited.needs_attention());
         assert_eq!(
-            serde_json::to_value(StepState::AppliedAdopted).expect("json"),
-            "applied_adopted"
+            serde_json::to_value(StepState::AppliedInherited).expect("json"),
+            "applied_inherited"
         );
         assert!(status.refusal.is_none(), "{:?}", status.refusal);
-        // An adopted step's down runs: the floor is a baseline's alone.
+        // An inherited step's down runs: the floor is a baseline's alone.
         let reverted = plan_run(
             &dir,
-            &adopted.records,
+            &inherited.records,
             Dialect::Sqlite,
             Direction::Down {
                 target: Target::Migration(1),
@@ -6597,7 +6612,7 @@ mod tests {
         assert_eq!(keys(&reverted), [(2, 3), (2, 2), (2, 1)]);
     }
 
-    // -- the readers on an adoptable database (#672) ----------------------------
+    // -- the readers on an inheritable database (#672) ----------------------------
 
     fn states(status: &RunStatus, migration: usize) -> Vec<StepState> {
         status.migrations[migration]
@@ -6608,25 +6623,25 @@ mod tests {
     }
 
     #[test]
-    fn status_reports_a_wholly_witnessed_squash_pending_adoptable_and_nothing_ahead() {
+    fn status_reports_a_wholly_witnessed_squash_pending_inheritable_and_nothing_ahead() {
         let (dir, records) = originals_applied();
         let status = run_status(&dir, &records, Dialect::Sqlite, false, None);
         assert_eq!(states(&status, 0), [StepState::Applied]);
-        assert_eq!(states(&status, 1), [StepState::PendingAdoptable; 3]);
-        assert_eq!(status.adoptable, ["0002_teams_epic"]);
+        assert_eq!(states(&status, 1), [StepState::PendingInheritable; 3]);
+        assert_eq!(status.inheritable, ["0002_teams_epic"]);
         assert_eq!(
-            status.migrations[1].adopts,
+            status.migrations[1].inherits,
             ["0002_add_teams", "0003_team_slug", "0004_drop_tmp"]
         );
-        assert!(status.migrations[0].adopts.is_empty());
+        assert!(status.migrations[0].inherits.is_empty());
         assert!(status.ahead.is_empty(), "{:?}", status.ahead);
-        // The run adopts and then has nothing to refuse.
+        // The run inherits and then has nothing to refuse.
         assert!(status.refusal.is_none(), "{:?}", status.refusal);
-        assert!(StepState::PendingAdoptable.is_pending());
-        assert!(!StepState::PendingAdoptable.needs_attention());
+        assert!(StepState::PendingInheritable.is_pending());
+        assert!(!StepState::PendingInheritable.needs_attention());
         assert_eq!(
-            serde_json::to_value(StepState::PendingAdoptable).expect("json"),
-            "pending_adoptable"
+            serde_json::to_value(StepState::PendingInheritable).expect("json"),
+            "pending_inheritable"
         );
         // A squash step's class is the one a run would record, never an
         // original's record of the same number and ordinal.
@@ -6644,17 +6659,17 @@ mod tests {
         let partial: Vec<StepRecord> = records.into_iter().filter(|r| r.migration < 4).collect();
         let status = run_status(&dir, &partial, Dialect::Sqlite, false, None);
         assert_eq!(states(&status, 1), [StepState::Pending; 3]);
-        assert!(status.adoptable.is_empty());
-        assert!(status.migrations[1].adopts.is_empty());
+        assert!(status.inheritable.is_empty());
+        assert!(status.migrations[1].inherits.is_empty());
         assert_eq!(status.ahead, ["0002_add_teams", "0003_team_slug"]);
-        let refusal = adoption(&dir, &partial, Dialect::Sqlite, &no_kinds(), "now", "v")
+        let refusal = inheritance(&dir, &partial, Dialect::Sqlite, &no_kinds(), "now", "v")
             .expect_err("partial");
         assert_eq!(status.refusal, Some(refusal.to_string()));
         assert!(status.refusal_needs_attention);
     }
 
     #[test]
-    fn status_reports_a_squash_of_a_squash_adoptable_from_either_generation() {
+    fn status_reports_a_squash_of_a_squash_inheritable_from_either_generation() {
         let originals = epic_originals();
         let first = squashed(&originals, 3, "slug_epic");
         let second = squashed(&first, 2, "big_epic");
@@ -6662,14 +6677,14 @@ mod tests {
             .into_iter()
             .map(|r| StepRecord {
                 origin: if r.migration == 3 {
-                    Origin::Adopted
+                    Origin::Inherited
                 } else {
                     r.origin
                 },
                 ..r
             })
             .collect();
-        for (records, adopts) in [
+        for (records, inherits) in [
             (inner, vec!["0002_add_teams", "0003_slug_epic"]),
             (
                 every_step(&originals),
@@ -6677,53 +6692,53 @@ mod tests {
             ),
         ] {
             let status = run_status(&second, &records, Dialect::Sqlite, false, None);
-            assert_eq!(states(&status, 1), [StepState::PendingAdoptable; 3]);
-            assert_eq!(status.adoptable, ["0002_big_epic"]);
-            assert_eq!(status.migrations[1].adopts, adopts);
+            assert_eq!(states(&status, 1), [StepState::PendingInheritable; 3]);
+            assert_eq!(status.inheritable, ["0002_big_epic"]);
+            assert_eq!(status.migrations[1].inherits, inherits);
             assert!(status.ahead.is_empty(), "{:?}", status.ahead);
             assert!(status.refusal.is_none(), "{:?}", status.refusal);
         }
     }
 
     #[test]
-    fn status_after_adoption_reads_applied_adopted_with_nothing_adoptable() {
+    fn status_after_inheritance_reads_applied_inherited_with_nothing_inheritable() {
         let (dir, records) = originals_applied();
-        let adopted =
-            adoption(&dir, &records, Dialect::Sqlite, &chunked_kind(), "now", "v").expect("adopts");
-        let status = run_status(&dir, &adopted.records, Dialect::Sqlite, false, None);
-        assert_eq!(states(&status, 1), [StepState::AppliedAdopted; 3]);
-        assert!(status.adoptable.is_empty());
+        let inherited = inheritance(&dir, &records, Dialect::Sqlite, &chunked_kind(), "now", "v")
+            .expect("inherits");
+        let status = run_status(&dir, &inherited.records, Dialect::Sqlite, false, None);
+        assert_eq!(states(&status, 1), [StepState::AppliedInherited; 3]);
+        assert!(status.inheritable.is_empty());
         assert!(status.ahead.is_empty());
     }
 
-    // -- a baseline is carried through adoption (panel F3, F13) -----------------
+    // -- a baseline is carried through inheritance (panel F3, F13) -----------------
 
     fn chunked_kind() -> BTreeMap<(u16, u8), RecordKind> {
         BTreeMap::from([((2, 2), RecordKind::Chunked)])
     }
 
     #[test]
-    fn a_wholly_baselined_witness_adopts_as_a_baseline_and_down_stops_above_it() {
+    fn a_wholly_baselined_witness_inherits_as_a_baseline_and_down_stops_above_it() {
         let (dir, mut records) = originals_applied();
         for record in &mut records {
             record.origin = Origin::Baseline;
         }
-        let adopted =
-            adoption(&dir, &records, Dialect::Sqlite, &chunked_kind(), "now", "v").expect("adopts");
-        assert_eq!(adopted.adoptions.len(), 1);
+        let inherited = inheritance(&dir, &records, Dialect::Sqlite, &chunked_kind(), "now", "v")
+            .expect("inherits");
+        assert_eq!(inherited.inheritances.len(), 1);
         assert!(
-            adopted
+            inherited
                 .inserted
                 .iter()
                 .all(|r| r.origin == Origin::Baseline),
             "{:?}",
-            adopted.inserted
+            inherited.inserted
         );
-        assert_eq!(adopted.inserted[1].kind, RecordKind::Chunked);
+        assert_eq!(inherited.inserted[1].kind, RecordKind::Chunked);
         // `down` goes no lower than the squash, as for any baseline.
         let refusal = plan_run(
             &dir,
-            &adopted.records,
+            &inherited.records,
             Dialect::Sqlite,
             Direction::Down {
                 target: Target::Migration(1),
@@ -6733,7 +6748,7 @@ mod tests {
         )
         .expect_err("below the baseline");
         assert_eq!(refusal, RunRefusal::BelowBaseline { migration: 2 });
-        let status = run_status(&dir, &adopted.records, Dialect::Sqlite, false, None);
+        let status = run_status(&dir, &inherited.records, Dialect::Sqlite, false, None);
         assert_eq!(states(&status, 1), [StepState::AppliedBaseline; 3]);
     }
 
@@ -6749,14 +6764,14 @@ mod tests {
 
     const MIXED: &str = "ferro migrate: 0002_teams_epic replaces 0002_add_teams … \
         0004_drop_tmp, but this database baselined 0002_add_teams and ran the rest, so the \
-        squash straddles the baseline and cannot be adopted whole. On the commit before the \
+        squash straddles the baseline and cannot be inherited whole. On the commit before the \
         squash, squash from above the baseline instead: `ferro migrate squash teams_epic \
         --from 0003_team_slug`. Nothing was applied.";
 
     #[test]
     fn a_witness_part_baselined_and_part_run_is_refused_naming_the_squash_above_the_baseline() {
         let (dir, records) = mixed();
-        let refusal = adoption(&dir, &records, Dialect::Sqlite, &chunked_kind(), "now", "v")
+        let refusal = inheritance(&dir, &records, Dialect::Sqlite, &chunked_kind(), "now", "v")
             .expect_err("mixed");
         assert_eq!(refusal.kind(), "mixed_witness");
         assert_eq!(
@@ -6768,27 +6783,27 @@ mod tests {
             }
         );
         assert_eq!(refusal.to_string(), MIXED);
-        // The readers say what the run meets: nothing adoptable, the
+        // The readers say what the run meets: nothing inheritable, the
         // originals ahead, the run's refusal.
         let status = run_status(&dir, &records, Dialect::Sqlite, false, None);
         assert_eq!(states(&status, 1), [StepState::Pending; 3]);
-        assert!(status.adoptable.is_empty());
-        assert!(status.migrations[1].adopts.is_empty());
+        assert!(status.inheritable.is_empty());
+        assert!(status.migrations[1].inherits.is_empty());
         assert_eq!(
             status.ahead,
             ["0002_add_teams", "0003_team_slug", "0004_drop_tmp"]
         );
         assert_eq!(status.refusal.as_deref(), Some(MIXED));
         assert!(status.refusal_needs_attention);
-        // The fix it names works: squashed from 0003, the same records adopt
+        // The fix it names works: squashed from 0003, the same records inherit
         // the run-applied part, and the baseline below stays a baseline.
         let fixed = squashed(&epic_originals(), 3, "teams_epic");
         let kinds = BTreeMap::from([((3, 2), RecordKind::Atomic)]);
-        let adopted =
-            adoption(&fixed, &records, Dialect::Sqlite, &kinds, "now", "v").expect("adopts");
-        assert_eq!(adopted.adoptions[0].origin(), Some(Origin::Adopted));
+        let inherited =
+            inheritance(&fixed, &records, Dialect::Sqlite, &kinds, "now", "v").expect("inherits");
+        assert_eq!(inherited.inheritances[0].origin(), Some(Origin::Inherited));
         assert!(
-            adopted
+            inherited
                 .records
                 .iter()
                 .all(|r| r.origin.is_baseline() == (r.migration <= 2))
@@ -6796,9 +6811,9 @@ mod tests {
     }
 
     #[test]
-    fn adoption_refuses_a_data_step_whose_declared_kind_it_was_not_given() {
+    fn inheritance_refuses_a_data_step_whose_declared_kind_it_was_not_given() {
         let (dir, records) = originals_applied();
-        let refusal = adoption(&dir, &records, Dialect::Sqlite, &no_kinds(), "now", "v")
+        let refusal = inheritance(&dir, &records, Dialect::Sqlite, &no_kinds(), "now", "v")
             .expect_err("no kind");
         assert_eq!(refusal.kind(), "undeclared_kind");
         assert_eq!(
@@ -6808,7 +6823,7 @@ mod tests {
                 step: "0002_teams_epic/02_backfill_team.py".into(),
             }
         );
-        // The readers need no kind: status reports the adoptable squash.
+        // The readers need no kind: status reports the inheritable squash.
         let status = run_status(&dir, &records, Dialect::Sqlite, false, None);
         assert!(status.refusal.is_none(), "{:?}", status.refusal);
     }

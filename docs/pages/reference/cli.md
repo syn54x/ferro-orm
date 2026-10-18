@@ -119,7 +119,7 @@ That section is [Changing a primary key](../guide/schema/migrations.md#changing-
 
 ## `ferro migrate squash NAME --from TARGET`
 
-Replace a run of migrations, from `TARGET` through the newest, with the one migration `new` would have written across it. A feature branch wrote `0002_add_bio` (with a hand-written SQL step `fix_rows`) and `0003_add_team`; `ferro migrate squash epic --from 0002` writes:
+Replace a range of migrations, from `TARGET` through the newest, with the one migration `new` would have written across it. A feature branch wrote `0002_add_bio` (with a hand-written SQL step `fix_rows`) and `0003_add_team`; `ferro migrate squash epic --from 0002` writes:
 
 <!-- output: squash -->
 ```text
@@ -139,28 +139,28 @@ ok Wrote migrations/0002_epic/  (replaces 0002_add_bio … 0003_add_team, now de
     Author
 ```
 
-The DDL is planned once, from the snapshot below the run to the run's last snapshot, with every rename the run declared composed into it: a column renamed in `0002` whose hint `0003` dropped is still a `RENAME COLUMN`, never a drop and an add. Every data step and hand-written SQL step of the run is carried byte for byte, in chain order, each marked `carried, review it` with the file it was; a carried data step still holding `todo(...)` still needs writing, except one that is byte for byte the generator's unwritten scaffold when the squashed plan does not scaffold it again: that one is dropped with a note (`<file> from <migration> was the generator's unwritten scaffold and the squashed plan needs no backfill of <table>.<col>: dropped`), and any hand-written byte means it is carried. The squashed migration takes the first migration's number, and its `ir.json` records which migrations it replaced. The run's directories are deleted. It reads the migrations directory only: never the models, never a database. A database that applied the originals adopts the squash on its next `up`, running nothing; [Squashing an epic's migrations](../guide/schema/migrations.md#squashing-an-epics-migrations) walks through the recipe, adoption and when to squash.
+The DDL is planned once, from the snapshot below the range to the range's last snapshot, with every rename the range declared composed into it: a column renamed in `0002` whose hint `0003` dropped is still a `RENAME COLUMN`, never a drop and an add. Every data step and hand-written SQL step of the range is carried byte for byte, in chain order, each marked `carried, review it` with the file it was; a carried data step still holding `todo(...)` still needs writing, except one that is byte for byte the generator's unwritten scaffold when the squashed plan does not scaffold it again: that one is dropped with a note (`<file> from <migration> was the generator's unwritten scaffold and the squashed plan needs no backfill of <table>.<col>: dropped`), and any hand-written byte means it is carried. The squashed migration takes the first migration's number, and its `ir.json` records which migrations it replaced. The range's directories are deleted. It reads the migrations directory only: never the models, never a database. A database that applied the originals inherits the squash on its next `up`, running nothing; [Squashing an epic's migrations](../guide/schema/migrations.md#squashing-an-epics-migrations) walks through the recipe, inheritance and when to squash.
 
 On a terminal the file table is laid out as `new`'s is, with the last column, what became of each file, in the default colour.
 
 | Flag | What it does |
 | :--- | :--- |
 | `NAME` | The squashed migration's name: lowercase letters, digits and `_`. |
-| `--from TARGET` | The run's first migration: `NNNN_NAME`, or `NNNN` when one migration carries the number. The run goes from it through the newest migration; a run that stops short of the newest (a sibling chain beside it) is refused, naming the `--from` that reaches it. |
+| `--from TARGET` | The range's first migration: `NNNN_NAME`, or `NNNN` when one migration carries the number. The range goes from it through the newest migration; a range that stops short of the newest (a sibling chain beside it) is refused, naming the `--from` that reaches it. |
 | `--sql-step NAME` | Also add a hand-written SQL step, as on `new`. |
 | `--data-step MODEL` | Also add a Python data step over this model, as on `new`. |
-| `--data-only` | Write only the `--data-step` and the steps the run carries: no DDL, and a full copy of the snapshot below the run. Only for a run that renders no DDL (what it adds, it drops again): over one that does, every database that ran the originals would adopt a snapshot saying their DDL never ran, so it is refused; squash without it, then add the data step with `ferro migrate new NAME --data-step MODEL --data-only`. |
+| `--data-only` | Write only the `--data-step` and the steps the range carries: no DDL, and a full copy of the snapshot below the range. Only for a range that renders no DDL (what it adds, it drops again): over one that does, every database that ran the originals would inherit a snapshot saying their DDL never ran, so it is refused; squash without it, then add the data step with `ferro migrate new NAME --data-step MODEL --data-only`. |
 | `--no-backfill TABLE.COLUMN` | Replace the generated backfill of this column with a guard step, as on `new`. Repeatable. |
 | `--verbose` | Show every name in a long list of the change summary, as on `new`. |
 
-Exit 0 when written, 1 when refused, writing nothing. A run whose changes cancel out and that carries no step is refused, naming the directories to delete instead:
+Exit 0 when written, 1 when refused, writing nothing. A range whose changes cancel out and that carries no step is refused, naming the directories to delete instead:
 
 <!-- refusal: squash-empty -->
 ```text
 squash --from 0002: on top of 0001_create_author, 0002_add_bio through 0003_drop_bio change nothing that renders DDL and carry no data step or hand-written SQL step, so the squashed migration would be empty; delete the directories /srv/app/migrations/0002_add_bio and /srv/app/migrations/0003_drop_bio instead. Nothing was written.
 ```
 
-Also refused: a `--from` the directory lacks, or a bare number two migrations share; a run that does not reach the newest migration (the refusal names the `--from` the head descends from, or `new --replace` on the first migration); a run whose first number another migration shares, because two branches each generated it (regenerate one on top of the other with `ferro migrate new NAME --replace`, then squash); renames inside the run that cannot be composed into one (the refusal names the `--from` that starts the range at the migration declaring the second, leaving the first below the squash); a `NAME` that writes the name of a migration a squash in the directory replaced, at any depth, which `new` and `new --replace` refuse too (pick another name); `--data-only` over a run that renders DDL; a carried data step that does not load, naming its `<migration>/<file>`; `--url`. A squash killed halfway leaves its originals in a hidden `.<first>..<last>.<new>.squashed` directory, which every verb refuses, naming the recovery: move its contents back while the new migration is absent, delete it once the new migration is in place.
+Also refused: a `--from` the directory lacks, or a bare number two migrations share; a range that does not reach the newest migration (the refusal names the `--from` the head descends from, or `new --replace` on the first migration); a range whose first number another migration shares, because two branches each generated it (regenerate one on top of the other with `ferro migrate new NAME --replace`, then squash); renames inside the range that cannot be composed into one (the refusal names the `--from` that starts the range at the migration declaring the second, leaving the first below the squash); a `NAME` that writes the name of a migration a squash in the directory replaced, at any depth, which `new` and `new --replace` refuse too (pick another name); `--data-only` over a range that renders DDL; a carried data step that does not load, naming its `<migration>/<file>`; `--url`. A squash killed halfway leaves its originals in a hidden `.<first>..<last>.<new>.squashed` directory, which every verb refuses, naming the recovery: move its contents back while the new migration is absent, delete it once the new migration is in place.
 
 ## `ferro migrate check`
 

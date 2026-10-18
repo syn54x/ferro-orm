@@ -135,7 +135,7 @@ def test_a_hand_written_witness_loads_under_every_verb(project, pkg, db, capsys)
     """Two originals, applied to another database, then removed; the one
     migration generated in their place carries a well-formed witness naming
     them. The reader checks the witness against the directory only, so the
-    database under test (which never ran the originals; adopting them is
+    database under test (which never ran the originals; inheriting them is
     #671's) reads it without a refusal."""
     two_migrations(project, pkg, '["postgres", "sqlite"]')
     elsewhere = f"sqlite:{project / 'originals.db'}?mode=rwc"
@@ -234,7 +234,7 @@ def test_an_original_left_beside_its_squash_is_refused_by_every_verb_naming_both
         _core._read_migrations_dir(str(migrations(project)))
     assert str(refused.value) == refusal
     for target in ("0001_library", left):
-        for keyword in ("replacing", "run_from"):
+        for keyword in ("replacing", "range_from"):
             with pytest.raises(ValueError) as refused:
                 _core._read_migrations_dir(
                     str(migrations(project)), **{keyword: target}

@@ -594,7 +594,7 @@ def _teams_epic_squashed(project: Path) -> None:
 
 def _teams_epic_dead_name(project: Path) -> None:
     """``0006_team_slug``'s backfill, a chunked step, selects its rows by
-    ``tmp_code``, a column that exists only inside the run."""
+    ``tmp_code``, a column that exists only inside the range."""
     _teams_epic(project)
     backfill = project / "migrations" / "0006_team_slug" / "02_backfill_team.py"
     backfill.write_text(
@@ -867,8 +867,8 @@ OUTPUTS = {
         _teams_epic_dead_name,
         ("migrate", "squash", "teams_epic", "--from", "0005"),
     ),
-    "squash-status-adoptable": (_teams_epic_squashed, ("migrate", "status")),
-    "squash-up-adopts": (_teams_epic_squashed, ("migrate", "up")),
+    "squash-status-inheritable": (_teams_epic_squashed, ("migrate", "status")),
+    "squash-up-inherits": (_teams_epic_squashed, ("migrate", "up")),
     "squash-partial-witness": (_teams_epic_partly_applied, ("migrate", "up")),
     "rekey-refused": (_primary_key_change, ("migrate", "new", "rekey")),
     # data steps
