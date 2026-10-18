@@ -867,7 +867,7 @@ OUTPUTS = {
         _teams_epic_dead_name,
         ("migrate", "squash", "teams_epic", "--from", "0005"),
     ),
-    "squash-status-adoptable":(_teams_epic_squashed, ("migrate", "status")),
+    "squash-status-adoptable": (_teams_epic_squashed, ("migrate", "status")),
     "squash-up-adopts": (_teams_epic_squashed, ("migrate", "up")),
     "squash-partial-witness": (_teams_epic_partly_applied, ("migrate", "up")),
     "rekey-refused": (_primary_key_change, ("migrate", "new", "rekey")),
