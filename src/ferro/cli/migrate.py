@@ -254,6 +254,103 @@ def new(
 
 
 @migrate.command
+def squash(
+    name: Annotated[
+        str,
+        Parameter(
+            help="The squashed migration's name: lowercase letters, digits and _."
+        ),
+    ],
+    *,
+    from_: Annotated[
+        str,
+        Parameter(
+            name="--from",
+            help=(
+                "The first migration of the run to squash (NNNN_<name>, or NNNN "
+                "when one migration carries the number); the run goes from it "
+                "through the newest migration."
+            ),
+        ),
+    ],
+    sql_step: Annotated[
+        str | None,
+        Parameter(
+            help=(
+                "Also add a hand-written SQL step NN_<name>.up.sql / .down.sql "
+                "that serves every dialect."
+            )
+        ),
+    ] = None,
+    data_step: Annotated[
+        str | None,
+        Parameter(
+            help=(
+                "Also add a Python data step NN_backfill_<model>.py over this model "
+                "(its class name), to be written where it says todo(...)."
+            )
+        ),
+    ] = None,
+    data_only: Annotated[
+        bool,
+        Parameter(
+            help=(
+                "Write only the --data-step and the steps the run carries: no DDL, "
+                "and a full copy of the snapshot below the run."
+            ),
+            negative="",
+        ),
+    ] = False,
+    no_backfill: Annotated[
+        list[str] | None,
+        Parameter(
+            help=(
+                "Replace the generated backfill of this column (<table>.<column>, "
+                "repeatable) with a guard step that fails the migration while any "
+                "row still needs a value."
+            ),
+            negative="",
+        ),
+    ] = None,
+    verbose: Verbose = False,
+    glob: Annotated[Global, Parameter(parse=False)],
+) -> int:
+    """Replace a run of migrations, from --from through the newest, with one.
+
+    Writes the migration `new` would have written across the run: planned
+    once from the snapshot below the run to the run's last snapshot (its
+    renames composed), carrying every data step and hand-written SQL step of
+    the run byte for byte, under the first migration's number. Deletes the
+    run's directories. Reads the migrations directory only: never the
+    models, never a database.
+    """
+    from ..migrations.generate import prepare, write
+    from .output import Output, print_new
+
+    _refuse_url(glob, "squash")
+    settings = FerroSettings(config=glob.config)
+    database = settings.database(glob.database)
+    out = Output.for_streams(out=sys.stdout, err=sys.stderr)
+    _say_directory(out, database)
+    migration = prepare(
+        database,
+        name,
+        sql_step=sql_step,
+        data_step=data_step,
+        data_only=data_only,
+        no_backfill=no_backfill or (),
+        squash_from=from_,
+    )
+    if migration is None:  # pragma: no cover - prepare refuses an empty squash
+        return exit_codes.REFUSED
+    written = write(database, migration)
+
+    shown = f"{_shown(written, Path.cwd().resolve())}/"
+    print_new(out, migration, shown, verbose=verbose)
+    return exit_codes.OK
+
+
+@migrate.command
 def check(
     *,
     verbose: Verbose = False,

@@ -446,17 +446,22 @@ def print_new(
     role (and, under ``--replace``, what became of it), the change summary,
     the notes, and the warnings on stderr."""
     where = ""
-    if migration.replaces is not None:
+    if migration.squash:
+        first, last = migration.replaces[0], migration.replaces[-1]
+        run = first if first == last else f"{first} … {last}"
+        where = f"(replaces {run}, now deleted)"
+    elif migration.replaces:
+        [replaced_dir] = migration.replaces
         where = (
             "(regenerated in place)"
-            if migration.replaces == migration.dir_name
-            else f"(replaces {migration.replaces}, now deleted)"
+            if replaced_dir == migration.dir_name
+            else f"(replaces {replaced_dir}, now deleted)"
         )
     out.heading("ok", f"Wrote {shown_dir}", where)
 
     rows = list(_file_rows(migration))
     name_width = max(len(name) for name, *_ in rows)
-    replaced = migration.replaces is not None
+    replaced = bool(migration.replaces)
     role_width = max(len(role) for _, _, role, _ in rows)
     for name, kind, role, became in rows:
         line = Text("  ")
@@ -528,13 +533,19 @@ def _role(step: GeneratedStep, name: str) -> str:
 def _became(migration: GeneratedMigration, name: str) -> str:
     """Under ``new --replace``, what became of the replaced migration's
     file now called ``name``: kept, moved, renumbered, carried (to review),
-    new, or the new snapshot and what it chains from."""
+    new, or the new snapshot and what it chains from. Under ``squash``, a
+    generated file is regenerated, a carried one names the original it was,
+    and the snapshot is the run's last one's, composed."""
     from ..migrations.layout import SNAPSHOT_FILE, Moved
 
-    if migration.replaces is None:
+    if not migration.replaces:
         return ""
     if name == SNAPSHOT_FILE:
         parent = migration.chained_from or "no migration (the first)"
+        if migration.squash:
+            first, last = migration.replaces[0], migration.replaces[-1]
+            run = first if first == last else f"{first}…{last}"
+            return f"{last}'s, chained from {parent}, replaces {run}"
         return f"new snapshot, chained from {parent}"
     moved = {new: (old, how) for old, new, how in migration.moves}
     if name not in moved:
@@ -546,9 +557,11 @@ def _became(migration: GeneratedMigration, name: str) -> str:
         )
         wins = "; it wins over the regenerated step of the same name" if over else ""
         return f"carried, review it (was {old}{wins})"
+    if how is Moved.REGENERATED:
+        return "regenerated"
     if how is Moved.RENUMBERED:
         return f"renumbered (was {old})"
-    if migration.replaces == migration.dir_name:
+    if migration.replaces == [migration.dir_name]:
         return "kept"
     return f"moved (was {old})"
 

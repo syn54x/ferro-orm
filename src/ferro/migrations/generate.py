@@ -21,6 +21,7 @@ does every model change have a migration, and is the directory intact?
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import warnings
@@ -32,6 +33,7 @@ from typing import TYPE_CHECKING, Any
 
 from .._core import (
     _check_migrations,
+    _compose_run,
     _generate_migration,
 )
 from . import scaffold
@@ -50,6 +52,7 @@ from .layout import (
     ensure_gitattributes,
     read_migrations,
     read_replacing,
+    read_run_reach,
     portable_sql_step,
     write_migration,
 )
@@ -66,6 +69,7 @@ __all__ = [
     "new",
     "prepare",
     "replace",
+    "squash",
     "write",
 ]
 
@@ -254,6 +258,56 @@ def replace(
     return write(database, migration)
 
 
+def squash(
+    database: DatabaseSettings,
+    name: str,
+    from_: str,
+    *,
+    sql_step: str | None = None,
+    data_step: str | None = None,
+    data_only: bool = False,
+    no_backfill: Sequence[str] = (),
+) -> Path:
+    """Replace the run from the migration ``from_`` names through the head
+    with the one migration ``new`` would have written across it (``ferro
+    migrate squash <name> --from <from_>``, ADR-0056), and return its
+    directory.
+
+    A feature branch wrote ``0005_add_teams`` through ``0009_fix_rows``;
+    ``squash(db, "teams_epic", "0005")`` writes ``0005_teams_epic``, planned
+    once by the one planner from the snapshot below the run (none for a run
+    from ``0001``) to the run's composed target, with every data step and
+    hand-written SQL step of the run carried byte for byte in chain order,
+    and deletes the five. Its snapshot stores the composed target under the
+    parent's checksum, with the witness naming each replaced migration.
+    ``from_`` is ``NNNN_<name>``, or ``NNNN`` when one migration carries the
+    number. The other options mean what they mean to :func:`new`. It reads
+    snapshots and the directory only: the models are never imported, no
+    database is opened.
+
+    Raises:
+        MigrationsDirectoryError: ``from_`` is not in the directory or is a
+            number two migrations share; the run does not reach the head;
+            the run's rename hints do not compose; the squash renders nothing
+            and carries nothing ("delete the directories"); an aside of an
+            earlier squash or replace is present; or what :func:`new` raises.
+    """
+    migration = prepare(
+        database,
+        name,
+        sql_step=sql_step,
+        data_step=data_step,
+        data_only=data_only,
+        no_backfill=no_backfill,
+        squash_from=from_,
+    )
+    if migration is None:  # pragma: no cover - prepare refuses an empty squash
+        raise MigrationsDirectoryError(f"squash --from {from_}: nothing to write")
+    for message in migration.warnings:
+        warnings.warn(f"ferro migrate squash: {message}", UserWarning, stacklevel=2)
+    return write(database, migration)
+
+
 def write(database: DatabaseSettings, migration: GeneratedMigration) -> Path:
     """Write a migration :func:`prepare` returned into ``database``'s
     directory (with its ``.gitattributes``); return the migration's directory.
@@ -264,16 +318,26 @@ def write(database: DatabaseSettings, migration: GeneratedMigration) -> Path:
     one, and deletes the aside; a write that raises puts it back. A run killed
     in between leaves the aside, which every directory reader refuses by
     name with its recovery (panel F6): rename it back while the replacement
-    is absent, delete it once the replacement is in place."""
+    is absent, delete it once the replacement is in place.
+
+    A squash moves the run's directories one by one into one aside named
+    after both ends and the replacement
+    (``.0005_add_teams..0009_fix_rows.0005_teams_epic.squashed``), writes the
+    new migration, and deletes the aside; a write that raises moves them
+    back. Every reader refuses a leftover aside the same way, naming any
+    original still outside it."""
     directory = database.directory
     ensure_gitattributes(directory)
-    if migration.replaces is None:
+    if not migration.replaces:
         return write_migration(directory, migration)
-    old = directory / migration.replaces
-    if migration.dir_name == migration.replaces:
-        aside = directory / f".{migration.replaces}.replaced"
+    if migration.squash:
+        return _write_squash(directory, migration)
+    [replaced] = migration.replaces
+    old = directory / replaced
+    if migration.dir_name == replaced:
+        aside = directory / f".{replaced}.replaced"
     else:
-        aside = directory / f".{migration.replaces}.{migration.dir_name}.replaced"
+        aside = directory / f".{replaced}.{migration.dir_name}.replaced"
     if aside.exists():
         raise MigrationsDirectoryError(
             f"{aside} exists: another `ferro migrate new --replace` is running, "
@@ -290,6 +354,33 @@ def write(database: DatabaseSettings, migration: GeneratedMigration) -> Path:
     return written
 
 
+def _write_squash(directory: Path, migration: GeneratedMigration) -> Path:
+    """:func:`write` for a squash: the originals into one aside, one by one,
+    the replacement written, the aside deleted; a raise moves them back."""
+    first, last = migration.replaces[0], migration.replaces[-1]
+    aside = directory / f".{first}..{last}.{migration.dir_name}.squashed"
+    if aside.exists():
+        raise MigrationsDirectoryError(
+            f"{aside} exists: another `ferro migrate squash` is running, or one was "
+            "interrupted. Nothing was written; `ferro migrate check` names how to "
+            "recover it"
+        )
+    aside.mkdir()
+    moved: list[str] = []
+    try:
+        for name in migration.replaces:
+            (directory / name).rename(aside / name)
+            moved.append(name)
+        written = write_migration(directory, migration)
+    except BaseException:
+        for name in reversed(moved):
+            (aside / name).rename(directory / name)
+        aside.rmdir()
+        raise
+    shutil.rmtree(aside)
+    return written
+
+
 def prepare(
     database: DatabaseSettings,
     name: str,
@@ -299,14 +390,30 @@ def prepare(
     data_only: bool = False,
     no_backfill: Sequence[str] = (),
     replace: str | None = None,
+    squash_from: str | None = None,
 ) -> GeneratedMigration | None:
     """The migration :func:`new` would write, without writing it; ``None``
     for no schema change. Raises what :func:`new` raises. With ``replace``,
     the migration :func:`replace` would write (never ``None``), raising what
-    it raises."""
+    it raises. With ``squash_from``, the migration :func:`squash` would write
+    (never ``None``), raising what it raises; the models are never read."""
+    if replace is not None and squash_from is not None:
+        raise ValueError("name either replace or squash_from, not both")
     check_name(name, "migration name")
     if sql_step is not None:
         check_name(sql_step, "--sql-step name")
+    if squash_from is not None:
+        return _prepare_squash(
+            database,
+            name,
+            squash_from,
+            {
+                "no_backfill": list(no_backfill),
+                "data_step": data_step,
+                "sql_step": sql_step,
+                "data_only": data_only,
+            },
+        )
     directory = database.directory
     replaced: dict[str, Any] | None = None
     carry: list[dict[str, Any]] = []
@@ -367,6 +474,219 @@ def prepare(
     return _with_moves(migration, replaced, carry, migrations)
 
 
+def _prepare_squash(
+    database: DatabaseSettings,
+    name: str,
+    from_: str,
+    options: dict[str, Any],
+) -> GeneratedMigration:
+    """:func:`prepare` for :func:`squash`: the run read, its snapshots
+    composed into the target (``_core._compose_run``), the migration planned
+    once from the parent snapshot to that target through the generator ``new``
+    uses, carrying the run's data steps and hand-written SQL steps and
+    recording the witness."""
+    directory = database.directory
+    read = read_run_reach(directory, from_)
+    below, run = read["below"], read["run"]
+    names = [_dir_name(m) for m in run]
+    if not read["reaches_head"]:
+        raise MigrationsDirectoryError(_short_of_the_head(directory, names[0], read))
+    carry = _carried_steps(directory, run)
+    parent = _head_snapshot_text(below)
+    try:
+        composed = json.loads(
+            _compose_run(
+                parent,
+                [_text(directory, Path(m["dir"]) / SNAPSHOT_FILE) for m in run],
+            )
+        )
+    except ValueError as err:
+        raise MigrationsDirectoryError(_compose_refusal(from_, err, names)) from None
+    witness = [
+        {
+            "migration": _dir_name(m),
+            "snapshot_checksum": m["snapshot"]["checksum"],
+            "steps": [step["ordinal"] for step in m["steps"]],
+            "replaces": m["replaces"],
+        }
+        for m in run
+    ]
+    try:
+        raw = _generate_migration(
+            parent,
+            json.dumps(composed["target"]),
+            list(database.dialects),
+            options_json=json.dumps(
+                {
+                    **options,
+                    "carry": [
+                        {k: step[k] for k in ("name", "body", "kind", "down")}
+                        for step in carry
+                    ],
+                    "replaces": witness,
+                }
+            ),
+        )
+    except ValueError as err:
+        raise MigrationsDirectoryError(str(err)) from None
+    if raw is None:
+        raise MigrationsDirectoryError(
+            _empty_squash(
+                directory, from_, names, _dir_name(below[-1]) if below else None
+            )
+        )
+    generated = json.loads(raw)
+    migration = _with_data_steps(
+        GeneratedMigration.from_generated(
+            generated, number=len(below) + 1, name=name, carry=carry
+        ),
+        generated,
+        directory / TEMPLATES_DIR,
+    )
+    return _with_squash_moves(
+        migration,
+        carry,
+        names,
+        chained_from=_dir_name(below[-1]) if below else None,
+        witness=witness,
+        dead_names=composed["dead_names"],
+    )
+
+
+def _short_of_the_head(directory: Path, first: str, read: dict[str, Any]) -> str:
+    """The refusal of a run that stops short of the head: the first
+    migration it leaves, what that one chains from, and the two fixes."""
+    off = read["off_run"][0]
+    checksums = {
+        _sha384_hex(path): path.parent.name
+        for path in sorted(directory.glob(f"[0-9][0-9][0-9][0-9]_*/{SNAPSHOT_FILE}"))
+    }
+    snapshots = {
+        name: json.loads((directory / name / SNAPSHOT_FILE).read_bytes())
+        for name in checksums.values()
+    }
+
+    def parent_of(name: str) -> str | None:
+        link = snapshots[name].get("parent_checksum")
+        return checksums.get(link) if link else None
+
+    chains_from = parent_of(off)
+    # The head's own ancestor at the run's number: where a squash reaching
+    # the head can start.
+    number = first[:4]
+    head = max(read["off_run"])
+    ancestor: str | None = head
+    while ancestor is not None and ancestor[:4] > number:
+        ancestor = parent_of(ancestor)
+    start = (
+        f"squash from a migration the head descends from (--from {ancestor}), or "
+        if ancestor is not None and ancestor[:4] == number and ancestor != first
+        else ""
+    )
+    return (
+        f"the run from {first} does not reach the head: {off} chains from "
+        f"{chains_from or 'no migration'}; {start}regenerate {first} on top of the "
+        f"head with ferro migrate new <name> --replace {first}. Nothing was written."
+    )
+
+
+def _sha384_hex(path: Path) -> str:
+    return hashlib.sha384(path.read_bytes()).hexdigest()
+
+
+def _compose_refusal(from_: str, err: ValueError, names: list[str]) -> str:
+    """A refusal of ``_compose_run``, its text kept as the core wrote it,
+    then the ``--from`` a squash can pass instead, when there is one."""
+    text = f"squash --from {from_}: {err}"
+    at = getattr(err, "from_index", None)
+    kind = getattr(err, "kind", None)
+    if at is None or kind is None:
+        return text
+    if kind in ("uncomposable", "old_name_re_added"):
+        return f"{text}; pass --from {names[at]} to end the range before it"
+    return f"{text}; pass --from {names[at]} to start the range after {names[at - 1]}"
+
+
+def _empty_squash(
+    directory: Path, from_: str, names: list[str], below: str | None
+) -> str:
+    """The refusal of a squash that renders nothing and carries nothing."""
+    run = names[0] if len(names) == 1 else f"{names[0]} through {names[-1]}"
+    verb = "changes" if len(names) == 1 else "change"
+    carry = "carries" if len(names) == 1 else "carry"
+    paths = [str(directory / name) for name in names]
+    if len(paths) == 1:
+        delete = f"the directory {paths[0]}"
+    else:
+        delete = f"the directories {', '.join(paths[:-1])} and {paths[-1]}"
+    return (
+        f"squash --from {from_}: on top of {below or 'no migration'}, {run} {verb} "
+        f"nothing that renders DDL and {carry} no data step or hand-written SQL "
+        f"step, so the squashed migration would be empty; delete {delete} instead. "
+        f"Nothing was written."
+    )
+
+
+def _with_squash_moves(
+    migration: GeneratedMigration,
+    carry: list[dict[str, Any]],
+    names: list[str],
+    *,
+    chained_from: str | None,
+    witness: list[dict[str, Any]],
+    dead_names: list[dict[str, Any]],
+) -> GeneratedMigration:
+    """``migration`` as the squash of the run ``names``: each carried file
+    and the original it was (``<migration>/<file>``), each generated DDL
+    file regenerated, and a note for each carried data step still holding
+    ``todo(...)``. A step asked for now (``--sql-step``, ``--data-step``)
+    has no original: it is new."""
+    moves: list[tuple[str, str, Moved]] = []
+    notes: list[str] = []
+    for step in migration.steps:
+        if step.carry is not None:
+            entry = carry[step.carry]
+            new_files = sorted(step.files, key=lambda n: ".down." in n)
+            for old, new in zip(entry["old"], new_files):
+                moves.append((_from_migration(old), new, Moved.CARRIED))
+            if step.kind == "data":
+                notes += _still_to_write(step, entry)
+            continue
+        if step.kind == "ddl" or step.role in ("backfill", "guard"):
+            moves += [(new, new, Moved.REGENERATED) for new in step.files]
+    return dataclass_replace(
+        migration,
+        replaces=names,
+        chained_from=chained_from,
+        moves=tuple(moves),
+        notes=(*migration.notes, *notes),
+        witness=witness,
+        dead_names=dead_names,
+    )
+
+
+def _from_migration(path: Path) -> str:
+    """A step file as ``<migration>/<file>``."""
+    return f"{path.parent.name}/{path.name}"
+
+
+def _still_to_write(step: GeneratedStep, entry: dict[str, Any]) -> list[str]:
+    """The note for a carried data step still holding ``todo(...)``; none
+    for one written throughout, or one that does not parse (``check`` names
+    that file)."""
+    [name] = step.files
+    try:
+        todos = scan_todos(entry["body"], Path(name))
+    except StepRefused:
+        return []
+    if not todos:
+        return []
+    return [
+        f"{name} still needs writing where it says todo(...) (carried from "
+        f"{_from_migration(entry['old'][0])})"
+    ]
+
+
 def _dir_name(migration: dict[str, Any]) -> str:
     return f"{migration['number']:04d}_{migration['name']}"
 
@@ -403,7 +723,7 @@ def _text(directory: Path, path: Path) -> str:
         return path.read_bytes().decode("utf-8")
     except UnicodeDecodeError:
         raise MigrationsDirectoryError(
-            f"{path.relative_to(directory)} is not UTF-8, so --replace cannot carry "
+            f"{path.relative_to(directory)} is not UTF-8, so it cannot be carried "
             f"it byte for byte; save it as UTF-8 and run the command again. Nothing "
             f"was written."
         ) from None
@@ -447,7 +767,7 @@ def _with_moves(
                 moves.append((f"{old_dir}/{old}", new, Moved.RENUMBERED))
     return dataclass_replace(
         migration,
-        replaces=old_dir,
+        replaces=[old_dir],
         chained_from=_dir_name(migrations[-1]) if migrations else None,
         moves=tuple(moves),
     )

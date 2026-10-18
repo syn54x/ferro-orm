@@ -251,9 +251,11 @@ pub fn _load_snapshot(ir_json: String) -> PyResult<String> {
 /// # Errors
 /// `ValueError` for a snapshot that does not load, and for every
 /// `ComposeError`, with its text. A compose refusal's exception carries
-/// `from_index`: the index into the run of the migration a squash can start
-/// from instead (the one that declares the conflicting name, or the one after
-/// the migration the refusal names), or `None` when there is none.
+/// `kind` (`uncomposable`, `old_name_re_added`, `new_name_held_by_parent` or
+/// `refused_hint`) and `from_index`: the index into the run of the migration a
+/// squash can start from instead (the one that declares the conflicting name,
+/// or the one after the migration the refusal names), or `None` when there is
+/// none.
 #[pyfunction]
 #[pyo3(name = "_compose_run")]
 #[pyo3(signature = (parent_json, run_json))]
@@ -279,6 +281,13 @@ pub fn _compose_run(
         Err(refusal) => {
             let from_index = compose_restart(parent_payload, &payloads, &refusal);
             let err = PyValueError::new_err(refusal.to_string());
+            let kind = match refusal {
+                ComposeError::Uncomposable { .. } => "uncomposable",
+                ComposeError::OldNameReAdded { .. } => "old_name_re_added",
+                ComposeError::NewNameHeldByParent { .. } => "new_name_held_by_parent",
+                ComposeError::RefusedHint { .. } => "refused_hint",
+            };
+            err.value(py).setattr("kind", kind)?;
             err.value(py).setattr("from_index", from_index)?;
             return Err(err);
         }
