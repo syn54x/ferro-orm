@@ -1076,7 +1076,7 @@ pub fn generate_with(
 
     // The schema snapshot is the declared modelset the migration was
     // generated from, whether its steps are generated or a person's.
-    let bytes = Snapshot::store(target, parent.map(|snapshot| snapshot.checksum))?;
+    let bytes = Snapshot::store(target, parent.map(|snapshot| snapshot.checksum), &[])?;
     let snapshot = Snapshot::load(&bytes)?;
     let snapshot_json = String::from_utf8(bytes).map_err(|err| {
         GenerateError::Render(format!("the generated snapshot is not UTF-8: {err}"))
@@ -1413,7 +1413,7 @@ mod tests {
     }
 
     fn snapshot_of(ir: &IrEnvelope<SchemaIrPayload>, parent: Option<&Snapshot>) -> Snapshot {
-        Snapshot::load(&Snapshot::store(ir, parent.map(|p| p.checksum)).expect("store"))
+        Snapshot::load(&Snapshot::store(ir, parent.map(|p| p.checksum), &[]).expect("store"))
             .expect("load")
     }
 
@@ -1483,7 +1483,9 @@ mod tests {
         assert_eq!(migration.snapshot.ir, target);
         assert_eq!(
             migration.snapshot_json.as_bytes(),
-            Snapshot::store(&target, None).expect("store").as_slice()
+            Snapshot::store(&target, None, &[])
+                .expect("store")
+                .as_slice()
         );
         assert_eq!(
             migration.summary.changes,
@@ -1593,7 +1595,7 @@ mod tests {
         assert_eq!(migration.snapshot.parent_checksum, Some(parent.checksum));
         assert_eq!(
             migration.snapshot_json.as_bytes(),
-            Snapshot::store(&target, Some(parent.checksum))
+            Snapshot::store(&target, Some(parent.checksum), &[])
                 .expect("store")
                 .as_slice()
         );

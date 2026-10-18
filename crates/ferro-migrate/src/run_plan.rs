@@ -3273,7 +3273,7 @@ mod tests {
         let mut out: Vec<Migration> = Vec::new();
         for (i, (name, steps, tables)) in migrations.into_iter().enumerate() {
             let parent = out.last().map(|m| m.snapshot.checksum);
-            let bytes = Snapshot::store(&ir(tables), parent).expect("store");
+            let bytes = Snapshot::store(&ir(tables), parent, &[]).expect("store");
             out.push(Migration {
                 number: u16::try_from(i + 1).expect("number"),
                 name: name.to_string(),
@@ -4546,8 +4546,8 @@ mod tests {
             std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
             std::fs::write(path, bytes).expect("write");
         };
-        let first = Snapshot::store(&ir(&["a"]), None).expect("store");
-        let second = Snapshot::store(&ir(&["a", "b"]), Some([7u8; 48])).expect("store");
+        let first = Snapshot::store(&ir(&["a"]), None, &[]).expect("store");
+        let second = Snapshot::store(&ir(&["a", "b"]), Some([7u8; 48]), &[]).expect("store");
         for (dir, snapshot) in [("0001_a", &first), ("0002_b", &second)] {
             write(root.join(dir).join("01_s.up.sqlite.sql"), b"SELECT 1;\n");
             write(root.join(dir).join("01_s.down.sqlite.sql"), b"SELECT 1;\n");
@@ -5019,7 +5019,7 @@ mod tests {
         // Rename hints are schema ir_version 2's.
         envelope.ir_version = 2;
         envelope.payload.models = models;
-        let bytes = Snapshot::store(&envelope, parent).expect("store");
+        let bytes = Snapshot::store(&envelope, parent, &[]).expect("store");
         Snapshot::load(&bytes).expect("load")
     }
 

@@ -1392,7 +1392,7 @@ mod tests {
                 "-- ferro: data-dependent\n\nDROP TABLE \"t\";\n",
             );
         }
-        let ir = Snapshot::store(&empty_ir(), parent.map(sha384)).expect("store");
+        let ir = Snapshot::store(&empty_ir(), parent.map(sha384), &[]).expect("store");
         std::fs::write(dir.join(SNAPSHOT_FILE), &ir).expect("ir.json");
         ir
     }

@@ -633,7 +633,7 @@ mod tests {
         dialect: Dialect,
     ) -> Vec<(String, StepClass)> {
         let parent =
-            Snapshot::load(&Snapshot::store(&ir(before), None).expect("store")).expect("load");
+            Snapshot::load(&Snapshot::store(&ir(before), None, &[]).expect("store")).expect("load");
         let migration = generate(Some(&parent), &ir(after), &BOTH)
             .expect("generates")
             .expect("changes something");
@@ -676,7 +676,7 @@ mod tests {
             let generated = generate(parent, &target, &BOTH)
                 .expect("generates")
                 .expect("changes something");
-            let bytes = Snapshot::store(&target, parent.map(|s| s.checksum)).expect("store");
+            let bytes = Snapshot::store(&target, parent.map(|s| s.checksum), &[]).expect("store");
             let steps = generated
                 .steps
                 .iter()
@@ -771,7 +771,7 @@ mod tests {
         moved.columns[0].autoincrement = false;
         moved.columns[1].primary_key = true;
         let parent = dir.migrations[0].snapshot.checksum;
-        let bytes = Snapshot::store(&ir(vec![moved]), Some(parent)).expect("store");
+        let bytes = Snapshot::store(&ir(vec![moved]), Some(parent), &[]).expect("store");
         dir.migrations.push(Migration {
             number: 2,
             name: "move_key".into(),

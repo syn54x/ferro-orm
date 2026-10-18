@@ -1,0 +1,102 @@
+{
+  "vector_name": "schema_squash_witness_v3",
+  "domain": "schema",
+  "expect_valid": true,
+  "ir": {
+    "ir_kind": "schema",
+    "ir_version": 3,
+    "parent_checksum": "e7c07b6535a7b4d1690a1b10df8a0908e9d660cf425d8f91a9b3b71abc554a3f416eab1166821cd68cb2a1751850aae4",
+    "payload": {
+      "dialect_agnostic": true,
+      "models": [
+        {
+          "model_name": "Team",
+          "table_name": "team",
+          "columns": [
+            {
+              "name": "id",
+              "logical_type": "integer",
+              "nullable": false,
+              "primary_key": true,
+              "autoincrement": true,
+              "unique": false,
+              "index": false,
+              "default": null,
+              "format": null
+            },
+            {
+              "name": "name",
+              "logical_type": "string",
+              "nullable": false,
+              "primary_key": false,
+              "autoincrement": false,
+              "unique": false,
+              "index": false,
+              "default": null,
+              "format": null
+            },
+            {
+              "name": "slug",
+              "logical_type": "string",
+              "nullable": false,
+              "primary_key": false,
+              "autoincrement": false,
+              "unique": true,
+              "index": false,
+              "default": null,
+              "format": null
+            }
+          ],
+          "foreign_keys": [],
+          "indexes": [],
+          "uniques": [
+            {
+              "name": "uq_team_slug",
+              "columns": [
+                "slug"
+              ]
+            }
+          ],
+          "checks": []
+        }
+      ]
+    },
+    "replaces": [
+      {
+        "migration": "0005_teams_epic",
+        "snapshot_checksum": "cc8702035f07159239261c9a55c5ffc485dfd59a2396c6bb3efdcbcf48f5e86b7227db9eeeb2bcd1fa742ee327482cf5",
+        "steps": [
+          1,
+          2
+        ],
+        "replaces": [
+          {
+            "migration": "0005_add_teams",
+            "snapshot_checksum": "5e11bb05b35817557b870de378d105ad1426ebeb735e66670f40e6fe2f15fe8b2e566204d179fc6a1cccdcc0928d8260",
+            "steps": [
+              1
+            ],
+            "replaces": []
+          },
+          {
+            "migration": "0006_team_slug",
+            "snapshot_checksum": "5153452f80af678f06185d497a9c5a1c0ae5b0d91ed4029390363b22f8fc25b1f725f59e9f18828b50d724eaede4064a",
+            "steps": [
+              1,
+              2
+            ],
+            "replaces": []
+          }
+        ]
+      },
+      {
+        "migration": "0006_drop_tmp",
+        "snapshot_checksum": "be8f788eb4893e7252069de81907e1c0778258a30af4820f315961259a582dd415d5f56b2544564e5a13a81738d64534",
+        "steps": [
+          1
+        ],
+        "replaces": []
+      }
+    ]
+  }
+}
