@@ -3598,12 +3598,13 @@ mod baseline_tests {
         let mut out: Vec<Migration> = Vec::new();
         for (i, (name, steps, tables)) in migrations.into_iter().enumerate() {
             let parent = out.last().map(|m| m.snapshot.checksum);
-            let bytes = Snapshot::store(&ir(tables), parent).expect("store");
+            let bytes = Snapshot::store(&ir(tables), parent, &[]).expect("store");
             out.push(Migration {
                 number: u16::try_from(i + 1).expect("number"),
                 name: name.to_string(),
                 dir: PathBuf::from(format!("/migrations/{:04}_{name}", i + 1)),
                 steps,
+                witness: Vec::new(),
                 snapshot: Snapshot::load(&bytes).expect("load"),
             });
         }

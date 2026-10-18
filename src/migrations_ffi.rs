@@ -7,8 +7,8 @@
 //! I-3: nothing here panics.
 
 use crate::migrate::parse_dialect;
-use ferro_migrate::directory::MigrationsDir;
-use ferro_migrate::snapshot::{Snapshot, encode_checksum};
+use ferro_migrate::directory::{MigrationsDir, serialize_snapshot};
+use ferro_migrate::snapshot::Snapshot;
 use ferro_migrate::{Dialect, GenerateOptions, check_migrations, generate_with, step_file_role};
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -64,12 +64,11 @@ fn to_json<T: serde::Serialize>(value: &T) -> PyResult<String> {
         .map_err(|e| PyRuntimeError::new_err(format!("could not serialize the result: {e}")))
 }
 
-fn snapshot_json(snapshot: &Snapshot) -> serde_json::Value {
-    serde_json::json!({
-        "checksum": encode_checksum(&snapshot.checksum),
-        "parent_checksum": snapshot.parent_checksum.as_ref().map(encode_checksum),
-        "ir": snapshot.ir,
-    })
+/// A snapshot's JSON, in the one shape the directory reader hands each
+/// migration's: `{"checksum", "parent_checksum", "replaces", "ir"}`.
+fn snapshot_json(snapshot: &Snapshot) -> PyResult<serde_json::Value> {
+    serialize_snapshot(snapshot, serde_json::value::Serializer)
+        .map_err(|e| PyRuntimeError::new_err(format!("could not serialize the snapshot: {e}")))
 }
 
 /// Generate the migration that turns the head snapshot into the declared
@@ -160,13 +159,17 @@ pub fn _step_file_role(name: String) -> PyResult<String> {
 /// Read and verify a migrations directory. Returns the JSON of the
 /// `MigrationsDir`: `{"path", "migrations": [{"number", "name", "dir",
 /// "steps": [{"ordinal", "name", "kind", "files": {<dialect>: {"up", "down",
-/// "up_checksum", "headers"}}}], "snapshot": {"checksum", "parent_checksum",
-/// "ir"}}]}`.
+/// "up_checksum", "headers"}}}], "replaces": [<witness entry>], "snapshot":
+/// {"checksum", "parent_checksum", "replaces", "ir"}}]}`. A witness entry is
+/// `{"migration", "snapshot_checksum", "steps", "replaces"}` (checksum in hex,
+/// `replaces` nesting a replaced squash's own); `replaces` is `[]` for a
+/// migration that is not a squash.
 ///
 /// # Errors
 /// `ValueError` naming the problem and its fix: a duplicate or missing
 /// number, a broken snapshot chain, a step with both suffixed and unsuffixed
-/// files, an unparseable header, an unexpected entry.
+/// files, an unparseable header, an unexpected entry, a malformed witness,
+/// or a witness naming a migration still in the directory.
 ///
 /// With `replacing` (`ferro migrate new --replace <target>`), the directory
 /// without that migration, admitting the duplicate at its number, and the
@@ -219,7 +222,8 @@ pub fn _read_migrations_dir(
 }
 
 /// Load one `ir.json` (any shipped `ir_version`). Returns JSON
-/// `{"checksum", "parent_checksum", "ir"}`.
+/// `{"checksum", "parent_checksum", "replaces", "ir"}`, `replaces` the
+/// squash's witness as `_read_migrations_dir` gives it (`[]` when none).
 ///
 /// # Errors
 /// `ValueError` when the text is not a loadable snapshot.
@@ -227,7 +231,7 @@ pub fn _read_migrations_dir(
 #[pyo3(name = "_load_snapshot")]
 pub fn _load_snapshot(ir_json: String) -> PyResult<String> {
     let snapshot = load_snapshot(ir_json.as_bytes(), "the snapshot")?;
-    to_json(&snapshot_json(&snapshot))
+    to_json(&snapshot_json(&snapshot)?)
 }
 
 // -- the run objects (ADR-0048) ------------------------------------------------------

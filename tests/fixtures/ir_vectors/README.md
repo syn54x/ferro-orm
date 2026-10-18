@@ -27,10 +27,17 @@ Each vector is one JSON file with this envelope:
 Rules:
 
 - `domain` and `ir.ir_kind` must match.
-- `schema` vectors are on `ir_version` 1 or 2. v2 (#528, ADR-0032) adds the
-  optional rename hints — `renamed_from` on a model, a column and a foreign
-  key, each omitted when undeclared — and is what ferro writes; every shipped
-  v1 vector stays and keeps loading through `Snapshot::load` (ADR-0023).
+- `schema` vectors are on `ir_version` 1, 2 or 3. v2 (#528, ADR-0032) adds
+  the optional rename hints — `renamed_from` on a model, a column and a
+  foreign key, each omitted when undeclared. v3 (#668, ADR-0056) adds the
+  optional envelope key `replaces` beside `parent_checksum`, a squash's
+  witness: one `{migration, snapshot_checksum, steps, replaces}` entry per
+  replaced migration in chain order, nesting a replaced squash's own; it is
+  omitted when nothing is replaced, and v3 is what ferro writes.
+  `schema_squash_witness_v3` pins a witness that nests a squash, written as
+  `Snapshot::store` writes it. Every shipped v1 and v2 vector stays and keeps
+  loading through `Snapshot::load` (ADR-0023); a v1 or v2 envelope carrying
+  `replaces` is refused.
   `codec` vectors are on `ir_version` 1. `query`
   vectors are on `ir_version: 14` (#395 — optional `before` position bound on
   fetch payloads; omitted when unset; `after` from v13 still omitted when

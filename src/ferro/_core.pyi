@@ -261,8 +261,12 @@ def _read_migrations_dir(
 
     ``{"path", "migrations": [{"number", "name", "dir", "steps": [{"ordinal",
     "name", "kind" ("ddl" | "data" | "portable_sql"), "files": {<step
-    dialect>: {"up", "down", "up_checksum", "headers"}}}], "snapshot":
-    {"checksum", "parent_checksum", "ir"}}]}``. A step dialect is
+    dialect>: {"up", "down", "up_checksum", "headers"}}}], "replaces":
+    [<witness entry>], "snapshot": {"checksum", "parent_checksum",
+    "replaces", "ir"}}]}``. ``replaces`` is a squash's witness (ADR-0056),
+    ``[]`` for any other migration; a witness entry is ``{"migration":
+    "NNNN_<name>", "snapshot_checksum": <96 hex>, "steps": [<ordinal>, ...],
+    "replaces": [<witness entry>, ...]}``. A step dialect is
     ``"postgres"``, ``"sqlite"`` or ``"portable"`` (an unsuffixed file, or a
     data step, serving every dialect); ``headers`` has ``no_transaction``,
     ``foreign_keys_off``, ``destructive``, ``data_dependent``,
@@ -291,7 +295,8 @@ def _read_migrations_dir(
 def _load_snapshot(ir_json: str) -> str:
     """Load one ``ir.json`` of any shipped ``ir_version``.
 
-    Returns JSON ``{"checksum", "parent_checksum", "ir"}`` (checksums in hex).
+    Returns JSON ``{"checksum", "parent_checksum", "replaces", "ir"}``
+    (checksums in hex; ``replaces`` the witness, ``[]`` when none).
     """
     ...
 
