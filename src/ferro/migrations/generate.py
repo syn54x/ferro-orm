@@ -557,17 +557,20 @@ def _short_of_the_head(directory: Path, first: str, read: dict[str, Any]) -> str
     """The refusal of a run that stops short of the head: the first
     migration it leaves, what that one chains from, and the two fixes."""
     off = read["off_run"][0]
-    checksums = {
-        _sha384_hex(path): path.parent.name
-        for path in sorted(directory.glob(f"[0-9][0-9][0-9][0-9]_*/{SNAPSHOT_FILE}"))
-    }
-    snapshots = {
-        name: json.loads((directory / name / SNAPSHOT_FILE).read_bytes())
-        for name in checksums.values()
-    }
+    # The reader leaves the off-run migrations unread: their links are read
+    # here, as the stored bytes say, for the refusal's words only.
+    checksums: dict[str, str] = {}
+    links: dict[str, str | None] = {}
+    for path in sorted(directory.glob(f"[0-9][0-9][0-9][0-9]_*/{SNAPSHOT_FILE}")):
+        stored = path.read_bytes()
+        checksums.setdefault(hashlib.sha384(stored).hexdigest(), path.parent.name)
+        try:
+            links[path.parent.name] = json.loads(stored).get("parent_checksum")
+        except (ValueError, AttributeError):
+            links[path.parent.name] = None
 
     def parent_of(name: str) -> str | None:
-        link = snapshots[name].get("parent_checksum")
+        link = links.get(name)
         return checksums.get(link) if link else None
 
     chains_from = parent_of(off)
@@ -588,10 +591,6 @@ def _short_of_the_head(directory: Path, first: str, read: dict[str, Any]) -> str
         f"{chains_from or 'no migration'}; {start}regenerate {first} on top of the "
         f"head with ferro migrate new <name> --replace {first}. Nothing was written."
     )
-
-
-def _sha384_hex(path: Path) -> str:
-    return hashlib.sha384(path.read_bytes()).hexdigest()
 
 
 def _compose_refusal(from_: str, err: ValueError, names: list[str]) -> str:
