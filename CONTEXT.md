@@ -324,7 +324,7 @@ What a squashed migration records about each migration it replaces, so a databas
 _Avoid_: Replaces list, lineage record, provenance
 
 **Adoption**:
-What a *run* does with a squashed migration on a database whose *tracking table* shows every replaced migration finished whole under the snapshot its *witness* names: it swaps those *step records* for the squashed migration's own and runs nothing. Decided from the tracking table alone, with no flag and no prompt. Not a *baseline* (the database really ran the steps, and an adopted step's *down* runs) and not a rerecord (no file was edited). A database that ran only part of the run is not adopted; it is *ahead*, and the refusal names how to finish or revert the run.
+What a *run* does with a squashed migration on a database whose *tracking table* shows every replaced migration finished whole under the snapshot its *witness* names: it swaps those *step records* for the squashed migration's own and runs nothing. Decided from the tracking table alone, with no flag and no prompt. Not a *baseline* (the database really ran the steps, and an adopted step's *down* runs) and not a rerecord (no file was edited). A database that ran only part of the run is not adopted; it is *ahead*, and the refusal names how to finish or revert the run. A witness a *baseline* recorded whole is adopted as a baseline, so *down* still stops above it; a witness that is part baseline and part run is refused, and the fix is to squash from above the baseline instead (`ferro migrate squash <name> --from <first run-applied migration>`, on the commit before the squash).
 _Avoid_: Fast-forward, stamp, fake-apply, replaces resolution
 
 **Ahead**:
