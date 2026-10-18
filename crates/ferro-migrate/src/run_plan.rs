@@ -765,6 +765,28 @@ pub enum RunRefusal {
         /// The ones they do not, in chain order.
         missing: Vec<String>,
     },
+    /// A squash whose witness the tracking table holds whole, part of it
+    /// recorded by `baseline` and part applied by runs (ADR-0056, amended
+    /// 2026-10-18): adopted, its records would carry one origin, so `down`
+    /// would either revert what the baseline only recorded or never revert
+    /// what the runs created. It is not adopted, and nothing runs.
+    MixedWitness {
+        /// `NNNN_<name>` of the squash.
+        squash: String,
+        /// The replaced migrations a baseline recorded, in chain order.
+        baselined: Vec<String>,
+        /// The ones runs applied (or adopted), in chain order.
+        ran: Vec<String>,
+    },
+    /// An adopted squash's data step whose declared kind (atomic or chunked,
+    /// its `up`'s declaration) the caller did not give: its record cannot be
+    /// written without one, and none is guessed.
+    UndeclaredKind {
+        /// `NNNN_<name>` of the squash.
+        squash: String,
+        /// `NNNN_<name>/<file>` of the data step.
+        step: String,
+    },
 }
 
 /// `NNNN` of a migration's `NNNN_<name>`.
@@ -810,6 +832,8 @@ impl RunRefusal {
             RunRefusal::BaselineStep { .. } => "baseline_step",
             RunRefusal::Unclassifiable { .. } => "unclassifiable",
             RunRefusal::PartialWitness { .. } => "partial_witness",
+            RunRefusal::MixedWitness { .. } => "mixed_witness",
+            RunRefusal::UndeclaredKind { .. } => "undeclared_kind",
         }
     }
 
@@ -1370,6 +1394,39 @@ impl std::fmt::Display for RunRefusal {
                     number_of(parent)
                 )
             }
+            RunRefusal::MixedWitness {
+                squash,
+                baselined,
+                ran,
+            } => {
+                // A baseline writes only to an empty tracking table, so what
+                // it recorded sits below every run: squashing from the first
+                // run-applied migration leaves the baseline out.
+                let span = |names: &[String]| match names {
+                    [] => String::new(),
+                    [one] => one.clone(),
+                    [first, .., last] => format!("{first} … {last}"),
+                };
+                let replaced: Vec<String> = baselined.iter().chain(ran).cloned().collect();
+                let from = ran.first().map_or("0000", String::as_str);
+                let name = squash.split_once('_').map_or(squash.as_str(), |(_, n)| n);
+                write!(
+                    f,
+                    "ferro migrate: {squash} replaces {}, but this database baselined {} and \
+                     ran the rest, so the squash straddles the baseline and cannot be adopted \
+                     whole. On the commit before the squash, squash from above the baseline \
+                     instead: `ferro migrate squash {name} --from {from}`. Nothing was applied.",
+                    span(&replaced),
+                    span(baselined),
+                )
+            }
+            RunRefusal::UndeclaredKind { squash, step } => write!(
+                f,
+                "ferro migrate: adopting {squash} needs the declared kind (atomic or chunked) \
+                 of its data step {step}, read from that file's `up`, and none was given; ferro \
+                 guesses none. Check that {step} declares its `up` as a data step does, then \
+                 run again. Nothing was changed."
+            ),
         }
     }
 }
@@ -2440,6 +2497,42 @@ pub struct Adoption {
     /// `(migration, step)` of every witnessed record, ascending: the records
     /// adoption deletes.
     pub witnessed: Vec<(u16, u8)>,
+    /// `NNNN_<name>` of every replaced migration whose witnessed records a
+    /// baseline wrote, in chain order: all of `replaced` when the squash
+    /// carries the baseline through, none when runs applied every one.
+    pub baselined: Vec<String>,
+}
+
+impl Adoption {
+    /// The origin the squash's records take (ADR-0056, amended 2026-10-18):
+    /// `baseline` when a baseline recorded every migration its witness
+    /// holds, so `down` still stops above it and `baseline --remove` still
+    /// removes it; `adopted` when runs applied (or adopted) them all; `None`
+    /// for a witness of both, which is not adopted
+    /// ([`RunRefusal::MixedWitness`]).
+    pub fn origin(&self) -> Option<Origin> {
+        if self.baselined.is_empty() {
+            Some(Origin::Adopted)
+        } else if self.baselined == self.replaced {
+            Some(Origin::Baseline)
+        } else {
+            None
+        }
+    }
+
+    /// The refusal a witness part baselined and part run meets.
+    fn mixed(&self) -> Option<RunRefusal> {
+        self.origin().is_none().then(|| RunRefusal::MixedWitness {
+            squash: self.squash.clone(),
+            baselined: self.baselined.clone(),
+            ran: self
+                .replaced
+                .iter()
+                .filter(|name| !self.baselined.contains(name))
+                .cloned()
+                .collect(),
+        })
+    }
 }
 
 /// A squash whose witness the tracking table holds only part of: some of
@@ -2529,7 +2622,9 @@ fn names_of(witnessed: &[&StepRecord]) -> Vec<String> {
 /// for every entry, finished records for exactly the recorded ordinals,
 /// each under the recorded snapshot checksum, and no other record of that
 /// migration's name; or, recursively, every entry of its nested list
-/// satisfied. Baseline records count, and so do records whose up-file
+/// satisfied. Baseline records count (a witness of baseline and run records
+/// both is adoptable here and refused by [`adoption`]), and so do records
+/// whose up-file
 /// checksum differs from the file: the snapshot checksum is the proof
 /// (ADR-0030). The tracking table is the whole witness; nothing live is
 /// read.
@@ -2544,6 +2639,12 @@ pub fn adoptable(dir: &MigrationsDir, records: &[StepRecord]) -> Vec<Adoption> {
                 witnessed.extend(witnessing(entry, &records)?);
             }
             let replaced = names_of(&witnessed);
+            let baselined: Vec<&StepRecord> = witnessed
+                .iter()
+                .copied()
+                .filter(|r| r.origin.is_baseline())
+                .collect();
+            let baselined = names_of(&baselined);
             let mut keys: Vec<(u16, u8)> =
                 witnessed.iter().map(|r| (r.migration, r.step)).collect();
             keys.sort_unstable();
@@ -2551,6 +2652,7 @@ pub fn adoptable(dir: &MigrationsDir, records: &[StepRecord]) -> Vec<Adoption> {
                 squash: squash.dir_name(),
                 replaced,
                 witnessed: keys,
+                baselined,
             })
         })
         .collect()
@@ -2637,8 +2739,10 @@ pub fn adoption_data_steps(dir: &MigrationsDir, records: &[StepRecord]) -> Vec<(
 pub struct AdoptionPlan {
     /// The squashes adopted, in directory order.
     pub adoptions: Vec<Adoption>,
-    /// `(migration, step)` of every witnessed record, deleted.
-    pub removed: Vec<(u16, u8)>,
+    /// Every witnessed record, deleted, by migration and step: a deletion
+    /// matches its migration name too, since an original and the squash
+    /// that replaced it share a number.
+    pub removed: Vec<StepRecord>,
     /// One finished record per step of every adopted squash, inserted.
     pub inserted: Vec<StepRecord>,
     /// The records after the swap, by migration and step: what the run
@@ -2651,20 +2755,74 @@ pub struct AdoptionPlan {
 /// deleted, and one finished record inserted per step of the squash, with
 /// this dialect's up file name and checksum, the squash's snapshot checksum,
 /// the class the step-class entry point decides (ADR-0054), `now` as
-/// started and finished, `ferro_version`, origin `adopted`, and for a data
-/// step the kind `kinds` holds for it (its `up`'s declaration, read by the
-/// caller from [`adoption_data_steps`]; `atomic` when absent).
+/// started and finished, `ferro_version`, the origin [`Adoption::origin`]
+/// decides (`baseline` when a baseline recorded the whole witness,
+/// `adopted` when runs applied it), and for a data step the kind `kinds`
+/// holds for it (its `up`'s declaration, read by the caller from
+/// [`adoption_data_steps`]).
 ///
 /// # Errors
 /// [`RunRefusal::PartialWitness`] for the first squash whose witness the
-/// records hold part of, before anything is adopted; a squash step with no
-/// rendering for `dialect` or headers it cannot honour; a squash whose
-/// generated steps get no class ([`RunRefusal::Unclassifiable`]).
+/// records hold part of, and [`RunRefusal::MixedWitness`] for the first
+/// whose witness is part baselined and part run, before anything is
+/// adopted; [`RunRefusal::UndeclaredKind`] for an adopted data step `kinds`
+/// lacks; a squash step with no rendering for `dialect` or headers it
+/// cannot honour; a squash whose generated steps get no class
+/// ([`RunRefusal::Unclassifiable`]).
 pub fn adoption(
     dir: &MigrationsDir,
     records: &[StepRecord],
     dialect: Dialect,
     kinds: &BTreeMap<(u16, u8), RecordKind>,
+    now: &str,
+    ferro_version: &str,
+) -> Result<AdoptionPlan, RunRefusal> {
+    swap(
+        dir,
+        records,
+        dialect,
+        |squash, step, shown| {
+            kinds
+                .get(&(squash.number, step.ordinal))
+                .copied()
+                .ok_or_else(|| RunRefusal::UndeclaredKind {
+                    squash: squash.dir_name(),
+                    step: shown.to_string(),
+                })
+        },
+        now,
+        ferro_version,
+    )
+}
+
+/// The records a run plans against once it has adopted, for a reader that
+/// computes only the refusal the run meets ([`run_status`]): [`adoption`]'s
+/// decision and refusals, apart from a data step's kind, which no refusal
+/// of a plan over finished records reads. Its data-step records carry the
+/// planner's own stand-in (`atomic`, as [`plan_run`]'s), so they are never
+/// written.
+fn adopted_records_for_reading(
+    dir: &MigrationsDir,
+    records: &[StepRecord],
+    dialect: Dialect,
+) -> Result<Vec<StepRecord>, RunRefusal> {
+    swap(
+        dir,
+        records,
+        dialect,
+        |_, _, _| Ok(RecordKind::Atomic),
+        "",
+        "",
+    )
+    .map(|plan| plan.records)
+}
+
+/// [`adoption`], each data step's kind from `data_kind`.
+fn swap(
+    dir: &MigrationsDir,
+    records: &[StepRecord],
+    dialect: Dialect,
+    data_kind: impl Fn(&Migration, &Step, &str) -> Result<RecordKind, RunRefusal>,
     now: &str,
     ferro_version: &str,
 ) -> Result<AdoptionPlan, RunRefusal> {
@@ -2677,6 +2835,9 @@ pub fn adoption(
         });
     }
     let adoptions = adoptable(dir, records);
+    if let Some(mixed) = adoptions.iter().find_map(Adoption::mixed) {
+        return Err(mixed);
+    }
     let mut plan = AdoptionPlan {
         records: records.to_vec(),
         ..AdoptionPlan::default()
@@ -2689,23 +2850,17 @@ pub fn adoption(
         else {
             continue;
         };
+        let origin = adoption.origin().unwrap_or(Origin::Adopted);
         let snapshot_checksum = encode_checksum(&squash.snapshot.checksum);
         let classes = migration_classes(dir, squash, dialect)?;
         for step in &squash.steps {
             let file = step_file(squash, step, dialect)?;
             let name = file_name(&file.up);
+            let shown = format!("{}/{name}", squash.dir_name());
             let kind = if step.kind == StepKind::Data {
-                kinds
-                    .get(&(squash.number, step.ordinal))
-                    .copied()
-                    .unwrap_or(RecordKind::Atomic)
+                data_kind(squash, step, &shown)?
             } else {
-                exec_mode(
-                    &file.headers,
-                    dialect,
-                    &format!("{}/{name}", squash.dir_name()),
-                )?
-                .record_kind()
+                exec_mode(&file.headers, dialect, &shown)?.record_kind()
             };
             plan.inserted.push(StepRecord {
                 migration: squash.number,
@@ -2723,7 +2878,7 @@ pub fn adoption(
                 rows_done: None,
                 duration_ms: 0,
                 ferro_version: ferro_version.to_string(),
-                origin: Origin::Adopted,
+                origin,
                 reverting: false,
                 revert_cursor: None,
                 class: Some(
@@ -2734,11 +2889,20 @@ pub fn adoption(
                 ),
             });
         }
-        plan.removed.extend(adoption.witnessed.iter().copied());
+        plan.removed.extend(
+            records
+                .iter()
+                .filter(|r| {
+                    adoption
+                        .witnessed
+                        .binary_search(&(r.migration, r.step))
+                        .is_ok()
+                })
+                .cloned(),
+        );
     }
-    plan.removed.sort_unstable();
-    plan.records
-        .retain(|r| plan.removed.binary_search(&(r.migration, r.step)).is_err());
+    plan.removed.sort_by_key(|r| (r.migration, r.step));
+    plan.records.retain(|r| !plan.removed.contains(r));
     plan.records.extend(plan.inserted.iter().cloned());
     plan.records.sort_by_key(|r| (r.migration, r.step));
     plan.adoptions = adoptions;
@@ -3128,7 +3292,11 @@ pub fn run_status(
     lock_held: bool,
     order_keys: Option<&OrderKeys>,
 ) -> RunStatus {
-    let adoptions = adoptable(dir, records);
+    // A witness part baselined and part run is not adopted: the run
+    // refuses on it, and its originals stand ahead, as a partial witness's.
+    let (adoptions, mixed): (Vec<Adoption>, Vec<Adoption>) = adoptable(dir, records)
+        .into_iter()
+        .partition(|a| a.origin().is_some());
     let partials = partial_witnesses(dir, records);
     let witnessed: BTreeSet<(u16, u8)> = adoptions
         .iter()
@@ -3226,6 +3394,7 @@ pub fn run_status(
     let partly_witnessed: BTreeSet<&str> = partials
         .iter()
         .flat_map(|p| p.satisfied.iter().chain(&p.missing))
+        .chain(mixed.iter().flat_map(|a| &a.replaced))
         .map(String::as_str)
         .collect();
     let ahead: BTreeSet<String> = records
@@ -3236,11 +3405,11 @@ pub fn run_status(
         .collect();
     // The refusal the run meets: its adoption's, else its plan's over the
     // records the adoption leaves. A data step's kind decides none.
-    let refusal = adoption(dir, records, dialect, &BTreeMap::new(), "", "")
+    let refusal = adopted_records_for_reading(dir, records, dialect)
         .and_then(|adopted| {
             plan_run(
                 dir,
-                &adopted.records,
+                &adopted,
                 dialect,
                 Direction::Up { through: None },
                 false,
@@ -6132,6 +6301,7 @@ mod tests {
                     "0004_drop_tmp".into()
                 ],
                 witnessed: vec![(2, 1), (2, 2), (3, 1), (4, 1)],
+                baselined: vec![],
             }]
         );
         assert!(partial_witnesses(&dir, &records).is_empty());
@@ -6297,7 +6467,15 @@ mod tests {
         )
         .expect("adopts");
         assert_eq!(adopted.adoptions.len(), 1);
-        assert_eq!(adopted.removed, [(2, 1), (2, 2), (3, 1), (4, 1)]);
+        assert_eq!(
+            adopted
+                .removed
+                .iter()
+                .map(|r| (r.migration, r.step))
+                .collect::<Vec<_>>(),
+            [(2, 1), (2, 2), (3, 1), (4, 1)]
+        );
+        assert_eq!(adopted.removed[3].migration_name, "0004_drop_tmp");
         let squash = &dir.migrations[1];
         let snapshot = encode_checksum(&squash.snapshot.checksum);
         let classes = migration_classes(&dir, squash, Dialect::Sqlite).expect("classes");
@@ -6386,7 +6564,7 @@ mod tests {
         assert!(Origin::Baseline.is_baseline());
         let (dir, records) = originals_applied();
         let adopted =
-            adoption(&dir, &records, Dialect::Sqlite, &no_kinds(), "now", "v").expect("adopts");
+            adoption(&dir, &records, Dialect::Sqlite, &chunked_kind(), "now", "v").expect("adopts");
         let status = run_status(&dir, &adopted.records, Dialect::Sqlite, false, None);
         assert_eq!(
             status.migrations[1]
@@ -6511,10 +6689,127 @@ mod tests {
     fn status_after_adoption_reads_applied_adopted_with_nothing_adoptable() {
         let (dir, records) = originals_applied();
         let adopted =
-            adoption(&dir, &records, Dialect::Sqlite, &no_kinds(), "now", "v").expect("adopts");
+            adoption(&dir, &records, Dialect::Sqlite, &chunked_kind(), "now", "v").expect("adopts");
         let status = run_status(&dir, &adopted.records, Dialect::Sqlite, false, None);
         assert_eq!(states(&status, 1), [StepState::AppliedAdopted; 3]);
         assert!(status.adoptable.is_empty());
         assert!(status.ahead.is_empty());
+    }
+
+    // -- a baseline is carried through adoption (panel F3, F13) -----------------
+
+    fn chunked_kind() -> BTreeMap<(u16, u8), RecordKind> {
+        BTreeMap::from([((2, 2), RecordKind::Chunked)])
+    }
+
+    #[test]
+    fn a_wholly_baselined_witness_adopts_as_a_baseline_and_down_stops_above_it() {
+        let (dir, mut records) = originals_applied();
+        for record in &mut records {
+            record.origin = Origin::Baseline;
+        }
+        let adopted =
+            adoption(&dir, &records, Dialect::Sqlite, &chunked_kind(), "now", "v").expect("adopts");
+        assert_eq!(adopted.adoptions.len(), 1);
+        assert!(
+            adopted
+                .inserted
+                .iter()
+                .all(|r| r.origin == Origin::Baseline),
+            "{:?}",
+            adopted.inserted
+        );
+        assert_eq!(adopted.inserted[1].kind, RecordKind::Chunked);
+        // `down` goes no lower than the squash, as for any baseline.
+        let refusal = plan_run(
+            &dir,
+            &adopted.records,
+            Dialect::Sqlite,
+            Direction::Down {
+                target: Target::Migration(1),
+            },
+            false,
+            None,
+        )
+        .expect_err("below the baseline");
+        assert_eq!(refusal, RunRefusal::BelowBaseline { migration: 2 });
+        let status = run_status(&dir, &adopted.records, Dialect::Sqlite, false, None);
+        assert_eq!(states(&status, 1), [StepState::AppliedBaseline; 3]);
+    }
+
+    /// `0001` and `0002_add_teams` recorded by a baseline, `0003` and `0004`
+    /// applied by runs.
+    fn mixed() -> (MigrationsDir, Vec<StepRecord>) {
+        let (dir, mut records) = originals_applied();
+        for record in records.iter_mut().filter(|r| r.migration <= 2) {
+            record.origin = Origin::Baseline;
+        }
+        (dir, records)
+    }
+
+    const MIXED: &str = "ferro migrate: 0002_teams_epic replaces 0002_add_teams … \
+        0004_drop_tmp, but this database baselined 0002_add_teams and ran the rest, so the \
+        squash straddles the baseline and cannot be adopted whole. On the commit before the \
+        squash, squash from above the baseline instead: `ferro migrate squash teams_epic \
+        --from 0003_team_slug`. Nothing was applied.";
+
+    #[test]
+    fn a_witness_part_baselined_and_part_run_is_refused_naming_the_squash_above_the_baseline() {
+        let (dir, records) = mixed();
+        let refusal = adoption(&dir, &records, Dialect::Sqlite, &chunked_kind(), "now", "v")
+            .expect_err("mixed");
+        assert_eq!(refusal.kind(), "mixed_witness");
+        assert_eq!(
+            refusal,
+            RunRefusal::MixedWitness {
+                squash: "0002_teams_epic".into(),
+                baselined: vec!["0002_add_teams".into()],
+                ran: vec!["0003_team_slug".into(), "0004_drop_tmp".into()],
+            }
+        );
+        assert_eq!(refusal.to_string(), MIXED);
+        // The readers say what the run meets: nothing adoptable, the
+        // originals ahead, the run's refusal.
+        let status = run_status(&dir, &records, Dialect::Sqlite, false, None);
+        assert_eq!(states(&status, 1), [StepState::Pending; 3]);
+        assert!(status.adoptable.is_empty());
+        assert!(status.migrations[1].adopts.is_empty());
+        assert_eq!(
+            status.ahead,
+            ["0002_add_teams", "0003_team_slug", "0004_drop_tmp"]
+        );
+        assert_eq!(status.refusal.as_deref(), Some(MIXED));
+        assert!(status.refusal_needs_attention);
+        // The fix it names works: squashed from 0003, the same records adopt
+        // the run-applied part, and the baseline below stays a baseline.
+        let fixed = squashed(&epic_originals(), 3, "teams_epic");
+        let kinds = BTreeMap::from([((3, 2), RecordKind::Atomic)]);
+        let adopted =
+            adoption(&fixed, &records, Dialect::Sqlite, &kinds, "now", "v").expect("adopts");
+        assert_eq!(adopted.adoptions[0].origin(), Some(Origin::Adopted));
+        assert!(
+            adopted
+                .records
+                .iter()
+                .all(|r| r.origin.is_baseline() == (r.migration <= 2))
+        );
+    }
+
+    #[test]
+    fn adoption_refuses_a_data_step_whose_declared_kind_it_was_not_given() {
+        let (dir, records) = originals_applied();
+        let refusal = adoption(&dir, &records, Dialect::Sqlite, &no_kinds(), "now", "v")
+            .expect_err("no kind");
+        assert_eq!(refusal.kind(), "undeclared_kind");
+        assert_eq!(
+            refusal,
+            RunRefusal::UndeclaredKind {
+                squash: "0002_teams_epic".into(),
+                step: "0002_teams_epic/02_backfill_team.py".into(),
+            }
+        );
+        // The readers need no kind: status reports the adoptable squash.
+        let status = run_status(&dir, &records, Dialect::Sqlite, false, None);
+        assert!(status.refusal.is_none(), "{:?}", status.refusal);
     }
 }

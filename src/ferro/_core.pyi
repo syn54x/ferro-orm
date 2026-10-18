@@ -522,8 +522,11 @@ class LockedDatabase:
         """Adopt every squash whose witness the records hold, in one
         transaction, running nothing (ADR-0056); ``[{"squash", "replaced"}]``.
         ``declared_kind(path)`` is an adopted data step's ``atomic`` /
-        ``chunked``. Raises ``RunRefused`` (``partial_witness``) on a squash
-        the records hold part of, writing nothing."""
+        ``chunked``. A squash whose whole witness a baseline recorded is
+        adopted with origin ``baseline``. Raises ``RunRefused``
+        (``partial_witness``) on a squash the records hold part of, and
+        (``mixed_witness``) on one part baselined and part run, writing
+        nothing."""
         ...
     async def execute(
         self, step: StepHandle, on_attempt: Callable[[str], object] | None = None
