@@ -26,7 +26,11 @@
 //! a [`DeadName`].
 
 use crate::plan::{Hint, HintError, enum_declaration, live_hints, refuse_hints, renamed_snapshot};
-use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel, SchemaRenamedLabels};
+use crate::snapshot::CURRENT_SCHEMA_IR_VERSION;
+use ferro_ddl_lowering::fk_name;
+use ferro_schema_ir::{
+    IrEnvelope, SchemaColumn, SchemaIrPayload, SchemaModel, SchemaRenamedLabels,
+};
 use std::collections::BTreeMap;
 
 /// The squashed target of a run: the last snapshot's payload with its rename
@@ -199,15 +203,41 @@ fn new_of(hint: &Hint) -> &str {
 /// [`ComposeError`]: a snapshot of the run whose hints the planner refuses,
 /// a later declaration that disagrees with an earlier rename, and a composed
 /// hint the planner would refuse or ignore against the parent.
+// The refusal carries its hints whole, as the squash prints them; it is
+// returned once per squash, never in a loop.
+#[allow(clippy::result_large_err)]
 pub fn compose_run(
     parent: Option<&SchemaIrPayload>,
     run: &[&SchemaIrPayload],
 ) -> Result<Composed, ComposeError> {
-    let _ = parent;
-    let last = run.last().copied().cloned().unwrap_or_else(empty);
+    let below = parent.cloned().unwrap_or_else(empty);
+    if run.is_empty() {
+        return Ok(Composed {
+            target: without_hints(&below),
+            dead_names: Vec::new(),
+        });
+    }
+    // Side 0 is the parent, side `i + 1` the run's snapshot `i`; step `p`
+    // goes from side `p - 1` to side `p`.
+    let mut sides: Vec<&SchemaIrPayload> = vec![&below];
+    sides.extend(run.iter().copied());
+    let mut steps: Vec<Vec<Hint>> = vec![Vec::new()];
+    for p in 1..sides.len() {
+        let hints =
+            live_hints(sides[p - 1], sides[p]).map_err(|error| ComposeError::RefusedHint {
+                position: p - 1,
+                error,
+            })?;
+        steps.push(hints);
+    }
+    let lineage = Lineage::follow(&sides, &steps);
+    lineage.refuse_disagreeing_declarations(&sides, &steps)?;
+    let target = lineage.composed_target(&sides)?;
+    lineage.refuse_re_added(&sides, &target)?;
+    lineage.refuse_held_by_parent(&target)?;
     Ok(Composed {
-        target: last,
-        dead_names: Vec::new(),
+        target,
+        dead_names: lineage.dead_names(sides.len() - 1),
     })
 }
 
@@ -218,10 +248,620 @@ fn empty() -> SchemaIrPayload {
     }
 }
 
-#[allow(dead_code)]
-fn unused(_: &IrEnvelope<SchemaIrPayload>, _: &SchemaModel, _: SchemaRenamedLabels) {
-    let _ = (live_hints, refuse_hints, renamed_snapshot, enum_declaration);
-    let _: BTreeMap<(), ()> = BTreeMap::new();
+/// `payload` with every rename hint field cleared.
+fn without_hints(payload: &SchemaIrPayload) -> SchemaIrPayload {
+    let mut out = payload.clone();
+    for model in &mut out.models {
+        model.renamed_from = None;
+        for col in &mut model.columns {
+            col.renamed_from = None;
+            col.enum_renamed_labels = None;
+        }
+        for fk in &mut model.foreign_keys {
+            fk.renamed_from = None;
+        }
+    }
+    out
+}
+
+/// One schema object of a snapshot, by the names that snapshot gives it.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Key {
+    Table(String),
+    Column(String, String),
+    Label(String, String, String),
+    Constraint(String, String),
+}
+
+impl Key {
+    fn kind(&self) -> DeadKind {
+        match self {
+            Key::Table(_) => DeadKind::Table,
+            Key::Column(..) => DeadKind::Column,
+            Key::Label(..) => DeadKind::EnumLabel,
+            Key::Constraint(..) => DeadKind::Constraint,
+        }
+    }
+
+    /// `table`, `table.column`, `table.column:label` or `table.constraint`.
+    fn name(&self) -> String {
+        match self {
+            Key::Table(table) => table.clone(),
+            Key::Column(table, column) | Key::Constraint(table, column) => {
+                format!("{table}.{column}")
+            }
+            Key::Label(table, column, label) => format!("{table}.{column}:{label}"),
+        }
+    }
+
+    /// The object's own name, without its owners'.
+    fn leaf(&self) -> &str {
+        match self {
+            Key::Table(name)
+            | Key::Column(_, name)
+            | Key::Label(_, _, name)
+            | Key::Constraint(_, name) => name,
+        }
+    }
+}
+
+/// Every object `model` declares, in a fixed order: the same order for a
+/// model and its [`renamed_snapshot`], which keeps each item in place.
+fn model_keys(model: &SchemaModel) -> Vec<Key> {
+    let table = &model.table_name;
+    let mut keys = vec![Key::Table(table.clone())];
+    for col in &model.columns {
+        keys.push(Key::Column(table.clone(), col.name.clone()));
+        if let Some((_, labels)) = enum_declaration(col) {
+            for label in labels {
+                keys.push(Key::Label(table.clone(), col.name.clone(), label));
+            }
+        }
+    }
+    let constraint = |name: &str| Key::Constraint(table.clone(), name.to_string());
+    for fk in &model.foreign_keys {
+        let name = fk
+            .name
+            .clone()
+            .unwrap_or_else(|| fk_name(table, &fk.column, &fk.to_table));
+        keys.push(constraint(&name));
+    }
+    keys.extend(model.indexes.iter().map(|i| constraint(&i.name)));
+    keys.extend(model.uniques.iter().map(|u| constraint(&u.name)));
+    keys.extend(model.checks.iter().map(|c| constraint(&c.name)));
+    keys.extend(model.table_checks.iter().map(|c| constraint(&c.name)));
+    keys
+}
+
+/// The column `column` of `table` in `side`.
+fn find_column<'a>(
+    side: &'a SchemaIrPayload,
+    table: &str,
+    column: &str,
+) -> Option<&'a SchemaColumn> {
+    side.models
+        .iter()
+        .find(|m| m.table_name == table)?
+        .columns
+        .iter()
+        .find(|c| c.name == column)
+}
+
+/// The enum type of `table.column` in `side`.
+fn enum_type(side: &SchemaIrPayload, table: &str, column: &str) -> Option<String> {
+    find_column(side, table, column)
+        .and_then(enum_declaration)
+        .map(|(type_name, _)| type_name)
+}
+
+/// Whether `side` declares the label `label` on `table.column`.
+fn declares_label(side: &SchemaIrPayload, table: &str, column: &str, label: &str) -> bool {
+    find_column(side, table, column)
+        .and_then(enum_declaration)
+        .is_some_and(|(_, labels)| labels.iter().any(|l| l == label))
+}
+
+/// Every object of the run followed from side to side, as the planner sees
+/// one step: the previous side with the step's live hints applied
+/// ([`renamed_snapshot`]) names each object as the next side names it.
+struct Lineage {
+    /// Per side: each key and the object it names.
+    at: Vec<BTreeMap<Key, usize>>,
+    /// Per object: its key on each side it exists on (contiguous sides).
+    objects: Vec<BTreeMap<usize, Key>>,
+}
+
+impl Lineage {
+    fn follow(sides: &[&SchemaIrPayload], steps: &[Vec<Hint>]) -> Lineage {
+        let mut lineage = Lineage {
+            at: Vec::with_capacity(sides.len()),
+            objects: Vec::new(),
+        };
+        for (p, side) in sides.iter().enumerate() {
+            let mut carried: BTreeMap<Key, usize> = BTreeMap::new();
+            if p > 0 {
+                let previous = IrEnvelope {
+                    ir_kind: "schema".into(),
+                    ir_version: CURRENT_SCHEMA_IR_VERSION,
+                    payload: sides[p - 1].clone(),
+                };
+                let renamed = renamed_snapshot(&previous, &steps[p]);
+                for (before, after) in sides[p - 1].models.iter().zip(&renamed.payload.models) {
+                    for (old, new) in model_keys(before).into_iter().zip(model_keys(after)) {
+                        if let Some(&id) = lineage.at[p - 1].get(&old) {
+                            carried.entry(new).or_insert(id);
+                        }
+                    }
+                }
+            }
+            let mut here: BTreeMap<Key, usize> = BTreeMap::new();
+            for model in &side.models {
+                for key in model_keys(model) {
+                    if here.contains_key(&key) {
+                        continue;
+                    }
+                    let id = match carried.get(&key) {
+                        Some(&id) => id,
+                        None => {
+                            lineage.objects.push(BTreeMap::new());
+                            lineage.objects.len() - 1
+                        }
+                    };
+                    lineage.objects[id].insert(p, key.clone());
+                    here.insert(key, id);
+                }
+            }
+            lineage.at.push(here);
+        }
+        lineage
+    }
+
+    /// The key of object `id` on side `p`.
+    fn key(&self, id: usize, p: usize) -> Option<&Key> {
+        self.objects[id].get(&p)
+    }
+
+    /// The object `key` names on side `p`.
+    fn id(&self, p: usize, key: &Key) -> Option<usize> {
+        self.at[p].get(key).copied()
+    }
+
+    /// The parent's key of the object `key` names on the last side.
+    fn origin(&self, key: &Key) -> Option<&Key> {
+        let last = self.at.len() - 1;
+        self.id(last, key).and_then(|id| self.key(id, 0))
+    }
+
+    /// What the object `key` names on side `j` is called on side `p`.
+    fn became(&self, j: usize, key: Key, p: usize) -> Option<&Key> {
+        self.id(j, &key).and_then(|id| self.key(id, p))
+    }
+
+    /// Refuse a declaration that claims an old name an earlier live hint
+    /// already renamed away, for something else than what that rename
+    /// became: the run renamed one way and declares another.
+    // The refusal carries both hints whole (see `compose_run`).
+    #[allow(clippy::result_large_err)]
+    fn refuse_disagreeing_declarations(
+        &self,
+        sides: &[&SchemaIrPayload],
+        steps: &[Vec<Hint>],
+    ) -> Result<(), ComposeError> {
+        let disagree = |first: &Hint, second: Hint| ComposeError::Uncomposable {
+            first: first.clone(),
+            second,
+        };
+        for p in 2..sides.len() {
+            let earlier = || (1..p).flat_map(|j| steps[j].iter().map(move |h| (j, h)));
+            for model in &sides[p].models {
+                let table = &model.table_name;
+                if let Some(old) = &model.renamed_from {
+                    let declared = Hint::Table {
+                        old: old.clone(),
+                        new: table.clone(),
+                    };
+                    if !steps[p].contains(&declared) {
+                        for (j, live) in earlier() {
+                            if let Hint::Table { old: o, new: n } = live
+                                && o == old
+                                && self.became(j, Key::Table(n.clone()), p)
+                                    != Some(&Key::Table(table.clone()))
+                            {
+                                return Err(disagree(live, declared));
+                            }
+                        }
+                    }
+                }
+                let table_id = self.id(p, &Key::Table(table.clone()));
+                for col in &model.columns {
+                    let here = Key::Column(table.clone(), col.name.clone());
+                    if let Some(old) = &col.renamed_from {
+                        let declared = Hint::Column {
+                            table: table.clone(),
+                            old: old.clone(),
+                            new: col.name.clone(),
+                        };
+                        if !steps[p].contains(&declared) {
+                            for (j, live) in earlier() {
+                                if let Hint::Column {
+                                    table: t,
+                                    old: o,
+                                    new: n,
+                                } = live
+                                    && o == old
+                                    && self.id(j, &Key::Table(t.clone())) == table_id
+                                    && self.became(j, Key::Column(t.clone(), n.clone()), p)
+                                        != Some(&here)
+                                {
+                                    return Err(disagree(live, declared));
+                                }
+                            }
+                        }
+                    }
+                    let (Some(renamed), Some((type_name, _))) =
+                        (&col.enum_renamed_labels, enum_declaration(col))
+                    else {
+                        continue;
+                    };
+                    let col_id = self.id(p, &here);
+                    for (new, old) in &renamed.labels {
+                        let declared = Hint::Label {
+                            type_name: type_name.clone(),
+                            old: old.clone(),
+                            new: new.clone(),
+                        };
+                        if steps[p].contains(&declared) {
+                            continue;
+                        }
+                        let now = Key::Label(table.clone(), col.name.clone(), new.clone());
+                        for (j, live) in earlier() {
+                            let Hint::Label {
+                                type_name: ty,
+                                old: o,
+                                new: n,
+                            } = live
+                            else {
+                                continue;
+                            };
+                            let Some(Key::Column(t, c)) = col_id.and_then(|id| self.key(id, j))
+                            else {
+                                continue;
+                            };
+                            if o == old
+                                && enum_type(sides[j], t, c).as_ref() == Some(ty)
+                                && self.became(j, Key::Label(t.clone(), c.clone(), n.clone()), p)
+                                    != Some(&now)
+                            {
+                                return Err(disagree(live, declared));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The last side with its hint fields rewritten: each object present on
+    /// the parent and on the last side under another name carries one hint
+    /// from its parent name.
+    // The refusal carries both hints whole (see `compose_run`).
+    #[allow(clippy::result_large_err)]
+    fn composed_target(&self, sides: &[&SchemaIrPayload]) -> Result<SchemaIrPayload, ComposeError> {
+        let last = sides.len() - 1;
+        let mut target = without_hints(sides[last]);
+        // Per enum type (as the last side names it): new label -> old label,
+        // and the enum class that declared them.
+        let mut labels: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
+        let mut classes: BTreeMap<String, String> = BTreeMap::new();
+        for model in &mut target.models {
+            let table = model.table_name.clone();
+            if let Some(Key::Table(old)) = self.origin(&Key::Table(table.clone()))
+                && *old != table
+            {
+                model.renamed_from = Some(old.clone());
+            }
+            let mut shadows: Vec<(String, Option<String>)> = Vec::new();
+            for col in &mut model.columns {
+                let here = Key::Column(table.clone(), col.name.clone());
+                if let Some(Key::Column(_, old)) = self.origin(&here)
+                    && *old != col.name
+                {
+                    col.renamed_from = Some(old.clone());
+                    shadows.push((col.name.clone(), self.relation_hint(sides, &here)));
+                }
+                let Some((type_name, declared)) = enum_declaration(col) else {
+                    continue;
+                };
+                for label in declared {
+                    let key = Key::Label(table.clone(), col.name.clone(), label.clone());
+                    let Some(Key::Label(_, _, old)) = self.origin(&key) else {
+                        continue;
+                    };
+                    if *old == label {
+                        continue;
+                    }
+                    let renamed = labels.entry(type_name.clone()).or_default();
+                    if let Some(other) = renamed.get(&label)
+                        && other != old
+                    {
+                        return Err(ComposeError::Uncomposable {
+                            first: Hint::Label {
+                                type_name: type_name.clone(),
+                                old: other.clone(),
+                                new: label.clone(),
+                            },
+                            second: Hint::Label {
+                                type_name,
+                                old: old.clone(),
+                                new: label,
+                            },
+                        });
+                    }
+                    renamed.insert(label.clone(), old.clone());
+                    if let Some(class) = self.enum_class(sides, &key) {
+                        classes.entry(type_name.clone()).or_insert(class);
+                    }
+                }
+            }
+            // A foreign key's hint follows its shadow column's.
+            for (column, field) in shadows {
+                if let Some(fk) = model.foreign_keys.iter_mut().find(|fk| fk.column == column) {
+                    fk.renamed_from = field;
+                }
+            }
+        }
+        // The IR carries an enum's declaration on every column of it.
+        for model in &mut target.models {
+            for col in &mut model.columns {
+                let Some((type_name, _)) = enum_declaration(col) else {
+                    continue;
+                };
+                if let (Some(renamed), Some(class)) =
+                    (labels.get(&type_name), classes.get(&type_name))
+                {
+                    col.enum_renamed_labels = Some(SchemaRenamedLabels {
+                        enum_class: class.clone(),
+                        labels: renamed.clone(),
+                    });
+                }
+            }
+        }
+        Ok(target)
+    }
+
+    /// The relation field the foreign key on the shadow column `column` (a
+    /// key of the last side) was declared under on the parent: the
+    /// `ForeignKey(renamed_from=…)` of the step that first renamed it.
+    fn relation_hint(&self, sides: &[&SchemaIrPayload], column: &Key) -> Option<String> {
+        let id = self.id(sides.len() - 1, column)?;
+        let parent_name = self.key(id, 0)?.leaf();
+        let p = (1..sides.len()).find(|&p| self.key(id, p).map(Key::leaf) != Some(parent_name))?;
+        let Some(Key::Column(table, col)) = self.key(id, p) else {
+            return None;
+        };
+        sides[p]
+            .models
+            .iter()
+            .find(|m| &m.table_name == table)?
+            .foreign_keys
+            .iter()
+            .find(|fk| &fk.column == col)?
+            .renamed_from
+            .clone()
+    }
+
+    /// The enum class that declared the latest rename of `label` (a key of
+    /// the last side), as that side's column names it.
+    fn enum_class(&self, sides: &[&SchemaIrPayload], label: &Key) -> Option<String> {
+        let id = self.id(sides.len() - 1, label)?;
+        (1..sides.len()).rev().find_map(|p| {
+            let (Some(Key::Label(table, column, now)), Some(Key::Label(_, _, before))) =
+                (self.key(id, p), self.key(id, p - 1))
+            else {
+                return None;
+            };
+            if now == before {
+                return None;
+            }
+            find_column(sides[p], table, column)?
+                .enum_renamed_labels
+                .as_ref()
+                .map(|r| r.enum_class.clone())
+        })
+    }
+
+    /// Refuse a composed hint whose old name the last side declares again,
+    /// naming the migration that re-declared it: the planner refuses such a
+    /// hint (ADR-0032, [`refuse_hints`]).
+    // The refusal carries the hint whole (see `compose_run`).
+    #[allow(clippy::result_large_err)]
+    fn refuse_re_added(
+        &self,
+        sides: &[&SchemaIrPayload],
+        target: &SchemaIrPayload,
+    ) -> Result<(), ComposeError> {
+        let last = sides.len() - 1;
+        // The run index of the first side of the last stretch on which
+        // `holds` is true. The rename's own side lacks the old name, so the
+        // stretch starts after the parent.
+        let since = |holds: &dyn Fn(usize) -> bool| {
+            let mut p = last;
+            while p > 1 && holds(p - 1) {
+                p -= 1;
+            }
+            p - 1
+        };
+        let Err(error) = refuse_hints(target) else {
+            return Ok(());
+        };
+        match error {
+            HintError::OldStillDeclared {
+                table,
+                field: None,
+                old,
+            } => {
+                let re_added_at = since(&|p| sides[p].models.iter().any(|m| m.table_name == old));
+                Err(ComposeError::OldNameReAdded {
+                    hint: Hint::Table { old, new: table },
+                    re_added_at,
+                })
+            }
+            HintError::OldStillDeclared {
+                table,
+                field: Some(field),
+                old,
+            } => {
+                let table_id = self.id(last, &Key::Table(table.clone()));
+                let re_added_at = since(&|p| {
+                    matches!(
+                        table_id.and_then(|id| self.key(id, p)),
+                        Some(Key::Table(t)) if find_column(sides[p], t, &old).is_some()
+                    )
+                });
+                Err(ComposeError::OldNameReAdded {
+                    hint: Hint::Column {
+                        table,
+                        old,
+                        new: field,
+                    },
+                    re_added_at,
+                })
+            }
+            HintError::LabelStillDeclared {
+                type_name,
+                new,
+                old,
+                ..
+            } => {
+                let column = target.models.iter().find_map(|m| {
+                    m.columns
+                        .iter()
+                        .find(|c| {
+                            enum_declaration(c).is_some_and(|(ty, labels)| {
+                                ty == type_name && labels.contains(&old)
+                            })
+                        })
+                        .map(|c| Key::Column(m.table_name.clone(), c.name.clone()))
+                });
+                let col_id = column.and_then(|key| self.id(last, &key));
+                let re_added_at = since(&|p| {
+                    matches!(
+                        col_id.and_then(|id| self.key(id, p)),
+                        Some(Key::Column(t, c)) if declares_label(sides[p], t, c, &old)
+                    )
+                });
+                Err(ComposeError::OldNameReAdded {
+                    hint: Hint::Label {
+                        type_name,
+                        old,
+                        new,
+                    },
+                    re_added_at,
+                })
+            }
+            // Composed hints follow distinct objects to distinct names, so
+            // no two claim one old name; were they to, the refusal is
+            // reported, never dropped.
+            error => Err(ComposeError::RefusedHint {
+                position: last - 1,
+                error,
+            }),
+        }
+    }
+
+    /// Refuse a composed hint onto a name the parent holds for another
+    /// object: against the parent the hint is inert, and the planner would
+    /// drop the object the run renamed.
+    // The refusal carries the hint whole (see `compose_run`).
+    #[allow(clippy::result_large_err)]
+    fn refuse_held_by_parent(&self, target: &SchemaIrPayload) -> Result<(), ComposeError> {
+        let held = |key: Key, hint: Hint| match self.id(0, &key) {
+            Some(id) => {
+                // The first side on which the parent's object lost the name.
+                let vacated = (1..self.at.len())
+                    .find(|&p| self.key(id, p).map(Key::leaf) != Some(key.leaf()))
+                    .unwrap_or(self.at.len() - 1);
+                Err(ComposeError::NewNameHeldByParent {
+                    hint,
+                    vacated_at: vacated - 1,
+                })
+            }
+            None => Ok(()),
+        };
+        for model in &target.models {
+            let table = &model.table_name;
+            let parent_table = model.renamed_from.as_ref().unwrap_or(table);
+            if let Some(old) = &model.renamed_from {
+                held(
+                    Key::Table(table.clone()),
+                    Hint::Table {
+                        old: old.clone(),
+                        new: table.clone(),
+                    },
+                )?;
+            }
+            for col in &model.columns {
+                if let Some(old) = &col.renamed_from {
+                    held(
+                        Key::Column(parent_table.clone(), col.name.clone()),
+                        Hint::Column {
+                            table: table.clone(),
+                            old: old.clone(),
+                            new: col.name.clone(),
+                        },
+                    )?;
+                }
+                let (Some(renamed), Some((type_name, _)), Some(Key::Column(t, c))) = (
+                    &col.enum_renamed_labels,
+                    enum_declaration(col),
+                    self.origin(&Key::Column(table.clone(), col.name.clone())),
+                ) else {
+                    continue;
+                };
+                for (new, old) in &renamed.labels {
+                    held(
+                        Key::Label(t.clone(), c.clone(), new.clone()),
+                        Hint::Label {
+                            type_name: type_name.clone(),
+                            old: old.clone(),
+                            new: new.clone(),
+                        },
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Every name an object born and gone inside the run held, with the
+    /// run indexes where it appeared and vanished, in order of appearance.
+    fn dead_names(&self, last: usize) -> Vec<DeadName> {
+        let mut dead = Vec::new();
+        for keys in &self.objects {
+            if keys.contains_key(&0) || keys.contains_key(&last) {
+                continue;
+            }
+            // Each stretch of sides under one name: (first, last, key).
+            let mut held: Vec<(usize, usize, &Key)> = Vec::new();
+            for (&p, key) in keys {
+                match held.last_mut() {
+                    Some((_, end, named)) if named.name() == key.name() => *end = p,
+                    _ => held.push((p, p, key)),
+                }
+            }
+            for (first, end, key) in held {
+                dead.push(DeadName {
+                    kind: key.kind(),
+                    name: key.name(),
+                    appeared: first - 1,
+                    vanished: end,
+                });
+            }
+        }
+        dead.sort_by_key(|d| d.appeared);
+        dead
+    }
 }
 
 #[cfg(test)]
@@ -229,7 +869,7 @@ mod tests {
     use super::*;
     use crate::generate::tests::{column, ir, model, pk};
     use crate::{Dialect, PlanOptions, Side, plan_from_ir};
-    use ferro_schema_ir::{SchemaCheck, SchemaColumn, SchemaForeignKey};
+    use ferro_schema_ir::{SchemaCheck, SchemaForeignKey};
 
     // -- builders ------------------------------------------------------------
 
@@ -327,22 +967,6 @@ mod tests {
     fn refusal(parent: &SchemaIrPayload, run: &[SchemaIrPayload]) -> ComposeError {
         let run: Vec<&SchemaIrPayload> = run.iter().collect();
         compose_run(Some(parent), &run).expect_err("refused")
-    }
-
-    /// `payload` with every hint field cleared.
-    fn without_hints(payload: &SchemaIrPayload) -> SchemaIrPayload {
-        let mut out = payload.clone();
-        for model in &mut out.models {
-            model.renamed_from = None;
-            for col in &mut model.columns {
-                col.renamed_from = None;
-                col.enum_renamed_labels = None;
-            }
-            for fk in &mut model.foreign_keys {
-                fk.renamed_from = None;
-            }
-        }
-        out
     }
 
     /// The composed target's hints, read back: `(table hint, [(column,
