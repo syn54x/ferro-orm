@@ -17,7 +17,7 @@ class PaginationGuardItem(Model):
 async def test_delete_with_limit_raises_value_error():
     with pytest.raises(ValueError, match=r"delete\(\) does not support limit/offset"):
         await (
-            PaginationGuardItem.where(lambda item: item.flagged == True)
+            PaginationGuardItem.where(lambda item: item.flagged == True)  # noqa: E712
             .limit(  # noqa: E712
                 5
             )
@@ -29,7 +29,7 @@ async def test_delete_with_limit_raises_value_error():
 async def test_delete_with_offset_raises_value_error():
     with pytest.raises(ValueError, match=r"delete\(\) does not support limit/offset"):
         await (
-            PaginationGuardItem.where(lambda item: item.flagged == True)
+            PaginationGuardItem.where(lambda item: item.flagged == True)  # noqa: E712
             .offset(  # noqa: E712
                 2
             )
@@ -41,7 +41,7 @@ async def test_delete_with_offset_raises_value_error():
 async def test_update_with_limit_raises_value_error():
     with pytest.raises(ValueError, match=r"update\(\) does not support limit/offset"):
         await (
-            PaginationGuardItem.where(lambda item: item.flagged == True)
+            PaginationGuardItem.where(lambda item: item.flagged == True)  # noqa: E712
             .limit(  # noqa: E712
                 5
             )
@@ -53,7 +53,7 @@ async def test_update_with_limit_raises_value_error():
 async def test_update_with_offset_raises_value_error():
     with pytest.raises(ValueError, match=r"update\(\) does not support limit/offset"):
         await (
-            PaginationGuardItem.where(lambda item: item.flagged == True)
+            PaginationGuardItem.where(lambda item: item.flagged == True)  # noqa: E712
             .offset(  # noqa: E712
                 2
             )

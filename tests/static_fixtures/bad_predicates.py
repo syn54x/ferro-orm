@@ -1,3 +1,4 @@
+# ruff: noqa: E731 - each annotated lambda assignment is the type-checker case under test
 """Type-checked (never executed): junk predicates must FAIL `ty check`.
 
 test_static_contracts.py asserts this file produces `invalid-assignment`

@@ -1,3 +1,4 @@
+# ruff: noqa: E731 - each annotated lambda assignment is the type-checker case under test
 """Type-checked (never executed): valid lambda predicates resolve to QueryNode."""
 
 from typing import Annotated, assert_type

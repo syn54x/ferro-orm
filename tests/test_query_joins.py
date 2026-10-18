@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from enum import StrEnum
 from typing import Annotated
-from uuid import UUID, uuid4
+from uuid import UUID
 
 import pytest
 

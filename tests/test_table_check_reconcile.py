@@ -91,8 +91,8 @@ def _define_reconcile_with_check() -> type[Model]:
                 "at_most_one_side",
                 lambda reconcile: (
                     (reconcile.left == None)  # noqa: E711
-                    | (reconcile.right == None)
-                ),  # noqa: E711
+                    | (reconcile.right == None)  # noqa: E711
+                ),
             ),
         )
 
@@ -483,8 +483,8 @@ async def test_rows_violating_the_new_check_fail_the_connect_and_roll_the_table_
                 "at_most_one_side",
                 lambda reconcile: (
                     (reconcile.left == None)  # noqa: E711
-                    | (reconcile.right == None)
-                ),  # noqa: E711
+                    | (reconcile.right == None)  # noqa: E711
+                ),
             ),
         )
 

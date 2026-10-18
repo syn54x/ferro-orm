@@ -248,15 +248,15 @@ def _build_transfer_models():
                 "at_most_one_outflow",
                 lambda transfer: (
                     (transfer.outflow_transaction == None)  # noqa: E711
-                    | (transfer.outflow_activity == None)
-                ),  # noqa: E711
+                    | (transfer.outflow_activity == None)  # noqa: E711
+                ),
             ),
             Check(
                 "at_most_one_inflow",
                 lambda transfer: (
                     (transfer.inflow_transaction_id == None)  # noqa: E711
-                    | (transfer.inflow_activity_id == None)
-                ),  # noqa: E711
+                    | (transfer.inflow_activity_id == None)  # noqa: E711
+                ),
             ),
             Check(
                 "outflow_present",
@@ -271,8 +271,8 @@ def _build_transfer_models():
                 "inflow_present",
                 lambda transfer: (
                     (transfer.inflow_transaction_id != None)  # noqa: E711
-                    | (transfer.inflow_activity_id != None)
-                ),  # noqa: E711
+                    | (transfer.inflow_activity_id != None)  # noqa: E711
+                ),
             ),
         )
 
@@ -557,8 +557,8 @@ async def test_auto_migrate_does_not_add_a_check_to_an_existing_table(db_url):
                 "at_most_one_side",
                 lambda reconcile: (
                     (reconcile.left == None)  # noqa: E711
-                    | (reconcile.right == None)
-                ),  # noqa: E711
+                    | (reconcile.right == None)  # noqa: E711
+                ),
             ),
         )
 

@@ -72,8 +72,8 @@ def _or_check() -> Check:
         "at_most_one_side",
         lambda orphan: (
             (orphan.left == None)  # noqa: E711
-            | (orphan.right == None)
-        ),  # noqa: E711
+            | (orphan.right == None)  # noqa: E711
+        ),
     )
 
 

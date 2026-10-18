@@ -11,10 +11,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import Annotated
 
-
 import pytest
-
-pytestmark = pytest.mark.backend_matrix
 
 from ferro import (
     BackRef,
@@ -30,6 +27,8 @@ from ferro import (
     reset_engine,
     transaction,
 )
+
+pytestmark = pytest.mark.backend_matrix
 
 
 # Test Models
@@ -857,7 +856,7 @@ async def test_tutorial_blog_example(db_url):
             author=alice,
         )
 
-        post2 = await DocPost.create(
+        await DocPost.create(
             title="Getting Started with Async Python",
             content="Async programming can be tricky...",
             published=True,
@@ -872,11 +871,9 @@ async def test_tutorial_blog_example(db_url):
         )
 
         # Create comments
-        comment1 = await Comment.create(text="Great article!", author=bob, post=post1)
+        await Comment.create(text="Great article!", author=bob, post=post1)
 
-        comment2 = await Comment.create(
-            text="Thanks for sharing", author=alice, post=post1
-        )
+        await Comment.create(text="Thanks for sharing", author=alice, post=post1)
 
         # Query: Find all published posts
         published = await DocPost.where(lambda t: t.published == True).all()  # noqa: E712

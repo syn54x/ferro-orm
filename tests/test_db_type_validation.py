@@ -7,7 +7,7 @@ before any query, emission, or migration runs.
 from __future__ import annotations
 
 import datetime as dt
-from enum import Enum, IntEnum, StrEnum
+from enum import IntEnum, StrEnum
 from typing import Any, Literal
 from uuid import UUID
 

@@ -23,7 +23,7 @@ from ferro import (
     engines,
     reset_engine,
 )
-from ferro._core import _render_create_table_sql_for_test, _render_table_check_body
+from ferro._core import _render_table_check_body
 from ferro.ir.compiler import compile_registry_schema_ir
 
 # Module global for ADR-0016: LOAD_GLOBAL of a non-enum name must fail, even

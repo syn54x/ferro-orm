@@ -95,8 +95,8 @@ async def main() -> None:
 
         # Reverse access: the BackRef is a chainable query
         alice_posts = await author.posts.where(
-            lambda post: post.published == True
-        ).all()  # noqa: E712
+            lambda post: post.published == True  # noqa: E712
+        ).all()
         # --8<-- [end:relationships]
         assert author.name == "Alice"
         assert len(alice_posts) == 2
@@ -107,9 +107,9 @@ async def main() -> None:
         await post.save()
 
         # Update many rows at once
-        updated = await Post.where(lambda post: post.published == False).update(
+        updated = await Post.where(lambda post: post.published == False).update(  # noqa: E712
             published=True
-        )  # noqa: E712
+        )
 
         # Delete
         deleted = await Post.where(

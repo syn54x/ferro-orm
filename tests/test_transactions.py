@@ -1,5 +1,4 @@
 import pytest
-import uuid
 import sqlite3
 from contextlib import closing
 from typing import Annotated

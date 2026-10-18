@@ -1,3 +1,4 @@
+# ruff: noqa: F811 - pytest fixtures imported from a sibling module are redefined as arguments
 """Retired enum labels (ADR-0053, #627).
 
 ``__ferro_retired_labels__ = frozenset({"canceled"})`` on a ``StrEnum`` stops

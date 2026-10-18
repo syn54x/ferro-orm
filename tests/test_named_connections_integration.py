@@ -12,7 +12,6 @@ class NamedSmokeMarker(ferro.Model):
 
 if TYPE_CHECKING:
     from ferro.models import ModelConnection
-    from ferro.query import Query
 
     async def _typing_assertions_for_using_interface() -> None:
         """Static type-checking regression tests for `Model.using(...)`.

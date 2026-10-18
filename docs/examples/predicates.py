@@ -59,8 +59,8 @@ async def main() -> None:
 
         # --8<-- [start:lambda-style]
         admins = await User.where(
-            lambda user: (user.role == "admin") & (user.archived == False)
-        ).all()  # noqa: E712
+            lambda user: (user.role == "admin") & (user.archived == False)  # noqa: E712
+        ).all()
         # --8<-- [end:lambda-style]
         assert len(admins) == 1
 
@@ -78,8 +78,8 @@ async def main() -> None:
         # --8<-- [start:combining]
         # & is AND, | is OR — parenthesize each side
         flagged = await User.where(
-            lambda user: (user.age < 18) | (user.archived == True)
-        ).all()  # noqa: E712
+            lambda user: (user.age < 18) | (user.archived == True)  # noqa: E712
+        ).all()
 
         # Chained .where() calls also AND together
         young_members = (
@@ -99,8 +99,8 @@ async def main() -> None:
         ).all()
         not_a_names = await User.where(lambda user: ~user.name.like("a%")).all()
         active_adults = await User.where(
-            lambda user: ~((user.age < 18) | (user.archived == True))
-        ).all()  # noqa: E712
+            lambda user: ~((user.age < 18) | (user.archived == True))  # noqa: E712
+        ).all()
         # --8<-- [end:negation]
         assert len(not_staff) == 3
         assert len(not_a_names) == 3
