@@ -743,28 +743,36 @@ class Door:
         return [_plan(a, b, dialect) for a, b in zip(shapes, shapes[1:], strict=False)]
 
 
-def _generate(case: Case, root: Path) -> Door:
-    """Run ``ferro migrate new`` for ``case`` in a fresh project under
-    ``root``, both dialects, in this process."""
-    project = root / case.id
-    project.mkdir()
+@contextlib.contextmanager
+def scratch_project(case: Case, project: Path):
+    """``project`` as the working directory, importable, with ``case``'s
+    package forgotten and the registry rewound on the way out; yields the
+    package name. ``ferro migrate new`` output is swallowed."""
     pkg = "ferro_p538_" + re.sub(r"[^a-z0-9]", "_", case.id.lower())
-    out = io.StringIO()
-    with pytest.MonkeyPatch.context() as mp, contextlib.redirect_stdout(out):
+    with pytest.MonkeyPatch.context() as mp, contextlib.redirect_stdout(io.StringIO()):
         mp.delenv("FERRO_CONFIG", raising=False)
         mp.chdir(project)
         mp.setattr(sys, "path", [str(project), *sys.path])
         mp.setattr(sys, "dont_write_bytecode", True)
         try:
-            write_config(project, pkg)
-            write_models(project, pkg, case.before)
-            new("create")
-            write_models(project, pkg, case.after)
-            new("edit")
+            yield pkg
         finally:
             for name in [m for m in sys.modules if m == pkg or m.startswith(pkg + ".")]:
                 del sys.modules[name]
             _rewind_registry()
+
+
+def _generate(case: Case, root: Path) -> Door:
+    """Run ``ferro migrate new`` for ``case`` in a fresh project under
+    ``root``, both dialects, in this process."""
+    project = root / case.id
+    project.mkdir()
+    with scratch_project(case, project) as pkg:
+        write_config(project, pkg)
+        write_models(project, pkg, case.before)
+        new("create")
+        write_models(project, pkg, case.after)
+        new("edit")
     migration = migration_dir(project, 2)
     parent_text = (migration_dir(project, 1) / "ir.json").read_text()
     target_text = (migration / "ir.json").read_text()
@@ -870,6 +878,9 @@ class Finding:
     dialects: frozenset[str] = frozenset(DIALECTS)
 
 
+_CARRIED_SCAFFOLD = "pin (h): the run's data step (0002's backfill scaffold) is carried byte for byte into the squash (ADR-0056: a data step of the run is carried, marked `carried, review it`), but `new` from the after models alone writes no backfill for a table it creates, so the squashed directory holds a `02_backfill_*.py` file `new`'s does not: the pin's file-for-file definition has no allowance for a carried step"
+
+
 FINDINGS: dict[str, Finding] = {
     "C2-drop-a-foreign-key-column": Finding(
         reason=(
@@ -884,46 +895,24 @@ FINDINGS: dict[str, Finding] = {
         dialects=frozenset({"sqlite"}),
     ),
     "A2b-required-column-with-a-factory": Finding(
-        reason=(
-            "pin (h): the run's data step (0002's backfill scaffold) is carried byte for byte into the squash (ADR-0056: a data step of the run is carried, marked `carried, review it`), but `new` from the after models alone writes no backfill for a table it creates, so the squashed directory holds a `02_backfill_*.py` file `new`'s does not: the pin's file-for-file definition has no allowance for a carried step"
-        ),
+        reason=(_CARRIED_SCAFFOLD,),
         raises=AssertionError,
         pins=frozenset({"h"}),
     ),
     "A3-required-column-without-a-default": Finding(
-        reason=(
-            "pin (h): the run's data step (0002's backfill scaffold) is carried byte for byte into the squash (ADR-0056: a data step of the run is carried, marked `carried, review it`), but `new` from the after models alone writes no backfill for a table it creates, so the squashed directory holds a `02_backfill_*.py` file `new`'s does not: the pin's file-for-file definition has no allowance for a carried step"
-        ),
+        reason=(_CARRIED_SCAFFOLD,),
         raises=AssertionError,
         pins=frozenset({"h"}),
     ),
     "A7a-make-a-column-required": Finding(
-        reason=(
-            "pin (h): the run's data step (0002's backfill scaffold) is carried byte for byte into the squash (ADR-0056: a data step of the run is carried, marked `carried, review it`), but `new` from the after models alone writes no backfill for a table it creates, so the squashed directory holds a `02_backfill_*.py` file `new`'s does not: the pin's file-for-file definition has no allowance for a carried step"
-        ),
+        reason=(_CARRIED_SCAFFOLD,),
         raises=AssertionError,
         pins=frozenset({"h"}),
     ),
     "C1-add-a-required-foreign-key": Finding(
-        reason=(
-            "pin (h): the run's data step (0002's backfill scaffold) is carried byte for byte into the squash (ADR-0056: a data step of the run is carried, marked `carried, review it`), but `new` from the after models alone writes no backfill for a table it creates, so the squashed directory holds a `02_backfill_*.py` file `new`'s does not: the pin's file-for-file definition has no allowance for a carried step"
-        ),
+        reason=(_CARRIED_SCAFFOLD,),
         raises=AssertionError,
         pins=frozenset({"h"}),
-    ),
-    "D2-remove-a-label": Finding(
-        reason=(
-            "pin (h) and (i): `squash --from 0001` refuses (exit 1) because the carried backfill's declaration names `status:canceled`, a label that existed only inside the run (added by 0001, removed by 0002); the refusal is ADR-0056's dead-step rule, but `new` from the after models writes a migration for the same run, so the two ends no longer agree"
-        ),
-        raises=AssertionError,
-        pins=frozenset({"h", "i"}),
-    ),
-    "D2-remove-a-label-of-a-column-with-a-model-default": Finding(
-        reason=(
-            "pin (h) and (i): `squash --from 0001` refuses (exit 1) because the carried backfill's declaration names `status:canceled`, a label that existed only inside the run (added by 0001, removed by 0002); the refusal is ADR-0056's dead-step rule, but `new` from the after models writes a migration for the same run, so the two ends no longer agree"
-        ),
-        raises=AssertionError,
-        pins=frozenset({"h", "i"}),
     ),
 }
 
@@ -1398,12 +1387,18 @@ def second_db(tmp_path: Path, db_backend: str, postgres_base_url: str | None):
             conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
 
 
-def _cli(*argv: str) -> int:
+def _cli_output(*argv: str) -> tuple[int, str]:
+    """The exit code and everything printed (stdout and stderr)."""
     from ferro.cli import main
 
     out = io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
-        return main(list(argv))
+        code = main(list(argv))
+    return code, out.getvalue()
+
+
+def _cli(*argv: str) -> int:
+    return _cli_output(*argv)[0]
 
 
 def migrate_through(
@@ -1501,35 +1496,66 @@ def _new_from_the_after_models(case: Case, root: Path) -> Path:
     fresh project under ``root``: its ``0001``."""
     project = root / "fresh"
     project.mkdir()
-    pkg = "ferro_p538_" + re.sub(r"[^a-z0-9]", "_", case.id.lower())
-    with pytest.MonkeyPatch.context() as mp:
-        mp.delenv("FERRO_CONFIG", raising=False)
-        mp.chdir(project)
-        mp.setattr(sys, "path", [str(project), *sys.path])
-        mp.setattr(sys, "dont_write_bytecode", True)
-        try:
-            write_config(project, pkg)
-            write_models(project, pkg, case.after)
-            with contextlib.redirect_stdout(io.StringIO()):
-                new(SQUASH_NAME)
-        finally:
-            for name in [m for m in sys.modules if m == pkg or m.startswith(pkg + ".")]:
-                del sys.modules[name]
-            _rewind_registry()
+    with scratch_project(case, project) as pkg:
+        write_config(project, pkg)
+        write_models(project, pkg, case.after)
+        new(SQUASH_NAME)
     return migration_dir(project, 1)
+
+
+def _copy_of_the_project(door: Door, root: Path) -> Path:
+    """A copy of the project ``door`` was generated in (the other pins keep
+    their ``0001`` and ``0002``): the copy's root."""
+    copy = root / "squashed"
+    shutil.copytree(door.migration.parent.parent, copy)
+    return copy
 
 
 def _squash_a_copy(door: Door, root: Path) -> Path:
     """``ferro migrate squash SQUASH_NAME --from 0001`` in a copy of the
-    project ``door`` was generated in (the other pins keep their ``0001`` and
-    ``0002``): the copy's project root."""
-    copy = root / "squashed"
-    shutil.copytree(door.migration.parent.parent, copy)
-    with pytest.MonkeyPatch.context() as mp, contextlib.redirect_stdout(io.StringIO()):
+    project ``door`` was generated in."""
+    copy = _copy_of_the_project(door, root)
+    with pytest.MonkeyPatch.context() as mp:
         mp.delenv("FERRO_CONFIG", raising=False)
         mp.chdir(copy)
         assert _cli("migrate", "squash", SQUASH_NAME, "--from", "0001") == 0
     return copy
+
+
+DEAD_STEP_REFUSALS = {
+    "D2-remove-a-label": "status:canceled",
+    "D2-remove-a-label-of-a-column-with-a-model-default": "status:canceled",
+}
+"""Cases whose carried backfill declares a name that existed only inside the
+run (a label ``0001`` added and ``0002`` removed): ADR-0056's dead-step rule
+refuses the squash, by design (#670), naming the name and the fix. Pins (h)
+and (i) assert the refusal, not an equality: it is not a finding."""
+
+
+def _assert_the_dead_step_refusal(case_id: str, project: Path, *, cwd: Path) -> None:
+    """``squash`` over ``0001``..``0002`` in ``project`` exits 1, names the
+    dead name and its fix, and leaves the migrations directory as it was."""
+    migrations = project / "migrations"
+    before = {
+        str(p.relative_to(migrations)): p.read_bytes()
+        for p in sorted(migrations.rglob("*"))
+        if p.is_file()
+    }
+    with pytest.MonkeyPatch.context() as mp:
+        mp.delenv("FERRO_CONFIG", raising=False)
+        mp.chdir(cwd)
+        code, out = _cli_output("migrate", "squash", SQUASH_NAME, "--from", "0001")
+    assert code == 1, out
+    assert DEAD_STEP_REFUSALS[case_id] in out, out
+    assert "which existed only inside the run" in out, out
+    assert "delete the step, or start the range at" in out, out
+    assert "Nothing was written." in out, out
+    after = {
+        str(p.relative_to(migrations)): p.read_bytes()
+        for p in sorted(migrations.rglob("*"))
+        if p.is_file()
+    }
+    assert after == before
 
 
 def _tree(directory: Path) -> dict[str, bytes]:
@@ -1547,6 +1573,10 @@ def test_pin_h_a_squash_is_new_across_its_ends(
     payload is the same once the squash's hints and witness are removed."""
     expect_finding(request, case_id, dialect, "h")
     door = doors(case_id)
+    if case_id in DEAD_STEP_REFUSALS:
+        copy = _copy_of_the_project(door, tmp_path)
+        _assert_the_dead_step_refusal(case_id, copy, cwd=copy)
+        return
     copy = _squash_a_copy(door, tmp_path)
     squashed = migration_dir(copy, 1)
     fresh = _new_from_the_after_models(door.case, tmp_path)
@@ -1863,11 +1893,16 @@ def test_pin_i_an_adopted_database_is_the_squashed_one(
     second_url, second_schema = second_db
     scratch = Db(second_url, db_backend, postgres_base_url, second_schema)
     after = project.register(case.after)
-    before_adoption = live_schema(db_url, after)
+    if case_id in DEAD_STEP_REFUSALS:
+        _assert_the_dead_step_refusal(case_id, project.root, cwd=project.root)
+        return
+    before_adoption = live_schema(db_url, after), column_defaults(adopted)
 
     assert _cli("migrate", "squash", "squashed", "--from", "0001") == 0
     assert _cli("migrate", "up", "--url", db_url) == 0
-    assert live_schema(db_url, after) == before_adoption, "adoption ran DDL"
+    assert (live_schema(db_url, after), column_defaults(adopted)) == before_adoption, (
+        "adoption ran DDL"
+    )
     assert _cli("migrate", "up", "--url", second_url) == 0
 
     assert live_schema(db_url, after) == live_schema(second_url, after)

@@ -190,7 +190,7 @@ on both dialects:
   `schema` statements equal `_core._plan_from_ir(..., render=True)` for the
   same live read, grouped by table (or enum type) and in order within each,
   the create pass standing in for each `AddTable`; its warnings equal the
-  plan's reports by kind and subject, never by sentence.;
+  plan's reports by kind and subject, never by sentence;
 - **(h)** a squash is `new` across its ends: on a copy of the migrations
   directory, `ferro migrate squash NAME --from 0001` writes the one `0001`
   that `ferro migrate new NAME` writes from the after models alone, file for
