@@ -288,6 +288,26 @@ def read_replacing(
     except ValueError as err:
         raise MigrationsDirectoryError(f"{directory}: {err}") from None
     read = json.loads(raw)
+    return read["migrations"], read["replaced"][0]
+
+
+def read_run(
+    directory: Path, from_: str
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """For a squash: every migration in ``directory`` below the one ``from_``
+    names (``NNNN_<name>``, or ``NNNN`` when one migration carries the
+    number), and the run from it through the head in chain order, each read
+    and verified by the Rust core.
+
+    Raises:
+        MigrationsDirectoryError: ``from_`` is not in the directory or is a
+            number two migrations share; or the directory is malformed.
+    """
+    try:
+        raw = _read_migrations_dir(str(directory), run_from=from_)
+    except ValueError as err:
+        raise MigrationsDirectoryError(f"{directory}: {err}") from None
+    read = json.loads(raw)
     return read["migrations"], read["replaced"]
 
 

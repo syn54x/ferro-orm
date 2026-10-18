@@ -314,7 +314,7 @@ def prepare(
         migrations = read_migrations(directory)
     else:
         migrations, replaced = read_replacing(directory, replace)
-        carry = _carried_steps(directory, replaced)
+        carry = _carried_steps(directory, [replaced])
     parent = _head_snapshot_text(migrations)
     number = len(migrations) + 1
     try:
@@ -371,27 +371,29 @@ def _dir_name(migration: dict[str, Any]) -> str:
     return f"{migration['number']:04d}_{migration['name']}"
 
 
-def _carried_steps(directory: Path, replaced: dict[str, Any]) -> list[dict[str, Any]]:
-    """Every data step and hand-written SQL step of ``replaced``, in order,
+def _carried_steps(directory: Path, run: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Every data step and hand-written SQL step of the ``run``'s migrations,
+    in chain order and, within a migration, step order,
     as the generator's ``carry`` option takes them (plus each one's ``old``
     files, for the per-file lines). A dialect-suffixed SQL file is generated
     DDL: it is regenerated, never carried."""
     carry: list[dict[str, Any]] = []
-    for step in replaced["steps"]:
-        if step["kind"] not in ("data", "portable_sql"):
-            continue
-        files = step["files"]["portable"]
-        up = Path(files["up"])
-        down = Path(files["down"]) if files.get("down") else None
-        carry.append(
-            {
-                "name": step["name"],
-                "kind": step["kind"],
-                "body": _text(directory, up),
-                "down": _text(directory, down) if down is not None else None,
-                "old": [p for p in (up, down) if p is not None],
-            }
-        )
+    for migration in run:
+        for step in migration["steps"]:
+            if step["kind"] not in ("data", "portable_sql"):
+                continue
+            files = step["files"]["portable"]
+            up = Path(files["up"])
+            down = Path(files["down"]) if files.get("down") else None
+            carry.append(
+                {
+                    "name": step["name"],
+                    "kind": step["kind"],
+                    "body": _text(directory, up),
+                    "down": _text(directory, down) if down is not None else None,
+                    "old": [p for p in (up, down) if p is not None],
+                }
+            )
     return carry
 
 

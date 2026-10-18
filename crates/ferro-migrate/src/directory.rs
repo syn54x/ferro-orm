@@ -841,8 +841,10 @@ impl MigrationsDir {
     /// `NNNN` when one migration carries the number. A run is always a tail
     /// of the directory (ADR-0023). The duplicate admitted at `from`'s number
     /// and the unchecked parent link of the run's first migration are
-    /// [`MigrationsDir::read_replacing`]'s; every later migration of the run
-    /// must chain from the one before it.
+    /// [`MigrationsDir::read_replacing`]'s; the run continues through each
+    /// next number whose snapshot links to the migration before it, and a
+    /// migration that does not link (a sibling branch's) stays in the
+    /// directory below, which verifies it.
     ///
     /// # Errors
     /// [`DirectoryError::AmbiguousNumber`] for a bare number two migrations
@@ -891,25 +893,25 @@ impl MigrationsDir {
         };
         let (number, name, dir) = dirs.remove(at);
         let first = read_migration(root, number, name, dir)?;
-        // The run's later migrations, by number; the rest stays below.
-        let (later, below): (Vec<_>, Vec<_>) = dirs.into_iter().partition(|(n, _, _)| *n > number);
+        // The run continues while the next number holds a migration whose
+        // snapshot links to the tip. What does not link (a sibling branch's
+        // migrations, at the admitted duplicate number) stays below, for the
+        // directory read to verify.
         let mut run = vec![first];
-        for (expected, (n, (name, dir))) in (number + 1..).zip(unique_numbers(root, later)?) {
-            if n != expected {
-                return Err(DirectoryError::MissingNumber {
-                    number: expected,
-                    next: relative(root, &dir),
-                });
+        let mut below = Vec::new();
+        for entry in dirs {
+            let tip = &run[run.len() - 1];
+            let linked = entry.0 == tip.number + 1
+                && std::fs::read(entry.2.join(SNAPSHOT_FILE))
+                    .ok()
+                    .and_then(|bytes| Snapshot::load(&bytes).ok())
+                    .is_some_and(|s| s.parent_checksum == Some(tip.snapshot.checksum));
+            if linked {
+                let (number, name, dir) = entry;
+                run.push(read_migration(root, number, name, dir)?);
+            } else {
+                below.push(entry);
             }
-            let migration = read_migration(root, n, name, dir)?;
-            let parent = run.last().map(|p| p.snapshot.checksum);
-            if migration.snapshot.parent_checksum != parent {
-                return Err(DirectoryError::BrokenChain {
-                    parent: run.last().map(|p| relative(root, &p.dir.join(SNAPSHOT_FILE))),
-                    child: relative(root, &migration.dir.join(SNAPSHOT_FILE)),
-                });
-            }
-            run.push(migration);
         }
         let dir = assemble(root, unique_numbers(root, below)?)?;
         Ok((dir, run))
@@ -1685,7 +1687,10 @@ CREATE INDEX i ON t (c);
         // Replacing still refuses a longer run, naming the next migration.
         let err = MigrationsDir::read_replacing(&root, "0002_b").expect_err("later");
         assert_eq!(err.kind(), "later_migration");
-        assert!(err.to_string().contains("0003_c chains from 0002_b"), "{err}");
+        assert!(
+            err.to_string().contains("0003_c chains from 0002_b"),
+            "{err}"
+        );
         let (_, replaced) = MigrationsDir::read_replacing(&root, "0004_d").expect("head");
         assert_eq!(replaced.dir_name(), "0004_d");
     }
@@ -1724,6 +1729,19 @@ CREATE INDEX i ON t (c);
             err.to_string().contains("0003_c/01_schema.up.postgres.sql"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn a_run_leaves_a_sibling_branchs_migrations_below() {
+        let root = scratch("run-sibling");
+        let a = migration(&root, "0001_a", None);
+        migration(&root, "0002_x", Some(b"a stale parent"));
+        let y = migration(&root, "0002_y", Some(&a));
+        migration(&root, "0003_after_y", Some(&y));
+        let (dir, run) = MigrationsDir::read_run(&root, "0002_x").expect("run");
+        let names = |ms: &[Migration]| ms.iter().map(Migration::dir_name).collect::<Vec<_>>();
+        assert_eq!(names(&run), ["0002_x"]);
+        assert_eq!(names(&dir.migrations), ["0001_a", "0002_y", "0003_after_y"]);
     }
 
     #[test]
