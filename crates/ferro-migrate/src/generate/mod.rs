@@ -30,6 +30,7 @@
 
 pub(crate) mod backfill;
 mod columns;
+mod compose;
 mod downs;
 pub(crate) mod enums;
 pub(crate) mod rebuild;
@@ -38,6 +39,7 @@ mod stages;
 pub(crate) mod staging;
 
 pub use backfill::{STAGED_NOT_NULL_PREFIX, staged_not_null_name};
+pub use compose::{ComposeError, Composed, DeadKind, DeadName, compose_run};
 pub use rebuild::{NEW_TABLE_PREFIX, new_table_name};
 
 use crate::directory::{DirectoryError, Headers, MigrationsDir, StepDialect, StepKind};
