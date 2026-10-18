@@ -15,7 +15,6 @@ async def test_like_search(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-
         await SearchableUser.create(name="Taylor")
         await SearchableUser.create(name="Tyler")
 
@@ -35,7 +34,6 @@ async def test_in_helper(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-
         await SearchableUser.create(name="user1")
         await SearchableUser.create(name="user2")
         await SearchableUser.create(name="user3")

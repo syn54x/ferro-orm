@@ -371,7 +371,9 @@ async def test_marshal_decimal(db_url):
     async with engines.session():
         amt = decimal.Decimal("1234.5678")
         if "postgres" in db_url:
-            await execute("CREATE TABLE t7d (id INTEGER PRIMARY KEY, amt NUMERIC(10,4))")
+            await execute(
+                "CREATE TABLE t7d (id INTEGER PRIMARY KEY, amt NUMERIC(10,4))"
+            )
             await execute("INSERT INTO t7d (id, amt) VALUES (1, $1::numeric)", amt)
             row = await fetch_one("SELECT amt::text AS amt FROM t7d")
         else:

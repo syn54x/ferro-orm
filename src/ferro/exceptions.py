@@ -131,9 +131,7 @@ class ModelDoesNotExist(FerroError, LookupError):
     def __init__(self, model_cls: type, pk: Any) -> None:
         self.model = model_cls
         self.pk = pk
-        super().__init__(
-            f"No {model_cls.__name__} record found for primary key {pk!r}"
-        )
+        super().__init__(f"No {model_cls.__name__} record found for primary key {pk!r}")
 
     def __reduce__(self):
         return (self.__class__, (self.model, self.pk))

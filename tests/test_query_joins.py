@@ -71,9 +71,9 @@ class QJTransfer(Model):
 class QJEmployee(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     name: str = ""
-    manager: Annotated["QJEmployee", ForeignKey(related_name="reports", nullable=True)] = (
-        None
-    )
+    manager: Annotated[
+        "QJEmployee", ForeignKey(related_name="reports", nullable=True)
+    ] = None
     reports: Relation[list["QJEmployee"]] = BackRef()
 
 
@@ -329,9 +329,9 @@ async def test_join_dedup_across_where_calls_and_boolean_tree(db_url):
         await _seed_core()
 
         # Same relation path referenced in two where() calls.
-        q_two_calls = QJTransaction.where(
-            lambda t: t.account.ledger_id == 1
-        ).where(lambda t: t.account.owner.email == "o1@ferro.dev")
+        q_two_calls = QJTransaction.where(lambda t: t.account.ledger_id == 1).where(
+            lambda t: t.account.owner.email == "o1@ferro.dev"
+        )
         assert list(q_two_calls._joins) == [("account",), ("account", "owner")]
         rows = await q_two_calls.all()
         # Ledger A + owner o1 -> account a1 -> transactions 1,2,3.
@@ -1099,8 +1099,9 @@ async def test_traversed_datetime_filter_binds_against_hop_model(db_url):
         assert {r.id for r in rows} == {2}
         assert (
             await QJTBUser.where(
-                lambda u: u.profile.created_at
-                >= datetime(2025, 1, 1, tzinfo=timezone.utc)
+                lambda u: (
+                    u.profile.created_at >= datetime(2025, 1, 1, tzinfo=timezone.utc)
+                )
             ).count()
             == 1
         )
@@ -1114,9 +1115,7 @@ async def test_traversed_uuid_filter_binds_against_hop_model(db_url):
     async with ferro.engines.session():
         await _seed_typed_bind_matrix()
 
-        rows = await QJTBUser.where(
-            lambda u: u.profile.external_id == _TB_UID1
-        ).all()
+        rows = await QJTBUser.where(lambda u: u.profile.external_id == _TB_UID1).all()
         assert {r.id for r in rows} == {1}
 
 

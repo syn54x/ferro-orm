@@ -229,7 +229,13 @@ def test_build_sa_table_from_ir_renders_quoted_check_body():
     model_ir = {
         "table_name": "account",
         "columns": [{"name": "role", "db_type": "text", "nullable": False}],
-        "checks": [{"name": "ck_account_role", "column": "role", "values": ["'admin'", "'user'"]}],
+        "checks": [
+            {
+                "name": "ck_account_role",
+                "column": "role",
+                "values": ["'admin'", "'user'"],
+            }
+        ],
     }
     _build_sa_table_from_ir(md, model_ir)
     table = md.tables["account"]
@@ -268,7 +274,6 @@ async def test_explicit_foreign_key_shadow_id_auto_migrate_roundtrip(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-
         role = await TyRoundJobRole.create(name="ic")
         card = await TyRoundScorecard.create(title="card-a", job_role=role)
         assert card.job_role_id == role.id

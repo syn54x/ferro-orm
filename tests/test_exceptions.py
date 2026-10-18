@@ -74,9 +74,7 @@ class TestStructuredAttributes:
             sqlstate="23505",
             constraint="uq_user_email",
         )
-        assert exc.driver_message == (
-            "duplicate key value violates unique constraint"
-        )
+        assert exc.driver_message == ("duplicate key value violates unique constraint")
         assert exc.sqlstate == "23505"
         assert exc.constraint == "uq_user_email"
         assert str(exc) == "Save failed: duplicate key"

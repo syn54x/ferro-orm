@@ -79,16 +79,20 @@ class FlavorWider(StrEnum):
 def _or_check() -> Check:
     return Check(
         "at_most_one_side",
-        lambda rebuild: (rebuild.left == None)  # noqa: E711
-        | (rebuild.right == None),  # noqa: E711
+        lambda rebuild: (
+            (rebuild.left == None)  # noqa: E711
+            | (rebuild.right == None)
+        ),  # noqa: E711
     )
 
 
 def _and_check() -> Check:
     return Check(
         "at_most_one_side",
-        lambda rebuild: (rebuild.left == None)  # noqa: E711
-        & (rebuild.right == None),  # noqa: E711
+        lambda rebuild: (
+            (rebuild.left == None)  # noqa: E711
+            & (rebuild.right == None)
+        ),  # noqa: E711
     )
 
 

@@ -525,9 +525,7 @@ async def create_tables(using: str | None = None) -> PassReport:
         raised. A failed pass's error carries it as ``.report``.
     """
     _ensure_rust_registration_synced()
-    return await _run_pass(
-        _core_create_tables(using=using, **_auto_migrate_settings())
-    )
+    return await _run_pass(_core_create_tables(using=using, **_auto_migrate_settings()))
 
 
 async def migrate(

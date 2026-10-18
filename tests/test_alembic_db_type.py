@@ -96,9 +96,11 @@ def test_uuid_on_uuid_renders_sa_uuid():
 
     col = get_metadata().tables["record"].c.ext_id
     # SA >= 2 provides sa.Uuid; older SA falls back to String(36)
-    assert isinstance(col.type, (sa.Uuid, sa.String)) if hasattr(
-        sa, "Uuid"
-    ) else isinstance(col.type, sa.String)
+    assert (
+        isinstance(col.type, (sa.Uuid, sa.String))
+        if hasattr(sa, "Uuid")
+        else isinstance(col.type, sa.String)
+    )
 
 
 def test_text_on_uuid_renders_string_family():

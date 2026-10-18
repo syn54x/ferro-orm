@@ -68,7 +68,9 @@ def test_assemble_fails_loudly_on_missing_envelope(clean_registry) -> None:
 
 
 @pytest.mark.asyncio
-async def test_clean_reconnect_zero_compiles_zero_bulk_install(db_url, clean_registry) -> None:
+async def test_clean_reconnect_zero_compiles_zero_bulk_install(
+    db_url, clean_registry
+) -> None:
     """After the first sync, an identical reconnect assembles without recompiling
     and skips the bulk install fingerprint gate."""
 
@@ -91,7 +93,9 @@ async def test_clean_reconnect_zero_compiles_zero_bulk_install(db_url, clean_reg
     assert _bulk_install_count_for_test() - after_first == 0
 
 
-def test_dirty_resolve_recompiles_only_affected_subset(clean_registry, monkeypatch) -> None:
+def test_dirty_resolve_recompiles_only_affected_subset(
+    clean_registry, monkeypatch
+) -> None:
     """Relationship resolution recompiles changed models and shadow-FK targets,
     not the entire registry."""
     from ferro.relations import resolve_relationships
@@ -128,7 +132,9 @@ def test_dirty_resolve_recompiles_only_affected_subset(clean_registry, monkeypat
 
 
 @pytest.mark.asyncio
-async def test_ensure_rust_registration_synced_routes_connect(db_url, clean_registry) -> None:
+async def test_ensure_rust_registration_synced_routes_connect(
+    db_url, clean_registry
+) -> None:
     from ferro import ensure_resolved_modelset
 
     class GcRouted(Model):

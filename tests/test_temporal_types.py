@@ -17,7 +17,6 @@ async def test_temporal_types_roundtrip(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-
         # Create fixed timestamps (stripping microseconds for SQLite TEXT comparison stability)
         now = datetime.now(timezone.utc).replace(microsecond=0)
         today = date.today()
@@ -53,7 +52,6 @@ async def test_temporal_filtering(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-
         past = datetime(2020, 1, 1, tzinfo=timezone.utc)
         future = datetime(2030, 1, 1, tzinfo=timezone.utc)
 
@@ -63,9 +61,7 @@ async def test_temporal_filtering(db_url):
         now = datetime(2025, 1, 1, tzinfo=timezone.utc)
 
         # Filter for future events
-        future_events = await TemporalModel.where(
-            lambda m: m.occurred_at > now
-        ).all()
+        future_events = await TemporalModel.where(lambda m: m.occurred_at > now).all()
         assert len(future_events) == 1
         assert future_events[0].occurred_at.year == 2030
 

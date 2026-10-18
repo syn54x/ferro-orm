@@ -17,7 +17,6 @@ async def test_model_save_new_record(db_url):
 
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         user = CrudUser(username="test_user", email="test@example.com")
         await user.save()
         assert user.id is not None
@@ -34,7 +33,6 @@ async def test_model_save_update_record(db_url):
 
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         user = CrudUser(id=1, username="initial_name", email="initial@example.com")
         await user.save()
         user.username = "updated_name"
@@ -56,7 +54,6 @@ async def test_model_all_fetching(db_url):
 
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         u1 = CrudUser(id=1, username="alice", email="alice@example.com")
         u2 = CrudUser(id=2, username="bob", email="bob@example.com")
         await u1.save()
@@ -78,20 +75,20 @@ async def test_upsert_updates_existing_row_without_duplicate(db_url):
 
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         user = CrudUser(id=42, username="original", email="original@example.com")
         await user.save()
         users_before = await CrudUser.all()
         assert len(users_before) == 1
 
         with pytest.raises(ferro.UniqueViolationError):
-            await CrudUser(id=42, username="updated", email="original@example.com").save()
+            await CrudUser(
+                id=42, username="updated", email="original@example.com"
+            ).save()
 
         await CrudUser.upsert(id=42, username="updated", email="original@example.com")
     ferro.reset_engine()
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         fetched = await CrudUser.get(42)
         assert fetched is not None
         assert fetched.username == "updated"
@@ -109,7 +106,6 @@ async def test_identity_map_consistency(db_url):
 
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         u1 = CrudUser(id=100, username="identity", email="id@test.com")
         await u1.save()
         results_1 = await CrudUser.all()
@@ -131,7 +127,6 @@ async def test_identity_map_disabled_returns_distinct_instances(db_url):
 
     await ferro.connect(db_url, auto_migrate=True, identity_map=False)
     async with ferro.engines.session():
-
         u1 = CrudUser(id=200, username="nomap", email="nomap@test.com")
         await u1.save()
         results_1 = await CrudUser.all()
@@ -154,7 +149,6 @@ async def test_model_get_operation(db_url):
 
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         u1 = CrudUser(id=500, username="get_test", email="get@test.com")
         await u1.save()
         user = await CrudUser.get(500)
@@ -174,7 +168,6 @@ async def test_model_get_invalid_usage(db_url):
 
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         with pytest.raises(TypeError):
             await CrudUser.get(id=1)
         with pytest.raises(TypeError):
@@ -192,7 +185,6 @@ async def test_model_get_not_found(db_url):
 
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         with pytest.raises(ModelDoesNotExist) as exc_info:
             await CrudUser.get(9999)
         assert exc_info.value.model is CrudUser

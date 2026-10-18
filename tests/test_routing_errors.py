@@ -47,7 +47,9 @@ async def test_using_conflicting_with_ambient_session_raises(db_url, tmp_path):
         name: str
 
     await connect(db_url, auto_migrate=True)
-    await connect(f"sqlite:{tmp_path}/other.db?mode=rwc", auto_migrate=True, name="other")
+    await connect(
+        f"sqlite:{tmp_path}/other.db?mode=rwc", auto_migrate=True, name="other"
+    )
     async with engines.session():
         with pytest.raises(ValueError, match="conflicts with the ambient session"):
             await RtC.all(using="other")
@@ -59,6 +61,8 @@ async def test_using_alone_still_works_without_identity(db_url, tmp_path):
         id: int | None = Field(default=None, primary_key=True)
         name: str
 
-    await connect(f"sqlite:{tmp_path}/named.db?mode=rwc", auto_migrate=True, name="named")
+    await connect(
+        f"sqlite:{tmp_path}/named.db?mode=rwc", auto_migrate=True, name="named"
+    )
     rows = await RtD.all(using="named")
     assert rows == []  # runs fine sessionless; no identity map involved

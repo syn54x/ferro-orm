@@ -189,9 +189,11 @@ async def test_unbounded_before_returns_every_earlier_row_in_declared_order(db_u
     async with ferro.engines.session():
         await _seed_page_items()
         ordered = await _ordered(BeforePageItem).all()
-        prefix = await _ordered(BeforePageItem).before(
-            (ordered[3].updated_at, ordered[3].id)
-        ).all()
+        prefix = (
+            await _ordered(BeforePageItem)
+            .before((ordered[3].updated_at, ordered[3].id))
+            .all()
+        )
         assert [row.id for row in prefix] == [1, 2, 3]
 
 
@@ -202,9 +204,11 @@ async def test_before_first_is_adjacent_previous_row(db_url):
     async with ferro.engines.session():
         await _seed_page_items()
         ordered = await _ordered(BeforePageItem).all()
-        adjacent = await _ordered(BeforePageItem).before(
-            (ordered[3].updated_at, ordered[3].id)
-        ).first()
+        adjacent = (
+            await _ordered(BeforePageItem)
+            .before((ordered[3].updated_at, ordered[3].id))
+            .first()
+        )
         assert adjacent is not None
         assert adjacent.id == 3
 

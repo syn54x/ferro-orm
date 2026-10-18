@@ -89,9 +89,7 @@ def _validate_query_node(node: dict[str, Any], label: str) -> None:
         # traversal-free test, pinned wire bytes).
         _require_keys(node, {"hops", "where"}, label)
         hops = node["hops"]
-        assert isinstance(hops, list) and hops, (
-            f"{label}.hops must be a non-empty list"
-        )
+        assert isinstance(hops, list) and hops, f"{label}.hops must be a non-empty list"
         for h, hop in enumerate(hops):
             _validate_hop(hop, f"{label}.hops[{h}]")
         inner = node["where"]
@@ -109,7 +107,7 @@ def _validate_query_node(node: dict[str, Any], label: str) -> None:
                 assert isinstance(join, dict), f"{join_label} must be object"
                 _require_keys(join, {"join_type", "path"}, join_label)
                 assert join["join_type"] == "inner", (
-                    f"{join_label}.join_type must be \"inner\" (ADR-0006: "
+                    f'{join_label}.join_type must be "inner" (ADR-0006: '
                     "traversal inside a subquery narrows)"
                 )
                 assert isinstance(join["path"], list) and join["path"], (
@@ -153,7 +151,15 @@ def _validate_schema_payload(payload: dict[str, Any], label: str) -> None:
         assert isinstance(model, dict), f"{model_label} must be object"
         _require_keys(
             model,
-            {"model_name", "table_name", "columns", "foreign_keys", "indexes", "uniques", "checks"},
+            {
+                "model_name",
+                "table_name",
+                "columns",
+                "foreign_keys",
+                "indexes",
+                "uniques",
+                "checks",
+            },
             model_label,
         )
         assert isinstance(model["model_name"], str) and model["model_name"], (
@@ -234,16 +240,12 @@ def _validate_materialization(plan: dict[str, Any], label: str) -> None:
         assert isinstance(expr["column"], str) and expr["column"], (
             f"{field_label}.expr.column must be non-empty string"
         )
-        assert isinstance(expr["path"], list), (
-            f"{field_label}.expr.path must be a list"
-        )
+        assert isinstance(expr["path"], list), f"{field_label}.expr.path must be a list"
         for h, hop in enumerate(expr["path"]):
             _validate_hop(hop, f"{field_label}.expr.path[{h}]")
         # An expression field's traversal travels on expr.path (hop facts);
         # its field-level path is always empty.
-        assert field["path"] == [], (
-            f"{field_label}.path must be empty on an expr field"
-        )
+        assert field["path"] == [], f"{field_label}.path must be empty on an expr field"
 
 
 def _validate_query_payload(payload: dict[str, Any], label: str) -> None:
@@ -268,7 +270,9 @@ def _validate_query_payload(payload: dict[str, Any], label: str) -> None:
         f"{label}.model_name must be non-empty string"
     )
     where_nodes = payload["where"]
-    assert isinstance(where_nodes, list) and where_nodes, f"{label}.where must be non-empty list"
+    assert isinstance(where_nodes, list) and where_nodes, (
+        f"{label}.where must be non-empty list"
+    )
     for i, node in enumerate(where_nodes):
         node_label = f"{label}.where[{i}]"
         assert isinstance(node, dict), f"{node_label} must be object"
@@ -306,7 +310,9 @@ def _validate_query_payload(payload: dict[str, Any], label: str) -> None:
         )
     if "after" in payload:
         after = payload["after"]
-        assert isinstance(after, list) and after, f"{label}.after must be a non-empty list"
+        assert isinstance(after, list) and after, (
+            f"{label}.after must be a non-empty list"
+        )
         assert len(after) == len(payload["order_by"]), (
             f"{label}.after arity must match order_by"
         )
@@ -319,7 +325,9 @@ def _validate_query_payload(payload: dict[str, Any], label: str) -> None:
         )
     if "before" in payload:
         before = payload["before"]
-        assert isinstance(before, list) and before, f"{label}.before must be a non-empty list"
+        assert isinstance(before, list) and before, (
+            f"{label}.before must be a non-empty list"
+        )
         assert len(before) == len(payload["order_by"]), (
             f"{label}.before arity must match order_by"
         )
@@ -392,7 +400,9 @@ def _validate_codec_payload(payload: dict[str, Any], label: str) -> None:
 
     hydration_abi = payload["hydration_abi"]
     assert isinstance(hydration_abi, dict), f"{label}.hydration_abi must be object"
-    _require_keys(hydration_abi, {"constructor_mode", "required_slots"}, f"{label}.hydration_abi")
+    _require_keys(
+        hydration_abi, {"constructor_mode", "required_slots"}, f"{label}.hydration_abi"
+    )
     assert hydration_abi["constructor_mode"] == "direct_dict", (
         f"{label}.hydration_abi.constructor_mode must be direct_dict"
     )
@@ -404,7 +414,9 @@ def _validate_codec_payload(payload: dict[str, Any], label: str) -> None:
         "__pydantic_fields_set__",
         "__pydantic_extra__",
         "__pydantic_private__",
-    }.issubset(set(required_slots)), f"{label}.hydration_abi.required_slots missing required slots"
+    }.issubset(set(required_slots)), (
+        f"{label}.hydration_abi.required_slots missing required slots"
+    )
 
 
 def _validate_domain_payload(domain: str, payload: dict[str, Any], label: str) -> None:
@@ -420,7 +432,9 @@ def _validate_domain_payload(domain: str, payload: dict[str, Any], label: str) -
 
 def test_ir_vectors_directory_has_seed_vectors() -> None:
     vectors = _load_vectors()
-    assert vectors, "Expected at least one IR vector fixture in tests/fixtures/ir_vectors"
+    assert vectors, (
+        "Expected at least one IR vector fixture in tests/fixtures/ir_vectors"
+    )
     found_domains = {payload["domain"] for _, payload in vectors if "domain" in payload}
     assert SUPPORTED_DOMAINS.issubset(found_domains), (
         f"Expected at least one vector for each domain: {sorted(SUPPORTED_DOMAINS)}"
@@ -434,8 +448,12 @@ def test_ir_vectors_match_phase0_contract_envelope() -> None:
         assert isinstance(vector["vector_name"], str) and vector["vector_name"], (
             f"{label}.vector_name must be non-empty string"
         )
-        assert vector["domain"] in SUPPORTED_DOMAINS, f"{label}.domain unsupported: {vector['domain']!r}"
-        assert vector["expect_valid"] is True, f"{label}.expect_valid must be true for Phase 0"
+        assert vector["domain"] in SUPPORTED_DOMAINS, (
+            f"{label}.domain unsupported: {vector['domain']!r}"
+        )
+        assert vector["expect_valid"] is True, (
+            f"{label}.expect_valid must be true for Phase 0"
+        )
 
         ir = vector["ir"]
         assert isinstance(ir, dict), f"{label}.ir must be object"
@@ -605,43 +623,59 @@ def test_schema_ir_compiler_emits_db_check_expression_for_closed_domain(
     document = next(model for model in models if model["table_name"] == "document")
     checks = document["checks"]
     assert checks == [
-        {"name": "ck_document_format", "column": "format", "values": ["'pdf'", "'json'"]}
+        {
+            "name": "ck_document_format",
+            "column": "format",
+            "values": ["'pdf'", "'json'"],
+        }
     ]
 
 
-def test_compiler_omits_db_type_for_non_explicit_columns(clean_model_registry: None) -> None:
+def test_compiler_omits_db_type_for_non_explicit_columns(
+    clean_model_registry: None,
+) -> None:
     from ferro import Field, Model, clear_registry
     from ferro.columns import build_column_specs
     from ferro.ir.compiler import compile_schema_ir_payload
 
     clear_registry()
-    M = type("Acct", (Model,), {
-        "__annotations__": {"id": int | None, "balance": int, "code": str},
-        "id": Field(default=None, primary_key=True),
-        "code": Field(db_type="varchar(32)"),
-    })
+    M = type(
+        "Acct",
+        (Model,),
+        {
+            "__annotations__": {"id": int | None, "balance": int, "code": str},
+            "id": Field(default=None, primary_key=True),
+            "code": Field(db_type="varchar(32)"),
+        },
+    )
     cols = {
         c["name"]: c
         for c in compile_schema_ir_payload(
             "Acct", list(build_column_specs(M).values()), table_name="acct"
         )["models"][0]["columns"]
     }
-    assert "db_type" not in cols["balance"], cols["balance"]   # non-explicit -> omitted
-    assert "db_type" not in cols["id"], cols["id"]             # non-explicit -> omitted
-    assert cols["code"]["db_type"] == "varchar(32)"            # explicit -> kept
+    assert "db_type" not in cols["balance"], cols["balance"]  # non-explicit -> omitted
+    assert "db_type" not in cols["id"], cols["id"]  # non-explicit -> omitted
+    assert cols["code"]["db_type"] == "varchar(32)"  # explicit -> kept
     assert cols["code"]["db_type_explicit"] is True
 
 
-def test_compiler_bytes_field_emits_binary_logical_type(clean_model_registry: None) -> None:
+def test_compiler_bytes_field_emits_binary_logical_type(
+    clean_model_registry: None,
+) -> None:
     from ferro import Field, Model, clear_registry
     from ferro.columns import build_column_specs
     from ferro.ir.compiler import compile_schema_ir_payload
 
     clear_registry()
-    M = type("Blob", (Model,), {
-        "__annotations__": {"id": int | None, "contents": bytes},
-        "id": Field(default=None, primary_key=True),
-    })
+    M = type(
+        "Blob",
+        (Model,),
+        {
+            "__annotations__": {"id": int | None, "contents": bytes},
+            "id": Field(default=None, primary_key=True),
+        },
+    )
     cols = {
         c["name"]: c
         for c in compile_schema_ir_payload(
@@ -651,7 +685,9 @@ def test_compiler_bytes_field_emits_binary_logical_type(clean_model_registry: No
     assert cols["contents"]["logical_type"] == "binary", cols["contents"]
 
 
-def test_schema_ir_compiler_includes_join_table_models(clean_model_registry: None) -> None:
+def test_schema_ir_compiler_includes_join_table_models(
+    clean_model_registry: None,
+) -> None:
     from ferro.ir import compile_registry_schema_ir
     from ferro.relations import resolve_relationships
 
@@ -759,5 +795,9 @@ def test_clear_registry_clears_join_table_registry(clean_model_registry: None) -
         REGISTRY.deregister(name)
 
     assert REGISTRY.join_tables() == {}, "clear_registry must clear join tables"
-    table_names = {m["table_name"] for m in compile_registry_schema_ir()["payload"]["models"]}
-    assert "tag_posts" not in table_names, f"stale join table resurrected: {table_names}"
+    table_names = {
+        m["table_name"] for m in compile_registry_schema_ir()["payload"]["models"]
+    }
+    assert "tag_posts" not in table_names, (
+        f"stale join table resurrected: {table_names}"
+    )

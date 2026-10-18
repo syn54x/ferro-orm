@@ -36,9 +36,7 @@ from tests._pass_harness import auto_migrate, schema_steps, warning_texts
 
 SIDE_CHECK_NAME = "ck_reconcile_at_most_one_side"
 SIDE_CHECK_BODY = '("left" IS NULL) OR ("right" IS NULL)'
-SIDE_CHECK_ADD = (
-    f'ALTER TABLE "reconcile" ADD CONSTRAINT "{SIDE_CHECK_NAME}" CHECK ({SIDE_CHECK_BODY})'
-)
+SIDE_CHECK_ADD = f'ALTER TABLE "reconcile" ADD CONSTRAINT "{SIDE_CHECK_NAME}" CHECK ({SIDE_CHECK_BODY})'
 
 
 def _rewind_registry() -> None:
@@ -91,8 +89,10 @@ def _define_reconcile_with_check() -> type[Model]:
         __ferro_checks__: ClassVar[tuple[Check, ...]] = (
             Check(
                 "at_most_one_side",
-                lambda reconcile: (reconcile.left == None)  # noqa: E711
-                | (reconcile.right == None),  # noqa: E711
+                lambda reconcile: (
+                    (reconcile.left == None)  # noqa: E711
+                    | (reconcile.right == None)
+                ),  # noqa: E711
             ),
         )
 
@@ -106,13 +106,20 @@ def _define_reconcile_with_check() -> type[Model]:
 def _define_cookie(*, db_check: bool) -> type[Model]:
     class Cookie(Model):
         id: int | None = Field(default=None, primary_key=True)
-        flavor: Annotated[Flavor, Field(db_type="text", db_check=db_check)] = Flavor.SWEET
+        flavor: Annotated[Flavor, Field(db_type="text", db_check=db_check)] = (
+            Flavor.SWEET
+        )
 
     return Cookie
 
 
 RECONCILE_LIVE_COLUMNS = [
-    {"name": "id", "declared_type": "integer", "is_primary_key": True, "is_nullable": False},
+    {
+        "name": "id",
+        "declared_type": "integer",
+        "is_primary_key": True,
+        "is_nullable": False,
+    },
     {"name": "left", "declared_type": "varchar", "is_nullable": True},
     {"name": "right", "declared_type": "varchar", "is_nullable": True},
 ]
@@ -166,7 +173,9 @@ def test_live_table_check_replans_to_nothing():
     _define_reconcile_with_check()
     live = [_live_check(SIDE_CHECK_NAME, f"CHECK ({SIDE_CHECK_BODY})")]
     for dialect in ("postgres", "sqlite"):
-        statements, warnings = _render("reconcile", RECONCILE_LIVE_COLUMNS, live, dialect)
+        statements, warnings = _render(
+            "reconcile", RECONCILE_LIVE_COLUMNS, live, dialect
+        )
         assert (statements, warnings) == ([], [])
         assert statements == [], dialect
         assert warnings == [], dialect
@@ -212,7 +221,12 @@ def test_sqlite_column_check_on_an_existing_column_warns_naming_migrations():
     without a table rebuild, so the add is a loud skip naming the door."""
     _define_cookie(db_check=True)
     live_columns = [
-        {"name": "id", "declared_type": "integer", "is_primary_key": True, "is_nullable": False},
+        {
+            "name": "id",
+            "declared_type": "integer",
+            "is_primary_key": True,
+            "is_nullable": False,
+        },
         {"name": "flavor", "declared_type": "text", "is_nullable": False},
     ]
     statements, warnings = _render("cookie", live_columns, [], "sqlite")
@@ -232,7 +246,12 @@ def test_sqlite_column_check_on_a_new_column_rides_its_add_column_inline():
     """#514: SQLite's ADD COLUMN accepts the column CHECK; nothing is skipped."""
     _define_cookie(db_check=True)
     pk_only = [
-        {"name": "id", "declared_type": "integer", "is_primary_key": True, "is_nullable": False}
+        {
+            "name": "id",
+            "declared_type": "integer",
+            "is_primary_key": True,
+            "is_nullable": False,
+        }
     ]
     statements, warnings = _render("cookie", pk_only, [], "sqlite")
     assert (statements, warnings) == (
@@ -263,7 +282,12 @@ def test_without_migrate_updates_no_check_is_planned():
 def test_toggling_db_check_on_an_existing_column_adds_the_column_check():
     _define_cookie(db_check=True)
     live_columns = [
-        {"name": "id", "declared_type": "integer", "is_primary_key": True, "is_nullable": False},
+        {
+            "name": "id",
+            "declared_type": "integer",
+            "is_primary_key": True,
+            "is_nullable": False,
+        },
         {"name": "flavor", "declared_type": "text", "is_nullable": False},
     ]
     statements, _ = _render("cookie", live_columns, [], "postgres")
@@ -283,7 +307,12 @@ def test_column_check_on_a_new_column_rides_its_add_column_exactly_once():
     add must not duplicate it."""
     _define_cookie(db_check=True)
     pk_only = [
-        {"name": "id", "declared_type": "integer", "is_primary_key": True, "is_nullable": False}
+        {
+            "name": "id",
+            "declared_type": "integer",
+            "is_primary_key": True,
+            "is_nullable": False,
+        }
     ]
     statements, _ = _render("cookie", pk_only, [], "postgres")
     assert (statements, _) == (
@@ -452,8 +481,10 @@ async def test_rows_violating_the_new_check_fail_the_connect_and_roll_the_table_
         __ferro_checks__: ClassVar[tuple[Check, ...]] = (
             Check(
                 "at_most_one_side",
-                lambda reconcile: (reconcile.left == None)  # noqa: E711
-                | (reconcile.right == None),  # noqa: E711
+                lambda reconcile: (
+                    (reconcile.left == None)  # noqa: E711
+                    | (reconcile.right == None)
+                ),  # noqa: E711
             ),
         )
 
@@ -515,7 +546,7 @@ async def test_toggling_db_check_on_a_live_column_adds_the_column_check(db_url):
     async with engines.session():
         assert "ck_cookie_flavor" in await _pg_check_names("cookie")
         with pytest.raises(CheckViolationError):
-            await execute("INSERT INTO \"cookie\" (\"flavor\") VALUES ('sour')")
+            await execute('INSERT INTO "cookie" ("flavor") VALUES (\'sour\')')
 
 
 @pytest.mark.backend_matrix

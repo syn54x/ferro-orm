@@ -69,7 +69,9 @@ def _is_overload(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     return False
 
 
-def _method_def(cls: ast.ClassDef, method_name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
+def _method_def(
+    cls: ast.ClassDef, method_name: str
+) -> ast.FunctionDef | ast.AsyncFunctionDef:
     return next(
         node
         for node in cls.body
@@ -143,9 +145,9 @@ def test_bulk_create_payload_has_no_conflict_handling():
         ):
             continue
         keywords = {kw.arg for kw in node.keywords}
-        assert (
-            "mode" not in keywords and "on_conflict" not in keywords
-        ), "bulk_create must not grow conflict handling implicitly"
+        assert "mode" not in keywords and "on_conflict" not in keywords, (
+            "bulk_create must not grow conflict handling implicitly"
+        )
 
 
 FIXTURES = Path(__file__).parent / "static_fixtures"

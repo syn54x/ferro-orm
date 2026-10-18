@@ -71,8 +71,10 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
         selected_backends,
         is_backend_matrix=metafunc.definition.get_closest_marker("backend_matrix")
         is not None,
-        is_sqlite_only=metafunc.definition.get_closest_marker("sqlite_only") is not None,
-        is_postgres_only=metafunc.definition.get_closest_marker("postgres_only") is not None,
+        is_sqlite_only=metafunc.definition.get_closest_marker("sqlite_only")
+        is not None,
+        is_postgres_only=metafunc.definition.get_closest_marker("postgres_only")
+        is not None,
         has_postgres_url=_has_postgres_provider(),
     )
 

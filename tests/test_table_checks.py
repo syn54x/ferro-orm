@@ -37,7 +37,9 @@ from ferro._core import _render_create_table_sql_for_test, _render_table_check_b
 from ferro.ir.compiler import compile_registry_schema_ir
 from ferro.migrations import get_metadata
 
-OUTFLOW_CHECK_BODY = '("outflow_transaction_id" IS NULL) OR ("outflow_activity_id" IS NULL)'
+OUTFLOW_CHECK_BODY = (
+    '("outflow_transaction_id" IS NULL) OR ("outflow_activity_id" IS NULL)'
+)
 OUTFLOW_CHECK_NAME = "ck_transfer_at_most_one_outflow"
 
 
@@ -75,7 +77,9 @@ def test_check_rejects_a_full_constraint_name():
         Check("ck_transfer_at_most_one_outflow", lambda transfer: transfer.memo == None)  # noqa: E711
 
 
-@pytest.mark.parametrize("suffix", ["At_Most_One", "1st_rule", "", "has space", "trailing-"])
+@pytest.mark.parametrize(
+    "suffix", ["At_Most_One", "1st_rule", "", "has space", "trailing-"]
+)
 def test_check_rejects_suffixes_outside_the_identifier_shape(suffix):
     with pytest.raises(TypeError, match=r"\[a-z\]\[a-z0-9_\]\*"):
         Check(suffix, lambda transfer: transfer.memo == None)  # noqa: E711
@@ -163,7 +167,9 @@ def test_collision_with_a_column_check_name_fails_at_class_definition():
             )
 
             id: int | None = Field(default=None, primary_key=True)
-            flavor: Annotated[Flavor, Field(db_type="text", db_check=True)] = Flavor.SWEET
+            flavor: Annotated[Flavor, Field(db_type="text", db_check=True)] = (
+                Flavor.SWEET
+            )
             memo: str | None = None
 
 
@@ -201,7 +207,9 @@ def test_unsupported_check_predicates_fail_at_class_definition(predicate, expect
             id: int | None = Field(default=None, primary_key=True)
             memo: str | None = None
             amount: int = 0
-            owner: Annotated[RejectOwner | None, ForeignKey(related_name="rejects")] = None
+            owner: Annotated[RejectOwner | None, ForeignKey(related_name="rejects")] = (
+                None
+            )
             notes: Relation[list["RejectNote"]] = BackRef()
 
         class RejectNote(Model):
@@ -238,25 +246,33 @@ def _build_transfer_models():
         __ferro_checks__: ClassVar[tuple[Check, ...]] = (
             Check(
                 "at_most_one_outflow",
-                lambda transfer: (transfer.outflow_transaction == None)  # noqa: E711
-                | (transfer.outflow_activity == None),  # noqa: E711
+                lambda transfer: (
+                    (transfer.outflow_transaction == None)  # noqa: E711
+                    | (transfer.outflow_activity == None)
+                ),  # noqa: E711
             ),
             Check(
                 "at_most_one_inflow",
-                lambda transfer: (transfer.inflow_transaction_id == None)  # noqa: E711
-                | (transfer.inflow_activity_id == None),  # noqa: E711
+                lambda transfer: (
+                    (transfer.inflow_transaction_id == None)  # noqa: E711
+                    | (transfer.inflow_activity_id == None)
+                ),  # noqa: E711
             ),
             Check(
                 "outflow_present",
-                lambda transfer: ~(
-                    (transfer.outflow_transaction == None)  # noqa: E711
-                    & (transfer.outflow_activity == None)  # noqa: E711
+                lambda transfer: (
+                    ~(
+                        (transfer.outflow_transaction == None)  # noqa: E711
+                        & (transfer.outflow_activity == None)  # noqa: E711
+                    )
                 ),
             ),
             Check(
                 "inflow_present",
-                lambda transfer: (transfer.inflow_transaction_id != None)  # noqa: E711
-                | (transfer.inflow_activity_id != None),  # noqa: E711
+                lambda transfer: (
+                    (transfer.inflow_transaction_id != None)  # noqa: E711
+                    | (transfer.inflow_activity_id != None)
+                ),  # noqa: E711
             ),
         )
 
@@ -327,7 +343,9 @@ def test_both_fk_null_spellings_compile_to_the_same_predicate():
         )
 
         id: int | None = Field(default=None, primary_key=True)
-        target: Annotated[SpellTarget | None, ForeignKey(related_name="spellings")] = None
+        target: Annotated[SpellTarget | None, ForeignKey(related_name="spellings")] = (
+            None
+        )
 
     table_checks = _model_payload("spelling")["table_checks"]
     assert table_checks[0]["predicate"] == table_checks[1]["predicate"]
@@ -344,9 +362,9 @@ def test_forward_referenced_relation_spelling_compiles():
         )
 
         id: int | None = Field(default=None, primary_key=True)
-        later: Annotated["LaterTarget", ForeignKey(related_name="forwards", nullable=True)] = (
-            None
-        )
+        later: Annotated[
+            "LaterTarget", ForeignKey(related_name="forwards", nullable=True)
+        ] = None
 
     class LaterTarget(Model):
         id: int | None = Field(default=None, primary_key=True)
@@ -375,7 +393,9 @@ def test_create_table_inlines_the_named_check_on_both_dialects(dialect):
         "Transfer", json.dumps(payload), dialect
     )
 
-    assert f'CONSTRAINT "{OUTFLOW_CHECK_NAME}" CHECK ({OUTFLOW_CHECK_BODY})' in create_sql
+    assert (
+        f'CONSTRAINT "{OUTFLOW_CHECK_NAME}" CHECK ({OUTFLOW_CHECK_BODY})' in create_sql
+    )
     assert not any("CHECK" in sql for sql in post_create_sqls), post_create_sqls
 
 
@@ -417,11 +437,15 @@ def test_db_check_column_check_stays_out_of_the_create_table_body():
 
     payload = json.dumps(compile_registry_schema_ir()["payload"])
 
-    pg_create, pg_post, _ = _render_create_table_sql_for_test("Cookie", payload, "postgres")
+    pg_create, pg_post, _ = _render_create_table_sql_for_test(
+        "Cookie", payload, "postgres"
+    )
     assert "CHECK" not in pg_create
     assert any("ck_cookie_flavor" in sql for sql in pg_post)
 
-    lite_create, lite_post, _ = _render_create_table_sql_for_test("Cookie", payload, "sqlite")
+    lite_create, lite_post, _ = _render_create_table_sql_for_test(
+        "Cookie", payload, "sqlite"
+    )
     assert (
         '"flavor" text NOT NULL CONSTRAINT "ck_cookie_flavor" '
         "CHECK (\"flavor\" IN ('sweet', 'salty'))"
@@ -531,8 +555,10 @@ async def test_auto_migrate_does_not_add_a_check_to_an_existing_table(db_url):
         __ferro_checks__: ClassVar[tuple[Check, ...]] = (
             Check(
                 "at_most_one_side",
-                lambda reconcile: (reconcile.left == None)  # noqa: E711
-                | (reconcile.right == None),  # noqa: E711
+                lambda reconcile: (
+                    (reconcile.left == None)  # noqa: E711
+                    | (reconcile.right == None)
+                ),  # noqa: E711
             ),
         )
 
@@ -594,7 +620,9 @@ async def test_autogenerate_against_a_rust_bootstrapped_db_is_empty(
     finally:
         engine.dispose()
 
-    flat = [op for entry in diff for op in (entry if isinstance(entry, list) else [entry])]
+    flat = [
+        op for entry in diff for op in (entry if isinstance(entry, list) else [entry])
+    ]
     assert flat == [], f"table checks produced a phantom autogenerate diff:\n{flat}"
 
 

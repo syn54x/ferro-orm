@@ -58,7 +58,6 @@ async def test_steady_state_crud_issues_zero_catalog_queries(db_url, clean_regis
 
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         # Warm-up: touch every table (model tables and the m2m join table) once.
         tag = await C2Tag.create(label="warm")
         task = await C2Task.create(
@@ -141,7 +140,6 @@ async def test_native_enum_str_model_steady_state_and_correct_casts(
 
     await connect(db_url, auto_migrate=False)
     async with ferro.engines.session():
-
         first = await C2StrRow.create(status="active")
         assert (await C2StrRow.get(first.id)).status == "active"
 
@@ -167,7 +165,6 @@ async def test_warm_up_issues_at_most_one_catalog_query_per_table(
 
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         before = _catalog_query_count_for_test()
         await C2Cold.create(name="first", due=datetime(2026, 7, 2, tzinfo=UTC))
         after_first = _catalog_query_count_for_test()
@@ -180,7 +177,9 @@ async def test_warm_up_issues_at_most_one_catalog_query_per_table(
 
 
 @pytest.mark.asyncio
-async def test_sqlite_crud_issues_zero_catalog_queries(db_url, db_backend, clean_registry):
+async def test_sqlite_crud_issues_zero_catalog_queries(
+    db_url, db_backend, clean_registry
+):
     """Non-Postgres backends must stay a cheap no-op: the counter never moves."""
     if db_backend != "sqlite":
         pytest.skip("sqlite-only assertion")
@@ -191,7 +190,6 @@ async def test_sqlite_crud_issues_zero_catalog_queries(db_url, db_backend, clean
 
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-
         row = await C2Lite.create(name="a")
         await C2Lite.get(row.id)
         await C2Lite.where(lambda r: r.name == "a").count()
@@ -200,9 +198,7 @@ async def test_sqlite_crud_issues_zero_catalog_queries(db_url, db_backend, clean
 
 @pytest.mark.asyncio
 @pytest.mark.postgres_only
-async def test_catalog_cache_invalidated_by_mid_session_migrate(
-    db_url, clean_registry
-):
+async def test_catalog_cache_invalidated_by_mid_session_migrate(db_url, clean_registry):
     """connect → CRUD (populates cache) → migrate() adds an enum column
     (refresh_pool clears the cache) → the next CRUD binds against the new
     schema, not a stale snapshot."""
@@ -220,7 +216,6 @@ async def test_catalog_cache_invalidated_by_mid_session_migrate(
 
     await connect(db_url, auto_migrate=False)
     async with ferro.engines.session():
-
         await execute(
             'CREATE TABLE "c2grow" ("id" bigserial PRIMARY KEY, "name" varchar NOT NULL)'
         )
@@ -233,7 +228,6 @@ async def test_catalog_cache_invalidated_by_mid_session_migrate(
     await ferro.migrate(updates=True)
 
     async with ferro.engines.session():
-
         # The new native-enum column must be visible to bind casting immediately;
         # a stale cache (no enum entry for "mood") would bind plain text and the
         # prepared INSERT would fail against the enum column.

@@ -104,9 +104,7 @@ _TOKEN_CASES = [
         {"postgres": "BIGINT", "sqlite": "BIGINT"},
         id="bigint",
     ),
-    pytest.param(
-        "uuid", UUID, {"postgres": "UUID", "sqlite": "CHAR(32)"}, id="uuid"
-    ),
+    pytest.param("uuid", UUID, {"postgres": "UUID", "sqlite": "CHAR(32)"}, id="uuid"),
     pytest.param(
         "timestamp",
         dt.datetime,
@@ -126,9 +124,7 @@ _TOKEN_CASES = [
     pytest.param(
         "jsonb", dict, {"postgres": "JSONB", "sqlite": "JSON"}, id="jsonb-dict"
     ),
-    pytest.param(
-        "json", dict, {"postgres": "JSON", "sqlite": "JSON"}, id="json-dict"
-    ),
+    pytest.param("json", dict, {"postgres": "JSON", "sqlite": "JSON"}, id="json-dict"),
 ]
 
 
@@ -146,21 +142,19 @@ def _extract_col_type(sql: str, col_name: str) -> str:
     Returns the uppercased type text up to the first trailing column attribute
     (NOT NULL, comma, closing paren, etc.). Whitespace is normalized.
     """
-    pattern = re.compile(_COL_RE_TEMPLATE.format(col=re.escape(col_name)), re.IGNORECASE)
+    pattern = re.compile(
+        _COL_RE_TEMPLATE.format(col=re.escape(col_name)), re.IGNORECASE
+    )
     match = pattern.search(sql)
     if match is None:
-        raise AssertionError(
-            f"Column {col_name!r} not found in SQL fragment:\n{sql}"
-        )
+        raise AssertionError(f"Column {col_name!r} not found in SQL fragment:\n{sql}")
     return " ".join(match.group(1).upper().split())
 
 
 def _render_alembic_sql(model_cls: type[Model], dialect_name: str) -> str:
     metadata = get_metadata()
     table = metadata.tables[model_cls.__name__.lower()]
-    dialect = (
-        postgresql.dialect() if dialect_name == "postgres" else sqlite.dialect()
-    )
+    dialect = postgresql.dialect() if dialect_name == "postgres" else sqlite.dialect()
     return str(CreateTable(table).compile(dialect=dialect))
 
 

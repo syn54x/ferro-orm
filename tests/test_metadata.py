@@ -18,7 +18,6 @@ async def test_autoincrement_id_retrieval(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-
         user = AutoUser(name="taylor")
         assert user.id is None
 
@@ -42,7 +41,6 @@ async def test_manual_id_no_autoincrement(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-
         user = ManualUser(id=999, name="jeff")
         await user.save()
 
@@ -66,7 +64,6 @@ async def test_string_primary_key(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-
         token = str(uuid.uuid4())
         s = Session(token=token, user_id=1)
         await s.save()

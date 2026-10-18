@@ -214,9 +214,7 @@ async def test_projected_aggregate_sum_nulls_last(db_url):
         await _seed_items()
 
         rows = await (
-            ObnItem.select(
-                lambda t: {"category": t.category, "total": t.amount.sum()}
-            )
+            ObnItem.select(lambda t: {"category": t.category, "total": t.amount.sum()})
             .order_by(lambda t: t.amount.sum(), "desc", nulls="last")
             .order_by("category")
             .all()

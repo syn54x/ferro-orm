@@ -104,9 +104,7 @@ def _postgres_check_constraints(
     return [(r[0], r[1]) for r in rows]
 
 
-def _postgres_enum_types(
-    postgres_base_url: str, schema_name: str
-) -> list[str]:
+def _postgres_enum_types(postgres_base_url: str, schema_name: str) -> list[str]:
     import psycopg
 
     with psycopg.connect(postgres_base_url) as conn:

@@ -256,9 +256,7 @@ async def test_declared_policy_scopes_plain_queries_and_rejects_cross_tenant_wri
 
 @pytest.mark.postgres_only
 @pytest.mark.asyncio
-async def test_fail_closed_session_returns_zero_rows_with_no_error(
-    db_url, tenant_role
-):
+async def test_fail_closed_session_returns_zero_rows_with_no_error(db_url, tenant_role):
     """The NULLIF contract, both halves.
 
     A session that never declared settings reads the GUC as `NULL`. A session
@@ -306,9 +304,7 @@ async def test_fail_closed_session_returns_zero_rows_with_no_error(
 
 @pytest.mark.postgres_only
 @pytest.mark.asyncio
-async def test_deferred_set_config_scopes_subsequent_plain_queries(
-    db_url, tenant_role
-):
+async def test_deferred_set_config_scopes_subsequent_plain_queries(db_url, tenant_role):
     """The auth-chain shape: the tenant isn't known until partway through the
     request, so the session opens bare and `current_session().set_config`
     supplies the scope once it resolves."""
@@ -419,7 +415,9 @@ async def test_owner_and_restrictive_tenant_fence_compose_end_to_end(
             "tenant", settings={LEDGER_KEY: str(LEDGER_A), MEMBER_KEY: "alice"}
         ):
             visible_ids = {row.id for row in await SharedDoc.all()}
-            assert visible_ids == {doc.id}, "alice's own in-ledger doc must still show up"
+            assert visible_ids == {doc.id}, (
+                "alice's own in-ledger doc must still show up"
+            )
             assert other_ledger_doc.id not in visible_ids
     finally:
         async with engines.session():

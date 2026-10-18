@@ -264,7 +264,9 @@ class _RelationNullProxy:
         return self._reject_operator("like()")
 
     def __repr__(self) -> str:
-        return f"_RelationNullProxy(relation={self._relation!r}, shadow={self._shadow!r})"
+        return (
+            f"_RelationNullProxy(relation={self._relation!r}, shadow={self._shadow!r})"
+        )
 
 
 def _declared_checks(model_cls: type[Any]) -> tuple[Check, ...]:
@@ -319,7 +321,9 @@ def _reverse_relation_names(model_cls: type[Any]) -> frozenset[str]:
     """Declared BackRef / ManyToMany field names (rejected in a check body)."""
     return frozenset(
         field_name
-        for field_name, meta in (getattr(model_cls, "ferro_relations", {}) or {}).items()
+        for field_name, meta in (
+            getattr(model_cls, "ferro_relations", {}) or {}
+        ).items()
         if not isinstance(meta, ForeignKey)
     )
 

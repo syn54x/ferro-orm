@@ -73,7 +73,11 @@ def backends_for_test(
         return ("sqlite",)
 
     if is_postgres_only:
-        return ("postgres",) if has_postgres_url and "postgres" in selected_backends else ()
+        return (
+            ("postgres",)
+            if has_postgres_url and "postgres" in selected_backends
+            else ()
+        )
 
     if is_backend_matrix:
         if has_postgres_url:
@@ -166,4 +170,6 @@ def build_postgres_url_from_connection_params(params: dict[str, str]) -> str:
     if port:
         netloc += f":{port}"
 
-    return urlunparse(("postgresql", netloc, f"/{quote(dbname, safe='')}", "", query, ""))
+    return urlunparse(
+        ("postgresql", netloc, f"/{quote(dbname, safe='')}", "", query, "")
+    )

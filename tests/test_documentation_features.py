@@ -182,7 +182,9 @@ async def test_field_constraints_pydantic_style(db_url):
     """Test Field() constraint syntax"""
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-        product = await DocProduct.create(sku="TEST-001", name="Test", price=Decimal("10.00"))
+        product = await DocProduct.create(
+            sku="TEST-001", name="Test", price=Decimal("10.00")
+        )
         assert product.sku == "TEST-001"
 
 
@@ -280,7 +282,9 @@ async def test_refresh_method(db_url):
         user = await DocUser.create(username="alice", email="alice@example.com")
 
         # Simulate external update
-        await DocUser.where(lambda t: t.id == user.id).update(email="updated@example.com")
+        await DocUser.where(lambda t: t.id == user.id).update(
+            email="updated@example.com"
+        )
 
         # Refresh instance
         await user.refresh()
@@ -293,7 +297,8 @@ async def test_bulk_create(db_url):
     await connect(db_url, auto_migrate=True)
     async with engines.session():
         users = [
-            DocUser(username=f"user_{i}", email=f"user{i}@example.com") for i in range(100)
+            DocUser(username=f"user_{i}", email=f"user{i}@example.com")
+            for i in range(100)
         ]
 
         count = await DocUser.bulk_create(users)
@@ -354,7 +359,9 @@ async def test_where_equality(db_url):
     """Test .where() with equality operator"""
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-        await DocUser.create(username="alice", email="alice@example.com", is_active=True)
+        await DocUser.create(
+            username="alice", email="alice@example.com", is_active=True
+        )
         await DocUser.create(username="bob", email="bob@example.com", is_active=False)
 
         active_users = await DocUser.where(lambda t: t.is_active == True).all()  # noqa: E712
@@ -399,8 +406,12 @@ async def test_where_in_operator(db_url):
     """Test .in_() operator as documented"""
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-        await DocUser.create(username="alice", email="alice@example.com", role=UserRole.ADMIN)
-        await DocUser.create(username="bob", email="bob@example.com", role=UserRole.MODERATOR)
+        await DocUser.create(
+            username="alice", email="alice@example.com", role=UserRole.ADMIN
+        )
+        await DocUser.create(
+            username="bob", email="bob@example.com", role=UserRole.MODERATOR
+        )
         await DocUser.create(
             username="charlie", email="charlie@example.com", role=UserRole.USER
         )
@@ -418,7 +429,10 @@ async def test_logical_and_operator(db_url):
     await connect(db_url, auto_migrate=True)
     async with engines.session():
         await DocUser.create(
-            username="alice", email="alice@example.com", is_active=True, role=UserRole.ADMIN
+            username="alice",
+            email="alice@example.com",
+            is_active=True,
+            role=UserRole.ADMIN,
         )
         await DocUser.create(
             username="bob", email="bob@example.com", is_active=True, role=UserRole.USER
@@ -442,15 +456,20 @@ async def test_logical_or_operator(db_url):
     """Test | (OR) operator in queries"""
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-        await DocUser.create(username="alice", email="alice@example.com", role=UserRole.ADMIN)
-        await DocUser.create(username="bob", email="bob@example.com", role=UserRole.MODERATOR)
+        await DocUser.create(
+            username="alice", email="alice@example.com", role=UserRole.ADMIN
+        )
+        await DocUser.create(
+            username="bob", email="bob@example.com", role=UserRole.MODERATOR
+        )
         await DocUser.create(
             username="charlie", email="charlie@example.com", role=UserRole.USER
         )
 
         staff = await DocUser.where(
-            lambda t: (t.role == UserRole.ADMIN.value)
-            | (t.role == UserRole.MODERATOR.value)
+            lambda t: (
+                (t.role == UserRole.ADMIN.value) | (t.role == UserRole.MODERATOR.value)
+            )
         ).all()
         assert len(staff) == 2
 
@@ -513,9 +532,13 @@ async def test_query_count(db_url):
     """Test .count() as documented"""
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-        await DocUser.create(username="alice", email="alice@example.com", is_active=True)
+        await DocUser.create(
+            username="alice", email="alice@example.com", is_active=True
+        )
         await DocUser.create(username="bob", email="bob@example.com", is_active=True)
-        await DocUser.create(username="charlie", email="charlie@example.com", is_active=False)
+        await DocUser.create(
+            username="charlie", email="charlie@example.com", is_active=False
+        )
 
         active_count = await DocUser.where(lambda t: t.is_active == True).count()  # noqa: E712
         assert active_count == 2
@@ -526,9 +549,13 @@ async def test_query_exists(db_url):
     """Test .exists() as documented"""
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-        await DocUser.create(username="alice", email="alice@example.com", role=UserRole.ADMIN)
+        await DocUser.create(
+            username="alice", email="alice@example.com", role=UserRole.ADMIN
+        )
 
-        has_admin = await DocUser.where(lambda t: t.role == UserRole.ADMIN.value).exists()
+        has_admin = await DocUser.where(
+            lambda t: t.role == UserRole.ADMIN.value
+        ).exists()
         assert has_admin is True
 
         has_moderator = await DocUser.where(
@@ -542,7 +569,9 @@ async def test_query_update(db_url):
     """Test .update() as documented"""
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-        await DocUser.create(username="alice", email="alice@example.com", is_active=True)
+        await DocUser.create(
+            username="alice", email="alice@example.com", is_active=True
+        )
         await DocUser.create(username="bob", email="bob@example.com", is_active=True)
 
         count = await DocUser.where(lambda t: t.is_active == True).update(  # noqa: E712
@@ -559,7 +588,9 @@ async def test_query_delete(db_url):
     """Test .delete() on query as documented"""
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-        await DocUser.create(username="alice", email="alice@example.com", is_active=True)
+        await DocUser.create(
+            username="alice", email="alice@example.com", is_active=True
+        )
         await DocUser.create(username="bob", email="bob@example.com", is_active=False)
 
         count = await DocUser.where(lambda t: t.is_active == False).delete()  # noqa: E712
@@ -583,7 +614,9 @@ async def test_foreign_key_creation(db_url):
         author = await DocUser.create(username="alice", email="alice@example.com")
 
         # Pass model instance
-        post = await DocPost.create(title="My Post", content="Content here", author=author)
+        post = await DocPost.create(
+            title="My Post", content="Content here", author=author
+        )
 
         assert post.author_id == author.id
 
@@ -627,7 +660,9 @@ async def test_reverse_relation_filtering(db_url):
         await DocPost.create(
             title="Published", content="Content", author=author, published=True
         )
-        await DocPost.create(title="Draft", content="Content", author=author, published=False)
+        await DocPost.create(
+            title="Draft", content="Content", author=author, published=False
+        )
 
         published = await author.posts.where(lambda t: t.published == True).all()  # noqa: E712
         assert len(published) == 1
@@ -839,7 +874,9 @@ async def test_tutorial_blog_example(db_url):
         # Create comments
         comment1 = await Comment.create(text="Great article!", author=bob, post=post1)
 
-        comment2 = await Comment.create(text="Thanks for sharing", author=alice, post=post1)
+        comment2 = await Comment.create(
+            text="Thanks for sharing", author=alice, post=post1
+        )
 
         # Query: Find all published posts
         published = await DocPost.where(lambda t: t.published == True).all()  # noqa: E712

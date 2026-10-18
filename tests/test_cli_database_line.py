@@ -279,9 +279,7 @@ def test_an_at_sign_in_a_query_value_never_shows_the_password_after_it(
     assert SECRET not in out
     assert SECRET not in err
 
-    code, out, err = cli(
-        capsys, "status", "--url", url.replace("a@b", "a%40b")
-    )
+    code, out, err = cli(capsys, "status", "--url", url.replace("a@b", "a%40b"))
 
     assert code == 1
     assert out == (

@@ -53,14 +53,12 @@ async def test_annotated_strenum_text_cold_fetch_after_reset_engine(db_url):
     """Cold read after reset_engine must return StrEnum members, not str (#65)."""
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-
         row_id = uuid4()
         await BillingRow.create(id=row_id, name="x", billing_mode=BillingMode.HOURLY)
 
     reset_engine()
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-
         loaded = (await BillingRow.all())[0]
         assert isinstance(loaded.billing_mode, BillingMode)
         assert loaded.billing_mode == BillingMode.HOURLY

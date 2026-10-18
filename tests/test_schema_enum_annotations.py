@@ -22,4 +22,6 @@ class ModelWithStrEnumField(Model):
 
 def test_enum_type_name_registered_for_future_annotated_strenum():
     """Deferred string annotations must still yield ``enum_type_name`` on the ColumnSpec."""
-    assert ModelWithStrEnumField.__ferro_columns__["format"].enum_type_name == "fileformat"
+    assert (
+        ModelWithStrEnumField.__ferro_columns__["format"].enum_type_name == "fileformat"
+    )

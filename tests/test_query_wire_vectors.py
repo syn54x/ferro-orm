@@ -27,7 +27,16 @@ from typing import Annotated, Any, Callable
 
 import pytest
 
-from ferro import BackRef, Field, FerroField, ForeignKey, ManyToMany, Model, Relation, now
+from ferro import (
+    BackRef,
+    Field,
+    FerroField,
+    ForeignKey,
+    ManyToMany,
+    Model,
+    Relation,
+    now,
+)
 from ferro.query.nodes import QueryProxy
 from ferro.query.wire import compile_query
 from ferro.relations import resolve_relationships

@@ -23,6 +23,8 @@ async def db_transaction(db):
     """Run a test inside a transaction sharing one connection."""
     async with transaction():
         yield
+
+
 # --8<-- [end:fixtures]
 
 

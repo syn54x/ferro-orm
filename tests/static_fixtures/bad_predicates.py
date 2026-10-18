@@ -15,8 +15,8 @@ class BadUser(Model):
     age: int = 0
 
 
-bad_bool: Predicate[BadUser] = lambda u: True          # bool is not QueryNode
-bad_value: Predicate[BadUser] = lambda u: u.age        # FieldProxy is not QueryNode
+bad_bool: Predicate[BadUser] = lambda u: True  # bool is not QueryNode
+bad_value: Predicate[BadUser] = lambda u: u.age  # FieldProxy is not QueryNode
 
 
 # Relation-proxy guardrails (#273). Attribute access on the QueryProxy is

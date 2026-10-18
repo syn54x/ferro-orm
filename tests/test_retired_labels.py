@@ -168,7 +168,9 @@ class RtlLiveOrder(Model):
 
 def _status_column(model) -> dict:
     envelope = compile_model_schema_ir(model.__ferro_identity__, model)
-    return next(c for c in envelope["payload"]["models"][0]["columns"] if c["name"] == "status")
+    return next(
+        c for c in envelope["payload"]["models"][0]["columns"] if c["name"] == "status"
+    )
 
 
 def test_the_column_carries_the_retired_labels_and_an_undeclared_enum_does_not():
@@ -201,9 +203,7 @@ async def test_a_row_holding_the_retired_label_hydrates_and_saves_after_another_
     RtlOrder = order_model()
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-        await RtlOrder.model_construct(
-            id=1, status=RtlStatus.CANCELED, note="a"
-        ).save()
+        await RtlOrder.model_construct(id=1, status=RtlStatus.CANCELED, note="a").save()
 
         order = await RtlOrder.where(lambda rtlorder: rtlorder.id == 1).first()
         assert order is not None and order.status is RtlStatus.CANCELED
@@ -221,9 +221,7 @@ async def test_bulk_create_of_live_labels_beside_a_hydrated_retired_row(db_url):
     RtlOrder = order_model()
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-        await RtlOrder.model_construct(
-            id=1, status=RtlStatus.CANCELED, note="a"
-        ).save()
+        await RtlOrder.model_construct(id=1, status=RtlStatus.CANCELED, note="a").save()
         held = await RtlOrder.where(lambda rtlorder: rtlorder.id == 1).first()
         assert held is not None
 
@@ -294,13 +292,16 @@ def test_deleting_the_member_and_the_declaration_is_the_existing_removal(
     project, pkg, db, capsys
 ):
     start(project, pkg, db, retire(models(ALL)))
-    db.execute("INSERT INTO \"rmlorder\" (\"status\") VALUES ('canceled')")
+    db.execute('INSERT INTO "rmlorder" ("status") VALUES (\'canceled\')')
     write_models(project, pkg, models(KEPT))
     capsys.readouterr()
 
     new("drop_canceled")
 
-    assert "\n  1 removed enum label\n    rmlorderstatus.canceled\n" in capsys.readouterr().out
+    assert (
+        "\n  1 removed enum label\n    rmlorderstatus.canceled\n"
+        in capsys.readouterr().out
+    )
     migration = migration_dir(project, 2)
     write_value(migration, "01_backfill_rmlorder.py", '"refunded"')
     assert run("migrate", "up", "--url", db.url) == 0
@@ -346,9 +347,7 @@ async def test_a_hydrated_retired_row_changes_another_field_and_saves(
     RtlOrder = order_model(validate_assignment)
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-        await RtlOrder.model_construct(
-            id=1, status=RtlStatus.CANCELED, note="a"
-        ).save()
+        await RtlOrder.model_construct(id=1, status=RtlStatus.CANCELED, note="a").save()
         order = await RtlOrder.where(lambda rtlorder: rtlorder.id == 1).first()
         assert order is not None and order.status is RtlStatus.CANCELED
 

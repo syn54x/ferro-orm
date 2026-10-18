@@ -1574,9 +1574,7 @@ def test_pin_e_a_migrated_database_is_the_auto_migrated_one(
         autogenerate(db_url, postgres_base_url, db_schema_name)
 
 
-def _third_db(
-    tmp_path: Path, backend: str, base: str | None
-) -> tuple[str, str | None]:
+def _third_db(tmp_path: Path, backend: str, base: str | None) -> tuple[str, str | None]:
     """A third, empty database of ``backend``: ``(url, schema)``."""
     if backend == "sqlite":
         return f"sqlite:{tmp_path / 'third.db'}?mode=rwc", None
@@ -1742,7 +1740,7 @@ def _pass_declines(url: str) -> bool:
 
 ROWS_HELD = {
     "D3-rename-a-label": (
-        "INSERT INTO \"enmorder\" (\"status\") VALUES ('canceled')",
+        'INSERT INTO "enmorder" ("status") VALUES (\'canceled\')',
         'SELECT "status" FROM "enmorder"',
     ),
 }

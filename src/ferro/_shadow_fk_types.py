@@ -12,8 +12,10 @@ _FALLBACK_SHADOW_ANNOTATION = Union[int, str, None]
 
 
 def is_concrete_ferro_model(obj: Any) -> bool:
-    return isinstance(obj, type) and issubclass(obj, BaseModel) and hasattr(
-        obj, "ferro_fields"
+    return (
+        isinstance(obj, type)
+        and issubclass(obj, BaseModel)
+        and hasattr(obj, "ferro_fields")
     )
 
 

@@ -1,4 +1,5 @@
 """ColumnSpec builder: one derivation site per column fact (grilling 2026-07-08)."""
+
 from typing import Annotated
 from uuid import UUID
 
@@ -26,14 +27,18 @@ class TestAutoincrementDerivation:
 
     def test_raw_path_integer_pk_defaults_true(self, clean_registry):
         class M(Model):
-            id: int = PydanticField(default=None, json_schema_extra={"primary_key": True})
+            id: int = PydanticField(
+                default=None, json_schema_extra={"primary_key": True}
+            )
 
         assert build_column_specs(M)["id"].autoincrement is True
 
     def test_raw_path_str_pk_defaults_false_unified(self, clean_registry):
         # ADR-0002: one rule for both paths - explicit, else (pk AND integer).
         class M(Model):
-            id: str = PydanticField(default=None, json_schema_extra={"primary_key": True})
+            id: str = PydanticField(
+                default=None, json_schema_extra={"primary_key": True}
+            )
 
         assert build_column_specs(M)["id"].autoincrement is False
 

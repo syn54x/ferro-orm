@@ -15,6 +15,8 @@ class User(Model):
     age: int
     role: str = "member"
     archived: bool = False
+
+
 # --8<-- [end:setup]
 
 
@@ -23,6 +25,8 @@ class Invoice(Model):
     id: Annotated[int | None, Field(default=None, primary_key=True)]
     reference: str
     amount: float | None = None  # None until the invoice is issued
+
+
 # --8<-- [end:nullable-model]
 
 
@@ -32,6 +36,8 @@ class Card(Model):
     title: str
     pinned_at: datetime | None = None
     updated_at: datetime
+
+
 # --8<-- [end:card-model]
 
 
@@ -61,7 +67,9 @@ async def main() -> None:
 
         # three-valued logic: the NULL-amount row matches neither predicate
         assert len(await Invoice.where(lambda invoice: invoice.amount > 100).all()) == 1
-        assert len(await Invoice.where(lambda invoice: ~(invoice.amount > 100)).all()) == 0
+        assert (
+            len(await Invoice.where(lambda invoice: ~(invoice.amount > 100)).all()) == 0
+        )
 
         t0 = datetime(2026, 1, 1, tzinfo=UTC)
         t1 = datetime(2026, 2, 1, tzinfo=UTC)

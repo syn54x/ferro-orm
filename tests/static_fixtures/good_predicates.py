@@ -53,8 +53,8 @@ class GoodTxn(Model):
 
 pred_hop1: Predicate[GoodTxn] = lambda t: t.account.ledger_id == 1
 pred_hop_multi: Predicate[GoodTxn] = lambda t: t.account.owner.email == "a@b.com"
-pred_hop_compound: Predicate[GoodTxn] = lambda t: (t.account.ledger_id == 1) & (
-    t.account.owner.email == "a@b.com"
+pred_hop_compound: Predicate[GoodTxn] = lambda t: (
+    (t.account.ledger_id == 1) & (t.account.owner.email == "a@b.com")
 )
 assert_type(pred_hop1(QueryProxy[GoodTxn](GoodTxn)), QueryNode)
 

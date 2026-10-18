@@ -159,9 +159,9 @@ def test_three_column_composite_index():
         b: int
         c: int
 
-    assert normalized_composite_indexes(Triple, frozenset(Triple.__ferro_columns__)) == (
-        ("a", "b", "c"),
-    )
+    assert normalized_composite_indexes(
+        Triple, frozenset(Triple.__ferro_columns__)
+    ) == (("a", "b", "c"),)
 
 
 def test_schema_json_uses_lists_not_tuples():
@@ -400,7 +400,6 @@ def test_coexists_with_single_column_field_index():
     ]
     assert len(column_idxs) >= 1
     assert len(composite_idxs) == 1
-
 
 
 def test_composite_index_name_python_matches_naming_convention():
@@ -748,7 +747,6 @@ async def test_use_case_m2m_reverse_query(db_url):
 
     await connect(db_url, auto_migrate=True)
     async with engines.session():
-
         python_tag = await TagF1.create(name="python")
         rust_tag = await TagF1.create(name="rust")
         article_a = await ArticleF1.create(title="A")

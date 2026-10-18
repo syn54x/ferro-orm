@@ -43,7 +43,9 @@ async def test_late_model_after_connect_save_and_query_without_ddl(
 
 
 @pytest.mark.asyncio
-async def test_operation_seam_sync_does_not_create_tables(db_url, clean_registry) -> None:
+async def test_operation_seam_sync_does_not_create_tables(
+    db_url, clean_registry
+) -> None:
     """Registration sync on save must not emit DDL when the table is missing."""
 
     class OsSeeded(Model):
