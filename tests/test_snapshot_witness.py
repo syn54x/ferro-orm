@@ -135,7 +135,7 @@ def test_a_hand_written_witness_loads_under_every_verb(project, pkg, db, capsys)
     """Two originals, applied to another database, then removed; the one
     migration generated in their place carries a well-formed witness naming
     them. The reader checks the witness against the directory only, so the
-    database under test (which never ran the originals; adopting them is
+    database under test (which never ran the originals; inheriting them is
     #671's) reads it without a refusal."""
     two_migrations(project, pkg, '["postgres", "sqlite"]')
     elsewhere = f"sqlite:{project / 'originals.db'}?mode=rwc"

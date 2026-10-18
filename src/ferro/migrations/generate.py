@@ -922,7 +922,7 @@ def _refuse_data_only_over_ddl(
 ) -> None:
     """Refuse ``squash --data-only`` over a run that renders DDL (panel F2
     on #690): ``--data-only`` writes the snapshot below the run, while the
-    witness lets every database that ran the originals adopt it, so they
+    witness lets every database that ran the originals inherit it, so they
     would stand on a snapshot that says the run's DDL never ran. A run that
     renders none (what it adds it drops again) loses nothing.
 

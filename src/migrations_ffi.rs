@@ -761,7 +761,7 @@ fn plan_handles(
 }
 
 /// Each data step's declared kind, `declared_kind(path)` for each of
-/// `steps` (`(migration, step, file)`): what an adopted data step's record
+/// `steps` (`(migration, step, file)`): what an inherited data step's record
 /// holds, read from its file as a baseline reads it (ADR-0056).
 fn declared_kinds(
     steps: Vec<(u16, u8, std::path::PathBuf)>,
@@ -867,22 +867,22 @@ impl TrackedDatabase {
     }
 
     /// A preview of a run's plan: its steps cannot be executed. With
-    /// `adopting` (a data step file's declared kind, `declared_kind(path)
+    /// `inheriting` (a data step file's declared kind, `declared_kind(path)
     /// -> "atomic" | "chunked"`), planned as the run would plan once it had
-    /// adopted every squash whose witness the records hold (ADR-0056); a
+    /// inherited every squash whose witness the records hold (ADR-0056); a
     /// partial witness refuses.
     ///
     /// # Errors
     /// `RunRefused` for every refusal the run would meet; whatever
-    /// `adopting` raises.
-    #[pyo3(signature = (direction, *, allow_ahead=None, order_keys=None, adopting=None))]
+    /// `inheriting` raises.
+    #[pyo3(signature = (direction, *, allow_ahead=None, order_keys=None, inheriting=None))]
     fn plan<'py>(
         &self,
         py: Python<'py>,
         direction: &Bound<'py, PyAny>,
         allow_ahead: Option<&Bound<'py, PyAny>>,
         order_keys: Option<&Bound<'py, PyAny>>,
-        adopting: Option<&Bound<'py, PyAny>>,
+        inheriting: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let direction = parse_direction(direction)?;
         let allow_ahead = allow_ahead
@@ -890,15 +890,15 @@ impl TrackedDatabase {
             .transpose()?
             .unwrap_or_default();
         let order_keys = order_keys_arg(order_keys)?;
-        let kinds = adopting
-            .map(|declared_kind| declared_kinds(self.inner.adoption_data_steps(), declared_kind))
+        let kinds = inheriting
+            .map(|declared_kind| declared_kinds(self.inner.inheritance_data_steps(), declared_kind))
             .transpose()?;
         let tracked = Arc::clone(&self.inner);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let plan = match &kinds {
                 Some(kinds) => {
                     tracked
-                        .plan_adopted(direction, allow_ahead, order_keys.as_ref(), kinds)
+                        .plan_inherited(direction, allow_ahead, order_keys.as_ref(), kinds)
                         .await?
                 }
                 None => {
@@ -1219,29 +1219,29 @@ impl LockedDatabase {
         })
     }
 
-    /// Adopt every squash whose witness the records read under the lock
+    /// Inherit every squash whose witness the records read under the lock
     /// hold (ADR-0056): one transaction swaps the witnessed records for the
-    /// squash's, origin `adopted` (`baseline` when a baseline recorded the
+    /// squash's, origin `inherited` (`baseline` when a baseline recorded the
     /// whole witness), and runs nothing; the plan then sees them.
-    /// `declared_kind(path)` gives each adopted data step's declared kind
+    /// `declared_kind(path)` gives each inherited data step's declared kind
     /// (`"atomic"` / `"chunked"`). Returns `[{"squash", "replaced"}]`, one
-    /// per squash adopted.
+    /// per squash inherited.
     ///
     /// # Errors
     /// `RunRefused`: the partial-witness and mixed-witness refusals (`kind
     /// == "partial_witness"` / `"mixed_witness"`, nothing written), the
     /// newer-format refusal, the lock's (a lock lost before the commit
     /// included); whatever `declared_kind` raises; a database error.
-    fn adopt<'py>(
+    fn inherit<'py>(
         &self,
         py: Python<'py>,
         declared_kind: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let kinds = declared_kinds(self.inner.tracked().adoption_data_steps(), declared_kind)?;
+        let kinds = declared_kinds(self.inner.tracked().inheritance_data_steps(), declared_kind)?;
         let locked = Arc::clone(&self.inner);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let adopted = locked.adopt(&kinds).await?;
-            to_py_attached(&adopted)
+            let inherited = locked.inherit(&kinds).await?;
+            to_py_attached(&inherited)
         })
     }
 

@@ -18,7 +18,7 @@ import pytest
 import ferro
 from ferro.migrations import runner
 from ferro.migrations.report import RunRefused
-from tests.test_migrate_adopt import squashed
+from tests.test_migrate_inherit import squashed
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     AUTHOR,
     pkg,
@@ -355,10 +355,10 @@ async def test_a_lock_lost_inside_a_downs_transaction_is_the_lost_lock_refusal(
     assert [(r[0], r[1]) for r in db.rows(RECORDS)] == [(1, 1), (2, 1)]
 
 
-async def test_a_lock_lost_while_an_adoption_writes_commits_nothing(
+async def test_a_lock_lost_while_an_inheritance_writes_commits_nothing(
     project, pkg, db, no_bytecode
 ):
-    """An adoption verifies the lock inside its transaction, before it
+    """An inheritance verifies the lock inside its transaction, before it
     commits (ADR-0029 as amended, panel F4 on #690): a lock lost after the
     write began rolls the swap back and refuses as a lost lock, so a second
     run that took the lock never meets this run's stale swap."""
@@ -368,7 +368,7 @@ async def test_a_lock_lost_while_an_adoption_writes_commits_nothing(
     _, database = settings_and_database()
     named = "SELECT migration_name, step, origin FROM _ferro_migrations ORDER BY 1, 2"
     before = db.rows(named)
-    # Another session holds a witnessed record, so the adoption's delete
+    # Another session holds a witnessed record, so the inheritance's delete
     # waits on it while the lock goes.
     import psycopg
 
@@ -378,13 +378,13 @@ async def test_a_lock_lost_while_an_adoption_writes_commits_nothing(
     tracked = await _tracked(db, database)
     try:
         async with tracked.locked(5.0) as run:
-            adopting = asyncio.ensure_future(run.adopt(runner._declared_kind))
+            inheriting = asyncio.ensure_future(run.inherit(runner._declared_kind))
             await asyncio.sleep(0.4)
-            assert not adopting.done()
+            assert not inheriting.done()
             await run._close_lock_connection_for_test()
             blocker.rollback()
             with pytest.raises(RunRefused, match="the run lock was lost"):
-                await adopting
+                await inheriting
     finally:
         blocker.close()
 

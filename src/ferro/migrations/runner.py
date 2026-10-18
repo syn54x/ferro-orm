@@ -105,8 +105,8 @@ if TYPE_CHECKING:
 
 __all__ = [
     "MAX_LOCK_TIMEOUT_S",
-    "AdoptedEvent",
-    "AdoptedMigration",
+    "InheritedEvent",
+    "InheritedMigration",
     "AllowAhead",
     "AppliedStep",
     "DownPlan",
@@ -183,8 +183,8 @@ class StepFailure:
 
 
 @dataclass(frozen=True)
-class AdoptedMigration:
-    """A squash a run adopted before it planned (ADR-0056): the database had
+class InheritedMigration:
+    """A squash a run inherited before it planned (ADR-0056): the database had
     applied every migration it replaced, so the run swapped their step
     records for the squash's and ran nothing."""
 
@@ -196,10 +196,10 @@ class AdoptedMigration:
 
     @property
     def line(self) -> str:
-        """``adopted <squash>: this database had applied <first> … <last>;
+        """``inherited <squash>: this database had applied <first> … <last>;
         nothing was run``."""
         return (
-            f"adopted {self.squash}: this database had applied "
+            f"inherited {self.squash}: this database had applied "
             f"{migration_span(self.replaced)}; nothing was run"
         )
 
@@ -208,8 +208,8 @@ class AdoptedMigration:
 class RunReport:
     """What :func:`up` or :func:`down` did."""
 
-    adopted: list[AdoptedMigration] = field(default_factory=list)
-    """The squashes the run adopted before anything else, in order."""
+    inherited: list[InheritedMigration] = field(default_factory=list)
+    """The squashes the run inherited before anything else, in order."""
     applied: list[AppliedStep] = field(default_factory=list)
     """The steps applied, in order."""
     reverted: list[AppliedStep] = field(default_factory=list)
@@ -362,9 +362,9 @@ class RunNote:
 
 
 @dataclass(frozen=True)
-class AdoptedEvent:
-    """A squash the run adopted, said before any step
-    (``adopted 0005_teams_epic: this database had applied 0005_add_teams …
+class InheritedEvent:
+    """A squash the run inherited, said before any step
+    (``inherited 0005_teams_epic: this database had applied 0005_add_teams …
     0009_fix_rows; nothing was run``)."""
 
     squash: str
@@ -373,17 +373,17 @@ class AdoptedEvent:
     """``NNNN_<name>`` of each migration whose records it replaced."""
 
     def line(self) -> str:
-        """The line ``progress`` receives (:attr:`AdoptedMigration.line`)."""
-        return AdoptedMigration(self.squash, list(self.replaced)).line
+        """The line ``progress`` receives (:attr:`InheritedMigration.line`)."""
+        return InheritedMigration(self.squash, list(self.replaced)).line
 
 
-RunEvent: TypeAlias = StepEvent | RunNote | AdoptedEvent
+RunEvent: TypeAlias = StepEvent | RunNote | InheritedEvent
 """What a run says: one event per line ``progress`` receives."""
 
 
 def _declared_kind(path: Path) -> str:
-    """The shape (``atomic`` / ``chunked``) an adopted data step's ``up``
-    declares, read from its syntax tree: adoption runs no step, so its
+    """The shape (``atomic`` / ``chunked``) an inherited data step's ``up``
+    declares, read from its syntax tree: inheritance runs no step, so its
     record holds the declaration, as a baseline's does (ADR-0056)."""
     try:
         return declared_up_kind(Path(path))
@@ -391,21 +391,21 @@ def _declared_kind(path: Path) -> str:
         raise RunRefused(f"{refused}. Nothing was changed.") from None
 
 
-async def _adopt(
+async def _inherit(
     run: LockedDatabase, tell: Callable[[RunEvent], None]
-) -> list[AdoptedMigration]:
-    """Adopt, on ``run``, every squash whose witness its records hold, before
+) -> list[InheritedMigration]:
+    """Inherit, on ``run``, every squash whose witness its records hold, before
     anything is planned (ADR-0056), telling ``tell`` one event per squash
-    adopted. Raises ``RunRefused`` (``partial_witness``) on a squash the
+    inherited. Raises ``RunRefused`` (``partial_witness``) on a squash the
     records hold part of, and (``mixed_witness``) on one a baseline
     recorded part of, with nothing written."""
-    adopted = [
-        AdoptedMigration(entry["squash"], list(entry["replaced"]))
-        for entry in await run.adopt(_declared_kind)
+    inherited = [
+        InheritedMigration(entry["squash"], list(entry["replaced"]))
+        for entry in await run.inherit(_declared_kind)
     ]
-    for migration in adopted:
-        tell(AdoptedEvent(migration.squash, list(migration.replaced)))
-    return adopted
+    for migration in inherited:
+        tell(InheritedEvent(migration.squash, list(migration.replaced)))
+    return inherited
 
 
 def _step_prefix(migration: str, file: str, name_width: int, stem_width: int) -> str:
@@ -435,17 +435,17 @@ async def up(
     ``"expand-only"`` when every step they hold is ``expand`` (ADR-0054),
     ``True`` whatever they hold (:data:`AllowAhead`).
     ``progress`` receives each line as the run goes: one per squash it
-    adopts (before any step, ADR-0056), one per applied step, and one per
+    inherits (before any step, ADR-0056), one per applied step, and one per
     attempt a step makes while it waits for a table lock under the
     database's ``ddl_lock_timeout``. ``on_event`` receives the same lines as
     data, each just before ``progress`` receives its ``line()``: an
-    :class:`AdoptedEvent` per squash adopted (its ``squash`` and the
+    :class:`InheritedEvent` per squash inherited (its ``squash`` and the
     ``replaced`` migrations, with no ``.text`` or ``.step``), a
     :class:`StepEvent` per applied step, a :class:`RunNote` for any other;
     a failed step is a ``StepEvent`` too, with no line for ``progress``.
 
-    Returns the :class:`RunReport` of what it did: ``.adopted`` the squashes
-    it adopted, in order (an :class:`AdoptedMigration` each), then
+    Returns the :class:`RunReport` of what it did: ``.inherited`` the squashes
+    it inherited, in order (an :class:`InheritedMigration` each), then
     ``.applied`` the steps it applied.
 
     Raises:
@@ -503,7 +503,7 @@ async def _up(
     tracked = await open_tracked(name, database)
     try:
         async with tracked.locked(timeout, say_waiting) as run:
-            report.adopted = await _adopt(run, tell)
+            report.inherited = await _inherit(run, tell)
             keys = _order_keys_for(run, "applied")
             try:
                 plan = await run.plan(
@@ -514,7 +514,7 @@ async def _up(
                     report.ahead = list(run.status()["ahead"])
                 raise
             walked = await _walk(run, plan, tell, using=name)
-            walked.adopted = report.adopted
+            walked.inherited = report.inherited
             report = walked
     except RunRefused as refused:
         report._refuse(refused)
@@ -1159,7 +1159,7 @@ async def require_applied(
     classifies it.
 
     The answer is the run planner's: the plan ``up`` would make, read with
-    no lock, after the adoption it would make first (ADR-0056). A database
+    no lock, after the inheritance it would make first (ADR-0056). A database
     that applied a squash's originals is pending that squash, never ahead
     by them, whatever ``allow_ahead`` says (ADR-0040); one that applied
     them in part carries the run's ``partial_witness`` refusal.
@@ -1190,7 +1190,7 @@ async def require_applied(
             raise PendingMigrationsError(pending, [tracked.refusal])
         try:
             await tracked.plan(
-                {"direction": "up"}, allow_ahead=allow_ahead, adopting=_declared_kind
+                {"direction": "up"}, allow_ahead=allow_ahead, inheriting=_declared_kind
             )
         except RunRefused as refused:
             if refused.ahead_only:
@@ -1278,7 +1278,7 @@ async def _preview_down(
     tracked: TrackedDatabase, direction: dict[str, Any]
 ) -> tuple[Plan, DownPlan]:
     """What a ``down`` would revert, planned on ``tracked`` with no lock, as
-    the run plans it once it has adopted every squash whose witness the
+    the run plans it once it has inherited every squash whose witness the
     records hold (ADR-0056): a data step's down declares itself in Python,
     so an irreversible one refuses here too (before any lock), and a
     nothing-to-reverse one says so.
@@ -1290,7 +1290,7 @@ async def _preview_down(
         keys = order_keys_on_disk(tracked)
     except MigrationRefused as refused:
         raise RunRefused(f"{refused}. Nothing was reverted.") from None
-    plan = await tracked.plan(direction, order_keys=keys, adopting=_declared_kind)
+    plan = await tracked.plan(direction, order_keys=keys, inheriting=_declared_kind)
     _, reasons = _load_data_steps(plan.steps, "down")
     shown = DownPlan(
         steps=[
@@ -1327,9 +1327,9 @@ async def plan_down(
             return DownPlan(refusal=str(refused))
 
 
-_ADOPTION_STAMP = ("started_at", "finished_at", "ferro_version")
-"""What an adopted record holds of the moment it was adopted: the preview
-plans over the records adoption would write, the run over the ones it
+_INHERITANCE_STAMP = ("started_at", "finished_at", "ferro_version")
+"""What an inherited record holds of the moment it was inherited: the preview
+plans over the records inheritance would write, the run over the ones it
 wrote a moment later (ADR-0056)."""
 
 
@@ -1338,16 +1338,16 @@ def _records_as_shown(locked: list[Any], shown: list[Any]) -> bool:
     preview showed. Taking the lock gives a record an older ferro wrote
     without a class the class ADR-0054 decides for it; that fills a gap and
     changes nothing the plan was shown, so a class the preview read as
-    missing is not compared. An adopted record is compared without the time
-    and version it was adopted at (:data:`_ADOPTION_STAMP`)."""
+    missing is not compared. An inherited record is compared without the time
+    and version it was inherited at (:data:`_INHERITANCE_STAMP`)."""
 
     def standing(step: Any, missing_class: bool) -> dict[str, Any] | None:
         record = step.standing
         if record is None:
             return record
         skipped = ("class",) if missing_class else ()
-        if record.get("origin") == "adopted":
-            skipped += _ADOPTION_STAMP
+        if record.get("origin") == "inherited":
+            skipped += _INHERITANCE_STAMP
         return {key: value for key, value in record.items() if key not in skipped}
 
     if len(locked) != len(shown):
@@ -1387,17 +1387,17 @@ async def down(
     false nothing is reverted (``declined``). Once the lock is held the plan
     is made again, and a database that changed in between is refused rather
     than reverted unseen. Under the lock and before it plans, a ``down``
-    adopts every squash whose witness the records hold, as ``up`` does
-    (ADR-0056). ``progress`` receives one line per squash adopted, then one
+    inherits every squash whose witness the records hold, as ``up`` does
+    (ADR-0056). ``progress`` receives one line per squash inherited, then one
     per reverted step; ``on_event`` receives each as data just before
-    ``progress`` receives its ``line()``: an :class:`AdoptedEvent` per
-    squash adopted (its ``squash`` and the ``replaced`` migrations, with no
+    ``progress`` receives its ``line()``: an :class:`InheritedEvent` per
+    squash inherited (its ``squash`` and the ``replaced`` migrations, with no
     ``.text`` or ``.step``), a :class:`StepEvent` per reverted step, a
     :class:`RunNote` for any other line; a failed down is a ``StepEvent``
     with no line.
 
-    Returns the :class:`RunReport` of what it did: ``.adopted`` the squashes
-    it adopted, in order (an :class:`AdoptedMigration` each), then
+    Returns the :class:`RunReport` of what it did: ``.inherited`` the squashes
+    it inherited, in order (an :class:`InheritedMigration` each), then
     ``.reverted`` the steps it reverted, newest first (``.declined`` when
     ``confirm`` said no).
 
@@ -1432,7 +1432,7 @@ async def down(
                 deferred = warn_unclassified(run)
                 report.notes.extend(deferred)
                 tell = _teller(progress, on_event)
-                report.adopted = await _adopt(run, tell)
+                report.inherited = await _inherit(run, tell)
                 plan = await run.plan(
                     direction, order_keys=_order_keys_for(run, "reverted")
                 )
@@ -1443,9 +1443,9 @@ async def down(
                         "down` again to see the plan as it stands now."
                     )
                     return report._raise_if_refused()
-                adopted = report.adopted
+                inherited = report.inherited
                 report = await _walk(run, plan, tell, using=name)
-                report.adopted = adopted
+                report.inherited = inherited
                 report.notes[:0] = deferred
         except RunRefused as refused:
             report._refuse(refused)

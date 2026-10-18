@@ -378,7 +378,7 @@ def test_squash_with_data_step_sql_step_and_data_only(project, pkg, capsys):
 def test_data_only_over_a_run_that_renders_ddl_is_refused(project, pkg, capsys):
     # Panel F2 on #690: --data-only planned parent -> parent, so the squash's
     # snapshot said the run's DDL never ran while its witness let every
-    # database that ran it adopt the squash.
+    # database that ran it inherit the squash.
     feature_branch(project, pkg)
     before = tree(project)
 

@@ -59,7 +59,7 @@ if TYPE_CHECKING:
     from ..migrations.report import MigrationStatus, StatusReport
     from ..migrations.rerecord import RerecordReport
     from ..migrations.runner import (
-        AdoptedEvent,
+        InheritedEvent,
         AppliedStep,
         DownPlan,
         RunEvent,
@@ -77,7 +77,7 @@ __all__ = [
     "StepFileRole",
     "applied_at_short",
     "kind_of_file",
-    "print_adopted",
+    "print_inherited",
     "print_baseline",
     "print_changes",
     "print_check",
@@ -142,10 +142,10 @@ status`` taught. The count heading above them stays plain bold."""
 STATES: dict[str, tuple[str, str]] = {
     "applied": ("ok", "green"),
     "applied (baseline)": ("ok", "green"),
-    "applied (adopted)": ("ok", "green"),
+    "applied (inherited)": ("ok", "green"),
     "reverted": ("ok", "green"),
     "pending": ("pending", "yellow"),
-    "pending (adoptable)": ("pending", "yellow"),
+    "pending (inheritable)": ("pending", "yellow"),
     "failed": ("error", "bold red"),
     "interrupted": ("error", "red"),
     "applied (different checksum)": ("error", "red"),
@@ -737,7 +737,7 @@ def _status_row(
     hint: str | None = None,
 ) -> None:
     """One migration's row: glyph, name, state word, then its ``applied_at``
-    dim, or the migration's hint plain (a squash pending adoption names
+    dim, or the migration's hint plain (a squash pending inheritance names
     ``ferro migrate up``)."""
     key = _state_key(state)
     glyph = STATE_GLYPH[key]
@@ -916,11 +916,11 @@ def print_reverted(out: Output, reverted: Sequence[AppliedStep]) -> None:
     )
 
 
-def print_adopted(out: Output, event: AdoptedEvent) -> None:
-    """A squash the run adopted, before any step (ADR-0056): the line
-    ``progress`` receives in the plain form (``adopted 0005_teams_epic: this
+def print_inherited(out: Output, event: InheritedEvent) -> None:
+    """A squash the run inherited, before any step (ADR-0056): the line
+    ``progress`` receives in the plain form (``inherited 0005_teams_epic: this
     database had applied 0005_add_teams … 0009_fix_rows; nothing was
-    run``); on a TTY an ok heading, ``adopted <squash>`` bold and the rest
+    run``); on a TTY an ok heading, ``inherited <squash>`` bold and the rest
     dim."""
     from ..migrations.report import migration_span
 
@@ -929,21 +929,21 @@ def print_adopted(out: Output, event: AdoptedEvent) -> None:
         return
     out.heading(
         "ok",
-        f"adopted {event.squash}",
+        f"inherited {event.squash}",
         f"this database had applied {migration_span(event.replaced)}; nothing was run",
     )
 
 
 def print_event(out: Output, event: RunEvent) -> None:
     """One line a run says, as it says it: a finished step through
-    :func:`print_step` at the run's widths, an adopted squash through
-    :func:`print_adopted`; any other line as it is."""
-    from ..migrations.runner import AdoptedEvent, StepEvent
+    :func:`print_step` at the run's widths, an inherited squash through
+    :func:`print_inherited`; any other line as it is."""
+    from ..migrations.runner import InheritedEvent, StepEvent
 
     if isinstance(event, StepEvent):
         print_step(out, event, name_width=event.name_width, stem_width=event.stem_width)
-    elif isinstance(event, AdoptedEvent):
-        print_adopted(out, event)
+    elif isinstance(event, InheritedEvent):
+        print_inherited(out, event)
     else:
         out.print(event.text)
 

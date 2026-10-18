@@ -20,7 +20,7 @@ pub struct Snapshot {
 }
 
 /// One migration a squash replaced, as its witness records it: what a
-/// database that ran the originals must hold to adopt the squash (ADR-0056).
+/// database that ran the originals must hold to inherit the squash (ADR-0056).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WitnessEntry {
     /// The replaced migration's directory name, `NNNN_<name>`.
@@ -241,7 +241,7 @@ fn load_v1(document: serde_json::Value) -> Result<IrEnvelope<SchemaIrPayload>, S
 /// `{migration, snapshot_checksum, steps, replaces}`, naming every
 /// migration once across the whole tree. Anything else is refused, never
 /// read as a shorter witness: a witness read short would report an
-/// adoptable database ahead.
+/// inheritable database ahead.
 pub(crate) fn load_witness(value: &serde_json::Value) -> Result<Vec<WitnessEntry>, String> {
     let mut seen = BTreeSet::new();
     match value.as_array() {

@@ -1,17 +1,17 @@
 # ruff: noqa: F811 - pytest fixtures imported from a sibling module are redefined as arguments
-"""A database that ran a squash's originals adopts the squash (#671, ADR-0056).
+"""A database that ran a squash's originals inherits the squash (#671, ADR-0056).
 
 ```text
 $ ferro migrate squash epic --from 0002     # replaces 0002_add_tmp … 0004_drop_tmp
 $ ferro migrate up                          # on a database that applied them
 default · sqlite:app.db
-adopted 0002_epic: this database had applied 0002_add_tmp … 0004_drop_tmp; nothing was run
+inherited 0002_epic: this database had applied 0002_add_tmp … 0004_drop_tmp; nothing was run
 ```
 
-Every run, ``up`` and ``down``, adopts under the run lock before it plans:
+Every run, ``up`` and ``down``, inherits under the run lock before it plans:
 the tracking table alone is the witness (finished records for exactly the
 ordinals the squash's ``ir.json`` records, under the snapshot checksums it
-records), and one transaction swaps those records for one ``adopted``
+records), and one transaction swaps those records for one ``inherited``
 record per squashed step. Nothing runs. Every test builds a real project
 under ``tmp_path``, applies the originals with ``ferro migrate up``, swaps
 the directory for the squash with ``ferro migrate squash`` and reads the
@@ -66,8 +66,8 @@ pytestmark = [
 ]
 
 ORIGINALS = ["0002_add_tmp", "0003_add_bio", "0004_drop_tmp"]
-ADOPTED = (
-    "adopted 0002_epic: this database had applied 0002_add_tmp … 0004_drop_tmp; "
+INHERITED = (
+    "inherited 0002_epic: this database had applied 0002_add_tmp … 0004_drop_tmp; "
     "nothing was run"
 )
 TITLE = BIO + "    title: str | None = None\n"
@@ -133,7 +133,7 @@ def names(db) -> list[tuple[str, int, str]]:
 
 
 async def _read_live(url: str, declared: dict) -> tuple[str, str]:
-    name = f"adopt_{uuid.uuid4().hex}"
+    name = f"inherit_{uuid.uuid4().hex}"
     await connect(url, name=name)
     try:
         return await _core._live_schema_ir(name, json.dumps(declared), "[]")
@@ -156,10 +156,10 @@ def expected_classes(db) -> dict[int, str]:
     return {step.step: step.step_class for step in squash.steps}
 
 
-# -- up adopts ----------------------------------------------------------------------
+# -- up inherits ----------------------------------------------------------------------
 
 
-def test_up_adopts_the_squash_running_nothing_and_records_its_steps(
+def test_up_inherits_the_squash_running_nothing_and_records_its_steps(
     project, pkg, db, capsys
 ):
     squashed(project, pkg, db)
@@ -170,13 +170,13 @@ def test_up_adopts_the_squash_running_nothing_and_records_its_steps(
     code, out, err = cli(capsys, "up", "--url", db.url)
 
     assert (code, err) == (0, "")
-    assert out == f"{db.line}\n{ADOPTED}\n"
+    assert out == f"{db.line}\n{INHERITED}\n"
     assert live(project, db) == before
     squash = migrations(project) / "0002_epic"
     snapshot = sha384(squash / "ir.json")
     rows = records(db)
     assert rows[0] == first
-    adopted = rows[1:]
+    inherited = rows[1:]
     steps = sorted(
         p
         for p in squash.iterdir()
@@ -184,15 +184,15 @@ def test_up_adopts_the_squash_running_nothing_and_records_its_steps(
         and ".down." not in p.name
         and (p.suffix == ".py" or p.name.endswith((f".{db.backend}.sql", ".up.sql")))
     )
-    assert [r[3] for r in adopted] == [p.name for p in steps]
-    for row, path in zip(adopted, steps, strict=True):
+    assert [r[3] for r in inherited] == [p.name for p in steps]
+    for row, path in zip(inherited, steps, strict=True):
         number, step, name, file, kind, checksum, snap, origin, ran_by, klass, done = (
             row
         )
         assert (number, name, origin, ran_by, done) == (
             2,
             "0002_epic",
-            "adopted",
+            "inherited",
             installed("ferro-orm"),
             True,
         )
@@ -202,7 +202,7 @@ def test_up_adopts_the_squash_running_nothing_and_records_its_steps(
         assert kind == ("atomic" if path.suffix == ".py" else "ddl")
     assert not {r[2] for r in rows} & set(ORIGINALS)
 
-    # Adopted once: the next up finds nothing to adopt and nothing pending.
+    # Inherited once: the next up finds nothing to inherit and nothing pending.
     code, out, _ = cli(capsys, "up", "--url", db.url)
     assert (code, out) == (
         0,
@@ -215,11 +215,11 @@ def test_up_adopts_the_squash_running_nothing_and_records_its_steps(
     document = json.loads(out)
     assert [(m["name"], m["state"]) for m in document["migrations"]] == [
         ("0001_create_author", "applied"),
-        ("0002_epic", "applied (adopted)"),
+        ("0002_epic", "applied (inherited)"),
     ]
 
 
-def test_up_reports_the_adoption_and_tells_it_before_any_step(project, pkg, db):
+def test_up_reports_the_inheritance_and_tells_it_before_any_step(project, pkg, db):
     squashed(project, pkg, db)
     write_models(project, pkg, TITLE)
     new("add_title")
@@ -227,11 +227,11 @@ def test_up_reports_the_adoption_and_tells_it_before_any_step(project, pkg, db):
 
     report = asyncio.run(runner.up(url=db.url, on_event=events.append))
 
-    assert report.adopted == [
-        runner.AdoptedMigration("0002_epic", ORIGINALS),
+    assert report.inherited == [
+        runner.InheritedMigration("0002_epic", ORIGINALS),
     ]
-    assert isinstance(events[0], runner.AdoptedEvent)
-    assert events[0].line() == ADOPTED
+    assert isinstance(events[0], runner.InheritedEvent)
+    assert events[0].line() == INHERITED
     assert [type(e) for e in events[1:]] == [runner.StepEvent]
     assert [(s.migration, s.outcome) for s in events[1:]] == [
         ("0003_add_title", "applied")
@@ -240,7 +240,7 @@ def test_up_reports_the_adoption_and_tells_it_before_any_step(project, pkg, db):
     assert names(db)[-1] == ("0003_add_title", 1, "run")
 
 
-def test_a_baselined_originals_database_adopts(project, pkg, db, capsys):
+def test_a_baselined_originals_database_inherits(project, pkg, db, capsys):
     epic(project, pkg, db, apply_through=0)
 
     async def build() -> None:
@@ -256,7 +256,7 @@ def test_a_baselined_originals_database_adopts(project, pkg, db, capsys):
 
     # The squash carries the baseline through: its records are a baseline's,
     # since its originals created nothing here (panel F3 on #690).
-    assert (code, out) == (0, f"{db.line}\n{ADOPTED}\n")
+    assert (code, out) == (0, f"{db.line}\n{INHERITED}\n")
     assert [(name, origin) for name, _, origin in names(db)] == [
         ("0001_create_author", "baseline"),
         *[("0002_epic", "baseline")] * (len(records(db)) - 1),
@@ -290,7 +290,7 @@ def test_a_baselined_originals_database_adopts(project, pkg, db, capsys):
 MIXED = (
     "ferro migrate: 0002_epic replaces 0002_add_tmp … 0004_drop_tmp, but this "
     "database baselined 0002_add_tmp and ran the rest, so the squash straddles the "
-    "baseline and cannot be adopted whole. On the commit before the squash, squash "
+    "baseline and cannot be inherited whole. On the commit before the squash, squash "
     "from above the baseline instead: `ferro migrate squash epic --from "
     "0003_add_bio`. Nothing was applied."
 )
@@ -310,7 +310,7 @@ def test_a_witness_part_baselined_and_part_run_is_refused_naming_the_fix(
     refused = raised.value.report.refused
     assert refused.kind == "mixed_witness"
     assert str(refused) == MIXED
-    assert raised.value.report.adopted == []
+    assert raised.value.report.inherited == []
     assert records(db) == before
     code, out, err = cli(capsys, "up", "--url", db.url)
     assert (code, out) == (1, f"{db.line}\n")
@@ -320,11 +320,11 @@ def test_a_witness_part_baselined_and_part_run_is_refused_naming_the_fix(
     assert records(db) == before
     # The readers say what the run meets.
     report = stands(db)
-    assert report.adoptable == []
+    assert report.inheritable == []
     assert report.refusal == MIXED
 
 
-def test_an_original_edited_after_apply_and_never_rerecorded_adopts(
+def test_an_original_edited_after_apply_and_never_rerecorded_inherits(
     project, pkg, db, capsys
 ):
     epic(project, pkg, db)
@@ -336,13 +336,15 @@ def test_an_original_edited_after_apply_and_never_rerecorded_adopts(
 
     code, out, _ = cli(capsys, "up", "--url", db.url)
 
-    assert (code, out) == (0, f"{db.line}\n{ADOPTED}\n")
+    assert (code, out) == (0, f"{db.line}\n{INHERITED}\n")
 
 
-# -- down adopts first --------------------------------------------------------------
+# -- down inherits first --------------------------------------------------------------
 
 
-def test_down_adopts_then_reverts_through_the_squashed_downs(project, pkg, db, capsys):
+def test_down_inherits_then_reverts_through_the_squashed_downs(
+    project, pkg, db, capsys
+):
     squashed(project, pkg, db)
     report = asyncio.run(runner.plan_down(url=db.url, target="0001"))
     assert report.refusal is None
@@ -352,9 +354,9 @@ def test_down_adopts_then_reverts_through_the_squashed_downs(project, pkg, db, c
 
     assert (code, err) == (0, ""), err
     lines = out.splitlines()
-    adopted = lines.index(ADOPTED)
+    inherited = lines.index(INHERITED)
     reverted = [i for i, line in enumerate(lines) if " reverted (" in line]
-    assert reverted and adopted < reverted[0], out
+    assert reverted and inherited < reverted[0], out
     assert all(lines[i].startswith("0002_epic") for i in reverted)
     assert names(db) == [("0001_create_author", 1, "run")]
     assert "bio" not in json.dumps(json.loads(live(project, db)[0]))
@@ -366,10 +368,10 @@ def test_down_to_a_step_stops_inside_the_squash(project, pkg, db, capsys):
     code, out, err = cli(capsys, "down", "--to", "0002:01", "--yes", "--url", db.url)
 
     assert (code, err) == (0, ""), err
-    assert ADOPTED in out.splitlines()
+    assert INHERITED in out.splitlines()
     assert names(db) == [
         ("0001_create_author", 1, "run"),
-        ("0002_epic", 1, "adopted"),
+        ("0002_epic", 1, "inherited"),
     ]
 
 
@@ -378,9 +380,9 @@ def test_down_to_a_step_stops_inside_the_squash(project, pkg, db, capsys):
 PARTIAL = (
     "ferro migrate: 0002_epic replaces migrations this database applied only part "
     "of: it applied 0002_add_tmp and 0003_add_bio but not 0004_drop_tmp, so it "
-    "cannot adopt 0002_epic. To keep its rows, check out the commit that holds "
+    "cannot inherit 0002_epic. To keep its rows, check out the commit that holds "
     "0004_drop_tmp, run `ferro migrate up` there to finish it, then run `ferro "
-    "migrate up` here, which adopts 0002_epic. Or revert instead: on the commit "
+    "migrate up` here, which inherits 0002_epic. Or revert instead: on the commit "
     "that applied them run `ferro migrate down --to 0001`, then `ferro migrate up` "
     "here; the revert drops what they created and fails on an irreversible step. "
     "Nothing was changed."
@@ -400,7 +402,7 @@ def test_a_database_that_applied_part_of_the_originals_is_refused_naming_both_fi
     assert refused.kind == "partial_witness"
     assert str(refused) == PARTIAL
     assert PARTIAL.index("check out the commit") < PARTIAL.index("down --to 0001")
-    assert raised.value.report.adopted == []
+    assert raised.value.report.inherited == []
     assert records(db) == before
 
     code, out, err = cli(capsys, "up", "--url", db.url)
@@ -431,16 +433,18 @@ def test_a_failed_last_original_step_is_missing_from_the_witness(project, pkg, d
 # -- a squash of a squash -----------------------------------------------------------
 
 
-@pytest.mark.parametrize("adopted_first", [True, False], ids=["adopted", "originals"])
-def test_a_squash_of_a_squash_adopts_from_either_generation(
-    project, pkg, db, capsys, adopted_first
+@pytest.mark.parametrize(
+    "inherited_first", [True, False], ids=["inherited", "originals"]
+)
+def test_a_squash_of_a_squash_inherits_from_either_generation(
+    project, pkg, db, capsys, inherited_first
 ):
     epic(project, pkg, db)
     assert squash("bio_epic", "--from", "0003") == 0
-    if adopted_first:
+    if inherited_first:
         code, out, _ = cli(capsys, "up", "--url", db.url)
         assert out.splitlines()[1] == (
-            "adopted 0003_bio_epic: this database had applied 0003_add_bio … "
+            "inherited 0003_bio_epic: this database had applied 0003_add_bio … "
             "0004_drop_tmp; nothing was run"
         )
     assert squash("epic", "--from", "0002") == 0
@@ -449,24 +453,24 @@ def test_a_squash_of_a_squash_adopts_from_either_generation(
 
     replaced = (
         "0002_add_tmp … 0003_bio_epic"
-        if adopted_first
+        if inherited_first
         else "0002_add_tmp … 0004_drop_tmp"
     )
     assert (code, out) == (
         0,
-        f"{db.line}\nadopted 0002_epic: this database had applied {replaced}; "
+        f"{db.line}\ninherited 0002_epic: this database had applied {replaced}; "
         "nothing was run\n",
     )
     assert {name for name, _, _ in names(db)} == {"0001_create_author", "0002_epic"}
     assert {origin for name, _, origin in names(db) if name == "0002_epic"} == {
-        "adopted"
+        "inherited"
     }
 
 
 # -- two runs at once ----------------------------------------------------------------
 
 
-def test_two_concurrent_ups_adopt_once(project, pkg, db):
+def test_two_concurrent_ups_inherit_once(project, pkg, db):
     squashed(project, pkg, db)
 
     async def both() -> list[runner.RunReport]:
@@ -474,8 +478,8 @@ def test_two_concurrent_ups_adopt_once(project, pkg, db):
 
     first, second = asyncio.run(both())
 
-    adopted = sorted([first.adopted, second.adopted], key=len)
-    assert adopted == [[], [runner.AdoptedMigration("0002_epic", ORIGINALS)]]
+    inherited = sorted([first.inherited, second.inherited], key=len)
+    assert inherited == [[], [runner.InheritedMigration("0002_epic", ORIGINALS)]]
     assert first.applied == second.applied == []
     rows = names(db)
     assert len(rows) == len(set(rows))
@@ -504,7 +508,7 @@ def tracking_table(db) -> str:
     return f"{schema}._ferro_migrations"
 
 
-def test_status_reports_an_adoptable_squash_pending_with_the_up_hint_and_nothing_ahead(
+def test_status_reports_an_inheritable_squash_pending_with_the_up_hint_and_nothing_ahead(
     project, pkg, db, capsys
 ):
     squashed(project, pkg, db)
@@ -514,15 +518,15 @@ def test_status_reports_an_adoptable_squash_pending_with_the_up_hint_and_nothing
     document = json.loads(out)
 
     assert code == 3
-    assert document["adoptable"] == ["0002_epic"]
+    assert document["inheritable"] == ["0002_epic"]
     assert document["ahead"] == [] and document["refusal"] is None
     assert document["pending"] is True and document["needs_attention"] is False
     assert [(m["name"], m["state"]) for m in document["migrations"]] == [
         ("0001_create_author", "applied"),
-        ("0002_epic", "pending (adoptable)"),
+        ("0002_epic", "pending (inheritable)"),
     ]
     assert {s["state"] for s in document["migrations"][1]["steps"]} == {
-        "pending (adoptable)"
+        "pending (inheritable)"
     }
 
     code, out, err = cli(capsys, "status", "--url", db.url)
@@ -533,22 +537,22 @@ def test_status_reports_an_adoptable_squash_pending_with_the_up_hint_and_nothing
         f"{db.line}\n"
         f"-- 1 pending  {tracking_table(db)}\n"
         f"  ok 0001_create_author  applied  {when}\n"
-        f"  -- 0002_epic           pending (adoptable)  {HINT}\n"
+        f"  -- 0002_epic           pending (inheritable)  {HINT}\n"
     )
 
     report = stands(db)
-    assert report.adoptable == ["0002_epic"]
+    assert report.inheritable == ["0002_epic"]
     assert report.pending is True and report.ahead == []
     [squash_] = [m for m in report.migrations if m.name == "0002_epic"]
-    assert squash_.state == "pending (adoptable)"
-    assert squash_.adopts == ORIGINALS
+    assert squash_.state == "pending (inheritable)"
+    assert squash_.inherits == ORIGINALS
     assert squash_.hint == HINT
-    assert report.render().splitlines()[-1].endswith(f"pending (adoptable)  {HINT}")
+    assert report.render().splitlines()[-1].endswith(f"pending (inheritable)  {HINT}")
     # The readers wrote nothing.
     assert records(db) == before
 
 
-def test_status_steps_lists_each_squashed_step_pending_adoptable(
+def test_status_steps_lists_each_squashed_step_pending_inheritable(
     project, pkg, db, capsys
 ):
     squashed(project, pkg, db)
@@ -558,15 +562,15 @@ def test_status_steps_lists_each_squashed_step_pending_adoptable(
     assert code == 3
     lines = out.splitlines()
     row = next(i for i, line in enumerate(lines) if "0002_epic" in line)
-    assert lines[row].endswith(f"pending (adoptable)  {HINT}")
+    assert lines[row].endswith(f"pending (inheritable)  {HINT}")
     steps = lines[row + 1 :]
     [outer] = [m for m in stands(db).migrations if m.name == "0002_epic"]
     assert len(steps) == len(outer.steps) > 1
-    assert all(" pending (adoptable)  " in step for step in steps), steps
+    assert all(" pending (inheritable)  " in step for step in steps), steps
 
 
 @pytest.mark.parametrize("allow_ahead", [False, True, "expand-only"])
-def test_require_applied_raises_pending_on_an_adoptable_database_whatever_allow_ahead(
+def test_require_applied_raises_pending_on_an_inheritable_database_whatever_allow_ahead(
     project, pkg, db, allow_ahead
 ):
     squashed(project, pkg, db)
@@ -580,7 +584,7 @@ def test_require_applied_raises_pending_on_an_adoptable_database_whatever_allow_
     assert "ferro migrate up" in str(raised.value)
 
 
-def test_an_adoptable_squash_below_a_pending_migration_is_pending_with_it(
+def test_an_inheritable_squash_below_a_pending_migration_is_pending_with_it(
     project, pkg, db
 ):
     squashed(project, pkg, db)
@@ -591,10 +595,10 @@ def test_an_adoptable_squash_below_a_pending_migration_is_pending_with_it(
 
     assert [(m.name, m.state) for m in report.migrations] == [
         ("0001_create_author", "applied"),
-        ("0002_epic", "pending (adoptable)"),
+        ("0002_epic", "pending (inheritable)"),
         ("0003_add_title", "pending"),
     ]
-    assert report.adoptable == ["0002_epic"]
+    assert report.inheritable == ["0002_epic"]
     assert report.ahead == [] and report.refusal is None
     with pytest.raises(PendingMigrationsError) as raised:
         require(db)
@@ -608,7 +612,7 @@ def test_a_partial_witness_is_ahead_by_the_originals_it_holds_with_the_runs_refu
 
     report = stands(db)
 
-    assert report.adoptable == []
+    assert report.inheritable == []
     assert report.ahead == ["0002_add_tmp", "0003_add_bio"]
     assert report.refusal == PARTIAL
     assert [(m.name, m.state) for m in report.migrations][1] == ("0002_epic", "pending")
@@ -623,7 +627,7 @@ def test_a_partial_witness_is_ahead_by_the_originals_it_holds_with_the_runs_refu
         assert raised.value.refusals == [PARTIAL]
 
 
-def test_after_up_status_reads_applied_adopted_and_require_applied_returns(
+def test_after_up_status_reads_applied_inherited_and_require_applied_returns(
     project, pkg, db, capsys
 ):
     squashed(project, pkg, db)
@@ -632,30 +636,32 @@ def test_after_up_status_reads_applied_adopted_and_require_applied_returns(
     report = stands(db)
 
     [squash_] = [m for m in report.migrations if m.name == "0002_epic"]
-    assert {step.state for step in squash_.steps} == {"applied (adopted)"}
+    assert {step.state for step in squash_.steps} == {"applied (inherited)"}
     assert squash_.hint is None
-    assert report.adoptable == [] and report.ahead == [] and not report.pending
+    assert report.inheritable == [] and report.ahead == [] and not report.pending
     require(db)
 
 
-@pytest.mark.parametrize("adopted_first", [True, False], ids=["adopted", "originals"])
-def test_a_squash_of_a_squash_reads_adoptable_from_either_generation(
-    project, pkg, db, capsys, adopted_first
+@pytest.mark.parametrize(
+    "inherited_first", [True, False], ids=["inherited", "originals"]
+)
+def test_a_squash_of_a_squash_reads_inheritable_from_either_generation(
+    project, pkg, db, capsys, inherited_first
 ):
     epic(project, pkg, db)
     assert squash("bio_epic", "--from", "0003") == 0
-    if adopted_first:
+    if inherited_first:
         assert cli(capsys, "up", "--url", db.url)[0] == 0
     assert squash("epic", "--from", "0002") == 0
 
     report = stands(db)
 
     [outer] = [m for m in report.migrations if m.name == "0002_epic"]
-    assert outer.state == "pending (adoptable)"
-    assert outer.adopts == (
-        ["0002_add_tmp", "0003_bio_epic"] if adopted_first else ORIGINALS
+    assert outer.state == "pending (inheritable)"
+    assert outer.inherits == (
+        ["0002_add_tmp", "0003_bio_epic"] if inherited_first else ORIGINALS
     )
-    assert report.adoptable == ["0002_epic"] and report.ahead == []
+    assert report.inheritable == ["0002_epic"] and report.ahead == []
     with pytest.raises(PendingMigrationsError) as raised:
         require(db)
     assert raised.value.pending == ["0002_epic"]

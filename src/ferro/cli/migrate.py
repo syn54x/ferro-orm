@@ -433,7 +433,7 @@ def up(
     except MigrationRefused as refused:
         print_run_failure(out, refused)
         return exit_codes.REFUSED
-    if not report.applied and not report.adopted:
+    if not report.applied and not report.inherited:
         print_done(out, "nothing to apply", "the database is up to date")
     return exit_codes.OK
 

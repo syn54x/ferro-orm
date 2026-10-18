@@ -28,7 +28,7 @@ one token; (d) the validate, label-addition and type-creation statements are
 the pass's; (e) a migrated database equals an ``auto_migrate``'d one and
 Alembic sees nothing to do against either; (f) the bridge's revision runs the
 pass's DDL; (g) the pass's ``PassReport`` is the plan it renders; (h) a squash
-is ``new`` across its ends; (i) a database that adopts a squash is the one
+is ``new`` across its ends; (i) a database that inherits a squash is the one
 that ran it — at the end of this file.
 
 The canonical bridge test in this file is
@@ -1833,7 +1833,7 @@ def test_pin_e_a_migrated_database_holds_the_auto_migrated_server_defaults(
         ] == [1], f"{table}.{column} is NOT NULL"
 
 
-# -- pin (i): an adopted database is the squashed one --------------------------------
+# -- pin (i): an inherited database is the squashed one --------------------------------
 
 _TRACKING = (
     "SELECT migration, step, migration_name, file, kind, checksum, "
@@ -1845,7 +1845,7 @@ _TRACKING = (
 
 
 @pytest.mark.parametrize("case_id", CASE_IDS)
-def test_pin_i_an_adopted_database_is_the_squashed_one(
+def test_pin_i_an_inherited_database_is_the_squashed_one(
     request,
     project,
     second_db,
@@ -1855,7 +1855,7 @@ def test_pin_i_an_adopted_database_is_the_squashed_one(
     postgres_base_url,
     db_schema_name,
 ):
-    """A database taken through ``0001`` and ``0002`` and then adopted by
+    """A database taken through ``0001`` and ``0002`` and then inherited by
     ``up`` against the squashed directory is the database that ran the
     squashed ``0001`` from empty: the same live schema and facts (columns,
     types, nullability, indexes, constraints, policies), the same server
@@ -1866,33 +1866,34 @@ def test_pin_i_an_adopted_database_is_the_squashed_one(
     case = CASEBOOK[case_id]
     if migrate_through(project, case, db_url, db_backend) is None:
         pytest.skip("the edit changes nothing on this backend: nothing to squash")
-    adopted = Db(db_url, db_backend, postgres_base_url, db_schema_name)
+    inherited = Db(db_url, db_backend, postgres_base_url, db_schema_name)
     second_url, second_schema = second_db
     scratch = Db(second_url, db_backend, postgres_base_url, second_schema)
     after = project.register(case.after)
     if case_id in DEAD_STEP_REFUSALS:
         _assert_the_dead_step_refusal(case_id, project.root, cwd=project.root)
         return
-    before_adoption = live_schema(db_url, after), column_defaults(adopted)
+    before_inheritance = live_schema(db_url, after), column_defaults(inherited)
 
     assert _cli("migrate", "squash", "squashed", "--from", "0001") == 0
     assert _cli("migrate", "up", "--url", db_url) == 0
-    assert (live_schema(db_url, after), column_defaults(adopted)) == before_adoption, (
-        "adoption ran DDL"
-    )
+    assert (
+        live_schema(db_url, after),
+        column_defaults(inherited),
+    ) == before_inheritance, "inheritance ran DDL"
     assert _cli("migrate", "up", "--url", second_url) == 0
 
     assert live_schema(db_url, after) == live_schema(second_url, after)
-    assert column_defaults(adopted) == column_defaults(scratch)
-    assert adopted.rows(_TRACKING) == scratch.rows(_TRACKING)
-    assert adopted.rows(_TRACKING), "the squashed migration is recorded"
+    assert column_defaults(inherited) == column_defaults(scratch)
+    assert inherited.rows(_TRACKING) == scratch.rows(_TRACKING)
+    assert inherited.rows(_TRACKING), "the squashed migration is recorded"
     for url in (db_url, second_url):
         report = asyncio.run(migrations_drift(url=url))
         assert (report.refusal, report.lines) == (None, []), report
 
     for url in (db_url, second_url):
         assert _cli("migrate", "down", "--all", "--yes", "--url", url) == 0
-    for db in (adopted, scratch):
+    for db in (inherited, scratch):
         assert db.rows("SELECT 1 FROM _ferro_migrations") == []
         left = {t for t in db.tables() if not t.startswith(("_ferro_", "sqlite_"))}
         assert left == set(), left

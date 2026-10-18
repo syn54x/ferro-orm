@@ -471,11 +471,11 @@ class TrackedDatabase:
         *,
         allow_ahead: bool | Literal["expand-only"] = False,
         order_keys: Any = None,
-        adopting: Callable[[Path], str] | None = None,
+        inheriting: Callable[[Path], str] | None = None,
     ) -> Plan:
-        """A preview: its steps cannot be executed. With ``adopting`` (a data
+        """A preview: its steps cannot be executed. With ``inheriting`` (a data
         step file's declared kind), planned as the run plans once it has
-        adopted every squash whose witness the records hold (ADR-0056)."""
+        inherited every squash whose witness the records hold (ADR-0056)."""
         ...
     def locked(
         self,
@@ -523,12 +523,14 @@ class LockedDatabase:
         allow_ahead: bool | Literal["expand-only"] = False,
         order_keys: Any = None,
     ) -> Plan: ...
-    async def adopt(self, declared_kind: Callable[[Path], str]) -> list[dict[str, Any]]:
-        """Adopt every squash whose witness the records hold, in one
+    async def inherit(
+        self, declared_kind: Callable[[Path], str]
+    ) -> list[dict[str, Any]]:
+        """Inherit every squash whose witness the records hold, in one
         transaction, running nothing (ADR-0056); ``[{"squash", "replaced"}]``.
-        ``declared_kind(path)`` is an adopted data step's ``atomic`` /
+        ``declared_kind(path)`` is an inherited data step's ``atomic`` /
         ``chunked``. A squash whose whole witness a baseline recorded is
-        adopted with origin ``baseline``. Raises ``RunRefused``
+        inherited with origin ``baseline``. Raises ``RunRefused``
         (``partial_witness``) on a squash the records hold part of, and
         (``mixed_witness``) on one part baselined and part run, writing
         nothing."""

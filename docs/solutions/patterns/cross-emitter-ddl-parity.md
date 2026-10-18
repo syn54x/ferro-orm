@@ -102,9 +102,9 @@ tests' own models), on both dialects:
 | (f) | — (the bridge) | every statement the revision runs as written is the pass's, and the revision leaves the pass's schema |
 | (g) | — (the pass itself) | `ferro.migrate()`'s `PassReport`: its `schema` statements are the plan's for the same live read, grouped by table (the create pass standing in for each add); its warnings the plan's reports by kind and subject |
 | (h) | `ferro migrate squash NAME --from 0001` over a copy of the chain | `ferro migrate new NAME` from the after models alone: the same files byte for byte, bar `ir.json`, whose payload is the same once the witness and the composed rename hints are removed |
-| (i) | a database taken through the originals, then adopted by `ferro migrate up` (it runs nothing) | a database that ran the squash from empty: the same live schema (every fact pin (e) reads, server defaults included), the same tracking rows bar origin and times, no drift, and a `down --all` that empties both |
+| (i) | a database taken through the originals, then inherited by `ferro migrate up` (it runs nothing) | a database that ran the squash from empty: the same live schema (every fact pin (e) reads, server defaults included), the same tracking rows bar origin and times, no drift, and a `down --all` that empties both |
 
-Pins (h) and (i) hold `ferro migrate squash` to the door it belongs to rather than to the pass: a squash writes what `new` would have written across its ends, and a database that adopts it stands where one that ran it stands.
+Pins (h) and (i) hold `ferro migrate squash` to the door it belongs to rather than to the pass: a squash writes what `new` would have written across its ends, and a database that inherits it stands where one that ran it stands.
 
 The plain twins pin (a) compares by: a `NOT VALID` add is the plain add,
 `CONCURRENTLY` is gone (the leading crash-leftover `DROP INDEX CONCURRENTLY`

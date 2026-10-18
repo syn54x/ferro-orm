@@ -196,8 +196,8 @@ on both dialects:
   that `ferro migrate new NAME` writes from the after models alone, file for
   file and byte for byte, bar `ir.json`, whose payload is the same once the
   squash's witness and the composed rename hints are removed;
-- **(i)** an adopted database is the squashed one: a database taken through
-  `0001` and `0002` and then adopted by `ferro migrate up` against the squashed
+- **(i)** an inherited database is the squashed one: a database taken through
+  `0001` and `0002` and then inherited by `ferro migrate up` against the squashed
   directory (it runs no statement) has the same live schema as one that ran
   the squashed `0001` from empty, reading every fact pin (e) reads (columns,
   types, nullability, indexes, constraints, policies, and the server default
