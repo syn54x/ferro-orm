@@ -178,7 +178,7 @@ Rules for closing a session:
 
 `reset_engine()` tears down every connection. It exists for test isolation, not for closing one session.
 
-The [`Session`](../api/connection.md#ferro.Session) and [`engines`](../api/connection.md#ferro.engines) reference entries list every argument, including `settings=` for [row-level security](row-level-security.md#session-settings).
+The [`Session`](../api/connection.md#ferro.Session) and [`engines`](../api/connection.md#ferro.engines) reference entries list every argument, including `settings=` for [row-level security](../concepts/row-level-security.md#session-settings).
 
 !!! note "Changed in 0.13"
     Calls outside a session used to run on the default connection; they now raise `RuntimeError`. The [upgrade guide](../howto/upgrade-guide.md#connection-routing-requires-a-session) shows how to move old call sites into sessions.
@@ -207,7 +207,7 @@ await connect(
 )
 ```
 
-The pool holds up to ten connections and keeps one open. `max_connections` defaults to 5 and `min_connections` to 0, and `min_connections` may not exceed `max_connections`. In a web application, connect once at startup and let the pool serve every request. `PoolConfig(settings_delivery=...)` chooses how sessions send their [row-level security settings](row-level-security.md#connection-delivery-mode); the [`PoolConfig`](../api/connection.md#ferro.PoolConfig) reference covers every field.
+The pool holds up to ten connections and keeps one open. `max_connections` defaults to 5 and `min_connections` to 0, and `min_connections` may not exceed `max_connections`. In a web application, connect once at startup and let the pool serve every request. `PoolConfig(settings_delivery=...)` chooses how sessions send their [row-level security settings](../concepts/row-level-security.md#connection-delivery); the [`PoolConfig`](../api/connection.md#ferro.PoolConfig) reference covers every field.
 
 ## Named connections
 
