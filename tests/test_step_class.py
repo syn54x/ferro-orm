@@ -462,7 +462,7 @@ def test_the_deploying_guide_quotes_the_refusal_expand_only_raises(project, pkg,
     quotes is the text ferro raises (the guide's migration is ``0008``)."""
     page = DEPLOYING.read_text()
     recipe = 'await ferro.migrations.require_applied(allow_ahead="expand-only")'
-    assert f"```python\n{recipe}\n```" in page
+    assert re.search(rf"```python[^\n]*\n{re.escape(recipe)}\n```", page)
     quoted = re.search(
         r"```text\n(ferro\.migrations\.DatabaseAheadError: [^`]*?0008_drop_bio:01[^`]*)```",
         page,
