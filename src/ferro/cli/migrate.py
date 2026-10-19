@@ -48,6 +48,7 @@ if TYPE_CHECKING:
 __all__ = ["migrate"]
 
 migrate = App(
+    help_format="plaintext",
     name="migrate",
     help="Write, apply and check schema migrations.",
 )

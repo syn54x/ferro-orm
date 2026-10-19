@@ -114,6 +114,7 @@ def _build() -> "App":
         ferro_version = "unknown"
 
     root = App(
+        help_format="plaintext",
         name="ferro",
         help="ferro's command line: schema migrations for ferro models.",
         version=ferro_version,
