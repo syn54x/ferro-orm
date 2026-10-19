@@ -194,9 +194,9 @@ def _resolve_join_selector(
 ) -> tuple[str, ...]:
     """Resolve a join-chainer selector into a relation path (#272).
 
-    ``selector`` is a lambda receiving a validating :class:`QueryProxy` and
+    ``selector`` is a lambda receiving a validating `QueryProxy` and
     naming a RELATION path (``lambda t: t.account``, ``lambda t: t.account.owner``)
-    — i.e. it must return a :class:`RelationProxy`. Each hop is validated against
+    — i.e. it must return a `RelationProxy`. Each hop is validated against
     the relevant model at build time (the proxy raises ``AttributeError`` with a
     did-you-mean for a bad hop, same as ``where()``).
 
@@ -205,7 +205,7 @@ def _resolve_join_selector(
 
     Raises:
         TypeError: If ``selector`` is not callable, resolves to a column
-            (:class:`FieldProxy`) rather than a relation, or returns any other
+            (`FieldProxy`) rather than a relation, or returns any other
             non-relation value — a join selector names a relation path, not a
             column.
     """
@@ -266,10 +266,10 @@ def _reverse_population_error(name: str) -> TypeError:
     """The pinned include()-cannot-populate-a-reverse-relation error (#287).
 
     One construction site for the two paths that reach it: a reverse relation
-    the predicate proxies resolve (a :class:`ReverseRelationProxy` selector
+    the predicate proxies resolve (a `ReverseRelationProxy` selector
     result, #314) and one they don't yet (an M2M name, surfaced as an
     ``AttributeError`` and re-raised by
-    :func:`_reject_reverse_relation_include`).
+    `_reject_reverse_relation_include`).
     """
     return TypeError(
         f"include() cannot populate {name!r}: it is a reverse (BackRef) "
@@ -287,10 +287,10 @@ def _resolve_include_selector(
 ) -> tuple[str, ...]:
     """Resolve an ``include()`` selector into a relation path (#286).
 
-    ``selector`` is a lambda receiving a validating :class:`QueryProxy` and
+    ``selector`` is a lambda receiving a validating `QueryProxy` and
     naming a forward-FK RELATION path (``lambda t: t.account``,
     ``lambda t: t.account.owner``) — the same traversal syntax as ``join()``,
-    resolving to a :class:`RelationProxy`. Each hop is validated against the
+    resolving to a `RelationProxy`. Each hop is validated against the
     relevant model at build time (the proxy raises ``AttributeError`` with a
     did-you-mean for a bad hop, exactly like ``where()``).
 
@@ -300,7 +300,7 @@ def _resolve_include_selector(
     Raises:
         TypeError: If ``selector`` is a string or otherwise not callable
             (strings never traverse, #280 — include is lambda-selector only),
-            resolves to a column (:class:`FieldProxy`) rather than a relation,
+            resolves to a column (`FieldProxy`) rather than a relation,
             names a BackRef/M2M relation (reverse population is a separate
             future mechanism, #287), or returns any other non-relation value.
     """
@@ -370,7 +370,7 @@ def _resolve_projection_selector(
 ) -> tuple[_ProjectedField, ...]:
     """Resolve a ``select()`` lambda selector into projected fields (#279/#293).
 
-    ``selector`` receives a validating :class:`QueryProxy` and returns one
+    ``selector`` receives a validating `QueryProxy` and returns one
     field (``lambda t: t.amount``), a tuple/list of fields
     (``lambda t: (t.id, t.account.name)``), or a dict whose keys name the
     output fields (``lambda t: {"account_name": t.account.name}`` — output
@@ -430,7 +430,7 @@ def _resolve_projection_strings(
     Raises:
         ValueError: For a dotted path, or a column named twice.
         AttributeError: For a name that is not a queryable column
-            (did-you-mean, from :func:`validate_query_column`).
+            (did-you-mean, from `validate_query_column`).
     """
     columns: list[str] = []
     for name in names:
@@ -990,7 +990,7 @@ class Query(Generic[T]):
     def _add_explicit_join(
         self, selector: "Callable[[QueryProxy[T]], Any]", join_type: str
     ) -> Self:
-        """Shared body of :meth:`join`/:meth:`left_join` (#272).
+        """Shared body of `join`/`left_join` (#272).
 
         Resolves the selector to a relation path, checks every edge for a
         contradictory explicit mark (INNER vs LEFT), then records the marks and

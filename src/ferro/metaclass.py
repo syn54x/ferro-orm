@@ -614,7 +614,7 @@ class ModelMetaclass(type(BaseModel)):
 
         The relation gets no descriptor and no shadow ``*_id`` field, so the
         model has neither attribute; its column is compiled from the
-        ``ForeignKey`` alone (:func:`ferro.columns.retired_column_specs`).
+        ``ForeignKey`` alone (`ferro.columns.retired_column_specs`).
         """
         if metadata.renamed_from is not None:
             raise _retired_and_renamed(model_name, field_name)

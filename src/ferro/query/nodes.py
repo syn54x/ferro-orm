@@ -1307,7 +1307,7 @@ def _resolve_scoped_predicate(
     """Evaluate an existence test's inner lambda over the related model (#315).
 
     The inner predicate is ordinary ferro — the same validating
-    :class:`QueryProxy` a root ``where()`` receives, constructed for the
+    `QueryProxy` a root ``where()`` receives, constructed for the
     related model — so every operator, combinator, traversal, and nested
     existence test works unchanged. The rejection shapes mirror
     ``where()``'s own.
