@@ -1,122 +1,103 @@
-# Pagination
+# How to paginate query results
 
-Ferro supports the two standard pagination strategies: offset pagination with `limit()` / `offset()`, and keyset (cursor) pagination with a `where` filter on the sort key.
+This page splits a query's results into pages two ways: by page number with `limit()` and `offset()`, and by position with `after()` and `before()`. Use page numbers when users jump to page 7 of a small table; use positions for feeds, infinite scroll, APIs and large tables.
 
-## Offset Pagination
-
-The simplest approach: order the rows, skip `(page - 1) * per_page`, take `per_page`.
-
-```python
---8<-- "docs/examples/pagination.py:offset"
-```
-
-Offset pagination is easy to implement and lets users jump to an arbitrary page number. It has two well-known costs:
-
-- **Drift.** If rows are inserted or deleted between requests, page boundaries shift — a user paging through results can see duplicates or miss rows.
-- **Deep offsets are expensive.** The database still scans and discards every skipped row, so `OFFSET 100000` does real work before returning anything. Latency grows with page depth.
-
-For small datasets and admin-style page numbers, neither matters much. For feeds and large tables, use keyset pagination instead.
-
-## Keyset (Cursor) Pagination
-
-Instead of skipping rows, remember the last value seen and filter past it:
-
-```python
---8<-- "docs/examples/pagination.py:keyset"
-```
-
-The client passes back the `id` of the last item it received (the cursor); the next query is a plain indexed range scan (`WHERE id > ? ORDER BY id LIMIT ?`). This makes keyset pagination:
-
-- **Stable** — inserts and deletes elsewhere in the table don't shift the window, so no duplicates or gaps.
-- **Fast at any depth** — page 1 and page 10,000 cost the same, since the database seeks directly to the cursor instead of scanning skipped rows.
-
-The trade-off: clients can only walk forward (or backward) from a cursor — there is no "jump to page 57".
-
-## Using It in an API
-
-A keyset endpoint returns the items plus the cursor for the next request:
+The examples page through seven articles, newest first. Declare the model, connect, and add the rows inside a session:
 
 === "Assignment"
 
     ```python
-    from fastapi import FastAPI, Query
-
-    from ferro import Field, Model
-
-
-    class Article(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        title: str
-
-
-    app = FastAPI()
-
-
-    @app.get("/articles")
-    async def list_articles(
-        cursor: int | None = Query(None),
-        limit: int = Query(20, ge=1, le=100),
-    ):
-        query = Article.select() if cursor is None else Article.where(lambda t: t.id > cursor)
-        items = await query.order_by(lambda t: t.id).limit(limit).all()
-        return {
-            "items": items,
-            "next_cursor": items[-1].id if items else None,
-            "has_more": len(items) == limit,
-        }
+    --8<-- "docs/examples/pagination.py:model"
+    --8<-- "docs/examples/pagination.py:session"
     ```
 
 === "Annotated"
 
     ```python
-    from typing import Annotated
-
-    from fastapi import FastAPI, Query
-
-    from ferro import Field, Model
-
-
-    class Article(Model):
-        id: Annotated[int | None, Field(default=None, primary_key=True)]
-        title: str
-
-
-    app = FastAPI()
-
-
-    @app.get("/articles")
-    async def list_articles(
-        cursor: int | None = Query(None),
-        limit: int = Query(20, ge=1, le=100),
-    ):
-        query = Article.select() if cursor is None else Article.where(lambda t: t.id > cursor)
-        items = await query.order_by(lambda t: t.id).limit(limit).all()
-        return {
-            "items": items,
-            "next_cursor": items[-1].id if items else None,
-            "has_more": len(items) == limit,
-        }
+    --8<-- "docs/examples/pagination_annotated.py:model"
+    --8<-- "docs/examples/pagination_annotated.py:session"
     ```
 
-Clients call `/articles`, then `/articles?cursor=<next_cursor>` until `has_more` is false. Ferro models are Pydantic models, so FastAPI serializes them directly.
+`published_on` carries an index because both kinds of paging read the table in `published_on` order. The blocks below run inside this session; [Sessions](../guide/connections.md#sessions) explains why every call needs one.
 
-## Tips
+## Pages by number with `offset()`
 
-- **Always `order_by`.** Without an explicit ordering, the database returns rows in whatever order it likes, and `limit`/`offset` windows become non-deterministic. Order by a unique column (or end the ordering with one) so ties can't straddle a page boundary.
-- **Index your sort columns.** Both strategies turn into an ordered scan over the sort key. Declare an index on non-primary-key sort columns, e.g. `created_at: datetime = Field(index=True)`. Primary keys are already indexed.
-- **Cap page sizes.** Enforce a maximum `limit` at the API boundary (as the FastAPI example does with `le=100`) so a single request can't ask for the whole table.
+Order the rows, skip `(page - 1) * per_page` of them, and take `per_page`:
 
-## Choosing a Strategy
+```python
+--8<-- "docs/examples/pagination.py:offset"
+```
 
-| | Offset | Keyset (cursor) |
-|---|---|---|
-| Jump to arbitrary page | Yes | No |
-| Stable under concurrent writes | No (drift) | Yes |
-| Cost of deep pages | Grows with depth | Constant |
-| Implementation effort | Trivial | Small (track a cursor) |
-| Best for | Small tables, admin UIs, page numbers | Feeds, infinite scroll, large tables, APIs |
+Each call reads one page. Page 2, three to a page, holds the fourth to sixth newest articles:
 
-## See Also
+```python
+--8<-- "docs/examples/pagination.py:offset-call"
+```
 
-- [Queries guide](../guide/queries.md) — filtering, ordering, `limit` and `offset`
-- [Queries API](../api/queries.md) — the full `Query` builder reference
+Two articles share 12 January, so the second `order_by()` on `id` decides which comes first. Without it the database may return tied rows in either order, and a row can move from one page to the next between two requests.
+
+Offset paging has two costs:
+
+- **Drift.** A row added or deleted between two requests shifts every later page by one, so the reader sees a row twice or misses one.
+- **Deep pages are slow.** The database reads and discards every skipped row, so `offset(100_000)` reads 100,000 rows before it returns any.
+
+## Keyset (cursor) pagination
+
+[`after()`][ferro.query.builder.Query.after] starts a page just after a row you already have. Build the ordered query once, read the first page, then pass its last row to `after()`:
+
+```python
+--8<-- "docs/examples/pagination.py:after"
+```
+
+The second page starts with Keyset paging in practice, the row after Soft deletes and unique keys. The database seeks straight to that position, so page 1,000 costs what page 2 costs, and rows added or deleted elsewhere do not shift the page.
+
+[`before()`][ferro.query.builder.Query.before] goes the other way. Pass it the first row of a page to get the page before it, still newest first:
+
+```python
+--8<-- "docs/examples/pagination.py:before"
+```
+
+`previous_page` holds the same three articles as `first_page`. The order keys must end with the primary key, so that every row has exactly one position; `after()` and `before()` raise `ValueError` when it is missing. [Paging with `after()` and `before()`](../guide/queries.md#paging-with-after-and-before) lists the other rules.
+
+## A paginated API endpoint
+
+An API hands the client a cursor: a string that encodes the last row's position, which the client sends back for the next page. [`position_of()`][ferro.query.builder.Query.position_of] reads a row's position as a tuple of its order-key values, and `after()` accepts that tuple in place of the row:
+
+```python
+--8<-- "docs/examples/pagination.py:cursor"
+```
+
+`article_page()` asks for one row more than the page holds. If that row comes back, there is a next page and `next_cursor` points at the page's last row; if it does not, `next_cursor` is `None`, even when the last page is exactly full. Three calls walk all seven articles:
+
+```python
+--8<-- "docs/examples/pagination.py:cursor-calls"
+```
+
+The third page holds the one remaining article, and its `next_cursor` is `None`.
+
+A FastAPI endpoint opens a session for the request and returns `article_page()`'s result. Ferro models are Pydantic models, so FastAPI serializes the articles directly:
+
+```python {compile-only="needs FastAPI, which the docs test environment does not install; article_page() runs in docs/examples/pagination.py"}
+from fastapi import FastAPI, Query
+
+from ferro import engines
+from myapp.articles import article_page
+
+app = FastAPI()
+
+
+@app.get("/articles")
+async def list_articles(
+    cursor: str | None = None,
+    limit: int = Query(20, ge=1, le=100),
+):
+    async with engines.session():
+        return await article_page(cursor=cursor, limit=limit)
+```
+
+Clients call `/articles`, then `/articles?cursor=<next_cursor>` until `next_cursor` is `null`. `le=100` caps the page size, so one request cannot ask for the whole table. [A session per request](../guide/connections.md#a-session-per-request) shows other ways to open the session.
+
+## See also
+
+- [Paging with `after()` and `before()`](../guide/queries.md#paging-with-after-and-before): the rules for positions, `None` order keys and related columns.
+- [`Query.after()`][ferro.query.builder.Query.after], [`Query.before()`][ferro.query.builder.Query.before], [`Query.limit()`][ferro.query.builder.Query.limit] and [`Query.offset()`][ferro.query.builder.Query.offset] in the API reference.
