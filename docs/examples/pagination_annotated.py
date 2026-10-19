@@ -17,16 +17,6 @@ class Article(Model):
 
 # --8<-- [end:model]
 
-ARTICLES = [
-    ("Choosing a primary key", date(2026, 1, 5)),
-    ("Indexes that pay for themselves", date(2026, 1, 12)),
-    ("Reading a query plan", date(2026, 1, 12)),
-    ("Keyset paging in practice", date(2026, 1, 19)),
-    ("Soft deletes and unique keys", date(2026, 1, 26)),
-    ("Storing time in UTC", date(2026, 2, 2)),
-    ("Testing with an in-memory database", date(2026, 2, 9)),
-]
-
 
 async def main() -> None:
     # --8<-- [start:session]
@@ -34,7 +24,15 @@ async def main() -> None:
 
     async with engines.session():
         await Article.bulk_create(
-            [Article(title=title, published_on=day) for title, day in ARTICLES]
+            [
+                Article(title="Choosing a primary key", published_on=date(2026, 1, 5)),
+                Article(title="Indexes that pay off", published_on=date(2026, 1, 12)),
+                Article(title="Reading a query plan", published_on=date(2026, 1, 12)),
+                Article(title="Keyset paging", published_on=date(2026, 1, 19)),
+                Article(title="Soft deletes", published_on=date(2026, 1, 26)),
+                Article(title="Storing UTC", published_on=date(2026, 2, 2)),
+                Article(title="Testing with SQLite", published_on=date(2026, 2, 9)),
+            ]
         )
         # --8<-- [end:session]
 
@@ -47,9 +45,9 @@ async def main() -> None:
         first_page = await newest.all()
         second_page = await newest.after(first_page[-1]).all()
         assert [article.title for article in second_page] == [
-            "Keyset paging in practice",
+            "Keyset paging",
             "Reading a query plan",
-            "Indexes that pay for themselves",
+            "Indexes that pay off",
         ]
 
     print("pagination_annotated example ran successfully")

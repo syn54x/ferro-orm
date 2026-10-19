@@ -2,8 +2,6 @@
 
 import asyncio
 
-from ferro import UniqueViolationError
-
 # --8<-- [start:model]
 from datetime import UTC, datetime
 
@@ -78,6 +76,8 @@ async def main() -> None:
         # --8<-- [end:querying]
 
         # --8<-- [start:unique]
+        from ferro import UniqueViolationError
+
         try:
             await Invoice.create(number="INV-001")
         except UniqueViolationError:

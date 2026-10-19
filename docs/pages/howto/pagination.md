@@ -49,7 +49,7 @@ Offset paging has two costs:
 --8<-- "docs/examples/pagination.py:after"
 ```
 
-The second page starts with Keyset paging in practice, the row after Soft deletes and unique keys. The database seeks straight to that position, so page 1,000 costs what page 2 costs, and rows added or deleted elsewhere do not shift the page.
+The second page starts with "Keyset paging", the article after "Soft deletes". The database seeks straight to that position, so page 1,000 costs what page 2 costs, and rows added or deleted elsewhere do not shift the page.
 
 [`before()`][ferro.query.builder.Query.before] goes the other way. Pass it the first row of a page to get the page before it, still newest first:
 

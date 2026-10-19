@@ -21,20 +21,6 @@ class Article(Model):
 
 # --8<-- [end:model]
 
-ARTICLES = [
-    ("Choosing a primary key", date(2026, 1, 5)),
-    ("Indexes that pay for themselves", date(2026, 1, 12)),
-    ("Reading a query plan", date(2026, 1, 12)),
-    ("Keyset paging in practice", date(2026, 1, 19)),
-    ("Soft deletes and unique keys", date(2026, 1, 26)),
-    ("Storing time in UTC", date(2026, 2, 2)),
-    ("Testing with an in-memory database", date(2026, 2, 9)),
-]
-
-
-def titles(articles: list[Article]) -> list[str]:
-    return [article.title for article in articles]
-
 
 # --8<-- [start:offset]
 async def get_page(page: int, per_page: int) -> list[Article]:
@@ -90,16 +76,24 @@ async def main() -> None:
 
     async with engines.session():
         await Article.bulk_create(
-            [Article(title=title, published_on=day) for title, day in ARTICLES]
+            [
+                Article(title="Choosing a primary key", published_on=date(2026, 1, 5)),
+                Article(title="Indexes that pay off", published_on=date(2026, 1, 12)),
+                Article(title="Reading a query plan", published_on=date(2026, 1, 12)),
+                Article(title="Keyset paging", published_on=date(2026, 1, 19)),
+                Article(title="Soft deletes", published_on=date(2026, 1, 26)),
+                Article(title="Storing UTC", published_on=date(2026, 2, 2)),
+                Article(title="Testing with SQLite", published_on=date(2026, 2, 9)),
+            ]
         )
         # --8<-- [end:session]
 
         # --8<-- [start:offset-call]
         page_two = await get_page(page=2, per_page=3)
-        assert titles(page_two) == [
-            "Keyset paging in practice",
+        assert [article.title for article in page_two] == [
+            "Keyset paging",
             "Reading a query plan",
-            "Indexes that pay for themselves",
+            "Indexes that pay off",
         ]
         # --8<-- [end:offset-call]
 
@@ -112,23 +106,23 @@ async def main() -> None:
         )
 
         first_page = await newest.all()
-        assert titles(first_page) == [
-            "Testing with an in-memory database",
-            "Storing time in UTC",
-            "Soft deletes and unique keys",
+        assert [article.title for article in first_page] == [
+            "Testing with SQLite",
+            "Storing UTC",
+            "Soft deletes",
         ]
 
         second_page = await newest.after(first_page[-1]).all()
-        assert titles(second_page) == [
-            "Keyset paging in practice",
+        assert [article.title for article in second_page] == [
+            "Keyset paging",
             "Reading a query plan",
-            "Indexes that pay for themselves",
+            "Indexes that pay off",
         ]
         # --8<-- [end:after]
 
         # --8<-- [start:before]
         previous_page = await newest.before(second_page[0]).all()
-        assert titles(previous_page) == titles(first_page)
+        assert previous_page == first_page
         # --8<-- [end:before]
 
         # --8<-- [start:cursor-calls]
@@ -139,14 +133,16 @@ async def main() -> None:
         assert second["next_cursor"] == "2026-01-12_2"
 
         last = await article_page(cursor=second["next_cursor"], limit=3)
-        assert titles(last["items"]) == ["Choosing a primary key"]
+        assert [article.title for article in last["items"]] == [
+            "Choosing a primary key"
+        ]
         assert last["next_cursor"] is None
         # --8<-- [end:cursor-calls]
 
         # A page that ends exactly on the last row reports no next page.
         exact = await article_page(cursor="2026-01-12_3", limit=2)
-        assert titles(exact["items"]) == [
-            "Indexes that pay for themselves",
+        assert [article.title for article in exact["items"]] == [
+            "Indexes that pay off",
             "Choosing a primary key",
         ]
         assert exact["next_cursor"] is None
