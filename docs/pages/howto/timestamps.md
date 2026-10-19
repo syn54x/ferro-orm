@@ -1,76 +1,68 @@
-# Timestamps
+# How to record created and updated times
 
-Track when rows are created and last modified with `created_at` / `updated_at` fields: `created_at` is filled by a field default, and `updated_at` is refreshed by a small mixin that hooks `save()`.
+This page gives a model `created_at` and `updated_at` fields: a field default sets both when the row is created, and a mixin sets `updated_at` again in every `save()`.
 
-## The Pattern
+## The `TimestampMixin`
+
+Declare both fields on the model with a default of the current UTC time, and put the mixin first among the bases so its `save()` runs before `Model.save()`:
 
 === "Assignment"
 
     ```python
     --8<-- "docs/examples/timestamps.py:model"
+    --8<-- "docs/examples/timestamps.py:session"
     ```
 
 === "Annotated"
 
     ```python
     --8<-- "docs/examples/timestamps_annotated.py:model"
+    --8<-- "docs/examples/timestamps_annotated.py:session"
     ```
 
-Two pieces work together:
+The new note's `created_at` is an aware datetime in UTC. `create()` saves through `save()`, so the mixin runs for it too. The blocks below run inside this session; [Sessions](../guide/connections.md#sessions) explains why every call needs one.
 
-- **Field defaults on the concrete model.** `created_at` and `updated_at` are declared on `Note` itself with `default_factory=utcnow`, so both are set when an instance is constructed.
-- **`TimestampMixin` for behavior.** The mixin overrides `save()` to touch `updated_at` before delegating to `Model.save()`. It is a *plain class* — not a `Model` subclass — and contributes only behavior, never fields.
+The mixin is a plain class, not a `Model` subclass, so every model that uses it declares the two fields itself. A `Model` base class would get a table of its own; [Fields on a model base class](../guide/models-and-fields.md#fields-on-a-model-base-class) shows that table.
 
-Every model that wants timestamps repeats the same two field declarations and adds the mixin to its bases (mixin first, so its `save()` wins in the MRO).
+## Updating a note
 
-!!! note "Why a mixin instead of a `Model` base class?"
-
-    You might expect to declare the fields once on a shared base, e.g. `class Timestamped(Model)` with `created_at` / `updated_at`, and inherit from it. Ferro does not support this: the ORM registers a table schema for each model class as it is defined, so fields declared on a `Model` base class are not contributed to its subclasses' tables. Keep shared *behavior* in a plain mixin and declare *fields* on each concrete model.
-
-## Usage
+Change a field and save, and the mixin moves `updated_at` forward:
 
 ```python
 --8<-- "docs/examples/timestamps.py:usage"
 ```
 
-`created_at` is set once when the instance is created; every subsequent `save()` advances `updated_at`. Note that the mixin only hooks instance `save()` (which `create()` paths go through) — batch updates like `Note.where(...).update(...)` write columns directly and will not touch `updated_at` unless you set it explicitly. Use a recipe with the imported `now` singleton for the database clock:
+`created_at` keeps the time the note was created, and `updated_at` is now later than before the save.
+
+## Batch updates
+
+!!! warning "Batch updates skip the mixin"
+    `Note.where(...).update(...)` writes its columns in one `UPDATE` statement without loading the rows, so no `save()` runs and `updated_at` keeps its old value unless the update sets it.
+
+Pass `updated_at=utcnow()` beside the columns the update changes:
 
 ```python
-from ferro import now
-
-await Note.where(lambda note: note.id == nid).update(
-    lambda note: {"updated_at": now}
-)
+--8<-- "docs/examples/timestamps.py:batch"
 ```
 
-## Timezone Notes
+The archived note now has the latest `updated_at`, so it sorts first, and it reads back as an aware datetime that compares with `utcnow()`. Ferro stores `utcnow()` in an update exactly as `save()` stores it, so rows touched either way sort together.
 
-Store UTC, always. The example's `utcnow()` helper returns a timezone-aware datetime:
+!!! warning "`now` on SQLite"
+    The database-clock recipe `update(lambda note: {"updated_at": now})` writes SQLite's own time format, whole seconds with no time zone (`2026-10-19 14:56:27`), while `save()` writes `2026-10-19T14:56:27.736246Z`. SQLite compares the two as text, so such a row sorts before every row `save()` wrote on the same day, however much earlier. It also reads back as a naive datetime, which raises `TypeError` when compared with `utcnow()`. Use `utcnow()` on SQLite; on Postgres, `now` stores a `timestamptz` like any other.
 
-```python
-from datetime import UTC, datetime
+## Storing UTC
 
+`utcnow()` returns `datetime.now(UTC)`, an aware datetime. A naive `datetime.now()` reads the server's local clock, so its values change meaning between hosts and across daylight-saving changes. Store UTC and convert to the reader's time zone when you display the value.
 
-def utcnow() -> datetime:
-    return datetime.now(UTC)
-```
+## Naive and aware columns
 
-Avoid naive `datetime.now()` — it captures the server's local clock, which makes values ambiguous and breaks comparisons across hosts and DST changes. Keep storage in UTC and convert to the user's timezone only at the display layer.
-
-### Naive vs timezone-aware columns
-
-A `datetime` field maps to Postgres `timestamptz` (SQLite stores both the same
-way). If you point a model at a pre-existing plain `timestamp` (no time zone)
-column, Ferro will **not** silently convert it — auto-migrate warns and leaves the
-column untouched, because a `timestamp` → `timestamptz` cast reinterprets stored
-values under the connection's timezone and can shift your data.
+A `datetime` field is a `timestamptz` column on Postgres; SQLite stores both kinds as text. If a model's `datetime` field points at an existing `timestamp` column (no time zone), auto-migrate warns and leaves the column as it is: casting `timestamp` to `timestamptz` reads the stored values in the connection's time zone and can shift them.
 
 - To keep the column naive, declare the field with `db_type="timestamp"`.
-- To convert it intentionally, run a reviewed migration (Alembic) with an explicit
-  source timezone, e.g. `USING occurred_at AT TIME ZONE 'UTC'`.
+- To convert it, write the cast yourself with an explicit source time zone, such as `USING occurred_at AT TIME ZONE 'UTC'`, in a [hand-written migration step](../guide/schema/migrations.md#hand-written-steps) or an Alembic revision.
 
-## See Also
+## See also
 
-- [Models & Fields guide](../guide/models-and-fields.md) — field defaults and `default_factory`
-- [Soft Deletes how-to](soft-deletes.md) — the same mixin pattern applied to deletion
-- [Mutations guide](../guide/mutations.md) — instance `save()` vs batch `update()`
+- [Fields on a model base class](../guide/models-and-fields.md#fields-on-a-model-base-class): why the fields go on each model.
+- [How to soft-delete rows](soft-deletes.md): the same mixin pattern for deletion.
+- [Batch updates and deletes](../guide/mutations.md#batch-updates-and-deletes) and [`Query.update()`][ferro.query.builder.Query.update] in the API reference.
