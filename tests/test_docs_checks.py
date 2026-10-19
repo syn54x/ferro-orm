@@ -66,6 +66,22 @@ def test_lambda_passed_to_sorted_is_ignored(tmp_path: Path) -> None:
     assert lambda_param_violations(path) == []
 
 
+def test_parameters_captured_by_default_are_not_query_parameters(
+    tmp_path: Path,
+) -> None:
+    path = _write(
+        tmp_path,
+        "capture.py",
+        """
+        Post.where(lambda post, f=field, v=value: getattr(post, f) == v)
+        Post.where(lambda p, f=field: getattr(p, f))
+        """,
+    )
+    assert [(v.line, "'p'" in v.message) for v in lambda_param_violations(path)] == [
+        (2, True)
+    ]
+
+
 def test_every_named_query_method_is_checked(tmp_path: Path) -> None:
     methods = query_methods_taking_callables()
     # Derived from the Query and Model signatures, plus the names the
@@ -220,4 +236,3 @@ def test_cli_exits_0_when_clean(tmp_path: Path) -> None:
         cwd=REPO_ROOT,
     )
     assert (result.returncode, result.stdout) == (0, ""), result.stderr
-
