@@ -7,17 +7,20 @@ from ferro import Check, CheckViolationError, Field, Model, connect, engines
 
 
 # --8<-- [start:models]
-class Pair(Model):
+class Payment(Model):
     __ferro_checks__: ClassVar[tuple[Check, ...]] = (
         Check(
-            "at_most_one_side",
-            lambda pair: (pair.left == None) | (pair.right == None),  # noqa: E711
+            "at_most_one_method",
+            lambda payment: (
+                (payment.card_token == None)  # noqa: E711
+                | (payment.bank_account == None)  # noqa: E711
+            ),
         ),
     )
 
-    id: Annotated[int | None, Field(default=None, primary_key=True)]
-    left: str | None = None
-    right: str | None = None
+    id: Annotated[int | None, Field(primary_key=True)] = None
+    card_token: str | None = None
+    bank_account: str | None = None
 
 
 # --8<-- [end:models]
@@ -27,12 +30,15 @@ async def main() -> None:
     await connect("sqlite::memory:", auto_migrate=True)
 
     async with engines.session():
-        await Pair.create(left="only-left")
+        await Payment.create(card_token="tok_visa_4242")
 
         try:
-            await Pair.create(left="both", right="set")
-        except CheckViolationError:
-            pass
+            await Payment.create(
+                card_token="tok_visa_4242",
+                bank_account="GB33BUKB20201555555555",
+            )
+        except CheckViolationError as exc:
+            assert "ck_payment_at_most_one_method" in str(exc)
         else:
             raise AssertionError("expected CheckViolationError")
 
