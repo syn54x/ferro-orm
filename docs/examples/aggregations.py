@@ -242,7 +242,12 @@ async def main() -> None:
         try:
             Transaction.select(lambda transaction: {"x": transaction.memo.sum()})
         except TypeError as exc:
-            assert "string-typed" in str(exc)
+            assert str(exc) == (
+                "t.memo.sum() is not supported: Transaction.memo is string-typed, "
+                "and sum() takes a numeric column (int, float, or Decimal). No "
+                "portable cross-backend meaning exists for this aggregate over a "
+                "string column."
+            )
         else:
             raise AssertionError("expected TypeError")
         # --8<-- [end:error-family]
@@ -252,7 +257,11 @@ async def main() -> None:
         try:
             Transaction.where(lambda transaction: transaction.amount.sum() > 100)
         except TypeError as exc:
-            assert "having()" in str(exc)
+            assert str(exc).startswith(
+                "t.amount.sum() > ... is not a where() predicate: WHERE filters "
+                "rows before aggregation, so an aggregate cannot appear in it. "
+                "Post-aggregation filtering is having()"
+            )
         else:
             raise AssertionError("expected TypeError")
         # --8<-- [end:error-where]
@@ -266,7 +275,10 @@ async def main() -> None:
                 }
             )
         except TypeError as exc:
-            assert "did you mean t.amount.sum()?" in str(exc)
+            assert str(exc).startswith(
+                "t.amount is a column reference and cannot be iterated; "
+                "did you mean t.amount.sum()?"
+            )
         else:
             raise AssertionError("expected TypeError")
         # --8<-- [end:error-builtin-sum]
@@ -276,6 +288,7 @@ async def main() -> None:
         try:
             Transaction.select(lambda transaction: transaction.amount.sum())
         except TypeError as exc:
+            assert str(exc).startswith("aggregate fields are user-named")
             assert "give t.amount.sum() an output name" in str(exc)
         else:
             raise AssertionError("expected TypeError")
@@ -291,7 +304,10 @@ async def main() -> None:
                 }
             ).order_by("memo")
         except ValueError as exc:
-            assert "group key or an aggregate" in str(exc)
+            assert str(exc).startswith(
+                "order_by('memo') on an aggregate projection must name a group key "
+                "or an aggregate"
+            )
         else:
             raise AssertionError("expected ValueError")
         # --8<-- [end:error-order-key]
@@ -306,7 +322,11 @@ async def main() -> None:
                 }
             ).count()
         except ValueError as exc:
-            assert "len(await q.all())" in str(exc)
+            assert str(exc) == (
+                "count() on an aggregate projection is ambiguous: count the matching "
+                "rows with an unprojected query (Model.where(...).count()), or count "
+                "the groups with len(await q.all())."
+            )
         else:
             raise AssertionError("expected ValueError")
         # --8<-- [end:error-count]

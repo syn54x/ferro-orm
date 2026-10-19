@@ -8,7 +8,7 @@ Here is a whole program. It adds four transactions and asks for the sum of the a
 --8<-- "docs/examples/aggregations.py:global"
 ```
 
-The single record holds four numbers over the four rows: they total 115, so the average is 28.75. Every query on this page runs inside a session like this one; see [Sessions](connections.md#sessions-recommended) for why and how to open one.
+The single record holds four numbers over the four rows: they total 115, so the average is 28.75. Every query on this page runs inside a session like this one; see [Sessions](connections.md#sessions) for why and how to open one.
 
 ## The ledger
 
@@ -139,7 +139,7 @@ for transaction in await Transaction.select().all():
 assert {key: len(rows) for key, rows in by_account.items()} == {1: 2, 2: 1, None: 1}
 ```
 
-Account 1 holds two transactions, account 2 holds one, and the orphan sits under `None`. Reach for aggregation when you want facts about groups, and partition in Python when you want the rows themselves, organized. This block runs inside a session, as [Sessions](connections.md#sessions-recommended) describes.
+Account 1 holds two transactions, account 2 holds one, and the orphan sits under `None`. Reach for aggregation when you want facts about groups, and partition in Python when you want the rows themselves, organized. This block runs inside a session, as [Sessions](connections.md#sessions) describes.
 
 ## Ordering grouped results
 
@@ -210,7 +210,7 @@ An aggregate outside the dict form has no output name, so it raises:
 ```
 
 ```text
-TypeError: aggregate fields are user-named: give t.amount.sum() an output name with the dict selector form ...
+TypeError: aggregate fields are user-named ...: give t.amount.sum() an output name with the dict selector form (e.g. select(lambda t: {"total": t.amount.sum()})).
 ```
 
 Sorting groups by a column that is not a group key raises, as the ordering rules above say:
