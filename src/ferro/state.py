@@ -1,8 +1,8 @@
 """Operation routing: sessions, transactions, and RouteHandle construction.
 
 The single resolution site for "which connection does this operation hit"
-(FF-D D3/D4) and the only module allowed to construct ``RouteHandle``.
-Registration state lives in :mod:`ferro.registry`.
+and the only module allowed to construct ``RouteHandle``.
+Registration state lives in `ferro.registry`.
 """
 
 from contextvars import ContextVar
@@ -22,11 +22,18 @@ _CURRENT_TRANSACTION_CONNECTION: ContextVar[str | None] = ContextVar(
 
 
 class SessionLike(Protocol):
+    """What routing reads from a session: its id, connection and settings."""
+
     session_id: str
+    """The open session's id."""
     connection_name: str
-    # Settings this session runs with, snapshotted at enter; empty for the
-    # sessions that declare none. Read by a nested session to inherit from.
+    """The connection the session runs on."""
     effective_settings: dict[str, str]
+    """The settings the session runs with, snapshotted when it opened.
+
+    Empty for a session that declares none; a nested session inherits from
+    it.
+    """
 
 
 _CURRENT_SESSION: ContextVar[SessionLike | None] = ContextVar(
@@ -65,14 +72,25 @@ def resolve_operation_scope(
     using: str | None,
     session: SessionLike | None,
 ) -> RouteHandle:
-    """Resolve the route for ORM/raw operations.
+    """Resolve the route of an ORM or raw SQL operation.
 
-    Exactly one resolution site per operation (FF-D D3/D4): a session
-    (ambient or explicit), an explicit `using=`, or an active transaction.
-    No route is an error; `using=` conflicting with the ambient session is
-    an error (the silent sessionless bypass was removed in v0.14). The
-    returned `RouteHandle` is resolved once and threaded by value through
-    every FFI operation — Rust never re-derives it.
+    The one resolution site per operation: a session (current or explicit),
+    an explicit `using=`, or an active transaction. The returned
+    `RouteHandle` is resolved once and passed by value through every core
+    operation; the Rust core never derives it again.
+
+    Args:
+        using: An explicit connection name, or `None`.
+        session: An explicit session, or `None` for the current one.
+
+    Returns:
+        The route the operation runs on.
+
+    Raises:
+        ValueError: `using` names another connection than the session's or
+            the transaction's, or an explicit session and `using` disagree.
+        RuntimeError: There is no route (no session, no `using`), or the
+            session is closed.
     """
     tx_id = _CURRENT_TRANSACTION.get()
     tx_connection = _CURRENT_TRANSACTION_CONNECTION.get()
@@ -124,11 +142,21 @@ def resolve_compile_connection_name(
     using: str | None,
     session: SessionLike | None,
 ) -> str | None:
-    """Connection name execute would use, or ``None`` when there is no route.
+    """Return the connection an operation would run on, or `None` when there is no route.
 
-    Compile-time dialect gates (``.merge()``) must inspect the same
-    connection as ``resolve_operation_scope``, not only ``Query._using``.
-    IR goldens compile without an engine; that case stays ``None``.
+    Compile-time dialect gates (`.merge()`) must inspect the same connection
+    as `resolve_operation_scope`, not only `Query._using`. Schema goldens
+    compile without an engine; that case stays `None`.
+
+    Args:
+        using: An explicit connection name, or `None`.
+        session: An explicit session, or `None` for the current one.
+
+    Returns:
+        The connection name, or `None` when there is no route.
+
+    Raises:
+        ValueError: `using` conflicts with the session or the transaction.
     """
     try:
         return resolve_operation_scope(using=using, session=session).connection_name
@@ -143,10 +171,22 @@ def resolve_transaction_scope(
     using: str | None,
     session: SessionLike | None,
 ) -> RouteHandle:
-    """Resolve the route for `transaction()` — same rules as
-    `resolve_operation_scope`, but nested transactions always inherit the
-    parent transaction's route. The returned handle's `tx_id` is the
-    *parent* transaction (or `None` for a root transaction).
+    """Resolve the route of a `transaction()` block.
+
+    The rules are `resolve_operation_scope`'s, except that a nested
+    transaction always inherits its parent's route.
+
+    Args:
+        using: An explicit connection name, or `None`.
+        session: An explicit session, or `None` for the current one.
+
+    Returns:
+        The route, whose `tx_id` is the parent transaction's, or `None` for
+            a root transaction.
+
+    Raises:
+        ValueError: `using` conflicts with the session's connection.
+        RuntimeError: There is no route, or the session is closed.
     """
     parent_tx_id = _CURRENT_TRANSACTION.get()
     tx_connection = _CURRENT_TRANSACTION_CONNECTION.get()
@@ -187,13 +227,19 @@ def resolve_transaction_scope(
 def route_for_transaction(
     connection_name: str, tx_id: str, session_id: str | None
 ) -> RouteHandle:
-    """Build the child route for the `Transaction` handle yielded by
-    `transaction()` (FF-D D3).
+    """Build the route of the `Transaction` handle a `transaction()` block yields.
 
-    Kept in `state.py` — the only module allowed to construct
-    `RouteHandle` — rather than inline in `models.py`, so the single
-    construction-site invariant holds for every route, including the one
-    handed to raw SQL inside a transaction block.
+    It lives here, in the only module allowed to construct `RouteHandle`,
+    so that invariant holds for every route, including the one raw SQL
+    uses inside a transaction block.
+
+    Args:
+        connection_name: The transaction's connection.
+        tx_id: The transaction's id.
+        session_id: The session's id, or `None` outside a session.
+
+    Returns:
+        The route.
     """
     return RouteHandle(
         connection_name=connection_name, tx_id=tx_id, session_id=session_id

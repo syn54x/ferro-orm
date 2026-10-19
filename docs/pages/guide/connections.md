@@ -187,7 +187,7 @@ The [`Session`](../api/connection.md#ferro.Session) and [`engines`](../api/conne
 
 Beyond the URL, `connect()` takes the options you will reach for most:
 
-- `auto_migrate=True` creates the missing tables for every registered model; existing tables are left alone. `migrate_updates` and `migrate_destructive` also change existing tables; see [Auto-migrate](schema/auto-migrate.md).
+- `auto_migrate=True` creates the missing tables for every registered model; existing tables are left alone. `migrate_updates` and `migrate_destructive` also change existing tables; see [Auto-migrate](schema/auto-migrate.md). The three flags run under the same run lock as `ferro migrate up`, are refused on a database that migrations govern, and wait for locks under the project's `lock_timeout` and `ddl_lock_timeout` ([Concurrent passes and the run lock](schema/auto-migrate.md#concurrent-passes-and-the-run-lock)).
 - `name="analytics"` registers a [named connection](#named-connections). Without a name, the connection registers as `"default"`.
 - `identity_map=False` turns off the identity map for sessions on this connection, trading the `a is b` guarantee for lower memory use.
 - `pool=PoolConfig(...)` sizes the pool, below.
