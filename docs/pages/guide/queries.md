@@ -653,7 +653,7 @@ Ferro refuses these when you build the query, before any SQL:
 --8<-- "docs/examples/populated_relations.py:limits"
 ```
 
-Each refusal names the form to use. `include()` also works on a many-to-many query (`tag.transactions.include(lambda transaction: transaction.account)`), and with `where()`, `order_by()`, `limit()`, `offset()` and `first()`. The [`Query` reference](../api/queries.md#include-and-populated-relations) lists its parameters.
+Each refusal names the form to use. `include()` also works on a many-to-many query (`tag.transactions.include(lambda transaction: transaction.account)`), and with `where()`, `order_by()`, `limit()`, `offset()` and `first()`. The [`Query` reference](../api/queries.md#ferro.query.Query.include) lists its parameters.
 
 ## Selecting a column subset
 

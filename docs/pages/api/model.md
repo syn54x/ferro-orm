@@ -4,6 +4,12 @@
 
 ::: ferro.Model
 
+## Routing one call
+
+[`Model.using(name)`][ferro.Model.using] binds the model's class methods to one named connection and returns a `ModelConnection`.
+
+::: ferro.models.ModelConnection
+
 ## Table-level declarations
 
 A model declares its table checks in `__ferro_checks__` and its row security in `__ferro_rls__`; see [Table checks](../guide/models-and-fields.md#table-checks) and [Using with Postgres RLS](../guide/row-level-security.md).

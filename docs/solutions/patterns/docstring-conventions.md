@@ -216,6 +216,32 @@ Args:
 """
 ```
 
+### A docstring link to a guide heading is checked by the site test, not the build
+
+`zensical build --strict` reports a dead anchor in a docs page, but not in a
+link that mkdocstrings renders from a docstring. Three docstrings linked guide
+headings that had been renamed (`#composite-constraints`,
+`#overriding-the-column-type-with-db_type`,
+`#every-traversed-hop-is-an-inner-join`) and the strict build stayed green.
+`test_links_from_api_pages_land_on_existing_anchors` in
+`tests/test_docs_site.py` reads every link on the built API pages and fails on
+one whose anchor does not exist. Before renaming a guide heading, grep
+`src/ferro` as well as `docs/pages` for its anchor.
+
+### Every export has one entry, and nothing renders empty
+
+`test_every_export_has_an_api_entry` checks that each name in `ferro.__all__`,
+`ferro.query.__all__`, `ferro.migrations.__all__` and
+`ferro.migrations.testing.__all__` has exactly one entry on the API pages,
+under its public path (`::: ferro.query.Query`, never
+`::: ferro.query.builder.Query`). A type a public call returns but no
+`__all__` exports (`RunReport`, `ModelConnection`) is listed in
+`RETURNED_TYPES` there and documented under its defining module.
+`show_if_no_docstring` is off, so a public member without a docstring would
+vanish from the reference without a warning;
+`test_every_public_object_and_member_has_a_docstring` reads the package with
+griffe and fails naming it.
+
 ## How to recognize
 
 - Literal `:class:` or `:meth:` text on a rendered API page.

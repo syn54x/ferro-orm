@@ -1,4 +1,4 @@
-# Exceptions
+# FerroError and its subclasses
 
 Every database failure Ferro raises is catchable by type. The tree is
 DBAPI-shaped, rooted at `FerroError`:
@@ -26,8 +26,8 @@ FerroError
 insert, and deleting a row still referenced by `ForeignKey(on_delete="RESTRICT")`.
 Catch the type, not a SQLSTATE. On PostgreSQL 17 that RESTRICT delete
 reports `23503`; PostgreSQL 18 reports `23001` (`restrict_violation`).
-Both are this class. `exc.sqlstate` is the raw driver code — it is not
-rewritten.
+Both are this class. `exc.sqlstate` is the raw driver code; Ferro does not
+rewrite it.
 
 Catch a duplicate insert without matching driver text:
 
@@ -42,7 +42,7 @@ except UniqueViolationError as exc:
     print(exc.driver_message)  # original driver text, for logs
 ```
 
-The same pattern applies to table checks declared in `__ferro_checks__` — a row that violates the predicate raises `CheckViolationError`:
+The same pattern applies to table checks declared in `__ferro_checks__`. A row that violates the predicate raises `CheckViolationError`:
 
 ```python
 from ferro import CheckViolationError
@@ -50,41 +50,23 @@ from ferro import CheckViolationError
 try:
     await Pair.create(left="both", right="set")
 except CheckViolationError as exc:
-    print(exc.constraint)  # e.g. "ck_pair_at_most_one_side" on Postgres
+    print(exc.constraint)  # "ck_pair_at_most_one_side" on Postgres
 ```
 
-`ModelDoesNotExist` is raised by primary-key lookups like `Model.get(pk)` when
-no row matches — use `Model.get_or_none(pk)` if you prefer `None` over an
-exception — and by `save()` on a persisted instance whose row no longer exists
+`ModelDoesNotExist` is raised by primary-key lookups such as `Model.get(pk)`
+when no row matches; use `Model.get_or_none(pk)` to get `None` instead. It is
+also raised by `save()` on a persisted instance whose row no longer exists
 (see [Saving: INSERT or UPDATE](../guide/mutations.md#saving-insert-or-update)).
-It remains a `LookupError`, so pre-existing `except LookupError` handlers keep
-working.
+It is a `LookupError` too, so an `except LookupError` handler still catches it.
 
 `SettingsError` is raised by `FerroSettings` and every call that reads the
 project configuration; its message names the key to add or move, the line to
 write, or the variable to set.
 
 A refused migration call raises
-[`MigrationRefused`](migrations.md#ferro.migrations.MigrationRefused), or one
-of its subclasses for the states an application branches on:
-[`PendingMigrationsError`](migrations.md#ferro.migrations.PendingMigrationsError)
-when `require_applied()` finds the database behind its migrations,
-[`DatabaseAheadError`](migrations.md#ferro.migrations.DatabaseAheadError) when
-the database has applied migrations this checkout does not have (`.ahead`
-names them, `.contract_steps` each of their steps that is not `expand`, as
-`NNNN_<name>:NN`: what `allow_ahead="expand-only"` refuses on),
-[`AlreadyTrackedError`](migrations.md#ferro.migrations.AlreadyTrackedError)
-when `baseline()` finds the database already tracked (another pre-deploy
-adopted it first; `.applied` names the recorded migrations, `.head` the
-newest), and
-[`AppliedAboveBaselineError`](migrations.md#ferro.migrations.AppliedAboveBaselineError)
-when `remove_baseline()` finds a run applied migrations above the baseline
-(`.above` names them). Its `.report` is the report of the call that refused,
-when it has one: the run's report (what `up()` applied before it stopped, the
-refusal itself as `report.refused`), the `check()` report whose
-`raise_for_problems()` raised it, or the status report of the database a
-baseline refusal is about. A refusal is raised, never returned: an application
-that called `up()` must not go on serving a database the run did not reach.
+[`MigrationRefused`](migrations.md#ferro.migrations.MigrationRefused) or one of
+its subclasses; see [Errors](migrations.md#errors) in the migrations reference.
+Its `.report` says how far the call got:
 
 ```python
 import ferro.migrations

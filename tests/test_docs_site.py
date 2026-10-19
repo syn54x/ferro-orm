@@ -14,6 +14,10 @@ below reads the HTML a reader would get:
 - the API reference hides source blocks, dunder and ``__ferro_*__`` members,
   links the types in its signatures, renders ``Field`` once and gives
   ``Relation.all()`` / ``.first()`` their inherited docstrings;
+- every exported name has one API entry under its public path, every public
+  object and member has a docstring, no entry renders empty, each API page is
+  titled after its objects, and every link from an API page lands on an
+  anchor that exists;
 - the docs build in CI and in the publish workflow is strict.
 """
 
@@ -266,3 +270,160 @@ def test_docs_build_in_workflows_is_strict(workflow: str) -> None:
     assert builds, f"{workflow} does not build the docs"
     for build in builds:
         assert "--strict" in build, f"{workflow}: {build}"
+
+
+RETURNED_TYPES = (
+    "ferro.models.ModelConnection",
+    "ferro.session.EngineManager",
+    "ferro.session.EngineManager.session",
+    "ferro.migrations.runner.RunReport",
+    "ferro.migrations.report.StatusReport",
+    "ferro.migrations.generate.CheckReport",
+    "ferro.pass_report.Subject",
+)
+"""Objects no ``__all__`` exports that a public call returns or is called on:
+``Model.using()``, ``engines.session()``, ``up()``, ``status()``,
+``check()`` and ``Report.subject``. They are documented under the module that
+defines them."""
+
+_DOC_HEADING_ID = re.compile(r'id="([\w.]+)" class="doc doc-heading"')
+
+
+def _public_paths() -> set[str]:
+    """Return the public path of every exported name, and the returned types."""
+    import ferro
+    import ferro.migrations
+    import ferro.migrations.testing
+    import ferro.query
+
+    paths = {f"ferro.{name}" for name in ferro.__all__}
+    paths |= {
+        f"ferro.query.{name}"
+        for name in ferro.query.__all__
+        if name not in ferro.__all__
+    }
+    paths |= {f"ferro.migrations.{name}" for name in ferro.migrations.__all__}
+    paths |= {
+        f"ferro.migrations.testing.{name}" for name in ferro.migrations.testing.__all__
+    }
+    return paths | set(RETURNED_TYPES)
+
+
+def _api_entries(built_site: Path) -> dict[str, list[str]]:
+    """Map each object the API pages document to the pages that render it."""
+    entries: dict[str, list[str]] = {}
+    for url, page_html in rendered_pages(built_site):
+        if url.startswith("/api/"):
+            for anchor in _DOC_HEADING_ID.findall(page_html):
+                entries.setdefault(anchor, []).append(url)
+    return entries
+
+
+def test_every_export_has_an_api_entry(built_site: Path) -> None:
+    entries = _api_entries(built_site)
+    public = _public_paths()
+    missing = sorted(path for path in public if path not in entries)
+    assert not missing, f"exported names with no API entry: {missing}"
+    repeated = {path: entries[path] for path in public if len(entries[path]) > 1}
+    assert not repeated, f"exported names with more than one API entry: {repeated}"
+
+
+def test_api_entries_use_public_paths(built_site: Path) -> None:
+    public = _public_paths()
+    private = sorted(
+        path
+        for path in _api_entries(built_site)
+        if path not in public and not any(path.startswith(f"{p}.") for p in public)
+    )
+    assert not private, f"API entries under a non-public path: {private}"
+
+
+def test_api_pages_are_titled_after_their_objects(built_site: Path) -> None:
+    entries = _api_entries(built_site)
+    for url, page_html in rendered_pages(built_site):
+        if not url.startswith("/api/"):
+            continue
+        title = re.search(r"<h1[^>]*>(.*?)</h1>", page_html, re.DOTALL)
+        assert title, f"{url} has no title"
+        words = re.findall(r"[\w.]+", html.unescape(_TAG.sub("", title.group(1))))
+        named = set()
+        for path, pages in entries.items():
+            if url in pages:
+                parts = path.split(".")
+                named |= {".".join(parts[:i]) for i in range(2, len(parts) + 1)}
+                named.add(parts[-1])
+        assert named & set(words), (
+            f"{url} is titled {words}, naming none of its objects"
+        )
+
+
+def test_no_api_entry_renders_empty(built_site: Path) -> None:
+    config = (REPO_ROOT / "zensical.toml").read_text(encoding="utf-8")
+    assert re.search(r"^show_if_no_docstring = false$", config, re.MULTILINE)
+    empty = []
+    for url, page_html in rendered_pages(built_site):
+        if not url.startswith("/api/"):
+            continue
+        for section in re.split(
+            r'(?=<h\d id="[\w.]+" class="doc doc-heading")', page_html
+        )[1:]:
+            anchor = _DOC_HEADING_ID.search(section)
+            contents = section.split('class="doc doc-contents', 1)[-1]
+            contents = re.sub(
+                r'<div class="[^"]*doc-signature.*?</div>',
+                "",
+                contents,
+                flags=re.DOTALL,
+            )
+            if not re.search(r"<p>", contents.split("doc doc-heading", 1)[0]):
+                empty.append(f"{url} {anchor.group(1) if anchor else '?'}")
+    assert not empty, "API entries with no text:\n" + "\n".join(empty)
+
+
+def test_every_public_object_and_member_has_a_docstring() -> None:
+    """``show_if_no_docstring`` is off, so an undocumented member would vanish."""
+    import griffe
+
+    package = griffe.load(
+        "ferro",
+        search_paths=[str(REPO_ROOT / "src")],
+        extensions=griffe.load_extensions("griffe_inherited_docstrings"),
+        resolve_aliases=True,
+        resolve_external=False,
+    )
+    undocumented = []
+    for path in sorted(_public_paths()):
+        obj = package[path.removeprefix("ferro.")]
+        if not obj.docstring:
+            undocumented.append(path)
+        if obj.is_class:
+            undocumented += [
+                f"{path}.{name}"
+                for name, member in obj.members.items()
+                if not name.startswith("_")
+                and name != "model_config"
+                and not member.docstring
+            ]
+    assert not undocumented, f"public objects with no docstring: {undocumented}"
+
+
+_HREF = re.compile(r'<a\b[^>]*\bhref="([^"]+)"')
+
+
+def test_links_from_api_pages_land_on_existing_anchors(built_site: Path) -> None:
+    dead = []
+    for url, page_html in rendered_pages(built_site):
+        if not url.startswith("/api/"):
+            continue
+        for href in sorted({html.unescape(href) for href in _HREF.findall(page_html)}):
+            if re.match(r"[a-z]+:", href):
+                continue
+            path, _, fragment = urljoin(url, href).partition("#")
+            if not fragment:
+                continue
+            target = built_site / path.strip("/") / "index.html"
+            if not target.is_file() or f'id="{fragment}"' not in target.read_text(
+                encoding="utf-8"
+            ):
+                dead.append(f"{url} -> {href}")
+    assert not dead, "links to anchors that do not exist:\n" + "\n".join(dead)

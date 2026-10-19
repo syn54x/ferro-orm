@@ -272,10 +272,11 @@ def test_the_api_page_documents_every_public_name_of_ferro_migrations() -> None:
     targets = re.findall(
         r"^::: (ferro\.migrations\.[\w.]+)", API_PAGE.read_text(), re.M
     )
+    # Only `ferro.migrations.<name>`: the testing harness and the reports
+    # documented under their defining module (`ferro.migrations.runner.RunReport`)
+    # are not in `ferro.migrations.__all__`.
     documented = sorted(
-        target.rsplit(".", 1)[1]
-        for target in targets
-        if not target.startswith("ferro.migrations.testing.")
+        target.rsplit(".", 1)[1] for target in targets if target.count(".") == 2
     )
     assert documented == sorted(ferro.migrations.__all__)
 
