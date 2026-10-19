@@ -85,6 +85,25 @@ never typed by hand; a hand-simplified block drifts (unquoted reserved
 words, invented aliases). This lands once #700 ships a public way to read a
 query's SQL (#725 applies it to the guides).
 
+### Quoted migration files are regenerated, never pasted
+
+A block whose first line is `-- 0002_author_slug/04_contract.up.sqlite.sql`
+(or, for a generated data step, `# migrations/0002_author_slug/02_backfill_author.py`)
+quotes a file `ferro migrate new` writes. `tests/test_docs_migrations.py`
+regenerates it from the page's example models (`STEP_FILE_SOURCES` names the
+example or scenario) and compares byte for byte, so a quoted step file cannot
+go stale the way the hand-pasted `0001` `CREATE TABLE` and SQLite rebuild did
+(they lost a column, a unique index, the `sqlite_sequence` copy and a
+recreated index). A data step the page shows written by hand is listed with
+`None`. Alembic revisions on the bridge page are pinned the same way, under
+`<!-- revision: <id> -->`.
+
+### Compile-only blocks say why
+
+An inline Python block that does not run under the harness says why in its
+fence: `{test=compile reason="needs a Postgres database"}`. Generated files
+and `env.py` excerpts are the usual cases; a block that can run, runs.
+
 ### The glossary file
 
 Acronyms in prose (DDL, RLS, FK, PK, GUC, FFI, IR, ...) get a hover

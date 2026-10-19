@@ -1,10 +1,15 @@
 """The Schema Management docs say what the code does (#539).
 
-Five promises the pages make, each checked against the implementation:
+Seven promises the pages make, each checked against the implementation:
 
 - every ``ferro migrate`` output a page quotes (a ```text block marked
   ``<!-- output: <id> -->``) is what the verb prints with no terminal, on a
   scratch SQLite project, once the parts that vary are normalised;
+- every step file a page quotes (a block headed ``-- NNNN_<name>/<file>``, or a
+  Python block headed ``# migrations/NNNN_<name>/<file>``) is, byte for byte,
+  what ``ferro migrate new`` writes from the page's example models;
+- every Alembic revision the bridge page quotes (``<!-- revision: <id> -->``)
+  is what ``alembic revision --autogenerate`` writes for that change;
 
 - the two declaration styles of every migrations example generate the same
   migration, byte for byte (the ``_annotated`` twin's ``migrations/`` equals
@@ -1298,7 +1303,7 @@ the after models, prints the revision as the page quotes it."""
 
 def _quoted_revisions() -> dict[str, str]:
     found = re.findall(
-        r"<!-- revision: ([a-z0-9-]+) -->\n```python\n(.*?)```",
+        r"<!-- revision: ([a-z0-9-]+) -->\n```python[^\n]*\n(.*?)```",
         ALEMBIC_PAGE.read_text(),
         flags=re.DOTALL,
     )

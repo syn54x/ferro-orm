@@ -17,7 +17,7 @@ Ferro bridges your models into the SQLAlchemy metadata [Alembic](https://alembic
 Against a SQLite database that holds `author` without the field, `alembic revision --autogenerate -m "add nickname"` writes this revision:
 
 <!-- revision: nickname -->
-```python
+```python {test=compile reason="an Alembic revision; the docs tests regenerate it and compare"}
 def upgrade() -> None:
     op.add_column('author', sa.Column('nickname', sa.String(), nullable=True))
     op.execute(sa.DDL('CREATE INDEX IF NOT EXISTS "idx_author_nickname" ON "author" ("nickname")'))
@@ -131,7 +131,7 @@ The first command writes the revision shown at the top of this page into `alembi
 An operation that drops data, or that fails on existing rows, carries a comment saying so. Say `Author` also had `bio: str | None = None` and you delete that line; the revision marks the drop:
 
 <!-- revision: drop-bio -->
-```python
+```python {test=compile reason="an Alembic revision; the docs tests regenerate it and compare"}
 def upgrade() -> None:
     # ferro: destructive (drops author.bio and the data it holds)
     op.drop_column('author', 'bio')

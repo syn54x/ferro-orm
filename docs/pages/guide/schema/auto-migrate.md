@@ -132,7 +132,7 @@ On PostgreSQL, a `StrEnum` field creates a **native enum type**, and a type that
 
 === "Assignment"
 
-    ```python
+    ```python {test=compile reason="declares models only; label addition needs Postgres"}
     from enum import StrEnum
 
     from ferro import Field, Model
@@ -153,7 +153,7 @@ On PostgreSQL, a `StrEnum` field creates a **native enum type**, and a type that
 
 === "Annotated"
 
-    ```python
+    ```python {test=compile reason="declares models only; label addition needs Postgres"}
     from enum import StrEnum
     from typing import Annotated
 

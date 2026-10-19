@@ -57,7 +57,7 @@ default · sqlite:///./app.db
 This database has no ferro migration records, but table "author" from 0001 already exists. If it was built by auto-migrate or Alembic, run "ferro migrate baseline 0001". up will not run 0001 over it.
 ```
 
-## When baseline says no
+## Baseline refusals on drift {#when-baseline-says-no}
 
 Baseline compares the database with the target migration's schema snapshot exactly as `ferro migrate drift` does. On any difference, `ferro migrate baseline 0001` records nothing, prints each one and exits 4:
 
