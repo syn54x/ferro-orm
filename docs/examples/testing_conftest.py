@@ -1,6 +1,8 @@
-"""Example pytest fixtures for the Testing how-to (docs/pages/howto/testing.md).
+"""The pytest fixtures of the testing how-to (docs/pages/howto/testing.md).
 
-This file is snippeted into the docs; it is not meant to be executed directly.
+Readers copy this file to ``tests/conftest.py``.
+``tests/test_docs_testing_fixtures.py`` does the same in a scratch project
+and runs the page's tests with it, so every fixture here runs under pytest.
 """
 
 # --8<-- [start:fixtures]
@@ -9,9 +11,13 @@ import pytest
 from ferro import connect, engines, reset_engine, transaction
 
 
+class RollBack(Exception):
+    """Raised at the end of a test to roll its transaction back."""
+
+
 @pytest.fixture
 async def db():
-    """Fresh in-memory database per test."""
+    """A fresh in-memory database, with a session open around the test."""
     await connect("sqlite::memory:", auto_migrate=True)
     async with engines.session():
         yield
@@ -20,17 +26,13 @@ async def db():
 
 @pytest.fixture
 async def db_transaction(db):
-    """Run a test inside a transaction sharing one connection."""
-    async with transaction():
-        yield
+    """The test runs in one transaction, which rolls back when it ends."""
+    try:
+        async with transaction() as tx:
+            yield tx
+            raise RollBack
+    except RollBack:
+        pass
 
 
 # --8<-- [end:fixtures]
-
-
-def main() -> None:  # pragma: no cover - import smoke check only
-    """No-op: fixtures are exercised by pytest, not by running this file."""
-
-
-if __name__ == "__main__":
-    main()
