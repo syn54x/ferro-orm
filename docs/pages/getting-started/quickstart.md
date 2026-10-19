@@ -1,8 +1,14 @@
 # Quickstart
 
-This tutorial builds a small blog backend on an in-memory SQLite database: two related models, `Author` and `Post`, and every core Ferro operation (create, query, traverse a relationship, update, delete and run a transaction). It takes about ten minutes.
+This tutorial builds a small blog backend on an in-memory SQLite database: two related models, `Author` and `Post`, and every core Ferro operation: create, query, traverse a relationship, update, delete and run a transaction.
 
-Every code block comes from one runnable script, shown in full under [Complete script](#complete-script). Type the blocks into a file of your own, or run the script.
+Every code block comes from one runnable script, shown in full under [Complete script](#complete-script). To follow along in a file of your own, start with these imports:
+
+```python
+--8<-- "docs/examples/quickstart.py:imports"
+```
+
+The model block comes next at module level. Every block after it uses `await`, so it goes inside one `async def main()` that you run with `asyncio.run(main())`, in the order the page shows them; the script has that shape. You can also run the script as it is.
 
 ## Models
 
@@ -41,21 +47,13 @@ The blocks that follow run inside this session. See [Sessions](../guide/connecti
 
 ## Create data
 
-Create an author and a first post:
+Create an author and a first post, then insert two more posts in one statement with `bulk_create()`:
 
 ```python
 --8<-- "docs/examples/quickstart.py:create"
 ```
 
-`create()` validates the data, inserts one row and returns the instance with its database-assigned `id`. Passing the instance (`author=alice`) sets the foreign key. A duplicate unique value raises [`UniqueViolationError`](../api/exceptions.md); `create()` never overwrites a row.
-
-Insert two more posts in one statement with `bulk_create()`:
-
-```python
---8<-- "docs/examples/quickstart.py:bulk-create"
-```
-
-The table now holds three posts. Use `bulk_create()` whenever you load more than a handful of rows.
+`create()` validates the data, inserts one row and returns the instance with its database-assigned `id`. Passing the instance (`author=alice`) sets the foreign key. A duplicate unique value raises [`UniqueViolationError`](../api/exceptions.md); `create()` never overwrites a row. `bulk_create()` writes the whole batch at once, so use it whenever you load more than a handful of rows. The table now holds three posts.
 
 ## Query
 

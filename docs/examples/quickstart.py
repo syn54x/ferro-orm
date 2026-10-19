@@ -1,8 +1,11 @@
 """Runnable companion to the Quickstart tutorial (docs/pages/getting-started/quickstart.md)."""
 
+# --8<-- [start:imports]
 import asyncio
 
 from ferro import connect, engines, transaction
+
+# --8<-- [end:imports]
 
 # --8<-- [start:models]
 from datetime import UTC, datetime
@@ -47,9 +50,7 @@ async def main() -> None:
             author=alice,
         )
         assert post.id == 1  # the database assigned it
-        # --8<-- [end:create]
 
-        # --8<-- [start:bulk-create]
         await Post.bulk_create(
             [
                 Post(
@@ -66,7 +67,7 @@ async def main() -> None:
             ]
         )
         assert await Post.select().count() == 3
-        # --8<-- [end:bulk-create]
+        # --8<-- [end:create]
 
         # --8<-- [start:get]
         same_post = await Post.get(post.id)
