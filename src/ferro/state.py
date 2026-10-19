@@ -47,8 +47,8 @@ def _ensure_active_session(session: SessionLike | None) -> None:
 _NO_ROUTE_MESSAGE = (
     "No database route for this operation. Open a session "
     "(`async with ferro.engines.session(...)`) or pass `using=`/`session=` "
-    "explicitly. Implicit default-connection routing was removed in v0.13 "
-    "(deprecated since v0.12); see the sessions migration guide."
+    "explicitly. Implicit default-connection routing was removed in v0.14 "
+    "(deprecated since v0.12); see the upgrade guide."
 )
 
 
@@ -70,7 +70,7 @@ def resolve_operation_scope(
     Exactly one resolution site per operation (FF-D D3/D4): a session
     (ambient or explicit), an explicit `using=`, or an active transaction.
     No route is an error; `using=` conflicting with the ambient session is
-    an error (the silent sessionless bypass was removed in v0.13). The
+    an error (the silent sessionless bypass was removed in v0.14). The
     returned `RouteHandle` is resolved once and threaded by value through
     every FFI operation — Rust never re-derives it.
     """
