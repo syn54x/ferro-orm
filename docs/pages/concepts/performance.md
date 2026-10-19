@@ -82,11 +82,11 @@ The 1,000 interns went in through one call. Batch size has no limit of its own: 
 Fetching rows to change and save them one by one sends a query plus one `UPDATE` per row. A query's `update()` sends one statement:
 
 ```python {test=run prelude=concepts}
-changed = await User.where(lambda user: user.active == False).update(  # noqa: E712
+changed = await User.where(lambda user: user.active == False).update(
     active=True
 )
 assert changed == 1
-assert await User.where(lambda user: user.active == False).count() == 0  # noqa: E712
+assert await User.where(lambda user: user.active == False).count() == 0
 ```
 
 One `UPDATE` reactivated edsger, the one inactive user, and returned the number of rows it changed. [Mutations](../guide/mutations.md) covers bulk updates and deletes.

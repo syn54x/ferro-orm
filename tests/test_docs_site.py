@@ -5,7 +5,8 @@ temporary directory, so a warning anywhere fails the session, and every test
 below reads the HTML a reader would get:
 
 - a code block embedded from ``docs/examples`` starts at column 0, so a
-  pasted block runs (``pymdownx.snippets.dedent_subsections``);
+  pasted block runs (``pymdownx.snippets.dedent_subsections``), and no code
+  block shows a ``# noqa`` comment;
 - Assignment/Annotated tabs carry word anchors and switch together site-wide;
 - acronyms such as DDL carry a hover definition from the glossary;
 - ``#NNN`` references link to GitHub;
@@ -147,6 +148,18 @@ def test_embedded_code_starts_at_column_zero(built_site: Path) -> None:
     assert not offenders, "code blocks render indented:\n" + "\n\n".join(
         f"{url}:\n{block}" for url, block in offenders.items()
     )
+
+
+def test_no_code_block_shows_a_noqa_comment(built_site: Path) -> None:
+    """Lint exceptions for the examples live in ``pyproject.toml``, not on pages."""
+    offenders = [
+        f"{url}: {line.strip()}"
+        for url, page_html in rendered_pages(built_site)
+        for match in _CODE_BLOCK.finditer(page_html)
+        for line in _code_lines(match.group(1))
+        if "# noqa" in line
+    ]
+    assert not offenders, "code blocks show # noqa:\n" + "\n".join(offenders)
 
 
 def test_quickstart_has_code_blocks_to_check(built_site: Path) -> None:

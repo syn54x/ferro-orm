@@ -27,7 +27,7 @@ async def main():
         await User.create(username="alice")
         await User.create(username="bob", is_active=False)
 
-        active_users = await User.where(lambda user: user.is_active == True).all()  # noqa: E712
+        active_users = await User.where(lambda user: user.is_active == True).all()
         print(f"Found {len(active_users)} active users.")
         # --8<-- [end:query]
 

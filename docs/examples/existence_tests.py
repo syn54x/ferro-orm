@@ -139,7 +139,7 @@ async def main() -> None:
 
         tags_on_uncleared = await Tag.where(
             lambda tag: tag.transactions.exists(
-                lambda transaction: transaction.cleared_on == None  # noqa: E711
+                lambda transaction: transaction.cleared_on == None
             )
         ).all()
         assert [tag.name for tag in tags_on_uncleared] == ["reimbursable"]
@@ -161,9 +161,7 @@ async def main() -> None:
             raise AssertionError("column access on a reverse relation must raise")
 
         try:
-            Transaction.where(
-                lambda transaction: transaction.transfer_out != None  # noqa: E711
-            )
+            Transaction.where(lambda transaction: transaction.transfer_out != None)
         except TypeError as error:
             assert "transfer_out.exists()" in str(error)
         else:

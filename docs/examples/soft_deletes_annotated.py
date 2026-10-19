@@ -29,7 +29,7 @@ class SoftDeleteMixin:
 
     @classmethod
     def active(cls) -> Query:
-        return cls.where(lambda row: row.is_deleted == False)  # noqa: E712
+        return cls.where(lambda row: row.is_deleted == False)
 
 
 class Invoice(SoftDeleteMixin, Model):

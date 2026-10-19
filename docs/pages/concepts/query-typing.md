@@ -11,7 +11,7 @@ This page explains how Ferro's lambda predicates are checked: what your type che
 ```python {test=run prelude=queries}
 uncleared_debits = await Transaction.where(
     lambda transaction: (transaction.amount < 0)
-    & (transaction.cleared_on == None)  # noqa: E711
+    & (transaction.cleared_on == None)
 ).all()
 assert {transaction.memo for transaction in uncleared_debits} == {
     "Train to Lyon",
@@ -30,7 +30,7 @@ The proxy checks every name when the lambda runs, which is when you build the qu
 
 ```python {test=run prelude=queries}
 try:
-    Transaction.where(lambda transaction: transaction.cleard_on == None)  # noqa: E711
+    Transaction.where(lambda transaction: transaction.cleard_on == None)
 except AttributeError as error:
     assert "Did you mean 'cleared_on'?" in str(error)
 else:
@@ -51,7 +51,7 @@ A relation's `where()`, such as `account.transactions.where(...)`, takes the sam
 ```python {test=run prelude=queries}
 checking = await Account.get(1)
 uncleared = await checking.transactions.where(
-    lambda transaction: transaction.cleared_on == None  # noqa: E711
+    lambda transaction: transaction.cleared_on == None
 ).all()
 assert [transaction.memo for transaction in uncleared] == ["Weekly shop"]
 ```

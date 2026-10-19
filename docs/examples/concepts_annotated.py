@@ -41,7 +41,7 @@ async def main() -> None:
 
     async with engines.session():
         users = await (
-            User.where(lambda user: user.active == True)  # noqa: E712
+            User.where(lambda user: user.active == True)
             .order_by(lambda user: user.age, "desc")
             .limit(10)
             .all()

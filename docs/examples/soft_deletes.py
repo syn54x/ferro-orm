@@ -28,7 +28,7 @@ class SoftDeleteMixin:
 
     @classmethod
     def active(cls) -> Query:
-        return cls.where(lambda row: row.is_deleted == False)  # noqa: E712
+        return cls.where(lambda row: row.is_deleted == False)
 
 
 class Invoice(SoftDeleteMixin, Model):
@@ -71,7 +71,7 @@ async def main() -> None:
         )
         assert [invoice.number for invoice in live] == ["INV-002", "INV-003"]
 
-        trashed = await Invoice.where(lambda invoice: invoice.is_deleted == True).all()  # noqa: E712
+        trashed = await Invoice.where(lambda invoice: invoice.is_deleted == True).all()
         assert [invoice.number for invoice in trashed] == ["INV-001"]
         # --8<-- [end:querying]
 
@@ -87,7 +87,7 @@ async def main() -> None:
         # --8<-- [end:unique]
 
         # --8<-- [start:purge]
-        soft_deleted = Invoice.where(lambda invoice: invoice.is_deleted == True)  # noqa: E712
+        soft_deleted = Invoice.where(lambda invoice: invoice.is_deleted == True)
         purged = await soft_deleted.delete()
         assert purged == 1
         assert await Invoice.select().count() == 2

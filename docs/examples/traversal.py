@@ -189,12 +189,8 @@ async def main() -> None:
         # --8<-- [end:existence]
 
         # --8<-- [start:is-null]
-        ownerless = await Account.where(
-            lambda account: account.owner == None  # noqa: E711
-        ).all()
-        owned_count = await Account.where(
-            lambda account: account.owner != None  # noqa: E711
-        ).count()
+        ownerless = await Account.where(lambda account: account.owner == None).all()
+        owned_count = await Account.where(lambda account: account.owner != None).count()
         assert [account.label for account in ownerless] == ["Petty cash"]
         assert owned_count == 3
         # --8<-- [end:is-null]
@@ -310,7 +306,7 @@ async def main() -> None:
         try:
             Transaction.where(
                 lambda transaction: (
-                    (transaction.amount < 0) and (transaction.cleared_on == None)  # noqa: E711
+                    (transaction.amount < 0) and (transaction.cleared_on == None)
                 )
             )
         except TypeError as error:

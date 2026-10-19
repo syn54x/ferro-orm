@@ -46,7 +46,7 @@ def test_docs_examples(example: CodeExample, eval_example: EvalExample) -> None:
     if fence_settings(example).get("lint") == "check":
         eval_example.set_config(
             # Docs snippets often intentionally use print statements or partial examples.
-            ruff_ignore=["D", "T", "B", "C4", "E721"],
+            ruff_ignore=["D", "T", "B", "C4", "E711", "E712", "E721"],
             line_length=100,
             target_version="py313",
         )

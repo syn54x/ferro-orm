@@ -101,7 +101,7 @@ async def main() -> None:
 
         # --8<-- [start:filtering]
         uncleared = await Transaction.where(
-            lambda transaction: transaction.cleared_on == None  # noqa: E711
+            lambda transaction: transaction.cleared_on == None
         ).all()
         assert {transaction.memo for transaction in uncleared} == {
             "Train to Lyon",
@@ -145,8 +145,7 @@ async def main() -> None:
         # & is AND, | is OR: parenthesize each side.
         small_uncleared = await Transaction.where(
             lambda transaction: (
-                (transaction.cleared_on == None)  # noqa: E711
-                & (transaction.amount > -90)
+                (transaction.cleared_on == None) & (transaction.amount > -90)
             )
         ).all()
         assert {transaction.memo for transaction in small_uncleared} == {
@@ -205,7 +204,7 @@ async def main() -> None:
         not_before_or_uncleared = await Transaction.where(
             lambda transaction: (
                 ~(transaction.cleared_on < date(2026, 3, 5))
-                | (transaction.cleared_on == None)  # noqa: E711
+                | (transaction.cleared_on == None)
             )
         ).all()
         assert len(not_before_or_uncleared) == 7
@@ -341,7 +340,7 @@ async def main() -> None:
         assert newest is not None and newest.memo == "Weekly shop"
 
         uncleared_count = await Transaction.where(
-            lambda transaction: transaction.cleared_on == None  # noqa: E711
+            lambda transaction: transaction.cleared_on == None
         ).count()
         assert uncleared_count == 3
 
@@ -357,7 +356,7 @@ async def main() -> None:
         debit_count = await debits.count()
         biggest = await debits.order_by(lambda transaction: transaction.amount).first()
         uncleared_debits = await debits.where(
-            lambda transaction: transaction.cleared_on == None  # noqa: E711
+            lambda transaction: transaction.cleared_on == None
         ).count()
 
         assert debit_count == 7

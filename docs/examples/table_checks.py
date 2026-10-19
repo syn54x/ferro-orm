@@ -26,8 +26,7 @@ class Payment(Model):
         Check(
             "at_most_one_method",
             lambda payment: (
-                (payment.card_token == None)  # noqa: E711
-                | (payment.bank_account == None)  # noqa: E711
+                (payment.card_token == None) | (payment.bank_account == None)
             ),
         ),
     )
