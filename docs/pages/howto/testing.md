@@ -1,37 +1,22 @@
-# Testing
+# How to test a Ferro app with pytest
 
-Connect to a fresh in-memory SQLite database per test, run your code, and reset the engine on teardown. The rest of this page is the pytest fixture, a factory for test data, and how to isolate tests against a real PostgreSQL database.
+This page sets up pytest so that each test gets a fresh in-memory SQLite database with a session open, then shows a first test, factories for test data, and a fixture for tests against PostgreSQL.
 
-## Test Setup
+## The `db` fixture
 
-Put two fixtures in your `conftest.py`:
+Put two fixtures in `tests/conftest.py`:
 
 ```python
 --8<-- "docs/examples/testing_conftest.py:fixtures"
 ```
 
-How this works:
+`db` connects to a new in-memory SQLite database and holds an [`engines.session()`](../guide/connections.md#sessions) open while the test runs, so the test's ORM calls need no session of their own. `auto_migrate=True` creates a table for every model your code has imported, so there is no schema setup to keep up to date. On teardown, [`reset_engine()`][ferro.reset_engine] closes the connection and clears the identity map, so no rows or cached instances carry over to the next test.
 
-- **`db`** connects to a fresh in-memory SQLite database for each test and holds an [`engines.session()`](../guide/connections.md#sessions) open around the test body, so ORM calls inside the test resolve against that session without extra boilerplate. `auto_migrate=True` creates tables for every registered model, so there is no schema setup to maintain. On teardown, [`reset_engine()`](../api/connection.md) closes the pool and clears the identity map, guaranteeing no state leaks between tests.
-- **`db_transaction`** layers a [`transaction()`](../guide/transactions.md) on top. Everything inside the test shares one connection, which gives you connection affinity for the duration of the test. Use it when a test mixes ORM calls with raw SQL that must observe the same uncommitted state.
-
-Since each test gets its own database, most tests only need `db`.
+`db_transaction` runs the test inside one [`transaction()`](../guide/transactions.md) and yields its handle. The handle's `fetch_one()`, `fetch_all()` and `execute()` run raw SQL on the test's own connection, so they see what the test's ORM calls wrote before anything is committed. When the test ends, the fixture raises `RollBack` inside the transaction, which rolls back every write. Each test already has a database of its own, so most tests need only `db`.
 
 ## Configuring pytest-asyncio
 
-Ferro is async, so tests are `async def` functions. With `asyncio_mode = auto`, pytest-asyncio runs them without per-test decorators:
-
-```ini
-# pytest.ini
-[pytest]
-asyncio_mode = auto
-testpaths = tests
-python_files = test_*.py
-python_classes = Test*
-python_functions = test_*
-```
-
-Or in `pyproject.toml`:
+Ferro is async, so tests are `async def` functions, run by [pytest-asyncio](https://pytest-asyncio.readthedocs.io/). Set its mode to `auto` in `pyproject.toml`, and it runs every async test and fixture without a decorator:
 
 ```toml
 [tool.pytest.ini_options]
@@ -39,139 +24,142 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 ```
 
-If you prefer `asyncio_mode = strict`, mark each test with `@pytest.mark.asyncio`.
+`pytest.ini` takes the same `asyncio_mode = auto` line under `[pytest]`. In `strict` mode, decorate each async fixture with `@pytest_asyncio.fixture` instead of `@pytest.fixture`, and mark each test with `@pytest.mark.asyncio`.
 
-## Writing Your First Test
+## The models
 
-Request the `db` fixture and use your models directly:
+The tests on this page use two models, kept in `myapp/models.py`:
 
-```python
+=== "Assignment"
+
+    ```python
+    --8<-- "docs/examples/testing_models.py:models"
+    ```
+
+=== "Annotated"
+
+    ```python
+    --8<-- "docs/examples/testing_models_annotated.py:models"
+    ```
+
+`username` and `email` are unique, which the tests below rely on.
+
+## A first test
+
+Request the `db` fixture and use the models directly. A second insert of the same email raises [`UniqueViolationError`][ferro.UniqueViolationError], which `pytest.raises` expects:
+
+```python {test=pytest path="tests/test_users.py"}
+import pytest
+
+from ferro import UniqueViolationError
 from myapp.models import User
 
 
 async def test_create_user(db):
-    user = await User.create(username="testuser", email="test@example.com")
+    user = await User.create(username="ada", email="ada@example.com")
 
-    assert user.id is not None
-    assert user.username == "testuser"
-
-    # Verify it round-trips through the database
-    found = await User.where(lambda t: t.username == "testuser").first()
+    found = await User.where(lambda user: user.username == "ada").first()
     assert found is not None
     assert found.id == user.id
+
+
+async def test_email_is_unique(db):
+    await User.create(username="ada", email="ada@example.com")
+
+    with pytest.raises(UniqueViolationError):
+        await User.create(username="grace", email="ada@example.com")
 ```
 
-Constraint violations surface as exceptions from the engine:
+Run the file:
 
-```python
-import pytest
+```text
+$ pytest -q tests/test_users.py
+..                                                                       [100%]
+2 passed in 0.04s
+```
 
+Both tests create `ada@example.com`, and neither sees the other's row: each starts with an empty database.
+
+## Raw SQL in the test's transaction
+
+Request `db_transaction` instead of `db` when a test checks its work with raw SQL. The handle it yields reads on the test's connection:
+
+```python {test=pytest path="tests/test_raw_sql.py"}
 from myapp.models import User
 
 
-async def test_user_unique_email(db):
-    await User.create(username="user1", email="same@example.com")
+async def test_raw_count_sees_new_user(db_transaction):
+    await User.create(username="ada", email="ada@example.com")
 
-    with pytest.raises(Exception):
-        await User.create(username="user2", email="same@example.com")
+    row = await db_transaction.fetch_one('SELECT count(*) AS total FROM "user"')
+    assert row == {"total": 1}
 ```
+
+The raw count sees the new user inside the transaction, and the fixture rolls the row back when the test ends.
 
 ## Factories
 
-For tests that need realistic object graphs, a small factory class keeps setup terse without pulling in a library:
+A test that needs a post also needs its author. A factory class per model fills in the fields a test does not care about:
 
-```python
+```python {test=pytest path="tests/test_posts.py"}
 from typing import Any
 
 from myapp.models import Post, User
 
 
 class UserFactory:
-    _counter = 0
+    count = 0
 
     @classmethod
-    async def create(cls, **kwargs: Any) -> User:
-        cls._counter += 1
+    async def create(cls, **fields: Any) -> User:
+        cls.count += 1
         defaults = {
-            "username": f"user_{cls._counter}",
-            "email": f"user{cls._counter}@example.com",
+            "username": f"user{cls.count}",
+            "email": f"user{cls.count}@example.com",
         }
-        defaults.update(kwargs)
-        return await User.create(**defaults)
+        return await User.create(**(defaults | fields))
 
 
 class PostFactory:
-    _counter = 0
+    count = 0
 
     @classmethod
-    async def create(cls, **kwargs: Any) -> Post:
-        cls._counter += 1
-
-        # Auto-create an author when none is provided
-        if "author" not in kwargs:
-            kwargs["author"] = await UserFactory.create()
-
-        defaults = {"title": f"Post {cls._counter}", "content": "Test content"}
-        defaults.update(kwargs)
-        return await Post.create(**defaults)
+    async def create(cls, **fields: Any) -> Post:
+        cls.count += 1
+        if "author" not in fields:
+            fields["author"] = await UserFactory.create()
+        defaults = {"title": f"Post {cls.count}", "content": "Test content"}
+        return await Post.create(**(defaults | fields))
 
 
-async def test_post_with_author(db):
-    post = await PostFactory.create(title="Custom Title")
-    assert (await post.author) is not None
+async def test_post_gets_an_author(db):
+    post = await PostFactory.create(title="Custom title")
+
+    author = await post.author
+    assert post.title == "Custom title"
+    assert author.username.startswith("user")
 ```
 
-Override only the fields the test cares about; the counters keep unique-constrained fields distinct.
+The post keeps the title the test passed and gets a generated author. The counters keep the unique `username` and `email` values distinct across every call in the run.
 
-## Testing Against Postgres
+## Testing against Postgres
 
-SQLite in memory covers most logic, but behavior that depends on native Postgres types, casts, or constraints should run against a real PostgreSQL database.
-
-### Schema isolation with `?ferro_search_path=...`
-
-Appending `ferro_search_path=<schema>` to a Postgres connection URL makes Ferro run `SET search_path TO <schema>` on every pooled connection. All tables created by `auto_migrate` (and all queries) then live in that schema, so many test runs can share one physical database without colliding.
-
-The schema must already exist — create it before connecting, and drop it on teardown:
+In-memory SQLite covers most logic. Behaviour that depends on Postgres types, casts or constraints needs a real PostgreSQL database. This fixture gives each test a schema of its own in one shared database, through the URL's [`ferro_search_path`](../guide/connections.md#postgres-schema-isolation) parameter:
 
 ```python
-import uuid
-
-import pytest
-
-from ferro import connect, engines, execute, reset_engine
-
-POSTGRES_URL = "postgresql://localhost:5432/app_test"
-
-
-@pytest.fixture
-async def pg_db():
-    schema = f"test_{uuid.uuid4().hex[:8]}"
-
-    # Create the schema with a throwaway connection
-    await connect(POSTGRES_URL)
-    async with engines.session():
-        await execute(f'CREATE SCHEMA "{schema}"')
-    reset_engine()
-
-    # Reconnect with the schema as the search path
-    await connect(f"{POSTGRES_URL}?ferro_search_path={schema}", auto_migrate=True)
-    async with engines.session():
-        yield
-
-        await execute(f'DROP SCHEMA "{schema}" CASCADE')
-    reset_engine()
+--8<-- "docs/examples/testing_conftest_postgres.py:postgres"
 ```
 
-Schema names passed through `ferro_search_path` must contain only ASCII letters, digits, and underscores; anything else is rejected at connect time.
+`pg_db` creates the schema on a first connection, reconnects with `ferro_search_path` set to it so that `auto_migrate=True` creates the tables there, and drops the schema with everything in it when the test ends. `with_search_path()` adds the parameter beside any the URL already has, such as `sslmode=require`. Set `TEST_POSTGRES_URL` to point the fixture at your test database.
 
-## Tests in a Project with Migrations
+## Projects with migrations
 
 The fixtures above stay as they are when a project adopts [migrations](../guide/schema/migrations.md). A fresh test database has never run a migration, so `auto_migrate=True` is not refused on it ([one door per database](../guide/schema/overview.md#one-door-per-database)), and it builds the schema the models declare.
 
-That schema is the head of your migrations only while the models and the migrations agree, so run `ferro migrate check` in CI beside the tests. And `auto_migrate=True` never runs a migration's own SQL, its backfill or its down: test those with the migration test harness, on a database it stands at a named migration. See [Testing migrations](../guide/schema/testing.md).
+That schema is the schema your migrations end at only while the models and the migrations agree, so run `ferro migrate check` in CI beside the tests. `auto_migrate=True` never runs a migration's own SQL, backfill or down step. Test those with the migration test harness, which stands a database at a named migration; see [Testing migrations](../guide/schema/testing.md).
 
-## See Also
+## See also
 
-- [Transactions guide](../guide/transactions.md) — semantics of `transaction()` and connection affinity
-- [Connections & Databases guide](../guide/connections.md) — connection URLs and `auto_migrate`
-- [Connection & Registry API](../api/connection.md) — `connect`, `reset_engine`, and friends
+- [Transactions](../guide/transactions.md): what `transaction()` commits and rolls back.
+- [Connections](../guide/connections.md): connection URLs, sessions and `auto_migrate`.
+- [`connect()`][ferro.connect], [`reset_engine()`][ferro.reset_engine] and [`transaction()`][ferro.transaction] in the API reference.

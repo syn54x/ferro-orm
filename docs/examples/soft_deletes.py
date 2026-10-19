@@ -1,4 +1,4 @@
-"""Runnable companion to the Soft Deletes how-to (docs/pages/howto/soft-deletes.md)."""
+"""Runnable companion to the soft-deletes how-to (docs/pages/howto/soft-deletes.md)."""
 
 import asyncio
 
@@ -10,10 +10,10 @@ from ferro.query import Query
 
 
 class SoftDeleteMixin:
-    """Soft-delete behavior as a plain mixin.
+    """Soft-delete behaviour as a plain class.
 
-    Declare ``is_deleted`` and ``deleted_at`` on each concrete model;
-    the mixin supplies the lifecycle methods.
+    Each model that uses it declares ``is_deleted`` and ``deleted_at``
+    itself; the mixin supplies the methods.
     """
 
     async def soft_delete(self) -> None:
@@ -28,12 +28,12 @@ class SoftDeleteMixin:
 
     @classmethod
     def active(cls) -> Query:
-        return cls.where(lambda invoice: invoice.is_deleted == False)  # noqa: E712
+        return cls.where(lambda row: row.is_deleted == False)  # noqa: E712
 
 
 class Invoice(SoftDeleteMixin, Model):
     id: int | None = Field(default=None, primary_key=True)
-    number: str
+    number: str = Field(unique=True)
     is_deleted: bool = False
     deleted_at: datetime | None = None
 
@@ -42,20 +42,56 @@ class Invoice(SoftDeleteMixin, Model):
 
 
 async def main() -> None:
+    # --8<-- [start:session]
     await connect("sqlite::memory:", auto_migrate=True)
 
     async with engines.session():
-        # --8<-- [start:usage]
         invoice = await Invoice.create(number="INV-001")
         await Invoice.create(number="INV-002")
+        await Invoice.create(number="INV-003")
+        # --8<-- [end:session]
 
+        # --8<-- [start:usage]
         await invoice.soft_delete()
-        assert await Invoice.active().count() == 1
-        assert await Invoice.select().count() == 2  # row still exists
+        assert await Invoice.active().count() == 2
+        assert await Invoice.select().count() == 3
 
         await invoice.restore()
-        assert await Invoice.active().count() == 2
+        assert await Invoice.active().count() == 3
         # --8<-- [end:usage]
+
+        await invoice.soft_delete()
+
+        # --8<-- [start:querying]
+        live = await (
+            Invoice.active()
+            .where(lambda invoice: invoice.number >= "INV-002")
+            .order_by(lambda invoice: invoice.number)
+            .all()
+        )
+        assert [invoice.number for invoice in live] == ["INV-002", "INV-003"]
+
+        trashed = await Invoice.where(lambda invoice: invoice.is_deleted == True).all()  # noqa: E712
+        assert [invoice.number for invoice in trashed] == ["INV-001"]
+        # --8<-- [end:querying]
+
+        # --8<-- [start:unique]
+        from ferro import UniqueViolationError
+
+        try:
+            await Invoice.create(number="INV-001")
+        except UniqueViolationError:
+            print("INV-001 is still taken")
+        else:
+            raise AssertionError("expected UniqueViolationError")
+        # --8<-- [end:unique]
+
+        # --8<-- [start:purge]
+        soft_deleted = Invoice.where(lambda invoice: invoice.is_deleted == True)  # noqa: E712
+        purged = await soft_deleted.delete()
+        assert purged == 1
+        assert await Invoice.select().count() == 2
+        # --8<-- [end:purge]
 
     print("soft_deletes example ran successfully")
 

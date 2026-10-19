@@ -14,10 +14,10 @@ def utcnow() -> datetime:
 
 
 class TimestampMixin:
-    """Touch ``updated_at`` on every save.
+    """Set ``updated_at`` on every save.
 
-    A plain mixin (not a Model subclass): declare the timestamp fields on
-    each concrete model, and the mixin keeps them fresh.
+    A plain class, not a ``Model`` subclass: each model that uses it
+    declares ``created_at`` and ``updated_at`` itself.
     """
 
     async def save(self, **kwargs) -> None:
@@ -26,7 +26,7 @@ class TimestampMixin:
 
 
 class Note(TimestampMixin, Model):
-    id: Annotated[int | None, Field(default=None, primary_key=True)]
+    id: Annotated[int | None, Field(primary_key=True)] = None
     text: str
     created_at: Annotated[datetime, Field(default_factory=utcnow)]
     updated_at: Annotated[datetime, Field(default_factory=utcnow)]
@@ -36,15 +36,18 @@ class Note(TimestampMixin, Model):
 
 
 async def main() -> None:
+    # --8<-- [start:session]
     await connect("sqlite::memory:", auto_migrate=True)
 
     async with engines.session():
-        note = await Note.create(text="first draft")
-        original = note.updated_at
+        note = await Note.create(text="First draft")
+        assert note.created_at.tzinfo is UTC
+        # --8<-- [end:session]
 
-        note.text = "second draft"
+        edited_before = note.updated_at
+        note.text = "Second draft"
         await note.save()
-        assert note.updated_at > original
+        assert note.updated_at > edited_before
 
     print("timestamps_annotated example ran successfully")
 
