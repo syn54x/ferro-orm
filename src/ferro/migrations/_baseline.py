@@ -1,5 +1,4 @@
-"""``ferro migrate baseline``: adopt migrations on a database that already
-has their schema (ADR-0031).
+"""`ferro migrate baseline`: adopt migrations on a database that already has their schema.
 
 ```text
 $ ferro migrate baseline
@@ -13,19 +12,18 @@ $ ferro migrate status
 0007_nickname       pending
 ```
 
-A database that ``connect(auto_migrate=True)`` or Alembic built already has
-the tables ``0001`` creates. ``baseline`` records every step of every
-migration through the target as applied without running it, and only after
-checking: under the run lock, with no step records yet, the live database
-is planned against the target migration's schema snapshot exactly as
-``ferro migrate drift`` plans it against the last applied one: both call
-:func:`ferro.migrations._drift.against`, so the lines are the same. Any
-line means nothing is recorded; there is no flag that records past one.
-Live tables the snapshot does not declare (``alembic_version``, a later
-migration's tables) are never drift.
+A database that `connect(auto_migrate=True)` or Alembic built already has
+the tables `0001` creates. `baseline` records every step of every migration
+through the target as applied without running it, and only after checking:
+under the run lock, with no step records yet, the live database is planned
+against the target migration's schema snapshot exactly as
+`ferro migrate drift` plans it against the last applied one, so the lines
+are the same. Any line means nothing is recorded; there is no flag that
+records past one. Live tables the snapshot does not declare
+(`alembic_version`, a later migration's tables) are never drift.
 
-``baseline --remove`` deletes the baseline's records again, refused while a
-run has applied a migration above them; ``down`` never reverts a baselined
+`baseline --remove` deletes the baseline's records again, refused while a
+run has applied a migration above them; `down` never reverts a baselined
 migration, whose down would drop tables it never created.
 """
 
@@ -52,28 +50,26 @@ NOT_COMPARED = (
     "baseline checked what `ferro migrate drift` checks: objects ferro does not "
     "own (functions, triggers) were not compared"
 )
-"""What a successful baseline says it did not check (ADR-0031)."""
+"""What a successful baseline says it did not check."""
 
 
 @dataclass(frozen=True)
 class BaselineReport:
-    """What ``baseline`` did.
-
-    ``recorded`` names every migration it recorded (``NNNN_<name>``), empty
-    when the drift check found something; ``data_steps_listed`` every data
-    step it recorded without running (``NNNN_<name>/<file>``); ``drift`` the
-    drift check's report when it found something, ``None`` when the
-    database matched the target's snapshot.
-    """
+    """What [`baseline`][ferro.migrations.baseline] did: what it recorded, or the drift that stopped it."""
 
     recorded: list[str]
+    """Every migration it recorded (`NNNN_<name>`); empty when the drift check found something."""
     data_steps_listed: list[str]
+    """Every data step it recorded without running (`NNNN_<name>/<file>`)."""
     drift: DriftReport | None
+    """The drift check's report when it found something; `None` when the database matched the target's snapshot."""
     steps: int = 0
     """How many step records were written."""
     reports: list[dict[str, Any]] = field(default_factory=list)
-    """What the drift check reported without counting it as drift (a
-    foreign or unverifiable row policy, ...), as ``drift`` reports it."""
+    """What the drift check reported without counting it as drift, as `drift` reports it.
+
+    A foreign or unverifiable row policy, for example.
+    """
 
     @property
     def warnings(self) -> list[str]:
@@ -81,7 +77,11 @@ class BaselineReport:
         return [report["text"] for report in self.reports]
 
     def render(self) -> str:
-        """The text ``ferro migrate baseline`` prints on stdout."""
+        """Render the text `ferro migrate baseline` prints on stdout.
+
+        Returns:
+            The drift lines and `nothing was recorded`, or what was recorded.
+        """
         if self.drift is not None:
             return f"{self.drift.render()}\nnothing was recorded"
         data = len(self.data_steps_listed)
@@ -94,15 +94,25 @@ class BaselineReport:
         return "\n".join(lines)
 
     def raise_for_problems(self) -> None:
-        """Raise :class:`MigrationRefused` naming every drift line unless the
-        baseline was recorded."""
+        """Raise unless the baseline was recorded.
+
+        Raises:
+            MigrationRefused: The drift check found something; the message
+                names every drift line.
+        """
         if self.drift is not None:
             raise MigrationRefused(self.render())
 
 
 def render_removed(removed: list[str]) -> str:
-    """The text ``ferro migrate baseline --remove`` prints for the migrations
-    whose baseline it removed."""
+    """Render the text `ferro migrate baseline --remove` prints.
+
+    Args:
+        removed: The migrations whose baseline was removed.
+
+    Returns:
+        `no baseline to remove`, or the span of migrations removed.
+    """
     if not removed:
         return "no baseline to remove"
     return f"removed the baseline of {_span(removed)}"
@@ -191,25 +201,47 @@ async def baseline(
     url: str | None = None,
     lock_timeout: str | float | None = None,
 ) -> BaselineReport:
-    """Record every migration through ``target`` (the head when ``None``;
-    ``"0006"`` or ``"0006_add_teams"``) as applied on a database that already
-    has their schema, under the run lock (``ferro migrate baseline``).
+    """Record migrations as applied on a database that already has their schema.
 
-    The database is checked against the target's schema snapshot first, as
-    :func:`~ferro.migrations.drift` checks it; when that finds anything,
-    nothing is recorded and the report's ``drift`` lists it
-    (``.raise_for_problems()`` raises with every line). There is no
-    override (ADR-0031). Works on ``using`` (an open connection), on a
-    private connection to ``url``, or on the default connection.
+    This is `ferro migrate baseline`. Under the run lock, the database is
+    checked against the target's schema snapshot first, as
+    [`drift`][ferro.migrations.drift] checks it; when that finds anything,
+    nothing is recorded and the report's `drift` lists it. There is no
+    override. See
+    [Adopting migrations](../howto/adopting-migrations.md).
+
+    Args:
+        settings: The project's configuration. Defaults to `FerroSettings()`.
+        database: The configured database. Defaults to the only one
+            configured.
+        target: The last migration to record, `"0006"` or
+            `"0006_add_teams"`. Defaults to the newest migration.
+        using: An open connection to work on. Defaults to the default
+            connection.
+        url: A URL to open a private connection to, closed after the call.
+            Refused together with `using`.
+        lock_timeout: How long to wait for another run's lock: `"30s"`,
+            `"500ms"`, `"1m"` or a number of seconds; `0` refuses at once.
+            Defaults to the database's `lock_timeout`.
+
+    Returns:
+        What was recorded, or the drift that stopped it; its
+            `raise_for_problems()` raises with every drift line.
 
     Raises:
-        AlreadyTrackedError: the database is already tracked (its tracking
-            table holds step records): ``applied`` names them, ``head`` the
-            newest, ``report`` is its status. Another pre-deploy may have
-            adopted it first; carry on to ``up()``.
-        MigrationRefused: the target is not in the migrations directory, the
+        AlreadyTrackedError: The database is already tracked (its tracking
+            table holds step records). Another pre-deploy may have adopted
+            it first; carry on to `up()`.
+        MigrationRefused: The target is not in the migrations directory, the
             directory holds no migration, the lock wait outlasts
-            ``lock_timeout``, or the configuration names no single database.
+            `lock_timeout`, or the configuration names no single database.
+
+    Examples:
+        ```python {test=compile reason="needs a migrations project and a database"}
+        report = await ferro.migrations.baseline(target="0006")
+        report.raise_for_problems()
+        print(report.recorded[-1])  # 0006_add_teams
+        ```
     """
     where = Target.resolve(settings, database, using=using, url=url)
     async with where.open() as name:
@@ -224,16 +256,32 @@ async def remove_baseline(
     url: str | None = None,
     lock_timeout: str | float | None = None,
 ) -> list[str]:
-    """Delete every record a baseline wrote, under the run lock (``ferro
-    migrate baseline --remove``). Returns the migrations whose baseline was
-    removed (``NNNN_<name>``), empty when there was none; they are pending
+    """Delete every record a baseline wrote, under the run lock.
+
+    This is `ferro migrate baseline --remove`. The migrations are pending
     afterwards.
 
+    Args:
+        settings: The project's configuration. Defaults to `FerroSettings()`.
+        database: The configured database. Defaults to the only one
+            configured.
+        using: An open connection to work on. Defaults to the default
+            connection.
+        url: A URL to open a private connection to, closed after the call.
+            Refused together with `using`.
+        lock_timeout: How long to wait for another run's lock: `"30s"`,
+            `"500ms"`, `"1m"` or a number of seconds; `0` refuses at once.
+            Defaults to the database's `lock_timeout`.
+
+    Returns:
+        The migrations whose baseline was removed (`NNNN_<name>`); empty
+            when there was none.
+
     Raises:
-        AppliedAboveBaselineError: a run applied a migration above the
-            baseline (``above`` names each; revert them with ``ferro migrate
-            down`` first, as the message says).
-        MigrationRefused: the lock wait outlasts ``lock_timeout``, or the
+        AppliedAboveBaselineError: A run applied a migration above the
+            baseline; revert it with `ferro migrate down` first, as the
+            message says.
+        MigrationRefused: The lock wait outlasts `lock_timeout`, or the
             configuration names no single database.
     """
     target = Target.resolve(settings, database, using=using, url=url)

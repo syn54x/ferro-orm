@@ -549,7 +549,7 @@ def test_status_shows_the_edited_chunked_refusal_with_its_doors(
 
 
 def test_the_cursor_names_its_order_keys():
-    from ferro.migrations.chunked import encode_cursor
+    from ferro.migrations._chunk_loop import encode_cursor
 
     assert json.loads(encode_cursor((7,), 7, order_by=["author.id"])) == {
         "keys": [7],

@@ -1,5 +1,4 @@
-"""The Alembic bridge (ADR-0041): ferro's models as Alembic metadata, and one
-comparator that writes what the one planner decides.
+"""The Alembic bridge: Ferro's models as Alembic metadata, and one comparator that writes what the planner decides.
 
 ```python
 # env.py
@@ -8,14 +7,14 @@ from ferro.migrations import ferro_options, get_metadata
 context.configure(connection=connection, target_metadata=get_metadata(), **ferro_options())
 ```
 
-``alembic revision --autogenerate`` reads the live database through the
-reconciliation pass's converter (``_core._live_schema_ir``), asks the core
-for the whole revision in one call (``_core._plan_revision``: the upgrade
-planned against the models with destructive changes on, the downgrade the
-planner run back to the live database, and every refusal and marker) and
-hands it to the translator (:mod:`ferro.migrations.translate`), which
-decides nothing. An empty revision and "no drift" are the same statement. ``ferro_options()`` hides ferro's tables and both tracking
-tables from Alembic's own comparator, so every op on a ferro table is the
+`alembic revision --autogenerate` reads the live database the way the
+auto-migrate pass reads it, asks the core for the whole revision in one
+call (the upgrade planned against the models with destructive changes on,
+the downgrade planned back to the live database, and every refusal and
+marker) and hands it to the translator (`ferro.migrations.translate`),
+which decides nothing. An empty revision and "no drift" are the same
+statement. `ferro_options()` hides Ferro's tables and both tracking tables
+from Alembic's own comparator, so every op on a Ferro table is the
 planner's; a project's own SQLAlchemy tables keep Alembic's comparison.
 """
 
@@ -76,7 +75,7 @@ class _FerroMetadata:
         """The models' tables and every table a rename hint names as the old
         one: the tables Alembic's own comparator is kept off. Which of them
         the planner reads live is the live read's own rule
-        (``_live_schema_ir``, ADR-0047)."""
+        (``_live_schema_ir``)."""
         names = set()
         for model in self.envelope["payload"]["models"]:
             names.add(model["table_name"])
@@ -104,30 +103,42 @@ def _declared_modelset(database: "str | None") -> Dict[str, Any]:
 
 
 def get_metadata(database: "str | None" = None) -> "sa.MetaData":
-    """
-    Generate a SQLAlchemy MetaData object representing the project's Ferro
-    models, for alembic's env.py together with :func:`ferro_options`.
+    """Build SQLAlchemy `MetaData` for the project's Ferro models, for Alembic's `env.py`.
 
-    With a ferro configuration (``ferro.toml`` or ``[tool.ferro]``, read
-    through ``FerroSettings``) it imports the configured database's
-    ``models`` modules and returns only that database's tables; name the
-    database with ``database=`` when several are configured. A registered
-    model no configured database claims is refused by name. With no
-    configuration it renders every registered model.
+    Pass it as `target_metadata` together with
+    [`ferro_options`][ferro.migrations.alembic.ferro_options]. With a Ferro
+    configuration (`ferro.toml` or `[tool.ferro]`) it imports the configured
+    database's `models` modules and returns only that database's tables; a
+    registered model no configured database claims is refused by name. With
+    no configuration it renders every registered model.
 
-    Enum columns are mapped to named ``sqlalchemy.Enum`` types so PostgreSQL
-    autogenerate and DDL compilation succeed (anonymous enums are rejected).
-    When the field annotation is a Python ``enum.Enum`` subclass, the database
-    type name defaults to the enum class name in lowercase; otherwise the
-    column name is used as the type name.
+    Enum columns map to named `sqlalchemy.Enum` types, named after the enum
+    class in lowercase (or after the column when the annotation is not an
+    `enum.Enum`), so Postgres autogenerate and DDL compilation succeed.
 
-    **Column nullability:** ``Column.nullable`` follows :class:`~ferro.base.FerroField`
-    / :class:`~ferro.base.ForeignKey` ``nullable`` when set to a boolean (force
-    NULL / NOT NULL). The default ``nullable='infer'`` uses whether the Python
-    annotation allows ``None`` (after unwrapping ``Annotated``). Shadow ``*_id``
-    columns infer from the **forward relation** field's annotation, not from the
-    synthetic ``*_id`` field. Primary key columns are always ``nullable=False``.
-    Pydantic "required" and JSON-schema defaults do not change inferred nullability.
+    A column's `nullable` follows the `nullable` of its
+    [`FerroField`][ferro.FerroField] or [`ForeignKey`][ferro.ForeignKey]
+    when that is a boolean. The default, `nullable="infer"`, uses whether
+    the annotation allows `None`; a shadow `*_id` column infers from its
+    forward relation's annotation. Primary key columns are never nullable.
+
+    Args:
+        database: The configured database whose tables to return. Defaults
+            to the only one configured; name it when several are.
+
+    Returns:
+        The metadata, one table per model.
+
+    Examples:
+        ```python {test=compile reason="an Alembic env.py"}
+        from ferro.migrations import ferro_options, get_metadata
+
+        context.configure(
+            connection=connection,
+            target_metadata=get_metadata(),
+            **ferro_options(),
+        )
+        ```
     """
     metadata = _naming_metadata()
     envelope = _declared_modelset(database)
@@ -370,22 +381,24 @@ def _db_type_to_sa_type(token: str) -> "sa.types.TypeEngine | None":
 def render_item(
     type_: str, obj: Any, autogen_context: "AutogenContext"
 ) -> "str | Literal[False]":
-    """Alembic ``render_item`` hook for ferro's bridge, carried by
-    :func:`ferro_options` (which ``env.py`` passes to ``context.configure``).
+    """Render a native Postgres enum type the revision must not create, for Alembic.
 
-    It renders one thing Alembic cannot: a native Postgres enum type the
-    revision must **not** create. Every enum type a revision needs is
-    created by the planner's own ``CREATE TYPE`` (or already exists), so a
-    ``create_table`` / ``add_column`` column of it is written
-    ``postgresql.ENUM(..., create_type=False)`` — or SQLAlchemy would issue
-    ``CREATE TYPE`` again and the upgrade would fail with ``DuplicateObject``
-    (#443). ``repr()`` of that type silently drops the flag, and Alembic's
-    default type renderer is that ``repr``; this hook renders the flag and
-    adds the ``from sqlalchemy.dialects import postgresql`` import.
+    The planner creates every enum type a revision needs, so a column of one
+    is written `postgresql.ENUM(..., create_type=False)`. Everything else
+    returns `False`, so Alembic's own renderers keep their say. You do not
+    call this directly:
+    [`ferro_options`][ferro.migrations.alembic.ferro_options] passes it to
+    Alembic.
 
-    Everything else returns ``False`` so Alembic's own renderers keep their
-    say. The signature is Alembic's ``RenderItemFn`` exactly —
-    ``(str, Any, AutogenContext) -> str | Literal[False]`` (#446).
+    Args:
+        type_: The kind of item Alembic is rendering, such as `"type"`.
+        obj: The item.
+        autogen_context: Alembic's autogenerate context, which collects the
+            revision's imports.
+
+    Returns:
+        The rendered type, or `False` for anything this hook does not
+            render.
     """
     if type_ != "type" or sa is None:
         return False
@@ -414,7 +427,7 @@ _RenderItem = Callable[[str, Any, "AutogenContext"], "str | Literal[False]"]
 
 
 class _FerroObjectFilter:
-    """Alembic's ``include_object`` hook from :func:`ferro_options`: hides
+    """Alembic's ``include_object`` hook from `ferro_options`: hides
     ferro's tables (and everything on them) and both tracking tables from
     Alembic's own comparator, then asks the project's own filter, if any.
 
@@ -448,23 +461,34 @@ def ferro_options(
     include_object: "_IncludeObject | None" = None,
     render_item: "_RenderItem | None" = None,
 ) -> dict[str, Any]:
-    """The options ``env.py`` passes to ``context.configure`` beside
-    ``get_metadata()``::
+    """Return the options `env.py` passes to `context.configure` beside `get_metadata()`.
+
+    The returned `include_object` keeps Alembic's own comparator off Ferro's
+    tables and both tracking tables, so every op on a Ferro table is the
+    planner's; the returned `render_item` writes a native enum type the
+    revision must not create. Autogenerate over `get_metadata()` without
+    these options is refused, naming this line.
+
+    Args:
+        include_object: The project's own `include_object` hook. Ferro's
+            filter asks it about every object Ferro does not hide.
+        render_item: The project's own `render_item` hook. Ferro's renderer
+            falls through to it whenever Ferro's returns `False`.
+
+    Returns:
+        The `include_object` and `render_item` keyword arguments for
+            `context.configure`.
+
+    Examples:
+        ```python {test=compile reason="an Alembic env.py"}
+        from ferro.migrations import ferro_options, get_metadata
 
         context.configure(
             connection=connection,
             target_metadata=get_metadata(),
             **ferro_options(),
         )
-
-    ``include_object`` keeps Alembic's own comparator off ferro's tables and
-    both tracking tables, so every op on a ferro table is the planner's;
-    ``render_item`` writes a native enum type the revision must not create
-    (``postgresql.ENUM(..., create_type=False)``). A project with its own
-    hooks passes them here: ferro's filter asks the project's for every
-    object it does not hide, and ferro's renderer falls through to the
-    project's on ``False``. Autogenerate over ``get_metadata()`` without
-    these options is refused, naming this line.
+        ```
     """
 
     def rendered(

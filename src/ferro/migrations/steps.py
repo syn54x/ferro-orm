@@ -1,4 +1,4 @@
-"""Data step declarations, ``todo()``, and the loader that reads a step file.
+"""Data step declarations, `todo()`, and the loader that reads a step file.
 
 ```python
 # migrations/0011_backfill_slugs/01_backfill_author.py
@@ -14,14 +14,15 @@ async def up(ctx):
 def down(ctx): ...
 ```
 
-Every ``up`` and ``down`` carries exactly one declaration (ADR-0035):
-:func:`atomic`, :func:`chunked`, or, on a ``down`` only, :func:`irreversible`
-or :func:`nothing_to_reverse`. :func:`load_step` refuses an undecorated or
-doubly decorated function naming the file and function, and reads every
-:func:`todo` call from the file's syntax tree, so ``up`` refuses the
-migration with file, line and message before running anything::
+Every `up` and `down` carries exactly one declaration: `atomic`, `chunked`,
+or, on a `down` only, `irreversible` or `nothing_to_reverse`. `load_step`
+refuses an undecorated or doubly decorated function naming the file and
+function, and reads every `todo` call from the file's syntax tree, so `up`
+refuses the migration with file, line and message before running anything:
 
-    0011_backfill_slugs/01_backfill_author.py:7: not written yet: write this step
+```text
+0011_backfill_slugs/01_backfill_author.py:7: not written yet: write this step
+```
 """
 
 from __future__ import annotations
@@ -68,13 +69,15 @@ _PUBLIC_MODULE = "ferro.migrations"
 
 
 class StepRefused(MigrationRefused):
-    """A data step file that cannot run as written: an undeclared or doubly
-    declared function, a file that does not load, or one edited since it
-    was planned. The message names the file and the fix."""
+    """The refusal for a data step file that cannot run as written.
+
+    An undeclared or doubly declared function, a file that does not load, or
+    one edited since it was planned. The message names the file and the fix.
+    """
 
 
 class NotWrittenError(RuntimeError):
-    """A :func:`todo` was reached at run time."""
+    """The error a [`todo`][ferro.migrations.todo] raises when a run reaches it."""
 
 
 # -- the shapes -------------------------------------------------------------------------
@@ -82,38 +85,45 @@ class NotWrittenError(RuntimeError):
 
 @dataclass(frozen=True)
 class Atomic:
-    """One transaction, the step's record committed inside it (ADR-0024)."""
+    """The atomic shape: one transaction, the step's record committed inside it."""
 
     kind = "atomic"
+    """The shape's name, as a step record and a refusal spell it."""
 
 
 @dataclass(frozen=True)
 class Chunked:
-    """The runner pages ``query`` by keyset, ``batch_size`` rows per
-    transaction (ADR-0024; :func:`ferro.migrations.chunked.run_chunked`).
-    :func:`chunked_query` builds and checks the query."""
+    """The chunked shape: the runner pages `query` by keyset, `batch_size` rows per transaction.
+
+    `chunked_query` builds and checks the query.
+    """
 
     query: Callable[[HistoricalModels], Query[Any]]
+    """The declared query, a function of the step's historical models."""
     batch_size: int
+    """The rows each transaction takes."""
     kind = "chunked"
+    """The shape's name, as a step record and a refusal spell it."""
 
 
 @dataclass(frozen=True)
 class Irreversible:
-    """A ``down`` that cannot be reversed: a run that would revert it refuses
-    before reverting anything (ADR-0033)."""
+    """The irreversible shape: a run that would revert the step refuses before reverting anything."""
 
     reason: str
+    """Why the step cannot be reversed."""
     kind = "irreversible"
+    """The shape's name, as a step record and a refusal spell it."""
 
 
 @dataclass(frozen=True)
 class NothingToReverse:
-    """A ``down`` with nothing to do: reverting it removes the record and runs
-    nothing (ADR-0033)."""
+    """The nothing-to-reverse shape: reverting the step removes its record and runs nothing."""
 
     reason: str
+    """Why there is nothing to reverse."""
     kind = "nothing_to_reverse"
+    """The shape's name, as a step record and a refusal spell it."""
 
 
 Shape = Atomic | Chunked | Irreversible | NothingToReverse
@@ -124,7 +134,9 @@ class Declared:
     """One step function and its declared shape."""
 
     fn: Callable[..., Any]
+    """The step function."""
     shape: Shape
+    """The shape its one declaration gave it."""
 
 
 @dataclass(frozen=True)
@@ -132,9 +144,11 @@ class LoadedStep:
     """A loaded data step file."""
 
     up: Declared
+    """The file's `up` and its shape."""
     down: Declared
+    """The file's `down` and its shape."""
     todos: list[tuple[int, str]]
-    """Every ``todo("…")`` in the file: ``(line, message)``, in file order."""
+    """Every `todo("…")` in the file as `(line, message)`, in file order."""
 
 
 # -- the declarations --------------------------------------------------------------------
@@ -150,27 +164,79 @@ def _declare[F: Callable[..., Any]](fn: F, shape: Shape) -> F:
 
 
 def atomic[F: Callable[..., Awaitable[Any]]](fn: F) -> F:
-    """Declare a step function atomic: it runs as one transaction, with the
-    step's record committed inside it. ``async def up(ctx)``."""
+    """Declare a step function atomic: one transaction, with the step's record committed inside it.
+
+    The function is `async def up(ctx)` (or `down`); `ctx` is the step's
+    [context](../guide/schema/data-steps.md).
+
+    Args:
+        fn: The step function.
+
+    Returns:
+        The function, unchanged apart from its declaration.
+
+    Raises:
+        TypeError: `fn` is not callable.
+
+    Examples:
+        ```python {test=compile reason="a step file in a migrations directory"}
+        from ferro.migrations import atomic
+
+
+        @atomic
+        async def up(ctx):
+            for author in await ctx.models.Author.where(lambda author: author.slug == None).all():
+                author.slug = author.name.lower().replace(" ", "-")
+                await author.save()
+        ```
+    """
     return _declare(fn, Atomic())
 
 
 def chunked[F: Callable[..., Awaitable[Any]]](
     query: Callable[[HistoricalModels], Query[Any]], *, batch_size: int
 ) -> Callable[[F], F]:
-    """Declare a step function chunked: the runner pages ``query`` (given
-    ``ctx.models``) by keyset, ``batch_size`` rows per transaction, and calls
-    ``async def up(ctx, batch)`` once per batch, committing the batch's
-    cursor with it. ``query`` orders by keys that include the model's
-    primary key, and selects only the rows that still need the step, so a
-    resumed run re-pages from its cursor::
+    """Declare a step function chunked: the runner pages a query in batches, one transaction each.
+
+    The runner calls `async def up(ctx, batch)` once per batch and commits
+    the batch's cursor with it, so a failed or interrupted run resumes after
+    the last committed batch. See
+    [Data steps and backfills](../guide/schema/data-steps.md).
+
+    Args:
+        query: A function of `ctx.models` that returns the query to page. It
+            orders by keys that include the model's primary key, and selects
+            only the rows that still need the step, so a resumed run re-pages
+            from its cursor.
+        batch_size: The rows each transaction takes; a positive `int`.
+
+    Returns:
+        A decorator that declares the step function chunked.
+
+    Raises:
+        TypeError: `query` is not callable.
+        ValueError: `batch_size` is not a positive `int`.
+        StepRefused: At run time, before anything runs: the query does not
+            build, pages a table without a single primary key, is not
+            ordered by keys that include the primary key, orders by a
+            related model's column, or sets its own `limit`, `offset`,
+            `after` or `before`.
+
+    Examples:
+        ```python {test=compile reason="a step file in a migrations directory"}
+        from ferro.migrations import chunked
+
 
         @chunked(
             lambda models: models.Author.where(lambda author: author.slug == None)
             .order_by(lambda author: author.id),
             batch_size=1000,
         )
-        async def up(ctx, batch): ...
+        async def up(ctx, batch):
+            for author in batch:
+                author.slug = author.name.lower().replace(" ", "-")
+                await author.save()
+        ```
     """
     if not callable(query):
         raise TypeError("@chunked takes the query as a function of ctx.models")
@@ -191,8 +257,29 @@ def chunked[F: Callable[..., Awaitable[Any]]](
 
 
 def irreversible[F: Callable[..., Any]](reason: str) -> Callable[[F], F]:
-    """Declare a ``down`` irreversible, saying why: a run that would revert
-    it refuses before reverting anything."""
+    """Declare a `down` irreversible, saying why.
+
+    A run that would revert the step refuses before reverting anything, and
+    prints the reason.
+
+    Args:
+        reason: Why the step cannot be reversed; a non-empty string.
+
+    Returns:
+        A decorator that declares the `down` irreversible.
+
+    Raises:
+        TypeError: `reason` is not a non-empty string.
+
+    Examples:
+        ```python {test=compile reason="a step file in a migrations directory"}
+        from ferro.migrations import irreversible
+
+
+        @irreversible("the old nicknames were dropped with the column")
+        def down(ctx): ...
+        ```
+    """
     shape = Irreversible(_reason(reason, "irreversible"))
 
     def decorate(fn: F) -> F:
@@ -202,8 +289,28 @@ def irreversible[F: Callable[..., Any]](reason: str) -> Callable[[F], F]:
 
 
 def nothing_to_reverse[F: Callable[..., Any]](reason: str) -> Callable[[F], F]:
-    """Declare that a ``down`` has nothing to reverse, saying why: reverting
-    removes the step's record and runs nothing."""
+    """Declare that a `down` has nothing to reverse, saying why.
+
+    Reverting the step removes its record and runs nothing.
+
+    Args:
+        reason: Why there is nothing to reverse; a non-empty string.
+
+    Returns:
+        A decorator that declares the `down` as having nothing to reverse.
+
+    Raises:
+        TypeError: `reason` is not a non-empty string.
+
+    Examples:
+        ```python {test=compile reason="a step file in a migrations directory"}
+        from ferro.migrations import nothing_to_reverse
+
+
+        @nothing_to_reverse("slugs are derived; nothing to put back")
+        def down(ctx): ...
+        ```
+    """
     shape = NothingToReverse(_reason(reason, "nothing_to_reverse"))
 
     def decorate(fn: F) -> F:
@@ -213,16 +320,25 @@ def nothing_to_reverse[F: Callable[..., Any]](reason: str) -> Callable[[F], F]:
 
 
 def chunked_query(shape: Chunked, models: HistoricalModels, path: Path) -> Query[Any]:
-    """Build a ``@chunked`` step's query over ``models`` and check that the
-    runner can page it by keyset (what the run checks for every chunked step
-    before anything runs).
+    """Build a `@chunked` step's query and check that the runner can page it by keyset.
+
+    The run checks this for every chunked step before anything runs.
+
+    Args:
+        shape: The step's chunked declaration.
+        models: The step's historical models, passed to the query function.
+        path: The step file, named in a refusal.
+
+    Returns:
+        The query, ready to page.
 
     Raises:
-        StepRefused: the declaration does not return a query; the query pages
-            a table without a single primary key (a many-to-many join table,
-            #492); it has no ``order_by``, orders by a related model's
-            column, or its order keys leave out the primary key; or it sets its own ``limit`` / ``offset`` /
-            ``after`` / ``before``. The message names the file and the fix.
+        StepRefused: The declaration does not return a query; the query
+            pages a table without a single primary key (a many-to-many join
+            table); it has no `order_by`, orders by a related model's
+            column, or its order keys leave out the primary key; or it sets
+            its own `limit`, `offset`, `after` or `before`. The message
+            names the file and the fix.
     """
     from ..query import Query
 
@@ -303,11 +419,29 @@ def _reason(reason: Any, name: str) -> str:
 
 
 def todo(message: str) -> Any:
-    """Mark what only a person can supply: ``author.slug = todo("…")``.
+    """Mark a value in a data step that only a person can supply.
 
-    The loader reads every call from the file's syntax tree and ``up``
-    refuses the migration before running anything; reached at run time
-    anyway, it raises :class:`NotWrittenError`.
+    The loader reads every call from the file's syntax tree, and `up`
+    refuses the migration before running anything, naming the file, the
+    line and the message.
+
+    Args:
+        message: What is missing, as a string literal: the refusal prints it.
+
+    Raises:
+        NotWrittenError: Always, when a run reaches the call anyway.
+
+    Examples:
+        ```python {test=compile reason="a step file in a migrations directory"}
+        from ferro.migrations import atomic, todo
+
+
+        @atomic
+        async def up(ctx):
+            for author in await ctx.models.Author.where(lambda author: author.slug == None).all():
+                author.slug = todo("the slug for an existing author")
+                await author.save()
+        ```
     """
     raise NotWrittenError(f"not written yet: {message}")
 
@@ -353,11 +487,18 @@ def _dotted(node: ast.expr) -> str | None:
 
 
 def scan_todos(source: str | bytes, path: Path) -> list[tuple[int, str]]:
-    """Every ``todo("…")`` call in a step file's source: ``(line, message)``.
+    """Find every `todo("…")` call in a step file's source.
+
+    Args:
+        source: The file's source.
+        path: The file, named in a refusal.
+
+    Returns:
+        Each call as `(line, message)`, in line order.
 
     Raises:
-        StepRefused: the file does not parse, or a ``todo`` carries no
-            literal message.
+        StepRefused: The file does not parse, or a `todo` carries no literal
+            message.
     """
     try:
         tree = ast.parse(source, filename=str(path))
@@ -390,7 +531,16 @@ def scan_todos(source: str | bytes, path: Path) -> list[tuple[int, str]]:
 
 
 def unwritten(path: Path, todos: list[tuple[int, str]]) -> list[str]:
-    """The refusal lines for a step's ``todo`` calls, one per call."""
+    """Render the refusal lines for a step's `todo` calls, one per call.
+
+    Args:
+        path: The step file.
+        todos: Its `todo` calls as `(line, message)`.
+
+    Returns:
+        One `<migration>/<file>:<line>: not written yet: <message>` line per
+            call.
+    """
     return [
         f"{_shown(path)}:{line}: not written yet: {message}" for line, message in todos
     ]
@@ -400,13 +550,19 @@ _DECORATOR = re.compile(r"^(atomic|chunked|irreversible|nothing_to_reverse)$")
 
 
 def declared_up_kind(path: Path) -> str:
-    """The record kind (``atomic`` / ``chunked``) a step file's ``up``
-    declares, read from its syntax tree without running the file (what
-    ``baseline`` records for a step it never runs).
+    """Read the record kind a step file's `up` declares, without running the file.
+
+    This is what `baseline` records for a step it never runs.
+
+    Args:
+        path: The step file.
+
+    Returns:
+        `"atomic"` or `"chunked"`.
 
     Raises:
-        StepRefused: the file has no ``up``, or its ``up`` does not carry
-            exactly one of ``@atomic`` / ``@chunked``.
+        StepRefused: The file does not parse, has no `up`, or its `up` does
+            not carry exactly one of `@atomic` / `@chunked`.
     """
     source = path.read_bytes()
     try:
@@ -463,20 +619,26 @@ def _declaration_problem(path: Path, function: str, kinds: list[str]) -> str:
 
 
 def load_step(path: Path, expected_checksum: str | None) -> LoadedStep:
-    """Load the data step file at ``path``.
+    """Load a data step file, checked against the checksum it was planned with.
 
-    The file's bytes are checked against ``expected_checksum`` (SHA-384,
-    lowercase hex, as the run planner recorded it; ``None`` skips the
-    check), then compiled from those same bytes under the module name
-    ``ferro.migrations.steps_loaded.<migration>_<step>`` (never put on
-    ``sys.path``), so the code that runs is the code that was checked. Its
-    ``todo`` calls are read from the syntax tree; the caller refuses them.
+    The file is compiled from the same bytes that were checked, under the
+    module name `ferro.migrations.steps_loaded.<migration>_<step>` (never
+    put on `sys.path`), so the code that runs is the code that was checked.
+    Its `todo` calls are read from the syntax tree; the caller refuses them.
+
+    Args:
+        path: The step file.
+        expected_checksum: The file's SHA-384 as the run planner recorded
+            it, in lowercase hex; `None` skips the check.
+
+    Returns:
+        The file's `up` and `down` with their shapes, and its `todo` calls.
 
     Raises:
-        StepRefused: the file changed since it was planned, does not load,
-            lacks an ``up`` or ``down``, or a function is undeclared, doubly
-            declared, not ``async def`` where it must run, or (``up``)
-            declared irreversible or nothing-to-reverse.
+        StepRefused: The file changed since it was planned, does not load,
+            lacks an `up` or `down`, or a function is undeclared, doubly
+            declared, not `async def` where it must run, or (`up`) declared
+            irreversible or nothing-to-reverse.
     """
     shown = _shown(path)
     try:

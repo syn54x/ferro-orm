@@ -1,4 +1,4 @@
-"""``ferro migrate rerecord``: accept a deliberate edit of an applied step (ADR-0030).
+"""`ferro migrate rerecord`: accept a deliberate edit of an applied step.
 
 ```text
 $ ferro migrate up
@@ -11,24 +11,23 @@ $ ferro migrate rerecord 0007:01
 re-recorded 0007_nickname/01_add_nickname.up.postgres.sql (sha384:3f9a…c1 → sha384:b7e2…09); nothing was run
 ```
 
-A step record's checksum covers the up file this database executed, in
-its own dialect. ``up`` never runs a finished step again, so an edit to
-one is refused until the operator says it is deliberate; ``rerecord``
-then changes the record and nothing else: no statement of the step runs.
+A step record's checksum covers the up file this database executed, in its
+own dialect. `up` never runs a finished step again, so an edit to one is
+refused until the operator says it is deliberate; `rerecord` then changes
+the record and nothing else: no statement of the step runs.
 
 An unfinished chunked step whose batches already committed rows is the
-other case that needs a decision (``up`` refuses it): ``--continue`` keeps
-the committed rows and resumes from the cursor, allowed only while the
-edited query pages over the same order keys the cursor was committed
-under; ``--restart`` clears the cursor and ``rows_done`` so the next ``up``
-starts from the first row.
+other case that needs a decision (`up` refuses it): `--continue` keeps the
+committed rows and resumes from the cursor, allowed only while the edited
+query pages over the same order keys the cursor was committed under;
+`--restart` clears the cursor and `rows_done` so the next `up` starts from
+the first row.
 
-The Rust core decides (the locked run's ``plan_rerecord``: which record,
-which refusal) and writes (its ``rerecord``: one statement under the run
-lock); this module sequences the two and reads the facts only Python can:
-a data step's declared kind and an edited chunked query's order keys.
-``rerecord`` is a CLI verb, never part of the application API
-(ADR-0045); the CLI calls :func:`rerecord` with ``url=``, as every verb.
+The core decides (which record, which refusal) and writes (one statement
+under the run lock); this module sequences the two and reads the facts only
+Python can: a data step's declared kind and an edited chunked query's order
+keys. `rerecord` is a CLI verb, never part of the application API; the CLI
+calls `rerecord` with `url=`, as every verb.
 """
 
 from __future__ import annotations
@@ -56,23 +55,22 @@ _MODES = ("record", "continue", "restart")
 
 @dataclass(frozen=True)
 class RerecordReport:
-    """What ``rerecord`` changed: the record of ``file``
-    (``NNNN_<name>/<file>``) now holds ``new_checksum`` where it held
-    ``old_checksum``."""
+    """What `rerecord` changed: the record of `file` now holds `new_checksum` where it held `old_checksum`."""
 
     file: str
+    """The step, `NNNN_<name>/<file>`."""
     old_checksum: str
+    """The checksum the record held, as SHA-384 hex."""
     new_checksum: str
+    """The checksum the record holds now: the file's on disk."""
     mode: Mode = "record"
+    """`"record"`, `"continue"` or `"restart"`."""
     notes: list[str] = field(default_factory=list)
-    """Warnings taking the lock gave: the records of a migration that does
-    not regenerate keep no class (ADR-0054)."""
+    """Warnings taking the lock gave: the records of a migration that does not regenerate keep no class."""
 
     @property
     def note(self) -> str | None:
-        """What the re-record leaves the next ``up`` to do, by its mode
-        (``the next up continues from its cursor``); ``None`` for a plain
-        ``record``."""
+        """What the re-record leaves the next `up` to do, by its mode; `None` for a plain `record`."""
         return {
             "record": None,
             "continue": "the next up continues from its cursor",
@@ -83,7 +81,11 @@ class RerecordReport:
         }[self.mode]
 
     def render(self) -> str:
-        """The line ``ferro migrate rerecord`` prints."""
+        """Render the line `ferro migrate rerecord` prints.
+
+        Returns:
+            The line, ending `nothing was run`.
+        """
         done = "" if self.note is None else f"; {self.note}"
         return (
             f"re-recorded {self.file} (sha384:{self.old_checksum} → "
@@ -101,25 +103,39 @@ async def rerecord(
     mode: Mode = "record",
     lock_timeout: str | float | None = None,
 ) -> RerecordReport:
-    """Accept a deliberate edit of step ``target`` (``"0007:01"``) under the
-    run lock: its record takes the file's checksum (and file name and kind),
-    and nothing of the step runs.
+    """Accept a deliberate edit of one applied step, under the run lock.
 
-    ``mode`` is ``"continue"`` or ``"restart"`` for an unfinished chunked
-    step with committed batches, and ``"record"`` for anything else.
-    Works on the database and connection
-    :meth:`~ferro.migrations.target.Target.resolve` picks. A second run waits
-    up to ``lock_timeout`` (the database's configured ``lock_timeout`` when
-    ``None``).
+    This is `ferro migrate rerecord`. The step's record takes the file's
+    checksum (and file name and kind), and nothing of the step runs.
+
+    Args:
+        settings: The project's configuration. Defaults to `FerroSettings()`.
+        database: The configured database. Defaults to the only one
+            configured.
+        using: An open connection to work on. Defaults to the default
+            connection.
+        url: A URL to open a private connection to, closed after the call.
+            Refused together with `using`.
+        target: The step, `"0007:01"`.
+        mode: `"continue"` or `"restart"` for an unfinished chunked step
+            with committed batches; `"record"` for anything else.
+        lock_timeout: How long to wait for another run's lock: `"30s"`,
+            `"500ms"`, `"1m"` or a number of seconds; `0` refuses at once.
+            Defaults to the database's `lock_timeout`.
+
+    Returns:
+        What the re-record changed.
 
     Raises:
-        RunRefused: ``target`` is not one step (a migration alone, the
-            snapshot: restore the file), names a step with no record (free to
-            edit) or an unchanged one, ``mode`` does not fit the step, the
-            edited chunked step needs ``--continue`` or ``--restart``, or
-            ``--continue`` meets changed order keys. Each names the fix; the
-            refusal's ``kind`` says which.
-        MigrationRefused: an edited data step's file does not load.
+        SettingsError: `mode` is not `"record"`, `"continue"` or
+            `"restart"`.
+        RunRefused: `target` is not one step (a migration alone, the
+            snapshot: restore the file), names a step with no record (free
+            to edit) or an unchanged one, `mode` does not fit the step, the
+            edited chunked step needs `continue` or `restart`, or `continue`
+            meets changed order keys. Each names the fix; the refusal's
+            `kind` says which.
+        MigrationRefused: An edited data step's file does not load.
     """
     if mode not in _MODES:
         raise SettingsError(f"rerecord mode {mode!r} is not one of {', '.join(_MODES)}")

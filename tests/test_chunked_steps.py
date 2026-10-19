@@ -40,7 +40,7 @@ import pytest
 import ferro
 from ferro.migrations import runner
 from ferro.migrations.report import RunRefused
-from ferro.migrations.chunked import decode_cursor, encode_cursor
+from ferro.migrations._chunk_loop import decode_cursor, encode_cursor
 from ferro.settings import FerroSettings
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     pkg,
