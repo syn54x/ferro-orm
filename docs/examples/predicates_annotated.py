@@ -1,92 +1,122 @@
-"""Annotated-style companion to predicates.py (AGENTS.md I-7)."""
+"""Annotated-style companion to predicates.py (AGENTS.md I-7).
+
+Declares the Queries guide's ledger with field options inside
+``Annotated[...]``, adds the same rows and checks that a few of the guide's
+queries return what they return against predicates.py's models. Foreign keys
+and ``BackRef()`` / ``ManyToMany()`` have one form and read the same in both
+files.
+"""
 
 import asyncio
-from datetime import UTC, datetime
 
-# --8<-- [start:setup]
+# --8<-- [start:models]
+from datetime import date
+from decimal import Decimal
 from typing import Annotated
 
-from ferro import Field, Model, connect, engines
+from ferro import BackRef, Field, ForeignKey, ManyToMany, Model, Relation
 
 
-class User(Model):
-    id: Annotated[int | None, Field(default=None, primary_key=True)]
+class Owner(Model):
+    id: Annotated[int | None, Field(primary_key=True)] = None
     name: str
-    age: int
-    role: str = "member"
-    archived: bool = False
+    email: Annotated[str, Field(unique=True)]
+    accounts: Relation[list["Account"]] = BackRef()
 
 
-# --8<-- [end:setup]
+class Account(Model):
+    id: Annotated[int | None, Field(primary_key=True)] = None
+    label: str
+    owner: Annotated[Owner | None, ForeignKey(related_name="accounts")] = None
+    transactions: Relation[list["Transaction"]] = BackRef()
 
 
-# --8<-- [start:nullable-model]
-class Invoice(Model):
-    id: Annotated[int | None, Field(default=None, primary_key=True)]
-    reference: str
-    amount: float | None = None  # None until the invoice is issued
+class Category(Model):
+    id: Annotated[int | None, Field(primary_key=True)] = None
+    name: Annotated[str, Field(unique=True)]
+    parent: Annotated[
+        "Category", ForeignKey(related_name="children", nullable=True)
+    ] = None
+    children: Relation[list["Category"]] = BackRef()
+    transactions: Relation[list["Transaction"]] = BackRef()
+    split_lines: Relation[list["SplitLine"]] = BackRef()
 
 
-# --8<-- [end:nullable-model]
+class Transaction(Model):
+    id: Annotated[int | None, Field(primary_key=True)] = None
+    memo: str
+    amount: Decimal
+    posted_on: date
+    cleared_on: date | None = None
+    account: Annotated[Account, ForeignKey(related_name="transactions")]
+    category: Annotated[Category | None, ForeignKey(related_name="transactions")] = None
+    lines: Relation[list["SplitLine"]] = BackRef()
+    transfer_out: "Transfer" = BackRef()
+    transfer_in: "Transfer" = BackRef()
+    tags: Relation[list["Tag"]] = BackRef()
 
 
-# --8<-- [start:card-model]
-class Card(Model):
-    id: Annotated[int | None, Field(default=None, primary_key=True)]
-    title: str
-    pinned_at: datetime | None = None
-    updated_at: datetime
+class SplitLine(Model):
+    id: Annotated[int | None, Field(primary_key=True)] = None
+    amount: Decimal
+    transaction: Annotated[Transaction, ForeignKey(related_name="lines")]
+    category: Annotated[Category, ForeignKey(related_name="split_lines")]
 
 
-# --8<-- [end:card-model]
+class Transfer(Model):
+    id: Annotated[int | None, Field(primary_key=True)] = None
+    outflow: Annotated[
+        Transaction, ForeignKey(related_name="transfer_out", unique=True)
+    ]
+    inflow: Annotated[Transaction, ForeignKey(related_name="transfer_in", unique=True)]
+
+
+class Tag(Model):
+    id: Annotated[int | None, Field(primary_key=True)] = None
+    name: Annotated[str, Field(unique=True)]
+    transactions: Relation[list[Transaction]] = ManyToMany(related_name="tags")
+
+
+# --8<-- [end:models]
 
 
 async def main() -> None:
+    from _ledger_seed import seed
+
+    from ferro import connect, engines
+
     await connect("sqlite::memory:", auto_migrate=True)
-
     async with engines.session():
-        await User.bulk_create(
-            [
-                User(name="alice", age=34, role="admin"),
-                User(name="bob", age=19),
-            ]
-        )
+        await seed(globals())
 
-        adults = await User.where(lambda user: user.age >= 18).all()
-        assert len(adults) == 2
-
-        not_admins = await User.where(lambda user: ~(user.role == "admin")).all()
-        assert len(not_admins) == 1
-
-        await Invoice.bulk_create(
-            [
-                Invoice(reference="inv-1", amount=250.0),
-                Invoice(reference="inv-2", amount=None),
-            ]
-        )
-
-        # three-valued logic: the NULL-amount row matches neither predicate
-        assert len(await Invoice.where(lambda invoice: invoice.amount > 100).all()) == 1
-        assert (
-            len(await Invoice.where(lambda invoice: ~(invoice.amount > 100)).all()) == 0
-        )
-
-        t0 = datetime(2026, 1, 1, tzinfo=UTC)
-        t1 = datetime(2026, 2, 1, tzinfo=UTC)
-        await Card.bulk_create(
-            [
-                Card(title="unpinned", pinned_at=None, updated_at=t1),
-                Card(title="pinned", pinned_at=t0, updated_at=t0),
-            ]
-        )
-        cards = (
-            await Card.select()
-            .order_by(lambda card: card.pinned_at, "desc", nulls="last")
-            .order_by(lambda card: card.updated_at, "desc")
-            .order_by(lambda card: card.id, "desc")
+        large = (
+            await Transaction.where(lambda transaction: transaction.amount <= -100)
+            .order_by(lambda transaction: transaction.amount)
             .all()
         )
-        assert [card.title for card in cards] == ["pinned", "unpinned"]
+        assert [transaction.memo for transaction in large] == ["Rent", "To savings"]
+
+        on_ada_accounts = await Transaction.where(
+            lambda transaction: transaction.account.owner.name == "Ada Lovelace"
+        ).count()
+        assert on_ada_accounts == 6
+
+        split = await Transaction.where(
+            lambda transaction: transaction.lines.exists()
+        ).all()
+        assert [transaction.memo for transaction in split] == ["Weekly shop"]
+
+        reimbursable = await Transaction.where(
+            lambda transaction: transaction.tags.exists(
+                lambda tag: tag.name == "reimbursable"
+            )
+        ).count()
+        assert reimbursable == 2
+
+        under_food = await Category.where(
+            lambda category: category.parent.name == "Food"
+        ).count()
+        assert under_food == 2
 
     print("predicates_annotated example ran successfully")
 
