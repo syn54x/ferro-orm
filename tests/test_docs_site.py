@@ -19,7 +19,8 @@ below reads the HTML a reader would get:
   object and member has a docstring, no entry renders empty, each API page is
   titled after its objects, and every link from an API page lands on an
   anchor that exists;
-- the docs build in CI and in the publish workflow is strict;
+- the docs build in CI and in the publish workflow is strict, and CI's docs
+  job runs every docs test file and the docs lint;
 - the nav has six tabs holding every page once, each label equal to its
   page's title; every page has a one-sentence description and new pages are
   marked new; every moved page, and every anchor that moved, redirects to the
@@ -308,6 +309,20 @@ def test_docs_build_in_workflows_is_strict(workflow: str) -> None:
     assert builds, f"{workflow} does not build the docs"
     for build in builds:
         assert "--strict" in build, f"{workflow}: {build}"
+
+
+def test_ci_docs_job_runs_every_docs_test_and_the_lint() -> None:
+    jobs = yaml.safe_load((WORKFLOWS / "ci.yml").read_text(encoding="utf-8"))["jobs"]
+    commands = "\n".join(step.get("run", "") for step in jobs["docs"]["steps"])
+    docs_tests = sorted(
+        path.relative_to(REPO_ROOT).as_posix()
+        for path in (REPO_ROOT / "tests").glob("test_doc*.py")
+    )
+    missing = [test for test in docs_tests if test not in commands]
+    assert not missing, f"the CI docs job does not run: {missing}"
+    assert (
+        "python -m tests._docs_checks docs/pages docs/examples src/ferro" in commands
+    )
 
 
 RETURNED_TYPES = (

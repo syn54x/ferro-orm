@@ -1,8 +1,9 @@
-"""The docs lint (``tests._docs_checks``) as a test gate.
+"""The docs lint (``tests._docs_checks``) as a gate over the whole tree.
 
-It runs over every docs page, example script and docstring in ``src/ferro``
-and must find nothing; each check also fails on a seeded example of the
-mistake it catches.
+``python -m tests._docs_checks docs/pages docs/examples src/ferro`` must find
+nothing: no query lambda with a one-letter parameter and no error check that
+cannot fail, on any docs page, in any example script or in any docstring.
+``tests/test_docs_checks.py`` covers each check case by case.
 """
 
 from __future__ import annotations
@@ -11,81 +12,35 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
-from tests._docs_checks import lambda_param_violations, main, unfailing_error_checks
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LINTED = ("docs/pages", "docs/examples", "src/ferro")
 
 
-def test_docs_pages_examples_and_docstrings_pass_the_lint(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    monkeypatch.chdir(REPO_ROOT)
-    status = main(list(LINTED))
-    assert capsys.readouterr().out == ""
-    assert status == 0
-
-
-def test_command_line_exits_zero_on_the_tree() -> None:
-    result = subprocess.run(
-        [sys.executable, "-m", "tests._docs_checks", *LINTED],
+def _lint(*paths: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-m", "tests._docs_checks", *paths],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
         timeout=120,
     )
+
+
+def test_docs_pages_examples_and_docstrings_pass_the_lint() -> None:
+    result = _lint(*LINTED)
     assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout == ""
 
 
-def _page(tmp_path: Path, body: str) -> Path:
+def test_one_letter_lambda_on_a_page_fails_the_lint(tmp_path: Path) -> None:
     page = tmp_path / "page.md"
-    page.write_text(f"# Page\n\nText:\n\n```python\n{body}\n```\n", encoding="utf-8")
-    return page
-
-
-def test_one_letter_lambda_on_a_page_is_reported(tmp_path: Path) -> None:
-    page = _page(tmp_path, "posts = await Post.where(lambda t: t.id == 1).all()")
-    [violation] = lambda_param_violations(page)
-    assert violation.line == 6
-    assert "one-letter parameter 't'" in violation.message
-    assert main([str(page)]) == 1
-
-
-def test_one_letter_lambda_in_a_docstring_is_reported(tmp_path: Path) -> None:
-    module = tmp_path / "library.py"
-    module.write_text(
-        'def first():\n    """Return one.\n\n    ```python\n'
-        "    await Post.order_by(lambda t: t.id).first()\n"
-        '    ```\n    """\n',
+    page.write_text(
+        "# Page\n\nThe first post:\n\n```python\n"
+        "post = await Post.where(lambda t: t.id == 1).first()\n```\n",
         encoding="utf-8",
     )
-    [violation] = lambda_param_violations(module)
-    assert violation.line == 5
-
-
-def test_error_check_that_cannot_fail_is_reported(tmp_path: Path) -> None:
-    page = _page(
-        tmp_path,
-        "try:\n"
-        "    await Post.create(title=None)\n"
-        "except ValueError as error:\n"
-        '    assert "title" in str(error)',
+    result = _lint(str(page))
+    assert result.returncode == 1
+    assert f"{page}:6: lambda passed to where() takes one-letter parameter 't'" in (
+        result.stdout
     )
-    [violation] = unfailing_error_checks(page)
-    assert 'else: raise AssertionError("expected ValueError")' in violation.message
-
-
-def test_named_lambda_and_checked_error_pass(tmp_path: Path) -> None:
-    page = _page(
-        tmp_path,
-        "posts = await Post.where(lambda post: post.id == 1).all()\n"
-        "try:\n"
-        "    await Post.create(title=None)\n"
-        "except ValueError as error:\n"
-        '    assert "title" in str(error)\n'
-        "else:\n"
-        '    raise AssertionError("expected ValueError")',
-    )
-    assert main([str(page)]) == 0

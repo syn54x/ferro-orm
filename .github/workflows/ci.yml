@@ -60,7 +60,7 @@ jobs:
           uv run --no-sync --python 3.13 prek run --all-files
 
   docs:
-    name: Docs build (Zensical, strict)
+    name: Docs build and docs tests
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -76,13 +76,43 @@ jobs:
         with:
           enable-cache: true
 
-      - name: Install documentation dependencies
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1
+          cache-on-failure: true
+
+      - name: Install documentation and test dependencies
         run: |
-          uv sync --only-group docs --no-install-project --python 3.13
+          uv sync --only-group ci-test --only-group docs --no-install-project --python 3.13
+
+      - name: Build Rust extension
+        run: |
+          uv run maturin develop
 
       - name: Build Zensical site
         run: |
           uv run --no-sync zensical build --clean --strict
+
+      - name: Run the docs lint
+        run: |
+          uv run --no-sync python -m tests._docs_checks docs/pages docs/examples src/ferro
+
+      - name: Run the docs tests
+        run: |
+          uv run --no-sync pytest --no-cov -p no:cacheprovider \
+            tests/test_docs_site.py \
+            tests/test_docs_examples.py \
+            tests/test_docstring_examples.py \
+            tests/test_docs_migrations.py \
+            tests/test_docs_testing_fixtures.py \
+            tests/test_docs_checks.py \
+            tests/test_docs_lint.py \
+            tests/test_docs_field_type_table.py \
+            tests/test_documentation_features.py
 
   test-rust:
     name: Rust tests
