@@ -14,7 +14,7 @@ It prints:
 Rustaceans ['Ferris']
 ```
 
-`await ferris.team` runs one query and returns the `Team`. `rustaceans.players` is a query that runs when you call a terminal such as `.all()`. Every example on this page runs inside the session this program opens; see [Sessions](connections.md#sessions-recommended) for why and how to open one.
+`await ferris.team` runs one query and returns the `Team`. `rustaceans.players` is a query that runs when you call a terminal such as `.all()`. Every example on this page runs inside the session this program opens; see [Sessions](connections.md#sessions) for why and how to open one.
 
 ## The roster
 
