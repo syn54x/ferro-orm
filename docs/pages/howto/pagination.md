@@ -57,7 +57,7 @@ The second page starts with "Keyset paging", the article after "Soft deletes". T
 --8<-- "docs/examples/pagination.py:before"
 ```
 
-`previous_page` holds the same three articles as `first_page`. The order keys must end with the primary key, so that every row has exactly one position; `after()` and `before()` raise `ValueError` when it is missing. [Paging with `after()` and `before()`](../guide/queries.md#paging-with-after-and-before) lists the other rules.
+`previous_page` holds the same three articles as `first_page`. The order keys must include the primary key, so that every row has exactly one position; `after()` and `before()` raise `ValueError` when it is missing. [Paging with `after()` and `before()`](../guide/queries.md#paging-with-after-and-before) lists the other rules.
 
 ## A paginated API endpoint
 
@@ -77,7 +77,7 @@ The third page holds the one remaining article, and its `next_cursor` is `None`.
 
 A FastAPI endpoint opens a session for the request and returns `article_page()`'s result. Ferro models are Pydantic models, so FastAPI serializes the articles directly:
 
-```python {compile-only="needs FastAPI, which the docs test environment does not install; article_page() runs in docs/examples/pagination.py"}
+```python {test=compile reason="needs FastAPI, which the docs test environment does not install; article_page() runs in docs/examples/pagination.py"}
 from fastapi import FastAPI, Query
 
 from ferro import engines
