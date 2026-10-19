@@ -35,7 +35,7 @@ The query returns the two accounts aged 40 or over, in name order. Every recipe 
     --8<-- "docs/examples/upgrade_account_annotated.py:models"
     ```
 
-Every block below that calls a model runs inside a session on four accounts, as the first block does; see [Connections › Sessions](../guide/connections.md#sessions-recommended). Each section shows only what changed.
+Every block below that calls a model runs inside a session on four accounts, as the first block does; see [Connections › Sessions](../guide/connections.md#sessions). Each section shows only what changed.
 
 ## Which sections apply
 
@@ -254,7 +254,7 @@ The class is refused at definition. Keep one primary key and let the other colum
     --8<-- "docs/examples/upgrade_account_annotated.py:primary-key"
     ```
 
-If the pair of columns together must be unique, declare a [composite unique](../guide/models-and-fields.md#composite-constraints). Reference: [Models and fields](../guide/models-and-fields.md).
+If the pair of columns together must be unique, declare a [composite unique](../guide/models-and-fields.md#composite-uniques). Reference: [Models and fields](../guide/models-and-fields.md).
 
 ## Releases that need no action
 
@@ -412,7 +412,7 @@ Unqualified operations (`Account.all()`, `ferro.execute(...)`) used to fall back
         assert len(accounts) == 3
     ```
 
-The session routes both calls to its connection, and the query returns the three active accounts. Reference: [Identity map](../concepts/identity-map.md) and [Sessions](../guide/connections.md#sessions-recommended).
+The session routes both calls to its connection, and the query returns the three active accounts. Reference: [Identity map](../concepts/identity-map.md) and [Sessions](../guide/connections.md#sessions).
 
 ### `create()` on a primary-key conflict
 
@@ -480,18 +480,20 @@ Portable SQL has no `DELETE … LIMIT`. The pagination used to be silently dropp
 
 === "Before (limit silently ignored)"
 
-    ```python {test=run prelude=upgrade}
-    try:
-        await Account.where(lambda account: account.active == True).limit(2).delete()  # noqa: E712
-    except ValueError:
-        pass  # the call raises now; it used to delete every active account
-    else:
-        raise AssertionError("delete() accepted limit()")
+    ```python {test=compile reason="shows the pre-0.14 behaviour, which deleted every active account"}
+    await Account.where(lambda account: account.active == True).limit(2).delete()  # noqa: E712
     ```
 
 === "After (bounded by a primary-key set)"
 
     ```python {test=run prelude=upgrade}
+    try:
+        await Account.where(lambda account: account.active == True).limit(2).delete()  # noqa: E712
+    except ValueError:
+        pass  # the bounded delete is refused
+    else:
+        raise AssertionError("delete() accepted limit()")
+
     batch = await Account.where(lambda account: account.active == True).order_by("id").limit(2).all()  # noqa: E712
     ids = [account.id for account in batch]
     await Account.where(lambda account: account.id.in_(ids)).delete()
