@@ -385,8 +385,8 @@ The `timestamped` table is the cost. Every schema door treats `Timestamped` as a
 | `default`, `default_factory` | none | Pydantic's default. [Auto-migrate](schema/auto-migrate.md) also uses a literal default to fill existing rows when it adds a `NOT NULL` column. |
 | `db_type` | `None` | Overrides the column type; see [Column type overrides](#column-type-overrides-with-db_type). |
 | `db_check` | `False` | Adds a `CHECK` for a closed set of values; needs `db_type`. |
-| `renamed_from` | `None` | The column's previous name; see [Renames](schema/migrations.md#renames). |
-| `retired` | `False` | Keeps the column in the schema after the field leaves the model; see [Retiring a column](schema/migrations.md#retiring-a-column). |
+| `renamed_from` | `None` | The column's previous name; see [Rename hints](schema/renames-and-retirements.md#rename-hints). |
+| `retired` | `False` | Keeps the column in the schema after the field leaves the model; see [Retiring a column](schema/renames-and-retirements.md#retiring-a-column). |
 
 The full signature is in the reference: [`Field`](../api/fields.md#ferro.Field), [`FerroField`](../api/fields.md#ferro.FerroField) and [`DbType`](../api/fields.md#ferro.DbType).
 

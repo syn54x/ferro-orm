@@ -142,18 +142,7 @@ It is ahead by contract steps, starting with 0008_drop_bio:01 (contract: a write
 Pass allow_ahead=True to run beside them (a rolling deploy).
 ```
 
-`.contract_steps` lists every such step (`["0008_drop_bio:01"]`). Each step's class is decided from what the step does:
-
-| Expand | Contract |
-| :--- | :--- |
-| adding a table, or a nullable column | dropping a table or a column |
-| `DROP NOT NULL` | `SET NOT NULL`: a required column's add-constraint and contract steps |
-| a plain index; dropping an index, a check, a foreign key or a unique | a unique index; a type change |
-| adding an enum label | renaming a column, a table, an enum type or a label; removing a label |
-| a data step, a guard step | adding a check or a foreign key (`NOT VALID`) and its validate step |
-| a hand-written SQL step whose file says `-- ferro: expand` | any other hand-written SQL step |
-
-A SQLite table rebuild takes the class of what it carries, and a step that runs nothing on a dialect (`not-applicable`) is expand there. A generated step you edit by hand is classed like a hand-written one: `contract` unless its file says `-- ferro: expand`.
+`.contract_steps` lists every such step (`["0008_drop_bio:01"]`). Each step's class is decided from what the step does: adding a nullable column is expand, dropping a column is contract. The [step classes](../../reference/migrations.md#step-classes) table lists the class of every kind of step.
 
 The class is about **writes**. `expand` means the previous release's writes keep succeeding beside the step, not that its reads only meet values it knows. Adding a label is `expand`, yet release 0 reading a row that holds the new label gets a value its enum does not have. So add a label in one release and write it in the next.
 
@@ -165,6 +154,8 @@ The one-migration shape (expand, backfill and contract together) is for deploys 
 
 !!! note "Databases last migrated by ferro 0.22"
     Records written by ferro 0.22 carry no class, and read as `contract`. The first run of a newer ferro against such a database (`up`, `down`, `baseline` or `rerecord`) records each class from the migration files when they are the files the record applied, and `contract` where they are gone, edited or replaced since. A migration whose snapshots no longer regenerate refuses `up` and `baseline`, naming the migration, rather than recording a class the planner did not decide; `down`, `rerecord` and `baseline --remove` read no class, so they run and warn, leaving its records without one. So `"expand-only"` is answerable only after the first run since the upgrade. That upgrade changed nothing a 0.22 runner refuses, so it can still roll back; the upgrade from 0.24 to 0.25 cannot (below).
+
+<a id="squashes-and-older-releases"></a>
 
 !!! note "Upgrading from 0.24 to 0.25"
     Ferro 0.25 writes two things 0.24 cannot read. During a rolling deploy with both versions on one migrations directory and one database, the 0.24 instances stop where the 0.25 ones carry on:

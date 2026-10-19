@@ -1,8 +1,8 @@
 # ruff: noqa: E402 - the models come first, as the docs page shows them
 """Runnable companion for retiring an enum label, Annotated style
-(docs/pages/guide/schema/migrations.md).
+(docs/pages/guide/schema/renames-and-retirements.md).
 
-Release A writes ``canceled``. Release B retires it: the member stays so rows
+Release A writes ``paused``. Release B retires it: the member stays so rows
 holding it still load, the label stays in the database, and the migration
 says "no schema change". On SQLite.
 """
@@ -11,19 +11,23 @@ says "no schema change". On SQLite.
 from enum import StrEnum
 from typing import Annotated
 
-from ferro import FerroField, Model
+from ferro import Field, Model
 
 
 class Status(StrEnum):
-    __ferro_retired_labels__ = frozenset({"canceled"})  # new
-    PAID = "paid"
+    __ferro_retired_labels__ = frozenset({"paused"})  # new
+    ACTIVE = "active"
+    PAUSED = "paused"
     CANCELED = "canceled"
 
 
-class Order(Model):
-    id: Annotated[int | None, FerroField(primary_key=True)] = None
-    status: Annotated[Status, FerroField()] = Status.PAID
-    note: str = ""
+class Author(Model):
+    id: Annotated[int | None, Field(primary_key=True)] = None
+    name: str
+    email: Annotated[str, Field(unique=True)]
+    nickname: Annotated[str | None, Field(index=True)] = None
+    bio: Annotated[str, Field(index=True)]
+    status: Status = Status.ACTIVE
 
 
 # --8<-- [end:models]
@@ -35,18 +39,20 @@ import sys
 from _migrations_project import project
 
 PROBE = """
-from blog.models import Order, Status
+from blog.models import Author, Status
 
 # A row release A wrote hydrates as the member and can change another field.
-order = Order.model_construct(id=1, status=Status.CANCELED)
-order.note = "b"
-assert order.status is Status.CANCELED
+author = Author.model_construct(id=1, status=Status.PAUSED)
+author.bio = "Mathematician"
+assert author.status is Status.PAUSED
 
 # This release does not write the label.
 try:
-    Order(status="canceled")
+    Author(
+        name="Grace Hopper", email="grace@example.com", bio="Admiral", status="paused"
+    )
 except ValueError as error:
-    assert "Status.CANCELED ('canceled') is retired in this release" in str(error)
+    assert "Status.PAUSED ('paused') is retired in this release" in str(error)
 else:
     raise SystemExit("the retired label was accepted")
 """
@@ -54,22 +60,25 @@ else:
 
 def main() -> None:
     with project(__file__) as app:
-        # Release A creates the table; its code writes "canceled".
+        # Release A creates the table; its code writes "paused".
         app.models_before()
-        app.ferro("migrate", "new", "create_order")
+        app.ferro("migrate", "new", "create_author")
         app.ferro("migrate", "up")
-        app.sql("INSERT INTO \"order\" (status, note) VALUES ('canceled', 'a')")
+        app.sql(
+            "INSERT INTO author (name, email, bio, status) VALUES"
+            " ('Ada Lovelace', 'ada@example.com', 'Analyst', 'paused')"
+        )
 
         # Release B retires the label: nothing to migrate, nothing to check.
         app.models_after()
-        assert "no schema change" in app.ferro("migrate", "new", "retire_canceled")
-        assert not (app.migrations / "0002_retire_canceled").exists()
+        assert "no schema change" in app.ferro("migrate", "new", "retire_paused")
+        assert not (app.migrations / "0002_retire_paused").exists()
         app.ferro("migrate", "check")
 
         subprocess.run(
             [sys.executable, "-c", PROBE], cwd=app.root, check=True, timeout=120
         )
-        assert app.sql('SELECT status FROM "order"') == [("canceled",)]
+        assert app.sql("SELECT status FROM author") == [("paused",)]
 
 
 if __name__ == "__main__":

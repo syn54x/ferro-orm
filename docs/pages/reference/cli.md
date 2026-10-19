@@ -106,7 +106,7 @@ On a terminal the heading is bold with a green tick, and each file's stem is col
 | `--data-only` | Write only the `--data-step`: no DDL, and a full copy of the previous migration's snapshot. |
 | `--no-backfill TABLE.COLUMN` | Replace the generated backfill of this column with a guard step that fails the migration while any row still needs a value. Repeatable. |
 | `--verbose` | Show every name in a long list of the change summary; a terminal otherwise shows the first few (a list past 12 names shows its first 6). |
-| `--replace NNNN_NAME` | Regenerate this migration (or `NNNN`, when one migration carries the number) on top of the newest snapshot below it, carrying its data steps and hand-written SQL steps across byte for byte; the number is kept when free. Only the newest migration can be replaced. See [Two branches, one number](../guide/schema/migrations.md#two-branches-one-number). |
+| `--replace NNNN_NAME` | Regenerate this migration (or `NNNN`, when one migration carries the number) on top of the newest snapshot below it, carrying its data steps and hand-written SQL steps across byte for byte; the number is kept when free. Only the newest migration can be replaced. See [Duplicate migration numbers and `--replace`](../guide/schema/migrations.md#duplicate-migration-numbers-and-replace). |
 
 Exit 0 when written (or nothing to write), 1 when refused. A primary-key change is refused, writing nothing:
 
@@ -119,12 +119,12 @@ That section is [Changing a primary key](../guide/schema/migrations.md#changing-
 
 ## `ferro migrate squash NAME --from TARGET`
 
-Replace a range of migrations, from `TARGET` through the newest, with the one migration `new` would have written across it. A feature branch wrote `0002_add_bio` (with a hand-written SQL step `fix_rows`) and `0003_add_team`; `ferro migrate squash epic --from 0002` writes:
+Replace a range of migrations, from `TARGET` through the newest, with the one migration `new` would have written across it. A feature branch wrote `0002_add_bio` (with a hand-written SQL step `fix_rows`) and `0003_add_team`; `ferro migrate squash teams --from 0002` writes:
 
 <!-- output: squash -->
 ```text
 default · migrations
-ok Wrote migrations/0002_epic/  (replaces 0002_add_bio … 0003_add_team, now deleted)
+ok Wrote migrations/0002_teams/  (replaces 0002_add_bio … 0003_add_team, now deleted)
   01_schema.up.postgres.sql    schema step, up (postgres)    regenerated
   01_schema.down.postgres.sql  schema step, down (postgres)  regenerated
   01_schema.up.sqlite.sql      schema step, up (sqlite)      regenerated
@@ -139,7 +139,7 @@ ok Wrote migrations/0002_epic/  (replaces 0002_add_bio … 0003_add_team, now de
     Author
 ```
 
-The DDL is planned once, from the snapshot below the range to the range's last snapshot, with every rename the range declared composed into it: a column renamed in `0002` whose hint `0003` dropped is still a `RENAME COLUMN`, never a drop and an add. Every data step and hand-written SQL step of the range is carried byte for byte, in chain order, each marked `carried, review it` with the file it was; a carried data step still holding `todo(...)` still needs writing, except one that is byte for byte the generator's unwritten scaffold when the squashed plan does not scaffold it again: that one is dropped with a note (`<file> from <migration> was the generator's unwritten scaffold and the squashed plan needs no backfill of <table>.<col>: dropped`), and any hand-written byte means it is carried. The squashed migration takes the first migration's number, and its `ir.json` records which migrations it replaced. The range's directories are deleted. It reads the migrations directory only: never the models, never a database. A database that applied the originals inherits the squash on its next `up`, running nothing; [Squashing an epic's migrations](../guide/schema/migrations.md#squashing-an-epics-migrations) walks through the recipe, inheritance and when to squash.
+The DDL is planned once, from the snapshot below the range to the range's last snapshot, with every rename the range declared composed into it: a column renamed in `0002` whose hint `0003` dropped is still a `RENAME COLUMN`, never a drop and an add. Every data step and hand-written SQL step of the range is carried byte for byte, in chain order, each marked `carried, review it` with the file it was; a carried data step still holding `todo(...)` still needs writing, except one that is byte for byte the generator's unwritten scaffold when the squashed plan does not scaffold it again: that one is dropped with a note (`<file> from <migration> was the generator's unwritten scaffold and the squashed plan needs no backfill of <table>.<col>: dropped`), and any hand-written byte means it is carried. The squashed migration takes the first migration's number, and its `ir.json` records which migrations it replaced. The range's directories are deleted. It reads the migrations directory only: never the models, never a database. A database that applied the originals inherits the squash on its next `up`, running nothing; [Squashing a feature branch's migrations](../guide/schema/squash.md) walks through the recipe, inheritance and when to squash.
 
 On a terminal the file table is laid out as `new`'s is, with the last column, what became of each file, in the default colour.
 

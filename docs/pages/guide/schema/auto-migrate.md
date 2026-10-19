@@ -48,50 +48,13 @@ The empty `test.db` gets an `author` table with every column and index the model
 
 ## Applying column changes with `migrate_updates`
 
-`migrate_updates=True`, the flag in the first example, also brings existing tables to the models' shape. These are the changes you meet most:
+`migrate_updates=True`, the flag in the first example, also brings existing tables to the models' shape, as far as one in-place statement can:
 
-| Change | SQLite | PostgreSQL |
-| :--- | :--- | :--- |
-| Add a column | ✅ `ADD COLUMN` | ✅ `ADD COLUMN` |
-| Add an index (`index=True`) | ✅ `CREATE INDEX` | ✅ `CREATE INDEX` |
-| Rename a column declared `renamed_from` | ✅ `RENAME COLUMN` | ✅ `RENAME COLUMN` |
-| Change a column's type or nullability | ⚠️ `UserWarning`, no DDL; migrations generate the table rebuild | ✅ `ALTER COLUMN ...` |
-| Add a missing enum label | ✅ nothing to do: enums store as text | ✅ `ALTER TYPE ... ADD VALUE` |
-| Drop a column or a table | ❌ never here | ❌ never here |
+- A new column, a new index, a column declared `renamed_from` and a new enum label are added or renamed on both backends.
+- A change of type or nullability, and a new or changed check or foreign key, run on PostgreSQL. SQLite can only make them by rebuilding the table, so there the connect raises a `UserWarning` and runs nothing ([below](#sqlite-changes-that-need-a-table-rebuild)).
+- Nothing is dropped unless you also pass `migrate_destructive=True`, and a table never is.
 
-The full list, below, covers checks, foreign keys, defaults, index redefinitions and renames:
-
-??? note "Every change `migrate_updates` covers, per backend"
-
-    | Change | SQLite | PostgreSQL |
-    | :--- | :--- | :--- |
-    | Add missing column | ✅ `ADD COLUMN` | ✅ `ADD COLUMN` |
-    | Rename a column declared `renamed_from` | ✅ `RENAME COLUMN` | ✅ `RENAME COLUMN` |
-    | Add the column's index (`index=True`) | ✅ `CREATE INDEX` | ✅ `CREATE INDEX` |
-    | Add composite index (`__ferro_composite_indexes__`) to existing columns | ✅ `CREATE INDEX` | ✅ `CREATE INDEX` |
-    | Add table check (`__ferro_checks__`) on CREATE TABLE | ✅ inline CHECK | ✅ inline CHECK |
-    | Add table check to existing table | ⚠️ `UserWarning`, no DDL; [migrations](migrations.md#sqlite-table-rebuilds) generate the table rebuild | ✅ `ADD CONSTRAINT` |
-    | Rebuild table check on body drift | ⚠️ `UserWarning`, no DDL; migrations generate the table rebuild | ✅ rebuild: `DROP CONSTRAINT` + `ADD CONSTRAINT` |
-    | Add column `db_check=True` on existing column | ⚠️ `UserWarning`, no DDL; migrations generate the table rebuild | ✅ `ADD CONSTRAINT` |
-    | Leftover ferro check (`ck_*` live, removed from model) under `migrate_updates` | ⚠️ `UserWarning`, constraint stays | ⚠️ `UserWarning`, constraint stays |
-    | Drop orphaned ferro check (`ck_*`) | ⚠️ `UserWarning`, no DDL; migrations generate the table rebuild | ✅ with `migrate_destructive=True` |
-    | Add unique column (`unique=True`) | ✅ via explicit unique index + warning | ✅ inline `UNIQUE` |
-    | Add foreign-key column | ✅ column only, no FK constraint + warning | ✅ column + FK constraint |
-    | Add missing FK constraint to an existing column | ⚠️ `UserWarning`, no DDL; migrations generate the table rebuild | ✅ `ADD CONSTRAINT` |
-    | Drop a ferro foreign key (`fk_*`) from a column the model keeps (`team: Annotated[Team, ForeignKey(...)]` became `team_id: int`) | ⚠️ `UserWarning`, constraint stays; migrations generate the table rebuild | ✅ with `migrate_destructive=True`: `DROP CONSTRAINT` |
-    | Change a foreign key's `on_delete` (or target) | ⚠️ `UserWarning`, no DDL; migrations generate the table rebuild | ✅ rebuild: `DROP CONSTRAINT` + `ADD CONSTRAINT` |
-    | Change column type | ⚠️ `UserWarning`, no DDL (SQLite type affinity makes drift mostly cosmetic); migrations generate the table rebuild | ✅ `ALTER COLUMN ... TYPE ... USING` cast |
-    | Change nullability | ⚠️ `UserWarning`, no DDL; migrations generate the table rebuild | ✅ `SET NOT NULL` / `DROP NOT NULL`. `SET NOT NULL` backfills nothing, whatever the default: it fails the connect if any row holds `NULL`. A [migration](data-steps.md) writes the backfill first |
-    | A server default no model declares (a *foreign default*, [below](#destructive-drops-with-migrate_destructive)) | ⚠️ `UserWarning`, default stays; only a hand rebuild drops it (an expression, or any default on a nullable column; a literal on a `NOT NULL` column is ferro's own) | ⚠️ `UserWarning` under `migrate_updates`; ✅ with `migrate_destructive=True`: `DROP DEFAULT` |
-    | Drop orphaned Ferro-named index (`idx_*` / `uq_*`) | ✅ with `migrate_destructive=True` | ✅ with `migrate_destructive=True` |
-    | Redefine an index that keeps its name (a long name cut to 63 characters, two column groups that join to one name, or a live `idx_*` / `uq_*` index written another way) | ✅ `DROP INDEX` + `CREATE INDEX` under `migrate_updates`. A unique one over duplicate values fails the connect, counting them | ✅ same, in the table's transaction |
-    | Add a missing enum label (a `StrEnum` grew a member) | ✅ nothing to do — enums store as text | ✅ `ALTER TYPE ... ADD VALUE` |
-    | Rename an enum label declared with `__ferro_renamed_labels__` | ✅ nothing to do | ✅ `ALTER TYPE ... RENAME VALUE` |
-    | Remove an enum label | ✅ nothing to do | ⚠️ `UserWarning`, no DDL. [Migrations](migrations.md) generate it with its [backfill](data-steps.md#removing-an-enum-label) |
-    | Inline single-column `UNIQUE` on an existing column, index option changes | ❌ never here; [migrations](migrations.md) generate it | ❌ never here; migrations generate it |
-    | Rename a table | ✅ `ALTER TABLE … RENAME TO` under `migrate_updates` when the database holds the old name from `__ferro_renamed_from__` and not the new one; derived index and check names follow. Without `migrate_updates` a `UserWarning` names the table, the hint and both doors, and nothing is created. [Migrations](migrations.md#renames) are the reviewed path | ✅ same |
-    | Drop a table | ❌ never here; [migrations](migrations.md#reading-a-migration) generate it, marked destructive | ❌ same |
-    | Change a primary key | ❌ never; no door generates it. Migrations refuse it with [the recipe](migrations.md#changing-a-primary-key) | ❌ same |
+The [per-backend table](../../reference/migrations.md#auto-migrate-changes-per-backend) lists every change the pass makes or refuses, checks, foreign keys, defaults, index redefinitions and renames included.
 
 Rules worth knowing:
 
@@ -187,7 +150,7 @@ The connect runs `ALTER TYPE "plan" ADD VALUE IF NOT EXISTS 'pro'`, and from the
 The contract, precisely:
 
 - **Append-only, metadata-only.** Label addition adds labels and does nothing else; rows are never touched. A shared `StrEnum` used by several models is one type and reconciles once.
-- **Removals are never automatic here.** A live label the model no longer declares raises a `UserWarning` naming the type and labels, and the label stays: rows may still hold it, and older code may still be running against the schema mid-deploy. A label you declare renamed with `__ferro_renamed_labels__` ([Renames](migrations.md#renames)) is renamed in place; a migration removes one with a generated [backfill and contract](data-steps.md#removing-an-enum-label).
+- **Removals are never automatic here.** A live label the model no longer declares raises a `UserWarning` naming the type and labels, and the label stays: rows may still hold it, and older code may still be running against the schema mid-deploy. A label you declare renamed with `__ferro_renamed_labels__` ([Renames](renames-and-retirements.md#rename-hints)) is renamed in place; a migration removes one with a generated [backfill and contract](data-steps.md#removing-an-enum-label).
 - **Labels commit before table changes.** Additions run as their own autocommit statements ahead of the per-table plans, so a new column whose literal default is a brand-new member works in a single deploy, on every supported PostgreSQL version.
 - **Appended labels sort last.** `ADD VALUE` appends: a member inserted mid-enum in Python lands at the end of the database ordering, and `ORDER BY` on an enum column follows *database* order, not declaration order.
 - **SQLite is unaffected.** Enums store as text there; a new member needs no DDL.
