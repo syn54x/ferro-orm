@@ -202,21 +202,16 @@ class ForeignKey:
     `<field>_id` column holding the target's primary key, and the target
     model reads the relation back through the [`BackRef`][ferro.BackRef]
     that `related_name` names. The models these examples run against declare
-    one:
+    the pair like this, other fields left out:
 
     ```python
     class Author(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        name: str
-        email: str = Field(unique=True)
+        ...
         posts: Relation[list["Post"]] = BackRef()
 
 
     class Post(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        title: str
-        published: bool = False
-        views: int = 0
+        ...
         author: Annotated[Author, ForeignKey(related_name="posts")]
     ```
 
