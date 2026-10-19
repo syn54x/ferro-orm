@@ -58,9 +58,9 @@ ci-test = [
     "cyclopts>=5,<6",
 ]
 docs = [
-    "zensical>=0.0.45",
-    "mkdocstrings-python>=1.16.0",
-    "pymdown-extensions>=10.7.0",
+    "zensical>=0.0.71",
+    "mkdocstrings-python>=2.0.9",
+    "pymdown-extensions>=12.3",
 ]
 release = [
     "python-semantic-release>=9.0.0",
@@ -78,9 +78,9 @@ dev = [
     "python-semantic-release>=9.0.0",
     "alembic>=1.18.1",
     "sqlalchemy>=2.0.46",
-    "zensical>=0.0.45",
-    "mkdocstrings-python>=1.16.0",
-    "pymdown-extensions>=10.7.0",
+    "zensical>=0.0.71",
+    "mkdocstrings-python>=2.0.9",
+    "pymdown-extensions>=12.3",
     "pytest-examples>=0.0.18",
     "psycopg[binary]>=3.3.3",
     "pytest-postgresql>=8.0.0",
