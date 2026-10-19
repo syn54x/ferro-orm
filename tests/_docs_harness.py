@@ -76,7 +76,7 @@ def fence_settings(example: CodeExample) -> dict[str, str]:
     if unknown:
         raise ValueError(
             f"{example}: unknown setting {', '.join(unknown)}; a block that runs "
-            'is marked {test=run prelude=<name>}, one that cannot says why with '
+            "is marked {test=run prelude=<name>}, one that cannot says why with "
             '{test=compile reason="..."}'
         )
     mode = settings.get("test")

@@ -320,9 +320,7 @@ def test_ci_docs_job_runs_every_docs_test_and_the_lint() -> None:
     )
     missing = [test for test in docs_tests if test not in commands]
     assert not missing, f"the CI docs job does not run: {missing}"
-    assert (
-        "python -m tests._docs_checks docs/pages docs/examples src/ferro" in commands
-    )
+    assert "python -m tests._docs_checks docs/pages docs/examples src/ferro" in commands
 
 
 RETURNED_TYPES = (
@@ -872,9 +870,7 @@ def seeded_site(tmp_path_factory: pytest.TempPathFactory) -> tuple[str, str]:
     project = _scratch_project(tmp_path_factory.mktemp("seeded-site"))
     (project / "seeded_src").mkdir()
     (project / "seeded_src" / "seeded.py").write_text(SEEDED_MODULE, encoding="utf-8")
-    (project / "docs" / "pages" / "seeded.md").write_text(
-        SEEDED_PAGE, encoding="utf-8"
-    )
+    (project / "docs" / "pages" / "seeded.md").write_text(SEEDED_PAGE, encoding="utf-8")
     config = project / "zensical.toml"
     text = config.read_text(encoding="utf-8")
     assert '\npaths = ["src"]\n' in text
@@ -894,8 +890,7 @@ def seeded_site(tmp_path_factory: pytest.TempPathFactory) -> tuple[str, str]:
         "Sphinx role :class:",
         "unresolved cross-reference [C][ferro.Nope]",
         "list merged into a paragraph: 'A dash list with no blank line before it:'",
-        "list merged into a paragraph: "
-        "'A numbered list with no blank line before it:'",
+        "list merged into a paragraph: 'A numbered list with no blank line before it:'",
         "docstring section rendered as prose: 'Args:'",
         "docstring section rendered as prose: 'Attributes:'",
         "Returns row is a sentence fragment: 'A value whose description continues'",

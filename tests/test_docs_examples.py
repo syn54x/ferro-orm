@@ -157,7 +157,9 @@ def test_prelude_without_test_run_is_refused(tmp_path: Path) -> None:
 
 def test_fence_settings_read_bare_and_quoted_values() -> None:
     example = CodeExample.create(
-        "pass", prefix='python {test=run prelude=reference lint="check"}', path=Path("p.md")
+        "pass",
+        prefix='python {test=run prelude=reference lint="check"}',
+        path=Path("p.md"),
     )
     assert fence_settings(example) == {
         "test": "run",
@@ -191,7 +193,9 @@ def test_unknown_test_mode_is_refused() -> None:
 
 
 def test_other_compile_only_spelling_is_refused() -> None:
-    with pytest.raises(ValueError, match=r'unknown setting compile-only.*test=compile reason="'):
+    with pytest.raises(
+        ValueError, match=r'unknown setting compile-only.*test=compile reason="'
+    ):
         fence_settings(_fence('python {compile-only="needs Postgres"}'))
 
 
@@ -201,12 +205,17 @@ def test_reason_without_compile_is_refused() -> None:
 
 
 def test_unmarked_page_fence_must_say_how_it_is_tested() -> None:
-    with pytest.raises(ValueError, match=r'says neither test=run.*test=compile reason="'):
+    with pytest.raises(
+        ValueError, match=r'says neither test=run.*test=compile reason="'
+    ):
         page_fence_mode(_fence("python"))
 
 
 def test_compile_only_page_fence_states_its_reason() -> None:
-    assert page_fence_mode(_fence('python {test=compile reason="needs Postgres"}')) == "compile"
+    assert (
+        page_fence_mode(_fence('python {test=compile reason="needs Postgres"}'))
+        == "compile"
+    )
 
 
 README = REPO_ROOT / "README.md"
