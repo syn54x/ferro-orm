@@ -11,10 +11,10 @@ from ferro.query import Query
 
 
 class SoftDeleteMixin:
-    """Soft-delete behavior as a plain mixin.
+    """Soft-delete behaviour as a plain class.
 
-    Declare ``is_deleted`` and ``deleted_at`` on each concrete model;
-    the mixin supplies the lifecycle methods.
+    Each model that uses it declares ``is_deleted`` and ``deleted_at``
+    itself; the mixin supplies the methods.
     """
 
     async def soft_delete(self) -> None:
@@ -29,12 +29,12 @@ class SoftDeleteMixin:
 
     @classmethod
     def active(cls) -> Query:
-        return cls.where(lambda invoice: invoice.is_deleted == False)  # noqa: E712
+        return cls.where(lambda row: row.is_deleted == False)  # noqa: E712
 
 
 class Invoice(SoftDeleteMixin, Model):
-    id: Annotated[int | None, Field(default=None, primary_key=True)]
-    number: str
+    id: Annotated[int | None, Field(primary_key=True)] = None
+    number: Annotated[str, Field(unique=True)]
     is_deleted: bool = False
     deleted_at: datetime | None = None
 
@@ -43,16 +43,21 @@ class Invoice(SoftDeleteMixin, Model):
 
 
 async def main() -> None:
+    # --8<-- [start:session]
     await connect("sqlite::memory:", auto_migrate=True)
 
     async with engines.session():
         invoice = await Invoice.create(number="INV-001")
+        await Invoice.create(number="INV-002")
+        await Invoice.create(number="INV-003")
+        # --8<-- [end:session]
+
         await invoice.soft_delete()
-        assert await Invoice.active().count() == 0
-        assert await Invoice.select().count() == 1
+        assert await Invoice.active().count() == 2
+        assert await Invoice.select().count() == 3
 
         await invoice.restore()
-        assert await Invoice.active().count() == 1
+        assert await Invoice.active().count() == 3
 
     print("soft_deletes_annotated example ran successfully")
 
