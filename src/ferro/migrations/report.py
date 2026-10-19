@@ -1,4 +1,4 @@
-"""What ``ferro migrate status`` reports, and how it prints (#466, #473).
+"""What `ferro migrate status` reports, and how it prints.
 
 ```text
 $ ferro migrate status
@@ -14,14 +14,14 @@ default (postgres) · public._ferro_migrations
 ```
 
 A fully applied or fully pending migration is one line; its steps expand
-where something needs attention, or everywhere with ``--steps``. Every state
-is decided in the Rust core (the tracked database's ``status()``); this module names and
-prints them (a chunked step's ``rows_done`` comes from its record), and is
+where something needs attention, or everywhere with `--steps`. Every state
+is decided in the core; this module names and prints them (a chunked
+step's `rows_done` comes from its record), and is
 the one place that reads them into where the database stands: its last
 fully applied migration, the one a run left unfinished, and whether
-anything is pending. ``status`` exits 3 when anything is pending and 4 when
+anything is pending. `status` exits 3 when anything is pending and 4 when
 anything needs attention (a failed, interrupted or reverting step, an edited
-file, a database ahead of the checkout, or a refusal ``up`` would meet).
+file, a database ahead of the checkout, or a refusal `up` would meet).
 """
 
 from __future__ import annotations
@@ -44,27 +44,13 @@ __all__ = [
 
 
 class RunRefused(MigrationRefused):
-    """A migration run refused before running anything, naming the fix.
+    """A migration run's refusal before it ran anything, naming the fix.
 
-    Raised by the Rust core for every refusal the run planner, the run lock
-    and the tracking tables make; its message is the operator's text. A
-    planner refusal also carries what it is about, so a caller matches on
-    ``kind`` rather than on the text: ``kind`` (``"irreversible"``,
-    ``"edited_applied"``, ``"edited_chunked"``, ...), ``migration`` and
-    ``step`` (numbers, when it names them) and ``reason`` (an irreversible
-    step's declared reason). Each is ``None`` for a refusal that is not the
-    planner's (a lost lock, a missing schema). ``ahead_only`` is true when
-    the database holds migrations the directory lacks and ``allow_ahead``
-    alone would have let the run through; ``contract_steps`` then names each
-    step record of those migrations whose class is not ``expand``
-    (``NNNN_<name>:NN``, ADR-0054), what ``allow_ahead="expand-only"``
-    refuses on. ``names`` lists the migrations
-    (``NNNN_<name>``) a refusal about a set of them names: a tracked
-    database's records (``already_tracked``), the run-applied migrations
-    above a baseline (``applied_above_baseline``); empty otherwise. ``head``
-    is the newest of a tracked database's records (``already_tracked``),
-    ``None`` otherwise. The core builds every planner refusal through
-    :meth:`from_core`, so a kind with a class of its own arrives as it.
+    Raised for every refusal the run planner, the run lock and the tracking
+    tables make; its message is the operator's text. A planner refusal also
+    carries what it is about, so a caller matches on `kind` rather than on
+    the text. A kind with a class of its own (`AlreadyTrackedError`,
+    `AppliedAboveBaselineError`) arrives as that class.
     """
 
     def __init__(
@@ -82,63 +68,100 @@ class RunRefused(MigrationRefused):
     ) -> None:
         super().__init__(message)
         self.kind = kind
+        """The planner's refusal kind (`"irreversible"`, `"edited_applied"`, ...), or `None`.
+
+        `None` for a refusal that is not the planner's (a lost lock, a
+        missing schema).
+        """
         self.migration = migration
+        """The migration number the refusal names, or `None`."""
         self.step = step
+        """The step number the refusal names, or `None`."""
         self.reason = reason
+        """An irreversible step's declared reason, or `None`."""
         self.ahead_only = ahead_only
+        """Whether `allow_ahead` alone would have let the run through.
+
+        True when the database holds migrations the directory lacks and
+        nothing else stood in the way.
+        """
         self.contract_steps = list(contract_steps or ())
+        """With `ahead_only`, each step of those migrations whose class is not `expand`.
+
+        Each is `NNNN_<name>:NN`: what `allow_ahead="expand-only"` refuses
+        on. Empty otherwise.
+        """
         self.names = list(names or ())
+        """The migrations (`NNNN_<name>`) a refusal about a set of them names.
+
+        A tracked database's records, or the run-applied migrations above a
+        baseline. Empty otherwise.
+        """
         self.head = head
+        """The newest of a tracked database's records, for an already-tracked refusal; `None` otherwise."""
 
     @classmethod
     def from_core(
         cls, message: str, *, kind: str | None = None, **payload: Any
     ) -> RunRefused:
-        """The refusal the core raises for ``kind``: the subclass a caller
-        branches on when the kind has one (:class:`AlreadyTrackedError`,
-        :class:`AppliedAboveBaselineError`), plain :class:`RunRefused`
-        otherwise. Chosen by ``kind`` alone, never by ``message``; ``payload``
-        is the keyword data ``RunRefused`` takes."""
+        """Build the refusal for `kind`, as the subclass a caller branches on when there is one.
+
+        The class is chosen by `kind` alone, never by `message`.
+
+        Args:
+            message: The refusal's text, naming the fix.
+            kind: The planner's refusal kind, or `None` for a refusal that is
+                not the planner's.
+            **payload: The other keyword data `RunRefused` takes.
+
+        Returns:
+            An `AlreadyTrackedError` or `AppliedAboveBaselineError` when the
+                kind has one, a plain `RunRefused` otherwise.
+        """
         return _BY_KIND.get(kind or "", RunRefused)(message, kind=kind, **payload)
 
 
 class AlreadyTrackedError(RunRefused):
-    """``baseline()``: the database is already tracked; its tracking table
-    holds step records, and a baseline records only on a database that has
-    none (ADR-0031). Nothing was recorded.
+    """The refusal `baseline()` raises for a database that is already tracked.
 
-    Two pre-deploys that adopt one database at once both find no records and
-    both call ``baseline()``; the run lock lets one record, and the other
-    raises this. ``applied`` names every migration the records name
-    (``NNNN_<name>``, in order), ``head`` the newest of them (both as the
-    core decided the refusal), and ``report`` is the database's
-    :class:`StatusReport` (what ``status()`` reports), so the caller carries
-    on to ``up()``. The target is the migration the previous release's models
-    generated, so an unattended baseline records no step it did not run::
+    A baseline records only on a database whose tracking table holds no
+    step records; nothing was recorded. Two pre-deploys that adopt one
+    database at once both find no records and both call `baseline()`; the
+    run lock lets one record, and the other raises this, so the caller
+    carries on to `up()`. The target is the migration the previous
+    release's models generated, so an unattended baseline records no step
+    it did not run. Its `head` is the newest of the records, and its
+    `report` the database's `StatusReport`, what `status()` reports.
 
+    Examples:
+        ```python {test=compile reason="needs a migrations project and a database"}
         try:
             await ferro.migrations.baseline(target="0001")
         except ferro.migrations.AlreadyTrackedError:
             pass
         await ferro.migrations.up()
+        ```
     """
 
     def __init__(self, message: str, **payload: Any) -> None:
         super().__init__(message, **payload)
         self.applied = list(self.names)
+        """Every migration the records name, as `NNNN_<name>`, in order."""
 
 
 class AppliedAboveBaselineError(RunRefused):
-    """``remove_baseline()``: a run applied migrations above the baseline
-    (``above``, ``NNNN_<name>``); removing it under them would leave applied
-    migrations above pending ones. The message names the ``ferro migrate
-    down --to`` that reverts them; nothing was removed. ``report`` is the
-    database's :class:`StatusReport`.
+    """The refusal `remove_baseline()` raises when a run applied migrations above the baseline.
+
+    Removing the baseline under them would leave applied migrations above
+    pending ones. The message names the `ferro migrate down --to` that
+    reverts them; nothing was removed. Its `report` is the database's
+    `StatusReport`.
     """
 
     def __init__(self, message: str, **payload: Any) -> None:
         super().__init__(message, **payload)
         self.above = list(self.names)
+        """The run-applied migrations above the baseline, as `NNNN_<name>`."""
 
 
 _BY_KIND: dict[str, type[RunRefused]] = {
@@ -204,8 +227,16 @@ _RUNNING = next(state for state in _STATES if state.running)
 
 
 def migration_span(names: Sequence[str]) -> str:
-    """``<first> … <last>`` of migration names in chain order, or the one
-    name: how an inheritance names what the database applied."""
+    """Name a run of migrations as `<first> … <last>`, or the one name.
+
+    This is how an inheritance names what the database applied.
+
+    Args:
+        names: Migration names, in chain order.
+
+    Returns:
+        The first and last names joined by an ellipsis, or the only name.
+    """
     return names[0] if len(names) == 1 else f"{names[0]} … {names[-1]}"
 
 
@@ -214,64 +245,70 @@ class StepStatus:
     """One step of one migration."""
 
     step: int
+    """The step's number within its migration."""
     file: str
     """The file this database executes (or executed)."""
     state: str
-    """``applied``, ``applied (different checksum)``, ``applied
-    (baseline)``, ``applied (inherited)``, ``pending``, ``pending
-    (inheritable)`` (a squash the next run inherits, ADR-0056), ``running``,
-    ``failed``, ``interrupted`` or ``reverting``."""
+    """The state `status` prints, such as `applied`, `pending (inheritable)` or `failed`.
+
+    One of `applied`, `applied (different checksum)`, `applied (baseline)`,
+    `applied (inherited)`, `pending`, `pending (inheritable)` (a squash the
+    next run inherits), `running`, `failed`, `interrupted` or `reverting`.
+    """
     error: str | None = None
     """The last attempt's error, when recorded."""
     applied_checksum: str | None = None
+    """The file's checksum when it was applied, or `None` for a step with no record."""
     on_disk_checksum: str | None = None
+    """The file's checksum as it is on disk now."""
     flags: list[str] = field(default_factory=list)
-    """``destructive`` / ``data-dependent`` headers the file carries."""
+    """The `destructive` / `data-dependent` headers the file carries."""
     step_class: str = "contract"
-    """``expand`` or ``contract`` (ADR-0054): whether the previous release's
-    writes keep succeeding beside the step. The class its record holds, read
-    as ``contract`` when a record an older ferro wrote holds none; for a
-    step with no record, the class a run would record."""
+    """`expand` or `contract`: whether the previous release's writes keep succeeding beside the step.
+
+    The class its record holds, read as `contract` when a record an older
+    Ferro wrote holds none; for a step with no record, the class a run would
+    record.
+    """
     rows_done: int | None = None
     """The rows a chunked step's current walk has committed."""
     finished_at: str | None = None
-    """When the step's record finished, as stored (ISO-8601 UTC, ``Z``); a
-    baseline record's is the baseline time. ``None`` for a step with no
-    finished record (pending, running, failed, interrupted)."""
+    """When the step's record finished, as stored (ISO-8601 UTC, `Z`).
+
+    A baseline record's is the baseline time. `None` for a step with no
+    finished record (pending, running, failed, interrupted).
+    """
 
     @property
     def shown(self) -> str:
-        """The state as ``status`` prints it: a failed chunked step says how
-        far it got (``failed at 30,000 rows``)."""
+        """The state as `status` prints it, with how far a failed chunked step got (`failed at 30,000 rows`)."""
         if self.state == "failed" and self.rows_done is not None:
             return f"failed at {self.rows_done:,} rows"
         return self.state
 
     @property
     def applied(self) -> bool:
-        """The step has a finished step record (``applied``, ``applied
-        (different checksum)``, ``applied (baseline)`` or ``applied
-        (inherited)``)."""
+        """Whether the step has a finished step record (any of the `applied` states)."""
         return _state(shown=self.state).applied
 
     @property
     def unfinished(self) -> bool:
-        """A run left this step part-way, or is in it (``running``,
-        ``failed``, ``interrupted`` or ``reverting``)."""
+        """Whether a run left this step part-way, or is in it (`running`, `failed`, `interrupted` or `reverting`)."""
         return _state(shown=self.state).unfinished
 
     @property
     def running(self) -> bool:
-        """A run holding the run lock is in this step."""
+        """Whether a run holding the run lock is in this step."""
         return _state(shown=self.state).running
 
     @property
     def needs_attention(self) -> bool:
+        """Whether a person has to look before anything runs (exit 4)."""
         return _state(shown=self.state).attention
 
     @property
     def pending(self) -> bool:
-        """No finished step record: still to apply."""
+        """Whether the step is still to apply (it has no finished step record)."""
         return not self.applied
 
 
@@ -280,19 +317,24 @@ class MigrationStatus:
     """One migration and its steps."""
 
     number: int
+    """The migration's number."""
     name: str
-    """``NNNN_<name>``."""
+    """The migration's directory name, `NNNN_<name>`."""
     steps: list[StepStatus]
+    """Its steps, in order."""
     inherits: list[str] = field(default_factory=list)
-    """For a squash pending its inheritance, ``NNNN_<name>`` of each migration
-    whose records witness it, in chain order: what the database applied.
-    Empty otherwise."""
+    """For a squash pending its inheritance, each migration the database applied in its place.
+
+    Each is `NNNN_<name>`, in chain order. Empty otherwise.
+    """
 
     @property
     def hint(self) -> str | None:
-        """What to do about this migration, when ``status`` says it on its
-        row: for a squash pending inheritance, ``run `ferro migrate up`; this
-        database applied <first> … <last> and nothing will be run``."""
+        """What `status` says to do about this migration on its row, or `None`.
+
+        For a squash pending inheritance: ``run `ferro migrate up`; this
+        database applied <first> … <last> and nothing will be run``.
+        """
         if not self.inherits:
             return None
         return (
@@ -302,21 +344,22 @@ class MigrationStatus:
 
     @property
     def applied_at(self) -> str | None:
-        """When the migration was applied: the last finished step's
-        ``finished_at``, so a partial migration reports when it stopped.
-        ``None`` when no step has finished."""
+        """When the migration was applied: the last finished step's `finished_at`, or `None`.
+
+        A partial migration reports when it stopped.
+        """
         return next(
             (s.finished_at for s in reversed(self.steps) if s.finished_at), None
         )
 
     @property
     def applied(self) -> bool:
-        """Every step is applied."""
+        """Whether every step is applied."""
         return bool(self.steps) and all(step.applied for step in self.steps)
 
     @property
     def pending(self) -> bool:
-        """A step is still to apply."""
+        """Whether a step is still to apply."""
         return any(step.pending for step in self.steps)
 
     @property
@@ -326,15 +369,18 @@ class MigrationStatus:
 
     @property
     def unfinished(self) -> bool:
-        """A run left this migration part-way: a step is unfinished, or only
-        some of its steps are applied. A wholly pending migration is not."""
+        """Whether a run left this migration part-way.
+
+        True when a step is unfinished, or only some of its steps are
+        applied. A wholly pending migration is not.
+        """
         return self.unfinished_step is not None or (
             any(step.applied for step in self.steps) and not self.applied
         )
 
     @property
     def running(self) -> bool:
-        """A run holding the run lock is in this migration."""
+        """Whether a run holding the run lock is in this migration."""
         return any(step.running for step in self.steps)
 
     @property
@@ -349,11 +395,14 @@ class MigrationStatus:
 
     @property
     def state(self) -> str:
-        """``applied`` / ``applied (baseline)`` / ``applied (inherited)`` /
-        ``pending`` / ``pending (inheritable)`` when every
-        step agrees; ``running`` while a run is in it; ``applied (different
-        checksum)`` when every step is applied and one changed; else
-        ``partial, X of N steps``."""
+        """The migration's state as `status` prints it on its row.
+
+        The steps' one state when every step agrees (`applied`, `applied
+        (baseline)`, `applied (inherited)`, `pending` or `pending
+        (inheritable)`); `running` while a run is in it; `applied (different
+        checksum)` when every step is applied and one changed; else
+        `partial, X of N steps`.
+        """
         whole = self._whole
         if whole is not None:
             return whole
@@ -366,62 +415,74 @@ class MigrationStatus:
 
     @property
     def expands(self) -> bool:
-        """Whether ``status`` prints this migration's steps without ``--steps``."""
+        """Whether `status` prints this migration's steps without `--steps`."""
         return self._whole is None
 
 
 @dataclass(frozen=True)
 class StatusReport:
-    """What ``ferro migrate status`` prints, and what ``status()`` returns.
+    """Where a database stands against its migrations: what `status()` returns.
 
-    It also says where the database stands, for every caller that has to
-    know (``drift``, the test harness). For the database the module
-    docstring shows::
+    `ferro migrate status` prints it. It also says where the database
+    stands for every caller that has to know (`drift`, the test harness).
+    For a database with `0006_add_teams` applied and `0007_nickname`
+    part-way:
 
-        report.head_applied.name   # "0006_add_teams"
-        report.unfinished.name     # "0007_nickname"
-        report.pending             # True
+    ```python
+    report.head_applied.name   # "0006_add_teams"
+    report.unfinished.name     # "0007_nickname"
+    report.pending             # True
+    ```
     """
 
     database: str
+    """The configured database's name."""
     url: str
-    """The database's URL, its secrets masked by ``***``."""
+    """The database's URL, its secrets masked by `***`."""
     dialect: str
+    """The database's dialect, `postgres` or `sqlite`."""
     table: str
-    """``<schema>._ferro_migrations``."""
+    """The tracking table, `<schema>._ferro_migrations`."""
     migrations: list[MigrationStatus]
+    """Every migration in the directory, in order."""
     ahead: list[str] = field(default_factory=list)
-    """Migrations this database has applied that the directory lacks. Never
-    the originals of a squash it is pending the inheritance of (ADR-0038)."""
+    """Migrations this database has applied that the directory lacks.
+
+    Never the originals of a squash the database is pending the inheritance
+    of.
+    """
     inheritable: list[str] = field(default_factory=list)
-    """Each squash the next run inherits (``NNNN_<name>``), running nothing
-    (ADR-0056): pending, whatever ``allow_ahead`` says."""
+    """Each squash the next run inherits (`NNNN_<name>`), running nothing, whatever `allow_ahead` says."""
     refusal: str | None = None
-    """What ``up`` would refuse with, when it would."""
+    """What `up` would refuse with, when it would."""
     refusal_needs_attention: bool = False
+    """Whether `refusal` is one a person has to look at (exit 4) rather than a pending state."""
 
     @property
     def head_applied(self) -> MigrationStatus | None:
-        """The last migration every step of which is applied: the one whose
-        schema snapshot the database is measured against. ``None`` when no
-        migration is."""
+        """The last fully applied migration, or `None` when no migration is.
+
+        Its schema snapshot is the one the database is measured against.
+        """
         applied = [m for m in self.migrations if m.applied]
         return applied[-1] if applied else None
 
     @property
     def unfinished(self) -> MigrationStatus | None:
-        """The first migration a run left part-way (or is in): the database
-        stands at neither its parent's snapshot nor its own."""
+        """The first migration a run left part-way (or is in), or `None`.
+
+        The database stands at neither its parent's snapshot nor its own.
+        """
         return next((m for m in self.migrations if m.unfinished), None)
 
     @property
     def pending(self) -> bool:
-        """Anything still to apply."""
+        """Whether anything is still to apply."""
         return any(m.pending for m in self.migrations)
 
     @property
     def needs_attention(self) -> bool:
-        """A person has to look before anything runs."""
+        """Whether a person has to look before anything runs."""
         return (
             bool(self.ahead)
             or (self.refusal is not None and self.refusal_needs_attention)
@@ -430,7 +491,7 @@ class StatusReport:
 
     @property
     def exit_code(self) -> int:
-        """4 when anything needs attention, 3 when anything is pending, else 0."""
+        """The exit code `status` exits with: 4 when anything needs attention, 3 when anything is pending, else 0."""
         # Imported here so the in-process API never loads the CLI package.
         from ..cli import exit_codes
 
@@ -453,11 +514,23 @@ class StatusReport:
         rows_done: dict[tuple[int, int], int] | None = None,
         finished_at: dict[tuple[int, int], str | None] | None = None,
     ) -> StatusReport:
-        """Build the report from the tracked database's ``status()``
-        document; ``url`` is the database's URL, masked; ``refusal`` replaces
-        its refusal when given; ``rows_done``
-        holds each chunked step's committed rows by ``(migration, step)`` and
-        ``finished_at`` each step record's stored finish time."""
+        """Build the report from the tracked database's status document.
+
+        Args:
+            raw: The status document the core returns.
+            database: The configured database's name.
+            url: The database's URL, its secrets masked.
+            dialect: The database's dialect.
+            table: The tracking table, `<schema>._ferro_migrations`.
+            refusal: A refusal that replaces the document's own, when given.
+            rows_done: Each chunked step's committed rows, by
+                `(migration, step)`.
+            finished_at: Each step record's stored finish time, by
+                `(migration, step)`.
+
+        Returns:
+            The report.
+        """
         rows_done = rows_done or {}
         finished_at = finished_at or {}
         migrations = [
@@ -498,8 +571,16 @@ class StatusReport:
         )
 
     def render(self, steps: bool = False) -> str:
-        """The text ``ferro migrate status`` prints (``--steps``: every
-        migration's steps, each with its class after its flags)."""
+        """Render the text `ferro migrate status` prints.
+
+        Args:
+            steps: Print every migration's steps, each with its class after
+                its flags, as `--steps` does. Defaults to only the
+                migrations that need attention.
+
+        Returns:
+            The report as plain text, one line per migration or step.
+        """
         lines = [f"{self.database} ({self.dialect}) · {self.table}", ""]
         names = [m.name for m in self.migrations] + self.ahead
         name_width = max((len(name) for name in names), default=0)
@@ -528,7 +609,11 @@ class StatusReport:
         return "\n".join(lines)
 
     def to_json(self) -> str:
-        """The same report as a JSON document (``status --json``)."""
+        """Render the report as the JSON document `status --json` prints.
+
+        Returns:
+            The report as indented JSON.
+        """
         return json.dumps(
             {
                 "database": self.database,

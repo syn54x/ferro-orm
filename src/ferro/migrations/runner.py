@@ -80,7 +80,7 @@ from ..registry import REGISTRY
 from ..settings import MAX_LOCK_TIMEOUT_S, SettingsError, parse_lock_timeout
 from ..state import resolve_operation_scope
 from . import historical
-from .chunked import BatchFailed, order_keys, run_chunked
+from ._chunk_loop import BatchFailed, order_keys, run_chunked
 from .context import HistoricalModels, StepContext
 from .errors import DatabaseAheadError, MigrationRefused, PendingMigrationsError
 from .historical import HistoricalModelError

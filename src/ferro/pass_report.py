@@ -1,18 +1,10 @@
-"""What an auto-migrate pass did: the value ``ferro.migrate()`` and
-``ferro.create_tables()`` return (ADR-0049).
+"""What an auto-migrate pass did: the value `ferro.migrate()` and `ferro.create_tables()` return.
 
-```python
-report = await ferro.migrate()
-[(s.subject, s.sql) for s in report.statements if s.role == "schema"]
-# [('author', 'ALTER TABLE "author" ADD COLUMN "slug" TEXT')]
-[(w.kind, str(w)) for w in report.warnings]
-# []
-```
-
-The Rust core builds the report from what its DDL executor actually ran,
-never from the plan, so it cannot describe a statement that did not execute.
-A pass that fails partway raises its usual error with ``.report`` set: what
-committed before the failure, the failing statement left out.
+The report is built from what the pass actually executed, never from its
+plan, so it cannot list a statement that did not run. A pass that fails
+partway raises its usual error with `.report` set to what committed before
+the failure, the failing statement left out. See
+[Auto-migrate](../guide/schema/auto-migrate.md).
 """
 
 from __future__ import annotations
@@ -31,10 +23,14 @@ __all__ = [
 ]
 
 Role = Literal["schema", "lock_timeout", "probe"]
-"""What an executed statement was for: ``"schema"`` (the create pass, the
-type statements, the reconciliation), ``"lock_timeout"`` (the ``SET LOCAL
-lock_timeout`` / ``SET`` / ``RESET`` lines of ADR-0044) or ``"probe"`` (the
-SQLite label row probe of ADR-0047)."""
+"""What an executed statement was for: `"schema"`, `"lock_timeout"` or `"probe"`.
+
+`"schema"` is the create pass, the enum type statements and the
+reconciliation. `"lock_timeout"` is a `SET LOCAL lock_timeout` (or `SET` /
+`RESET`) the pass wraps each Postgres unit in. `"probe"` is a read that only
+decides what the pass reports, such as SQLite looking for rows that hold an
+enum label being renamed.
+"""
 
 _PASS_REPORT_ATTR = "_ferro_pass_report"
 """The attribute the Rust core sets on a failed pass's error (the report as
@@ -50,18 +46,25 @@ class ExecutedStatement:
     sql: str
     """The statement, exactly as it ran."""
     role: Role
-    """What it was for (see ``Role``)."""
+    """What it was for: `"schema"` (DDL), `"lock_timeout"` or `"probe"` (a read that changes nothing)."""
 
 
 @dataclass(frozen=True)
 class Subject:
-    """What a ``Report`` is about: the modelset as a whole, one table, one
-    column, or one enum type. Only the fields of its ``scope`` are set."""
+    """What a [`Report`][ferro.Report] is about.
+
+    The modelset as a whole, one table, one column, or one enum type. Only the
+    fields its `scope` names are set.
+    """
 
     scope: Literal["modelset", "table", "column", "enum_type"]
+    """Which of the four it is: `"modelset"`, `"table"`, `"column"` or `"enum_type"`."""
     table: str | None = None
+    """The table, for the `"table"` and `"column"` scopes; `None` otherwise."""
     column: str | None = None
+    """The column, for the `"column"` scope; `None` otherwise."""
     type_name: str | None = None
+    """The Postgres enum type, for the `"enum_type"` scope; `None` otherwise."""
 
     @classmethod
     def _from_wire(cls, wire: dict[str, Any]) -> Subject:
@@ -75,22 +78,20 @@ class Subject:
 
 @dataclass(frozen=True)
 class Report:
-    """One warning, typed (ADR-0052): the planner's, the renderer's, or the
-    pass's own. ``str(report)`` is the sentence printed.
+    """One warning a pass raised, with a kind code can match on.
 
-    ``kind`` is the kind's name: the planner's (``"LeftoverChecks"``,
-    ``"HintRefused"``, ``"ForeignDefault"``, ...), the renderer's (``"RefusedConversion"``,
-    ``"SqliteInPlace"``, ``"PrimaryKeyKept"``, ``"EnumTypeMove"``,
-    ``"RowSecuritySkipped"``) or
-    the pass's (``"PendingTableRename"``, ``"StrandedLabelRename"``,
-    ``"RowSecurityUnderMigrator"``, ``"RunLockWait"``, ``"DdlLockRetry"``).
-    ``recurs`` says whether it is raised on every pass until someone acts.
+    `str(report)` is the sentence the pass printed. The
+    [Auto-migrate](../guide/schema/auto-migrate.md) guide lists every kind.
     """
 
     kind: str
+    """The warning's kind, such as `"LeftoverChecks"`, `"RefusedConversion"` or `"RunLockWait"`."""
     subject: Subject
+    """What the warning is about."""
     text: str
+    """The sentence the pass printed and raised as a `UserWarning`."""
     recurs: bool
+    """Whether every pass raises it again until someone acts."""
 
     def __str__(self) -> str:
         return self.text
@@ -109,15 +110,27 @@ class Report:
 
 @dataclass(frozen=True)
 class PassReport:
-    """Every statement an auto-migrate pass sent to the database, in
-    execution order, and every warning it raised, in the order raised.
+    """What one auto-migrate pass sent to the database and the warnings it raised.
 
-    Every warning is also raised as a Python ``UserWarning``, as before; the
-    report lists it as well.
+    Every warning is also raised as a Python `UserWarning`.
+
+    Examples:
+        ```python {test=run prelude=reference}
+        import ferro
+
+        await ferro.raw.execute('DROP TABLE "post"')
+        report = await ferro.create_tables()
+        print([(statement.subject, statement.role) for statement in report.statements])
+        # [('post', 'schema')]
+        print(report.warnings)
+        # ()
+        ```
     """
 
     statements: tuple[ExecutedStatement, ...] = ()
+    """Every statement the pass sent, in execution order."""
     warnings: tuple[Report, ...] = ()
+    """Every warning the pass raised, in the order raised."""
 
     @classmethod
     def _from_json(cls, text: str) -> PassReport:
