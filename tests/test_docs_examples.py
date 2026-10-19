@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -145,3 +146,39 @@ def test_fence_settings_read_bare_and_quoted_values() -> None:
         "pass", prefix='python {test=run lint="check"}', path=Path("p.md")
     )
     assert fence_settings(example) == {"test": "run", "lint": "check"}
+
+
+README = REPO_ROOT / "README.md"
+_README_FENCE = re.compile(r"^```python\n(.*?)^```", flags=re.M | re.S)
+_MODELS_SECTION = re.compile(
+    r"# --8<-- \[start:models\]\n(.*?)# --8<-- \[end:models\]", flags=re.S
+)
+
+
+def _readme_quick_start() -> str:
+    [source] = _README_FENCE.findall(README.read_text(encoding="utf-8"))
+    return source
+
+
+def test_readme_quick_start_runs_and_prints_what_it_claims(tmp_path: Path) -> None:
+    """The README's Python block runs as written and prints its stated output."""
+    script = tmp_path / "readme_quick_start.py"
+    script.write_text(_readme_quick_start(), encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(script)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        cwd=tmp_path,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Found 1 active users." in README.read_text(encoding="utf-8")
+    assert result.stdout.strip() == "Found 1 active users."
+
+
+def test_readme_model_is_the_home_page_example() -> None:
+    """The README's model is the one the home page embeds in both tabs."""
+    [models] = _MODELS_SECTION.findall(
+        (DOCS_EXAMPLES / "readme_quickstart.py").read_text(encoding="utf-8")
+    )
+    assert models.strip() in _readme_quick_start()

@@ -1,11 +1,6 @@
 # Installation
 
-## Requirements
-
-- **Python 3.13 or newer**
-- macOS, Linux, or Windows — pre-compiled wheels are published for all three, so no Rust toolchain is needed for a normal install
-
-## Install
+Install Ferro with `pip` or `uv`, then check the installed version. Ferro ships pre-compiled wheels, so a normal install needs no Rust toolchain:
 
 === "uv"
 
@@ -19,60 +14,69 @@
     pip install ferro-orm
     ```
 
-### Migration support
+The install adds Ferro and its two runtime dependencies, Pydantic and pydantic-settings.
 
-Reviewed schema migrations (`ferro migrate init`, `new`, `up`) need the `cli` extra, which installs the `ferro` command line:
+## Requirements
+
+- Python 3.13 or newer. Ferro is tested on 3.13 and 3.14.
+- macOS, Linux or Windows. Wheels are published for all three.
+
+## Extras
+
+Ferro has two optional extras. The `cli` extra installs the `ferro` command, which runs reviewed schema migrations (`ferro migrate init`, `new`, `up`). The `alembic` extra adds Alembic and SQLAlchemy so a project that already runs Alembic can generate revisions from Ferro models; Ferro never uses SQLAlchemy at runtime.
+
+Add the extra you need:
 
 === "uv"
 
     ```bash
     uv add "ferro-orm[cli]"
+    uv add "ferro-orm[alembic]"
     ```
 
 === "pip"
 
     ```bash
     pip install "ferro-orm[cli]"
+    pip install "ferro-orm[alembic]"
     ```
 
-See [Schema Management](../guide/schema/overview.md) for how migrations and auto-migrate fit together, and [Migrations](../guide/schema/migrations.md) for the workflow.
+[Schema management](../guide/schema/overview.md) explains how migrations and auto-migrate fit together, [Migrations](../guide/schema/migrations.md) covers the workflow, and [Alembic](../guide/schema/alembic.md) covers the bridge.
 
-A project that already runs Alembic can keep it with the `alembic` extra instead (`pip install "ferro-orm[alembic]"`), which adds Alembic and SQLAlchemy for generating revisions only; Ferro never uses SQLAlchemy at runtime. See [Alembic](../guide/schema/alembic.md).
+## Database drivers
 
-## Database Drivers
+Ferro's Rust engine bundles SQLite and PostgreSQL support through SQLx, so there are no driver packages to install or configure. `ferro-orm` alone covers both backends.
 
-You don't need any. Ferro's Rust engine bundles SQLite and PostgreSQL support via SQLx, so there are no driver packages to install or configure — `pip install ferro-orm` is enough for both backends.
+## Build from source
 
-## Building from Source
-
-!!! note
-    Most users never need this. Pre-compiled wheels cover all common platforms.
-
-Building from source (for example, on an unsupported platform) requires a recent Rust toolchain and [maturin](https://www.maturin.rs/):
+Most users never need this, because wheels cover the common platforms. To build on an unsupported platform, install a Rust toolchain and [uv](https://docs.astral.sh/uv/), then build into a project environment:
 
 ```bash
-# Install Rust
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-
-# Clone and build
 git clone https://github.com/syn54x/ferro-orm.git
 cd ferro-orm
-pip install maturin
-maturin develop --release
+uv sync
+uv run maturin develop --release
 ```
 
-Expect the first compile to take a few minutes.
+The first compile takes a few minutes, and the build installs Ferro into the project's `.venv`.
 
-## Verify Your Installation
+## Installed version
 
-```python
+Print the version to confirm the install:
+
+```python {compile-only="prints the version, which changes every release"}
 import ferro
 
 print(ferro.version())
 ```
 
-If this prints a version number, you're ready to go.
+The number is the installed Ferro version:
 
-## Next Steps
+```text
+0.25.0
+```
 
-Build your first app with the [Quickstart Tutorial](quickstart.md).
+## Next steps
+
+Build a small app in the [Quickstart](quickstart.md).

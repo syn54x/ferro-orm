@@ -1,7 +1,5 @@
 # Ferro: The Pydantic x Rust ORM
 
-<!-- --8<-- [start:main] -->
-
 [![PyTest](https://img.shields.io/badge/Pytest-0A9EDC?style=for-the-badge&logo=pytest&logoColor=white)](https://docs.pytest.org/)
 [![Ruff](https://img.shields.io/badge/Ruff-FFC107?style=for-the-badge&logo=python&logoColor=black)](https://docs.astral.sh/ruff/)
 [![Zensical](https://img.shields.io/badge/Zensical-4051B5?style=for-the-badge&logo=markdown&logoColor=white)](https://zensical.org/)
@@ -14,60 +12,66 @@
 [![Codecov](https://img.shields.io/codecov/c/github/syn54x/ferro-orm?style=for-the-badge&logo=codecov&logoColor=white)](https://codecov.io/gh/syn54x/ferro-orm)
 [![Issues](https://img.shields.io/github/issues/syn54x/ferro-orm?style=for-the-badge&logo=github&logoColor=white)](https://github.com/syn54x/ferro-orm/issues)
 
-Ferro is a high-performance, asynchronous ORM for Python, powered by a core engine written in Rust. Designed for simplicity and it only has one dependency: Pydantic.  Delivering ergonomics familiar to the modern Pythonista and the speed and safety of Rust's SQLx and Sea-Query.
+<!-- --8<-- [start:intro] -->
+Ferro is an async ORM for Python: you declare Pydantic models, and a Rust engine builds the SQL, runs it and turns rows into model instances. Its runtime dependencies are Pydantic and pydantic-settings.
+<!-- --8<-- [end:intro] -->
 
-## Key Features
-
-- **High-Performance Core**: All SQL generation and row hydration are handled by a dedicated Rust engine, minimizing "Python Tax" on data-heavy operations.
-- **Async First**: Built from the ground up for asynchronous applications, utilizing `pyo3-async-runtimes` for non-blocking I/O.
-- **Pydantic Integration**: Leverages Pydantic V2 for schema definition and data validation, providing full IDE support and type safety.
-- **Zero-Copy Intent**: Designed with zero-copy principles to maximize throughput during large-scale data retrieval.
-- **Identity Map**: Ensures object consistency across your application by tracking active model instances in a thread-safe registry.
-
-## Architecture
-
-Ferro operates through a dual-layer architecture connected via a high-performance FFI (Foreign Function Interface) bridge:
-
-1.  **Python Layer**: Developers define models using standard Python classes; a metaclass registers them with the backend.
-2.  **Rust Engine**: Built on `SQLx` and `Sea-Query` for GIL-free row parsing and object instantiation.
-
-## Installation
-
-Ferro is distributed as pre-compiled wheels for macOS, Linux, and Windows.
-
-```bash
-pip install ferro-orm
-# Or with the migrations CLI (ferro migrate)
-pip install "ferro-orm[cli]"
-# Or with the Alembic bridge
-pip install "ferro-orm[alembic]"
-```
-
-Schema changes go through auto-migrate while you develop and reviewed migrations (`ferro migrate new`, `ferro migrate up`) in production — see [Schema Management](https://ferro-orm.x54.sh/guide/schema/overview/). Ferro currently supports SQLite and PostgreSQL. Register multiple named connections with `connect(..., name="...")` when a process needs more than one database — see the [connections guide](https://ferro-orm.x54.sh/guide/connections/).
-
-## Quick Start
+Here is a model, a query and the result:
 
 ```python
 import asyncio
-from ferro import Field, Model, connect
+
+from ferro import Field, Model, connect, engines
+
 
 class User(Model):
     id: int | None = Field(default=None, primary_key=True)
     username: str
     is_active: bool = True
 
+
 async def main():
-    await connect("sqlite:example.db?mode=rwc", auto_migrate=True)
+    await connect("sqlite::memory:", auto_migrate=True)
 
-    # Create
-    alice = await User.create(username="alice")
+    async with engines.session():
+        await User.create(username="alice")
+        await User.create(username="bob", is_active=False)
 
-    # Query (lambda predicates — name the parameter after the model, e.g. user for User)
-    active_users = await User.where(lambda user: user.is_active == True).all()
-    print(f"Found {len(active_users)} active users.")
+        active_users = await User.where(lambda user: user.is_active == True).all()
+        print(f"Found {len(active_users)} active users.")
 
-if __name__ == "__main__":
-    asyncio.run(main())
+
+asyncio.run(main())
 ```
 
-<!-- --8<-- [end:main] -->
+Running it prints:
+
+```text
+Found 1 active users.
+```
+
+Every ORM call runs inside `async with engines.session():`, which routes it to the connection you opened. `auto_migrate=True` creates the table on connect; it suits development and tests.
+
+## What Ferro does
+
+- The Rust engine generates the SQL and parses rows outside the GIL, then fills each model's fields directly, without calling `__init__`.
+- Everything is async, on `pyo3-async-runtimes` and SQLx.
+- Models are Pydantic v2 models, so validation and IDE support work as they do for any Pydantic class.
+- Within a session, one database row is one Python object (the identity map).
+- It supports SQLite and PostgreSQL. Both are compiled into the engine, so no driver packages are needed.
+
+## Installation
+
+Ferro ships pre-compiled wheels for macOS, Linux and Windows:
+
+```bash
+pip install ferro-orm
+# With the migrations CLI (ferro migrate)
+pip install "ferro-orm[cli]"
+# With the Alembic bridge
+pip install "ferro-orm[alembic]"
+```
+
+## Schema changes
+
+Auto-migrate keeps a development database current. For production, `ferro migrate new` writes reviewed migration files and `ferro migrate up` applies them; see [Schema management](https://ferro-orm.x54.sh/guide/schema/overview/). To use more than one database, register named connections with `connect(..., name="...")`; see [Connections](https://ferro-orm.x54.sh/guide/connections/).
