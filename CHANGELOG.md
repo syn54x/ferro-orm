@@ -1,6 +1,14 @@
 # CHANGELOG
 
 
+## v0.25.0 (2026-10-19)
+
+### Features
+
+- **migrate**: `ferro migrate squash` ([#690](https://github.com/syn54x/ferro-orm/pull/690),
+  [`c588a46`](https://github.com/syn54x/ferro-orm/commit/c588a4689fbe3d846cc7e006c7ba7825e9c4f475))
+
+
 ## v0.24.0 (2026-10-15)
 
 ### Features
