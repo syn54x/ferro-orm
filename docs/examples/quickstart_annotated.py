@@ -2,31 +2,34 @@
 
 Same models as docs/examples/quickstart.py, declared with ``Annotated``
 metadata instead of assignment. Field options move into ``Annotated[...]``;
-relationship declarations are identical in both styles.
+the default stays as the assigned value. Relationship declarations are
+identical in both styles.
 """
 
 import asyncio
 
+from ferro import connect, engines
+
 # --8<-- [start:models]
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated
 
-from ferro import BackRef, Field, ForeignKey, Model, Relation, connect, engines
+from ferro import BackRef, Field, ForeignKey, Model, Relation
 
 
 class Author(Model):
-    id: Annotated[int | None, Field(default=None, primary_key=True)]
+    id: Annotated[int | None, Field(primary_key=True)] = None
     name: str
     email: Annotated[str, Field(unique=True)]
     posts: Relation[list["Post"]] = BackRef()
 
 
 class Post(Model):
-    id: Annotated[int | None, Field(default=None, primary_key=True)]
+    id: Annotated[int | None, Field(primary_key=True)] = None
     title: str
     body: str
     published: bool = False
-    created_at: Annotated[datetime, Field(default_factory=datetime.now)]
+    created_at: Annotated[datetime, Field(default_factory=lambda: datetime.now(UTC))]
     author: Annotated[Author, ForeignKey(related_name="posts")]
 
 
@@ -39,14 +42,13 @@ async def main() -> None:
     async with engines.session():
         alice = await Author.create(name="Alice", email="alice@example.com")
         post = await Post.create(
-            title="Hello", body="...", published=True, author=alice
+            title="Hello", body="First post.", published=True, author=alice
         )
 
-        assert post.id is not None
+        assert post.id == 1
         assert (await post.author).email == "alice@example.com"
-        assert (
-            len(await alice.posts.where(lambda post: post.published == True).all()) == 1  # noqa: E712
-        )
+        published = await alice.posts.where(lambda post: post.published == True).all()  # noqa: E712
+        assert len(published) == 1
 
     print("quickstart_annotated example ran successfully")
 
