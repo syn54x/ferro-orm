@@ -44,7 +44,7 @@ description: "API reference for connect(), sessions and the model registry."
 
 `ferro.migrate()` and `ferro.create_tables()` return a `PassReport`, built from the statements the database actually ran. A pass that fails partway raises its usual error with `.report` set to what committed before the failure:
 
-```python
+```python {test=compile reason="needs a database one column behind its models"}
 report = await ferro.migrate(updates=True)
 [(s.subject, s.sql) for s in report.statements if s.role == "schema"]
 # [('author', 'ALTER TABLE "author" ADD COLUMN "slug" TEXT')]

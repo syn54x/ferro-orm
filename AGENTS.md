@@ -446,8 +446,10 @@ Rules:
 - **The lint** `uv run --no-sync python -m tests._docs_checks PATH...` lists
   every lambda passed to a query method whose parameter is one character,
   as `path:line: message`, and exits 1. It reads Python files, Python fences
-  in Markdown and docstrings (added by #704; #724 makes it a test gate).
-  Run it over every docs page, example and docstring you touch.
+  in Markdown and docstrings. `tests/test_docs_lint.py` runs it over
+  `docs/pages`, `docs/examples` and `src/ferro`, so a violation fails the
+  suite; run it yourself over every docs page, example and docstring you
+  touch.
 
 `docs/pages/guide/queries.md` and `docs/pages/concepts/query-typing.md`
 explain how lambda predicates are evaluated and typed; every other page uses
@@ -609,7 +611,7 @@ Rules:
   prelude** (`docs/examples/_preludes/reference.py`: `Author` and `Post`,
   connected, inside a session), in a fence marked
   `{test=run prelude=reference}` so the docs harness
-  (`tests/test_docstring_examples.py`, from #704) runs it.
+  (`tests/test_docstring_examples.py`) runs it.
 - **An explanation longer than one paragraph lives in a guide or concepts
   page**, and the docstring links to it.
 

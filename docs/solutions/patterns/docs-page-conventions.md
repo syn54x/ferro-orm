@@ -104,6 +104,19 @@ An inline Python block that does not run under the harness says why in its
 fence: `{test=compile reason="needs a Postgres database"}`. Generated files
 and `env.py` excerpts are the usual cases; a block that can run, runs.
 
+Every Python fence on a page carries one of three markers, and
+`tests/test_docs_examples.py` fails on a fence with none:
+
+| Marker | What the harness does |
+| --- | --- |
+| `{test=run prelude=<name>}` | Runs the block after `docs/examples/_preludes/<name>.py`. |
+| `{test=compile reason="..."}` | Compiles the block; the reason says why it cannot run. |
+| `{test=pytest path="tests/<file>.py"}` | Writes the block at that path in a scratch project and runs pytest there (`tests/test_docs_testing_fixtures.py`, for the testing how-to). |
+
+`lint=check` can be added to any of them. Any other setting is refused with
+the marker to write instead, so `{compile-only="..."}` or a bare
+`{test=run}` fails the test rather than being ignored.
+
 ### The glossary file
 
 Acronyms in prose (DDL, RLS, FK, PK, GUC, FFI, IR, ...) get a hover

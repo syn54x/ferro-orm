@@ -69,7 +69,7 @@ The first compile takes a few minutes, and the build installs Ferro into the pro
 
 Print the version to confirm the install:
 
-```python {compile-only="prints the version, which changes every release"}
+```python {test=compile reason="prints the version, which changes every release"}
 import ferro
 
 print(ferro.version())

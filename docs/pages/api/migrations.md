@@ -6,7 +6,7 @@ description: "API reference for ferro.migrations, which applications, data steps
 
 `ferro.migrations` is what an application, a data step, a test and an Alembic `env.py` import. The guides show each in use: [Deploying migrations](../guide/schema/deploying.md) for `up` and `require_applied`, [Data steps and backfills](../guide/schema/data-steps.md) for the declarations, [Testing migrations](../guide/schema/testing.md) for the harness, [Alembic](../guide/schema/alembic.md) for the bridge. The commands are in the [CLI reference](../reference/cli.md).
 
-```python
+```python {test=compile reason="needs a project with a migrations directory and a database URL"}
 import ferro
 import ferro.migrations
 
@@ -64,7 +64,7 @@ Passing both `using=` and `url=` raises `MigrationRefused`. `check` reads only t
 
 A database ahead of the checkout raises `DatabaseAheadError`: `.ahead` names the migrations it has applied that the directory lacks, and `.contract_steps` each of their steps whose class is not `expand` (`["0008_drop_bio:01"]`), the steps `allow_ahead="expand-only"` refuses on. The [rolling-deploy recipe](../guide/schema/deploying.md#rolling-deploys-and-the-two-release-contract) shows it in use.
 
-```python
+```python {test=compile reason="needs a database ahead of the checkout"}
 try:
     await ferro.migrations.require_applied(allow_ahead="expand-only")
 except ferro.migrations.DatabaseAheadError as ahead:

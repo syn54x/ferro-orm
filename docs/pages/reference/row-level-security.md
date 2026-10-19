@@ -19,7 +19,7 @@ Postgres returns Acme's two invoices; the policy filtered out Globex's. The exam
 
 `RowSecurity` declares a table's row security, its policies and its table flags:
 
-```python {compile-only="a signature"}
+```python {test=compile reason="a signature"}
 class RowSecurity:
     def __init__(self, *policies: RowPolicy, force: bool = True) -> None: ...
 ```
@@ -51,7 +51,7 @@ Raises `TypeError` when a positional argument is not a `RowPolicy` or `force` is
 
 `RowPolicy` declares one policy, the rows a command may see or write:
 
-```python {compile-only="a signature"}
+```python {test=compile reason="a signature"}
 @dataclass(frozen=True)
 class RowPolicy:
     name: str | None = None

@@ -668,7 +668,7 @@ The private helpers `ferro.migrations.alembic._build_sa_table` and `ferro.migrat
 
 === "After"
 
-    ```python {test=run}
+    ```python {test=run prelude=upgrade}
     from ferro.migrations import get_metadata
 
     target_metadata = get_metadata()
