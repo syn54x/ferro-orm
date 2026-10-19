@@ -82,18 +82,31 @@ nav = [
 
 [project.theme]
 features = [
-  "navigation.tabs",
-  "navigation.sections",
-  "navigation.expand",
-  "navigation.top",
-  "toc.follow",
-  "search.suggest",
-  "search.highlight",
-  "content.code.copy",
-  "content.code.annotate",
+  "content.action.copy",
   "content.action.edit",
   "content.action.view",
+  "content.code.annotate",
+  "content.code.copy",
+  "content.code.select",
+  "content.tabs.link",
+  "content.tooltips",
+  "navigation.expand",
+  "navigation.footer",
+  "navigation.instant",
+  "navigation.instant.progress",
+  "navigation.path",
+  "navigation.sections",
+  "navigation.tabs",
+  "navigation.top",
+  "navigation.tracking",
+  "search.highlight",
+  "toc.follow",
 ]
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme)"
+toggle.icon = "lucide/sun-moon"
+toggle.name = "Switch to light mode"
 
 [[project.theme.palette]]
 media = "(prefers-color-scheme: light)"
@@ -109,21 +122,98 @@ scheme = "slate"
 primary = "custom"
 accent = "amber"
 toggle.icon = "lucide/moon"
-toggle.name = "Switch to light mode"
+toggle.name = "Switch to system preference"
+
+[project.extra]
+status.new = "Recently added"
+status.deprecated = "Deprecated"
+
+[[project.extra.social]]
+icon = "fontawesome/brands/github"
+link = "https://github.com/syn54x/ferro-orm"
+name = "Ferro on GitHub"
+
+[[project.extra.social]]
+icon = "fontawesome/brands/python"
+link = "https://pypi.org/project/ferro-orm/"
+name = "Ferro on PyPI"
+
+[project.plugins.social]
+cards_layout_options.background_color = "#B7410E"
+
+[project.plugins.llmstxt]
+markdown_description = "Ferro is an async Python ORM: Pydantic models, a Rust core, SQLite and Postgres."
+full_output = "llms-full.txt"
+
+[project.plugins.llmstxt.sections]
+"Start here" = [
+  "index.md",
+  "why-ferro.md",
+  "getting-started/installation.md",
+  "getting-started/quickstart.md",
+  "getting-started/next-steps.md",
+]
+"Guide" = ["guide/*.md", "guide/schema/*.md"]
+"How-to" = ["howto/*.md"]
+"Concepts" = ["concepts/*.md"]
+"Reference" = ["reference/*.md", "api/*.md"]
+"Community" = ["faq.md", "roadmap.md", "contributing.md", "changelog.md"]
+
+# Moved pages. Each old URL, and each anchor it had, points at the section
+# that replaced it.
+[project.plugins.redirects.redirect_maps]
+"guide/migrations.md" = "guide/schema/overview.md"
+"guide/migrations.md#three-ways-to-manage-schema" = "guide/schema/overview.md#the-ladder"
+"guide/migrations.md#auto-migration" = "guide/schema/auto-migrate.md"
+"guide/migrations.md#creating-tables-with-auto_migratetrue" = "guide/schema/auto-migrate.md#creating-tables-with-auto_migratetrue"
+"guide/migrations.md#applying-column-changes-with-migrate_updates" = "guide/schema/auto-migrate.md#applying-column-changes-with-migrate_updates"
+"guide/migrations.md#evolving-enums-label-addition" = "guide/schema/auto-migrate.md#evolving-enums-label-addition"
+"guide/migrations.md#destructive-drops-with-migrate_destructive" = "guide/schema/auto-migrate.md#destructive-drops-with-migrate_destructive"
+"guide/migrations.md#on-demand-migrate" = "guide/schema/auto-migrate.md#on-demand-migrate"
+"guide/migrations.md#safety-guidance" = "guide/schema/auto-migrate.md#safety-guidance"
+"guide/migrations.md#alembic-for-production" = "guide/schema/alembic.md"
+"guide/migrations.md#install" = "guide/schema/alembic.md#install"
+"guide/migrations.md#initialize" = "guide/schema/alembic.md#initialize"
+"guide/migrations.md#configure-envpy" = "guide/schema/alembic.md#configure-envpy"
+"guide/migrations.md#autogenerate" = "guide/schema/alembic.md#one-decider"
+"guide/migrations.md#review-apply" = "guide/schema/alembic.md#one-decider"
+"guide/migrations.md#choosing-a-workflow" = "guide/schema/overview.md#choosing"
 
 [project.plugins.mkdocstrings.handlers.python]
 paths = ["src"]
-inventories = ["https://docs.python.org/3/objects.inv"]
+inventories = [
+  "https://docs.python.org/3/objects.inv",
+  "https://docs.pydantic.dev/latest/objects.inv",
+]
 
 [project.plugins.mkdocstrings.handlers.python.options]
 docstring_style = "google"
-show_source = true
+docstring_options = { ignore_init_summary = true }
+merge_init_into_class = true
+show_source = false
 show_root_heading = true
 show_root_full_path = false
 show_category_heading = true
+# Stays on until every public object has a docstring (#722).
 show_if_no_docstring = true
 members_order = "source"
+# Not "public": griffe counts every dunder as public, so "public" would render
+# __repr__, __post_init__ and the __ferro_*__ class attributes. A protocol a
+# reader uses (async with, len(), comparisons) belongs in the class docstring.
+filters = ["!^_"]
+separate_signature = true
+show_signature_annotations = true
+signature_crossrefs = true
+show_symbol_type_heading = true
+show_symbol_type_toc = true
+scoped_crossrefs = true
+relative_crossrefs = true
+summary = true
+backlinks = "tree"
+extensions = ["griffe_inherited_docstrings"]
 
+# --- Python-Markdown core ---
+[project.markdown_extensions.abbr]
 [project.markdown_extensions.attr_list]
 [project.markdown_extensions.md_in_html]
 [project.markdown_extensions.admonition]
@@ -131,12 +221,22 @@ members_order = "source"
 
 [project.markdown_extensions.toc]
 permalink = true
+permalink_title = "Anchor link to this section"
 
+# --- pymdown-extensions ---
 [project.markdown_extensions.pymdownx.details]
 [project.markdown_extensions.pymdownx.inlinehilite]
 [project.markdown_extensions.pymdownx.keys]
 [project.markdown_extensions.pymdownx.mark]
 [project.markdown_extensions.pymdownx.smartsymbols]
+
+[project.markdown_extensions.pymdownx.magiclink]
+provider = "github"
+user = "syn54x"
+repo = "ferro-orm"
+repo_url_shorthand = true
+repo_url_shortener = true
+normalize_issue_symbols = true
 
 [project.markdown_extensions.pymdownx.superfences]
 custom_fences = [
@@ -146,6 +246,11 @@ custom_fences = [
 [project.markdown_extensions.pymdownx.snippets]
 base_path = ["."]
 check_paths = true
+# Example sections sit inside `async def main():`; strip that indentation so
+# an embedded block starts at column 0 and runs when pasted.
+dedent_subsections = true
+# The glossary lives outside docs_dir so it is not built as a page.
+auto_append = ["docs/includes/abbreviations.md"]
 
 [project.markdown_extensions.pymdownx.highlight]
 anchor_linenums = true
@@ -154,6 +259,8 @@ pygments_lang_class = true
 
 [project.markdown_extensions.pymdownx.tabbed]
 alternate_style = true
+combine_header_slug = true
+slugify = { object = "pymdownx.slugs.slugify", kwds = { case = "lower" } }
 
 [project.markdown_extensions.pymdownx.emoji]
 emoji_index = "zensical.extensions.emoji.twemoji"

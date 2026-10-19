@@ -604,6 +604,7 @@ dev = [
     { name = "commitizen" },
     { name = "cyclopts" },
     { name = "greenlet" },
+    { name = "griffe-inherited-docstrings" },
     { name = "jupyter" },
     { name = "maturin" },
     { name = "mkdocstrings-python" },
@@ -623,6 +624,7 @@ dev = [
     { name = "zensical" },
 ]
 docs = [
+    { name = "griffe-inherited-docstrings" },
     { name = "mkdocstrings-python" },
     { name = "pymdown-extensions" },
     { name = "zensical" },
@@ -663,6 +665,7 @@ dev = [
     { name = "commitizen", specifier = ">=3.13.0" },
     { name = "cyclopts", specifier = ">=5,<6" },
     { name = "greenlet", specifier = ">=3.3.1" },
+    { name = "griffe-inherited-docstrings", specifier = ">=1.1.4" },
     { name = "jupyter", specifier = ">=1.1.1" },
     { name = "maturin", specifier = ">=1.11.5" },
     { name = "mkdocstrings-python", specifier = ">=2.0.9" },
@@ -682,6 +685,7 @@ dev = [
     { name = "zensical", specifier = ">=0.0.71" },
 ]
 docs = [
+    { name = "griffe-inherited-docstrings", specifier = ">=1.1.4" },
     { name = "mkdocstrings-python", specifier = ">=2.0.9" },
     { name = "pymdown-extensions", specifier = ">=12.3" },
     { name = "zensical", specifier = ">=0.0.71" },
@@ -768,6 +772,18 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/97/43/8bf0ffa3d498eeee4c58c212a3905dd6146c01c8dc0b0a046481ca29b18c/greenlet-3.3.1-cp314-cp314t-musllinux_1_2_aarch64.whl", hash = "sha256:ed6b402bc74d6557a705e197d47f9063733091ed6357b3de33619d8a8d93ac53", size = 1614917, upload-time = "2026-01-23T16:04:26.276Z" },
     { url = "https://files.pythonhosted.org/packages/89/90/a3be7a5f378fc6e84abe4dcfb2ba32b07786861172e502388b4c90000d1b/greenlet-3.3.1-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:59913f1e5ada20fde795ba906916aea25d442abcc0593fba7e26c92b7ad76249", size = 1676092, upload-time = "2026-01-23T15:33:52.176Z" },
     { url = "https://files.pythonhosted.org/packages/e1/2b/98c7f93e6db9977aaee07eb1e51ca63bd5f779b900d362791d3252e60558/greenlet-3.3.1-cp314-cp314t-win_amd64.whl", hash = "sha256:301860987846c24cb8964bdec0e31a96ad4a2a801b41b4ef40963c1b44f33451", size = 233181, upload-time = "2026-01-23T15:33:00.29Z" },
+]
+
+[[package]]
+name = "griffe-inherited-docstrings"
+version = "1.1.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "griffelib" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/32/61/1dd4a7c59618c5e9ee0f61eb9fb934ba11163fa66932c8e2cc99d74f3d7b/griffe_inherited_docstrings-1.1.4.tar.gz", hash = "sha256:ac98890a4505d986254302325959de6c82716968ec499aca009cb91c1d75eecb", size = 32495, upload-time = "2026-10-06T09:07:03.147Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/34/35/364ed24b4cba404a6f02998b381c872f99480a26f0c57687537578d4b5ad/griffe_inherited_docstrings-1.1.4-py3-none-any.whl", hash = "sha256:6c813c567f6f7396d6e1a78575fb7ad0d5b472fc02c1b782f830fcf26ab7254d", size = 10888, upload-time = "2026-10-06T09:07:02.095Z" },
 ]
 
 [[package]]
