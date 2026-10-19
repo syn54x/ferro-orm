@@ -172,7 +172,10 @@ async def on_postgres(migrator_url: str, role: str) -> None:
         "app", settings={"app.tenant_id": acme, "app.user": "ada"}
     ) as outer:
         async with engines.session("app", settings={"app.user": "grace"}) as inner:
-            assert inner.effective_settings == {"app.tenant_id": acme, "app.user": "grace"}
+            assert inner.effective_settings == {
+                "app.tenant_id": acme,
+                "app.user": "grace",
+            }
         assert outer.effective_settings == {"app.tenant_id": acme, "app.user": "ada"}
     # --8<-- [end:nested]
 
@@ -190,9 +193,9 @@ async def on_postgres(migrator_url: str, role: str) -> None:
     async with engines.session(
         "app", settings={"app.tenant_id": str(ACME), "app.user": "ada"}
     ):
-        documents = await Document.select().order_by(
-            lambda document: document.title
-        ).all()
+        documents = (
+            await Document.select().order_by(lambda document: document.title).all()
+        )
         assert [document.title for document in documents] == ["Handbook", "Q3 plan"]
     # --8<-- [end:composed_query]
 
