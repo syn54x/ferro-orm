@@ -27,6 +27,7 @@ import subprocess
 import sys
 from collections.abc import Iterator
 from pathlib import Path
+from urllib.parse import urljoin
 
 import pytest
 
@@ -137,7 +138,11 @@ def test_declaration_tabs_have_word_anchors_and_switch_together(
 
 
 def _theme_features(page_html: str) -> list[str]:
-    match = re.search(r'<script id="__config" type="application/json">(.*?)</script>', page_html, re.DOTALL)
+    match = re.search(
+        r'<script id="__config" type="application/json">(.*?)</script>',
+        page_html,
+        re.DOTALL,
+    )
     assert match, "page carries no theme config"
     return json.loads(match.group(1))["features"]
 
@@ -183,14 +188,14 @@ def test_old_migrations_page_is_gone_from_the_source() -> None:
 
 
 def test_old_migrations_url_redirects_each_anchor(built_site: Path) -> None:
-    page = _page(built_site, "guide/migrations")
-    targets = _redirect_targets(page)
+    old_url = "https://ferro-orm.x54.sh/guide/migrations/"
+    targets = _redirect_targets(_page(built_site, "guide/migrations"))
     for anchor, section in OLD_MIGRATIONS_ANCHORS.items():
         assert anchor in targets, f"old anchor {anchor or '(none)'} is not redirected"
-        resolved = targets[anchor]
-        assert resolved.endswith(section.removeprefix("guide/")) or resolved.endswith(
-            section
-        ), f"{anchor or '(none)'} redirects to {resolved}, expected {section}"
+        resolved = urljoin(old_url, targets[anchor])
+        assert resolved == urljoin(old_url, "/" + section), (
+            f"{anchor or '(none)'} redirects to {resolved}, expected {section}"
+        )
         path, _, fragment = section.partition("#")
         target_page = _page(built_site, path)
         if fragment:
@@ -223,10 +228,12 @@ def test_model_api_page_shows_the_public_surface_only(built_site: Path) -> None:
     dunders = [anchor for anchor in ids if re.search(r"\.__\w+__$", anchor)]
     assert not dunders, f"dunder members rendered: {dunders}"
     signatures = re.findall(
-        r'<div class="doc-signature[^"]*".*?</div>', page, re.DOTALL
-    ) or re.findall(r'class="doc-signature.*?</code>', page, re.DOTALL)
+        r'<div class="language-python doc-signature highlight">.*?</code>',
+        page,
+        re.DOTALL,
+    )
     assert signatures, "no separate signatures on the Model API page"
-    assert any("autorefs" in signature for signature in signatures), (
+    assert any('<a class="autorefs' in signature for signature in signatures), (
         "no linked type annotation in any Model signature"
     )
 
@@ -242,14 +249,14 @@ def test_relation_query_methods_inherit_their_docstrings(built_site: Path) -> No
     page = _page(built_site, "api/relationships")
     for method in ("all", "first"):
         section = re.search(
-            rf'id="ferro\.Relation\.{method}".*?(?=<div class="doc doc-object doc-function">|$)',
+            rf'id="ferro\.Relation\.{method}" class="doc doc-heading">(.*?)(?:class="doc doc-heading"|</article>)',
             page,
             re.DOTALL,
         )
         assert section, f"Relation.{method} is not documented"
-        assert "Returns:" in _TAG.sub("", section.group(0)) or "doc-section" in section.group(0), (
-            f"Relation.{method} has no docstring"
-        )
+        text = html.unescape(_TAG.sub("", section.group(1)))
+        assert "Returns:" in text, f"Relation.{method} renders without a docstring"
+        assert "Examples:" in text, f"Relation.{method} renders without a docstring"
 
 
 @pytest.mark.parametrize("workflow", ["publish-docs.yml", "ci.yml"])

@@ -42,7 +42,7 @@ jobs:
 
       - name: Build Zensical site
         run: |
-          uv run --no-sync zensical build --clean
+          uv run --no-sync zensical build --clean --strict
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

@@ -721,7 +721,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         return ModelConnection(cls, name)
 
     @classmethod
-    async def create(cls, *, session: "Session | None" = None, **fields) -> Self:
+    async def create(cls, *, session: "Session | None" = None, **fields: Any) -> Self:
         """Create and persist a new model instance
 
         ``create()`` is a plain INSERT: it never updates an existing row.
@@ -747,7 +747,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         return instance
 
     @classmethod
-    async def upsert(cls, *, session: "Session | None" = None, **fields) -> Self:
+    async def upsert(cls, *, session: "Session | None" = None, **fields: Any) -> Self:
         """Insert the row, or update the existing row on primary-key conflict.
 
         Equivalent to ``cls(**fields).save(on_conflict="update")``. With an
@@ -808,7 +808,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         defaults: dict[str, Any] | None = None,
         *,
         session: "Session | None" = None,
-        **fields,
+        **fields: Any,
     ) -> tuple[Self, bool]:
         """Fetch a record by filters or create one when missing
 
@@ -841,7 +841,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         defaults: dict[str, Any] | None = None,
         *,
         session: "Session | None" = None,
-        **fields,
+        **fields: Any,
     ) -> tuple[Self, bool]:
         """Update a matched record or create one when missing
 
