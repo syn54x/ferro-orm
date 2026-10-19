@@ -64,7 +64,7 @@ _ANNOTATIONS: dict[str, Any] = {
     "unknown": Any,
 }
 """Each SchemaIR ``logical_type`` and the annotation that compiles back to it
-(``ferro.columns._logical_type`` read in reverse). :func:`_check_compiled`
+(``ferro.columns._logical_type`` read in reverse). `_check_compiled`
 pins every class against its union, so a gap here fails loudly."""
 
 # The column facts that decide storage: a same-named column differing in one
@@ -304,7 +304,7 @@ def _field(model: dict[str, Any], column: dict[str, Any]) -> tuple[Any, Any]:
 
 def _enum(column: dict[str, Any]) -> type[enum.Enum]:
     """The historical enum: every label either snapshot declares. A value
-    the live type holds beyond them fails hydration naming it (ADR-0035)."""
+    the live type holds beyond them fails hydration naming it."""
     type_name = column["enum_type_name"]
     values: Iterable[Any] = column["enum_values"]
     # Member names only label the values; a sunder-looking label gets a prefix.

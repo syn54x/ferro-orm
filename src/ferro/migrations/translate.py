@@ -1,4 +1,4 @@
-"""The Alembic bridge's translator: the one planner's ops as Alembic ops (ADR-0041).
+"""The Alembic bridge's translator: the one planner's ops as Alembic ops.
 
 ```python
 class Card(Model):
@@ -16,8 +16,7 @@ def downgrade():
     op.drop_column('card', 'flavor')
 ```
 
-Every op comes from ``_core._plan_revision`` (``plan_revision`` in the core),
-which decides what the revision holds: each op of ``upgrade()`` and
+Every op comes from the core's revision planner, which decides what the revision holds: each op of ``upgrade()`` and
 ``downgrade()`` in the planner's order, its statements, whether Alembic's
 own op writes it, its ``# ferro:`` marker and any irreversible reason.
 This module only writes that answer, and decides nothing. Where the core
@@ -251,7 +250,7 @@ def _not_creating_types(column: sa.Column, dialect: str) -> sa.Column:
     """``column`` (copied) whose native enum type the table op does not
     create: on Postgres every enum type a revision needs is created by the
     planner's ``CreateEnumType`` (or already exists), so SQLAlchemy must not
-    issue its own ``CREATE TYPE`` beside the table (#443)."""
+    issue its own ``CREATE TYPE`` beside the table."""
     copied = column._copy()
     if dialect == "postgres" and isinstance(column.type, sa.Enum) and column.type.name:
         from sqlalchemy.dialects import postgresql

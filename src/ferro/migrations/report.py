@@ -216,7 +216,7 @@ their own copy."""
 
 
 def _state(*, word: str | None = None, shown: str | None = None) -> _State:
-    """The row of :data:`_STATES` with this core ``word`` or this ``shown`` word."""
+    """The row of `_STATES` with this core ``word`` or this ``shown`` word."""
     for state in _STATES:
         if state.word == word or state.shown == shown:
             return state

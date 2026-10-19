@@ -409,7 +409,7 @@ def write(database: DatabaseSettings, migration: GeneratedMigration) -> Path:
 
 
 def _write_squash(directory: Path, migration: GeneratedMigration) -> Path:
-    """:func:`write` for a squash: the originals into one aside, one by one,
+    """`write` for a squash: the originals into one aside, one by one,
     the replacement written, the aside deleted; a raise moves them back."""
     first, last = migration.replaces[0], migration.replaces[-1]
     aside = directory / f".{first}..{last}.{migration.dir_name}.squashed"
@@ -554,7 +554,7 @@ def _prepare_squash(
     from_: str,
     options: dict[str, Any],
 ) -> GeneratedMigration:
-    """:func:`prepare` for :func:`squash`: the range read, its snapshots
+    """`prepare` for `squash`: the range read, its snapshots
     composed into the target (``_core._compose_range``), the migration planned
     once from the parent snapshot to that target through the generator ``new``
     uses, carrying the range's data steps and hand-written SQL steps and
@@ -667,7 +667,7 @@ def _unneeded_scaffolds(
     dialects: list[str],
 ) -> dict[int, str]:
     """The carried data steps a squash drops, by their place in ``carry``,
-    each with the note that names it (ADR-0056, amended 2026-10-18).
+    each with the note that names it.
 
     A carried data step is dropped when it is still, byte for byte, the
     backfill the generator scaffolded for its original migration (that
@@ -756,12 +756,12 @@ def _with_dead_name_notes(
     names: list[str],
 ) -> GeneratedMigration:
     """``migration`` with a note for each dead name (a table, column, enum
-    label or constraint that existed only inside the range, ADR-0056) no carried
+    label or constraint that existed only inside the range) no carried
     data step's declaration touches, or the refusal of the first carried step
     whose declaration does.
 
     A squash cannot read what a step's body does, but it can read what the
-    step declares (ADR-0035): a chunked step's query, built over the
+    step declares: a chunked step's query, built over the
     historical models of the squashed migration widened by the dead names. The
     query's table, the columns its filter and order keys read and the enum
     labels its filter compares are names the step provably touches. A range
@@ -815,7 +815,7 @@ def _widened_models(
     names: list[str],
 ) -> HistoricalModels:
     """The squashed migration's historical models (the snapshot below the range
-    over the composed target, ADR-0025) plus every table and column any
+    over the composed target) plus every table and column any
     snapshot of the range held that the parent does not, so a declaration
     naming a dead name still builds and can be read.
 
@@ -987,8 +987,8 @@ def _refuse_data_only_over_ddl(
     name: str,
     options: dict[str, Any],
 ) -> None:
-    """Refuse ``squash --data-only`` over a range that renders DDL (panel F2
-    on #690): ``--data-only`` writes the snapshot below the range, while the
+    """Refuse ``squash --data-only`` over a range that renders DDL:
+    ``--data-only`` writes the snapshot below the range, while the
     witness lets every database that ran the originals inherit it, so they
     would stand on a snapshot that says the range's DDL never ran. A range that
     renders none (what it adds it drops again) loses nothing.
@@ -1206,7 +1206,7 @@ def _with_data_steps(
     template_dir: Path,
 ) -> GeneratedMigration:
     """``migration`` with each data step's file written from the step record
-    the generator produced (:func:`scaffold.render`), and each backfill that
+    the generator produced (`scaffold.render`), and each backfill that
     still needs writing named in a note after the generator's. The step's
     name and place are the generator's."""
     by_ordinal = {step["ordinal"]: step for step in generated["steps"]}

@@ -452,7 +452,7 @@ RunEvent: TypeAlias = StepEvent | RunNote | InheritedEvent
 def _declared_kind(path: Path) -> str:
     """The shape (``atomic`` / ``chunked``) an inherited data step's ``up``
     declares, read from its syntax tree: inheritance runs no step, so its
-    record holds the declaration, as a baseline's does (ADR-0056)."""
+    record holds the declaration, as a baseline's does."""
     try:
         return declared_up_kind(Path(path))
     except StepRefused as refused:
@@ -463,7 +463,7 @@ async def _inherit(
     run: LockedDatabase, tell: Callable[[RunEvent], None]
 ) -> list[InheritedMigration]:
     """Inherit, on ``run``, every squash whose witness its records hold, before
-    anything is planned (ADR-0056), telling ``tell`` one event per squash
+    anything is planned, telling ``tell`` one event per squash
     inherited. Raises ``RunRefused`` (``partial_witness``) on a squash the
     records hold part of, and (``mixed_witness``) on one a baseline
     recorded part of, with nothing written."""
@@ -566,16 +566,16 @@ async def _up(
     on_event: Callable[[RunEvent], Any] | None = None,
     through: str | None = None,
 ) -> RunReport:
-    """:func:`up` on open connection ``name``, raising as it does.
+    """`up` on open connection ``name``, raising as it does.
 
     ``through`` (``"0007"``, a migration number) stops the run after that
     migration: only pending steps of migrations up to and including it run.
-    It is the test harness's target (ADR-0045); the application's ``up()``
-    has none (ADR-0040), so it is reachable only here. A number the
+    It is the test harness's target; the application's ``up()``
+    has none, so it is reachable only here. A number the
     directory lacks is refused, and so is a step (``"0007:02"``): neither is
     a target. A ``through`` at or below the last applied migration has
     nothing pending to run: the run applies nothing and reverts nothing
-    (going down is :func:`down`'s).
+    (going down is `down`'s).
     """
     timeout = database.lock_wait(lock_timeout)
     direction: dict[str, Any] = {"direction": "up"}
@@ -820,7 +820,7 @@ def order_keys_on_disk(
 def _order_keys_for(
     run: LockedDatabase, nothing: str
 ) -> list[tuple[int, int, list[str]]]:
-    """:func:`order_keys_on_disk` for a run that refuses on a file that does
+    """`order_keys_on_disk` for a run that refuses on a file that does
     not load (``Nothing was <nothing>.``)."""
     try:
         return order_keys_on_disk(run)
@@ -840,7 +840,7 @@ def _load_data_steps(
     the loaded steps, and going down each data step whose down declares
     ``nothing_to_reverse`` with its reason (it runs no function). A
     ``@chunked`` query is checked once its historical models are built
-    (:func:`_check_chunked`)."""
+    (`_check_chunked`)."""
     nothing = "applied" if direction == "up" else "reverted"
     loaded: dict[tuple[int, int], LoadedStep] = {}
     reasons: dict[tuple[int, int], str] = {}
@@ -887,7 +887,7 @@ def _check_chunked(
     direction: str,
 ) -> None:
     """Refuse the run before anything runs when a ``@chunked`` step's query
-    cannot be paged by keyset (:func:`~ferro.migrations.steps.chunked_query`),
+    cannot be paged by keyset (`chunked_query`),
     built over its migration's historical models."""
     nothing = "applied" if direction == "up" else "reverted"
     for step in steps:
@@ -906,7 +906,7 @@ def _check_chunked(
 class _HistoricalSwaps:
     """The registry swap of the migration whose data step is running: one
     swap per migration with data steps, held until the run leaves that
-    migration (ADR-0035), restored on exit, error and cancellation. Built
+    migration, restored on exit, error and cancellation. Built
     from the run's held directory read, never from disk again."""
 
     def __init__(self, run: LockedDatabase) -> None:
@@ -959,11 +959,11 @@ def _route() -> Any:
 
 class _DataStep:
     """Run one planned data step, its record moved through the run's
-    transitions (ADR-0024, ADR-0048).
+    transitions.
 
     An atomic step is one transaction on the run's connection, its record
     finished (going up) or removed (going down) inside that transaction. A
-    chunked step runs through :func:`~ferro.migrations.chunked.run_chunked`,
+    chunked step runs through `run_chunked`,
     one transaction per batch with its cursor committed in it.
 
     A failure rolls back what it was running and is recorded only where the
@@ -1440,7 +1440,7 @@ async def _preview_down(
 ) -> tuple[Plan, DownPlan]:
     """What a ``down`` would revert, planned on ``tracked`` with no lock, as
     the run plans it once it has inherited every squash whose witness the
-    records hold (ADR-0056): a data step's down declares itself in Python,
+    records hold: a data step's down declares itself in Python,
     so an irreversible one refuses here too (before any lock), and a
     nothing-to-reverse one says so.
 
@@ -1506,16 +1506,16 @@ async def plan_down(
 _INHERITANCE_STAMP = ("started_at", "finished_at", "ferro_version")
 """What an inherited record holds of the moment it was inherited: the preview
 plans over the records inheritance would write, the run over the ones it
-wrote a moment later (ADR-0056)."""
+wrote a moment later."""
 
 
 def _records_as_shown(locked: list[Any], shown: list[Any]) -> bool:
     """Whether the steps planned under the lock stand on the records the
     preview showed. Taking the lock gives a record an older ferro wrote
-    without a class the class ADR-0054 decides for it; that fills a gap and
+    without a class the class the lock decides for it; that fills a gap and
     changes nothing the plan was shown, so a class the preview read as
     missing is not compared. An inherited record is compared without the time
-    and version it was inherited at (:data:`_INHERITANCE_STAMP`)."""
+    and version it was inherited at (`_INHERITANCE_STAMP`)."""
 
     def standing(step: Any, missing_class: bool) -> dict[str, Any] | None:
         record = step.standing

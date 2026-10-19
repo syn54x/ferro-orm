@@ -1,29 +1,32 @@
-"""The generated data step's text (ADR-0035, ADR-0037, ADR-0040).
+"""The generated data step's text.
 
 The generator decides every data step of a migration and hands each one over
-as a record; :func:`render` turns that record into the step's file. There are
+as a record; `render` turns that record into the step's file. There are
 three shapes, and the record says which.
 
-A **backfill**. ``Author`` gains a required ``slug``; ``ferro migrate new
-author_slug`` writes it between the expand and the contract::
+A backfill. `Author` gains a required `slug`;
+`ferro migrate new author_slug` writes it between the expand and the
+contract:
 
-    # migrations/0012_author_slug/02_backfill_author.py
-    from ferro.migrations import chunked, nothing_to_reverse, todo
-
-
-    @chunked(
-        lambda models: models.Author.where(lambda author: author.slug == None)
-        .order_by(lambda author: author.id),
-        batch_size=1000,
-    )
-    async def up(ctx, batch):
-        for author in batch:
-            author.slug = todo("the slug for an existing author")
-            await author.save()
+```python
+# migrations/0012_author_slug/02_backfill_author.py
+from ferro.migrations import chunked, nothing_to_reverse, todo
 
 
-    @nothing_to_reverse("01_expand.down.sql drops the column")
-    def down(ctx): ...
+@chunked(
+    lambda models: models.Author.where(lambda author: author.slug == None)
+    .order_by(lambda author: author.id),
+    batch_size=1000,
+)
+async def up(ctx, batch):
+    for author in batch:
+        author.slug = todo("the slug for an existing author")
+        await author.save()
+
+
+@nothing_to_reverse("01_expand.down.sql drops the column")
+def down(ctx): ...
+```
 
 The query always selects the rows that still need a value, so a re-run (the
 contract's recipe for rows written behind the cursor) touches only what is
@@ -32,40 +35,43 @@ pre-filled as its call; any other is a ``todo`` naming it. A model without a
 single primary key has no keyset to page by: its backfill is one ``@atomic``
 ``update`` per column.
 
-A label removed from a ``StrEnum`` (D2) is a backfill over the rows still
-holding it, each given another label (the historical model's enum still
-declares the removed one, and the label written is looked up in it)::
+A label removed from a `StrEnum` is a backfill over the rows still holding
+it, each given another label (the historical model's enum still declares
+the removed one, and the label written is looked up in it):
 
-    @chunked(
-        lambda models: models.Order.where(lambda order: order.status == "canceled")
-        .order_by(lambda order: order.id),
-        batch_size=1000,
-    )
-    async def up(ctx, batch):
-        for order in batch:
-            order.status = type(order.status)(todo("the label to use instead of 'canceled'"))
-            await order.save()
+```python
+@chunked(
+    lambda models: models.Order.where(lambda order: order.status == "canceled")
+    .order_by(lambda order: order.id),
+    batch_size=1000,
+)
+async def up(ctx, batch):
+    for order in batch:
+        order.status = type(order.status)(todo("the label to use instead of 'canceled'"))
+        await order.save()
+```
 
-A **guard step**. ``new --no-backfill author.slug`` writes one in the
-backfill's place: an ``@atomic`` step that fails the migration, naming the
-count, when any row still needs a value, so a step number is never a gap
-(ADR-0037).
+A guard step. `new --no-backfill author.slug` writes one in the backfill's
+place: an `@atomic` step that fails the migration, naming the count, when
+any row still needs a value, so a step number is never a gap.
 
-A **hand-requested data step** (``ferro migrate new backfill_slugs
---data-step Author``)::
+A hand-requested data step
+(`ferro migrate new backfill_slugs --data-step Author`):
 
-    from ferro.migrations import atomic, todo
-
-
-    @atomic
-    async def up(ctx):
-        # ctx.models.Author is the table as this migration leaves it.
-        todo("write this step")
+```python
+from ferro.migrations import atomic, todo
 
 
-    @atomic
-    async def down(ctx):
-        todo("write this step")
+@atomic
+async def up(ctx):
+    # ctx.models.Author is the table as this migration leaves it.
+    todo("write this step")
+
+
+@atomic
+async def down(ctx):
+    todo("write this step")
+```
 
 A project overrides any of the three with a file in ``_templates/`` beside
 its migrations (``backfill.py``, ``guard.py``, ``data_step.py``), used
@@ -198,7 +204,7 @@ class _Demand:
     fills: tuple[tuple[str, str | None], ...]
     """What the step fills, in order: ``(column, None)`` for a column whose
     rows hold ``NULL``, ``(column, label)`` for each removed enum ``label``
-    its rows may hold (D2)."""
+    its rows may hold."""
     removed: bool
     """Some column's rows hold a label the migration removes."""
     driver: str

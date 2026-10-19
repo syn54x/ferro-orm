@@ -75,7 +75,7 @@ class _FerroMetadata:
         """The models' tables and every table a rename hint names as the old
         one: the tables Alembic's own comparator is kept off. Which of them
         the planner reads live is the live read's own rule
-        (``_live_schema_ir``, ADR-0047)."""
+        (``_live_schema_ir``)."""
         names = set()
         for model in self.envelope["payload"]["models"]:
             names.add(model["table_name"])
@@ -427,7 +427,7 @@ _RenderItem = Callable[[str, Any, "AutogenContext"], "str | Literal[False]"]
 
 
 class _FerroObjectFilter:
-    """Alembic's ``include_object`` hook from :func:`ferro_options`: hides
+    """Alembic's ``include_object`` hook from `ferro_options`: hides
     ferro's tables (and everything on them) and both tracking tables from
     Alembic's own comparator, then asks the project's own filter, if any.
 
