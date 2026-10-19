@@ -20,7 +20,7 @@ Run it with `asyncio.run(main())`. The database assigns `id`, and `status` takes
 --8<-- "docs/examples/models_and_fields.py:product-table"
 ```
 
-Columns are written in name order, and every annotation that does not allow `None` is `NOT NULL`. The rest of this page takes the model apart one feature at a time. Each later example runs inside the session the first one opens; see [Sessions](connections.md#sessions-recommended).
+Columns are written in name order, and every annotation that does not allow `None` is `NOT NULL`. The rest of this page takes the model apart one feature at a time. Each later example runs inside the session the first one opens; see [Sessions](connections.md#sessions).
 
 Every Ferro model is also a [Pydantic](https://docs.pydantic.dev/latest/) `BaseModel`, so `model_dump()`, `model_dump_json()`, validators and `model_config` work as they do in Pydantic.
 
@@ -122,7 +122,7 @@ Both columns are `jsonb` on PostgreSQL and `JSON` on SQLite, and a value reads b
 
 On SQLite both tokens store plain JSON text, so switching between them changes nothing there. On PostgreSQL the switch is a declaration edit: with [`migrate_updates`](schema/auto-migrate.md) on, the pass runs one `ALTER TABLE ... TYPE ... USING ...` and existing values survive the cast. A [migration](schema/migrations.md) and the [Alembic bridge](schema/alembic.md) write the same statement.
 
-A filter compares a JSON column as a whole value. The query builder has no containment or path operators (`@>`, `->`, `#>>`) and declares no GIN index. To change some keys of a stored object on PostgreSQL, use `.merge()` in a [recipe update](mutations.md#recipe-updates).
+A filter compares a JSON column as a whole value. The query builder has no containment or path operators (`@>`, `->`, `#>>`) and declares no GIN index. To change some keys of a stored object on PostgreSQL, use `.merge()` in a [recipe update](mutations.md#expression-updates).
 
 !!! note "Changed in 0.15"
     Before 0.15, a `dict` or `list` field without `db_type` created a plain `json` column on PostgreSQL. Read [Derived JSON storage is JSONB on PostgreSQL](../howto/upgrade-guide.md#derived-json-storage-is-jsonb-on-postgresql) before you connect such a database with `migrate_updates`.
