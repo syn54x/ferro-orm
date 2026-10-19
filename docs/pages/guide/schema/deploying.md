@@ -201,6 +201,7 @@ Two different waits apply:
     ```
 
     `--lock-timeout` bounds the wait: `30s` (the default), `500ms`, `1m`, a number of seconds, or `0` to refuse at once. The lock dies with the process that holds it, never by a timeout, so a crashed run never leaves it stuck.
+
 - **The DDL lock timeout.** On Postgres, each statement waits for its table lock under the database's [`ddl_lock_timeout`](../../reference/configuration.md#ddl_lock_timeout) (default `5s`), so one statement queued behind a long query never queues every other query behind itself. A statement that times out is retried with its step from the first statement, each attempt a progress line. With `ddl_lock_timeout = "1s"` and another session holding `author`, a step that adds a column to it prints (Postgres only; the docs test runs this one when `FERRO_POSTGRES_URL` is set):
 
     <!-- output: ddl-lock-retry -->

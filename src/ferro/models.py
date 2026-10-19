@@ -730,7 +730,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
 
         Returns:
             A query over the matching rows; nothing runs until you await one
-            of its methods, such as [`all`][ferro.query.builder.Query.all].
+                of its methods, such as [`all`][ferro.query.builder.Query.all].
 
         Examples:
             ```python {test=run prelude=reference}
@@ -802,7 +802,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
 
         Returns:
             An object with this model's `create`, `get`, `where` and other
-            class methods, each running on `name`.
+                class methods, each running on `name`.
 
         Examples:
             ```python {test=run prelude=reference}

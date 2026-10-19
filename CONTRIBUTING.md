@@ -34,6 +34,7 @@ uv sync --group dev
 ```
 
 This installs every development dependency, including:
+
 - Testing tools (pytest, pytest-asyncio, pytest-cov)
 - Linting and formatting tools (ruff, prek)
 - Build tools (maturin)
@@ -51,6 +52,7 @@ uv run prek install --hook-type commit-msg
 ```
 
 These hooks:
+
 - Check for trailing whitespace
 - Fix end-of-file issues
 - Validate YAML, TOML, and JSON files
@@ -256,28 +258,29 @@ Ferro uses automated releases. You don't need to manually bump versions or updat
 ### How releases work
 
 1. **Commits are merged to main**
-   - Changelog is automatically updated with unreleased changes
+    - Changelog is automatically updated with unreleased changes
 
 2. **Maintainer triggers the release workflow**
 
-   The release process is fully automated. To trigger a new release:
+    The release process is fully automated. To trigger a new release:
 
-   - **Via GitHub CLI (Recommended):**
-     ```bash
-     gh workflow run release.yml
-     ```
-   - **Via GitHub Web UI:** Go to the **Actions** tab, select the **Release** workflow, and click **Run workflow**.
+    - **Via GitHub CLI (Recommended):**
+      ```bash
+      gh workflow run release.yml
+      ```
+    - **Via GitHub Web UI:** Go to the **Actions** tab, select the **Release** workflow, and click **Run workflow**.
 
-   This will:
-   - Automatically determine the next version from conventional commits.
-   - Update `pyproject.toml` and `Cargo.toml`.
-   - Finalize `CHANGELOG.md`.
-   - Create and push the Git tag.
-   - Trigger the **Build & Publish** workflow to upload wheels to PyPI.
+    This will:
+
+    - Automatically determine the next version from conventional commits.
+    - Update `pyproject.toml` and `Cargo.toml`.
+    - Finalize `CHANGELOG.md`.
+    - Create and push the Git tag.
+    - Trigger the **Build & Publish** workflow to upload wheels to PyPI.
 
 3. **Package is automatically published to PyPI**
-   - Cross-platform wheels are built
-   - Package is uploaded using trusted publishing
+    - Cross-platform wheels are built
+    - Package is uploaded using trusted publishing
 
 ### Version bumping
 

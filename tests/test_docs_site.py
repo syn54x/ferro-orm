@@ -22,7 +22,12 @@ below reads the HTML a reader would get:
 - the nav has six tabs holding every page once, each label equal to its
   page's title; every page has a one-sentence description and new pages are
   marked new; every moved page, and every anchor that moved, redirects to the
-  section that replaced it.
+  section that replaced it;
+- no page renders a literal Sphinx role, an unresolved cross-reference, a
+  list merged into a paragraph, a docstring section as prose or a section
+  table row that stops mid-sentence, and griffe reads every docstring without
+  a warning; a second build, of a page and a module seeded with each defect,
+  shows every check failing on it.
 """
 
 from __future__ import annotations
@@ -61,10 +66,11 @@ _CODE_BLOCK = re.compile(
 _TAG = re.compile(r"<[^>]+>")
 
 
-@pytest.fixture(scope="session")
-def built_site(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """Build the docs site with ``zensical build --strict``; return its root."""
-    project = tmp_path_factory.mktemp("docs-site")
+BUILD_LOG = "build.log"
+"""The build's output, written next to ``site/`` in the scratch project."""
+
+
+def _scratch_project(project: Path) -> Path:
     for name in COPIED:
         source, target = REPO_ROOT / name, project / name
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -76,13 +82,26 @@ def built_site(tmp_path_factory: pytest.TempPathFactory) -> Path:
         target = project / name
         target.parent.mkdir(parents=True, exist_ok=True)
         target.symlink_to(REPO_ROOT / name)
+    return project
+
+
+def _build(project: Path, *flags: str) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(
-        [sys.executable, "-m", "zensical", "build", "--clean", "--strict"],
+        [sys.executable, "-m", "zensical", "build", "--clean", *flags],
         cwd=project,
         capture_output=True,
         text=True,
         timeout=600,
     )
+    (project / BUILD_LOG).write_text(result.stdout + result.stderr, encoding="utf-8")
+    return result
+
+
+@pytest.fixture(scope="session")
+def built_site(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Build the docs site with ``zensical build --strict``; return its root."""
+    project = _scratch_project(tmp_path_factory.mktemp("docs-site"))
+    result = _build(project, "--strict")
     assert result.returncode == 0, (
         f"zensical build --strict failed\nstdout:\n{result.stdout}\n"
         f"stderr:\n{result.stderr}"
@@ -645,3 +664,225 @@ def test_moved_anchors_redirect_to_existing_sections(built_site: Path) -> None:
             assert f'id="{old_fragment}"' not in _page(
                 built_site, _url_path(old_page)
             ), f"{old} is a live section; redirecting it would hide it"
+
+
+# --- Markup that renders wrong ---
+
+_PRE = re.compile(r"<pre\b.*?</pre>", re.DOTALL)
+_INLINE_CODE = re.compile(r"<code\b[^>]*>.*?</code>", re.DOTALL)
+_PARAGRAPH = re.compile(r"<p>(.*?)</p>", re.DOTALL)
+_SPHINX_ROLE = re.compile(r":(?:py:)?(?:class|meth|func|attr|data|mod|exc|obj):(?=\S)")
+_LEFTOVER_REFERENCE = re.compile(r"\[[^\[\]]*\]\[[\w.:-]*\]")
+_LIST_ITEM_LINE = re.compile(r"^\s*(?:[-*+]|\d+\.)\s")
+_SECTION_HEADER_LINE = re.compile(
+    r"^\s*(?:Args|Arguments|Parameters|Attributes|Returns|Raises|Yields|Examples):\s*$"
+)
+_SECTION_TABLE = re.compile(
+    r'<span class="doc-section-title">(\w+):</span></p>\s*<table>(.*?)</table>',
+    re.DOTALL,
+)
+_SECTION_ROW = re.compile(r'<tr class="doc-section-item">(.*?)</tr>', re.DOTALL)
+_CELL = re.compile(r"<td[^>]*>(.*?)</td>", re.DOTALL)
+_SENTENCE_END = re.compile(r"[.?!]\)?$")
+_GRIFFE_WARNING = re.compile(r"^\s*griffe: .*$", re.MULTILINE)
+
+
+def _text(fragment: str) -> str:
+    return html.unescape(_TAG.sub("", fragment))
+
+
+def markup_defects(page_html: str) -> list[str]:
+    """Name each place a page renders Markdown or a docstring wrongly.
+
+    Code blocks are skipped and inline code is blanked, so an example that
+    shows ``x[0][1]`` or a Sphinx role on purpose is not a defect. Found:
+
+    - a literal Sphinx role (``:class:`Model```), which MkDocs never renders;
+    - a ``[text][target]`` left as text: a cross-reference nothing resolved;
+    - a paragraph holding a line that starts ``- `` or ``1. ``: a list with
+      no blank line before it, merged into the paragraph;
+    - a paragraph holding an ``Args:`` or ``Attributes:`` line: a docstring
+      section the parser did not recognise, rendered as prose;
+    - a ``Returns:``/``Attributes:``/... table row whose description stops
+      mid-sentence: a continuation line not indented, split into its own row.
+    """
+    defects = []
+    prose = _INLINE_CODE.sub("<code>C</code>", _PRE.sub("", page_html))
+    text = _text(prose)
+    defects += [f"Sphinx role {m.group()}" for m in _SPHINX_ROLE.finditer(text)]
+    defects += [
+        f"unresolved cross-reference {m.group()}"
+        for m in _LEFTOVER_REFERENCE.finditer(text)
+    ]
+    for paragraph in _PARAGRAPH.findall(prose):
+        if paragraph.startswith('<span class="doc-section-title">'):
+            continue
+        lines = _text(paragraph).splitlines()
+        if any(_LIST_ITEM_LINE.match(line) for line in lines[1:]):
+            defects.append(f"list merged into a paragraph: {lines[0]!r}")
+        defects += [
+            f"docstring section rendered as prose: {line.strip()!r}"
+            for line in lines
+            if _SECTION_HEADER_LINE.match(line)
+        ]
+    for title, table in _SECTION_TABLE.findall(page_html):
+        headers = re.findall(r"<th>(.*?)</th>", table)
+        if "Description" not in headers:
+            continue
+        column = headers.index("Description")
+        for row in _SECTION_ROW.findall(table):
+            description = " ".join(_text(_CELL.findall(row)[column]).split())
+            if not _SENTENCE_END.search(description):
+                defects.append(f"{title} row is a sentence fragment: {description!r}")
+    return defects
+
+
+def docstring_warnings(build_log: str) -> list[str]:
+    """Return griffe's warnings from a build's output.
+
+    A docstring item griffe cannot read (an ``Args:`` entry with no
+    ``name: description`` pair) is dropped from the page with only a
+    warning, and ``--strict`` does not fail on it.
+    """
+    return [match.group().strip() for match in _GRIFFE_WARNING.finditer(build_log)]
+
+
+def test_no_page_renders_markup_defects(built_site: Path) -> None:
+    defects = [
+        f"{url}: {defect}"
+        for url, page_html in rendered_pages(built_site)
+        for defect in markup_defects(page_html)
+    ]
+    assert not defects, "pages render markup wrongly:\n" + "\n".join(defects)
+
+
+def test_every_docstring_parses_without_a_warning(built_site: Path) -> None:
+    log = (built_site.parent / BUILD_LOG).read_text(encoding="utf-8")
+    assert docstring_warnings(log) == []
+
+
+SEEDED_MODULE = '''\
+"""A module seeded with one docstring defect per check."""
+
+
+def sphinx_role(value):
+    """Return a :class:`ferro.Model` for ``value``."""
+
+
+def unparsed_args(value):
+    """Return ``value``.
+
+    Args:
+    value the value, with no colon and no indent
+    """
+
+
+def unreadable_args(value):
+    """Return ``value``.
+
+    Args:
+        value the value, with no colon
+    """
+
+
+def split_returns():
+    """Return a value.
+
+    Returns:
+        A value whose description continues
+        on a second line that is not indented.
+    """
+
+
+class SplitAttributes:
+    """A class whose attribute description splits into two rows.
+
+    Attributes:
+        name: The name, whose description runs
+        on: to a second row.
+    """
+
+
+class DroppedAttributes:
+    """A class whose attributes section is not indented.
+
+    Attributes:
+    name the name
+    """
+
+
+def unresolved():
+    """Point at [`Nope`][ferro.Nope]."""
+'''
+
+SEEDED_PAGE = """\
+---
+description: "A page seeded with one Markdown defect per check."
+---
+
+# Seeded
+
+A dash list with no blank line before it:
+- one
+- two
+
+A numbered list with no blank line before it:
+1. first
+2. second
+
+::: seeded
+"""
+
+
+@pytest.fixture(scope="session")
+def seeded_site(tmp_path_factory: pytest.TempPathFactory) -> tuple[str, str]:
+    """Build the site with a seeded page and module; return its HTML and log.
+
+    The build is not strict: a strict build stops at the unresolved
+    reference before the other defects reach a page.
+    """
+    project = _scratch_project(tmp_path_factory.mktemp("seeded-site"))
+    (project / "seeded_src").mkdir()
+    (project / "seeded_src" / "seeded.py").write_text(SEEDED_MODULE, encoding="utf-8")
+    (project / "docs" / "pages" / "seeded.md").write_text(
+        SEEDED_PAGE, encoding="utf-8"
+    )
+    config = project / "zensical.toml"
+    text = config.read_text(encoding="utf-8")
+    assert '\npaths = ["src"]\n' in text
+    config.write_text(
+        text.replace('\npaths = ["src"]\n', '\npaths = ["src", "seeded_src"]\n'),
+        encoding="utf-8",
+    )
+    result = _build(project)
+    assert result.returncode == 0, result.stdout + result.stderr
+    page = _page(project / "site", "seeded")
+    return page, (project / BUILD_LOG).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    "expected",
+    [
+        "Sphinx role :class:",
+        "unresolved cross-reference [C][ferro.Nope]",
+        "list merged into a paragraph: 'A dash list with no blank line before it:'",
+        "list merged into a paragraph: "
+        "'A numbered list with no blank line before it:'",
+        "docstring section rendered as prose: 'Args:'",
+        "docstring section rendered as prose: 'Attributes:'",
+        "Returns row is a sentence fragment: 'A value whose description continues'",
+        "Attributes row is a sentence fragment: 'The name, whose description runs'",
+    ],
+)
+def test_seeded_markup_defect_is_caught(
+    seeded_site: tuple[str, str], expected: str
+) -> None:
+    page, _ = seeded_site
+    assert expected in markup_defects(page)
+
+
+def test_seeded_unreadable_docstring_item_is_caught(
+    seeded_site: tuple[str, str],
+) -> None:
+    _, log = seeded_site
+    assert any("seeded.py:" in warning for warning in docstring_warnings(log)), log
