@@ -1,3 +1,5 @@
+"""The attributes that read a relation from a model instance."""
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -20,15 +22,28 @@ def _instance_origin_outside_transaction(instance: object) -> str | None:
 
 
 class RelationshipDescriptor(BaseModel):
-    """Descriptor that returns either a Query object or a single object (for 1:1)."""
+    """The attribute behind a reverse (`BackRef`) or many-to-many relation.
+
+    On an instance, a to-many relation reads as a
+    [`Relation`][ferro.Relation] query over the related rows, and a
+    one-to-one reverse relation as an awaitable of the related instance or
+    `None`. See [Relationships](../guide/relationships.md).
+    """
 
     target_model_name: str
+    """The related model's name."""
     field_name: str
+    """The name of the related model's foreign key field that points back."""
     is_one_to_one: bool = False
+    """Whether at most one related row exists."""
     is_m2m: bool = False
+    """Whether the relation goes through a join table."""
     join_table: str | None = None
+    """The join table, for a many-to-many relation."""
     source_col: str | None = None
+    """The join table column that points at this model."""
     target_col: str | None = None
+    """The join table column that points at the related model."""
     _target_model: Model | None = None
 
     def __get__(self, instance, owner):
@@ -72,10 +87,17 @@ class RelationshipDescriptor(BaseModel):
 
 
 class ForwardDescriptor(BaseModel):
-    """Descriptor that handles lazy loading of a related object."""
+    """The attribute behind a foreign key relation, loaded when awaited.
+
+    On an instance, the relation reads as an awaitable of the related
+    instance, or `None` when the foreign key is empty. A query with
+    `include()` fills the relation in instead, as a plain attribute.
+    """
 
     target_model_name: str
+    """The related model's name."""
     field_name: str
+    """The relation's field name; its foreign key column is `<field_name>_id`."""
     _target_model: Model | None = None
 
     def __get__(self, instance, owner):

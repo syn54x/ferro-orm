@@ -1,3 +1,5 @@
+"""Relation resolution: binding each declared relation to its target model."""
+
 from typing import ForwardRef
 
 from .._shadow_fk_types import pk_python_type_for_model, reconcile_shadow_fk_types
@@ -44,12 +46,19 @@ def _join_table_rename_hints(
 
 
 def resolve_relationships():
-    """Finalize all pending relationships and cross-validate.
+    """Bind every declared relation to its target model and check the pair.
 
-    After binding each ``ForeignKey.to`` to a concrete model, upgrades shadow
-    ``{name}_id`` Pydantic annotations from the forward-ref fallback to the related
-    model's PK type where applicable, then ``model_rebuild``s affected classes before
-    the schema re-registration pass.
+    Ferro calls this on `connect()` and before creating tables. Each
+    foreign key's `<field>_id` column takes the type of the target's primary
+    key, and the affected models are rebuilt and registered again.
+
+    Raises:
+        RuntimeError: A relation names a model that is not defined, the
+            target has no field named by `related_name`, a many-to-many join
+            table's name is another model's table, or a model's schema fails
+            to rebuild.
+        TypeError: A model's declaration is invalid once its relations are
+            known.
     """
     # Drain (copy-and-clear) so that we don't process the same relations
     # multiple times if resolve_relationships is called again (e.g. in tests)
