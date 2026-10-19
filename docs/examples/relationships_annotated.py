@@ -1,9 +1,10 @@
 """Annotated-style companion to relationships.py (AGENTS.md I-7).
 
-Field options move into ``Annotated[...]``. The relationship declarations
-themselves are identical in both styles: forward FKs are always
+The roster's field options move into ``Annotated[...]``. The relationship
+declarations are the same in both styles: forward foreign keys are always
 ``Annotated[Target, ForeignKey(...)]`` and ``BackRef()``/``ManyToMany()``
-are always assignments.
+are always assignments. ``main()`` checks this declaration creates the same
+tables as the assignment one.
 """
 
 import asyncio
@@ -17,113 +18,76 @@ from ferro import (
     Model,
     Relation,
     connect,
+    create_tables,
     engines,
 )
 
 
-# --8<-- [start:one-to-many]
+# --8<-- [start:models]
 class Team(Model):
-    id: Annotated[int | None, Field(default=None, primary_key=True)]
+    id: Annotated[int | None, Field(primary_key=True)] = None
     name: str
-    members: Relation[list["Player"]] = BackRef()
+    players: Relation[list["Player"]] = BackRef()
+    titles: Relation[list["Tournament"]] = BackRef()
 
 
 class Player(Model):
-    id: Annotated[int | None, Field(default=None, primary_key=True)]
+    id: Annotated[int | None, Field(primary_key=True)] = None
     name: str
-    team: Annotated[Team, ForeignKey(related_name="members")]
-
-
-# --8<-- [end:one-to-many]
-
-
-# --8<-- [start:one-to-one]
-class User(Model):
-    id: Annotated[int | None, Field(default=None, primary_key=True)]
-    username: str
+    team: Annotated[Team, ForeignKey(related_name="players", index=True)]
+    mentor: Annotated[
+        "Player",
+        ForeignKey(related_name="mentees", nullable=True, on_delete="SET NULL"),
+    ] = None
+    mentees: Relation[list["Player"]] = BackRef()
     profile: "Profile" = BackRef()
+    tournaments: Relation[list["Tournament"]] = ManyToMany(related_name="players")
 
 
 class Profile(Model):
-    id: Annotated[int | None, Field(default=None, primary_key=True)]
+    id: Annotated[int | None, Field(primary_key=True)] = None
     bio: str
-    user: Annotated[User, ForeignKey(related_name="profile", unique=True)]
+    player: Annotated[Player, ForeignKey(related_name="profile", unique=True)]
 
 
-# --8<-- [end:one-to-one]
-
-
-# --8<-- [start:many-to-many]
-class Student(Model):
-    id: Annotated[int | None, Field(default=None, primary_key=True)]
+class Tournament(Model):
+    id: Annotated[int | None, Field(primary_key=True)] = None
     name: str
-    courses: Relation[list["Course"]] = ManyToMany(related_name="students")
-
-
-class Course(Model):
-    id: Annotated[int | None, Field(default=None, primary_key=True)]
-    title: str
-    students: Relation[list["Student"]] = BackRef()
-
-
-# --8<-- [end:many-to-many]
-
-
-# --8<-- [start:self-referential]
-class Employee(Model):
-    id: Annotated[int | None, Field(default=None, primary_key=True)]
-    name: str
-    manager: Annotated[
-        "Employee", ForeignKey(related_name="reports", nullable=True)
+    winner: Annotated[
+        Team | None, ForeignKey(related_name="titles", on_delete="SET NULL")
     ] = None
-    reports: Relation[list["Employee"]] = BackRef()
+    players: Relation[list[Player]] = BackRef()
 
 
-# --8<-- [end:self-referential]
-
-
-# --8<-- [start:on-delete]
-class Library(Model):
-    id: Annotated[int | None, Field(default=None, primary_key=True)]
-    name: str
-    documents: Relation[list["Document"]] = BackRef()
-
-
-class Document(Model):
-    id: Annotated[int | None, Field(default=None, primary_key=True)]
-    title: str
-    library: Annotated[
-        Library, ForeignKey(related_name="documents", on_delete="CASCADE")
-    ]
-
-
-# --8<-- [end:on-delete]
+# --8<-- [end:models]
 
 
 async def main() -> None:
-    await connect("sqlite::memory:", auto_migrate=True)
+    await connect("sqlite::memory:")
+    report = await create_tables()
+    assert [statement.subject for statement in report.statements] == [
+        "team",
+        "tournament",
+        "player",
+        "player",
+        "profile",
+        "profile",
+        "player_tournaments",
+        "player_tournaments",
+        "player_tournaments",
+    ]
 
     async with engines.session():
-        team = await Team.create(name="Rustaceans")
-        player = await Player.create(name="Ferris", team=team)
-        assert (await player.team).id == team.id
+        rustaceans = await Team.create(name="Rustaceans")
+        ferris = await Player.create(name="Ferris", team=rustaceans)
+        crabby = await Player.create(name="Crabby", team=rustaceans, mentor=ferris)
+        await Profile.create(bio="Plays in the front row", player=ferris)
+        spring = await Tournament.create(name="Spring Open")
+        await ferris.tournaments.add(spring)
 
-        user = await User.create(username="alice")
-        await Profile.create(bio="Pythonista", user=user)
-        assert (await user.profile).bio == "Pythonista"
-
-        sam = await Student.create(name="Sam")
-        rust101 = await Course.create(title="Rust 101")
-        await sam.courses.add(rust101)
-        assert len(await sam.courses.all()) == 1
-
-        boss = await Employee.create(name="Grace")
-        dev = await Employee.create(name="Linus", manager=boss)
-        assert (await dev.manager).name == "Grace"
-
-        lib = await Library.create(name="Main")
-        await Document.create(title="Charter", library=lib)
-        assert len(await lib.documents.all()) == 1
+        assert (await crabby.mentor).name == "Ferris"
+        assert (await ferris.profile).bio == "Plays in the front row"
+        assert [player.name for player in await spring.players.all()] == ["Ferris"]
 
     print("relationships_annotated example ran successfully")
 

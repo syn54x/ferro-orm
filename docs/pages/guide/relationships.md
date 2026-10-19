@@ -1,254 +1,225 @@
 # Relationships
 
-Ferro connects models with foreign keys, reverse lookups, and join tables the ORM creates.
+This guide shows how to link models with foreign keys: a player belongs to a team, a team lists its players, and players enter tournaments through a join table Ferro creates.
 
-## Overview
+Here is a whole program. It creates the tables, adds a team and a player, then reads the relation in both directions:
 
-Relationships are **lazy** — nothing is fetched until you ask for it:
+```python
+--8<-- "docs/examples/relationships.py:first"
+```
 
-- **Forward relations** (a `ForeignKey` field): `await post.author` performs one query and returns the related instance. A query can also deliver the relation already **populated** — `Post.select().include(lambda p: p.author)` makes `post.author` a plain attribute, no await, no extra query (see [Populated relations](#populated-relations)).
-- **Reverse relations** (a `BackRef` field): `author.posts` is a chainable query — filter, order, and slice it before awaiting a terminal.
+It prints:
 
-A forward `ForeignKey(related_name="x")` always pairs with a reverse field named `x` on the target model. The pairing is **required and checked at `connect()`** — a `ForeignKey` whose `related_name` has no matching `BackRef()` on the target raises at connect time.
+```text
+Rustaceans ['Ferris']
+```
 
-## One-to-Many
+`await ferris.team` runs one query and returns the `Team`. `rustaceans.players` is a query that runs when you call a terminal such as `.all()`. Every example on this page runs inside the session this program opens; see [Sessions](connections.md#sessions) for why and how to open one.
 
-The most common shape: a `ForeignKey` on the "child" model, declared as `Annotated` metadata, plus a `Relation[list[...]] = BackRef()` on the "parent":
+## The roster
+
+Every example on this page uses one roster. A team has players, a player may have a profile and a mentor, players enter tournaments, and a tournament may have a winning team:
 
 === "Assignment"
 
     ```python
-    --8<-- "docs/examples/relationships.py:one-to-many"
+    --8<-- "docs/examples/relationships.py:models"
     ```
 
 === "Annotated"
 
     ```python
-    --8<-- "docs/examples/relationships_annotated.py:one-to-many"
+    --8<-- "docs/examples/relationships_annotated.py:models"
     ```
 
+Each relation has two sides. The forward side is a [`ForeignKey`][ferro.ForeignKey] field on the model whose table holds the key column. The reverse side is a [`BackRef()`][ferro.BackRef] on the other model, named by the forward side's `related_name`. Ferro checks the pairing at `connect()`: a `related_name` with no matching `BackRef()` raises `RuntimeError` naming both models.
+
+`create_tables()` returns a report of every statement it ran. The sections below print parts of it, so you can see the tables each relation creates.
+
+## One-to-many
+
+`Player.team` is a `ForeignKey` to `Team`, and `Team.players` is its reverse side, a `Relation[list["Player"]]`. Add two more players, then read one team's roster in name order:
+
 ```python
---8<-- "docs/examples/relationships.py:one-to-many-usage"
+--8<-- "docs/examples/relationships.py:one-to-many"
 ```
 
-### Shadow FK columns
+Gordon plays for the Gophers, so the Rustaceans' roster is Corro and Ferris. `rustaceans.players` is a query, so you can filter, order and page it before you run it.
 
-For every `ForeignKey` field (e.g. `team`), Ferro creates a shadow scalar column and matching Pydantic field named `{field}_id` (e.g. `team_id`) holding the related row's primary key. Its Python type follows the target model's primary-key annotation. Read it or filter on it like any other column — `Player.where(lambda t: t.team_id == team.id)` — with no extra query.
+### Shadow foreign-key columns
 
-To filter or order by a column on the *related* model, a query lambda can traverse the relation itself (`Player.where(lambda player: player.team.name == "Rustaceans")`) — see [Querying Across Relationships](queries.md#querying-across-relationships).
+For each `ForeignKey` field, Ferro adds a column and a model field named after it with `_id` (`team_id` for `team`), holding the related row's primary key. Its Python type follows the target model's primary key. Read it or filter on it without loading the team:
+
+```python
+--8<-- "docs/examples/relationships.py:shadow-column"
+```
+
+`ferris.team_id` is already on the instance, and the count runs one query with no join. The `player` table shows the shadow columns and their constraints:
+
+```python
+--8<-- "docs/examples/relationships.py:player-ddl"
+```
+
+It prints, with line breaks added:
+
+```sql
+CREATE TABLE IF NOT EXISTS "player" (
+  "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT,
+  "mentor_id" integer,
+  "name" varchar NOT NULL,
+  "team_id" integer NOT NULL,
+  CONSTRAINT "fk_player_mentor_id_player" FOREIGN KEY ("mentor_id")
+    REFERENCES "player" ("id") ON DELETE SET NULL,
+  CONSTRAINT "fk_player_team_id_team" FOREIGN KEY ("team_id")
+    REFERENCES "team" ("id") ON DELETE CASCADE
+)
+CREATE INDEX IF NOT EXISTS "idx_player_team_id" ON "player" ("team_id")
+```
+
+Each foreign key becomes a constraint named `fk_<table>_<column>_<target table>`. `idx_player_team_id` comes from `index=True`; see [Indexing foreign keys](#indexing-foreign-keys). On PostgreSQL the statements are the same except the `id` column, which is `"id" serial PRIMARY KEY NOT NULL`.
+
+To filter or order by a column of the related model, a lambda can follow the relation, as in `Player.where(lambda player: player.team.name == "Rustaceans")`. [Querying across relationships](queries.md#querying-across-relationships) covers it.
 
 ### Populated relations
 
-Awaiting a forward relation in a loop is the classic N+1 pattern — each access is a query. When a query knows it will read a relation, ask for it up front with `include()` and the relation arrives **populated**: a plain attribute holding the complete related instance, fetched in the same single statement as the roots:
+Awaiting a forward relation in a loop runs one query per row. When a query will read a relation, ask for it with `include()`, and the related rows arrive in the same statement:
 
 ```python
---8<-- "docs/examples/populated_relations.py:basic"
+--8<-- "docs/examples/relationships.py:populated"
 ```
 
-A relation is populated only on instances an including query delivered (or refreshed); everywhere else the awaitable form above keeps working, unchanged. Nullable FKs populate truthfully — `transaction.account` is `None` (not a coroutine) when the row has no account. The full semantics — membership preservation, multi-hop paths, identity-map behavior, and the refresh rule — live in [Populating Relations with include()](queries.md#populating-relations-with-include).
+It prints:
 
-`include()` covers **forward** foreign keys only. Populating a `BackRef` collection or an M2M set is a separate future mechanism; until it lands, reverse relations stay chainable queries (`await author.posts.all()`).
+```text
+Corro | Rustaceans
+Ferris | Rustaceans
+Gordon | Gophers
+```
 
-## One-to-One
+`player.team` is now the `Team` instance itself: reading it needs no `await` and runs no query. `include()` covers forward foreign keys only; load a `BackRef` or many-to-many collection with `await rustaceans.players.all()`. [Populating relations with `include()`](queries.md#populating-relations-with-include) covers nullable relations, multi-hop paths and how long a relation stays populated.
 
-Add `unique=True` to the `ForeignKey` to enforce at most one child per parent. The reverse side is a plain (non-list) `BackRef` that resolves to a single instance:
+The [`ForeignKey`][ferro.ForeignKey], [`BackRef`][ferro.BackRef] and [`Relation`][ferro.Relation] reference lists every parameter.
 
-=== "Assignment"
+## One-to-one
 
-    ```python
-    --8<-- "docs/examples/relationships.py:one-to-one"
-    ```
-
-=== "Annotated"
-
-    ```python
-    --8<-- "docs/examples/relationships_annotated.py:one-to-one"
-    ```
+Add `unique=True` to a `ForeignKey` to allow at most one child per parent. `Profile.player` is unique, so its reverse side `Player.profile` is a `BackRef()` annotated with the single model, `"Profile"`, and awaiting it returns one instance or `None`:
 
 ```python
---8<-- "docs/examples/relationships.py:one-to-one-usage"
+--8<-- "docs/examples/relationships.py:one-to-one"
 ```
 
-`unique=True` implies an index on the shadow column (combining it with `index=True` is redundant and emits a `UserWarning`).
+Ferris's profile comes back as one `Profile`. Corro has none, so `await corro.profile` returns `None`. Ferro backs `unique=True` with a unique index on the shadow column, `uq_profile_player_id`, so a second profile for Ferris would fail. That index also serves lookups, so `index=True` next to `unique=True` is redundant, and Ferro warns with a `UserWarning` and ignores it.
 
-## Many-to-Many
+## Many-to-many
 
-Declare `ManyToMany(related_name=...)` on one side and a `BackRef()` collection on the other. Ferro synthesizes the join table automatically:
-
-=== "Assignment"
-
-    ```python
-    --8<-- "docs/examples/relationships.py:many-to-many"
-    ```
-
-=== "Annotated"
-
-    ```python
-    --8<-- "docs/examples/relationships_annotated.py:many-to-many"
-    ```
+Declare [`ManyToMany(related_name=...)`][ferro.ManyToMany] on one side and a `BackRef()` collection on the other. `Player.tournaments` and `Tournament.players` are the two sides. Enter players in tournaments, then read both directions:
 
 ```python
---8<-- "docs/examples/relationships.py:m2m-usage"
+--8<-- "docs/examples/relationships.py:many-to-many"
 ```
 
-Both sides expose the chainable query API plus the link mutators `add(*instances)`, `remove(*instances)`, and `clear()`.
+Ferris entered both tournaments, and the Spring Open has Ferris and Gordon. Both sides are queries with three link methods, `add(*instances)`, `remove(*instances)` and `clear()`:
 
-`ManyToMany` accepts:
+```python
+--8<-- "docs/examples/relationships.py:m2m-remove"
+```
+
+`remove()` drops one of Ferris's links and `clear()` drops the rest. The tournaments themselves stay, and so does Gordon's entry. `add()` and `remove()` read each instance's `id` attribute, so they work only when the related model's primary key is named `id`.
+
+### The join table
+
+Ferro creates the join table itself. It names the table after the side that declares `ManyToMany`, as `<table>_<field>`, here `player_tournaments`, with one `<table>_id` column for each side. Print its statements from the `create_tables()` report:
+
+```python
+--8<-- "docs/examples/relationships.py:join-table-ddl"
+```
+
+It prints, with line breaks added:
+
+```sql
+CREATE TABLE IF NOT EXISTS "player_tournaments" (
+  "player_id" integer NOT NULL,
+  "tournament_id" integer NOT NULL,
+  CONSTRAINT "fk_player_tournaments_player_id_player" FOREIGN KEY ("player_id")
+    REFERENCES "player" ("id") ON DELETE CASCADE,
+  CONSTRAINT "fk_player_tournaments_tournament_id_tournament" FOREIGN KEY ("tournament_id")
+    REFERENCES "tournament" ("id") ON DELETE CASCADE
+)
+CREATE INDEX IF NOT EXISTS "idx_player_tournaments_tournament_id_player_id"
+  ON "player_tournaments" ("tournament_id", "player_id")
+CREATE UNIQUE INDEX IF NOT EXISTS "uq_player_tournaments_player_id_tournament_id"
+  ON "player_tournaments" ("player_id", "tournament_id")
+```
+
+Both link columns cascade, so deleting a player or a tournament deletes its links. The unique index stores each link once, and the index on `(tournament_id, player_id)` serves lookups from the tournament side. The statements are the same on PostgreSQL.
+
+`ManyToMany` takes three parameters:
 
 | Parameter | Default | Description |
 | :--- | :--- | :--- |
-| `related_name` | required | Name of the reverse field on the related model. |
-| `through` | `None` | Explicit join-table name; auto-generated when omitted. |
-| `reverse_index` | `True` | Add a non-unique composite index on `(target_col, source_col)` in the join table so reverse queries also hit an index. Pass `False` to opt out on write-heavy join tables. |
+| `related_name` | required | Name of the `BackRef()` field on the related model. |
+| `through` | `None` | Join-table name; `<table>_<field>` when omitted. |
+| `reverse_index` | `True` | Adds the index on `(target_col, source_col)`, so lookups from the other side use an index. Pass `False` to skip it on a write-heavy join table. |
 
-The default join table gets a **composite unique** on its two foreign-key columns, so the same link can never be stored twice. `reverse_index` lives on the forward `ManyToMany(...)` declaration — passing it to `BackRef()` raises `TypeError`.
+`reverse_index` belongs on `ManyToMany(...)`; passing it to `BackRef()` raises `TypeError`. The [`ManyToMany` reference][ferro.ManyToMany] lists every parameter.
 
-## Self-Referential
+## Self-referential relations
 
-A model can reference itself — org charts, threaded comments, category trees. The forward reference must be the **quoted class name**, and because a string annotation cannot carry `| None`, nullability must be declared explicitly with `nullable=True`:
-
-=== "Assignment"
-
-    ```python
-    --8<-- "docs/examples/relationships.py:self-referential"
-    ```
-
-=== "Annotated"
-
-    ```python
-    --8<-- "docs/examples/relationships_annotated.py:self-referential"
-    ```
+A model can point at itself, for mentors, org charts, threads or category trees. `Player.mentor` is a `ForeignKey` to `Player`. A class cannot name itself in its own annotations, so the target is the string `"Player"`, and because that string cannot carry `| None`, `nullable=True` makes the column optional:
 
 ```python
---8<-- "docs/examples/relationships.py:self-referential-usage"
+--8<-- "docs/examples/relationships.py:self-referential"
 ```
 
-Without `nullable=True` the root of the tree (an `Employee` with no manager) could never be stored.
+Crabby's mentor is Ferris, and Ferris's mentees are Crabby. Ferris has no mentor, which the `mentor_id` column allows only because of `nullable=True`. Writing `"Player | None"` instead fails at `connect()` with `RuntimeError: Relationship resolution failed: 'Player | None' not found`.
 
-## Nullable Relationships
+## Nullable relations
 
-For an optional relation to *another* model, put the union **inside** `Annotated` and default the field to `None`:
+For an optional relation to another model, put `| None` inside `Annotated` and default the field to `None`. `Tournament.winner` is `Annotated[Team | None, ForeignKey(...)] = None`, so a tournament can exist before anyone wins it:
 
-=== "Assignment"
+```python
+--8<-- "docs/examples/relationships.py:nullable"
+```
 
-    ```python
-    from typing import Annotated
+The Autumn Cup has no winner, so its `winner_id` is `None`. Setting `winner_id` and saving records the Rustaceans' Spring Open win, and `rustaceans.titles` finds it. A relation field cannot be assigned on an instance (`spring.winner = rustaceans` raises `AttributeError`), so set the shadow column.
 
-    from ferro import BackRef, Field, ForeignKey, Model, Relation
+With the default `nullable="infer"`, the column's nullability follows the annotation. `on_delete="SET NULL"` needs a nullable column, so combining it with `nullable=False` raises `ValueError`.
 
+!!! note "Put `| None` inside `Annotated`"
+    Write `Annotated[Team | None, ForeignKey(...)] = None`. In the form `Annotated[Team, ForeignKey(...)] | None`, Ferro does not see the `ForeignKey`: it adds no `winner_id` column and no constraint, and raises no error.
 
-    class Category(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        name: str
-        products: Relation[list["Product"]] = BackRef()
+## Delete behavior
 
+`ForeignKey(on_delete=...)` decides what happens to child rows when their parent row is deleted:
 
-    class Product(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        name: str
-        category: Annotated[Category | None, ForeignKey(related_name="products")] = None
-    ```
-
-=== "Annotated"
-
-    ```python
-    from typing import Annotated
-
-    from ferro import BackRef, Field, ForeignKey, Model, Relation
-
-
-    class Category(Model):
-        id: Annotated[int | None, Field(default=None, primary_key=True)]
-        name: str
-        products: Relation[list["Product"]] = BackRef()
-
-
-    class Product(Model):
-        id: Annotated[int | None, Field(default=None, primary_key=True)]
-        name: str
-        category: Annotated[Category | None, ForeignKey(related_name="products")] = None
-    ```
-
-!!! warning "Union placement matters"
-    Write `Annotated[Category | None, ForeignKey(...)] = None` — the union goes **inside** `Annotated`. The form `Annotated[Category, ForeignKey(...)] | None` is not supported and will not produce a nullable foreign key.
-
-With the default `nullable="infer"`, Ferro derives column nullability from whether the relation annotation allows `None`. `on_delete="SET NULL"` also implies a nullable column (and explicitly combining it with `nullable=False` raises).
-
-## Delete Behavior
-
-`ForeignKey(on_delete=...)` controls what happens to child rows when their parent is deleted:
-
-| `on_delete` | Effect when the parent row is deleted |
+| `on_delete` | When the parent row is deleted |
 | :--- | :--- |
-| `"CASCADE"` (default) | Child rows are deleted too. |
-| `"RESTRICT"` | Deletion fails while child rows exist. |
-| `"SET NULL"` | The shadow FK column is set to `NULL` (requires a nullable relation). |
-| `"SET DEFAULT"` | The shadow FK column is reset to its column default. |
-| `"NO ACTION"` | The constraint is not enforced at delete time (backend semantics apply). |
+| `"CASCADE"` (default) | The child rows are deleted too. |
+| `"RESTRICT"` | The delete fails with `ForeignKeyViolationError` while child rows exist. |
+| `"SET NULL"` | The shadow column is set to `NULL`; the relation must be nullable. |
+| `"SET DEFAULT"` | The shadow column is reset to its column default. |
+| `"NO ACTION"` | Like `RESTRICT`, the delete fails while child rows exist; the database checks at the end of the statement rather than at once. |
 
-=== "Assignment"
+Delete the Rustaceans, and each rule in the roster runs:
 
-    ```python
-    --8<-- "docs/examples/relationships.py:on-delete"
-    ```
+```python
+--8<-- "docs/examples/relationships.py:on-delete"
+```
 
-=== "Annotated"
+Corro, Ferris and Crabby go with their team (`CASCADE` on `Player.team`), and Ferris's profile goes with Ferris (`CASCADE` on `Profile.player`). The Spring Open stays, with no winner (`SET NULL` on `Tournament.winner`). Gordon plays for the Gophers and stays. Had only Ferris been deleted, `SET NULL` on `Player.mentor` would have kept Crabby, with no mentor.
 
-    ```python
-    --8<-- "docs/examples/relationships_annotated.py:on-delete"
-    ```
+Because `CASCADE` is the default, deleting a parent removes its children unless you choose otherwise. Pick `RESTRICT` when deleting a parent that still has children would be a bug you want to surface.
 
-Because `CASCADE` is the default, deleting a parent silently removes its children unless you choose otherwise — pick `RESTRICT` when orphan deletion would be a bug you want surfaced.
+## Indexing foreign keys
 
-## Indexing Foreign Keys
+PostgreSQL does not index foreign-key columns on its own. For a foreign key on a busy query path, such as a tenant id that every list filters on, pass `index=True`. `Player.team` does, as `ForeignKey(related_name="players", index=True)`, and that is where `idx_player_team_id` in the [`player` table](#shadow-foreign-key-columns) comes from.
 
-PostgreSQL does not automatically index foreign-key columns. For FKs that appear in hot query paths (tenant IDs on every list endpoint, for instance), request a non-unique index on the shadow column with `index=True`:
+A one-to-one relation already has its unique index. For an index over several columns that starts with the foreign key, use [composite indexes](models-and-fields.md#composite-indexes).
 
-=== "Assignment"
+## See also
 
-    ```python
-    from typing import Annotated
-
-    from ferro import BackRef, Field, ForeignKey, Model, Relation
-
-
-    class Org(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        name: str
-        projects: Relation[list["Project"]] = BackRef()
-
-
-    class Project(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        name: str
-        org: Annotated[Org, ForeignKey(related_name="projects", index=True)]
-    ```
-
-=== "Annotated"
-
-    ```python
-    from typing import Annotated
-
-    from ferro import BackRef, Field, ForeignKey, Model, Relation
-
-
-    class Org(Model):
-        id: Annotated[int | None, Field(default=None, primary_key=True)]
-        name: str
-        projects: Relation[list["Project"]] = BackRef()
-
-
-    class Project(Model):
-        id: Annotated[int | None, Field(default=None, primary_key=True)]
-        name: str
-        org: Annotated[Org, ForeignKey(related_name="projects", index=True)]
-    ```
-
-One-to-one relations (`unique=True`) already get an index; for multi-column indexes that start with the FK column, use [composite indexes](models-and-fields.md#composite-indexes).
-
-## See Also
-
-- [Models & Fields](models-and-fields.md) — field declaration styles and constraints
-- [Queries](queries.md) — filtering on shadow FK columns, traversing relations, and reverse relations
-- [Mutations](mutations.md) — creating related records, cascade implications
-- [Schema Management](schema/overview.md) — how foreign keys and join tables reach the database, through auto-migrate, [migrations](schema/migrations.md) or the [Alembic bridge](schema/alembic.md)
+- [Relationships reference](../api/relationships.md): `ForeignKey`, `BackRef`, `ManyToMany` and `Relation`
+- [Models and fields](models-and-fields.md): field declaration styles and constraints
+- [Queries](queries.md): filtering on shadow columns, traversing relations and `include()`
+- [Mutations](mutations.md): creating related rows and what a delete cascades to
+- [Schema management](schema/overview.md): how foreign keys and join tables reach the database, through auto-migrate, [migrations](schema/migrations.md) or the [Alembic bridge](schema/alembic.md)
