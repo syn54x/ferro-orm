@@ -1,16 +1,13 @@
-"""Projected-record containers: ``Row`` and the list-like ``Rows`` (ADR-0007).
+"""The records a `select()` projection returns: [`Row`][ferro.query.Row] and [`Rows`][ferro.query.Rows].
 
-A projection (``Transaction.select(lambda t: (t.id, t.amount))``) returns
-projected records, never model instances — a model instance always carries a
-complete row (the complete-instance invariant). ``Row`` is one record;
-``Rows`` is the list-like container a projected query's ``all()`` delivers
-them in.
-
-Both are pydantic-shaped (``model_dump()``, FastAPI ``response_model``) but
-never pydantic-constructed: instances come off the same direct-to-dict
-hydration path as models (AGENTS.md I-2), and ``Rows`` wraps without
-re-validating. Pydantic is the interface, not the constructor.
+A projection returns records, never model instances, because a model
+instance always holds a complete row. Both types behave like Pydantic models
+for `model_dump()` and as a FastAPI `response_model`.
 """
+
+# Both are built without Pydantic validation: rows come off the same
+# direct-to-dict hydration path as model instances (AGENTS.md I-2), and
+# ``Rows`` wraps them without re-validating.
 
 from collections.abc import Iterator
 from typing import TypeVar, overload
@@ -18,52 +15,53 @@ from typing import TypeVar, overload
 from pydantic import BaseModel, ConfigDict, RootModel
 
 R = TypeVar("R")
+"""The record type a `Rows` list holds."""
 
 
 class Row(BaseModel):
-    """One projected record: named values from an explicit projection.
+    """One record from a `select()` projection: the selected fields, by name.
 
-    A ``Row`` is not a model instance. It carries no persistence identity —
-    no ``save()``, no refresh, no identity-map participation — and its field
-    set is whatever the projection selected, in selection order.
-
-    Fields live in pydantic's extra storage (``model_config`` is
-    ``extra="allow"``); the Rust hydration path populates them directly
-    (I-2), so construction never runs pydantic validation. Attribute access,
-    ``model_dump()``, ``model_dump_json()``, equality, and ``repr`` all work
-    as on any pydantic model:
+    A `Row` is not a model instance: it has no `save()` or `refresh()`, the
+    session does not track it, and its fields are the ones the projection
+    selected, in that order. Reading a field, `model_dump()`,
+    `model_dump_json()`, equality and `repr` work as on any Pydantic model.
+    See
+    [Selecting a column subset](../guide/queries.md#selecting-a-column-subset).
 
     Examples:
-        >>> rows = await Transaction.select(lambda t: (t.id, t.amount)).all()  # doctest: +SKIP
-        >>> rows[0].amount  # doctest: +SKIP
-        Decimal('12.50')
-        >>> rows[0].model_dump()  # doctest: +SKIP
-        {'id': 1, 'amount': Decimal('12.50')}
+        ```python {test=run prelude=reference}
+        rows = await Post.select(lambda post: (post.id, post.views)).order_by(lambda post: post.id).all()
+        assert rows[0].views == 1843
+        assert rows[0].model_dump() == {"id": 1, "views": 1843}
+        ```
     """
 
     model_config = ConfigDict(extra="allow")
+    """The selected fields are stored as Pydantic extra fields."""
 
 
 class Rows(RootModel[list[R]]):
-    """List-like pydantic container for projected records.
+    """The list of records a projected query's `all()` returns.
 
-    Delivered by a projected query's ``all()`` as ``Rows[Row]``. Indexing,
-    slicing, iteration, ``len()``, and truthiness work like a list; a slice
-    returns a ``Rows`` of the same record type. As a pydantic ``RootModel``
-    it drops straight into an API response: ``model_dump()`` yields
-    ``list[dict]`` and ``Rows[Row]`` works as a FastAPI ``response_model``.
+    It works like a list: indexing, slicing (which returns a `Rows`),
+    iteration, `len()` and truthiness. As a Pydantic `RootModel`,
+    `model_dump()` gives a list of dicts and `Rows[Row]` works as a FastAPI
+    `response_model`.
 
     Examples:
-        >>> len(rows), rows[0].id, [r.amount for r in rows]  # doctest: +SKIP
-        (3, 1, [Decimal('12.50'), Decimal('7.00'), Decimal('99.99')])
-        >>> rows[:2].model_dump()  # doctest: +SKIP
-        [{'id': 1, 'amount': Decimal('12.50')}, {'id': 2, 'amount': Decimal('7.00')}]
+        ```python {test=run prelude=reference}
+        rows = await Post.select(lambda post: (post.id, post.title)).order_by(lambda post: post.id).all()
+        assert len(rows) == 2
+        assert rows[:1].model_dump() == [{"id": 1, "title": "Notes on the Analytical Engine"}]
+        ```
     """
 
     def __len__(self) -> int:
+        """Count the records."""
         return len(self.root)
 
     def __iter__(self) -> Iterator[R]:  # type: ignore[override]  # ty: ignore[invalid-method-override]
+        """Iterate over the records."""
         # BaseModel.__iter__ yields (field, value) pairs; a Rows iterates its
         # records, like the list it stands in for.
         return iter(self.root)
@@ -75,16 +73,16 @@ class Rows(RootModel[list[R]]):
     def __getitem__(self, index: slice) -> "Rows[R]": ...
 
     def __getitem__(self, index: int | slice) -> "R | Rows[R]":
+        """Return one record, or a `Rows` of a slice."""
         if isinstance(index, slice):
             return self.__class__.model_construct(root=self.root[index])
         return self.root[index]
 
     @classmethod
     def _wrap(cls, records: list[R]) -> "Rows[R]":
-        """Wrap already-hydrated records WITHOUT validation (ADR-0007).
+        """Wrap already-hydrated records without validation.
 
-        The records come off the Rust hydration path; re-validating them here
-        would put pydantic back on the hot path that direct-to-dict
-        construction exists to avoid (I-2).
+        Re-validating would put Pydantic back on the hot path that
+        direct-to-dict construction avoids (AGENTS.md I-2).
         """
         return cls.model_construct(root=records)

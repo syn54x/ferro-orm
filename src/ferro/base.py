@@ -1,6 +1,7 @@
-"""Define field and relationship metadata primitives for Ferro models.
+"""Field and relation options that model annotations carry.
 
-This module provides lightweight configuration objects used by model annotations to describe column constraints and inter-model relationships.
+[`FerroField`][ferro.FerroField] holds a column's database options and
+[`ForeignKey`][ferro.ForeignKey] the owning side of a relation.
 """
 
 import warnings
@@ -13,9 +14,15 @@ from typing import (
 from ._annotation_utils import annotation_allows_none
 
 T = TypeVar("T")
+"""A type variable for generic helpers."""
 
 FerroNullable = Literal["infer"] | bool
-"""Alembic column nullability: ``'infer'`` from the field type, or forced bool."""
+"""Column nullability: `"infer"` follows the annotation, `True` or `False` forces it.
+
+With `"infer"`, a column is nullable when its annotation allows `None`.
+`True` and `False` force `NULL` and `NOT NULL` in every schema Ferro emits,
+whatever the annotation says.
+"""
 
 DbTypeToken = Literal[
     "text",
@@ -30,22 +37,41 @@ DbTypeToken = Literal[
     "json",
     "jsonb",
 ]
-"""Fixed canonical SQL storage tokens accepted by :func:`~ferro.Field` ``db_type=``."""
+"""SQL storage type names accepted by `db_type=` on [`Field`][ferro.Field].
+
+See [Overriding the column type with `db_type`](../guide/models-and-fields.md#overriding-the-column-type-with-db_type)
+for the types each name maps to on SQLite and Postgres.
+"""
 
 DbType = DbTypeToken | str
-"""Canonical ``db_type`` value: a :data:`DbTypeToken` or ``varchar(N)`` (see :func:`varchar`)."""
+"""A `db_type=` value: a [`DbTypeToken`][ferro.DbTypeToken] or a `varchar(N)` string.
+
+Build the `varchar(N)` form with [`varchar`][ferro.varchar].
+"""
 
 
 def varchar(length: int) -> str:
-    """Build the canonical ``varchar(N)`` token for :func:`~ferro.Field` ``db_type=``.
+    """Build the `varchar(N)` type name for `db_type=`.
 
-    Prefer this over a raw string so IDEs and type checkers see a deliberate
-    Ferro vocabulary choice. Runtime validation still applies at model
-    definition time.
+    A call to `varchar` reads as a deliberate type choice, where a raw
+    `"varchar(80)"` string could be a typo. Ferro still checks the value
+    against the field's annotation when the model class is defined.
+
+    Args:
+        length: The maximum length in characters. Must be positive.
+
+    Returns:
+        The type name, `"varchar(<length>)"`.
+
+    Raises:
+        ValueError: `length` is zero or negative.
 
     Examples:
-        >>> varchar(255)
-        'varchar(255)'
+        ```python {test=run prelude=reference}
+        from ferro import varchar
+
+        assert varchar(80) == "varchar(80)"
+        ```
     """
     if length <= 0:
         raise ValueError(f"varchar length must be positive, got {length}")
@@ -76,42 +102,30 @@ def _validate_retired(retired: bool, owner: str) -> bool:
 
 
 class FerroField:
-    """Store database column metadata for a model field
+    """Database options for one model field, given inside `Annotated[...]`.
 
-    Attributes:
-
-        primary_key: Mark the field as the table primary key.
-        autoincrement: Override automatic increment behavior for primary key columns.
-        unique: Enforce a **single-column** uniqueness constraint for this column only.
-            For uniqueness on multiple columns together, declare
-            ``__ferro_composite_uniques__`` on the :class:`ferro.models.Model` subclass
-            (see the models guide).
-        index: Request an index for the column.
-        nullable: Alembic ``Column.nullable`` when using :func:`~ferro.migrations.get_metadata`.
-            ``'infer'`` (default) uses whether the annotation allows ``None``.
-            ``False`` / ``True`` force NOT NULL / NULL regardless of the type (for
-            advanced cases such as ``int | None`` used only for static typing).
-        db_type: Optional canonical SQL-type override (:data:`DbType`). Use a
-            :data:`DbTypeToken` literal or :func:`varchar` for ``varchar(N)``.
-            Strict validation against the Python annotation runs at class-definition
-            time. Default ``None`` preserves today's behavior.
-        db_check: When ``True``, emit a DB-side ``CHECK`` constraint enforcing the
-            allowed values for closed-domain types (``enum.Enum`` subclasses).
-            Only valid in combination with ``db_type``; combining with default
-            native-enum storage is rejected as redundant. Default ``False``.
-        retired: When ``True``, the column is retired (ADR-0053): it leaves the
-            model (no attribute, no keyword, no statement the model issues names
-            it) and stays in the schema snapshot, nullable, until the
-            declaration is deleted in a later release. The annotation must
-            allow ``None``. Default ``False``.
+    [`Field`][ferro.Field] takes the same options and is the usual spelling.
+    `FerroField` carries only the database options, for an `Annotated`
+    declaration that keeps them apart from Pydantic's own `Field`. See
+    [Field options](../guide/models-and-fields.md#field-options) for each
+    option at work.
 
     Examples:
-        >>> from typing import Annotated
-        >>> from ferro.models import Model
-        >>>
-        >>> class User(Model):
-        ...     id: Annotated[int, FerroField(primary_key=True)]
-        ...     email: Annotated[str, FerroField(unique=True, index=True)]
+        ```python {test=run prelude=reference}
+        from typing import Annotated
+
+        from ferro import FerroField, Model, create_tables
+
+
+        class Tag(Model):
+            id: Annotated[int | None, FerroField(primary_key=True)] = None
+            label: Annotated[str, FerroField(unique=True, index=True)]
+
+
+        await create_tables()
+        tag = await Tag.create(label="history")
+        assert tag.id == 1
+        ```
     """
 
     def __init__(
@@ -126,69 +140,90 @@ class FerroField:
         renamed_from: str | None = None,
         retired: bool = False,
     ):
-        """Initialize field metadata options
+        """Declare the database options for a field.
 
         Args:
+            primary_key: Make the column the table's primary key.
+            autoincrement: Whether the database generates the key. Defaults to
+                `None`, which lets an integer primary key auto-increment.
+            unique: Add a unique constraint on this column alone. For
+                uniqueness across several columns, declare
+                `__ferro_composite_uniques__` on the model (see
+                [Composite uniques](../guide/models-and-fields.md#composite-uniques)).
+            index: Add an index on the column.
+            nullable: `"infer"` (the default) makes the column nullable when
+                the annotation allows `None`; `True` or `False` forces `NULL`
+                or `NOT NULL` whatever the annotation says.
+            db_type: The column's SQL type, overriding the one Ferro derives
+                from the annotation: a [`DbTypeToken`][ferro.DbTypeToken] or
+                a [`varchar(N)`][ferro.varchar] name. Defaults to `None`, the
+                derived type. A type the annotation cannot be stored as is
+                refused when the class is defined.
+            db_check: Add a `CHECK` constraint that limits the column to an
+                enum's values. Needs `db_type`, since the default native enum
+                type already enforces them. Defaults to `False`.
+            renamed_from: The column's previous name, so that
+                `ferro migrate new` renames the column instead of dropping
+                and adding it. See [Renames](../guide/schema/migrations.md#renames).
+            retired: Take the column out of the model while it stays in the
+                schema, nullable, until a later release deletes the
+                declaration. The annotation must allow `None`. Defaults to
+                `False`. See
+                [Retiring a column](../guide/schema/migrations.md#retiring-a-column).
 
-            primary_key: Set to True when the field is the primary key.
-            autoincrement: Control whether the database auto-increments the value.
-                When not provided, the backend infers a default for integer primary keys.
-            unique: Set to True to enforce **single-column** uniqueness only.
-            index: Set to True to create a database index.
-            nullable: See :class:`FerroField` attribute ``nullable`` in the class docstring.
-            renamed_from: The column's previous name. ``ferro migrate new``
-                renders ``RENAME COLUMN`` while the previous migration still
-                holds that name; afterwards the hint is inert and may stay or
-                be deleted (ADR-0032).
-            retired: Retire the column (ADR-0053); see the class docstring.
-
-        Examples:
-            >>> from typing import Annotated
-            >>> from ferro.models import Model
-            >>>
-            >>> class User(Model):
-            ...     id: Annotated[int, FerroField(primary_key=True)]
-            ...     created_at: Annotated[int, FerroField(index=True)]
+        Raises:
+            TypeError: `nullable`, `renamed_from` or `retired` has a value of
+                the wrong type.
         """
         self.primary_key = primary_key
+        """Whether the column is the table's primary key."""
         self.autoincrement = autoincrement
+        """Whether the database generates the key; `None` lets Ferro decide."""
         self.unique = unique
+        """Whether the column has a single-column unique constraint."""
         self.index = index
+        """Whether the column has an index."""
         self.nullable = _validate_nullable_option(nullable, "FerroField")
+        """`"infer"`, or a forced `True` or `False`."""
         self.db_type = db_type
+        """The SQL type override, or `None` for the derived type."""
         self.db_check = db_check
+        """Whether the column has a `CHECK` constraint on an enum's values."""
         self.renamed_from = _validate_renamed_from(renamed_from, "FerroField")
+        """The column's previous name, or `None`."""
         self.retired = _validate_retired(retired, "FerroField")
+        """Whether the column is retired from the model."""
 
 
 class ForeignKey:
-    """Describe a forward foreign-key relationship between models
+    """The owning side of a relation: a foreign key to another model.
 
-    Attributes:
+    Declare it as `Annotated[Target, ForeignKey(...)]`. The table gets a
+    `<field>_id` column holding the target's primary key, and the target
+    model reads the relation back through the [`BackRef`][ferro.BackRef]
+    that `related_name` names. The models these examples run against declare
+    the pair like this, other fields left out:
 
-        to: Target model class resolved during model binding.
-        related_name: Name of the reverse relationship attribute on the target model.
-        on_delete: Referential action applied when the parent row is deleted.
-        unique: Treat the relation as one-to-one when True.
-        index: Request a non-unique index on the shadow ``*_id`` column.
-        nullable: Alembic nullability for the shadow ``*_id`` column (see
-            :class:`FerroField` ``nullable``). When ``'infer'``, uses whether the
-            **relation** annotation allows ``None``.
-        retired: Retire the relation and its shadow ``*_id`` column
-            (ADR-0053): both leave the model, and the column stays in the schema
-            snapshot, nullable, with its foreign key, until the declaration is
-            deleted in a later release.
+    ```python
+    class Author(Model):
+        ...
+        posts: Relation[list["Post"]] = BackRef()
+
+
+    class Post(Model):
+        ...
+        author: Annotated[Author, ForeignKey(related_name="posts")]
+    ```
+
+    See [Relationships](../guide/relationships.md) for one-to-one, nullable
+    and self-referential relations.
 
     Examples:
-        >>> from typing import Annotated
-        >>> from ferro.models import Model
-        >>>
-        >>> class User(Model):
-        ...     id: Annotated[int, FerroField(primary_key=True)]
-        >>>
-        >>> class Post(Model):
-        ...     id: Annotated[int, FerroField(primary_key=True)]
-        ...     author: Annotated[int, ForeignKey("posts", on_delete="CASCADE")]
+        ```python {test=run prelude=reference}
+        post = await Post.where(lambda post: post.views > 1000).first()
+        author = await post.author
+        assert author.name == "Ada Lovelace"
+        ```
     """
 
     def __init__(
@@ -201,50 +236,55 @@ class ForeignKey:
         renamed_from: str | None = None,
         retired: bool = False,
     ):
-        """Initialize foreign-key relationship metadata
+        """Declare a foreign key to the model in the annotation.
 
         Args:
+            related_name: The name of the [`BackRef`][ferro.BackRef] on the
+                target model that reads this relation back. Required unless
+                `retired=True`.
+            on_delete: What the database does to this row when the target row
+                is deleted: `"CASCADE"` (the default), `"RESTRICT"`,
+                `"SET NULL"`, `"SET DEFAULT"` or `"NO ACTION"`.
+            unique: Make the relation one-to-one with a unique constraint on
+                the `<field>_id` column. The constraint indexes the column, so
+                `index=True` beside it is ignored with a `UserWarning`.
+            index: Add a non-unique index on the `<field>_id` column. Postgres
+                does not index a foreign key column on its own.
+            nullable: `"infer"` (the default) makes the `<field>_id` column
+                nullable when the relation's annotation allows `None` or
+                `on_delete` is `"SET NULL"`; `True` or `False` forces it.
+            renamed_from: The relation's previous field name. The
+                `<field>_id` column and its foreign key constraint are renamed
+                with it (`writer` to `author` renames `writer_id` to
+                `author_id`). See [Renames](../guide/schema/migrations.md#renames).
+            retired: Take the relation and its `<field>_id` column out of the
+                model while the column and its foreign key stay in the schema,
+                nullable, until a later release deletes the declaration.
+                Defaults to `False`. See
+                [Retiring a column](../guide/schema/migrations.md#retiring-a-column).
 
-            related_name: Name for reverse access from the related model.
-                Required unless ``retired=True``: a retired relation has no
-                reverse access.
-            on_delete: Referential action for parent deletion.
-                Common values include "CASCADE", "RESTRICT", "SET NULL", "SET DEFAULT", and "NO ACTION".
-            unique: Set to True to enforce one-to-one behavior. Implies an
-                index, so combining ``unique=True`` with ``index=True`` is
-                redundant; ``index=True`` will be ignored and a ``UserWarning``
-                will be raised.
-            index: Set to True to create a non-unique index on the shadow
-                ``*_id`` column. Useful for tenant FKs queried on every list
-                endpoint where Postgres does not auto-index the FK column.
-            nullable: See :class:`ForeignKey` class docstring.
-            renamed_from: The relation field's previous name. Its shadow
-                ``<field>_id`` column is renamed with it (``press`` →
-                ``house`` renames ``press_id`` to ``house_id``), together with
-                its ``fk_`` constraint (ADR-0032).
-            retired: Retire the relation (ADR-0053); see the class docstring.
-
-        Examples:
-            >>> from typing import Annotated
-            >>> from ferro import BackRef, ForeignKey, Relation
-            >>> from ferro.models import Model
-            >>>
-            >>> class Org(Model):
-            ...     id: Annotated[int, FerroField(primary_key=True)]
-            ...     projects: Relation[list["Project"]] = BackRef()
-            >>>
-            >>> class Project(Model):
-            ...     id: Annotated[int, FerroField(primary_key=True)]
-            ...     org: Annotated[Org, ForeignKey("projects", index=True)]
+        Raises:
+            TypeError: `related_name` is missing on a relation that is not
+                retired, or an option has a value of the wrong type.
+            ValueError: `on_delete="SET NULL"` with `nullable=False`; the
+                database could not set the column to `NULL`.
         """
         self.to = None  # Resolved later
+        """The target model class, set once Ferro resolves the relation."""
         self.related_name = related_name
+        """The name of the reverse relation on the target model."""
         self.on_delete = on_delete
+        """The referential action when the target row is deleted."""
         self.unique = unique
+        """Whether the relation is one-to-one."""
         self.index = index
+        """Whether the `<field>_id` column has a non-unique index."""
         self.nullable = _validate_nullable_option(nullable, "ForeignKey")
+        """`"infer"`, or a forced `True` or `False`."""
         self.renamed_from = _validate_renamed_from(renamed_from, "ForeignKey")
+        """The relation's previous field name, or `None`."""
         self.retired = _validate_retired(retired, "ForeignKey")
+        """Whether the relation is retired from the model."""
         if related_name is None and not self.retired:
             raise TypeError(
                 "ForeignKey requires related_name, the BackRef on the target "
@@ -263,13 +303,23 @@ class ForeignKey:
                 stacklevel=2,
             )
             self.index = False
-        #: First type argument of ``Annotated[..., ForeignKey]``; set by the metaclass
-        #: for Alembic nullability inference (forward fields are not in ``model_fields``).
+        # Set by the metaclass: forward fields are not in ``model_fields``, so
+        # nullability inference reads the relation's annotation from here.
         self.relation_annotation: Any | None = None
+        """The relation's annotation, set when the model class is defined."""
 
 
 def foreign_key_allows_none(metadata: "ForeignKey") -> bool | None:
-    """Effective FK nullability from explicit override, delete action, and relation type."""
+    """Decide whether a foreign key's `<field>_id` column is nullable.
+
+    Args:
+        metadata: The relation's foreign key options.
+
+    Returns:
+        `True` or `False` when `nullable` forces it or `on_delete` is
+        `"SET NULL"`; otherwise whether the relation's annotation allows
+        `None`, or `None` when the annotation is not known yet.
+    """
     if metadata.nullable is True:
         return True
     if metadata.nullable is False:
@@ -283,24 +333,11 @@ def foreign_key_allows_none(metadata: "ForeignKey") -> bool | None:
 
 
 class ManyToManyRelation:
-    """Describe internal metadata for a many-to-many relationship
+    """The options of a many-to-many relation, as Ferro stores them on the model.
 
-    Attributes:
-
-        to: Target model class resolved during model binding.
-        related_name: Name of the reverse relationship attribute on the target model.
-        through: Optional join table name used for the association.
-
-    Examples:
-        >>> from typing import Annotated
-        >>> from ferro.models import Model
-        >>>
-        >>> class Tag(Model):
-        ...     id: Annotated[int, FerroField(primary_key=True)]
-        >>>
-        >>> class Post(Model):
-        ...     id: Annotated[int, FerroField(primary_key=True)]
-        ...     tags: Relation[list["Tag"]] = ManyToMany(related_name="posts")
+    Declare the relation with [`ManyToMany`][ferro.ManyToMany], which builds
+    this object; see
+    [Many-to-many](../guide/relationships.md#many-to-many).
     """
 
     def __init__(
@@ -309,27 +346,22 @@ class ManyToManyRelation:
         through: str | None = None,
         reverse_index: bool = True,
     ):
-        """Initialize many-to-many relationship metadata
+        """Store the options of a many-to-many relation.
 
         Args:
-
-            related_name: Name for reverse access from the related model.
-            through: Explicit join table name.
-                When omitted, Ferro generates a join table name automatically.
-            reverse_index: When True (default), the synthesized join table
-                gets a non-unique composite index on ``(target_col, source_col)``
-                to optimize back-ref queries. Set to False to opt out (e.g.,
-                write-heavy join tables where the extra index cost is unwanted).
-
-        Examples:
-            >>> from typing import Annotated
-            >>> from ferro.models import Model
-            >>>
-            >>> class User(Model):
-            ...     id: Annotated[int, FerroField(primary_key=True)]
-            ...     teams: Relation[list["Team"]] = ManyToMany(related_name="members", through="team_members")
+            related_name: The name of the relation on the target model that
+                reads this one back.
+            through: The join table's name. Defaults to `None`, a name Ferro
+                derives from the two models.
+            reverse_index: Add an index on the join table's
+                `(target, source)` columns for queries from the other side.
+                Defaults to `True`; turn it off for a write-heavy join table.
         """
         self.to = None  # Resolved later
+        """The target model class, set once Ferro resolves the relation."""
         self.related_name = related_name
+        """The name of the reverse relation on the target model."""
         self.through = through
+        """The join table's name, or `None` for the derived one."""
         self.reverse_index = reverse_index
+        """Whether the join table has an index for reverse queries."""

@@ -122,17 +122,39 @@ def evict_instance(
     using: str | None = None,
     session: "Session | None" = None,
 ) -> None:
-    """Remove one instance from the active scope's identity map.
+    """Remove one instance from the session's identity map.
 
-    ``model`` is a model class, its qualified identity, or an unambiguous
-    bare class name (ambiguity raises with the candidates listed).
+    Within a session, fetching a row you already hold returns the same
+    object. After an eviction, the next fetch of that row builds a new
+    instance and leaves the one you hold detached. A re-fetch already
+    refreshes a held instance in place, so evict only when you want a second,
+    separate object. See
+    [Eviction and invalidation](../concepts/identity-map.md#eviction-and-invalidation).
 
-    Public wrapper around the FFI `evict_instance` (FF-D D3): resolves the
-    route once via `resolve_operation_scope`, then passes it through. Model
-    instance methods (`save`/`delete`/`refresh`) call the FFI symbol
-    directly with their already-resolved route instead of going through this
-    wrapper, so a route is never resolved twice for one operation.
+    Args:
+        model: The model class, or its name when the name is unambiguous.
+        pk: The instance's primary key, as a string.
+        using: The named connection whose map to evict from. Defaults to
+            `None`, the session's connection.
+        session: The session whose map to evict from. Defaults to `None`, the
+            session opened by the enclosing `async with engines.session():`.
+
+    Raises:
+        RuntimeError: No session, `using=` or transaction gives the call a
+            database route.
+
+    Examples:
+        ```python {test=run prelude=reference}
+        from ferro import evict_instance
+
+        ada = await Author.get(1)
+        evict_instance(Author, "1")
+        fresh = await Author.get(1)
+        assert fresh is not ada
+        ```
     """
+    # The instance methods call the core's evict with the route they already
+    # resolved; this wrapper resolves it once here.
     from .registry import REGISTRY
 
     model_cls = REGISTRY.resolve_reference(model) if isinstance(model, str) else model
@@ -147,34 +169,60 @@ async def transaction(
     session: "Session | None" = None,
     immediate: bool = False,
 ):
-    """Run database operations inside a transaction context.
+    """Run the operations in the block in one database transaction.
 
-    Yields a :class:`~ferro.raw.Transaction` handle bound to this transaction's
-    connection. The handle exposes ``execute`` / ``fetch_all`` / ``fetch_one``
-    for raw SQL on the same connection — useful for setting Postgres GUCs,
-    advisory locks, and any one-off statement that doesn't fit a Model.
+    The transaction commits when the block exits and rolls back when it
+    raises. A `transaction()` inside another one opens a savepoint. The
+    yielded [`Transaction`][ferro.Transaction] handle runs raw SQL on the
+    transaction's connection, for statements no model covers, such as
+    setting a Postgres setting or taking an advisory lock. See
+    [Transactions](../guide/transactions.md).
 
-    ``immediate=True`` opens a SQLite transaction with ``BEGIN IMMEDIATE``:
-    it holds the database's write lock from the start, so a transaction that
-    reads and then writes never fails with ``SQLITE_BUSY`` upgrading its
-    lock (another writer waits on the busy timeout instead). On Postgres it
-    is a plain ``BEGIN`` and changes nothing; a nested transaction (a
-    savepoint) ignores it.
+    Args:
+        using: The named connection to open the transaction on. Defaults to
+            `None`, the session's connection.
+        session: The session to open the transaction in. Defaults to `None`,
+            the session opened by the enclosing `async with engines.session():`.
+        immediate: On SQLite, open with `BEGIN IMMEDIATE`, which takes the
+            write lock at once, so a transaction that reads and then writes
+            never fails with `SQLITE_BUSY` while upgrading its lock. Postgres
+            and nested transactions ignore it. Defaults to `False`.
+
+    Yields:
+        tx (ferro.Transaction): A handle with `execute`, `fetch_all` and
+            `fetch_one` for raw SQL on the transaction's connection.
+
+    Raises:
+        RuntimeError: No session, `using=` or transaction gives the call a
+            database route.
 
     Examples:
-        >>> async with transaction() as tx:
-        ...     user = await User.create(name="Taylor")
-        ...     await tx.execute(
-        ...         "select set_config('request.jwt.claims', $1, true)",
-        ...         claims_json,
-        ...     )
+        A failure inside the block rolls back every write in it:
 
-    Existing callers that don't bind the yielded value continue to work; the
-    handle is simply discarded::
+        ```python {test=run prelude=reference}
+        from ferro import transaction
 
-        >>> async with transaction():
-        ...     user = await User.create(name="Taylor")
-        ...     await user.save()
+        try:
+            async with transaction():
+                await Author.create(name="Mary Somerville", email="mary@example.com")
+                raise RuntimeError("abandon the import")
+        except RuntimeError:
+            pass
+
+        assert await Author.where(lambda author: author.name == "Mary Somerville").count() == 0
+        ```
+
+        The handle runs raw SQL in the same transaction:
+
+        ```python {test=run prelude=reference}
+        from ferro import transaction
+
+        async with transaction() as tx:
+            await Author.create(name="Mary Somerville", email="mary@example.com")
+            row = await tx.fetch_one("SELECT count(*) AS total FROM author")
+
+        assert row == {"total": 3}
+        ```
     """
     from .raw import Transaction
 
@@ -207,54 +255,32 @@ async def transaction(
 
 
 class Model(BaseModel, metaclass=ModelMetaclass):
-    """Provide the base class for all Ferro models
+    """The base class of every Ferro model: a Pydantic model backed by a table.
 
-    Inheriting from this class provisionally registers schema metadata in Python
-    caches and exposes high-performance CRUD and query entrypoints. The Rust
-    runtime is populated on first ``connect()`` via bulk install (#246).
+    A subclass declares its columns as annotated fields, and its table is
+    created on [`connect`][ferro.connect] with `auto_migrate=True`. Every
+    database call runs inside a session, opened with
+    `async with engines.session():`, and the examples on this page run in
+    one. See [Models and fields](../guide/models-and-fields.md) to declare a
+    model and [Connections](../guide/connections.md#sessions-recommended) for
+    sessions.
 
-    **Composite unique constraints:** declare a ``typing.ClassVar`` named
-    ``__ferro_composite_uniques__`` as a tuple of tuples of column names
-    (for example ``(("user_id", "org_id"),)``) to enforce uniqueness on those
-    columns together. This is separate from per-column uniqueness
-    (``Field(unique=True)`` on the field, ``Annotated[..., Field(unique=True)]``,
-    or ``Annotated[..., FerroField(unique=True)]``), each of which applies to a
-    single column only. Default many-to-many join tables get a
-    composite unique on their two foreign-key columns automatically.
-
-    **Composite indexes:** declare a ``typing.ClassVar`` named
-    ``__ferro_composite_indexes__`` as a tuple of tuples of column names
-    (for example ``(("user_id", "created_at"),)``) for non-unique multi-column
-    indexes. Validation rules mirror ``__ferro_composite_uniques__``: each
-    inner tuple must contain at least two columns, columns must exist on the
-    model, and order is preserved (matters for leftmost-prefix optimization).
-    For single-column indexes use ``Field(index=True)``. Default many-to-many
-    join tables get a non-unique reverse-direction composite index
-    automatically; opt out with ``ManyToMany(reverse_index=False)``.
-
-    **Table checks:** declare a ``typing.ClassVar`` named ``__ferro_checks__``
-    as a tuple of :class:`~ferro.checks.Check` objects — each a name suffix
-    plus a ferro predicate lambda over this model's own columns, e.g.
-    ``(Check("at_most_one_outflow", lambda transfer: (transfer.outflow_transaction
-    == None) | (transfer.outflow_activity == None)),)``. The live constraint is
-    ``ck_<table>_<suffix>``, emitted inline in ``CREATE TABLE`` on both backends
-    (ADR-0012, ADR-0014). For a single-column closed-domain CHECK use
-    ``Field(db_check=True)`` instead.
-
-    **Row security:** declare a ``typing.ClassVar`` named ``__ferro_rls__`` as a
-    :class:`~ferro.rowsecurity.RowSecurity` container of
-    :class:`~ferro.rowsecurity.RowPolicy` objects, e.g.
-    ``RowSecurity(RowPolicy(column="tenant_id", setting="app.tenant_id"))``.
-    A table created with it on gets ``ENABLE``/``FORCE ROW LEVEL SECURITY`` and
-    its ``rls_<table>_<name>`` policies, so PostgreSQL — not application
-    discipline — decides which rows a query can see. Row-level security is a
-    Postgres-only schema object: on SQLite the model registers and the table is
-    created, with a warning and no policies.
+    A model declares table-wide constraints in class attributes:
+    `__ferro_composite_uniques__` and `__ferro_composite_indexes__` (see
+    [Composite constraints](../guide/models-and-fields.md#composite-constraints)),
+    `__ferro_checks__` (see
+    [Table checks](../guide/models-and-fields.md#table-checks)) and
+    `__ferro_rls__` (see [Using with Postgres RLS](../guide/row-level-security.md)).
 
     Examples:
-        >>> class User(Model):
-        ...     id: int | None = None
-        ...     name: str
+        ```python {test=run prelude=reference}
+        mary = await Author.create(name="Mary Somerville", email="mary@example.com")
+        fetched = await Author.get(mary.id)
+        assert fetched is mary
+        ```
+
+        Within a session, fetching a row you already hold returns the same
+        object.
     """
 
     __ferro_composite_uniques__: ClassVar[tuple[tuple[str, ...], ...]] = ()
@@ -291,17 +317,18 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         use_attribute_docstrings=True,
         arbitrary_types_allowed=True,
     )
+    """Pydantic settings shared by every model; a subclass may extend them."""
 
     def __init__(self, **data: Any):
-        """Initialize a model instance and normalize relationship inputs
+        """Build an instance in memory, without saving it.
 
         Args:
-            **data: Field values used to construct the model.
+            **data: The field values. A relation field takes the related
+                instance or its primary key.
 
-        Examples:
-            >>> user = User(name="Taylor")
-            >>> isinstance(user, User)
-            True
+        Raises:
+            TypeError: A value names a retired field.
+            ValueError: A related instance's model has no primary key.
         """
         retired = self.__class__.__ferro_retired_names__
         if retired and not retired.isdisjoint(data):
@@ -372,67 +399,67 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         only: set[str] | frozenset[str] | list[str] | tuple[str, ...] | None = None,
         exclude: set[str] | frozenset[str] | list[str] | tuple[str, ...] | None = None,
     ) -> None:
-        """Persist the current model instance.
+        """Write the instance to its row: insert it when new, update it otherwise.
 
-        A transient instance (constructed with ``Model(...)`` and never saved)
-        is INSERTed — a duplicate primary key or unique value raises
-        :class:`~ferro.exceptions.UniqueViolationError`. A persistent instance
-        (fetched from the database, or previously saved) is UPDATEd by primary
-        key. Pass ``on_conflict="update"`` for insert-or-update semantics
-        regardless of persistence state (the primitive behind
-        :meth:`upsert`).
-
-        On a persisted UPDATE, ``only=`` is an explicit column allowlist
-        and ``exclude=`` is the complementary denylist:
-        ``await row.save(only={"messages", "updated_at"})`` writes those
-        columns' current in-memory values (including ``None`` → NULL);
-        ``await row.save(exclude={"turns"})`` writes every persisted
-        column except the denylist. The primary key may appear in either
-        set and is never SET. ``exclude=set()`` is a full write.
-        Passing both ``only=`` and ``exclude=`` raises. The instance is
-        not refreshed; omitted in-memory fields may diverge from the row.
-        Mixins that assign ``updated_at`` then call ``super().save(**kwargs)``
-        forward the write-set without expanding it. ``only=`` / ``exclude=``
-        are rejected on INSERT and on ``on_conflict="update"``. Use
-        :meth:`Query.update` for set-oriented or expression writes.
-
-        Note that ``model_copy()`` copies persistence state: saving a copy of
-        a persisted instance updates the same row. The UPDATE targets the
-        instance's *current* primary-key value, so mutating the PK of a
-        persisted instance before ``save()`` matches no row and raises. A row
-        inserted inside a rolled-back transaction leaves the instance marked
-        persisted; a later ``save()`` raises ``ModelDoesNotExist``.
+        An instance you built and never saved is inserted. One fetched from
+        the database, or saved before, updates its row by primary key, and
+        `only=` or `exclude=` limit that update to some columns. For an
+        update across many rows, use [`Query.update`][ferro.query.builder.Query.update].
+        See [Saving: INSERT or UPDATE](../guide/mutations.md#saving-insert-or-update).
 
         Args:
-            using: Connection name override.
-            session: Session scope for the operation.
-            on_conflict: ``None`` (default) or ``"update"`` to upsert.
-            only: Persisted-UPDATE column allowlist (``set`` / ``frozenset``
-                / ``list`` / ``tuple`` of column names). ``None`` writes
-                every column (unless ``exclude=`` is set).
-            exclude: Persisted-UPDATE column denylist (same containers as
-                ``only=``). ``exclude=set()`` is a full write.
+            using: The named connection to write on. Defaults to `None`, the
+                session's connection, or the one the instance was loaded from.
+            session: The session to run in. Defaults to `None`, the session
+                opened by the enclosing `async with engines.session():`.
+            on_conflict: `"update"` inserts the row or, when its primary key
+                already exists, updates it, whether or not the instance was
+                saved before. Defaults to `None`, a plain insert or update.
+            only: On an update, the columns to write, as a set, list or
+                tuple of field names. Defaults to `None`, every column.
+            exclude: On an update, the columns not to write. Defaults to
+                `None`; `exclude=set()` writes every column.
 
         Raises:
-            UniqueViolationError: A duplicate primary key or unique value on
-                INSERT.
-            ModelDoesNotExist: The row behind a persisted instance no longer
-                exists (deleted underneath, or the PK was mutated).
-            TypeError: ``only=`` or ``exclude=`` is a bare ``str`` or
-                ``bytes``.
-            ValueError: ``on_conflict`` is not ``None`` or ``"update"``, a
-                persisted instance has no primary-key value, ``only=`` or
-                ``exclude=`` is used on INSERT / upsert, both write-sets
-                are passed, the write-set is empty after stripping the PK,
-                or a name is unknown / a relation.
+            UniqueViolationError: An insert repeats a primary key or unique
+                value.
+            ModelDoesNotExist: The row behind a saved instance no longer
+                exists, or its primary key was changed in memory.
+            TypeError: `only` or `exclude` is a bare string.
+            ValueError: `on_conflict` is neither `None` nor `"update"`; `only`
+                or `exclude` is given on an insert or with `on_conflict`, both
+                are given, or one names an unknown field or a relation; or a
+                saved instance has no primary key value.
+
+        Note:
+            The instance is not reloaded after a partial update, so a field
+            left out of `only` keeps its value in memory even if the row
+            differs. A copy made with `model_copy()` updates the same row as
+            the original. An instance inserted in a transaction that rolled
+            back still counts as saved, so its next `save()` raises
+            `ModelDoesNotExist`.
 
         Examples:
-            >>> user = User(name="Taylor")
-            >>> await user.save()
-            >>> row.messages = msgs
-            >>> row.updated_at = utcnow()
-            >>> await row.save(only={"messages", "updated_at"})
-            >>> await row.save(exclude={"turns"})
+            Saving a new instance inserts it:
+
+            ```python {test=run prelude=reference}
+            mary = Author(name="Mary Somerville", email="mary@example.com")
+            await mary.save()
+            assert mary.id == 3
+            ```
+
+            Saving a fetched instance with `only=` updates just those columns:
+
+            ```python {test=run prelude=reference}
+            post = await Post.get(2)
+            post.views = 1000
+            post.title = "Not written to the row"
+            await post.save(only={"views"})
+
+            rows = await Post.select("title", "views").where(lambda post: post.id == 2).all()
+            assert rows[0].title == "The Education of a Computer"
+            assert rows[0].views == 1000
+            ```
         """
         if on_conflict not in (None, "update"):
             raise ValueError(
@@ -517,15 +544,28 @@ class Model(BaseModel, metaclass=ModelMetaclass):
     async def delete(
         self, *, using: str | None = None, session: "Session | None" = None
     ) -> None:
-        """Delete the current model instance from storage
+        """Delete the instance's row.
 
-        Returns:
-            None
+        The instance stays in memory and counts as new again: saving it
+        inserts a new row. An instance without a primary key value has no
+        row, and the call does nothing.
+
+        Args:
+            using: The named connection to delete on. Defaults to `None`, the
+                session's connection, or the one the instance was loaded from.
+            session: The session to run in. Defaults to `None`, the session
+                opened by the enclosing `async with engines.session():`.
+
+        Raises:
+            ValueError: `using` names a different connection from the one the
+                instance was loaded from.
 
         Examples:
-            >>> user = await User.get_or_none(1)
-            >>> if user:
-            ...     await user.delete()
+            ```python {test=run prelude=reference}
+            post = await Post.get(2)
+            await post.delete()
+            assert await Post.get_or_none(2) is None
+            ```
         """
         pk_field_name = self.__class__.__ferro_pk__
         pk_val = getattr(self, pk_field_name) if pk_field_name is not None else None
@@ -545,37 +585,48 @@ class Model(BaseModel, metaclass=ModelMetaclass):
     async def all(
         cls, *, using: str | None = None, session: "Session | None" = None
     ) -> list[Self]:
-        """Fetch all records for this model class
+        """Fetch every row of the model's table.
+
+        Args:
+            using: The named connection to read from. Defaults to `None`, the
+                session's connection.
+            session: The session to run in. Defaults to `None`, the session
+                opened by the enclosing `async with engines.session():`.
 
         Returns:
-            A list of hydrated model instances.
+            One instance per row, in the order the database returns them.
 
         Examples:
-            >>> users = await User.all()
-            >>> isinstance(users, list)
-            True
+            ```python {test=run prelude=reference}
+            authors = await Author.all()
+            assert sorted(author.name for author in authors) == ["Ada Lovelace", "Grace Hopper"]
+            ```
         """
         route = await _transaction_or_using(using, session)
         return await fetch_all(cls, route)
 
     @classmethod
     async def get(cls, pk: Any, *, session: "Session | None" = None) -> Self:
-        """Fetch one record by primary key value.
+        """Fetch one record by primary key.
 
         Args:
-            pk: Primary key value to fetch a single record.
+            pk: The primary key value to look up.
+            session: The session to run in. Defaults to `None`, the session
+                opened by the enclosing `async with engines.session():`.
 
         Returns:
-            The matching model instance.
+            The record whose primary key is `pk`.
 
         Raises:
-            ModelDoesNotExist: When no row exists for this primary key. Use
-                :meth:`get_or_none` if you need optional lookup without raising.
+            ModelDoesNotExist: No row has that key. Use
+                [`get_or_none`][ferro.Model.get_or_none] to get `None` instead.
+            RuntimeError: The model declares no primary key.
 
         Examples:
-            >>> user = await User.get(1)
-            >>> isinstance(user, User)
-            True
+            ```python {test=run prelude=reference}
+            author = await Author.get(1)
+            assert author.name == "Ada Lovelace"
+            ```
         """
         instance = await cls.get_or_none(pk, session=session)
         if instance is None:
@@ -586,13 +637,23 @@ class Model(BaseModel, metaclass=ModelMetaclass):
     async def get_or_none(
         cls, pk: Any, *, session: "Session | None" = None
     ) -> Self | None:
-        """Fetch one record by primary key, or return None if no row exists.
+        """Fetch one record by primary key, or `None` when no row has it.
 
         Args:
-            pk: Primary key value to fetch a single record.
+            pk: The primary key value to look up.
+            session: The session to run in. Defaults to `None`, the session
+                opened by the enclosing `async with engines.session():`.
 
         Returns:
-            The matching model instance, or None when no record exists.
+            The record whose primary key is `pk`, or `None`.
+
+        Raises:
+            RuntimeError: The model declares no primary key.
+
+        Examples:
+            ```python {test=run prelude=reference}
+            assert await Author.get_or_none(99) is None
+            ```
         """
         pk_field_name = cls.__ferro_pk__
         if pk_field_name is None:
@@ -603,17 +664,28 @@ class Model(BaseModel, metaclass=ModelMetaclass):
     async def refresh(
         self, *, using: str | None = None, session: "Session | None" = None
     ) -> None:
-        """Reload this instance from storage using its primary key
+        """Reload the instance's fields from its row, in place.
 
-        Returns:
-            None
+        A change made in memory and not saved is lost. See
+        [Refreshing from the database](../guide/mutations.md#refreshing-from-the-database).
+
+        Args:
+            using: The named connection to read from. Defaults to `None`, the
+                session's connection, or the one the instance was loaded from.
+            session: The session to run in. Defaults to `None`, the session
+                opened by the enclosing `async with engines.session():`.
 
         Raises:
-            RuntimeError: If no primary key is available or the record no longer exists.
+            RuntimeError: The instance has no primary key value, or its row no
+                longer exists.
 
         Examples:
-            >>> user = await User.get(1)
-            >>> await user.refresh()
+            ```python {test=run prelude=reference}
+            post = await Post.get(1)
+            post.views = 0
+            await post.refresh()
+            assert post.views == 1843
+            ```
         """
         pk_field_name = self.__class__.__ferro_pk__
         pk_val = getattr(self, pk_field_name) if pk_field_name is not None else None
@@ -642,30 +714,28 @@ class Model(BaseModel, metaclass=ModelMetaclass):
     def where(
         cls, predicate: "Predicate[Self]", *, session: "Session | None" = None
     ) -> Query[Self]:
-        """Start a fluent query with an initial condition.
+        """Start a query filtered by a lambda predicate.
 
-        ``predicate`` is a lambda of shape
-        ``Callable[[QueryProxy[Self]], QueryNode]``, e.g.
-        ``User.where(lambda user: user.age >= 18)``. The lambda receives a
-        :class:`QueryProxy` whose attributes build comparisons as
-        :class:`QueryNode` instances, so predicates type-check cleanly.
-        Name the parameter after the model in lowercase singular (``user`` for
-        ``User``, ``post`` for ``Post``). Column names are validated at build
-        time against the model's declared fields (plus shadow ``{fk}_id``
-        columns).
+        The lambda receives a stand-in for one row; comparing its fields
+        builds the SQL condition. Name the parameter after the model, in
+        lowercase. A field name the model does not declare raises when the
+        query is built. See [Queries](../guide/queries.md#filtering-with-where).
 
         Args:
-            predicate: A callable that takes a :class:`QueryProxy` and
-                returns a :class:`QueryNode`.
+            predicate: A lambda that takes the row stand-in and returns a
+                condition, such as `lambda post: post.views > 1000`.
+            session: The session the query runs in. Defaults to `None`, the
+                session opened by the enclosing `async with engines.session():`.
 
         Returns:
-            A query object scoped to this model class.
+            A query over the matching rows; nothing runs until you await one
+            of its methods, such as [`all`][ferro.query.builder.Query.all].
 
         Examples:
-            >>> q1 = User.where(lambda user: user.archived == False)  # noqa: E712
-            >>> q2 = User.where(lambda user: user.id == 1)
-            >>> isinstance(q1, Query) and isinstance(q2, Query)
-            True
+            ```python {test=run prelude=reference}
+            popular = await Post.where(lambda post: post.views > 1000).all()
+            assert [post.title for post in popular] == ["Notes on the Analytical Engine"]
+            ```
         """
         return Query(cls, session=session).where(predicate)
 
@@ -691,56 +761,87 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         *selectors: "RowSelector[Self] | str",
         session: "Session | None" = None,
     ) -> "Query[Self] | ProjectedQuery[Self]":
-        """Start a fluent query, optionally projected to a column subset.
+        """Start a query, of whole records or of some columns.
 
-        Bare ``select()`` starts a full query of complete model instances
-        (unchanged). With a lambda selector —
-        ``select(lambda t: (t.id, t.amount))``, or the single-field form
-        ``select(lambda t: t.amount)`` — the query is a projection: its
-        results are :class:`~ferro.query.Row` records in the list-like
-        :class:`~ferro.query.Rows` container, never model instances
-        (ADR-0007). Column-name strings (``select("id", "amount")``) follow
-        ``order_by``'s string contract: root columns only, never mixed with
-        a lambda. Both forms validate at build time with did-you-mean.
+        With no argument, the query returns model instances. With a lambda
+        that picks fields, or with column names, it returns
+        [`Row`][ferro.query.Row] records holding only those columns. See
+        [Selecting a column subset](../guide/queries.md#selecting-a-column-subset).
+
+        Args:
+            *selectors: Nothing; one lambda returning a field, a tuple of
+                fields or a dict naming them; or column names as strings.
+            session: The session the query runs in. Defaults to `None`, the
+                session opened by the enclosing `async with engines.session():`.
 
         Returns:
-            A query object scoped to this model class; projected when a
-            selector is given.
+            A [`Query`][ferro.query.builder.Query] with no selector, otherwise a
+                [`ProjectedQuery`][ferro.query.builder.ProjectedQuery].
+
+        Raises:
+            TypeError: The selectors mix a lambda with column names, or are
+                not a lambda or strings.
+            ValueError: A selector names a field the model does not have.
 
         Examples:
-            >>> query = User.select().limit(5)
-            >>> isinstance(query, Query)
-            True
-            >>> rows = await Transaction.select(lambda t: (t.id, t.amount)).all()  # doctest: +SKIP
+            ```python {test=run prelude=reference}
+            rows = await Post.select(lambda post: (post.title, post.views)).order_by(lambda post: post.id).all()
+            assert rows[0].title == "Notes on the Analytical Engine"
+            assert rows[0].views == 1843
+            ```
         """
         return Query(cls, session=session).select(*selectors)
 
     @classmethod
     def using(cls, name: str) -> "ModelConnection[Self]":
-        """Bind ORM operations for this model to a named connection."""
+        """Run this model's operations on a named connection.
+
+        Args:
+            name: The connection's name, as given to `connect(..., name=...)`.
+
+        Returns:
+            An object with this model's `create`, `get`, `where` and other
+            class methods, each running on `name`.
+
+        Examples:
+            ```python {test=run prelude=reference}
+            from ferro import connect, engines
+
+            await connect("sqlite::memory:", name="archive", auto_migrate=True)
+            async with engines.session("archive"):
+                await Author.using("archive").create(name="Mary Somerville", email="mary@example.com")
+                archived = await Author.using("archive").all()
+
+            assert [author.name for author in archived] == ["Mary Somerville"]
+            ```
+        """
         return ModelConnection(cls, name)
 
     @classmethod
     async def create(cls, *, session: "Session | None" = None, **fields: Any) -> Self:
-        """Create and persist a new model instance
+        """Insert a new record and return it.
 
-        ``create()`` is a plain INSERT: it never updates an existing row.
+        `create` always inserts; use [`upsert`][ferro.Model.upsert] to update
+        a row whose primary key exists.
 
         Args:
-            **fields: Field values to construct the model.
+            session: The session to run in. Defaults to `None`, the session
+                opened by the enclosing `async with engines.session():`.
+            **fields: The field values. A relation field takes the related
+                instance or its primary key.
 
         Returns:
-            The newly created and persisted model instance.
+            The saved instance, with a generated primary key filled in.
 
         Raises:
             UniqueViolationError: A row with the same primary key or unique
-                value already exists — use :meth:`upsert` for
-                insert-or-update semantics.
+                value exists.
 
         Examples:
-            >>> user = await User.create(name="Taylor")
-            >>> isinstance(user, User)
-            True
+            ```python {test=run prelude=reference}
+            mary = await Author.create(name="Mary Somerville", email="mary@example.com")
+            assert mary.id == 3
+            ```
         """
         instance = cls(**fields)
         await instance.save(session=session)
@@ -748,22 +849,24 @@ class Model(BaseModel, metaclass=ModelMetaclass):
 
     @classmethod
     async def upsert(cls, *, session: "Session | None" = None, **fields: Any) -> Self:
-        """Insert the row, or update the existing row on primary-key conflict.
+        """Insert a record, or update the row that has its primary key.
 
-        Equivalent to ``cls(**fields).save(on_conflict="update")``. With an
-        autoincrement primary key left unset there is no conflict target, so
-        this degrades to a plain INSERT.
+        Without a primary key value, an auto-increment key has nothing to
+        conflict on and the record is inserted.
 
         Args:
-            **fields: Field values to construct the model.
+            session: The session to run in. Defaults to `None`, the session
+                opened by the enclosing `async with engines.session():`.
+            **fields: The field values, including the primary key.
 
         Returns:
-            The persisted model instance.
+            The saved instance.
 
         Examples:
-            >>> user = await User.upsert(id=1, name="Taylor")
-            >>> isinstance(user, User)
-            True
+            ```python {test=run prelude=reference}
+            await Author.upsert(id=1, name="Ada King", email="ada@example.com")
+            assert (await Author.get(1)).name == "Ada King"
+            ```
         """
         instance = cls(**fields)
         await instance.save(session=session, on_conflict="update")
@@ -777,24 +880,33 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         using: str | None = None,
         session: "Session | None" = None,
     ) -> int:
-        """Persist multiple instances in a single bulk operation
+        """Insert many new records in one call.
 
-        Batch size is unbounded: batches larger than the backend's
-        bind-parameter limit allows in one statement are split internally.
-        The call is atomic either way — inside an ambient ``transaction()``
-        that transaction is the atomicity boundary; a bare call is
-        all-or-nothing (a failure on any row inserts none).
+        Every record is inserted or none is. Ferro splits a batch too large
+        for one statement into several, inside the same all-or-nothing
+        boundary. See
+        [Bulk operations and the identity map](../guide/mutations.md#bulk-operations-and-the-identity-map).
 
         Args:
-            instances: Model instances to persist.
+            instances: The instances to insert.
+            using: The named connection to write on. Defaults to `None`, the
+                session's connection.
+            session: The session to run in. Defaults to `None`, the session
+                opened by the enclosing `async with engines.session():`.
 
         Returns:
-            The number of records inserted.
+            The number of rows inserted.
 
         Examples:
-            >>> rows = await User.bulk_create([User(name="A"), User(name="B")])
-            >>> isinstance(rows, int)
-            True
+            ```python {test=run prelude=reference}
+            inserted = await Author.bulk_create(
+                [
+                    Author(name="Mary Somerville", email="mary@example.com"),
+                    Author(name="Hedy Lamarr", email="hedy@example.com"),
+                ]
+            )
+            assert inserted == 2
+            ```
         """
         if not instances:
             return 0
@@ -810,19 +922,30 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         session: "Session | None" = None,
         **fields: Any,
     ) -> tuple[Self, bool]:
-        """Fetch a record by filters or create one when missing
+        """Fetch the first record whose fields match, or create it.
 
         Args:
-            defaults: Values applied only when creating a new record.
-            **fields: Exact-match filters used for lookup.
+            defaults: Extra field values used only when creating. Defaults to
+                `None`.
+            session: The session to run in. Defaults to `None`, the session
+                opened by the enclosing `async with engines.session():`.
+            **fields: The values to match exactly, also used when creating.
 
         Returns:
-            A tuple of ``(instance, created)`` where ``created`` is True for new records.
+            The record, and `True` when it was created or `False` when it
+                was found.
 
         Examples:
-            >>> user, created = await User.get_or_create(email="a@b.com")
-            >>> isinstance(created, bool)
-            True
+            ```python {test=run prelude=reference}
+            author, created = await Author.get_or_create(
+                email="mary@example.com", defaults={"name": "Mary Somerville"}
+            )
+            assert created is True
+
+            again, created = await Author.get_or_create(email="mary@example.com")
+            assert created is False
+            assert again is author
+            ```
         """
         query = Query(cls, session=session)
         for key, val in fields.items():
@@ -843,14 +966,27 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         session: "Session | None" = None,
         **fields: Any,
     ) -> tuple[Self, bool]:
-        """Update a matched record or create one when missing
+        """Update the first record whose fields match, or create it.
 
         Args:
-            defaults: Values applied on update or create paths.
-            **fields: Exact-match filters used for lookup.
+            defaults: The field values to write, on the found record or the
+                new one. Defaults to `None`.
+            session: The session to run in. Defaults to `None`, the session
+                opened by the enclosing `async with engines.session():`.
+            **fields: The values to match exactly, also used when creating.
 
         Returns:
-            A tuple of ``(instance, created)`` where ``created`` is True for new records.
+            The record, and `True` when it was created or `False` when it
+                was updated.
+
+        Examples:
+            ```python {test=run prelude=reference}
+            author, created = await Author.update_or_create(
+                email="ada@example.com", defaults={"name": "Ada King"}
+            )
+            assert created is False
+            assert author.name == "Ada King"
+            ```
         """
         query = Query(cls, session=session)
         for key, val in fields.items():
@@ -868,50 +1004,111 @@ class Model(BaseModel, metaclass=ModelMetaclass):
 
 
 class ModelConnection[M: Model]:
-    """Connection-bound ORM entrypoint returned by ``Model.using(name)``.
+    """A model's class methods bound to one named connection.
 
-    Generic over the concrete model class so that every accessor preserves
-    the bound type — e.g. ``Transcript.using("service").get(pk)`` resolves
-    to ``Transcript`` rather than ``Model``.
+    [`Model.using`][ferro.Model.using] returns one. Each method behaves like
+    the model's class method of the same name and runs on the bound
+    connection.
     """
 
     def __init__(self, model_cls: type[M], connection_name: str) -> None:
+        """Bind a model class to a connection.
+
+        Args:
+            model_cls: The model class.
+            connection_name: The name of the connection to run on.
+        """
         self.model_cls: type[M] = model_cls
+        """The bound model class."""
         self._connection_name: str = connection_name
 
     async def create(self, **fields: Any) -> M:
-        """Create and persist a new instance on this connection.
+        """Insert a new record on the connection and return it.
 
-        A plain INSERT — a duplicate primary key or unique value raises
-        :class:`~ferro.exceptions.UniqueViolationError`; use :meth:`upsert`
-        for insert-or-update semantics.
+        Args:
+            **fields: The field values.
+
+        Returns:
+            The saved instance.
+
+        Raises:
+            UniqueViolationError: A row with the same primary key or unique
+                value exists.
         """
         instance = self.model_cls(**fields)
         await instance.save(using=self._connection_name)
         return instance
 
     async def upsert(self, **fields: Any) -> M:
-        """Insert the row on this connection, or update it on PK conflict."""
+        """Insert a record on the connection, or update the row with its primary key.
+
+        Args:
+            **fields: The field values, including the primary key.
+
+        Returns:
+            The saved instance.
+        """
         instance = self.model_cls(**fields)
         await instance.save(using=self._connection_name, on_conflict="update")
         return instance
 
     async def all(self) -> list[M]:
+        """Fetch every row of the model's table on the connection.
+
+        Returns:
+            One instance per row.
+        """
         return await self.model_cls.all(using=self._connection_name)
 
     def select(self) -> Query[M]:
+        """Start a query of whole records on the connection.
+
+        Returns:
+            A query over every row.
+        """
         return Query(self.model_cls, using=self._connection_name)
 
     def where(self, predicate: "Predicate[M]") -> Query[M]:
+        """Start a query on the connection, filtered by a lambda predicate.
+
+        Args:
+            predicate: A lambda that takes the row stand-in and returns a
+                condition.
+
+        Returns:
+            A query over the matching rows.
+        """
         return self.select().where(predicate)
 
     async def get(self, pk: Any) -> M:
+        """Fetch one record by primary key on the connection.
+
+        Args:
+            pk: The primary key value to look up.
+
+        Returns:
+            The record whose primary key is `pk`.
+
+        Raises:
+            ModelDoesNotExist: No row has that key.
+        """
         instance = await self.get_or_none(pk)
         if instance is None:
             raise ModelDoesNotExist(self.model_cls, pk)
         return instance
 
     async def get_or_none(self, pk: Any) -> M | None:
+        """Fetch one record by primary key on the connection, or `None`.
+
+        Args:
+            pk: The primary key value to look up.
+
+        Returns:
+            The record whose primary key is `pk`, or `None`.
+
+        Raises:
+            RuntimeError: The model declares no primary key.
+        """
         pk_field_name = self.model_cls.__ferro_pk__
         if pk_field_name is None:
             raise RuntimeError(
@@ -921,11 +1118,29 @@ class ModelConnection[M: Model]:
         return await self.where(_field_eq(pk_field_name, pk)).first()
 
     async def bulk_create(self, instances: list[M]) -> int:
+        """Insert many new records on the connection in one call.
+
+        Args:
+            instances: The instances to insert.
+
+        Returns:
+            The number of rows inserted.
+        """
         return await self.model_cls.bulk_create(instances, using=self._connection_name)
 
     async def get_or_create(
         self, defaults: dict[str, Any] | None = None, **fields: Any
     ) -> tuple[M, bool]:
+        """Fetch the first matching record on the connection, or create it.
+
+        Args:
+            defaults: Extra field values used only when creating. Defaults to
+                `None`.
+            **fields: The values to match exactly, also used when creating.
+
+        Returns:
+            The record, and whether it was created.
+        """
         query = Query(self.model_cls, using=self._connection_name)
         for key, val in fields.items():
             query = query.where(_field_eq(key, val))
@@ -940,6 +1155,16 @@ class ModelConnection[M: Model]:
     async def update_or_create(
         self, defaults: dict[str, Any] | None = None, **fields: Any
     ) -> tuple[M, bool]:
+        """Update the first matching record on the connection, or create it.
+
+        Args:
+            defaults: The field values to write, on the found record or the
+                new one. Defaults to `None`.
+            **fields: The values to match exactly, also used when creating.
+
+        Returns:
+            The record, and whether it was created.
+        """
         query = Query(self.model_cls, using=self._connection_name)
         for key, val in fields.items():
             query = query.where(_field_eq(key, val))
