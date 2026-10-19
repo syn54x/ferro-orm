@@ -35,10 +35,7 @@ import ferro.migrations
 async def start(database_url: str) -> None:
     await ferro.connect(database_url)
     try:
-        # A file the previous release built matches 0001 and is recorded; a
-        # brand-new, empty file matches nothing and stays unrecorded, and
-        # up() creates it.
-        await ferro.migrations.baseline(target="0001")
+        await ferro.migrations.baseline(target="0001")  # the previous release's schema
     except ferro.migrations.AlreadyTrackedError:
         pass  # already tracked: an earlier start, or another instance, got here first
     await ferro.migrations.up()

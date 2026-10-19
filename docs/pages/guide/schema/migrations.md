@@ -111,10 +111,14 @@ The SQL is exactly what the auto-migrate passes run for the same change; Postgre
 
 ```sql
 -- 0001_create_author/01_schema.up.postgres.sql
-CREATE TABLE IF NOT EXISTS "author" ( "id" serial PRIMARY KEY NOT NULL, "name" varchar NOT NULL );
+CREATE TABLE IF NOT EXISTS "author" ( "email" varchar NOT NULL, "id" serial PRIMARY KEY NOT NULL, "name" varchar NOT NULL );
+
+CREATE UNIQUE INDEX IF NOT EXISTS "uq_author_email" ON "author" ("email");
 
 -- 0001_create_author/01_schema.up.sqlite.sql
-CREATE TABLE IF NOT EXISTS "author" ( "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "name" varchar NOT NULL );
+CREATE TABLE IF NOT EXISTS "author" ( "email" varchar NOT NULL, "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "name" varchar NOT NULL );
+
+CREATE UNIQUE INDEX IF NOT EXISTS "uq_author_email" ON "author" ("email");
 
 -- 0001_create_author/01_schema.down.postgres.sql
 DROP TABLE "author";
@@ -199,6 +203,8 @@ With a hint, it writes a rename and every row keeps its value. A hint says what 
 -- 0002_rename_writer/01_schema.up.postgres.sql
 ALTER TABLE "author" RENAME TO "writer";
 
+DO $$ DECLARE seq regclass := pg_get_serial_sequence('"writer"', 'id')::regclass; holder regclass; kind text; BEGIN IF seq IS NOT NULL AND (SELECT relname FROM pg_class WHERE oid = seq) <> 'writer_id_seq' THEN SELECT c.oid, CASE c.relkind WHEN 'S' THEN 'sequence' WHEN 'r' THEN 'table' WHEN 'p' THEN 'table' WHEN 'i' THEN 'index' WHEN 'I' THEN 'index' WHEN 'v' THEN 'view' WHEN 'm' THEN 'materialized view' ELSE 'relation' END INTO holder, kind FROM pg_class c WHERE c.relname = 'writer_id_seq' AND c.relnamespace = (SELECT relnamespace FROM pg_class WHERE oid = seq); IF holder IS NOT NULL THEN RAISE EXCEPTION USING ERRCODE = 'duplicate_table', MESSAGE = format('Cannot rename sequence %s, owned by %s, to %I, the name a table created as %s gives it: %s %s already holds that name. Rename or drop that %s, then run the change again.', seq, '"writer"."id"', 'writer_id_seq', '"writer"', kind, holder, kind); END IF; EXECUTE format('ALTER SEQUENCE %s RENAME TO %I', seq, 'writer_id_seq'); END IF; END $$;
+
 ALTER TABLE "writer" RENAME COLUMN "nickname" TO "handle";
 
 ALTER INDEX "idx_author_nickname" RENAME TO "idx_writer_handle";
@@ -207,11 +213,11 @@ ALTER TYPE "status" RENAME VALUE 'canceled' TO 'cancelled';
 ```
 
 - `Field(renamed_from="nickname")` renames a column; on a relation, `ForeignKey(..., renamed_from="writer")` renames its `*_id` column.
-- `__ferro_renamed_from__ = "author"` on a model renames its table, and every index and constraint named after it.
+- `__ferro_renamed_from__ = "author"` on a model renames its table, and every index and constraint named after it. On Postgres the `DO` block renames the table's `serial` sequence too, to `writer_id_seq`, the name a table created as `writer` gives it; it refuses, naming the object, if something else already holds that name.
 - `__ferro_renamed_labels__ = {"cancelled": "canceled"}` on a `StrEnum` maps each new label to its old one. On SQLite, where labels are text in the rows, the rows are rewritten in a table rebuild.
 - An enum *type*'s rename needs no hint: it is read off the columns that moved to it.
 
-A hint is live only while the previous snapshot still holds the old name and lacks the new one. Once its migration is generated it is inert and may be deleted. A hint whose old name is still declared, or two hints naming one old name, is refused. Auto-migrate honours the column and label hints but not a table's: its create pass builds the new table name as a new, empty table ([what each door covers](overview.md#what-each-door-covers)).
+A hint is live only while the previous snapshot still holds the old name and lacks the new one. Once its migration is generated it is inert and may be deleted. A hint whose old name is still declared, or two hints naming one old name, is refused. Auto-migrate honours every hint under `migrate_updates` (on SQLite a label hint only warns, since the labels live in the rows). Without `migrate_updates`, a table hint makes the create pass hold the table back with a warning rather than create it empty ([what each door covers](overview.md#what-each-door-covers)).
 
 The rename example runs end to end, including the revert, in [`docs/examples/migrations_rename.py`](https://github.com/syn54x/ferro-orm/blob/main/docs/examples/migrations_rename.py).
 
@@ -322,7 +328,7 @@ ok Wrote migrations/0003_fix_slugs/
 
 ## SQLite table rebuilds
 
-SQLite cannot add a constraint, change a type or nullability, or drop a constraint on a table that exists. A migration does it the only way SQLite allows: it creates the table again in its new shape under a temporary name, copies the rows, drops the old table and renames the new one into place, inside the step whose change needs it:
+SQLite cannot add a constraint, change a type or nullability, or drop a constraint on a table that exists. A migration does it the only way SQLite allows: it creates the table again in its new shape under a temporary name, copies the rows and the table's `AUTOINCREMENT` counter, drops the old table, renames the new one into place and recreates the table's indexes, inside the step whose change needs it:
 
 ```sql
 -- 0002_author_slug/04_contract.up.sqlite.sql
@@ -333,9 +339,15 @@ CREATE TABLE IF NOT EXISTS "_ferro_new_author" ( "id" integer NOT NULL PRIMARY K
 
 INSERT INTO "_ferro_new_author" ("id", "name", "slug") SELECT "id", "name", "slug" FROM "author";
 
+DELETE FROM sqlite_sequence WHERE name = '_ferro_new_author';
+
+INSERT INTO sqlite_sequence (name, seq) SELECT '_ferro_new_author', seq FROM sqlite_sequence WHERE name = 'author';
+
 DROP TABLE "author";
 
 ALTER TABLE "_ferro_new_author" RENAME TO "author";
+
+CREATE INDEX IF NOT EXISTS "idx_author_name" ON "author" ("name");
 ```
 
 The copy carries only what the schema snapshot declares, so before a rebuild runs, the runner refuses a live table that holds anything else, naming each object and its fix. Here `Post.title` became required while the table holds an index and a trigger ferro never declared; the steps before the rebuild have run, the rebuild has not:

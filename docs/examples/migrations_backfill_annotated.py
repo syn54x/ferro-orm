@@ -10,12 +10,12 @@ backfill is written where it says todo(...), the late-row recovery is
 # --8<-- [start:models]
 from typing import Annotated
 
-from ferro import FerroField, Model
+from ferro import Field, Model
 
 
 class Author(Model):
-    id: Annotated[int | None, FerroField(primary_key=True)] = None
-    name: Annotated[str, FerroField(index=True)]
+    id: Annotated[int | None, Field(primary_key=True)] = None
+    name: Annotated[str, Field(index=True)]
     slug: str  # new
 
 
