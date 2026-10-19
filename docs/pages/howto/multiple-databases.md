@@ -64,7 +64,7 @@ Explicit `using='analytics'` conflicts with the ambient session bound to connect
 
 A call with no session and no `using=` raises `RuntimeError`; Ferro never falls back to the default connection on its own.
 
-Routing is per call: `.using()` changes no global state, so two coroutines can use different databases at once. A `.using()` call outside a session has no identity map, so every load returns a new instance; see [No session, no identity](../concepts/identity-map.md#no-session-no-identity).
+Routing is per call: `.using()` changes no global state, so two coroutines can use different databases at once. A `.using()` call outside a session has no identity map, so every load returns a new instance; see [Sessionless operations](../concepts/identity-map.md#sessionless-operations).
 
 ## Transactions on a named connection
 

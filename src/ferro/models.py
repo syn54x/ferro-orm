@@ -129,7 +129,7 @@ def evict_instance(
     instance and leaves the one you hold detached. A re-fetch already
     refreshes a held instance in place, so evict only when you want a second,
     separate object. See
-    [Eviction and invalidation](../concepts/identity-map.md#eviction-and-invalidation).
+    [Eviction](../concepts/identity-map.md#eviction).
 
     Args:
         model: The model class, or its name when the name is unambiguous.
