@@ -53,68 +53,103 @@ __all__ = [
 class FerroExecuteOp(ops.MigrateOperation):
     """One statement the planner rendered, run as written.
 
-    Renders as ``op.execute(sa.DDL('<statement>'))``: a DDL construct is never
-    parsed for bind parameters (an enum label ``':admin'`` would be one in
-    ``text()``, #449), and its one rule is that ``%`` is written ``%%``. With
-    ``autocommit`` it runs inside ``op.get_context().autocommit_block()``
-    (an enum label addition, which must be committed before a later
-    statement of the revision can use the label).
+    Renders as `op.execute(sa.DDL('<statement>'))`: a DDL construct is never
+    parsed for bind parameters (an enum label `':admin'` would be one in
+    `text()`), and its one rule is that `%` is written `%%`. With
+    `autocommit` it runs inside `op.get_context().autocommit_block()` (an
+    enum label addition, which must be committed before a later statement
+    of the revision can use the label).
     """
 
     def __init__(self, statement: str, kind: str, *, autocommit: bool = False) -> None:
         self.statement = statement
+        """The statement, exactly as the planner rendered it."""
         self.kind = kind
+        """The planner op's kind the statement belongs to."""
         self.autocommit = autocommit
+        """Whether the statement runs inside an autocommit block."""
 
     def to_diff_tuple(self) -> tuple[Any, ...]:
+        """Return the op as Alembic's diff tuple: `("ferro_execute", kind, statement)`.
+
+        Returns:
+            The diff tuple.
+        """
         return ("ferro_execute", self.kind, self.statement)
 
 
 class FerroMarkedOp(ops.MigrateOperation):
-    """Ops written under one ``# ferro: <marker>`` comment line."""
+    """Ops written under one `# ferro: <marker>` comment line."""
 
     def __init__(self, marker: str, wrapped: list[ops.MigrateOperation]) -> None:
         self.marker = marker
+        """The comment's text."""
         self.wrapped = wrapped
+        """The ops written under it."""
 
     def to_diff_tuple(self) -> Any:
+        """Return the wrapped ops' diff tuples, as a list.
+
+        Returns:
+            One diff tuple per wrapped op.
+        """
         return [op.to_diff_tuple() for op in self.wrapped]
 
 
 class FerroWarningOp(ops.MigrateOperation):
-    """A report the planner made without planning an op for it (an enum
-    label the model no longer declares, which ferro never removes), as a
-    ``# ferro: <warning>`` comment."""
+    """A report the planner made without planning an op for it, written as a `# ferro: <warning>` comment.
+
+    For example, an enum label the model no longer declares, which the
+    auto-migrate pass never removes.
+    """
 
     def __init__(self, warning: str) -> None:
         self.warning = warning
+        """The report's sentence."""
 
     def to_diff_tuple(self) -> tuple[Any, ...]:
+        """Return the op as Alembic's diff tuple: `("ferro_warning", warning)`.
+
+        Returns:
+            The diff tuple.
+        """
         return ("ferro_warning", self.warning)
 
 
 class FerroRenameTableOp(ops.RenameTableOp):
-    """``op.rename_table``: Alembic's own op, which its autogenerate never
-    proposes and so has no renderer of its own."""
+    """Alembic's own `op.rename_table`, which its autogenerate never proposes and so has no renderer for."""
 
     def to_diff_tuple(self) -> tuple[Any, ...]:
+        """Return the op as Alembic's diff tuple: `("rename_table", old, new)`.
+
+        Returns:
+            The diff tuple.
+        """
         return ("rename_table", self.table_name, self.new_table_name)
 
 
 class FerroIrreversibleOp(ops.MigrateOperation):
-    """A step nothing undoes: ``raise RuntimeError("<reason>")``."""
+    """A step nothing undoes, written as `raise RuntimeError("<reason>")`."""
 
     def __init__(self, reason: str) -> None:
         self.reason = reason
+        """Why nothing undoes it."""
 
     def to_diff_tuple(self) -> tuple[Any, ...]:
+        """Return the op as Alembic's diff tuple: `("ferro_irreversible", reason)`.
+
+        Returns:
+            The diff tuple.
+        """
         return ("ferro_irreversible", self.reason)
 
 
 class FerroRevisionOps(ops.OpContainer):
-    """The whole revision ferro's comparator writes: the upgrade's ops, and
-    the downgrade's (the planner run back to the live database), which
-    ``reverse()`` swaps in. Never Alembic's per-op ``reverse()``."""
+    """The whole revision Ferro's comparator writes: the upgrade's ops and the downgrade's.
+
+    The downgrade is the planner run back to the live database, which
+    `reverse()` swaps in; Alembic's per-op `reverse()` is never used.
+    """
 
     def __init__(
         self,
@@ -123,8 +158,14 @@ class FerroRevisionOps(ops.OpContainer):
     ) -> None:
         super().__init__(upgrade)
         self.downgrade = downgrade
+        """The downgrade's ops, in order."""
 
     def reverse(self) -> FerroRevisionOps:
+        """Swap the upgrade and the downgrade.
+
+        Returns:
+            The revision with the downgrade's ops as its upgrade.
+        """
         return FerroRevisionOps(self.downgrade, list(self.ops))
 
 
@@ -397,16 +438,26 @@ def translate(
     dialect: str,
     reports: list[dict[str, Any]] | None = None,
 ) -> list[ops.MigrateOperation]:
-    """The Alembic ops that write one side of a revision, in its order.
+    """Build the Alembic ops that write one side of a revision, in its order.
 
-    ``written`` is ``_core._plan_revision``'s ``upgrade`` or ``downgrade``
-    list, ``target`` the envelope that side leads to (the models going up,
-    the live database going down) and ``dialect`` its dialect. The core has
-    decided every op: whether Alembic's own op writes it (``twin``) or
-    ``op.execute`` of the pass's statements does, the ``# ferro:`` comment
-    above it (``marker``) and the reason a ``raise RuntimeError(<reason>)``
-    replaces it (``irreversible``). ``reports``, the revision's one-off
-    reports, lead the upgrade as comments.
+    The core has decided every op: whether Alembic's own op writes it or
+    `op.execute` of the pass's statements does, the `# ferro:` comment above
+    it and the reason a `raise RuntimeError(<reason>)` replaces it.
+
+    Args:
+        written: The core's planned upgrade or downgrade list.
+        target: The schema that side leads to: the models going up, the live
+            database going down.
+        dialect: The target's dialect.
+        reports: The revision's one-off reports, which lead the upgrade as
+            comments. Defaults to none.
+
+    Returns:
+        The Alembic ops.
+
+    Raises:
+        RuntimeError: The planner planned an op the bridge has no
+            translation for.
     """
     resolved = _Target(target, dialect)
     out: list[ops.MigrateOperation] = [

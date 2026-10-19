@@ -1,23 +1,25 @@
 """Where a migration's files go, and how a new one is written.
 
-A database's migrations directory holds one directory per migration::
+A database's migrations directory holds one directory per migration:
 
-    migrations/
-      .gitattributes                     * -text   (byte-exact: checksums are of raw bytes)
-      0001_create_author/
-        01_schema.up.postgres.sql        one rendering per target dialect (ADR-0026, ADR-0037)
-        01_schema.down.postgres.sql
-        01_schema.up.sqlite.sql
-        01_schema.down.sqlite.sql
-        02_fix_rows.up.sql               a hand-written step: unsuffixed, serves every dialect
-        02_fix_rows.down.sql
-        03_backfill_author.py            a data step: Python, up() and down() in one file
-        ir.json                          the schema snapshot (ADR-0023)
+```text
+migrations/
+  .gitattributes                     * -text   (byte-exact: checksums are of raw bytes)
+  0001_create_author/
+    01_schema.up.postgres.sql        one rendering per target dialect
+    01_schema.down.postgres.sql
+    01_schema.up.sqlite.sql
+    01_schema.down.sqlite.sql
+    02_fix_rows.up.sql               a hand-written step: unsuffixed, serves every dialect
+    02_fix_rows.down.sql
+    03_backfill_author.py            a data step: Python, up() and down() in one file
+    ir.json                          the schema snapshot
+```
 
-The directory is read and verified by the Rust core (numbers dense from
-``0001``, a duplicate refused naming both directories, the snapshot chain
-intact); this module names paths, numbers the next migration and writes one
-whole, so a crash never leaves a half-written migration behind.
+The directory is read and verified by the core (numbers dense from `0001`,
+a duplicate refused naming both directories, the snapshot chain intact);
+this module names paths, numbers the next migration and writes one whole,
+so a crash never leaves a half-written migration behind.
 """
 
 from __future__ import annotations
@@ -53,24 +55,37 @@ __all__ = [
 ]
 
 SNAPSHOT_FILE = "ir.json"
+"""The schema snapshot's file name in each migration's directory."""
 
 GITATTRIBUTES = "* -text\n"
 """Mark every migration file byte-exact: a line-ending conversion on checkout
 would change an applied step's checksum."""
 
 SQL_STEP_PLACEHOLDER = "-- write this step\n"
-"""The body of a hand-written step ``new --sql-step`` adds."""
+"""The body of a hand-written step `new --sql-step` adds."""
 
 _NAME = re.compile(r"^[a-z0-9_]+$")
 
 
 class MigrationsDirectoryError(FerroError):
-    """A migrations directory ``new`` or ``check`` cannot use, or a migration
-    it cannot write; the message names the files involved and the fix."""
+    """The refusal for a migrations directory `new` or `check` cannot use, or a migration it cannot write.
+
+    The message names the files involved and the fix.
+    """
 
 
 def check_name(name: str, what: str) -> None:
-    """Refuse a migration or step name that is not ``[a-z0-9_]+``."""
+    """Refuse a migration or step name that is not `[a-z0-9_]+`.
+
+    Args:
+        name: The name to check.
+        what: What the name is for, as the refusal says it
+            (`"migration name"`).
+
+    Raises:
+        MigrationsDirectoryError: The name is not lowercase letters, digits
+            and `_`.
+    """
     if not _NAME.match(name):
         raise MigrationsDirectoryError(
             f"{what} {name!r} is not usable in a file name; use lowercase "
@@ -79,8 +94,7 @@ def check_name(name: str, what: str) -> None:
 
 
 class Moved(StrEnum):
-    """What ``ferro migrate new --replace`` or ``ferro migrate squash`` did
-    with one file of the migrations it replaced."""
+    """What `ferro migrate new --replace` or `ferro migrate squash` did with one file it replaced."""
 
     KEPT = "kept"
     """A regenerated file under the name it had."""
@@ -89,8 +103,7 @@ class Moved(StrEnum):
     CARRIED = "carried"
     """A data step or hand-written SQL step written back byte for byte."""
     REGENERATED = "regenerated"
-    """A squash's generated DDL file: planned once across the whole range,
-    so it is no one original file's counterpart."""
+    """A squash's generated DDL file, planned once across the whole range: no one original file's counterpart."""
 
 
 @dataclass(frozen=True)
@@ -98,29 +111,39 @@ class GeneratedStep:
     """One step of a migration about to be written."""
 
     ordinal: int
+    """The step's number within its migration."""
     name: str
+    """The step's name, without its number."""
     kind: str
-    """``ddl`` (one rendering per target dialect), ``portable_sql`` or
-    ``data`` (a Python data step)."""
+    """`ddl` (one rendering per target dialect), `portable_sql` or `data` (a Python data step)."""
     files: dict[str, str] = field(default_factory=dict)
     """File name to its exact text."""
     carry: int | None = None
-    """Carried across from the migration ``--replace`` regenerates: the
-    position of the step it carries in the generator's ``carry`` option, as
-    the generator names it."""
+    """For a step carried across from the migration `--replace` regenerates: its position in the carried steps.
+
+    `None` for a step the generator wrote.
+    """
     over_namesake: bool = False
-    """Carried, and in the place of a step of its name and kind the
-    regeneration laid out, which it wins over."""
+    """Whether a carried step takes the place of a step of its name and kind the regeneration laid out."""
     role: str | None = None
-    """Which kind of data step the generator laid out: ``backfill`` (a
-    generated backfill), ``guard`` (``--no-backfill``) or ``data_step``
-    (``--data-step``). ``None`` for every other step, and for a carried one,
-    whose file is a person's whatever the generator first made it."""
+    """Which kind of data step the generator laid out: `backfill`, `guard` or `data_step`.
+
+    `guard` is from `--no-backfill`, `data_step` from `--data-step`. `None`
+    for every other step, and for a carried one, whose file is a person's
+    whatever the generator first made it.
+    """
 
 
 def portable_sql_step(ordinal: int, name: str) -> GeneratedStep:
-    """The hand-written portable step ``NN_<name>`` (``new --sql-step``) at
-    ``ordinal``: its up and down files holding the placeholder."""
+    """Build the hand-written portable SQL step `new --sql-step` adds.
+
+    Args:
+        ordinal: The step's number within its migration.
+        name: The step's name.
+
+    Returns:
+        The step `NN_<name>`, its up and down files holding the placeholder.
+    """
     stem = f"{ordinal:02d}_{name}"
     return GeneratedStep(
         ordinal,
@@ -135,44 +158,58 @@ def portable_sql_step(ordinal: int, name: str) -> GeneratedStep:
 
 @dataclass(frozen=True)
 class Change:
-    """One entry of a :class:`ChangeSummary`: what happened to which names
-    of one kind (``new models: Team, TeamMember``), as the generator decided
-    it."""
+    """One entry of a change summary: what happened to which names of one kind (`new models: Team, TeamMember`)."""
 
     verb: str
-    """``new``, ``changed``, ``dropped``, ``renamed`` or ``removed``."""
+    """`new`, `changed`, `dropped`, `renamed` or `removed`."""
     kind: str
-    """``models``, ``enum types`` or ``enum labels``."""
+    """`models`, `enum types` or `enum labels`."""
     names: tuple[str, ...]
-    """The names, sorted; an enum label is ``type.label``, a rename
-    ``old → new``."""
+    """The names, sorted; an enum label is `type.label`, a rename `old → new`."""
 
     @classmethod
     def from_json(cls, raw: Mapping[str, Any]) -> Change:
-        """Build from one entry of the JSON the core returns."""
+        """Build a change from one entry of the JSON the core returns.
+
+        Args:
+            raw: The entry, with `verb`, `kind` and `names`.
+
+        Returns:
+            The change.
+        """
         return cls(raw["verb"], raw["kind"], tuple(raw["names"]))
 
 
 @dataclass(frozen=True)
 class ChangeSummary:
-    """What a migration adds, changes, drops or renames (ADR-0055): the
-    changes as data, in the generator's order, beside the one plain
-    rendering the Rust generator produced. Lay the changes out from
-    ``changes``; never take ``text`` apart."""
+    """What a migration adds, changes, drops or renames, as data and as one plain rendering.
+
+    Lay the changes out from `changes`; never take `text` apart.
+    """
 
     changes: tuple[Change, ...] = ()
+    """The changes, in the generator's order."""
     text: str = ""
-    """The plain rendering (``new models: Team; changed models: Account``),
-    the one the core quotes inside ``check``'s ``ungenerated`` message and
-    so the library's error text. ``new`` (in both forms) and ``check`` on a
-    terminal lay out ``changes`` instead; nothing in Python prints this."""
+    """The plain rendering (`new models: Team; changed models: Account`).
+
+    The core quotes it inside `check`'s `ungenerated` message, so it is the
+    library's error text. `new` and `check` on a terminal lay out `changes`
+    instead; nothing in Python prints this.
+    """
 
     def __bool__(self) -> bool:
         return bool(self.changes)
 
     @classmethod
     def from_json(cls, raw: Mapping[str, Any]) -> ChangeSummary:
-        """Build from the ``summary`` the core returns."""
+        """Build the summary from the `summary` the core returns.
+
+        Args:
+            raw: The core's summary, with `changes` and `text`.
+
+        Returns:
+            The summary.
+        """
         return cls(tuple(Change.from_json(c) for c in raw["changes"]), raw["text"])
 
 
@@ -181,35 +218,44 @@ class GeneratedMigration:
     """A whole migration about to be written: its steps and its snapshot."""
 
     number: int
+    """The migration's number."""
     name: str
+    """The migration's name, without its number."""
     steps: tuple[GeneratedStep, ...]
+    """Its steps, in order."""
     snapshot_json: str
-    """The ``ir.json`` text exactly as it is to be stored."""
+    """The `ir.json` text exactly as it is to be stored."""
     summary: ChangeSummary = ChangeSummary()
+    """What the migration adds, changes, drops or renames."""
     notes: tuple[str, ...] = ()
-    """The lines ``new`` prints after the summary, in order: the generator's
-    rename hints, then each backfill that still needs writing."""
+    """The lines `new` prints after the summary: the rename hints, then each backfill that still needs writing."""
     warnings: tuple[str, ...] = ()
+    """The rendering warnings, such as a dialect that skips a declaration."""
     replaces: list[str] = field(default_factory=list)
-    """``--replace`` and ``squash``: the replaced migrations' directory names
-    (``NNNN_<name>``) in chain order, deleted once this one is written; one
-    for ``--replace``, the range for a squash, empty for ``new``."""
+    """The migrations a replace or squash deletes once this one is written, as `NNNN_<name>` in chain order.
+
+    One for `--replace`, the range for a squash, empty for `new`.
+    """
     chained_from: str | None = None
-    """``--replace`` and ``squash``: the directory name of the migration
-    whose snapshot this one's links to (``None`` for the first)."""
+    """For a replace or squash, the migration whose snapshot this one's links to; `None` for the first."""
     moves: tuple[tuple[str, str, Moved], ...] = ()
-    """``--replace`` and ``squash``: ``(old file, new file, what happened)``
-    for every file of this migration a replaced one had a counterpart for,
-    ``old file`` relative to the migrations directory, ``new file`` to this
-    migration's."""
+    """For a replace or squash, `(old file, new file, what happened)` for every file with a counterpart.
+
+    `old file` is relative to the migrations directory, `new file` to this
+    migration's.
+    """
     witness: list[dict[str, Any]] = field(default_factory=list)
-    """``squash``: the witness its snapshot stores (ADR-0056), one entry per
-    replaced migration in chain order, ``{"migration", "snapshot_checksum",
-    "steps", "replaces"}``. Empty for ``new`` and ``--replace``."""
+    """For a squash, the witness its snapshot stores: one entry per replaced migration, in chain order.
+
+    Each is `{"migration", "snapshot_checksum", "steps", "replaces"}`.
+    Empty for `new` and `--replace`.
+    """
     dead_names: list[dict[str, Any]] = field(default_factory=list)
-    """``squash``: the names born and gone inside the range, as
-    ``_core._compose_range`` reports them (``{"kind", "name", "appeared",
-    "vanished"}``). Empty for ``new`` and ``--replace``."""
+    """For a squash, the names born and gone inside the range.
+
+    Each is `{"kind", "name", "appeared", "vanished"}`. Empty for `new` and
+    `--replace`.
+    """
 
     @property
     def squash(self) -> bool:
@@ -218,6 +264,7 @@ class GeneratedMigration:
 
     @property
     def dir_name(self) -> str:
+        """The migration's directory name, `NNNN_<name>`."""
         return f"{self.number:04d}_{self.name}"
 
     @classmethod
@@ -229,8 +276,18 @@ class GeneratedMigration:
         name: str,
         carry: Sequence[Mapping[str, Any]] = (),
     ) -> GeneratedMigration:
-        """Build from the JSON ``_core._generate_migration`` returns; a
-        carried step's files are the texts of the ``carry`` entry it names."""
+        """Build the migration from the JSON the generator returns.
+
+        Args:
+            raw: The generator's output.
+            number: The migration's number.
+            name: The migration's name.
+            carry: The steps carried across from a replaced migration; a
+                carried step's files are the texts of the entry it names.
+
+        Returns:
+            The migration, ready to write.
+        """
         steps = []
         for step in raw["steps"]:
             files: dict[str, str] = {}
@@ -266,7 +323,11 @@ class GeneratedMigration:
         )
 
     def files(self) -> dict[str, str]:
-        """Every file of the migration, by name, ``ir.json`` last."""
+        """List every file of the migration, by name, `ir.json` last.
+
+        Returns:
+            Each file name mapped to its exact text.
+        """
         out: dict[str, str] = {}
         for step in self.steps:
             out.update(step.files)
@@ -275,11 +336,17 @@ class GeneratedMigration:
 
 
 def read_migrations(directory: Path) -> list[dict[str, Any]]:
-    """Every migration in ``directory``, read and verified by the Rust core.
+    """Read and verify every migration in a migrations directory.
+
+    Args:
+        directory: The migrations directory.
+
+    Returns:
+        Each migration as the core reads it, in order.
 
     Raises:
-        MigrationsDirectoryError: the directory is malformed (a duplicate or
-            missing number, a broken snapshot chain, ...), naming the fix.
+        MigrationsDirectoryError: The directory is malformed (a duplicate or
+            missing number, a broken snapshot chain), naming the fix.
     """
     try:
         raw = _read_migrations_dir(str(directory))
@@ -291,15 +358,23 @@ def read_migrations(directory: Path) -> list[dict[str, Any]]:
 def read_replacing(
     directory: Path, target: str
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """For ``ferro migrate new --replace <target>``: every migration in
-    ``directory`` but the one ``target`` names (``NNNN_<name>``, or ``NNNN``
-    when one migration carries the number), read and verified by the Rust
-    core with the duplicate at that number admitted, and that migration.
+    """Read a migrations directory for `ferro migrate new --replace <target>`.
+
+    The directory is read and verified with the duplicate at the target's
+    number admitted.
+
+    Args:
+        directory: The migrations directory.
+        target: The migration to replace, `NNNN_<name>`, or `NNNN` when one
+            migration carries the number.
+
+    Returns:
+        Every other migration, in order, and the target migration.
 
     Raises:
-        MigrationsDirectoryError: the target is not in the directory, is a
-            number two migrations share, or a later migration chains from it;
-            or the rest of the directory is malformed.
+        MigrationsDirectoryError: The target is not in the directory, is a
+            number two migrations share, or a later migration chains from
+            it; or the rest of the directory is malformed.
     """
     try:
         raw = _read_migrations_dir(str(directory), replacing=target)
@@ -310,23 +385,26 @@ def read_replacing(
 
 
 def read_range_reach(directory: Path, from_: str) -> dict[str, Any]:
-    """For a squash: every migration in ``directory`` below the one ``from_``
-    names (``NNNN_<name>``, or ``NNNN`` when one migration carries the
-    number), the range from it in chain order, each read and verified by the
-    Rust core, and what the range leaves off.
+    """Read a migrations directory for a squash: the migrations below the range, the range, and what it leaves off.
 
-    Returns ``{"below", "range", "reaches_head", "off_range", "siblings"}``:
-    ``range`` follows snapshot links from the migration ``from_`` names and need
-    not reach the directory head. ``reaches_head`` says whether it does,
-    ``off_range`` names the later migrations it leaves (a sibling chain's, or
-    a fork's other branch), each ``{"migration", "chains_from"}``: its
-    ``NNNN_<name>`` and the migration its snapshot chains from (``None`` for
-    none in the directory), and ``siblings`` the other
-    migrations at ``from_``'s number (two branches each generated it), which
-    are never in ``below``; the caller refuses each with its own fix.
+    The caller refuses each thing the range leaves off with its own fix.
+
+    Args:
+        directory: The migrations directory.
+        from_: The first migration of the range, `NNNN_<name>`, or `NNNN`
+            when one migration carries the number.
+
+    Returns:
+        `{"below", "range", "reaches_head", "off_range", "siblings"}`.
+            `range` follows snapshot links from `from_` in chain order and
+            need not reach the directory head; `reaches_head` says whether
+            it does. `off_range` names the later migrations it leaves (a
+            sibling chain's, or a fork's other branch), each
+            `{"migration", "chains_from"}`. `siblings` are the other
+            migrations at `from_`'s number, never in `below`.
 
     Raises:
-        MigrationsDirectoryError: ``from_`` is not in the directory or is a
+        MigrationsDirectoryError: `from_` is not in the directory or is a
             number two migrations share; or the directory is malformed.
     """
     try:
@@ -344,12 +422,23 @@ def read_range_reach(directory: Path, from_: str) -> dict[str, Any]:
 
 
 def next_number(directory: Path) -> int:
-    """The number the next migration in ``directory`` takes (``1`` when empty)."""
+    """Return the number the next migration in a directory takes.
+
+    Args:
+        directory: The migrations directory.
+
+    Returns:
+        The next number; `1` for an empty directory.
+    """
     return len(read_migrations(directory)) + 1
 
 
 def ensure_gitattributes(directory: Path) -> None:
-    """Write ``directory/.gitattributes`` (``* -text``) when it is absent."""
+    """Write `.gitattributes` (`* -text`) into a migrations directory when it is absent.
+
+    Args:
+        directory: The migrations directory; created when missing.
+    """
     path = directory / ".gitattributes"
     if not path.exists():
         directory.mkdir(parents=True, exist_ok=True)
@@ -357,15 +446,23 @@ def ensure_gitattributes(directory: Path) -> None:
 
 
 def write_migration(directory: Path, migration: GeneratedMigration) -> Path:
-    """Write ``migration`` under ``directory`` and return its directory.
+    """Write a migration under a migrations directory, all at once.
 
     The files are written into a hidden sibling first and moved into place
     with one rename, so the directory reader never sees half a migration.
     Every file is written as raw UTF-8 bytes, never newline-translated.
 
+    Args:
+        directory: The migrations directory.
+        migration: The migration to write.
+
+    Returns:
+        The migration's directory.
+
     Raises:
-        MigrationsDirectoryError: the migration's directory, or its hidden
-            staging sibling (another run, or an interrupted one), already exists.
+        MigrationsDirectoryError: The migration's directory, or its hidden
+            staging sibling (another run, or an interrupted one), already
+            exists.
     """
     target = directory / migration.dir_name
     if target.exists():

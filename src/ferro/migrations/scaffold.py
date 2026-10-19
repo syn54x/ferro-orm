@@ -123,15 +123,20 @@ async def down(ctx):
 
 
 def render(step: Mapping[str, Any], *, template_dir: Path | None) -> str:
-    """The text of the data step ``step`` describes.
+    """Render the text of the data step file a generator step record describes.
 
-    ``step`` is one step record of ``_core._generate_migration``'s output, as
-    the generator produced it: its ``data`` (a backfill, or the guard when
-    ``data["guard"]``) or its ``hand_model`` (``--data-step``). The project's
-    template in ``template_dir`` wins when it exists.
+    Args:
+        step: One step record of the generator's output: its `data` (a
+            backfill, or the guard when `data["guard"]`) or its `hand_model`
+            (`--data-step`).
+        template_dir: The project's template directory; a template there
+            wins when it exists. `None` uses the built-in skeletons.
+
+    Returns:
+        The data step file's text.
 
     Raises:
-        ValueError: ``step`` is not a data step the generator scaffolds.
+        ValueError: `step` is not a data step the generator scaffolds.
     """
     hand = step.get("hand_model")
     if hand is not None:
@@ -150,11 +155,21 @@ def render(step: Mapping[str, Any], *, template_dir: Path | None) -> str:
 
 
 def note(step: Mapping[str, Any], *, dir_name: str, migration_name: str) -> str | None:
-    """The note a backfill that still needs writing adds to the
-    migration (``02_backfill_author.py needs writing where it says
-    todo(...); …``): where to write, and the command that regenerates the
-    migration with a guard instead. ``None`` for any other step: a guard, a
-    hand-requested step, or a backfill pre-filled throughout."""
+    """Render the note a backfill that still needs writing adds to its migration.
+
+    The note says where to write, and the command that regenerates the
+    migration with a guard instead
+    (`02_backfill_author.py needs writing where it says todo(...); …`).
+
+    Args:
+        step: One step record of the generator's output.
+        dir_name: The migration's directory name.
+        migration_name: The migration's name, for the regenerating command.
+
+    Returns:
+        The note, or `None` for any other step: a guard, a hand-requested
+            step, or a backfill pre-filled throughout.
+    """
     data = step.get("data")
     if data is None or data["guard"]:
         return None
