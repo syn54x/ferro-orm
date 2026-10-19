@@ -1,10 +1,12 @@
-"""Build fluent query objects; ``ferro.query.wire`` compiles them to QueryIR.
+"""Query builders: [`Query`][ferro.query.builder.Query], its projected form and relation collections.
 
-This module owns chainer-time state and validation (predicates, joins,
-projection, includes). Everything whose output is wire shape — the payload
-dataclasses, hop-fact resolution, join serialization, materialization plans,
-verb policy, and the versioned envelope — lives behind ``wire.compile_query``.
+Each chained call validates its arguments and returns a new query; nothing
+reaches the database until a query is awaited through one of its methods.
 """
+
+# This module owns chain-time state and validation (predicates, joins,
+# projection, includes). Everything whose output is wire shape lives behind
+# ``wire.compile_query``.
 
 import copy
 from typing import (
@@ -56,7 +58,9 @@ if TYPE_CHECKING:
     from .._core import RouteHandle
 
 T = TypeVar("T")
+"""The model class a query returns."""
 E = TypeVar("E")
+"""The element type of a relation collection."""
 
 # The concrete container type a projected query delivers (parameterized once
 # at import; `into=` record types would parameterize per call). Construction
@@ -554,32 +558,47 @@ def _collect_dict_projection(result: dict[Any, Any]) -> tuple[_ProjectedField, .
 
 
 class Query(Generic[T]):
-    """Build and execute fluent ORM queries.
+    """A lazy query over one model's rows.
 
-    Attributes:
-        model_cls: Model class used to hydrate results.
-        where_clause: Accumulated filter nodes for the query.
-        order_by_clause: Sort definitions sent to the Rust core.
+    Start one from the model with [`Model.where`][ferro.Model.where] or
+    [`Model.select`][ferro.Model.select]. Each chained method returns a new
+    query and leaves the original unchanged; nothing runs until you await
+    [`all`][ferro.query.builder.Query.all], [`first`][ferro.query.builder.Query.first],
+    [`count`][ferro.query.builder.Query.count], [`exists`][ferro.query.builder.Query.exists],
+    [`update`][ferro.query.builder.Query.update] or
+    [`delete`][ferro.query.builder.Query.delete]. See [Queries](../guide/queries.md).
+
+    Examples:
+        ```python {test=run prelude=reference}
+        query = Post.where(lambda post: post.views > 900)
+        newest_first = query.order_by(lambda post: post.id, "desc")
+
+        posts = await newest_first.all()
+        assert [post.id for post in posts] == [2, 1]
+        assert await query.count() == 2
+        ```
     """
 
     def __init__(
         self, model_cls: Type[T], using: str | None = None, session: Any | None = None
     ):
-        """Initialize a query for a model class.
+        """Start a query over every row of a model.
 
         Args:
-            model_cls: Model class that defines the target table.
-
-        Examples:
-            >>> query = Query(User)
-            >>> query.model_cls is User
-            True
+            model_cls: The model class whose table the query reads.
+            using: The named connection to run on. Defaults to `None`, the
+                session's connection.
+            session: The session to run in. Defaults to `None`, the session
+                opened by the enclosing `async with engines.session():`.
         """
         self.model_cls = model_cls
+        """The model class whose rows the query returns."""
         self._using = using
         self._session = session
         self.where_clause: list["QueryNode"] = []
+        """The conditions added by `where()`, combined with `AND`."""
         self.order_by_clause: list[OrderByEntry] = []
+        """The sort keys added by `order_by()`, in the order added."""
         self._limit: int | None = None
         self._offset: int | None = None
         self._after: tuple[Any, ...] | None = None
@@ -647,39 +666,36 @@ class Query(Generic[T]):
         return new
 
     def where(self, predicate: "Predicate[T]") -> Self:
-        """Add a filter condition to the query.
+        """Add a condition that every returned row must meet.
 
-        ``predicate`` is a lambda of shape ``Callable[[QueryProxy[T]], QueryNode]``.
-        The lambda receives a fresh :class:`QueryProxy` whose attributes
-        return :class:`FieldProxy` instances, so
-        ``lambda user: user.archived == False`` builds a comparison. Column
-        names are validated at build time against the model's declared
-        fields (plus shadow ``{fk}_id`` columns): a misspelled column raises
-        ``AttributeError`` naming the closest valid match, before any query
-        is sent to the database.
+        The lambda receives a stand-in for one row, a
+        [`QueryProxy`][ferro.query.QueryProxy]; comparing its fields builds
+        the SQL condition. Conditions from several `where()` calls are
+        combined with `AND`. A field name the model does not declare raises
+        `AttributeError` with the closest match, before any SQL runs.
 
-        Attribute access on a declared forward-FK field traverses the relation
-        (``lambda t: t.account.ledger_id == lid``): each hop resolves against
-        the related model, and every distinct traversed path renders one INNER
-        join (ADR-0006) when the query runs. Every hop is validated at build
-        time with the same did-you-mean naming the hop's model.
+        A field that is a foreign key relation reaches into the related
+        model (`lambda post: post.author.name == "Ada Lovelace"`), and each
+        relation path adds one `INNER JOIN`. See
+        [Querying across relationships](../guide/queries.md#querying-across-relationships).
 
         Args:
-            predicate: A callable that takes a :class:`QueryProxy` and
-                returns a :class:`QueryNode`.
+            predicate: A lambda that takes the row stand-in and returns a
+                condition, such as `lambda post: post.views > 1000`.
 
         Returns:
-            A new ``Query`` with the clause added; ``self`` is unchanged.
+            A new query with the condition added.
 
         Raises:
-            TypeError: If ``predicate`` is not callable, or if it does not
-                return a ``QueryNode``.
+            TypeError: `predicate` is not callable or does not return a
+                condition.
+            AttributeError: The lambda names a field the model does not have.
 
         Examples:
-            >>> q1 = User.where(lambda user: user.archived == False)  # noqa: E712
-            >>> q2 = User.where(lambda user: user.id == 1)
-            >>> isinstance(q1, Query) and isinstance(q2, Query)
-            True
+            ```python {test=run prelude=reference}
+            posts = await Post.where(lambda post: post.author.name == "Grace Hopper").all()
+            assert [post.title for post in posts] == ["The Education of a Computer"]
+            ```
         """
         new = self._clone()
         node = _resolve_where_node(predicate, self.model_cls)
@@ -697,61 +713,50 @@ class Query(Generic[T]):
     def select(self, *columns: str) -> "ProjectedQuery[T]": ...
 
     def select(self, *selectors: "RowSelector[T] | str") -> "Self | ProjectedQuery[T]":
-        """Project the query to a column subset, or pass through unchanged.
+        """Return only some columns, as records, or the query unchanged.
 
-        Bare ``select()`` keeps meaning "full query": it returns an equivalent
-        query of complete model instances. With a lambda selector — the
-        documented style — the query becomes a projection: its results are
-        :class:`Row` records in the list-like :class:`Rows` container, never
-        model instances (the complete-instance invariant, ADR-0007). The
-        selector returns one field (``select(lambda t: t.amount)``), a tuple
-        (``select(lambda t: (t.id, t.amount))``), or a dict whose keys name
-        the output fields (``select(lambda t: {"account_name":
-        t.account.name})`` — output aliases). Fields may traverse declared
-        forward-FK relations at any depth (``t.account.name`` — traversed
-        projection); traversal narrows exactly like a ``where()`` predicate
-        on the same path (INNER, one join per path, ADR-0006) and
-        ``left_join()`` is the opt-out — kept rows decode the traversed
-        fields as ``None``. Unaliased traversed fields take the bare leaf
-        column name; two fields resolving to the same output name raise at
-        build time. Column-name strings (``select("id", "amount")``) follow
-        ``order_by``'s string contract exactly: root columns only, never
-        traversal, never mixed with a lambda in one call. All forms validate
-        at build time with did-you-mean.
-
-        A projected query composes like any other query: ``where()``
-        (relation traversal included), ``order_by()`` (by unselected columns
-        too), ``limit()``/``offset()``, ``first()``, ``count()``, and
-        ``exists()`` all work; ``update()``/``delete()`` and a second
-        ``select()`` raise at build time.
+        With no argument, `select()` returns the same query of whole model
+        instances. With a lambda or column names, the query returns
+        [`Row`][ferro.query.Row] records in a [`Rows`][ferro.query.Rows] list,
+        never model instances. The lambda returns one field, a tuple of
+        fields, or a dict whose keys name the output fields; a field may
+        reach into a related model (`post.author.name`). Column names as
+        strings name the model's own columns only. See
+        [Selecting a column subset](../guide/queries.md#selecting-a-column-subset).
 
         Args:
-            *selectors: Nothing (full query), one lambda selector, or
-                column-name strings.
+            *selectors: Nothing; one lambda returning a field, a tuple of
+                fields or a dict naming them; or column names as strings.
 
         Returns:
-            A new query; ``self`` is unchanged. Projected when a selector is
-            given.
+            The query unchanged with no selector, otherwise a
+                [`ProjectedQuery`][ferro.query.builder.ProjectedQuery].
 
         Raises:
-            TypeError: If the selector is not callable/strings, selects
-                non-fields (a bare relation, a comparison), nests shapes
-                (a dict inside a tuple, a tuple inside a dict), uses a
-                non-string dict key, or mixes strings with a lambda in one
-                call.
-            ValueError: If the selection is empty, two fields resolve to the
-                same output name, a string is a dotted path (strings never
-                traverse), or the query already carries an ``include()``
-                (one materialization plan per query — record results are
-                flat, permanently).
+            TypeError: The selectors mix a lambda with column names, select a
+                relation or a comparison instead of a field, or nest a dict
+                and a tuple.
+            ValueError: The selection is empty, two fields share an output
+                name, a string names a related column, or the query already
+                has an `include()`.
 
         Examples:
-            >>> rows = await Transaction.select(lambda t: (t.id, t.amount)).all()  # doctest: +SKIP
-            >>> rows[0].amount  # doctest: +SKIP
-            Decimal('12.50')
-            >>> named = await Transaction.select(  # doctest: +SKIP
-            ...     lambda t: {"id": t.id, "account_name": t.account.name}
-            ... ).all()
+            A tuple keeps each field's own name:
+
+            ```python {test=run prelude=reference}
+            rows = await Post.select(lambda post: (post.title, post.views)).order_by(lambda post: post.id).all()
+            assert rows[0].title == "Notes on the Analytical Engine"
+            assert rows[0].views == 1843
+            ```
+
+            A dict names the output fields, and may reach into a related model:
+
+            ```python {test=run prelude=reference}
+            rows = await Post.select(
+                lambda post: {"post": post.title, "author": post.author.name}
+            ).order_by(lambda post: post.id).all()
+            assert rows[1].author == "Grace Hopper"
+            ```
         """
         if not selectors:
             return self._clone()
@@ -806,43 +811,36 @@ class Query(Generic[T]):
         *,
         nulls: str | None = None,
     ) -> Self:
-        """Add an ordering clause and return a new query.
+        """Sort the results by a column, after any sort keys added before.
 
-        Accepts a lambda naming the column (``order_by(lambda u: u.created_at,
-        "desc")`` — the documented style, matching ``where`` predicates) or a
-        column-name string (``order_by("created_at", "desc")``). Both forms are
-        validated against the model's queryable columns at build time.
-
-        A lambda selector may traverse a declared forward-FK relation
-        (``order_by(lambda t: t.account.name)``) exactly like ``where()``: each
-        hop resolves against the related model, and the traversed path renders
-        one INNER join (ADR-0006), shared with any ``where()`` traversal of the
-        same path in the same query — the same path referenced in both yields
-        exactly one join. String selectors do not traverse: ``"account.name"``
-        is looked up as a literal (unqualified) column name on the queried
-        model.
+        Name the column with a lambda, the documented form, or a string. Only
+        the lambda can sort by a related model's column
+        (`lambda post: post.author.name`), which joins that model the way
+        `where()` does; a string always names a column of the model itself.
+        See [Ordering, limit & offset](../guide/queries.md#ordering-limit-offset).
 
         Args:
-            field: Column selector — lambda receiving a :class:`QueryProxy`,
-                or a column-name string.
-            direction: ``"asc"`` (default) or ``"desc"``.
-            nulls: Optional ``"first"``, ``"last"``, or ``"native"`` null
-                placement (keyword-only). Omitted means ``"last"``; ``"native"``
-                keeps each backend's dialect default.
+            field: A lambda returning the column, such as
+                `lambda post: post.views`, or the column's name.
+            direction: `"asc"` (the default) or `"desc"`.
+            nulls: Where `NULL` values sort: `"first"`, `"last"` or
+                `"native"`, the database's own rule. Defaults to `None`,
+                which sorts them last on every database.
 
         Returns:
-            A new ``Query`` with the ordering added; ``self`` is unchanged.
+            A new query with the sort key added.
 
         Raises:
-            AttributeError: If the column is not a queryable column.
-            TypeError: If a lambda selector returns something other than a
-                single column reference (a bare relation, e.g.
-                ``lambda t: t.account``, is meaningless as a sort key).
-            ValueError: If ``direction`` is not ``"asc"`` or ``"desc"``, or
-                ``nulls`` is not ``"first"``, ``"last"``, or ``"native"``.
+            AttributeError: The column is not one the model has.
+            TypeError: The lambda returns a relation or anything else that is
+                not a column.
+            ValueError: `direction` or `nulls` has a value not listed above.
 
         Examples:
-            >>> newest = await Post.select().order_by(lambda p: p.created_at, "desc").all()
+            ```python {test=run prelude=reference}
+            posts = await Post.select().order_by(lambda post: post.views, "desc").all()
+            assert [post.views for post in posts] == [1843, 952]
+            ```
         """
         if direction.lower() not in ("asc", "desc"):
             raise ValueError("direction must be 'asc' or 'desc'")
@@ -893,110 +891,96 @@ class Query(Generic[T]):
         return new
 
     def join(self, selector: "Callable[[QueryProxy[T]], Any]") -> Self:
-        """Force an INNER join on a relation path and return a new query.
+        """Join a related model with `INNER JOIN`, keeping only rows that have it.
 
-        ``selector`` is a lambda naming a RELATION path
-        (``lambda t: t.account``, ``lambda t: t.account.owner``) — the same
-        traversal syntax as ``where()``, but resolving to the relation itself,
-        not a column on it. A bare ``.join(lambda t: t.account)`` with no
-        predicate is a meaningful **existence filter** on a nullable relation:
-        it narrows the result to rows where the relation exists (ADR-0006).
-
-        Every edge of the path is marked explicit-INNER; combining it with an
-        explicit ``.left_join`` on the same edge is a build-time error (see
-        :meth:`left_join`).
+        The lambda names a foreign key relation, not a column on it. On a
+        nullable relation, a `join()` with no condition drops the rows whose
+        relation is empty. A `where()` or `order_by()` that reaches into the
+        same relation shares the join. See
+        [Every traversed hop is an INNER join](../guide/queries.md#every-traversed-hop-is-an-inner-join).
 
         Args:
-            selector: A lambda receiving a :class:`QueryProxy` and returning a
-                relation path (a ``RelationProxy``).
+            selector: A lambda returning a relation, such as
+                `lambda post: post.author`, or a longer path through several.
 
         Returns:
-            A new ``Query`` with the join registered; ``self`` is unchanged.
+            A new query with the join added.
 
         Raises:
-            TypeError: If ``selector`` is not callable or does not resolve to a
-                relation path (a column selector is rejected — join names a
-                relation, not a column).
-            ValueError: If an edge of the path is already marked explicit-LEFT.
+            TypeError: `selector` is not callable, or names a column or a
+                reverse relation instead of a foreign key relation.
+            ValueError: A [`left_join`][ferro.query.builder.Query.left_join]
+                already marked part of the path.
 
         Examples:
-            >>> with_account = QJTransaction.select().join(lambda t: t.account)
+            ```python {test=run prelude=reference}
+            query = Post.select().join(lambda post: post.author)
+            assert await query.count() == 2
+            ```
         """
         return self._add_explicit_join(selector, "inner")
 
     def left_join(self, selector: "Callable[[QueryProxy[T]], Any]") -> Self:
-        """Mark a relation path LEFT (whole-path) and return a new query.
+        """Join a related model with `LEFT JOIN`, keeping rows that lack it.
 
-        ``selector`` names a RELATION path exactly like :meth:`join`. Every edge
-        of the path is marked LEFT (the **whole-path rule**, ADR-0006), so a
-        left-marked 2-hop path retains rows missing the relation at either hop.
-        Relation-less rows are retained (NULL retention), observable both in
-        ordered results and in traversal predicates on related columns (e.g.
-        ``where(lambda t: t.account.name == None)``).
-
-        Conflict rules: an explicit LEFT beats implicit ``where()``/``order_by()``
-        traversal on a shared edge (the path renders LEFT); an explicit ``.join``
-        plus an explicit ``.left_join`` on the same edge is a build-time error.
+        Every relation along the path is joined with `LEFT JOIN`, so a row
+        missing the relation at any step is still returned, and a field read
+        through the relation is `None`. The `LEFT JOIN` also applies to a
+        `where()`, `order_by()` or `select()` that reaches into the same
+        path. See
+        [Keeping rows that have no relation](../guide/queries.md#keeping-rows-that-have-no-relation).
 
         Args:
-            selector: A lambda receiving a :class:`QueryProxy` and returning a
-                relation path (a ``RelationProxy``).
+            selector: A lambda returning a relation, such as
+                `lambda post: post.author`, or a longer path through several.
 
         Returns:
-            A new ``Query`` with the LEFT join registered; ``self`` is unchanged.
+            A new query with the join added.
 
         Raises:
-            TypeError: If ``selector`` is not callable or does not resolve to a
-                relation path.
-            ValueError: If an edge of the path is already marked explicit-INNER.
+            TypeError: `selector` is not callable, or names a column or a
+                reverse relation instead of a foreign key relation.
+            ValueError: A [`join`][ferro.query.builder.Query.join] already
+                marked part of the path.
 
         Examples:
-            >>> keep_orphans = QJNote.select().left_join(lambda n: n.account)
+            ```python {test=run prelude=reference}
+            rows = await (
+                Post.select(lambda post: {"post": post.title, "author": post.author.name})
+                .left_join(lambda post: post.author)
+                .order_by(lambda post: post.id)
+                .all()
+            )
+            assert [row.author for row in rows] == ["Ada Lovelace", "Grace Hopper"]
+            ```
         """
         return self._add_explicit_join(selector, "left")
 
     def include(self, selector: "Callable[[QueryProxy[T]], Any]") -> Self:
-        """Populate a relation path on every result and return a new query.
+        """Load a related model with each result, in the same query.
 
-        ``selector`` is a lambda naming a forward-FK RELATION path
-        (``lambda t: t.account``, ``lambda t: t.account.owner``) — the same
-        traversal syntax as :meth:`join`. Results are the same ``list[T]``
-        the query always returned, in one SQL statement, with each included
-        relation **populated**: access is a plain attribute
-        (``txn.account.label`` — no await, no query) returning the complete
-        related instance, exactly as the field's declared annotation claims
-        (ADR-0008). Unpopulated relations keep the awaitable contract
-        unchanged; a nullable FK with no target populates as ``None`` with
-        the root row retained.
-
-        Include decides attached data only — joins decide membership,
-        projection decides shape. Adding ``.include(...)`` to any query
-        returns exactly the rows that query returned without it: include
-        contributes no join-type opinion on any edge a predicate or explicit
-        chainer references, and renders LEFT only on edges nothing else
-        touches. ``count()``/``exists()`` are unaffected.
-
-        Cumulative, order-free, and idempotent: chained includes accumulate,
-        shared prefixes dedup by path identity, and including a path
-        populates every hop along it.
+        Each returned instance has the relation filled in: reading it is a
+        plain attribute that holds the related instance, with no `await`
+        and no second query. `include()` never changes which rows come back
+        or how many. A path through several relations fills in each one. See
+        [Populating relations with include()](../guide/queries.md#populating-relations-with-include).
 
         Args:
-            selector: A lambda receiving a :class:`QueryProxy` and returning
-                a relation path (a ``RelationProxy``).
+            selector: A lambda returning a foreign key relation, such as
+                `lambda post: post.author`.
 
         Returns:
-            A new ``Query`` with the population registered; ``self`` is
-            unchanged.
+            A new query that loads the relation.
 
         Raises:
-            TypeError: If ``selector`` is a string or not callable, resolves
-                to a column rather than a relation, or names a BackRef/M2M
-                relation (reverse population is a separate future mechanism).
+            TypeError: `selector` is a string or not callable, or names a
+                column or a reverse or many-to-many relation.
 
         Examples:
-            >>> txns = await Transaction.select().include(lambda t: t.account).all()  # doctest: +SKIP
-            >>> txns[0].account.label  # doctest: +SKIP
-            'checking'
+            ```python {test=run prelude=reference}
+            posts = await Post.select().include(lambda post: post.author).order_by(lambda post: post.id).all()
+            assert posts[0].author.name == "Ada Lovelace"
+            ```
         """
         path = _resolve_include_selector(selector, self.model_cls)
         new = self._clone()
@@ -1032,40 +1016,46 @@ class Query(Generic[T]):
         return new
 
     def limit(self, value: int) -> Self:
-        """Limit the number of records returned
+        """Return at most `value` rows.
 
         Args:
-            value: The maximum number of records to return.
+            value: The largest number of rows to return.
 
         Returns:
-            A new ``Query`` with the clause added; ``self`` is unchanged.
+            A new query with the limit set.
 
         Examples:
-            >>> query = User.select().limit(10)
-            >>> query._limit
-            10
+            ```python {test=run prelude=reference}
+            posts = await Post.select().order_by(lambda post: post.id).limit(1).all()
+            assert [post.id for post in posts] == [1]
+            ```
         """
         new = self._clone()
         new._limit = value
         return new
 
     def offset(self, value: int) -> Self:
-        """Skip a specific number of records
+        """Skip the first `value` rows.
+
+        For pages deep into a large table, [`after`][ferro.query.builder.Query.after]
+        stays fast where an offset grows slower with every skipped row. See
+        [Pagination](../howto/pagination.md).
 
         Args:
-            value: The number of records to skip.
+            value: The number of rows to skip.
 
         Returns:
-            A new ``Query`` with the clause added; ``self`` is unchanged.
+            A new query with the offset set.
 
         Raises:
-            ValueError: If ``after()`` or ``before()`` is already set — a query
-                has one start.
+            ValueError: `after()` or `before()` is already set; a query has
+                one starting point.
 
         Examples:
-            >>> query = User.select().offset(20)
-            >>> query._offset
-            20
+            ```python {test=run prelude=reference}
+            posts = await Post.select().order_by(lambda post: post.id).limit(10).offset(1).all()
+            assert [post.id for post in posts] == [2]
+            ```
         """
         if self._after is not None or self._before is not None:
             raise ValueError(
@@ -1115,19 +1105,31 @@ class Query(Generic[T]):
                     )
 
     def position_of(self, row: T) -> tuple[Any, ...]:
-        """Read this query's order-key tuple off a model instance.
+        """Read an instance's values for this query's sort keys.
+
+        The tuple is the instance's place in the query's order, the cursor
+        that [`after`][ferro.query.builder.Query.after] and
+        [`before`][ferro.query.builder.Query.before] take. Store it to resume
+        paging later, for example in an API's next-page token.
 
         Args:
-            row: A hydrated instance of the queried model.
+            row: An instance of the queried model.
 
         Returns:
-            The ordered tuple of order-key values, matching ``order_by``
-            declaration order.
+            One value per sort key, in the order the keys were added.
 
         Raises:
-            TypeError: If ``row`` is not an instance of the queried model.
-            ValueError: If the order keys are not a legal position-paging
-                set, or a traversed order key's relation is unpopulated.
+            TypeError: `row` is not an instance of the queried model.
+            ValueError: The sort keys do not include the primary key, or a
+                key reaches into a relation the instance does not have loaded
+                with `include()`.
+
+        Examples:
+            ```python {test=run prelude=reference}
+            by_views = Post.select().order_by(lambda post: post.views, "desc").order_by(lambda post: post.id)
+            top = await by_views.first()
+            assert by_views.position_of(top) == (1843, 1)
+            ```
         """
         if not isinstance(row, self.model_cls):
             raise TypeError(
@@ -1181,24 +1183,40 @@ class Query(Generic[T]):
         return bound
 
     def after(self, position: tuple[Any, ...] | T) -> Self:
-        """Start the page after an exclusive position in the declared order.
+        """Start the results just after a position in the query's order.
 
-        ``position`` is the ordered tuple of this query's order-key values, or
-        a model instance (sugar for ``after(position_of(row))``). Order keys
-        may be root or traversed columns and must include the primary key.
-        ``None`` is legal in every non-PK slot; the PK slot cannot be empty.
+        This is keyset paging: pass the last row of one page to get the
+        next. The position is excluded, and rows inserted or deleted
+        elsewhere do not shift the page. The sort keys must include the
+        primary key, so that no two rows share a position. See
+        [Keyset (cursor) pagination](../howto/pagination.md#keyset-cursor-pagination).
 
         Args:
-            position: A tuple of order-key values, or a model instance.
+            position: An instance of the queried model, or the tuple of its
+                sort-key values that
+                [`position_of`][ferro.query.builder.Query.position_of]
+                returns. Any value but the primary key's may be `None`.
 
         Returns:
-            A new ``Query`` with the bound set; ``self`` is unchanged.
+            A new query that starts after `position`.
 
         Raises:
-            TypeError: If ``position`` is neither a tuple nor a model instance.
-            ValueError: If the order keys are illegal for ``after()``, the
-                tuple has the wrong arity, the PK slot is ``None``,
-                ``offset()`` is already set, or ``before()`` is already set.
+            TypeError: `position` is neither a tuple nor an instance of the
+                queried model.
+            ValueError: The sort keys do not include the primary key, the
+                tuple has the wrong length, its primary key value is `None`,
+                or `offset()` or `before()` is already set.
+
+        Examples:
+            ```python {test=run prelude=reference}
+            by_views = Post.select().order_by(lambda post: post.views, "desc").order_by(lambda post: post.id).limit(1)
+
+            page = await by_views.all()
+            assert [post.views for post in page] == [1843]
+
+            next_page = await by_views.after(page[-1]).all()
+            assert [post.views for post in next_page] == [952]
+            ```
         """
         bound = self._resolve_position(position, op="after")
         new = self._clone()
@@ -1206,29 +1224,41 @@ class Query(Generic[T]):
         return new
 
     def before(self, position: tuple[Any, ...] | T) -> Self:
-        """Start at the rows immediately before an exclusive position.
+        """End the results just before a position in the query's order.
 
-        With a limit this is the adjacent previous page, yielded in the
-        declared order. Without a limit it is every earlier row in declared
-        order (a prefix, not a page). On unbounded ``before()``, ``first()``
-        is the adjacent previous row and ``all()[0]`` is the head of the
-        prefix — they disagree, and that is accepted.
-
-        ``before(row)`` is sugar for ``before(position_of(row))``. Same
-        order-key rules as ``after()`` (root or traversed columns, PK
-        required). Cannot be combined with ``after()`` or ``offset()``.
+        With a limit, this is the previous page, still in the query's order.
+        Without one, it is every row before the position. The position is
+        excluded, and the sort keys must include the primary key, as for
+        [`after`][ferro.query.builder.Query.after].
 
         Args:
-            position: A tuple of order-key values, or a model instance.
+            position: An instance of the queried model, or the tuple of its
+                sort-key values that
+                [`position_of`][ferro.query.builder.Query.position_of]
+                returns. Any value but the primary key's may be `None`.
 
         Returns:
-            A new ``Query`` with the bound set; ``self`` is unchanged.
+            A new query that ends before `position`.
 
         Raises:
-            TypeError: If ``position`` is neither a tuple nor a model instance.
-            ValueError: If the order keys are illegal, the tuple has the
-                wrong arity, the PK slot is ``None``, ``offset()`` is
-                already set, or ``after()`` is already set.
+            TypeError: `position` is neither a tuple nor an instance of the
+                queried model.
+            ValueError: The sort keys do not include the primary key, the
+                tuple has the wrong length, its primary key value is `None`,
+                or `offset()` or `after()` is already set.
+
+        Note:
+            Without a limit, [`first`][ferro.query.builder.Query.first]
+            returns the row just before the position, while `all()[0]` is
+            the first row of the query.
+
+        Examples:
+            ```python {test=run prelude=reference}
+            by_views = Post.select().order_by(lambda post: post.views, "desc").order_by(lambda post: post.id).limit(1)
+
+            previous_page = await by_views.before((952, 2)).all()
+            assert [post.views for post in previous_page] == [1843]
+            ```
         """
         bound = self._resolve_position(position, op="before")
         new = self._clone()
@@ -1236,15 +1266,16 @@ class Query(Generic[T]):
         return new
 
     async def all(self) -> list[T]:
-        """Return all model instances that match the current query
+        """Run the query and return every matching record.
 
         Returns:
-            A list of model instances.
+            The matching instances, in the query's order.
 
         Examples:
-            >>> users = await User.where(lambda user: user.active == True).all()  # noqa: E712
-            >>> isinstance(users, list)
-            True
+            ```python {test=run prelude=reference}
+            posts = await Post.where(lambda post: post.views > 1000).all()
+            assert [post.title for post in posts] == ["Notes on the Analytical Engine"]
+            ```
         """
         compiled = compile_query(self, "fetch")
         route = await self._transaction_or_using()
@@ -1259,15 +1290,18 @@ class Query(Generic[T]):
         return rows
 
     async def count(self) -> int:
-        """Return the number of records that match the current query
+        """Count the matching rows.
+
+        Limits and offsets are ignored: the count covers every row the
+        conditions match.
 
         Returns:
-            The count of matching records.
+            The number of matching rows.
 
         Examples:
-            >>> total = await User.where(lambda user: user.active == True).count()  # noqa: E712
-            >>> isinstance(total, int)
-            True
+            ```python {test=run prelude=reference}
+            assert await Post.where(lambda post: post.views > 900).count() == 2
+            ```
         """
         compiled = compile_query(self, "count")
         route = await self._transaction_or_using()
@@ -1286,46 +1320,48 @@ class Query(Generic[T]):
     async def update(self, /, **fields: Any) -> int: ...
 
     async def update(self, *args: Any, **fields: Any) -> int:
-        """Update all records matching the current query.
+        """Update every matching row in one statement.
 
-        Two doors, one SET wire: keyword literals (``update(name="x")``) or a
-        recipe callable (``update(lambda user: {"email": "x", "bonus":
-        user.score, "n": user.n + 1, "updated_at": now})``). Recipe values
-        are a literal, a root column copy, ``+`` / ``-`` arithmetic, the
-        imported ``now`` singleton, or ``.merge()`` (Postgres-only shallow
-        object merge). ``+`` does not fill empties — ``NULL + 1`` is NULL;
-        ``.merge()`` treats a NULL object column as ``{}``. The doors
-        cannot be mixed.
+        Pass the new values as keywords, or pass one lambda, a recipe, that
+        returns a dict of new values computed in the database. A recipe
+        value is a literal, another column of the row, `+` or `-` arithmetic
+        on columns, [`now`][ferro.now] for the database's clock, or
+        `.merge()` on a JSON column (Postgres only). `NULL + 1` is `NULL`.
+        The two forms cannot be mixed. See
+        [Recipe updates](../guide/mutations.md#recipe-updates).
 
         Args:
-            *args: Optional positional recipe callable receiving a
-                :class:`QueryProxy` and returning a non-empty ``dict`` of
-                root-column assignments. Nameless so a keyword ``recipe=``
-                still SETs a column of that name.
-            **fields: Field names and literal values to update.
+            *args: An optional recipe: a lambda that takes the row stand-in
+                and returns a dict of column names to new values. It is
+                positional only, so `recipe=` as a keyword still names a
+                column.
+            **fields: Column names and the literal values to write.
 
         Returns:
-            The number of records updated.
+            The number of rows updated.
 
         Raises:
-            TypeError: If both doors are used, a recipe is not callable or
+            TypeError: Both forms are given, the recipe is not callable or
                 does not return a dict, or a keyword value is not a literal.
-            ValueError: If the recipe is empty, ``limit()`` or ``offset()``
-                was set, or the query traverses a relation — multi-table
-                mutation has no portable SQL.
+            ValueError: The recipe assigns nothing, the query has a
+                `limit()`, `offset()`, `after()` or `before()`, or it reaches
+                into a related model.
 
         Examples:
-            >>> updated = await User.where(lambda user: user.id == 1).update(name="Taylor")
-            >>> isinstance(updated, int)
-            True
-            >>> from ferro import now
-            >>> n = await Counter.where(lambda counter: counter.id == cid).update(
-            ...     lambda counter: {
-            ...         "n": counter.n + 1,
-            ...         "total": counter.a + counter.b,
-            ...         "updated_at": now,
-            ...     }
-            ... )
+            Keywords write literal values:
+
+            ```python {test=run prelude=reference}
+            updated = await Post.where(lambda post: post.id == 2).update(published=False)
+            assert updated == 1
+            ```
+
+            A recipe computes each row's new value from its current one:
+
+            ```python {test=run prelude=reference}
+            await Post.where(lambda post: post.views > 900).update(lambda post: {"views": post.views + 1})
+            posts = await Post.select().order_by(lambda post: post.id).all()
+            assert [post.views for post in posts] == [1844, 953]
+            ```
         """
         if len(args) > 1:
             raise TypeError("update() takes at most one positional recipe")
@@ -1349,37 +1385,37 @@ class Query(Generic[T]):
         )
 
     async def first(self) -> T | None:
-        """Return the first matching record, or None
+        """Run the query and return its first record, or `None` when nothing matches.
 
         Returns:
-            A model instance or None.
+            The first matching instance in the query's order, or `None`.
 
         Examples:
-            >>> user = await User.select().order_by("id").first()
-            >>> user is None or isinstance(user, User)
-            True
+            ```python {test=run prelude=reference}
+            post = await Post.select().order_by(lambda post: post.views).first()
+            assert post.title == "The Education of a Computer"
+            ```
         """
         results = await self.limit(1).all()
         return results[0] if results else None
 
     async def delete(self) -> int:
-        """Delete all records matching the current query
+        """Delete every matching row in one statement.
 
         Returns:
-            The number of records deleted.
+            The number of rows deleted.
 
         Raises:
-            ValueError: If ``limit()`` or ``offset()`` was set on this query, or
-                if the query traverses a relation (a ``where()`` predicate on a
-                related column, or an explicit ``join()``/``left_join()``) —
-                multi-table mutation has no portable SQL. Filter by a column on
-                the target model, or resolve the related primary keys first and
-                delete by primary-key set.
+            ValueError: The query has a `limit()`, `offset()`, `after()` or
+                `before()`, or reaches into a related model through
+                `where()`, `join()` or `left_join()`. Filter on the model's own columns instead,
+                such as the foreign key column `author_id`.
 
         Examples:
-            >>> deleted = await User.where(lambda user: user.disabled == True).delete()  # noqa: E712
-            >>> isinstance(deleted, int)
-            True
+            ```python {test=run prelude=reference}
+            deleted = await Post.where(lambda post: post.views < 1000).delete()
+            assert deleted == 1
+            ```
         """
         compiled = compile_query(self, "delete")
         route = await self._transaction_or_using()
@@ -1390,32 +1426,31 @@ class Query(Generic[T]):
         )
 
     async def exists(self) -> bool:
-        """Return whether at least one record matches the current query
+        """Return whether any row matches.
 
         Returns:
-            True if records exist, otherwise False.
+            `True` when at least one row matches, otherwise `False`.
 
         Examples:
-            >>> found = await User.where(lambda user: user.email == "a@b.com").exists()
-            >>> isinstance(found, bool)
-            True
+            ```python {test=run prelude=reference}
+            assert await Author.where(lambda author: author.email == "ada@example.com").exists()
+            ```
         """
         return await self.count() > 0
 
     async def add(self, *instances: Any) -> None:
-        """Add links to a many-to-many relationship
+        """Link instances to the owner of a many-to-many relation.
+
+        Call it on the relation, as in `await post.tags.add(history, science)`.
+        See [Many-to-many](../guide/relationships.md#many-to-many).
 
         Args:
-            *instances: Target model instances that provide an ``id`` attribute.
+            *instances: The related instances to link. Each is identified by
+                its `id` field, so the related model's primary key must be
+                named `id`.
 
         Raises:
-            RuntimeError: If the query is not bound to a many-to-many context.
-
-        Examples:
-            >>> user = await User.create(email="taylor@example.com")
-            >>> admin = await Group.create(name="admin")
-            >>> staff = await Group.create(name="staff")
-            >>> await user.groups.add(admin, staff)
+            RuntimeError: The query is not a many-to-many relation.
         """
         if not self._m2m_context:
             raise RuntimeError(
@@ -1438,18 +1473,18 @@ class Query(Generic[T]):
         )
 
     async def remove(self, *instances: Any) -> None:
-        """Remove links from a many-to-many relationship
+        """Unlink instances from the owner of a many-to-many relation.
+
+        Call it on the relation, as in `await post.tags.remove(history)`. The
+        instances' rows stay; only the links go.
 
         Args:
-            *instances: Target model instances that provide an ``id`` attribute.
+            *instances: The related instances to unlink. Each is identified
+                by its `id` field, so the related model's primary key must be
+                named `id`.
 
         Raises:
-            RuntimeError: If the query is not bound to a many-to-many context.
-
-        Examples:
-            >>> user = await User.create(email="taylor@example.com")
-            >>> admin = await Group.create(name="admin")
-            >>> await user.groups.remove(admin)
+            RuntimeError: The query is not a many-to-many relation.
         """
         if not self._m2m_context:
             raise RuntimeError(
@@ -1471,14 +1506,13 @@ class Query(Generic[T]):
         )
 
     async def clear(self) -> None:
-        """Clear all links in a many-to-many relationship
+        """Unlink every instance from the owner of a many-to-many relation.
+
+        Call it on the relation, as in `await post.tags.clear()`. The related
+        rows stay; only the links go.
 
         Raises:
-            RuntimeError: If the query is not bound to a many-to-many context.
-
-        Examples:
-            >>> user = await User.create(email="taylor@example.com")
-            >>> await user.groups.clear()
+            RuntimeError: The query is not a many-to-many relation.
         """
         if not self._m2m_context:
             raise RuntimeError(
@@ -1494,36 +1528,51 @@ class Query(Generic[T]):
         )
 
     def __repr__(self):
-        """Return a developer-friendly representation of the query"""
+        """Show the model and the conditions, for debugging."""
         return f"<Query model={self.model_cls.__name__} where={self.where_clause}>"
 
 
 class ProjectedQuery(Query[T]):
-    """A query projected to a column subset: results are records, not models.
+    """A query that returns some columns as records, not model instances.
 
-    Created by ``select()`` with a selector; carries a ``record``
-    materialization plan (ADR-0007), so ``all()`` delivers :class:`Row`
-    records in the list-like :class:`Rows` container and ``first()`` a
-    ``Row | None`` — never model instances (the complete-instance invariant).
-    Projected records bypass the identity map and carry no persistence
-    identity.
+    [`select`][ferro.query.builder.Query.select] with a lambda or column names
+    returns one. Awaiting [`all`][ferro.query.builder.ProjectedQuery.all]
+    gives [`Row`][ferro.query.Row] records in a [`Rows`][ferro.query.Rows]
+    list. Records are plain values: they are not tracked by the session and
+    cannot be saved. Filtering, sorting and paging work as on any query.
 
-    Filtering, ordering, and pagination compose exactly like on
-    :class:`Query`; ``count()``/``exists()`` are unaffected by the
-    projection.
+    A dict selector whose values include an aggregate such as
+    `post.views.sum()` groups the rows by the plain fields beside it. See
+    [Aggregations and grouped queries](../guide/aggregations.md).
+
+    Examples:
+        ```python {test=run prelude=reference}
+        rows = await Post.select(
+            lambda post: {"author": post.author.name, "total_views": post.views.sum()}
+        ).order_by("author").all()
+        assert [(row.author, row.total_views) for row in rows] == [
+            ("Ada Lovelace", 1843),
+            ("Grace Hopper", 952),
+        ]
+        ```
     """
 
     def __init__(self, source: Query[T], fields: tuple[_ProjectedField, ...]) -> None:
-        """Project ``source`` to ``fields`` (selection order preserved).
+        """Project a query to the given fields.
 
-        Copies the source query's state through ``_clone()`` (fresh mutable
-        containers, FF-F F-1); ``source`` is unchanged. Every traversed
-        field's relation path registers a join (#293): projection traversal
-        narrows exactly like ``where()``/``order_by()`` traversal, sharing
-        join identity per relation path (ADR-0006) — ``setdefault`` keeps an
-        already-registered path's entry, and an explicit ``left_join()``
-        still wins at serialization via the edge marks.
+        Args:
+            source: The query to project. It is left unchanged.
+            fields: The fields to return, in order.
+
+        Raises:
+            ValueError: A sort key added before the projection is not one of
+                its group keys.
         """
+        # Copies the source's state through ``_clone()`` (fresh mutable
+        # containers). Every traversed field's relation path registers a join:
+        # projection traversal narrows like where()/order_by() traversal,
+        # sharing one join per relation path, and an explicit left_join()
+        # still wins through the edge marks.
         self.__dict__.update(source._clone().__dict__)
         # Immutable, so chained clones share it safely.
         self._projection: tuple[_ProjectedField, ...] = fields
@@ -1585,41 +1634,45 @@ class ProjectedQuery(Query[T]):
         *,
         nulls: str | None = None,
     ) -> Self:
-        """Add an ordering clause to a projected query (#295's three rules).
+        """Sort the records by an output field, a column or an aggregate.
 
-        Strings resolve OUTPUT field names first, then root columns — SQL's
-        own ORDER BY scoping (``order_by("total")`` sorts by the projected
-        aggregate, even if a root column shares the name). The lambda form
-        spells SOURCE expressions: a column (traversal included), or an
-        aggregate (``order_by(lambda t: t.amount.sum(), "desc")``) which must
-        match a projected aggregate field and sorts by its output name.
+        A string names an output field first and a column of the model
+        second, the way SQL's `ORDER BY` reads names. A lambda names a
+        column, which may reach into a related model, or an aggregate that
+        the projection returns, such as `lambda post: post.views.sum()`.
 
-        On an AGGREGATE projection every sort key must be a group key or an
-        aggregate — anything else raises at build time (each group would
-        answer with an arbitrary row's value; SQLite would even permit it).
-        On a plain projection unselected root columns stay sortable,
-        unchanged.
+        When the projection has an aggregate, every sort key must be a
+        group key or an aggregate: any other column has no single value per
+        group. See
+        [Ordering grouped results](../guide/aggregations.md#ordering-grouped-results).
 
         Args:
-            field: Output field name or root column-name string, or a lambda
-                naming a source column / aggregate expression.
-            direction: ``"asc"`` (default) or ``"desc"``.
-            nulls: Optional ``"first"``, ``"last"``, or ``"native"`` null
-                placement (keyword-only). Omitted means ``"last"``; ``"native"``
-                keeps each backend's dialect default.
+            field: An output field or column name, or a lambda returning a
+                column or an aggregate.
+            direction: `"asc"` (the default) or `"desc"`.
+            nulls: Where `NULL` values sort: `"first"`, `"last"` or
+                `"native"`, the database's own rule. Defaults to `None`,
+                which sorts them last on every database.
 
         Returns:
-            A new query with the ordering added; ``self`` is unchanged.
+            A new query with the sort key added.
 
         Raises:
-            ValueError: If ``direction`` is invalid, ``nulls`` is invalid, or
-                the sort key is not a group key or aggregate on an aggregate
-                projection (including an aggregate expression matching no
-                projected field).
-            AttributeError: If a string names neither an output field nor a
-                queryable root column.
-            TypeError: If a lambda resolves to a bare relation or any other
-                non-sortable value.
+            ValueError: `direction` or `nulls` has a value not listed above,
+                or on an aggregate projection the key is neither a group key
+                nor an aggregate the projection returns.
+            AttributeError: A string names neither an output field nor a
+                column of the model.
+            TypeError: The lambda returns a relation or anything else that is
+                not a column or an aggregate.
+
+        Examples:
+            ```python {test=run prelude=reference}
+            rows = await Post.select(
+                lambda post: {"author": post.author.name, "total_views": post.views.sum()}
+            ).order_by(lambda post: post.views.sum(), "desc").all()
+            assert [row.author for row in rows] == ["Ada Lovelace", "Grace Hopper"]
+            ```
         """
         if direction.lower() not in ("asc", "desc"):
             raise ValueError("direction must be 'asc' or 'desc'")
@@ -1715,16 +1768,22 @@ class ProjectedQuery(Query[T]):
         )
 
     def count(self):  # type: ignore[override]
-        """Count matching rows — or raise on an aggregate projection (#295).
+        """Count the matching rows, whatever columns the projection selects.
 
-        On a plain projection ``count()`` stays projection-blind (#279's
-        verb contract). On an AGGREGATE projection "count" is ambiguous
-        between rows and groups, so it raises synchronously at the call,
-        before any coroutine or SQL exists, with both spellings.
+        On a projection with an aggregate, "count" could mean rows or
+        groups, so the call raises before any SQL runs.
+
+        Returns:
+            (int): The number of matching rows, once awaited.
 
         Raises:
-            ValueError: On an aggregate projection — count rows with an
-                unprojected query, count groups with ``len(await q.all())``.
+            ValueError: The projection has an aggregate. Count rows with the
+                query before `select()`, or groups with `len(await query.all())`.
+
+        Examples:
+            ```python {test=run prelude=reference}
+            assert await Post.select(lambda post: post.title).count() == 2
+            ```
         """
         if self._has_aggregate():
             raise ValueError(
@@ -1736,13 +1795,18 @@ class ProjectedQuery(Query[T]):
         return super().count()
 
     def exists(self):  # type: ignore[override]
-        """Existence check — or raise on an aggregate projection (#295).
+        """Return whether any row matches, whatever columns the projection selects.
+
+        On a projection with only aggregates there is always exactly one
+        record, so the call raises before any SQL runs.
+
+        Returns:
+            (bool): `True` when at least one row matches, once awaited.
 
         Raises:
-            ValueError: On an aggregate projection — a global aggregate
-                always yields one record, and "a group exists" is
-                ``len(await q.all()) > 0``; test the unprojected query
-                instead (``Model.where(...).exists()``).
+            ValueError: The projection has an aggregate. Test rows with the
+                query before `select()`, or groups with
+                `len(await query.all()) > 0`.
         """
         if self._has_aggregate():
             raise ValueError(
@@ -1755,18 +1819,32 @@ class ProjectedQuery(Query[T]):
         return super().exists()
 
     def position_of(self, row: T | Row) -> tuple[Any, ...]:
-        """Read this query's order-key tuple off a projected record or instance.
+        """Read a record's values for this query's sort keys.
 
-        Every order key must be in the projection (matched by source column
-        and path, or by output name). Otherwise pass a tuple to
-        ``after()``/``before()``.
+        Every sort key must be among the selected fields, under its own name
+        or an output name. Otherwise build the tuple yourself for `after()`
+        or `before()`.
+
+        Args:
+            row: A record this query returned, or an instance of the queried
+                model.
+
+        Returns:
+            One value per sort key, in the order the keys were added.
 
         Raises:
-            TypeError: If ``row`` is neither a :class:`Row` nor a model
+            TypeError: `row` is neither a [`Row`][ferro.query.Row] nor an
                 instance of the queried model.
-            ValueError: If an order key is missing from the projection, the
-                order keys are illegal, or a traversed key on a model
-                instance is unpopulated.
+            ValueError: A sort key is not selected, the sort keys do not
+                include the primary key, or a key reaches into a relation the
+                instance does not have loaded.
+
+        Examples:
+            ```python {test=run prelude=reference}
+            by_views = Post.select(lambda post: (post.id, post.views)).order_by(lambda post: post.views, "desc").order_by(lambda post: post.id)
+            top = await by_views.first()
+            assert by_views.position_of(top) == (1843, 1)
+            ```
         """
         if isinstance(row, Row):
             self._assert_position_order_keys()
@@ -1799,16 +1877,17 @@ class ProjectedQuery(Query[T]):
         return getattr(row, name)
 
     async def all(self) -> Rows[Row]:  # type: ignore[override]  # ty: ignore[invalid-method-override]
-        """Return the projected records for every matching row.
+        """Run the query and return a record for every matching row, or group.
 
         Returns:
-            A :class:`Rows` of :class:`Row` records, fields in selection
-            order, wrapped without validation.
+            A [`Rows`][ferro.query.Rows] list of [`Row`][ferro.query.Row]
+                records, each with the selected fields in selection order.
 
         Examples:
-            >>> rows = await Transaction.select(lambda t: (t.id, t.amount)).all()  # doctest: +SKIP
-            >>> [r.amount for r in rows]  # doctest: +SKIP
-            [Decimal('12.50'), Decimal('7.00')]
+            ```python {test=run prelude=reference}
+            rows = await Post.select(lambda post: post.views).order_by(lambda post: post.id).all()
+            assert [row.views for row in rows] == [1843, 952]
+            ```
         """
         compiled = compile_query(self, "fetch")
         route = await self._transaction_or_using()
@@ -1824,23 +1903,29 @@ class ProjectedQuery(Query[T]):
         return _ROWS_OF_ROW._wrap(records)
 
     async def first(self) -> Row | None:  # type: ignore[override]  # ty: ignore[invalid-method-override]
-        """Return the first matching projected record, or None.
+        """Run the query and return its first record, or `None` when nothing matches.
+
+        Returns:
+            The first [`Row`][ferro.query.Row] in the query's order, or `None`.
 
         Examples:
-            >>> row = await Transaction.select(lambda t: t.amount).order_by("id").first()  # doctest: +SKIP
-            >>> row is None or isinstance(row, Row)  # doctest: +SKIP
-            True
+            ```python {test=run prelude=reference}
+            row = await Post.select(lambda post: post.title).order_by(lambda post: post.views).first()
+            assert row.title == "The Education of a Computer"
+            ```
         """
         results = await self.limit(1).all()
         return results[0] if results else None
 
     def select(self, *selectors: "RowSelector[T] | str") -> NoReturn:  # type: ignore[override]  # ty: ignore[invalid-method-override]
-        """Reject a second projection: it would change the result type
-        mid-chain (#280).
+        """Refuse a second `select()`, which would change the result type mid-chain.
+
+        Args:
+            *selectors: Ignored; the call always raises.
 
         Raises:
-            ValueError: Always — build the projection in one ``select()``
-                call, or start a new query from the model.
+            ValueError: Always. Select every field in one `select()` call, or
+                start a new query from the model.
         """
         raise ValueError(
             "select() was already applied to this query; replacing a "
@@ -1850,19 +1935,18 @@ class ProjectedQuery(Query[T]):
         )
 
     def include(self: Never, selector: Any) -> NoReturn:  # type: ignore[override]
-        """Reject ``include()`` on a projected query (#287, final at #293).
+        """Refuse `include()`: a record is flat and cannot hold a related instance.
 
-        One materialization plan per query (ADR-0007/ADR-0008), and record
-        results are flat, permanently (ADR-0009: flattened-as-final) — a
-        record reaches across a relation with traversed projection, never by
-        nesting an instance. The ``self: Never`` pin makes this a STATIC
-        error at the call site (tests/static_fixtures/bad_includes.py),
-        mirroring the mutation pins.
+        A type checker reports the call as an error too. To read a related
+        model's columns, select them through the relation
+        (`lambda post: {"author": post.author.name}`).
+
+        Args:
+            selector: Ignored; the call always raises.
 
         Raises:
-            ValueError: Always — reach across the relation with traversed
-                projection, or populate instances through an unprojected
-                query.
+            ValueError: Always. Select the related columns, or call
+                `include()` on a query without `select()`.
         """
         raise ValueError(
             "include() cannot be combined with a projection: a query carries "
@@ -1886,11 +1970,17 @@ class ProjectedQuery(Query[T]):
         /,
         **fields: Any,
     ) -> NoReturn:
-        """Reject ``update()`` on a projected query (#280).
+        """Refuse `update()`: a projection only reads.
+
+        A type checker reports the call as an error too.
+
+        Args:
+            recipe: Ignored; the call always raises.
+            **fields: Ignored; the call always raises.
 
         Raises:
-            ValueError: Always — mutate through an unprojected query
-                (``Model.where(...).update(...)``).
+            ValueError: Always. Update through a query without `select()`,
+                such as `Model.where(...).update(...)`.
         """
         raise ValueError(
             "update() is not supported on a projected query: a projection is "
@@ -1899,11 +1989,13 @@ class ProjectedQuery(Query[T]):
         )
 
     def delete(self: Never) -> NoReturn:  # type: ignore[override]
-        """Reject ``delete()`` on a projected query (#280).
+        """Refuse `delete()`: a projection only reads.
+
+        A type checker reports the call as an error too.
 
         Raises:
-            ValueError: Always — mutate through an unprojected query
-                (``Model.where(...).delete()``).
+            ValueError: Always. Delete through a query without `select()`,
+                such as `Model.where(...).delete()`.
         """
         raise ValueError(
             "delete() is not supported on a projected query: a projection is "
@@ -1912,7 +2004,7 @@ class ProjectedQuery(Query[T]):
         )
 
     def __repr__(self):
-        """Return a developer-friendly representation of the projection"""
+        """Show the model, the selected fields and the conditions, for debugging."""
         return (
             f"<ProjectedQuery model={self.model_cls.__name__} "
             f"fields={[field.name for field in self._projection]} "
@@ -1921,23 +2013,19 @@ class ProjectedQuery(Query[T]):
 
 
 class Relation(Query[T]):
-    """Represent lazy collection relationship queries with typing support
+    """The type of a reverse (`BackRef`) or many-to-many collection on an instance.
+
+    Annotate the field as `Relation[list[Target]]`. On an instance, the field
+    is a query over the related rows: await `.all()` to load them, or chain
+    `where()`, `order_by()` and the other query methods first. See
+    [Relationships](../guide/relationships.md).
 
     Examples:
-        >>> class User(Model):
-        ...     id: Annotated[int, FerroField(primary_key=True)]
-        ...     name: str
-        ...     posts: Relation[list["Post"]] = BackRef()
-
-        >>> class Post(Model):
-        ...     id: Annotated[int, FerroField(primary_key=True)]
-        ...     title: str
-        ...     user: Annotated[User, ForeignKey(related_name="posts")]
-
-        >>> user = await User.get(1)
-        >>> posts = await user.posts.all()
-        >>> isinstance(posts, list)
-        True
+        ```python {test=run prelude=reference}
+        ada = await Author.get(1)
+        posts = await ada.posts.all()
+        assert [post.title for post in posts] == ["Notes on the Analytical Engine"]
+        ```
     """
 
     # NOTE ON TYPING:
@@ -1964,14 +2052,24 @@ class Relation(Query[T]):
         async def first(self: "Relation[E]") -> E | None: ...
 
     async def all(self):  # type: ignore[override]
+        """Load every related record.
+
+        Returns:
+            (list): The related instances, in the query's order.
+        """
         return await super().all()
 
     async def first(self):  # type: ignore[override]
+        """Load the first related record, or `None` when there is none.
+
+        Returns:
+            (Any): The first related instance in the query's order, or `None`.
+        """
         return await super().first()
 
     @classmethod
     def __get_pydantic_core_schema__(cls, _source_type, _handler):
-        """Allow pydantic-core to treat relationships as arbitrary runtime values"""
+        """Let Pydantic accept any value for a relation field."""
         from pydantic_core import core_schema
 
         return core_schema.any_schema()
