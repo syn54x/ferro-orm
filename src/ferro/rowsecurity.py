@@ -1,34 +1,37 @@
-"""Row security declared on Ferro models (PRD #406).
+"""Row security declared on Ferro models.
 
-A model says once who is allowed to see its rows::
+A model says once who is allowed to see its rows:
 
-    class Invoice(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        tenant_id: UUID
-        amount: float
+```python
+class Invoice(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    tenant_id: UUID
+    amount: float
 
-        __ferro_rls__: ClassVar = RowSecurity(
-            RowPolicy(column="tenant_id", setting="app.tenant_id")
-        )
+    __ferro_rls__: ClassVar = RowSecurity(
+        RowPolicy(column="tenant_id", setting="app.tenant_id")
+    )
+```
 
-and ferro creates the table with row-level security switched on and the
-matching policy::
+and Ferro creates the table with row-level security switched on and the
+matching policy:
 
-    ALTER TABLE "invoice" ENABLE ROW LEVEL SECURITY
-    ALTER TABLE "invoice" FORCE ROW LEVEL SECURITY
-    CREATE POLICY "rls_invoice_tenant_id" ON "invoice" FOR ALL
-      USING ("tenant_id" = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
-      WITH CHECK ("tenant_id" = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+```sql
+ALTER TABLE "invoice" ENABLE ROW LEVEL SECURITY
+ALTER TABLE "invoice" FORCE ROW LEVEL SECURITY
+CREATE POLICY "rls_invoice_tenant_id" ON "invoice" FOR ALL
+  USING ("tenant_id" = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+  WITH CHECK ("tenant_id" = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+```
 
-From then on the database itself decides which rows a query can see: a
-connection whose ``app.tenant_id`` setting is unset sees **no** rows, and one
-that carries a tenant id sees only that tenant's rows — a forgotten ``where``
-filter is no longer a data leak.
+From then on the database decides which rows a query can see: a connection
+whose `app.tenant_id` setting is unset sees no rows, and one that carries a
+tenant id sees only that tenant's rows.
 
-This module owns the declaration surface and the validation that runs at class
-definition. Every SQL decision — the policy name, the ``NULLIF`` expression,
-the ``CREATE POLICY`` statement — lives in ``crates/ferro-ddl-lowering`` so
-each emitter renders the same bytes (AGENTS.md § I-1).
+This module owns the declaration surface and the validation that runs at
+class definition. Every SQL decision (the policy name, the `NULLIF`
+expression, the `CREATE POLICY` statement) is made in the Rust core, so
+every emitter renders the same bytes (AGENTS.md I-1).
 """
 
 from __future__ import annotations
@@ -42,6 +45,7 @@ from typing import Any
 from ._core import _ddl_row_policy_name, _rls_command_matrix, _rls_shorthand_cast
 
 FERRO_RLS = "__ferro_rls__"
+"""The class attribute a model declares its row security in."""
 
 #: Which clauses Postgres accepts per command, read once from the shared
 #: lowering layer. There is no second copy of this table here on purpose: the
@@ -51,8 +55,8 @@ _COMMAND_CLAUSES: dict[str, dict[str, bool]] = {
     row["command"]: row for row in json.loads(_rls_command_matrix())
 }
 
-#: The commands a policy may be scoped to (`FOR <command>`), in Rust's order.
 COMMANDS = tuple(_COMMAND_CLAUSES)
+"""The commands a policy may cover (`FOR <command>`)."""
 
 #: A custom Postgres setting key: dotted identifiers, nothing else. Ferro's
 #: renderer already doubles single quotes when it inlines the key, but that
@@ -70,55 +74,75 @@ _NAME_SHAPE = "[a-z][a-z0-9_]*"
 
 @dataclass(frozen=True)
 class RowPolicy:
-    """One row policy: which rows a command may touch.
+    """One Postgres row policy: which rows a command may read or write.
 
-    Two forms. The **shorthand** compares a column to a session setting::
+    It comes in two forms. The shorthand, `RowPolicy(column=..., setting=...)`,
+    compares a column with a session setting and renders, for both `USING`
+    and `WITH CHECK`:
 
-        RowPolicy(column="tenant_id", setting="app.tenant_id")
+    ```sql
+    "tenant_id" = NULLIF(current_setting('app.tenant_id', true), '')::uuid
+    ```
 
-    which renders ``"tenant_id" = NULLIF(current_setting('app.tenant_id',
-    true), '')::uuid`` for both ``USING`` and ``WITH CHECK``. The cast comes
-    from the column's own storage type; ``uuid``, ``text``/``varchar`` and the
-    integer families are supported, and anything else is a class-definition
-    error pointing here, at the raw form. The ``NULLIF`` is what makes an unset
-    (or reset) setting mean *no rows* instead of a cast error.
-
-    The **raw** form takes SQL and requires a name::
-
-        RowPolicy(
-            name="invitee_read",
-            command="select",
-            using="id IN (SELECT doc_id FROM membership WHERE ...)",
-        )
+    The cast follows the column's type: `uuid`, `text`, `varchar` and the
+    integer types are supported, and any other type is refused when the
+    class is defined. The `NULLIF` makes an unset or reset setting match no
+    rows instead of raising a cast error; see
+    [Policy expressions](../concepts/row-level-security.md#policy-expressions).
+    The raw form, `RowPolicy(name=..., using=...)`, takes the SQL expressions
+    as written and needs a name.
 
     Args:
-        name: Policy name suffix; the live policy is ``rls_<table>_<name>``.
-            Defaults to the column name in the shorthand form; required in the
-            raw form.
-        command: ``"all"`` (default), ``"select"``, ``"insert"``, ``"update"``
-            or ``"delete"``.
-        restrictive: ``True`` makes the policy AND-compose with every other
-            policy (``AS RESTRICTIVE``) instead of OR-composing.
-        column: Shorthand — the model column carrying the scope value.
-        setting: Shorthand — the Postgres setting (GUC) key to compare it to.
-        using: Raw — the ``USING`` expression, deciding which rows are visible.
-        with_check: Raw — the ``WITH CHECK`` expression, deciding which rows
-            may be written.
+        name: The end of the policy's name, `rls_<table>_<name>`: a lowercase
+            identifier. Defaults to `None`, the column's name in the
+            shorthand; required in the raw form.
+        command: The command the policy covers: `"all"` (the default),
+            `"select"`, `"insert"`, `"update"` or `"delete"`.
+        restrictive: Make the policy `AS RESTRICTIVE`, so it must hold
+            alongside every other policy instead of being one alternative.
+            Defaults to `False`.
+        column: Shorthand: the model column holding the scope value.
+        setting: Shorthand: the dotted Postgres setting to compare it with,
+            such as `"app.tenant_id"`.
+        using: Raw: the `USING` expression, which decides the rows a command
+            can see.
+        with_check: Raw: the `WITH CHECK` expression, which decides the rows
+            a write may leave behind.
+
+    Raises:
+        TypeError: The two forms are mixed or neither is given, a clause is
+            one the command does not accept, or a name, command or flag has
+            the wrong shape.
+        ValueError: `setting` is not a dotted custom setting name.
 
     Examples:
-        >>> RowPolicy(column="tenant_id", setting="app.tenant_id")
-        RowPolicy(name='tenant_id', command='all')
-        >>> RowPolicy(name="owner_all", command="update", using="true")
-        RowPolicy(name='owner_all', command='update')
+        ```python {test=run prelude=reference}
+        from ferro import RowPolicy
+
+        tenant = RowPolicy(column="tenant_id", setting="app.tenant_id")
+        invitee = RowPolicy(
+            name="invitee_read",
+            command="select",
+            using="id IN (SELECT document_id FROM membership)",
+        )
+        assert (tenant.resolved_name, invitee.resolved_name) == ("tenant_id", "invitee_read")
+        ```
     """
 
     name: str | None = None
+    """The policy name's suffix, or `None` for the shorthand's column name."""
     command: str = "all"
+    """The command the policy covers."""
     restrictive: bool = False
+    """Whether the policy is `AS RESTRICTIVE`."""
     column: str | None = None
+    """Shorthand: the column holding the scope value."""
     setting: str | None = None
+    """Shorthand: the Postgres setting the column is compared with."""
     using: str | None = None
+    """Raw: the `USING` expression."""
     with_check: str | None = None
+    """Raw: the `WITH CHECK` expression."""
 
     def __post_init__(self) -> None:
         self._validate_command()
@@ -239,7 +263,7 @@ class RowPolicy:
 
     @property
     def resolved_name(self) -> str:
-        """The policy's name suffix — ``name``, or the column in the shorthand."""
+        """The policy name's suffix: `name`, or the column in the shorthand."""
         if self.name is not None:
             return self.name
         return self.column  # type: ignore[return-value]
@@ -250,20 +274,58 @@ class RowPolicy:
 
 @dataclass(frozen=True)
 class RowSecurity:
-    """A model's row security declaration: its policies plus the table flags.
+    """A model's row security: its policies and the table's flags.
 
-    ``force=True`` (the default) emits ``FORCE ROW LEVEL SECURITY`` as well as
-    ``ENABLE``, so the table's owner is filtered too. Without it a deployment
-    that connects as the table owner — the common single-role setup — gets
-    policies that are never consulted.
+    Assign it to the model's `__ferro_rls__`. On Postgres the table gets
+    `ENABLE ROW LEVEL SECURITY` and one `CREATE POLICY` per policy; on
+    SQLite, which has no row security, Ferro warns and creates the table
+    without them. See
+    [Scope rows by tenant](../guide/row-level-security.md) for the setup.
+
+    Args:
+        *policies: The table's policies.
+        force: Also emit `FORCE ROW LEVEL SECURITY`, so the policies apply to
+            the table's owner too. Defaults to `True`; without it, an
+            application that connects as the owner is never filtered. See
+            [`FORCE` and `BYPASSRLS`](../concepts/row-level-security.md#force-and-bypassrls).
+
+    Raises:
+        TypeError: A policy is not a [`RowPolicy`][ferro.RowPolicy], or
+            `force` is not a `bool`.
 
     Examples:
-        >>> RowSecurity(RowPolicy(column="tenant_id", setting="app.tenant_id"))
-        RowSecurity(policies=1, force=True)
+        ```python {test=run prelude=reference}
+        from typing import ClassVar
+        from uuid import UUID
+
+        from ferro import Field, Model, RowPolicy, RowSecurity
+
+
+        class Invoice(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            tenant_id: UUID
+            total: int
+
+            __ferro_rls__: ClassVar = RowSecurity(
+                RowPolicy(column="tenant_id", setting="app.tenant_id")
+            )
+        ```
+
+        On Postgres, `Invoice`'s table is created with:
+
+        ```sql
+        ALTER TABLE "invoice" ENABLE ROW LEVEL SECURITY
+        ALTER TABLE "invoice" FORCE ROW LEVEL SECURITY
+        CREATE POLICY "rls_invoice_tenant_id" ON "invoice" FOR ALL
+          USING ("tenant_id" = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+          WITH CHECK ("tenant_id" = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+        ```
     """
 
     policies: tuple[RowPolicy, ...]
+    """The table's policies, in declaration order."""
     force: bool = True
+    """Whether the table also gets `FORCE ROW LEVEL SECURITY`."""
 
     def __init__(self, *policies: RowPolicy, force: bool = True) -> None:
         object.__setattr__(self, "policies", tuple(policies))

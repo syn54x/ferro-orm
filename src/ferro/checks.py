@@ -38,6 +38,7 @@ from .base import ForeignKey
 from .query.nodes import FieldProxy, Predicate, QueryNode, QueryProxy
 
 FERRO_CHECKS = "__ferro_checks__"
+"""The class attribute a model declares its table checks in."""
 
 _SUFFIX_RE = re.compile(r"^[a-z][a-z0-9_]*\Z")
 _SUFFIX_SHAPE = "[a-z][a-z0-9_]*"
@@ -72,19 +73,55 @@ _DISALLOWED_QUERY_METHOD_CALLS = {
 
 @dataclass(frozen=True)
 class Check:
-    """One table check: a name suffix plus a ferro predicate lambda.
+    """A `CHECK` constraint across the columns of one row, declared in `__ferro_checks__`.
 
-    The live constraint name is ``ck_<table>_<suffix>`` — ferro owns the
-    prefix, so ``suffix`` is a bare identifier (``[a-z][a-z0-9_]*``), unique
-    per model.
+    Ferro names the constraint `ck_<table>_<suffix>` and writes it inside
+    `CREATE TABLE`, on SQLite and Postgres alike. The predicate is a lambda
+    written like a [`where`][ferro.Model.where] filter. See
+    [Table checks](../guide/models-and-fields.md#table-checks) for the
+    predicates it accepts.
+
+    Args:
+        suffix: The end of the constraint's name: a lowercase identifier
+            (`[a-z][a-z0-9_]*`), unique within the model, without the
+            `ck_<table>_` prefix Ferro adds.
+        predicate: A lambda over the model's own columns, its parameter named
+            after the model.
+
+    Raises:
+        TypeError: `suffix` is not a lowercase identifier or starts with
+            `ck_`, or `predicate` is not callable.
 
     Examples:
-        >>> Check("at_most_one_outflow", lambda transfer: transfer.outflow_transaction == None)
-        Check(suffix='at_most_one_outflow')
+        ```python {test=run prelude=reference}
+        from typing import ClassVar
+
+        from ferro import Check, CheckViolationError, Field, Model, create_tables
+
+
+        class Payment(Model):
+            __ferro_checks__: ClassVar[tuple[Check, ...]] = (
+                Check("positive_amount", lambda payment: payment.amount > 0),
+            )
+
+            id: int | None = Field(default=None, primary_key=True)
+            amount: int
+
+
+        await create_tables()
+        try:
+            await Payment.create(amount=0)
+        except CheckViolationError as error:
+            assert "ck_payment_positive_amount" in str(error)
+        else:
+            raise AssertionError("expected CheckViolationError")
+        ```
     """
 
     suffix: str
+    """The constraint name's suffix, after `ck_<table>_`."""
     predicate: Predicate[Any]
+    """The lambda the constraint's body is rendered from."""
 
     def __post_init__(self) -> None:
         if not isinstance(self.suffix, str):
@@ -118,15 +155,15 @@ class Check:
 
 @dataclass(frozen=True)
 class TableCheckSpec:
-    """One compiled table check: its suffix and its ``CheckExpr`` payload.
+    """One compiled table check: its suffix and its predicate as plain data.
 
-    The SchemaIR compiler turns the suffix into the canonical constraint name;
-    ``predicate`` is already in the ``CheckExpr`` wire shape pinned by
-    ``crates/ferro-schema-ir``.
+    The schema compiler turns the suffix into the constraint name.
     """
 
     suffix: str
+    """The constraint name's suffix, after `ck_<table>_`."""
     predicate: dict[str, Any]
+    """The predicate, lowered to the JSON shape the schema carries."""
 
 
 class _CheckProxy(QueryProxy[Any]):
