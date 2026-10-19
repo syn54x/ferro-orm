@@ -5,19 +5,19 @@ $ pip install "ferro-orm[cli]"
 $ ferro migrate init
 ```
 
-The ``ferro`` console script ships with the core wheel and calls
-:func:`main`. The command line itself is a cyclopts app that needs the
-``cli`` extra; without it :func:`main` prints the install line and exits 2.
-Importing this module never imports cyclopts: :data:`app` is built on first
-access, so ``import ferro`` costs nothing for the CLI.
+The `ferro` console script ships with the core wheel and calls `main`.
+The command line itself is a cyclopts app that needs the `cli` extra;
+without it `main` prints the install line and exits 2. Importing this module
+never imports cyclopts: `app` is built on first access, so `import ferro`
+costs nothing for the CLI.
 
-Every verb lives on the ``migrate`` sub-app (:mod:`ferro.cli.migrate`) and
-receives the three global options as one :class:`Global`, given before or
-after the verb (``ferro --database app migrate up`` or
-``ferro migrate up --database app``). A :class:`~ferro.exceptions.FerroError`
-raised by a verb is a refusal: :func:`render_refusal` prints its message,
-which names the fix, and the command exits :data:`exit_codes.REFUSED`.
-A bad flag or a missing ``cli`` extra exits :data:`exit_codes.USAGE`.
+Every verb lives on the `migrate` sub-app (`ferro.cli.migrate`) and
+receives the three global options as one `Global`, given before or after
+the verb (`ferro --database app migrate up` or
+`ferro migrate up --database app`). A [`FerroError`][ferro.FerroError]
+raised by a verb is a refusal: `render_refusal` prints its message, which
+names the fix, and the command exits `exit_codes.REFUSED`. A bad flag or a
+missing `cli` extra exits `exit_codes.USAGE`.
 """
 
 import sys
@@ -39,24 +39,33 @@ INSTALL_HINT = 'ferro\'s CLI needs the cli extra: pip install "ferro-orm[cli]"'
 
 @dataclass(frozen=True)
 class Global:
-    """The global options every verb receives (ADR-0036: the whole external
-    surface is these three flags and two environment variables)."""
+    """The global options every verb receives.
+
+    These three flags, with the `FERRO_CONFIG` and `url_env` environment
+    variables, are the whole surface outside the verbs' own flags.
+    """
 
     config: Path | None = None
-    """``--config``: the config file to read, in place of the lookup."""
+    """`--config`: the config file to read, in place of the lookup."""
     database: str | None = None
-    """``--database``: which configured database the verb acts on."""
+    """`--database`: which configured database the verb acts on."""
     url: str | None = None
-    """``--url``: the database URL, in place of the ``url_env`` variable."""
+    """`--url`: the database URL, in place of the `url_env` variable."""
 
 
 def render_refusal(err: FerroError, verb: str | None = None) -> int:
-    """Print a refusal's message to stderr and return :data:`exit_codes.REFUSED`.
+    """Print a refusal's message to stderr and return the refused exit code.
 
     The message is printed as it is; on a terminal it sits under a red
-    heading naming what refused (``new refused``, or ``ferro refused`` when
-    no ``verb`` was running), through :meth:`Output.refusal`, the one
-    refusal path every verb prints through.
+    heading naming what refused (`new refused`, or `ferro refused` when no
+    verb was running). Every verb prints its refusals through here.
+
+    Args:
+        err: The refusal to print; its message names the fix.
+        verb: The verb that refused, or `None` when no verb was running.
+
+    Returns:
+        `exit_codes.REFUSED` (1).
     """
     from .output import Output
 
@@ -67,9 +76,16 @@ def render_refusal(err: FerroError, verb: str | None = None) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run the ``ferro`` command on ``argv`` (``sys.argv[1:]`` when ``None``).
+    """Run the `ferro` command line and return its exit code.
 
-    Returns the exit code; the console script passes it to ``sys.exit``.
+    Args:
+        argv: The arguments after the program name. Defaults to
+            `sys.argv[1:]`.
+
+    Returns:
+        The exit code, which the console script passes to `sys.exit`: 0 on
+            success, 1 for a refusal, 2 for a bad flag or a missing `cli`
+            extra, and the verb's own code otherwise.
     """
     try:
         import cyclopts
@@ -116,7 +132,7 @@ def _build() -> "App":
     root = App(
         help_format="plaintext",
         name="ferro",
-        help="ferro's command line: schema migrations for ferro models.",
+        help="Ferro's command line: schema migrations for Ferro models.",
         version=ferro_version,
         result_action="return_value",
         exit_on_error=False,

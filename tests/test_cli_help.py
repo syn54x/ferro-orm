@@ -67,3 +67,25 @@ def test_the_scan_sees_the_placeholders_the_ticket_names() -> None:
     assert {"<migration>", "<step>"} <= found["migrate rerecord"]
     assert found["migrate new"]
     assert found["migrate squash"]
+
+
+MARKDOWN = re.compile(r"`|\*\*|\[[^\]]+\]\([^)]+\)")
+
+
+@pytest.mark.parametrize(("path", "command"), CASES)
+def test_help_carries_no_markdown(path, command) -> None:
+    # Help prints as plain text, so Markdown shows up literally: a `new` in
+    # backticks prints with its backticks.
+    found = MARKDOWN.findall(_help_source(command))
+    assert not found, f"{' '.join(('ferro', *path))} help carries Markdown {found}"
+
+
+@pytest.mark.parametrize(("path", "command"), CASES)
+def test_help_summary_is_one_line(path, command) -> None:
+    func = command.default_command
+    doc = inspect.getdoc(func) if func is not None else command.help
+    summary = (doc or "").split("\n\n")[0]
+    assert summary[:1].isupper() and "\n" not in summary and summary.endswith("."), (
+        f"{' '.join(('ferro', *path))}: summary {summary!r} is not one capitalised line ending "
+        "with a period"
+    )
