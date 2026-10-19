@@ -2,7 +2,7 @@
 description: "How a database comes to match your models: auto-migrate for development, migration files for production."
 ---
 
-# Schema management
+# Overview of schema management
 
 Schema management is how a database comes to match your models, which are the source of truth for its schema. Ferro gives you two doors for it:
 
