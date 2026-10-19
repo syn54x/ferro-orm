@@ -164,12 +164,12 @@ class FerroField:
                 type already enforces them. Defaults to `False`.
             renamed_from: The column's previous name, so that
                 `ferro migrate new` renames the column instead of dropping
-                and adding it. See [Renames](../guide/schema/migrations.md#renames).
+                and adding it. See [Rename hints](../guide/schema/renames-and-retirements.md#rename-hints).
             retired: Take the column out of the model while it stays in the
                 schema, nullable, until a later release deletes the
                 declaration. The annotation must allow `None`. Defaults to
                 `False`. See
-                [Retiring a column](../guide/schema/migrations.md#retiring-a-column).
+                [Retiring a column](../guide/schema/renames-and-retirements.md#retiring-a-column).
 
         Raises:
             TypeError: `nullable`, `renamed_from` or `retired` has a value of
@@ -256,12 +256,12 @@ class ForeignKey:
             renamed_from: The relation's previous field name. The
                 `<field>_id` column and its foreign key constraint are renamed
                 with it (`writer` to `author` renames `writer_id` to
-                `author_id`). See [Renames](../guide/schema/migrations.md#renames).
+                `author_id`). See [Rename hints](../guide/schema/renames-and-retirements.md#rename-hints).
             retired: Take the relation and its `<field>_id` column out of the
                 model while the column and its foreign key stay in the schema,
                 nullable, until a later release deletes the declaration.
                 Defaults to `False`. See
-                [Retiring a column](../guide/schema/migrations.md#retiring-a-column).
+                [Retiring a column](../guide/schema/renames-and-retirements.md#retiring-a-column).
 
         Raises:
             TypeError: `related_name` is missing on a relation that is not

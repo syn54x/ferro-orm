@@ -1,9 +1,33 @@
-# ruff: noqa: E402 - the models come first, as the docs page shows them
-"""Runnable companion for rename hints (docs/pages/guide/schema/migrations.md).
+# ruff: noqa: E402, F811 - the models come first, as the docs page shows them: before, then after
+"""Runnable companion for rename hints
+(docs/pages/guide/schema/renames-and-retirements.md).
 
 A table, a column and an enum label renamed in one migration, applied over a
 row and reverted, on SQLite.
 """
+
+# --8<-- [start:base]
+from enum import StrEnum
+
+from ferro import Field, Model
+
+
+class Status(StrEnum):
+    ACTIVE = "active"
+    PAUSED = "paused"
+    CANCELED = "canceled"
+
+
+class Author(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    name: str
+    email: str = Field(unique=True)
+    nickname: str | None = Field(default=None, index=True)
+    bio: str = Field(index=True)
+    status: Status = Status.ACTIVE
+
+
+# --8<-- [end:base]
 
 # --8<-- [start:models]
 from enum import StrEnum
@@ -13,16 +37,20 @@ from ferro import Field, Model
 
 class Status(StrEnum):
     __ferro_renamed_labels__ = {"cancelled": "canceled"}  # new
-    DRAFT = "draft"
+    ACTIVE = "active"
+    PAUSED = "paused"
     CANCELLED = "cancelled"  # before: CANCELED = "canceled"
 
 
 class Writer(Model):  # before: class Author(Model):
     __ferro_renamed_from__ = "author"  # new
     id: int | None = Field(default=None, primary_key=True)
-    # before: nickname: str = Field(index=True)
-    handle: str = Field(index=True, renamed_from="nickname")
-    status: Status = Status.DRAFT
+    name: str
+    email: str = Field(unique=True)
+    # before: nickname: str | None = Field(default=None, index=True)
+    handle: str | None = Field(default=None, index=True, renamed_from="nickname")
+    bio: str = Field(index=True)
+    status: Status = Status.ACTIVE
 
 
 # --8<-- [end:models]
@@ -36,7 +64,10 @@ def main() -> None:
         app.models_before()
         app.ferro("migrate", "new", "create_author")
         app.ferro("migrate", "up")
-        app.sql("INSERT INTO author (nickname, status) VALUES ('ada', 'canceled')")
+        app.sql(
+            "INSERT INTO author (name, email, nickname, bio, status) VALUES"
+            " ('Ada Lovelace', 'ada@example.com', 'ada', 'Analyst', 'canceled')"
+        )
 
         app.models_after()  # the three rename hints
         written = app.ferro("migrate", "new", "rename_writer")

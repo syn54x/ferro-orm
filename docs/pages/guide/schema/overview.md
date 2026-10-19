@@ -55,20 +55,13 @@ The rule is per database, not per project. A throwaway test database built with 
 
 ## What each door covers
 
-| Change | Auto-update | Migrations | Alembic bridge |
-| :--- | :--- | :--- | :--- |
-| Add a table, a nullable column, an index, an enum label | ✅ | ✅ | ✅ |
-| Add a check, a foreign key, change a type or nullability, on Postgres | ✅ | ✅ | ✅ |
-| The same on SQLite (needs a table rebuild) | ⚠️ warns, no DDL | ✅ generated [table rebuild](migrations.md#sqlite-table-rebuilds) | ❌ refused at autogenerate |
-| Rename a column (`renamed_from`) or an enum label (`__ferro_renamed_labels__`) | ✅ | ✅ [declared on the model](migrations.md#renames) | ✅ same hints |
-| Rename a table (`__ferro_renamed_from__`) | ✅ `ALTER TABLE … RENAME TO` under `migrate_updates`, indexes and checks renamed with it; without `migrate_updates` the pass warns and creates nothing | ✅ | ✅ |
-| Drop a column | with `migrate_destructive` | ✅ marked `-- ferro: destructive` | ✅ marked `# ferro: destructive` |
-| Drop a table | ❌ | ✅ marked `-- ferro: destructive` | ✅ marked `# ferro: destructive` |
-| Add a new required column to a table with rows | only with a literal default (backfills existing rows) | ✅ [expand, backfill, contract](data-steps.md) generated | Postgres: ⚠️ the plain op, marked `# ferro: data-dependent`; the backfill is yours to write. SQLite: ❌ refused at autogenerate |
-| Make a nullable column required | Postgres: `SET NOT NULL`, fails if any row is `NULL` (write it as a migration with a backfill); SQLite: warns, no DDL | ✅ expand, backfill, contract generated | Postgres: ⚠️ the plain op, marked `# ferro: data-dependent`. SQLite: ❌ refused at autogenerate |
-| Remove an enum label rows may hold | warns, no DDL | ✅ [backfill and contract](data-steps.md#removing-an-enum-label) generated | ❌ not written; [Migrations](data-steps.md#removing-an-enum-label) generate it |
-| Python data steps over the models as they were | ❌ | ✅ [data steps](data-steps.md) | hand-written `op.execute(...)` |
-| Change a primary key | ❌ | refused, with [the recipe](migrations.md#changing-a-primary-key) | ❌ refused, with the same recipe |
+The three doors plan with one planner, so a change two of them make leaves the same schema. They differ in which changes they make at all:
+
+- **Auto-update** alters a table in place, as far as one statement can. It never drops a table, warns rather than rebuilding a SQLite table, and adds a required column to a table with rows only when the field has a literal default.
+- **Migrations** cover every change the models can express, on Postgres and SQLite: [SQLite table rebuilds](migrations.md#sqlite-table-rebuilds), [backfills](data-steps.md), [renames](renames-and-retirements.md#rename-hints) and label removals. A primary-key change is refused with [the recipe](migrations.md#changing-a-primary-key).
+- **The Alembic bridge** writes the same statements as a revision, refuses at autogenerate a change that needs a SQLite table rebuild, and leaves backfills to you.
+
+The [door coverage table](../../reference/migrations.md#what-each-door-covers) lists every change, door by door.
 
 ## Choosing a door {#choosing}
 

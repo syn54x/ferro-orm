@@ -8,14 +8,14 @@ init, new, up; then a model edit, check, new, up, drift, down, on SQLite.
 # --8<-- [start:models]
 from typing import Annotated
 
-from ferro import FerroField, Model
+from ferro import Field, Model
 
 
 class Author(Model):
-    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    id: Annotated[int | None, Field(primary_key=True)] = None
     name: str
-    email: Annotated[str, FerroField(unique=True)]
-    nickname: Annotated[str | None, FerroField(index=True)] = None  # new
+    email: Annotated[str, Field(unique=True)]
+    nickname: Annotated[str | None, Field(index=True)] = None  # new
 
 
 # --8<-- [end:models]

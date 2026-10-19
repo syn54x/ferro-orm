@@ -1,6 +1,6 @@
 """The Schema Management docs say what the code does (#539).
 
-Seven promises the pages make, each checked against the implementation:
+The promises the pages make, each checked against the implementation:
 
 - every ``ferro migrate`` output a page quotes (a ```text block marked
   ``<!-- output: <id> -->``) is what the verb prints with no terminal, on a
@@ -14,6 +14,10 @@ Seven promises the pages make, each checked against the implementation:
 - the two declaration styles of every migrations example generate the same
   migration, byte for byte (the ``_annotated`` twin's ``migrations/`` equals
   the assignment twin's);
+- every example of the renames and retirements page starts from the one
+  running example the page declares;
+- the migrations reference lists every ``PassReport`` statement role and every
+  warning kind the core raises, in the core's order;
 - every refusal the CLI reference quotes is the text ``ferro`` prints, for
   the refusals that need no database;
 - the Migrations API page documents exactly ``ferro.migrations.__all__``, and
@@ -90,6 +94,35 @@ def test_both_declaration_styles_generate_the_same_migrations(
     written = _files(assignment / "migrations")
     assert any(path.endswith("ir.json") for path in written), written
     assert _files(annotated / "migrations") == written
+
+
+RENAMES_PAGE_EXAMPLES = [
+    "migrations_rename",
+    "migrations_retire",
+    "migrations_retire_label",
+]
+"""The examples of the renames and retirements page, each one change to its running
+example, which ``migrations_rename``'s ``base`` region declares."""
+
+
+def _examples_project() -> ModuleType:
+    """``docs/examples/_migrations_project.py``, which reads an example's regions."""
+    sys.path.insert(0, str(DOCS_EXAMPLES))
+    try:
+        return importlib.import_module("_migrations_project")
+    finally:
+        sys.path.remove(str(DOCS_EXAMPLES))
+
+
+@pytest.mark.parametrize("style", ["", "_annotated"])
+@pytest.mark.parametrize("name", RENAMES_PAGE_EXAMPLES)
+def test_each_renames_page_example_starts_from_the_page_s_running_example(
+    name: str, style: str
+) -> None:
+    project = _examples_project()
+    change = project._region(DOCS_EXAMPLES / f"{name}{style}.py", "models")
+    base = project._region(DOCS_EXAMPLES / f"migrations_rename{style}.py", "base")
+    assert project._before(change) == base
 
 
 # -- the refusals the CLI reference quotes -------------------------------------------
@@ -307,6 +340,43 @@ def test_the_api_page_documents_the_test_harness() -> None:
         assert f"::: ferro.migrations.testing.{name}\n" in page, name
 
 
+# -- the PassReport the migrations reference describes ------------------------------
+
+MIGRATIONS_REFERENCE = DOCS_PAGES / "reference" / "migrations.md"
+REPORT_KINDS_SOURCE = REPO_ROOT / "crates" / "ferro-ddl-lowering" / "src" / "lib.rs"
+
+
+def _first_column(page: Path, header: str) -> list[str]:
+    """The backticked first cell of every row of the table whose header row
+    starts with ``header``."""
+    lines = page.read_text().splitlines()
+    start = next(number for number, line in enumerate(lines) if line.startswith(header))
+    cells = []
+    for line in lines[start + 2 :]:
+        if not line.startswith("|"):
+            break
+        cells.append(line.split("|")[1].strip().strip("`").strip('"'))
+    return cells
+
+
+def test_the_reference_lists_every_report_kind_the_core_raises() -> None:
+    source = REPORT_KINDS_SOURCE.read_text()
+    body = source[source.index("pub enum ReportKind {") :]
+    body = body[: body.index("\n}\n")]
+    kinds = re.findall(r"^    ([A-Z]\w+)\b", body, flags=re.MULTILINE)
+    assert kinds, "no ReportKind variant found"
+    assert _first_column(MIGRATIONS_REFERENCE, "| `kind` |") == kinds
+
+
+def test_the_reference_lists_every_executed_statement_role() -> None:
+    from typing import get_args
+
+    from ferro.pass_report import Role
+
+    roles = _first_column(MIGRATIONS_REFERENCE, "| `role` |")
+    assert roles == list(get_args(Role))
+
+
 # -- the doors' names ---------------------------------------------------------------
 
 
@@ -332,6 +402,8 @@ def test_no_page_names_a_door_the_old_way(phrase: str) -> None:
 OUTPUT_PAGES = [
     CLI_REFERENCE,
     DOCS_PAGES / "guide" / "schema" / "migrations.md",
+    DOCS_PAGES / "guide" / "schema" / "renames-and-retirements.md",
+    DOCS_PAGES / "guide" / "schema" / "squash.md",
     DOCS_PAGES / "guide" / "schema" / "data-steps.md",
     DOCS_PAGES / "guide" / "schema" / "deploying.md",
     DOCS_PAGES / "howto" / "adopting-migrations.md",
@@ -351,7 +423,6 @@ class Author(Model):
 AUTHOR_NICKNAME = (
     AUTHOR + "    nickname: str | None = Field(default=None, index=True)\n"
 )
-AUTHOR_HANDLE = AUTHOR + "    handle: str | None = Field(default=None, index=True)\n"
 
 NAMED_AUTHOR = (
     HEAD
@@ -364,15 +435,7 @@ class Author(Model):
 NAMED_AUTHOR_SLUG = NAMED_AUTHOR + "    slug: str\n"
 NAMED_AUTHOR_OPTIONAL_SLUG = NAMED_AUTHOR + "    slug: str | None = None\n"
 
-POST = (
-    HEAD
-    + """\
-class Post(Model):
-    id: int | None = Field(default=None, primary_key=True)
-    title: str | None = None
-"""
-)
-POST_TITLE_REQUIRED = POST.replace("title: str | None = None", "title: str")
+AUTHOR_NICKNAME_REQUIRED = AUTHOR + "    nickname: str = Field(index=True)\n"
 
 
 def _write_models(project: Path, source: str) -> None:
@@ -485,54 +548,81 @@ def _sql_step_added(project: Path) -> None:
     _run_ok(project, "migrate", "new", "seed", "--sql-step", "seed_admins")
 
 
+# The renames page: its running example, and nickname renamed with no hint.
+
+RENAMES_BASE = (
+    "from enum import StrEnum\n\n"
+    + HEAD
+    + """\
+class Status(StrEnum):
+    ACTIVE = "active"
+    PAUSED = "paused"
+    CANCELED = "canceled"
+
+
+class Author(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    name: str
+    email: str = Field(unique=True)
+    nickname: str | None = Field(default=None, index=True)
+    bio: str = Field(index=True)
+    status: Status = Status.ACTIVE
+"""
+)
+
+
 def _before_rename(project: Path) -> None:
     _configured(project)
-    _write_models(project, AUTHOR_NICKNAME)
+    _write_models(project, RENAMES_BASE)
     _run_ok(project, "migrate", "new", "create_author")
     _run_ok(project, "migrate", "up")
-    _write_models(project, AUTHOR_HANDLE)
+    _write_models(project, RENAMES_BASE.replace("nickname:", "handle:"))
 
 
 def _rebuild_blocked(project: Path) -> None:
-    _configured(project)
-    _write_models(project, POST)
-    _run_ok(project, "migrate", "new", "create_post")
-    _run_ok(project, "migrate", "up")
+    """The loop's database, with an index and a trigger ferro never declared, meets
+    a migration that makes ``nickname`` required: a SQLite rebuild."""
+    _loop_applied(project)
     _database(
         project,
-        "CREATE INDEX my_idx ON post(title);"
-        " CREATE TRIGGER t AFTER INSERT ON post BEGIN SELECT 1; END;",
+        "CREATE INDEX my_idx ON author(name);"
+        " CREATE TRIGGER t AFTER INSERT ON author BEGIN SELECT 1; END;",
     )
-    _write_models(project, POST_TITLE_REQUIRED)
+    _write_models(project, AUTHOR_NICKNAME_REQUIRED)
     _run_ok(
-        project, "migrate", "new", "post_title_required", "--no-backfill", "post.title"
+        project,
+        "migrate",
+        "new",
+        "nickname_required",
+        "--no-backfill",
+        "author.nickname",
     )
 
 
-# Two branches that both generated migration 0002.
+# Two branches that both generated migration 0002: a teammate's, the loop's
+# ``0002_author_nickname``, and yours, ``0002_author_bio``.
 
-AUTHOR_NICK = NAMED_AUTHOR + "    nick: str | None = None\n"
-AUTHOR_BIO = NAMED_AUTHOR + "    bio: str | None = None\n"
-AUTHOR_BIO_AND_NICK = AUTHOR_NICK + "    bio: str | None = None\n"
+AUTHOR_BIO = AUTHOR + "    bio: str | None = None\n"
+AUTHOR_NICKNAME_AND_BIO = AUTHOR_NICKNAME + "    bio: str | None = None\n"
 
 
 def _two_branches(project: Path, *, applied: bool) -> None:
     import shutil
 
     _configured(project)
-    _write_models(project, NAMED_AUTHOR)
+    _write_models(project, AUTHOR)
     _run_ok(project, "migrate", "new", "create_author")
     _run_ok(project, "migrate", "up")
-    _write_models(project, AUTHOR_NICK)
-    _run_ok(project, "migrate", "new", "add_y")
-    teammate = project / "migrations" / "0002_add_y"
+    _write_models(project, AUTHOR_NICKNAME)
+    _run_ok(project, "migrate", "new", "author_nickname")
+    teammate = project / "migrations" / "0002_author_nickname"
     shutil.move(teammate, project / "teammate")
     _write_models(project, AUTHOR_BIO)
-    _run_ok(project, "migrate", "new", "add_x", "--sql-step", "fix_rows")
+    _run_ok(project, "migrate", "new", "author_bio", "--sql-step", "fix_rows")
     if applied:
         _run_ok(project, "migrate", "up")
     shutil.move(project / "teammate", teammate)
-    _write_models(project, AUTHOR_BIO_AND_NICK)
+    _write_models(project, AUTHOR_NICKNAME_AND_BIO)
 
 
 def _two_branches_unapplied(project: Path) -> None:
@@ -541,10 +631,10 @@ def _two_branches_unapplied(project: Path) -> None:
 
 def _two_branches_replaced(project: Path) -> None:
     _two_branches(project, applied=True)
-    _run_ok(project, "migrate", "new", "add_x", "--replace", "0002_add_x")
+    _run_ok(project, "migrate", "new", "author_bio", "--replace", "0002_author_bio")
 
 
-# An epic's branch, one migration per task, squashed before it merges.
+# A feature branch, one migration per task, squashed before it merges.
 
 TEAM = (
     "\n\nclass Team(Model):\n"
@@ -555,27 +645,21 @@ TEAM_TMP_CODE = "    tmp_code: str | None = None\n"
 TEAM_SLUG = "    slug: str\n"
 
 
-def _teams_epic(project: Path) -> None:
-    """Main holds ``0001``..``0004``; the epic's tasks add ``0005_add_teams`` (with
-    a ``tmp_code`` column), ``0006_team_slug`` (a required slug and its written
-    backfill), ``0007_drop_tmp`` and ``0008_fix_rows`` (a hand-written SQL step).
-    The developer's database applied every one."""
+def _teams_branch(project: Path) -> None:
+    """Main holds ``0001_create_author``, the loop's ``Author``; the branch's tasks
+    add ``0002_add_teams`` (with a ``tmp_code`` column), ``0003_team_slug`` (a
+    required slug and its written backfill), ``0004_drop_tmp`` and
+    ``0005_fix_rows`` (a hand-written SQL step). The developer's database applied
+    every one."""
     _configured(project)
-    models = NAMED_AUTHOR
-    for name, column in (
-        ("create_author", ""),
-        ("author_email", "    email: str | None = None\n"),
-        ("author_bio", "    bio: str | None = None\n"),
-        ("author_nick", "    nick: str | None = None\n"),
-    ):
-        models += column
-        _write_models(project, models)
-        _run_ok(project, "migrate", "new", name)
+    models = AUTHOR_NICKNAME
+    _write_models(project, models)
+    _run_ok(project, "migrate", "new", "create_author")
     _write_models(project, models + TEAM + TEAM_TMP_CODE)
     _run_ok(project, "migrate", "new", "add_teams")
     _write_models(project, models + TEAM + TEAM_TMP_CODE + TEAM_SLUG)
     _run_ok(project, "migrate", "new", "team_slug")
-    backfill = project / "migrations" / "0006_team_slug" / "02_backfill_team.py"
+    backfill = project / "migrations" / "0003_team_slug" / "02_backfill_team.py"
     backfill.write_text(
         backfill.read_text().replace(
             'todo("the slug for an existing team")', "team.name.lower()"
@@ -584,7 +668,7 @@ def _teams_epic(project: Path) -> None:
     _write_models(project, models + TEAM + TEAM_SLUG)
     _run_ok(project, "migrate", "new", "drop_tmp")
     _run_ok(project, "migrate", "new", "fix_rows", "--sql-step", "fix_rows")
-    fix_rows = project / "migrations" / "0008_fix_rows"
+    fix_rows = project / "migrations" / "0005_fix_rows"
     (fix_rows / "01_fix_rows.up.sql").write_text("UPDATE team SET name = trim(name);\n")
     (fix_rows / "01_fix_rows.down.sql").write_text(
         "-- ferro: nothing-to-reverse the names stay trimmed\n"
@@ -592,26 +676,26 @@ def _teams_epic(project: Path) -> None:
     _run_ok(project, "migrate", "up")
 
 
-def _teams_epic_squashed(project: Path) -> None:
-    _teams_epic(project)
-    _run_ok(project, "migrate", "squash", "teams_epic", "--from", "0005")
+def _teams_branch_squashed(project: Path) -> None:
+    _teams_branch(project)
+    _run_ok(project, "migrate", "squash", "teams", "--from", "0002")
 
 
-def _teams_epic_dead_name(project: Path) -> None:
-    """``0006_team_slug``'s backfill, a chunked step, selects its rows by
+def _teams_branch_dead_name(project: Path) -> None:
+    """``0003_team_slug``'s backfill, a chunked step, selects its rows by
     ``tmp_code``, a column that exists only inside the range."""
-    _teams_epic(project)
-    backfill = project / "migrations" / "0006_team_slug" / "02_backfill_team.py"
+    _teams_branch(project)
+    backfill = project / "migrations" / "0003_team_slug" / "02_backfill_team.py"
     backfill.write_text(
         backfill.read_text().replace("team.slug == None", "team.tmp_code == None")
     )
 
 
-def _teams_epic_partly_applied(project: Path) -> None:
-    """A teammate's database: it applied ``0005``..``0007`` and not ``0008``."""
-    _teams_epic(project)
-    _run_ok(project, "migrate", "down", "--to", "0007", "--yes")
-    _run_ok(project, "migrate", "squash", "teams_epic", "--from", "0005")
+def _teams_branch_partly_applied(project: Path) -> None:
+    """A teammate's database: it applied ``0002``..``0004`` and not ``0005``."""
+    _teams_branch(project)
+    _run_ok(project, "migrate", "down", "--to", "0004", "--yes")
+    _run_ok(project, "migrate", "squash", "teams", "--from", "0002")
 
 
 # A required column, a backfill, and the rows the backfill is for.
@@ -844,7 +928,7 @@ OUTPUTS = {
         ),
     ),
     "new-small": (_loop_edited, ("migrate", "new", "author_nickname")),
-    "squash": (_feature_branch, ("migrate", "squash", "epic", "--from", "0002")),
+    "squash": (_feature_branch, ("migrate", "squash", "teams", "--from", "0002")),
     "check-ok": (_loop_generated, ("migrate", "check")),
     "check-problem": (_loop_edited, ("migrate", "check")),
     "up": (_loop_generated, ("migrate", "up")),
@@ -860,7 +944,6 @@ OUTPUTS = {
     "loop-check": (_loop_edited, ("migrate", "check")),
     "loop-new": (_loop_edited, ("migrate", "new", "author_nickname")),
     "loop-up": (_loop_generated, ("migrate", "up")),
-    "rename-hint": (_before_rename, ("migrate", "new", "rename_writer")),
     "sql-step": (
         _created_and_applied,
         ("migrate", "new", "seed", "--sql-step", "seed_admins"),
@@ -875,21 +958,21 @@ OUTPUTS = {
     "duplicate-number": (_two_branches_unapplied, ("migrate", "check")),
     "replace": (
         _two_branches_unapplied,
-        ("migrate", "new", "add_x", "--replace", "0002_add_x"),
+        ("migrate", "new", "author_bio", "--replace", "0002_author_bio"),
     ),
     "replaced-up-refused": (_two_branches_replaced, ("migrate", "up")),
-    "squash-epic": (
-        _teams_epic,
-        ("migrate", "squash", "teams_epic", "--from", "0005"),
-    ),
-    "squash-dead-name": (
-        _teams_epic_dead_name,
-        ("migrate", "squash", "teams_epic", "--from", "0005"),
-    ),
-    "squash-status-inheritable": (_teams_epic_squashed, ("migrate", "status")),
-    "squash-up-inherits": (_teams_epic_squashed, ("migrate", "up")),
-    "squash-partial-witness": (_teams_epic_partly_applied, ("migrate", "up")),
     "rekey-refused": (_primary_key_change, ("migrate", "new", "rekey")),
+    # renames and retirements
+    "rename-hint": (_before_rename, ("migrate", "new", "rename_handle")),
+    # squashing
+    "squash-teams": (_teams_branch, ("migrate", "squash", "teams", "--from", "0002")),
+    "squash-dead-name": (
+        _teams_branch_dead_name,
+        ("migrate", "squash", "teams", "--from", "0002"),
+    ),
+    "squash-status-inheritable": (_teams_branch_squashed, ("migrate", "status")),
+    "squash-up-inherits": (_teams_branch_squashed, ("migrate", "up")),
+    "squash-partial-witness": (_teams_branch_partly_applied, ("migrate", "up")),
     # data steps
     "backfill-new": (_slug_edited, ("migrate", "new", "author_slug")),
     "backfill-unwritten": (_slug_unwritten, ("migrate", "up")),
@@ -1084,13 +1167,51 @@ def _label_removed(project: Path) -> None:
     _run_ok(project, "migrate", "new", "drop_canceled")
 
 
+INVOICE = """\
+import uuid
+from typing import ClassVar
+
+from ferro import Field, Model, RowPolicy, RowSecurity
+
+
+class Invoice(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    tenant_id: uuid.UUID
+    customer: str
+    total: int
+"""
+INVOICE_RLS = (
+    INVOICE
+    + """
+    __ferro_rls__: ClassVar = RowSecurity(
+        RowPolicy(column="tenant_id", setting="app.tenant_id")
+    )
+"""
+)
+
+
+def _invoice_rls(project: Path) -> None:
+    """The row-level security guide's ``Invoice``, which exists, gains its policy."""
+    _configured(project)
+    _write_models(project, INVOICE)
+    _run_ok(project, "migrate", "new", "create_invoice")
+    _write_models(project, INVOICE_RLS)
+    _run_ok(project, "migrate", "new", "invoice_rls")
+
+
 STEP_FILE_SOURCES: dict[tuple[str, ...], str | Callable[[Path], None]] = {
     ("guide/schema/migrations.md", "0001_create_author"): "migrations_quickstart",
     ("guide/schema/migrations.md", "0002_author_nickname"): "migrations_quickstart",
-    ("guide/schema/migrations.md", "0002_rename_writer"): "migrations_rename",
-    ("guide/schema/migrations.md", "0002_retire_bio"): "migrations_retire",
-    ("guide/schema/migrations.md", "0002_author_slug"): "migrations_backfill",
-    ("guide/schema/migrations.md", "0002_author_profile"): "migrations_squash",
+    (
+        "guide/schema/renames-and-retirements.md",
+        "0002_rename_writer",
+    ): "migrations_rename",
+    (
+        "guide/schema/renames-and-retirements.md",
+        "0002_retire_bio",
+    ): "migrations_retire",
+    ("guide/schema/squash.md", "0002_teams"): "migrations_squash",
+    ("reference/migrations.md", "0002_author_nickname"): "migrations_quickstart",
     ("guide/schema/data-steps.md", "0002_author_slug"): "migrations_backfill",
     (
         "guide/schema/data-steps.md",
@@ -1103,6 +1224,7 @@ STEP_FILE_SOURCES: dict[tuple[str, ...], str | Callable[[Path], None]] = {
         "02_guard_author.py",
     ): _slug_guarded,
     ("guide/schema/data-steps.md", "0002_drop_canceled"): _label_removed,
+    ("guide/row-level-security.md", "0002_invoice_rls"): _invoice_rls,
     (
         "guide/schema/migrations.md",
         "0002_add_writer",
