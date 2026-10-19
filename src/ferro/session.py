@@ -6,12 +6,16 @@ import asyncio
 import contextvars
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ._core import close_session as _core_close_session
 from ._core import open_session as _core_open_session
 from ._core import set_session_config as _core_set_session_config
 from .state import _CURRENT_SESSION
+
+if TYPE_CHECKING:
+    from .models import Model
+    from .query.builder import Query
 
 _SESSION_CLOSE_AMBIENT_MISMATCH = (
     "Session close failed: ambient session does not match the closing session. "
@@ -323,7 +327,7 @@ class Session:
         )
         self.effective_settings = dict(committed)
 
-    def query(self, model_cls):
+    def query[M: Model](self, model_cls: type[M]) -> Query[M]:
         """Start a query of a model's records in this session.
 
         Args:

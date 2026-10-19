@@ -381,7 +381,7 @@ def _check_literal_token(value: Any) -> str:
     """Render one Python value as a pre-quoted SQL literal token.
 
     Mirrors the ``db_check`` enum-label quoting in
-    :func:`ferro.ir.compiler.compile_schema_ir_payload` — bools as
+    `ferro.ir.compiler.compile_schema_ir_payload` — bools as
     ``true``/``false``, numbers as ``str``, everything else single-quoted
     with ``'`` escaped.
     """
@@ -628,7 +628,7 @@ def compile_table_checks(
         columns: The compile's column specs, keyed by column name.
 
     Returns:
-        One :class:`TableCheckSpec` per declared check, in declaration order.
+        One `TableCheckSpec` per declared check, in declaration order.
 
     Raises:
         TypeError: For any declaration error — a malformed ``__ferro_checks__``,

@@ -1,4 +1,4 @@
-"""Column specs: each column fact derived exactly once (CONTEXT.md "Column spec").
+"""Column specs: each column fact derived exactly once.
 
 One frozen ``ColumnSpec`` per column, built from the field declaration at
 class-body time (provisional) and replaced during relationship resolution
@@ -56,13 +56,19 @@ def primary_key_field_name(model_name: str, specs: dict[str, ColumnSpec]) -> str
     is legal; zero is a valid declaration (``None``) and the operations that
     need a PK raise their own errors.
 
+    Args:
+        model_name: The model's name, for the error message.
+        specs: The model's column specs, keyed by column name.
+
+    Returns:
+        The primary key's field name, or `None` when no column is one.
+
     Raises:
-        TypeError: If more than one column declares ``primary_key=True`` —
-            at class definition time, naming the model and offending fields,
-            rather than resolving the ambiguity silently by declaration order
-            (the follow-up ADR-0002 asked for). ``TypeError`` is the
-            declaration-error contract the metaclass surfaces unwrapped
-            (ADR-0003's db_type validation sets the precedent).
+        TypeError: More than one column declares `primary_key=True`. It is
+            raised at class definition, naming the model and the fields,
+            rather than settling the ambiguity by declaration order;
+            `TypeError` is the declaration error the metaclass surfaces
+            unwrapped.
     """
     pks = [name for name, spec in specs.items() if spec.primary_key]
     if len(pks) > 1:
@@ -75,90 +81,126 @@ def primary_key_field_name(model_name: str, specs: dict[str, ColumnSpec]) -> str
 
 @dataclass(frozen=True, slots=True)
 class ForeignKeyRef:
+    """The target of a column's foreign key."""
+
     to_table: str
+    """The referenced table's name."""
     on_delete: str | None
+    """The `ON DELETE` action, such as `"CASCADE"`, or `None` for the database's default."""
 
 
 @dataclass(frozen=True, slots=True)
 class RelationSpec:
-    """One declared forward-FK relation's traversal facts (#268).
+    """One declared forward foreign-key relation's traversal facts.
 
-    Built alongside ``ColumnSpec`` at the same compile choke point
-    (``compile_model_schema_ir``) and exposed as
-    ``cls.__ferro_relation_specs__``. Relation-traversal query planning (PRD
-    #267) resolves an attribute access like ``t.account`` to its target model
-    and shadow FK column via this lookup, hop by hop.
+    Built alongside `ColumnSpec` at the same compile choke point
+    (`compile_model_schema_ir`) and exposed as
+    `cls.__ferro_relation_specs__`. Relation-traversal query planning
+    resolves an attribute access like `post.author` to its target model and
+    shadow foreign-key column through this lookup, hop by hop.
     """
 
     field_name: str
+    """The relation field's name on the declaring model."""
     target: type
+    """The model the relation points at."""
     shadow_column: str
+    """The `<field>_id` column holding the target's primary key."""
     nullable: bool
+    """Whether the shadow column is nullable."""
 
 
 @dataclass(frozen=True, slots=True)
 class ReverseSpec:
-    """One reverse (BackRef/M2M) relation's existence-test facts (ADR-0007).
+    """One reverse (`BackRef` or many-to-many) relation's existence-test facts.
 
-    Built beside :class:`RelationSpec` at the same compile choke point and
-    exposed as ``cls.__ferro_reverse_specs__``. A reverse or M2M relation
-    supports exactly one predicate form — the existence test
-    ``t.rel.exists()`` — so the spec carries only what a correlated EXISTS
-    needs: the related model plus the correlation columns (the child-side FK
-    for a reverse FK; the join-table triple for M2M, #316). Reverse relations
-    are *tested*, never *traversed*; traversal facts stay on
-    :class:`RelationSpec`.
+    Built beside `RelationSpec` at the same compile choke point and exposed
+    as `cls.__ferro_reverse_specs__`. A reverse or many-to-many relation
+    supports one predicate form, the existence test
+    `author.posts.exists()`, so the spec carries only what a correlated
+    `EXISTS` needs: the related model and the correlation columns (the
+    child-side foreign key for a reverse relation, the join-table triple for
+    a many-to-many one). Reverse relations are tested, never traversed;
+    traversal facts stay on `RelationSpec`.
     """
 
     field_name: str
-    #: The related model — the FK-declaring child (reverse FK) or the M2M
-    #: target: the model the inner lambda's parameter resolves against.
+    """The relation field's name on this model."""
     target: type
-    #: Shadow FK column on the child table the EXISTS correlates against
-    #: (reverse FK only; ``None`` for M2M).
+    """The related model, which the inner lambda's parameter resolves against.
+
+    It is the child that declares the foreign key for a reverse relation,
+    or the far side of a many-to-many one.
+    """
     child_fk_column: str | None
-    #: True when the child FK is ``unique=True`` (one-to-one BackRef). The
-    #: rendering is identical at every cardinality (always correlated EXISTS);
-    #: carried as a compile-side fact, not a render switch.
+    """The child table's foreign-key column the `EXISTS` correlates on; `None` for many-to-many."""
     is_one_to_one: bool = False
-    #: True for an M2M edge — the existence test correlates through the join
-    #: table (two hops) instead of a child FK (one hop).
+    """Whether the child's foreign key is `unique=True`, a one-to-one `BackRef`.
+
+    The rendering is the same correlated `EXISTS` at every cardinality; this
+    is a compile-side fact, not a render switch.
+    """
     is_m2m: bool = False
-    #: M2M join-table triple (``None`` for reverse FK): the association
-    #: table, its column referencing THIS side, and its column referencing
-    #: the target side — exactly as the descriptor orients them per side.
+    """Whether the test correlates through a join table (two hops) instead of a child's foreign key."""
     join_table: str | None = None
+    """Many-to-many only: the join table's name."""
     source_col: str | None = None
+    """Many-to-many only: the join table's column referencing this side."""
     target_col: str | None = None
+    """Many-to-many only: the join table's column referencing the target side."""
 
 
 @dataclass(frozen=True, slots=True)
 class ColumnSpec:
+    """Every fact about one column, derived once from the field declaration."""
+
     name: str
+    """The column's name."""
     logical_type: str
+    """The JSON-schema type the column's storage is derived from, such as `"integer"`."""
     nullable: bool
+    """Whether the column accepts `NULL`."""
     primary_key: bool
+    """Whether the column is the table's primary key."""
     autoincrement: bool
+    """Whether the database generates the column's values."""
     unique: bool
+    """Whether the column has a single-column unique constraint."""
     index: bool
+    """Whether the column has a single-column index."""
     default: Any
+    """The JSON-schema default, or `None` when the field has none."""
     format: str | None
-    # The scalar Python type, ``Annotated``-stripped. NOTE: producers differ —
-    # ``build_column_specs`` stores the stripped annotation, which may still be
-    # a union (e.g. ``int | None`` for an optional PK); ``pk_spec`` /
-    # ``fk_shadow_spec`` store the fully-unwrapped scalar. Consumers that need a
-    # bare scalar must unwrap (``_scalar_part_of_annotation`` / union handling).
+    """The JSON-schema format, such as `"uuid"` or `"date-time"`, or `None`."""
     python_type: Any
+    """The field's Python type, with `Annotated` stripped.
+
+    Producers differ: `build_column_specs` stores the stripped annotation,
+    which may still be a union (`int | None` for an optional primary key);
+    `pk_spec` and `fk_shadow_spec` store the bare scalar. A consumer that
+    needs the scalar unwraps it (`_scalar_part_of_annotation`, or union
+    handling).
+    """
     enum_values: tuple[Any, ...] | None = None
+    """An enum column's values, or `None`."""
     enum_type_name: str | None = None
+    """An enum column's Postgres type name, or `None`."""
     enum_class: type[Enum] | None = None
+    """An enum column's `Enum` class, or `None`."""
     db_type: str | None = None
+    """The column's SQL type token, or `None` for the derived type."""
     db_type_explicit: bool = False
+    """Whether `db_type` was declared rather than derived."""
     db_check: bool = False
+    """Whether the column has a `CHECK` constraint on an enum's values."""
     foreign_key: ForeignKeyRef | None = None
-    #: A retired column (ADR-0053): in the schema snapshot, nullable, never in
-    #: ``__ferro_columns__`` (the mapped columns the model reads and writes).
+    """The column's foreign key, or `None`."""
     retired: bool = False
+    """Whether the column is retired.
+
+    A retired column stays in the schema snapshot, nullable, and is never in
+    `__ferro_columns__`, the mapped columns the model reads and writes.
+    """
 
 
 def _derive_autoincrement(
@@ -360,11 +402,17 @@ def _enum_values(col_info: dict[str, Any]) -> list[Any] | None:
 
 
 def build_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
-    """Build one ColumnSpec per schema property, in model-field order.
+    """Build one `ColumnSpec` per schema property, in model-field order.
 
-    Reads Pydantic's ``model_json_schema()`` exactly once — the only place in
-    Ferro that consumes it (grilling Q2). Returns a plain dict; callers store
-    it on ``cls.__ferro_columns__`` and must replace, never mutate.
+    Reads Pydantic's `model_json_schema()` exactly once, the only place in
+    Ferro that consumes it. Callers store the result on
+    `cls.__ferro_columns__` and must replace it, never mutate it.
+
+    Args:
+        model_cls: The model class.
+
+    Returns:
+        The column specs, keyed by column name.
     """
     schema = model_cls.model_json_schema()
     properties = schema.get("properties")
@@ -514,7 +562,7 @@ def build_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
 def build_relation_specs(
     model_cls: type[Any], columns: dict[str, ColumnSpec]
 ) -> dict[str, RelationSpec]:
-    """Build one RelationSpec per declared forward-FK relation (#268).
+    """Build one `RelationSpec` per declared forward foreign-key relation.
 
     Reads ``ferro_relations`` (the same class-body-registered relation
     metadata ``build_column_specs`` reads via ``fk_by_shadow``) and pairs each
@@ -530,6 +578,13 @@ def build_relation_specs(
 
     Callers store the result on ``cls.__ferro_relation_specs__`` and must
     replace, never mutate — same convention as ``__ferro_columns__``.
+
+    Args:
+        model_cls: The model class.
+        columns: The model's compiled column specs, keyed by column name.
+
+    Returns:
+        One spec per resolved forward relation, keyed by field name.
     """
     ferro_relations = getattr(model_cls, "ferro_relations", {}) or {}
     specs: dict[str, RelationSpec] = {}
@@ -553,24 +608,30 @@ def build_relation_specs(
 
 
 def build_reverse_specs(model_cls: type[Any]) -> dict[str, ReverseSpec]:
-    """Build one ReverseSpec per resolved reverse (BackRef) relation (#314).
+    """Build one `ReverseSpec` per resolved reverse (`BackRef`) relation.
 
-    Reads the :class:`~ferro.relations.descriptors.RelationshipDescriptor`
+    Reads the `RelationshipDescriptor`
     instances ``resolve_relationships`` installs on the class — the facts a
     correlated EXISTS needs (related model, child FK column or join-table
     triple, one-to-one flag) already live there, so this derives, never
     re-computes. At provisional class-body time no descriptors exist yet and
     the map is empty; the resolved second pass recompiles with descriptors
     installed, so the lookup is complete once resolution finishes (same
-    lifecycle as :func:`build_relation_specs`).
+    lifecycle as `build_relation_specs`).
 
-    M2M descriptors (#316) map to a join-table spec; each side's descriptor
+    Many-to-many descriptors map to a join-table spec; each side's descriptor
     already orients ``source_col``/``target_col`` for that side, so the spec
     is a straight copy of resolution's facts on both the declaring and the
     ``related_name`` side.
 
     Callers store the result on ``cls.__ferro_reverse_specs__`` and must
     replace, never mutate — same convention as ``__ferro_columns__``.
+
+    Args:
+        model_cls: The model class.
+
+    Returns:
+        One spec per resolved reverse relation, keyed by field name.
     """
     # Late imports: columns.py is a low-level leaf module; the relations
     # package (and the registry it pulls in) imports back into it.
@@ -619,10 +680,16 @@ _PK_TYPE_FACTS: dict[Any, tuple[str, str | None]] = {
 
 
 def pk_spec(name: str, python_type: Any) -> ColumnSpec:
-    """Spec for a column typed like a primary key (join-table columns).
+    """Build the spec of a column typed like a primary key, for join tables.
 
-    Mirrors the historical ``schema_fragment_for_pk`` mapping, including the
-    fall-back-to-string for None/unknown types.
+    A `None` or unknown type falls back to a string column.
+
+    Args:
+        name: The column's name.
+        python_type: The primary key's Python type.
+
+    Returns:
+        A non-null, non-key column spec of that type.
     """
     scalar = (
         _scalar_part_of_annotation(python_type) if python_type is not None else None
@@ -657,7 +724,22 @@ def fk_shadow_spec(
     index: bool = False,
     nullable: bool = False,
 ) -> ColumnSpec:
-    """FK column spec at a known target — join tables and resolve-time rebuilds."""
+    """Build a foreign-key column's spec at a known target.
+
+    Join tables and the resolve-time rebuilds use it.
+
+    Args:
+        name: The column's name.
+        python_type: The target primary key's Python type.
+        to_table: The target table's name.
+        on_delete: The `ON DELETE` action. Defaults to `"CASCADE"`.
+        unique: Add a unique constraint. Defaults to `False`.
+        index: Add an index. Defaults to `False`.
+        nullable: Allow `NULL`. Defaults to `False`.
+
+    Returns:
+        The column spec.
+    """
     return replace(
         pk_spec(name, python_type),
         foreign_key=ForeignKeyRef(to_table=to_table, on_delete=on_delete),
@@ -668,12 +750,18 @@ def fk_shadow_spec(
 
 
 def retired_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
-    """The retired columns of ``model_cls`` (ADR-0053), flagged and nullable.
+    """Return the retired columns of `model_cls`, flagged and nullable.
 
     A retired scalar field's spec was derived once at class creation, before
-    the field left the Pydantic model (``__ferro_retired_fields__``); a retired
-    ``ForeignKey``'s shadow column is derived here on every compile, as the
+    the field left the Pydantic model (`__ferro_retired_fields__`); a retired
+    `ForeignKey`'s shadow column is derived here on every compile, as the
     mapped relation's would be, so it follows its target's resolution.
+
+    Args:
+        model_cls: The model class.
+
+    Returns:
+        The retired columns' specs, keyed by column name.
     """
     specs: dict[str, ColumnSpec] = dict(
         model_cls.__dict__.get("__ferro_retired_fields__", {})
@@ -706,10 +794,19 @@ def retired_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
 
 
 def retired_clause(model_cls: type[Any], name: str) -> str:
-    """`` 'bio' is retired in this release.`` when ``name`` is one of
-    ``model_cls``'s retired fields or columns (ADR-0053), else ``""``: the
-    clause the usual unknown-column errors carry, so the reader learns the
-    name is gone on purpose, not misspelled."""
+    """Return the clause an unknown-column error adds for a retired name.
+
+    The usual unknown-column errors carry it, so the reader learns the name
+    is gone on purpose, not misspelled.
+
+    Args:
+        model_cls: The model class.
+        name: The field or column name the error is about.
+
+    Returns:
+        A sentence saying `name` is retired, or `""` when it is not one of
+        the model's retired fields or columns.
+    """
     retired = getattr(model_cls, "__ferro_retired_names__", frozenset())
     if name not in retired:
         return ""
@@ -722,15 +819,20 @@ def retired_clause(model_cls: type[Any], name: str) -> str:
 def refuse_back_ref_over_retired_relation(
     model_cls: type[Any], field_name: str, meta: ForeignKey
 ) -> None:
-    """Refuse a ``BackRef`` that reads a retired relation back (ADR-0053).
+    """Refuse a `BackRef` that reads a retired relation back.
 
     A retired ``ForeignKey`` leaves the model, so nothing fills the target's
     ``BackRef``; it renders no DDL, and the fix is to delete it. Checked when
     the target is a concrete class: at class creation when the target already
     exists, and again by relationship resolution for a forward reference.
 
+    Args:
+        model_cls: The model declaring the retired relation.
+        field_name: The retired relation's field name.
+        meta: The retired relation's `ForeignKey`.
+
     Raises:
-        TypeError: The target declares ``meta.related_name`` as a ``BackRef``.
+        TypeError: The target declares `meta.related_name` as a `BackRef`.
     """
     target = meta.to
     if meta.related_name is None or not isinstance(target, type):

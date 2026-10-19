@@ -11,12 +11,13 @@ import warnings
 from typing import Any
 
 FERRO_COMPOSITE_INDEXES = "__ferro_composite_indexes__"
+"""The class attribute a model declares its composite indexes in."""
 
 
 def _normalized_groups(cls: type[Any]) -> tuple[tuple[str, ...], ...]:
     """Return validated, de-duplicated composite-index column groups.
 
-    ``cls`` must be a :class:`ferro.models.Model` subclass; the base defines
+    ``cls`` must be a `ferro.models.Model` subclass; the base defines
     ``__ferro_composite_indexes__`` so normal access is always valid.
 
     Duplicate identical ordered column tuples are dropped; the first occurrence
@@ -78,10 +79,23 @@ def _validate_groups_against_columns(
 def normalized_composite_indexes(
     cls: type[Any], column_names: frozenset[str]
 ) -> tuple[tuple[str, ...], ...]:
-    """Return validated, de-duplicated composite-index column groups for ``cls``.
+    """Return the validated, de-duplicated composite-index column groups of `cls`.
 
     The single validate-and-normalize choke point for composite indexes: both
-    the SchemaIR compiler and the legacy dict pipeline route through this.
+    the schema compiler and the legacy dict pipeline route through it.
+
+    Args:
+        cls: The model class.
+        column_names: The model's column names, which every group must use.
+
+    Returns:
+        The column groups, in declaration order.
+
+    Raises:
+        TypeError: The declaration is not a tuple of tuples of non-empty
+            strings.
+        ValueError: A group names fewer than two columns, or a column the
+            model does not have.
     """
     groups = _normalized_groups(cls)
     if not groups:
@@ -93,12 +107,31 @@ def normalized_composite_indexes(
 def validate_composite_indexes_against_properties(
     cls: type[Any], properties: dict[str, Any]
 ) -> None:
-    """Ensure each referenced column exists on the JSON schema ``properties``."""
+    """Check that every column a group names is a JSON-schema property.
+
+    Args:
+        cls: The model class.
+        properties: The model's JSON-schema properties.
+
+    Raises:
+        TypeError: The declaration is not a tuple of tuples of non-empty
+            strings.
+        ValueError: A group names fewer than two columns, or a column the
+            model does not have.
+    """
     normalized_composite_indexes(cls, frozenset(properties.keys()))
 
 
 def ferro_composite_indexes_for_json(cls: type[Any]) -> list[list[str]] | None:
-    """Serialize composite groups for the Rust registry / Alembic, or ``None`` to omit."""
+    """Serialize the composite-index groups of `cls` for the Rust registry and Alembic.
+
+    Args:
+        cls: The model class.
+
+    Returns:
+        The groups as nested lists, since JSON has no tuple, or `None` when
+        the model declares none.
+    """
     groups = _normalized_groups(cls)
     if not groups:
         return None
@@ -115,6 +148,14 @@ def drop_overlap_with_uniques(
     Same ordered column tuple in both the composite-unique and composite-index
     groups is redundant: the unique constraint already creates an underlying
     index. Reordered tuples are kept (different leftmost-prefix optimization).
+
+    Args:
+        indexes: The model's composite-index groups.
+        uniques: The model's composite-unique groups.
+        model_name: The model's name, for the warning.
+
+    Returns:
+        The index groups that no unique group duplicates.
     """
     if not indexes or not uniques:
         return tuple(indexes)

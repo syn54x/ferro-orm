@@ -169,6 +169,9 @@ def clear_registry() -> None:
 def version() -> str:
     """Return the version of the installed Ferro.
 
+    Returns:
+        The version string, such as `"0.25.0"`.
+
     Examples:
         ```python {test=run prelude=reference}
         from importlib.metadata import version as installed
