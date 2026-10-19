@@ -1,4 +1,4 @@
-"""``ferro migrate drift``: the live database against its last applied snapshot.
+"""`ferro migrate drift`: the live database against its last applied snapshot.
 
 ```text
 $ ferro migrate drift
@@ -10,23 +10,23 @@ $ ferro migrate drift        # clean
 no drift against 0007_nickname
 ```
 
-Drift is what the one planner would change to turn the live database into the
-schema snapshot of the last migration applied to it (ADR-0023). Nothing here
-compares live and declared state: one core call, ``_core._plan_drift``, reads
-the live database into the planner's input, the snapshot's tables by the
-pass's own rule (ADR-0047), and plans it against the snapshot with the one
-planner, destructive changes on, so extra objects are reported too; each
-planned op is printed as one line (:func:`render_op`). That comparison of the live database with one snapshot
-is :func:`against`; ``baseline`` makes the same call with its target's
-snapshot, so the two check exactly the same things.
+Drift is what the planner would change to turn the live database into the
+schema snapshot of the last migration applied to it. Nothing here compares
+live and declared state: one core call reads the snapshot's tables from the
+live database the way the auto-migrate pass reads them, and plans them
+against the snapshot with destructive changes on, so extra objects are
+reported too; each planned op is printed as one line (`render_op`). That
+comparison of the live database with one snapshot is `against`; `baseline`
+makes the same call with its target's snapshot, so the two check exactly
+the same things.
 
 Only the snapshot's tables are read, so a live table the snapshot does not
-declare (``alembic_version``, an extension's tables, the tracking tables) is
-never drift (ADR-0031). A database mid-migration (a ``failed``, ``running``,
-``interrupted`` or ``reverting`` step, or a run holding the lock) is at
-neither snapshot, so drift refuses rather than report the run's own partial
-work (ADR-0043); so does a database with no migration records, which has no
-applied snapshot to drift from. ``drift`` takes no lock and writes nothing.
+declare (`alembic_version`, an extension's tables, the tracking tables) is
+never drift. A database mid-migration (a `failed`, `running`, `interrupted`
+or `reverting` step, or a run holding the lock) is at neither snapshot, so
+drift refuses rather than report the run's own partial work; so does a
+database with no migration records, which has no applied snapshot to drift
+from. `drift` takes no lock and writes nothing.
 """
 
 from __future__ import annotations
@@ -50,25 +50,23 @@ __all__ = ["DriftReport", "against", "drift", "render_op"]
 
 @dataclass(frozen=True)
 class DriftReport:
-    """What ``drift`` found.
-
-    ``lines`` holds one plain-language line per planned op; ``operations``
-    the planner's ops themselves (``{"kind": ..., <fields>}``). ``refusal``
-    is why there was nothing to compare: a run is unfinished, or the
-    database has no migration records. Either way ``clean`` is false.
-    """
+    """What [`drift`][ferro.migrations.drift] found: one line per difference, or why it could not compare."""
 
     against: str | None
-    """The applied migration whose snapshot the database was compared with
-    (``NNNN_<name>``), or ``None`` when drift refused."""
+    """The applied migration the database was compared with (`NNNN_<name>`), or `None` when drift refused."""
     lines: list[str] = field(default_factory=list)
+    """One plain-language line per difference, such as `author.slug column is missing`."""
     operations: list[dict[str, Any]] = field(default_factory=list)
+    """The planner's ops behind the lines, each `{"kind": ..., <fields>}`."""
     refusal: str | None = None
+    """Why there was nothing to compare: a run is unfinished, or the database has no migration records."""
     reports: list[dict[str, Any]] = field(default_factory=list)
-    """What the planner reports without planning an op for it (a foreign
-    or unverifiable row policy, ...), each ``{"kind", "subject", "text",
-    "recurs", "blocks"}``, in planning order. Never makes the report
-    unclean."""
+    """What the planner reports without planning an op for it, in planning order.
+
+    A foreign or unverifiable row policy, for example; each is
+    `{"kind", "subject", "text", "recurs", "blocks"}`. A report never makes
+    the drift report unclean.
+    """
 
     @property
     def warnings(self) -> list[str]:
@@ -77,11 +75,16 @@ class DriftReport:
 
     @property
     def clean(self) -> bool:
-        """The database matches the snapshot it was compared with."""
+        """Whether the database matches the snapshot it was compared with; false after a refusal."""
         return self.refusal is None and not self.lines
 
     def render(self) -> str:
-        """The text ``ferro migrate drift`` prints on stdout (empty for a refusal)."""
+        """Render the text `ferro migrate drift` prints on stdout.
+
+        Returns:
+            The drift lines under `drift against <migration>:`, `no drift
+                against <migration>`, or an empty string for a refusal.
+        """
         if self.refusal is not None:
             return ""
         if not self.lines:
@@ -91,8 +94,12 @@ class DriftReport:
         )
 
     def raise_for_problems(self) -> None:
-        """Raise :class:`MigrationRefused` naming every line (or the refusal)
-        unless the report is clean."""
+        """Raise unless the report is clean.
+
+        Raises:
+            MigrationRefused: The report has drift lines (the message names
+                every one) or a refusal (the message is the refusal).
+        """
         if self.refusal is not None:
             raise MigrationRefused(self.refusal)
         if self.lines:
@@ -221,15 +228,34 @@ new variant without a line here fails."""
 
 
 def render_op(op: dict[str, Any]) -> str:
-    """One planner op as one plain-language line (``team.name column is
-    missing``). An op kind this module does not know still renders, as
-    ``<kind> on <table>``; a known kind missing one of its fields raises
-    ``ValueError`` naming both.
+    """Render one planner op as one plain-language line.
 
-    ``AlterColumnType`` reads ``live_type`` / ``snapshot_type`` and
-    ``AlterColumnNullability`` reads ``live_nullable`` when the op carries
-    them (:func:`against` adds them); without them the line says only that the
-    two differ.
+    An op kind this function does not know still renders, as
+    `<kind> on <table>`. `AlterColumnType` reads `live_type` /
+    `snapshot_type` and `AlterColumnNullability` reads `live_nullable` when
+    the op carries them; without them the line says only that the two
+    differ.
+
+    Args:
+        op: The op, as `DriftReport.operations` holds it:
+            `{"kind": ..., <fields>}`.
+
+    Returns:
+        The line, such as `author.slug column is missing`.
+
+    Raises:
+        ValueError: A known kind is missing one of its fields; the message
+            names both.
+
+    Examples:
+        ```python {test=run prelude=reference}
+        from ferro.migrations import render_op
+
+        print(render_op({"kind": "AddColumn", "table": "author", "column": "slug"}))
+        # author.slug column is missing
+        print(render_op({"kind": "DropTable", "table": "post"}))
+        # post table is extra
+        ```
     """
     kind = op.get("kind", "unknown op")
     renderer = _RENDERERS.get(kind)
@@ -340,21 +366,31 @@ def _refused(why: str) -> DriftReport:
 async def against(
     snapshot: dict[str, Any], *, migration: str, using: str
 ) -> DriftReport:
-    """Drift of the live database on open connection ``using`` against one
-    schema snapshot (the ``["snapshot"]["ir"]`` of a migration in the
-    directory), reported as against ``migration`` (``NNNN_<name>``).
+    """Compare the live database with one schema snapshot.
 
-    The check :func:`drift` makes against the last applied migration and
-    ``baseline`` makes against its target, and nothing else: only the
-    snapshot's tables are read (ADR-0031), destructive changes count, each
-    planned op is one :func:`render_op` line, and nothing is refused, locked
-    or written::
+    This is the check `drift` makes against the last applied migration and
+    `baseline` makes against its target, and nothing else: only the
+    snapshot's tables are read, destructive changes count, each planned op
+    is one `render_op` line, and nothing is refused, locked or written.
 
-        report = await against(snapshot, migration="0007_nickname", using="default")
-        report.lines   # ["user.nickname column is missing"]
+    Args:
+        snapshot: The schema snapshot, the `["snapshot"]["ir"]` of a
+            migration in the directory.
+        migration: The migration the report says it compared against
+            (`NNNN_<name>`).
+        using: The open connection to read.
+
+    Returns:
+        The drift report.
 
     Raises:
-        MigrationRefused: ``using`` is not an open connection.
+        MigrationRefused: `using` is not an open connection.
+
+    Examples:
+        ```python {test=compile reason="needs a migrations project and a database"}
+        report = await against(snapshot, migration="0007_nickname", using="default")
+        report.lines  # ["user.nickname column is missing"]
+        ```
     """
     if _core.connection_backend(using) is None:
         raise MigrationRefused(f"connection `{using}` is not open; connect it first")
@@ -433,22 +469,35 @@ async def drift(
     using: str | None = None,
     url: str | None = None,
 ) -> DriftReport:
-    """Compare the live database with the schema snapshot of the last
-    migration applied to it (``ferro migrate drift``). Takes no lock and
-    changes nothing.
+    """Compare the live database with the schema snapshot of the last migration applied to it.
 
-    Works on ``using`` (an open connection), on a private connection to
-    ``url``, or on the default connection. Raises nothing for drift or for
-    a database it cannot compare (mid-migration, no records): the report
-    says so, and ``.raise_for_problems()`` raises :class:`MigrationRefused`
-    with every line, so a fixture aborts in one line::
+    This is `ferro migrate drift`. It takes no lock and changes nothing, and
+    raises nothing for drift or for a database it cannot compare
+    (mid-migration, no records): the report says so.
 
-        (await ferro.migrations.drift()).raise_for_problems()
+    Args:
+        settings: The project's configuration. Defaults to `FerroSettings()`.
+        database: The configured database. Defaults to the only one
+            configured.
+        using: An open connection to work on. Defaults to the default
+            connection.
+        url: A URL to open a private connection to, closed after the call.
+            Refused together with `using`.
+
+    Returns:
+        The drift report; its `raise_for_problems()` raises with every line.
 
     Raises:
-        MigrationRefused: the configuration names no single database, there
+        MigrationRefused: The configuration names no single database, there
             is no connection to work on, or the migrations directory is
             unreadable.
+
+    Examples:
+        A test fixture that aborts on drift, in one line:
+
+        ```python {test=compile reason="needs a migrations project and a database"}
+        (await ferro.migrations.drift()).raise_for_problems()
+        ```
     """
     target = Target.resolve(settings, database, using=using, url=url)
     async with target.open() as name:
