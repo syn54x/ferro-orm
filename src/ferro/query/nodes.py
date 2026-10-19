@@ -1,4 +1,9 @@
-"""Define query AST nodes and field proxies for fluent filtering"""
+"""The pieces a query lambda builds: row stand-ins, column references and conditions.
+
+A query lambda receives a [`QueryProxy`][ferro.query.QueryProxy]; reading a
+field from it gives a `FieldProxy`, and comparing that builds a `QueryNode`
+condition.
+"""
 
 import difflib
 from collections.abc import Callable, Mapping
@@ -10,7 +15,9 @@ from .._bind_payload import canonicalize_wire_scalar
 from ..columns import retired_clause
 
 TField = TypeVar("TField")
+"""The Python type of the column a `FieldProxy` refers to."""
 TModel = TypeVar("TModel")
+"""The model class a `QueryProxy` stands in for."""
 
 # Aggregate source families (#294, ADR-0009): which column families each
 # aggregate accepts, validated at build time. `None` = any column. Families
@@ -59,24 +66,26 @@ def _json_column_shape(spec: Any) -> str | None:
 
 
 class QueryNode:
-    """Represent a node in the query expression tree
+    """A condition in a query: one comparison, or several combined.
 
-    Attributes:
-        column: Column name for leaf nodes.
-        operator: Comparison or logical operator.
-        value: Right-hand value for leaf comparisons.
-        left: Left child node for compound expressions.
-        right: Right child node for compound expressions.
-        is_compound: Flag indicating whether the node combines two child nodes.
-        child: Negated child node for NOT nodes (``~``, ADR-0008).
-        exists: The existence test's facts for exists nodes (ADR-0007).
+    A comparison in a query lambda returns one, such as
+    `post.views > 1000`. Combine conditions with `&` (and) and `|` (or),
+    and negate one with `~`, which renders SQL `NOT (...)`. Python's own
+    `and`, `or` and `not` raise `TypeError`, since they would keep only one
+    side. A negated comparison, like SQL `NOT`, leaves out rows where the
+    column is `NULL`; see
+    [Negation and NULL values](../guide/queries.md#negation-and-null-values).
 
     Examples:
-        >>> active_filter = FieldProxy("active") == True
-        >>> admin_filter = FieldProxy("role") == "admin"
-        >>> expr = active_filter & admin_filter
-        >>> isinstance(expr, QueryNode)
-        True
+        ```python {test=run prelude=reference}
+        posts = await Post.where(
+            lambda post: (post.views > 1000) | (post.title == "The Education of a Computer")
+        ).all()
+        assert [post.id for post in posts] == [1, 2]
+
+        quiet = await Post.where(lambda post: ~(post.views > 1000)).all()
+        assert [post.id for post in quiet] == [2]
+        ```
     """
 
     def __init__(
@@ -92,101 +101,88 @@ class QueryNode:
         exists: "ExistsTest | None" = None,
         owner: type | None = None,
     ):
-        """Initialize a query expression node
+        """Build a condition; query lambdas build these for you.
 
         Args:
-            column: Column name for a leaf comparison node.
-            operator: Comparison or logical operator string.
-            value: Comparison value for leaf nodes.
-            left: Left child node for compound expressions.
-            right: Right child node for compound expressions.
-            is_compound: Set to True for logical expressions with child nodes.
-            path: Relation field names from the root model to ``column``'s
-                table; empty (default) means the root model. Plumbed through
-                so relation traversal (#270) can populate it — this slice
-                never produces a non-empty path.
-            child: The negated child for a NOT node (built by ``~``,
-                ADR-0008); ``None`` for leaf and compound nodes.
-            exists: The correlation hops and inner condition tree of an
-                existence test (built by ``t.rel.exists()``, ADR-0007);
-                ``None`` for every other node kind.
-            owner: The model class whose scope built this leaf (the proxy's
-                owner), when known. A compile-side fact, never serialized —
-                the cross-scope guard on scoped existence tests (#315) reads
-                it to catch a leaf smuggled in from another lambda's
-                parameter.
+            column: The compared column, on a comparison.
+            operator: The comparison (`"=="`, `"<"`, `"IN"`, `"LIKE"`, ...),
+                or `"AND"` or `"OR"` on a combination.
+            value: The value the column is compared with.
+            left: The first condition of a combination.
+            right: The second condition of a combination.
+            is_compound: Whether the node combines `left` and `right`.
+            path: The relation fields from the queried model to the column's
+                model. Defaults to `()`, the queried model itself.
+            child: The negated condition, on a `~` node.
+            exists: The details of an existence test, on a node built by
+                `.exists()`.
+            owner: The model whose stand-in built the comparison, used to
+                refuse a condition that mixes two lambdas' parameters.
         """
         self.column = column
+        """The compared column, or `None` on a combination."""
         self.operator = operator
+        """The comparison or combining operator."""
         self.value = value
+        """The value the column is compared with."""
         self.left = left
+        """The first condition of a combination."""
         self.right = right
+        """The second condition of a combination."""
         self.is_compound = is_compound
+        """Whether the node combines `left` and `right`."""
         self.path = path
+        """The relation fields from the queried model to the column's model."""
         self.child = child
+        """The negated condition, on a `~` node."""
         self.exists = exists
+        """The details of an existence test, on a node built by `.exists()`."""
         self.owner = owner
+        """The model whose stand-in built the comparison, when known."""
 
     def __or__(self, other: "QueryNode") -> "QueryNode":
-        """Combine two nodes with logical OR
+        """Combine two conditions with `OR`.
 
         Args:
-            other: Another query node to combine.
+            other: The other condition.
 
         Returns:
-            A compound node representing ``self OR other``.
-
-        Examples:
-            >>> role = FieldProxy("role")
-            >>> expr = (role == "admin") | (role == "owner")
-            >>> expr.is_compound
-            True
+            A condition met when either one is.
         """
         if not isinstance(other, QueryNode):
             return NotImplemented
         return QueryNode(left=self, operator="OR", right=other, is_compound=True)
 
     def __and__(self, other: "QueryNode") -> "QueryNode":
-        """Combine two nodes with logical AND
+        """Combine two conditions with `AND`.
 
         Args:
-            other: Another query node to combine.
+            other: The other condition.
 
         Returns:
-            A compound node representing ``self AND other``.
-
-        Examples:
-            >>> active = FieldProxy("active") == True
-            >>> email = FieldProxy("email").like("%@ferro.dev")
-            >>> expr = active & email
-            >>> expr.is_compound
-            True
+            A condition met when both are.
         """
         if not isinstance(other, QueryNode):
             return NotImplemented
         return QueryNode(left=self, operator="AND", right=other, is_compound=True)
 
     def __invert__(self) -> "QueryNode":
-        """Negate this predicate with prefix ``~`` (ADR-0008)
+        """Negate the condition with `~`, as SQL `NOT (...)`.
 
-        One universal rule: ``~`` negates ANY predicate node — leaf
-        comparison, AND/OR compound, or a negation itself (``~~p`` nests) —
-        by wrapping it in a NOT node rendered as SQL ``NOT (...)``. There are
-        no per-operator negative forms: ``~t.col.in_(ids)`` is NOT IN,
-        ``~t.col.like(p)`` is NOT LIKE.
+        `~` is the only negation: `~post.id.in_(ids)` is `NOT IN` and
+        `~post.title.like(pattern)` is `NOT LIKE`.
 
         Returns:
-            A NOT node wrapping ``self``.
-
-        Examples:
-            >>> node = ~FieldProxy("role").in_(["admin", "owner"])
-            >>> node.child.operator
-            'IN'
+            A condition met when this one is not.
         """
         return QueryNode(child=self)
 
     def to_ir_dict(self) -> dict[str, Any]:
-        """Serialize the query node tree into a QueryIR payload shape."""
+        """Convert the condition to the dict form Ferro sends with a query.
+
+        Returns:
+            The condition and everything under it, as plain dicts and lists.
+        """
         if self.child is not None:
             return {"node_kind": "not", "child": self.child.to_ir_dict()}
         if self.exists is not None:
@@ -223,17 +219,14 @@ class QueryNode:
         }
 
     def __bool__(self) -> bool:
-        """Reject boolean coercion of a query node (#273).
+        """Refuse `bool()`, so that `and`, `or` and `not` cannot drop a condition.
 
-        Python evaluates ``and``/``or`` by calling ``bool()`` on the operands
-        (and ``not`` coerces its operand the same way), so ``(u.age >= 18) and
-        (u.active == True)`` would silently collapse to one branch instead of
-        building a compound predicate. Raising here turns that mistake into a
-        pointed error at build time; combine predicates with the bitwise
-        ``&`` / ``|`` operators and negate with ``~``.
+        Python's `and` and `or` keep one operand by its truth value, so
+        `(post.views > 1) and (post.id == 2)` would lose a side. Use `&`, `|`
+        and `~` instead.
 
         Raises:
-            TypeError: Always — a ``QueryNode`` has no truth value.
+            TypeError: Always.
         """
         raise TypeError(
             "QueryNode cannot be used in a boolean context; use & / | to "
@@ -242,7 +235,7 @@ class QueryNode:
         )
 
     def __repr__(self):
-        """Return a developer-friendly representation of the node"""
+        """Show the condition, for debugging."""
         if self.child is not None:
             return f"QueryNode(NOT {self.child!r})"
         if self.exists is not None:
@@ -257,27 +250,26 @@ class QueryNode:
 
 @dataclass(frozen=True)
 class ExistsTest:
-    """The facts of one existence test (CONTEXT.md, ADR-0007).
+    """The details of one existence test, as `author.posts.exists()` builds them.
 
-    ``hops`` is the correlation hop path in the ``joins``-section hop-fact
-    shape (``QueryJoinHop`` — typed loosely here because the wire module
-    imports this one): one hop for a reverse FK, two for M2M. ``where`` is
-    the ordinary inner condition tree over the related model — empty for a
-    bare test; nesting and negation come free from :class:`QueryNode`
-    recursion. There is no negation flag: NOT EXISTS is ``~`` (a ``not``
-    node) over the exists node, like every other predicate (ADR-0008).
-
-    ``joins`` carries the inner tree's forward-traversal hop facts (#315,
-    ``QueryJoin`` entries, always ``"inner"`` — ADR-0006 semantics inside the
-    subquery), serialized only when non-empty. ``owner`` is the model whose
-    proxy built this test — a compile-side scope tag for the cross-scope
-    guard, never serialized.
+    `NOT EXISTS` is `~` over the condition that holds the test, like any
+    other negation.
     """
 
+    # ``hops`` holds ``QueryJoinHop`` entries and ``joins`` ``QueryJoin``
+    # entries, typed loosely because the wire module imports this one.
     hops: tuple[Any, ...]
+    """The joins from the queried row to the related rows.
+
+    One for a reverse relation, two through the join table for a
+    many-to-many.
+    """
     where: tuple["QueryNode", ...]
+    """The condition on the related rows; empty for a bare `exists()`."""
     joins: tuple[Any, ...] = ()
+    """The joins the condition needs inside the subquery."""
     owner: type | None = None
+    """The model whose stand-in built the test."""
 
 
 def _query_value_kind(value: Any) -> str:
@@ -299,19 +291,31 @@ def _query_value_kind(value: Any) -> str:
 
 
 class FieldProxy(Generic[TField]):
-    """Capture field comparisons and build query nodes
+    """A reference to one column inside a query lambda.
 
-    ``FieldProxy`` is generic over the column's Python type so that operator
-    overloads carry that type into static analysis. At runtime the type
-    parameter is erased and the proxy works identically for any column type.
+    Reading a field from the lambda's parameter gives one: `post.views` in
+    `lambda post: post.views > 1000`. It builds:
 
-    Attributes:
-        column: Database column name associated with the model field.
+    - conditions, with `==`, `!=`, `<`, `<=`, `>`, `>=`,
+      [`in_`][ferro.query.nodes.FieldProxy.in_] (or `<<`) and
+      [`like`][ferro.query.nodes.FieldProxy.like];
+    - aggregates for a `select()` dict, with
+      [`count`][ferro.query.nodes.FieldProxy.count],
+      [`sum`][ferro.query.nodes.FieldProxy.sum],
+      [`avg`][ferro.query.nodes.FieldProxy.avg],
+      [`min`][ferro.query.nodes.FieldProxy.min] and
+      [`max`][ferro.query.nodes.FieldProxy.max];
+    - new values in an `update()` recipe, with `+`, `-` and
+      [`merge`][ferro.query.nodes.FieldProxy.merge].
+
+    The type parameter is the column's Python type, so a type checker can
+    tell, for example, that `like` needs a text column.
 
     Examples:
-        >>> email_filter = FieldProxy("email") == "taylor@example.com"
-        >>> isinstance(email_filter, QueryNode)
-        True
+        ```python {test=run prelude=reference}
+        posts = await Post.where(lambda post: post.views >= 952).all()
+        assert [post.id for post in posts] == [1, 2]
+        ```
     """
 
     def __init__(
@@ -320,22 +324,19 @@ class FieldProxy(Generic[TField]):
         path: tuple[str, ...] = (),
         owner: type | None = None,
     ):
-        """Initialize a field proxy for a specific column
+        """Refer to a column; query lambdas build these for you.
 
         Args:
-            column: Database column name to target in expressions.
-            path: Relation field names from the root model to this column's
-                table; empty (default) means the root model. Plumbed through
-                so relation traversal (#270) can populate it — this slice
-                never produces a non-empty path.
-            owner: The model class this column belongs to (the root model, or
-                a traversal's target model), when known. Query proxies always
-                pass it; aggregate methods (#294) read the column spec off it
-                to validate source families at build time. A hand-built proxy
-                without an owner skips that validation.
+            column: The column's name.
+            path: The relation fields from the queried model to the column's
+                model. Defaults to `()`, the queried model itself.
+            owner: The model the column belongs to. Defaults to `None`, which
+                skips the column type checks of the aggregate methods.
         """
         self.column = column
+        """The column's name."""
         self.path = path
+        """The relation fields from the queried model to the column's model."""
         # Underscored so the attribute can never statically shadow traversal
         # to a relation FIELD named "owner" (`t.account.owner.email`) through
         # the TYPE_CHECKING `__getattr__` chain.
@@ -372,31 +373,100 @@ class FieldProxy(Generic[TField]):
         return AggregateExpr(fn, self.column, self.path)
 
     def count(self) -> "AggregateExpr":
-        """``COUNT(column)`` — counts rows where this column is non-NULL."""
+        """Count the rows where this column is not `NULL`, as SQL `COUNT(column)`.
+
+        Returns:
+            An aggregate to name in a `select()` dict. Its value is an `int`,
+                `0` over no rows.
+
+        Examples:
+            ```python {test=run prelude=reference}
+            row = await Post.select(lambda post: {"posts": post.id.count()}).first()
+            assert row.posts == 2
+            ```
+        """
         return self._aggregate("count")
 
     def sum(self) -> "AggregateExpr":
-        """``SUM(column)`` — numeric columns only; ``None`` over no rows."""
+        """Add up a numeric column, as SQL `SUM(column)`.
+
+        Returns:
+            An aggregate to name in a `select()` dict. Its value has the
+                column's type, or is `None` over no rows.
+
+        Raises:
+            TypeError: The column is not an `int`, `float` or `Decimal`
+                column.
+
+        Examples:
+            ```python {test=run prelude=reference}
+            row = await Post.select(lambda post: {"total": post.views.sum()}).first()
+            assert row.total == 2795
+            ```
+        """
         return self._aggregate("sum")
 
     def avg(self) -> "AggregateExpr":
-        """``AVG(column)`` — numeric columns only; ``None`` over no rows."""
+        """Average a numeric column, as SQL `AVG(column)`.
+
+        Returns:
+            An aggregate to name in a `select()` dict. Its value is a
+                `float`, or a `Decimal` for a `Decimal` column, or `None` over
+                no rows.
+
+        Raises:
+            TypeError: The column is not an `int`, `float` or `Decimal`
+                column.
+
+        Examples:
+            ```python {test=run prelude=reference}
+            row = await Post.select(lambda post: {"mean": post.views.avg()}).first()
+            assert row.mean == 1397.5
+            ```
+        """
         return self._aggregate("avg")
 
     def min(self) -> "AggregateExpr":
-        """``MIN(column)`` — numeric, text, or date/time columns."""
+        """Find a column's smallest value, as SQL `MIN(column)`.
+
+        Returns:
+            An aggregate to name in a `select()` dict. Its value has the
+                column's type, or is `None` over no rows.
+
+        Raises:
+            TypeError: The column is not a number, text, date or time column.
+
+        Examples:
+            ```python {test=run prelude=reference}
+            row = await Post.select(lambda post: {"low": post.views.min()}).first()
+            assert row.low == 952
+            ```
+        """
         return self._aggregate("min")
 
     def max(self) -> "AggregateExpr":
-        """``MAX(column)`` — numeric, text, or date/time columns."""
+        """Find a column's largest value, as SQL `MAX(column)`.
+
+        Returns:
+            An aggregate to name in a `select()` dict. Its value has the
+                column's type, or is `None` over no rows.
+
+        Raises:
+            TypeError: The column is not a number, text, date or time column.
+
+        Examples:
+            ```python {test=run prelude=reference}
+            row = await Post.select(lambda post: {"high": post.views.max()}).first()
+            assert row.high == 1843
+            ```
+        """
         return self._aggregate("max")
 
     def __iter__(self) -> "NoReturn":
-        """Reject iteration — the builtin-``sum`` trap (#294).
+        """Refuse iteration, so Python's `sum(post.views)` points at `post.views.sum()`.
 
-        ``sum(t.amount)`` calls ``iter(t.amount)`` and would otherwise fail
-        with an opaque message (or hang on an infinite proxy). Aggregation is
-        a method on the proxy, not a Python builtin over it.
+        Raises:
+            TypeError: Always.
         """
         raise TypeError(
             f"{self._dotted()} is a column reference and cannot be iterated; "
@@ -407,64 +477,68 @@ class FieldProxy(Generic[TField]):
     if TYPE_CHECKING:
 
         def __getattr__(self, name: str) -> "FieldProxy[Any]":
-            """Statically model relation-traversal chaining (#270).
+            """Type a field read through a relation for type checkers only.
 
-            Only visible to type checkers: ``t.account.ledger_id`` types each
-            hop as ``FieldProxy[Any]`` so a traversal comparison still yields a
-            ``QueryNode`` while a *bare* proxy (``lambda t: t.account``) stays a
-            non-``QueryNode`` and fails predicate typing. At runtime the actual
-            resolution lives on :class:`QueryProxy` / :class:`RelationProxy`
-            (relation → deeper proxy, column → this ``FieldProxy``); this
-            declaration is never executed.
+            `post.author.name` types each step as `FieldProxy[Any]`, so a
+            comparison at the end is still a condition. At runtime the
+            relation steps are resolved by the row stand-in.
+
+            Args:
+                name: The field read through the relation.
             """
             ...
 
     def __eq__(  # type: ignore[override]  # ty: ignore[invalid-method-override]
         self, other: "TField | FieldProxy[TField]"
     ) -> QueryNode:
-        """Build an equality comparison node"""
+        """Compare for equality; `== None` renders `IS NULL`."""
         return QueryNode(self.column, "==", other, path=self.path, owner=self._owner)
 
     def __ne__(  # type: ignore[override]  # ty: ignore[invalid-method-override]
         self, other: "TField | FieldProxy[TField]"
     ) -> QueryNode:
-        """Build an inequality comparison node"""
+        """Compare for inequality; `!= None` renders `IS NOT NULL`."""
         return QueryNode(self.column, "!=", other, path=self.path, owner=self._owner)
 
     def __lt__(self, other: "TField | FieldProxy[TField]") -> QueryNode:
-        """Build a less-than comparison node"""
+        """Compare with `<`."""
         return QueryNode(self.column, "<", other, path=self.path, owner=self._owner)
 
     def __le__(self, other: "TField | FieldProxy[TField]") -> QueryNode:
-        """Build a less-than-or-equal comparison node"""
+        """Compare with `<=`."""
         return QueryNode(self.column, "<=", other, path=self.path, owner=self._owner)
 
     def __gt__(self, other: "TField | FieldProxy[TField]") -> QueryNode:
-        """Build a greater-than comparison node"""
+        """Compare with `>`."""
         return QueryNode(self.column, ">", other, path=self.path, owner=self._owner)
 
     def __ge__(self, other: "TField | FieldProxy[TField]") -> QueryNode:
-        """Build a greater-than-or-equal comparison node"""
+        """Compare with `>=`."""
         return QueryNode(self.column, ">=", other, path=self.path, owner=self._owner)
 
     def in_(
         self, other: "list[TField] | tuple[TField, ...] | set[TField]"
     ) -> QueryNode:
-        """Build an ``IN`` comparison node from an iterable
+        """Match a column against a list of values, as SQL `IN`.
+
+        `post.id << {2, 3}` is the same condition. To test membership in
+        related rows, use the relation's `exists()` instead of a subquery.
 
         Args:
-            other: Collection of values to match against the field.
+            other: The values to match, as a list, tuple or set.
 
         Returns:
-            A node using the SQL ``IN`` operator.
+            A condition met when the column equals one of the values.
 
         Raises:
-            TypeError: If ``other`` is not a list, tuple, or set.
+            TypeError: `other` is not a list, tuple or set; a query is
+                refused with a pointer to `exists()`.
 
         Examples:
-            >>> status_filter = FieldProxy("status").in_(["active", "pending"])
-            >>> status_filter.operator
-            'IN'
+            ```python {test=run prelude=reference}
+            posts = await Post.where(lambda post: post.id.in_([2, 3])).all()
+            assert [post.id for post in posts] == [2]
+            ```
         """
         if not isinstance(other, (list, tuple, set)):
             # Late import: builder imports this module at load time.
@@ -492,22 +566,22 @@ class FieldProxy(Generic[TField]):
         )
 
     def like(self: "FieldProxy[str]", pattern: str) -> QueryNode:
-        """Build a ``LIKE`` comparison node
+        """Match a text column against a pattern, as SQL `LIKE`.
 
-        The ``self: FieldProxy[str]`` annotation prevents type checkers from
-        accepting ``.like(...)`` on non-string columns; at runtime the method
-        is available on any ``FieldProxy``.
+        In the pattern, `%` matches any run of characters and `_` one
+        character. A type checker accepts `like` on text columns only.
 
         Args:
-            pattern: SQL LIKE pattern such as ``"%@example.com"``.
+            pattern: The pattern, such as `"%Engine%"`.
 
         Returns:
-            A node using the SQL ``LIKE`` operator.
+            A condition met when the column matches.
 
         Examples:
-            >>> email_filter = FieldProxy("email").like("%@example.com")
-            >>> email_filter.operator
-            'LIKE'
+            ```python {test=run prelude=reference}
+            posts = await Post.where(lambda post: post.title.like("%Engine%")).all()
+            assert [post.id for post in posts] == [1]
+            ```
         """
         return QueryNode(
             self.column, "LIKE", pattern, path=self.path, owner=self._owner
@@ -516,39 +590,51 @@ class FieldProxy(Generic[TField]):
     def __lshift__(
         self, other: "list[TField] | tuple[TField, ...] | set[TField]"
     ) -> QueryNode:
-        """Use ``<<`` as shorthand syntax for ``IN`` comparisons
+        """Match a column against a list of values with `<<`, the same as `in_`.
 
         Args:
-            other: Collection of values to match against the field.
+            other: The values to match, as a list, tuple or set.
 
         Returns:
-            A node using the SQL ``IN`` operator.
-
-        Examples:
-            >>> role_filter = FieldProxy("role") << {"admin", "owner"}
-            >>> role_filter.operator
-            'IN'
+            A condition met when the column equals one of the values.
         """
         return self.in_(other)
 
     def __add__(self, other: Any) -> "BinaryValueExpr":
+        """Add to a numeric column in an `update()` recipe."""
         return _binary_value("+", self, other)
 
     def __sub__(self, other: Any) -> "BinaryValueExpr":
+        """Subtract from a numeric column in an `update()` recipe."""
         return _binary_value("-", self, other)
 
     def __radd__(self, other: Any) -> "BinaryValueExpr":
+        """Add a numeric column to a value in an `update()` recipe."""
         return _binary_value("+", other, self)
 
     def __rsub__(self, other: Any) -> "BinaryValueExpr":
+        """Subtract a numeric column from a value in an `update()` recipe."""
         return _binary_value("-", other, self)
 
     def merge(self, patch: Any) -> "MergeValueExpr":
-        """Shallow object merge — Postgres ``jsonb ||`` (#379).
+        """Merge keys into a JSON object column in an `update()` recipe (Postgres only).
 
-        The patch mapping wins on key overlap. A NULL object column becomes
-        ``{}`` at render time. Lists and non-object targets fail here so
-        SQLite / ``.concat()`` never become a late execute surprise.
+        The update renders Postgres `jsonb ||`: keys in `patch` replace the
+        same keys in the column, other keys stay, and a `NULL` column counts
+        as `{}`. The merge is shallow, so a nested object in `patch` replaces
+        the stored one whole. For example,
+        `Post.where(...).update(lambda post: {"meta": post.meta.merge({"pinned": True})})`
+        sets one key of a `meta` JSON column.
+
+        Args:
+            patch: The keys and values to merge in, as a mapping.
+
+        Returns:
+            A new value for the column, to assign in an `update()` recipe.
+
+        Raises:
+            TypeError: `patch` is not a mapping, or the column does not hold
+                a JSON object (a list column, or any other type).
         """
         if isinstance(patch, (list, tuple)):
             raise TypeError(
@@ -581,31 +667,49 @@ class FieldProxy(Generic[TField]):
         return MergeValueExpr(self, dict(patch))
 
     def __repr__(self):
-        """Return a developer-friendly representation of the field proxy"""
+        """Show the column, for debugging."""
         return f"FieldProxy(column={self.column!r})"
 
 
 class AggregateExpr:
-    """A build-time aggregate expression over one column (#294, ADR-0009).
+    """An aggregate over one column, such as `post.views.sum()`, for a `select()` dict.
 
-    Built by the five aggregate methods on :class:`FieldProxy`
-    (``t.amount.sum()``, traversal included: ``t.account.balance.avg()``).
-    Carries the aggregate ``fn`` (the closed ``count/sum/avg/min/max`` set),
-    the source ``column``, and the source's relation ``path`` — the data the
-    ``select()`` resolver turns into a v5 ``expr`` record field.
+    Name each aggregate with a dict key:
+    `select(lambda post: {"total": post.views.sum()})`. The column may be
+    reached through a relation (`post.author.id.count()`). With only
+    aggregates, the query returns one record; with plain fields beside them,
+    one record per group of those fields. See
+    [Aggregations and grouped queries](../guide/aggregations.md).
 
-    Deliberately opaque: an aggregate expression is a projection source, not
-    a value — comparing one raises pointedly at build time (post-aggregation
-    filtering is ``having()``, #291), and it is not a predicate, a column, or
-    an iterable.
+    An aggregate cannot be compared or used as a condition: `where()`
+    filters rows before they are aggregated, and Ferro has no `having()`
+    for filtering groups. Filter the rows with `where()`, or compare the
+    aggregated results in Python.
+
+    Examples:
+        ```python {test=run prelude=reference}
+        row = await Post.select(lambda post: {"total": post.views.sum()}).first()
+        assert row.total == 2795
+        ```
     """
 
     __slots__ = ("fn", "column", "path")
 
     def __init__(self, fn: str, column: str, path: tuple[str, ...]) -> None:
+        """Build an aggregate; the column methods such as `sum()` build these for you.
+
+        Args:
+            fn: The aggregate: `"count"`, `"sum"`, `"avg"`, `"min"` or `"max"`.
+            column: The aggregated column.
+            path: The relation fields from the queried model to the column's
+                model.
+        """
         self.fn = fn
+        """The aggregate: `"count"`, `"sum"`, `"avg"`, `"min"` or `"max"`."""
         self.column = column
+        """The aggregated column."""
         self.path = path
+        """The relation fields from the queried model to the column's model."""
 
     def _dotted(self) -> str:
         """The selector expression this aggregate came from (errors)."""
@@ -715,13 +819,17 @@ def _binary_value(op: str, left: Any, right: Any) -> "BinaryValueExpr":
 
 
 class ValueExpr:
-    """A SET value-producing expression (#377). Sibling of :class:`AggregateExpr`.
+    """A new value computed in the database, for an `update()` recipe.
 
-    Not a :class:`QueryNode`. Literals and root :class:`FieldProxy` copies
-    compile at the ``update()`` recipe door; ``+`` / ``-`` / ``now`` (#378)
-    and ``.merge()`` (#379) produce instances of this type. ``.concat()``
-    is not shipped yet. Comparing one to build a predicate is #327;
-    projecting or ordering by one is #309.
+    `post.views + 1`, [`now`][ferro.now] and `.merge()` build one. Assign it
+    to a column in the dict an `update()` recipe returns. A value expression
+    cannot be compared, selected or sorted by: it is only a new value.
+
+    Examples:
+        ```python {test=run prelude=reference}
+        await Post.where(lambda post: post.id == 1).update(lambda post: {"views": post.views + 1})
+        assert (await Post.get(1)).views == 1844
+        ```
     """
 
     def _reject_clause(self, clause: str) -> NoReturn:
@@ -765,35 +873,51 @@ class ValueExpr:
         )
 
     def __add__(self, other: Any) -> "BinaryValueExpr":
+        """Add a number to the value."""
         return _binary_value("+", self, other)
 
     def __sub__(self, other: Any) -> "BinaryValueExpr":
+        """Subtract a number from the value."""
         return _binary_value("-", self, other)
 
     def __radd__(self, other: Any) -> "BinaryValueExpr":
+        """Add the value to a number."""
         return _binary_value("+", other, self)
 
     def __rsub__(self, other: Any) -> "BinaryValueExpr":
+        """Subtract the value from a number."""
         return _binary_value("-", other, self)
 
     def __repr__(self) -> str:
+        """Show the expression, for debugging."""
         return "ValueExpr()"
 
 
 class BinaryValueExpr(ValueExpr):
-    """One binary ``+`` / ``-`` SET node (#378). Either side is a value."""
+    """A sum or difference in an `update()` recipe, such as `post.views + 1`."""
 
     def __init__(self, op: str, left: Any, right: Any) -> None:
+        """Build the expression; `+` and `-` on a column build these for you.
+
+        Args:
+            op: `"+"` or `"-"`.
+            left: The left operand: a column, a number or another expression.
+            right: The right operand: a column, a number or another
+                expression.
+        """
         self.op = op
+        """`"+"` or `"-"`."""
         self.left = left
+        """The left operand."""
         self.right = right
+        """The right operand."""
 
     def __repr__(self) -> str:
         return f"BinaryValueExpr({self.op!r}, {self.left!r}, {self.right!r})"
 
 
 class NowExpr(ValueExpr):
-    """The database clock singleton (#378). Assign ``now``, not ``now()``."""
+    """The type of [`now`][ferro.now], the database's clock in an `update()` recipe."""
 
     def __call__(self) -> NoReturn:
         raise TypeError("now is a singleton, not a function; assign now, not now()")
@@ -803,31 +927,71 @@ class NowExpr(ValueExpr):
 
 
 class MergeValueExpr(ValueExpr):
-    """One ``.merge(patch)`` SET node (#379). Left is a json object column."""
+    """A JSON object merge in an `update()` recipe, built by `.merge()`."""
 
     def __init__(self, left: FieldProxy, patch: dict[str, Any]) -> None:
+        """Build the merge; [`merge`][ferro.query.nodes.FieldProxy.merge] builds these for you.
+
+        Args:
+            left: The JSON object column to merge into.
+            patch: The keys and values to merge in.
+        """
         self.left = left
+        """The JSON object column to merge into."""
         self.patch = patch
+        """The keys and values to merge in."""
 
     def __repr__(self) -> str:
         return f"MergeValueExpr({self.left!r}, {self.patch!r})"
 
 
 now = NowExpr()
-"""The database clock: a recipe ``update()`` that assigns ``now`` (the
-singleton, not ``now()``) to a ``datetime`` column stamps it with the
-database's current timestamp."""
+"""The database's clock, for stamping a `datetime` column in an `update()` recipe.
+
+Assign `now` itself, not `now()`. The update renders SQL
+`CURRENT_TIMESTAMP`, so the time comes from the database server, not from
+Python.
+
+Examples:
+    ```python {test=run prelude=reference}
+    from datetime import datetime
+    from typing import Annotated
+
+    from ferro import FerroField, Model, create_tables, now
+
+
+    class Visit(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        page: str
+        seen_at: datetime | None = None
+
+
+    await create_tables()
+    visit = await Visit.create(page="/about")
+    await Visit.where(lambda visit: visit.page == "/about").update(lambda visit: {"seen_at": now})
+    await visit.refresh()
+    assert visit.seen_at is not None
+    ```
+"""
 
 
 def validate_query_column(model_cls: type, name: str) -> str:
-    """Validate a queryable column name at build time (FF-F F-2).
+    """Check that a model has a column a query can name.
+
+    A query can name every declared field and the `<relation>_id` column of
+    each foreign key.
+
+    Args:
+        model_cls: The model class.
+        name: The column name.
+
+    Returns:
+        `name`, unchanged.
 
     Raises:
-        AttributeError: If ``name`` is not a declared field or shadow
-            ``{fk}_id`` column of ``model_cls``. The message names the bad
-            column, suggests the closest valid one across BOTH columns and
-            declared forward-relation names (#270), and lists the valid
-            columns and relations.
+        AttributeError: The model has no such column. The message suggests
+            the closest column or relation name and lists the valid ones.
+        TypeError: `model_cls` is not a Ferro model.
     """
     valid = getattr(model_cls, "__ferro_query_columns__", None)
     if valid is None:
@@ -861,39 +1025,49 @@ def validate_query_column(model_cls: type, name: str) -> str:
 
 
 class QueryProxy(Generic[TModel]):
-    """Validating attribute proxy passed to lambda predicates (FF-F F-2).
+    """The stand-in for one row that a query lambda receives.
 
-    A fresh ``QueryProxy`` is constructed for the queried model each time a
-    lambda predicate is evaluated. Attribute access validates the name
-    against the model's queryable columns (declared fields plus shadow
-    ``{fk}_id`` columns) and returns a :class:`FieldProxy` — so
-    ``lambda user: user.archived == False`` builds a :class:`QueryNode`,
-    while ``lambda user: user.archievd == False`` raises ``AttributeError``
-    at build time naming the valid columns.
-
-    Attribute types are ``FieldProxy[Any]``: per-field static types for bare
-    lambda parameters require TypeScript-style mapped types, proposed for
-    Python in PEP 827 (draft, targeting 3.16) — adopted here when type
-    checkers support it.
+    Reading a field gives a `FieldProxy` for that column, so
+    `lambda post: post.views > 1000` builds a condition. A misspelled name
+    raises `AttributeError` with the closest match, before any SQL runs. A
+    foreign key relation gives a stand-in for the related row
+    (`post.author.name`), and a reverse or many-to-many relation offers
+    `exists()` (`author.posts.exists()`). See
+    [Typed query predicates](../concepts/query-typing.md).
 
     Examples:
-        >>> rows = await User.where(lambda user: user.archived == False).all()  # noqa: E712
+        ```python {test=run prelude=reference}
+        authors = await Author.where(lambda author: author.posts.exists(lambda post: post.views > 1000)).all()
+        assert [author.name for author in authors] == ["Ada Lovelace"]
+        ```
     """
+
+    # Every attribute types as ``FieldProxy[Any]``: per-field types for a bare
+    # lambda parameter need mapped types, proposed for Python in PEP 827.
 
     __slots__ = ("_model_cls",)
 
     def __init__(self, model_cls: type) -> None:
+        """Stand in for a row of a model; queries build these for you.
+
+        Args:
+            model_cls: The queried model class.
+        """
         self._model_cls = model_cls
 
     def __getattr__(self, name: str) -> "FieldProxy[Any]":
-        """Resolve ``name`` on the root model.
+        """Read a field: a column, a foreign key relation or a reverse relation.
 
-        Relation specs are consulted FIRST (#270): a declared forward-FK field
-        name yields a :class:`RelationProxy` for traversal (``t.account`` →
-        proxy → ``.ledger_id``). A reverse (BackRef) relation name yields a
-        :class:`ReverseRelationProxy` exposing the existence test and nothing
-        else (#314, ADR-0007). Every other name falls through to column
-        validation and returns a :class:`FieldProxy`.
+        Args:
+            name: The field name.
+
+        Returns:
+            A `FieldProxy` for a column, a `RelationProxy` for a foreign key
+            relation, or a `ReverseRelationProxy` for a reverse or
+            many-to-many relation.
+
+        Raises:
+            AttributeError: The model has no such field.
         """
         relations = getattr(self._model_cls, "__ferro_relation_specs__", None) or {}
         spec = relations.get(name)
@@ -916,47 +1090,56 @@ class QueryProxy(Generic[TModel]):
 
 
 class RelationProxy:
-    """Traversal proxy for a declared forward-FK relation path (#270).
+    """The stand-in for a related row, reached through a foreign key relation.
 
-    Returned by attribute access on a :class:`QueryProxy` (or a deeper
-    ``RelationProxy``) when the accessed name is a declared forward relation.
-    It carries the *root* model, the relation ``path`` walked so far (a tuple
-    of relation field names), and the ``target`` model that path resolves to.
-
-    Attribute access resolves against the CURRENT TARGET model, recursively at
-    any depth:
-
-    - a relation name yields a deeper ``RelationProxy`` (``path + (name,)``);
-    - a column name yields a :class:`FieldProxy` carrying this proxy's ``path``,
-      so ``t.account.ledger_id == lid`` builds a path-qualified comparison node;
-    - an unknown name raises ``AttributeError`` naming the hop's model with a
-      did-you-mean suggestion (same style as :func:`validate_query_column`).
-
-    A bare ``RelationProxy`` returned from a ``where()`` lambda is not a
-    :class:`QueryNode`; ``where()`` rejects it. Equality sugar against a
-    persisted target instance or ``None`` desugars **join-free** to a
-    shadow-FK comparison (#273): ``t.account == acct`` builds
-    ``QueryNode(column="account_id", operator="==", value=<acct.pk>, path=())``
-    — the shadow column of the LAST hop, with the proxy path MINUS that hop, so
-    a deep proxy (``t.account.owner == o``) compares ``owner_id`` under the
-    ``("account",)`` prefix joins only.
+    `post.author` in a query lambda gives one. Reading a field from it
+    reaches into the related model (`post.author.name`) and joins that
+    model when the query runs; the path can continue through further
+    relations. Comparing the relation itself with `==` or `!=` to a saved
+    instance or `None` compares the foreign key column, with no join. Other
+    comparisons on the relation itself raise `TypeError` naming a column to
+    compare instead.
 
     Examples:
-        >>> proxy = QueryProxy(Transaction)  # doctest: +SKIP
-        >>> node = (proxy.account.ledger_id == 7)  # doctest: +SKIP
-        >>> node.path  # doctest: +SKIP
-        ('account',)
+        ```python {test=run prelude=reference}
+        ada = await Author.get(1)
+        by_ada = await Post.where(lambda post: post.author == ada).all()
+        assert [post.id for post in by_ada] == [1]
+
+        by_name = await Post.where(lambda post: post.author.name == "Grace Hopper").all()
+        assert [post.id for post in by_name] == [2]
+        ```
     """
 
     __slots__ = ("_root_model", "_path", "_target")
 
     def __init__(self, root_model: type, path: tuple[str, ...], target: type) -> None:
+        """Stand in for a related row; query lambdas build these for you.
+
+        Args:
+            root_model: The queried model class.
+            path: The relation fields from the queried model to this one.
+            target: The related model class.
+        """
         self._root_model = root_model
         self._path = path
         self._target = target
 
     def __getattr__(self, name: str) -> "RelationProxy | FieldProxy[Any]":
-        """Resolve ``name`` against the current target model (one hop deeper)."""
+        """Read a field of the related model: a column or a further relation.
+
+        Args:
+            name: The field name.
+
+        Returns:
+            A `FieldProxy` for a column, or a `RelationProxy` one relation
+            further.
+
+        Raises:
+            AttributeError: The related model has no such field, or the
+                field is a reverse relation, which can only be tested with
+                `exists()` from the queried model.
+        """
         relations = getattr(self._target, "__ferro_relation_specs__", None) or {}
         spec = relations.get(name)
         if spec is not None:
@@ -1056,13 +1239,13 @@ class RelationProxy:
     def __eq__(  # type: ignore[override]  # ty: ignore[invalid-method-override]
         self, other: object
     ) -> QueryNode:
-        """Desugar ``t.<relation> == instance`` / ``== None`` (join-free, #273)."""
+        """Match rows whose relation is a given instance, or empty with `None`."""
         return self._instance_comparison(other, "==")
 
     def __ne__(  # type: ignore[override]  # ty: ignore[invalid-method-override]
         self, other: object
     ) -> QueryNode:
-        """Desugar ``t.<relation> != instance`` / ``!= None`` (join-free, #273)."""
+        """Match rows whose relation is not a given instance, or set with `None`."""
         return self._instance_comparison(other, "!=")
 
     def _reject_operator(self, symbol: str) -> "QueryNode":
@@ -1087,15 +1270,33 @@ class RelationProxy:
         return self._reject_operator(">=")
 
     def in_(self, other: object) -> "QueryNode":
+        """Refuse `in_` on a relation; compare one of its columns instead.
+
+        Args:
+            other: Ignored; the call always raises.
+
+        Raises:
+            TypeError: Always.
+        """
         return self._reject_operator("in_")
 
     def like(self, other: object) -> "QueryNode":
+        """Refuse `like` on a relation; match one of its columns instead.
+
+        Args:
+            other: Ignored; the call always raises.
+
+        Raises:
+            TypeError: Always.
+        """
         return self._reject_operator("like")
 
     def __lshift__(self, other: object) -> "QueryNode":
+        """Refuse `<<` on a relation; compare one of its columns instead."""
         return self._reject_operator("<<")
 
     def __repr__(self) -> str:
+        """Show the relation path, for debugging."""
         joined = ".".join(self._path)
         return f"RelationProxy(path={joined!r}, target={self._target.__name__!r})"
 
@@ -1245,52 +1446,64 @@ def _collect_inner_traversal_paths(
 
 
 class ReverseRelationProxy:
-    """Predicate proxy for a reverse (BackRef) or M2M relation (ADR-0007).
+    """The stand-in for a reverse (`BackRef`) or many-to-many relation in a query lambda.
 
-    Returned by attribute access on a :class:`QueryProxy` when the accessed
-    name is a resolved reverse or many-to-many relation. It exposes exactly
-    one verb — the existence test :meth:`exists` — because reverse relations
-    are *tested*, never *traversed*: column access, comparisons (including
-    ``!= None`` / ``== None``), and ``in_`` raise at build time with the
-    supported spelling in the message. Negation is uniform ``~`` over the
-    returned node (ADR-0008), so NOT EXISTS is ``~t.rel.exists()``.
+    `author.posts` gives one. Its one method is
+    [`exists`][ferro.query.nodes.ReverseRelationProxy.exists], which tests
+    whether related rows exist; reading a column, comparing the relation
+    or joining it raises with that spelling in the message, since joining
+    a collection would repeat the queried rows. See
+    [Existence tests](../guide/queries.md#existence-tests-on-reverse-many-to-many-relations).
+
+    Examples:
+        ```python {test=run prelude=reference}
+        authors = await Author.where(lambda author: author.posts.exists()).all()
+        assert len(authors) == 2
+        ```
     """
 
     __slots__ = ("_root_model", "_name", "_spec")
 
     def __init__(self, root_model: type, name: str, spec: Any) -> None:
+        """Stand in for a reverse relation; query lambdas build these for you.
+
+        Args:
+            root_model: The queried model class.
+            name: The relation's field name.
+            spec: The relation's details, from the model.
+        """
         self._root_model = root_model
         self._name = name
         self._spec = spec
 
     def exists(self, inner: "Predicate[Any] | None" = None) -> QueryNode:
-        """Build the existence test: a correlated EXISTS over the child rows.
+        """Test whether the row has related rows, as SQL `EXISTS (...)`.
 
-        Always a correlated EXISTS at every cardinality (a one-to-one BackRef
-        renders identically to a to-many one); the result stays root-shaped,
-        so the node composes with any other predicate, ordering, and paging.
+        Each queried row comes back at most once, however many related rows
+        match, so the condition combines with any other, with sorting and
+        with paging. Negate it with `~` for rows that have none.
 
         Args:
-            inner: Optional scoping predicate — a full ferro predicate over
-                the related model (#315): every operator, ``&``/``|``/``~``,
-                forward traversal (joins rendered INSIDE the subquery,
-                ADR-0006 unchanged), and nested existence tests. It may
-                reference only its own parameter's scope; cross-scope
-                references raise at build time (#309).
+            inner: A lambda over the related model that the related rows
+                must meet, such as `lambda post: post.views > 1000`. It can
+                use every condition a `where()` lambda can, but only its own
+                parameter. Defaults to `None`, any related row.
 
         Returns:
-            An exists :class:`QueryNode` carrying the one-hop correlation
-            path (child table, child FK column against the root PK) and,
-            when scoped, the inner condition tree plus its forward-traversal
-            join facts.
+            A condition met when a related row exists.
 
         Raises:
-            ValueError: If the root model declares no primary-key column —
-                the EXISTS correlates child FK to root PK, so a PK-less root
-                is a loud error, never a guess.
-            TypeError: If ``inner`` is not a predicate callable, does not
-                return a predicate, or references a scope other than its own
-                parameter (cross-scope, #309).
+            ValueError: The queried model, or a many-to-many relation's
+                target, has no primary key.
+            TypeError: `inner` is not callable, does not return a condition,
+                or uses the outer lambda's parameter.
+
+        Examples:
+            ```python {test=run prelude=reference}
+            await Author.create(name="Mary Somerville", email="mary@example.com")
+            without_posts = await Author.where(lambda author: ~author.posts.exists()).all()
+            assert [author.name for author in without_posts] == ["Mary Somerville"]
+            ```
         """
         # Late import: wire.py imports this module (nodes owns the predicate
         # shape, wire owns the hop-fact shape).
@@ -1375,6 +1588,7 @@ class ReverseRelationProxy:
         )
 
     def __getattr__(self, name: str) -> NoReturn:
+        """Refuse a column read: a reverse relation can only be tested with `exists()`."""
         raise AttributeError(
             f"reverse relation {self._name!r} has no queryable column "
             f"{name!r}: reverse relations are tested, not traversed "
@@ -1403,15 +1617,33 @@ class ReverseRelationProxy:
         return self._reject_operator(">=")
 
     def in_(self, other: object) -> QueryNode:
+        """Refuse `in_` on a reverse relation; use `exists()`.
+
+        Args:
+            other: Ignored; the call always raises.
+
+        Raises:
+            TypeError: Always.
+        """
         return self._reject_operator("in_")
 
     def like(self, other: object) -> QueryNode:
+        """Refuse `like` on a reverse relation; use `exists()`.
+
+        Args:
+            other: Ignored; the call always raises.
+
+        Raises:
+            TypeError: Always.
+        """
         return self._reject_operator("like")
 
     def __lshift__(self, other: object) -> QueryNode:
+        """Refuse `<<` on a reverse relation; use `exists()`."""
         return self._reject_operator("<<")
 
     def __repr__(self) -> str:
+        """Show the relation, for debugging."""
         return (
             f"ReverseRelationProxy(relation={self._name!r}, "
             f"child={self._spec.target.__name__!r})"
@@ -1419,7 +1651,11 @@ class ReverseRelationProxy:
 
 
 Predicate: TypeAlias = Callable[[QueryProxy[TModel]], QueryNode]
-"""Type alias for lambda predicates accepted by :meth:`Query.where`."""
+"""The type of a query lambda: it takes a row stand-in and returns a condition.
+
+`Predicate[Post]` is `Callable[[QueryProxy[Post]], QueryNode]`, as in
+`lambda post: post.views > 1000`.
+"""
 
 RowSelector: TypeAlias = Callable[
     [QueryProxy[TModel]],
@@ -1428,15 +1664,12 @@ RowSelector: TypeAlias = Callable[
     | list[FieldProxy[Any]]
     | dict[str, "FieldProxy[Any] | AggregateExpr"],
 ]
-"""Type alias for lambda selectors accepted by ``select()`` projections.
+"""The type of a `select()` lambda: it takes a row stand-in and returns the fields to keep.
 
-A selector names fields — one (``lambda t: t.amount``), several
-(``lambda t: (t.id, t.amount)``), or a dict whose string keys name the
-output fields (``lambda t: {"account_name": t.account.name}`` — output
-aliases, #293). Fields may traverse forward-FK relations at any depth, and
-dict values may be aggregate expressions (``{"total": t.amount.sum()}`` —
-#294; aggregates are user-named, so the dict form is their only home).
-Returning a comparison (a :class:`QueryNode`), nesting shapes, or using a
-non-string dict key fails the static gate: a projection selects fields,
-a predicate belongs in ``where()``.
+It returns one field (`lambda post: post.title`), a tuple of fields
+(`lambda post: (post.id, post.title)`), or a dict whose string keys name the
+output fields (`lambda post: {"author": post.author.name}`). A field may be
+reached through relations, and a dict value may be an aggregate
+(`{"total": post.views.sum()}`). A type checker refuses a comparison, a
+nested shape or a key that is not a string.
 """
