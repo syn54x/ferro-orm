@@ -462,11 +462,11 @@ def Field(
         renamed_from: The column's previous name, so that `ferro migrate new`
             renames the column, and every index and check named after it,
             instead of dropping and adding it. See
-            [Renames](../guide/schema/migrations.md#renames).
+            [Rename hints](../guide/schema/renames-and-retirements.md#rename-hints).
         retired: Take the column out of the model while it stays in the
             schema, nullable, until a later release deletes the declaration.
             The annotation must allow `None`. Defaults to `False`. See
-            [Retiring a column](../guide/schema/migrations.md#retiring-a-column).
+            [Retiring a column](../guide/schema/renames-and-retirements.md#retiring-a-column).
         default_factory: A callable to generate the default value. The callable can either take 0 arguments
             (in which case it is called as is) or a single argument containing the already validated data.
         alias: The name to use for the attribute when validating or serializing by alias.

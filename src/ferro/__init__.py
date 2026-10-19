@@ -339,7 +339,7 @@ async def connect(
     [Auto-migrate](../guide/schema/auto-migrate.md) lists what each flag
     changes on each backend and how the lock waits. A change the pass
     refuses, such as a primary-key change, is a migration's job: see
-    [Migrations](../guide/schema/migrations.md).
+    [Changing a primary key](../guide/schema/migrations.md#changing-a-primary-key).
 
     Args:
         url: The database URL, such as `"sqlite:app.db?mode=rwc"`,
