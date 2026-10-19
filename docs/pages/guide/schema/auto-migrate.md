@@ -25,7 +25,7 @@ async with engines.session():
     assert ada.nickname is None
 ```
 
-The connect ran `ALTER TABLE "author" ADD COLUMN "nickname" varchar` and created `idx_author_nickname`; Ada's row is still there, with no nickname yet. The ORM calls run inside a [session](../connections.md#sessions-recommended), as every block on this page does.
+The connect ran `ALTER TABLE "author" ADD COLUMN "nickname" varchar` and created `idx_author_nickname`; Ada's row is still there, with no nickname yet. The ORM calls run inside a [session](../connections.md#sessions), as every block on this page does.
 
 Auto-migrate is rungs 1 and 2 of [the ladder](overview.md#the-ladder). It suits tests, scripts and early development, and does not suit a database whose data matters: use [Migrations](migrations.md) there. A database is managed by auto-migrate or by migrations, never both: on a database that has run a migration, every flag on this page is refused before any DDL ([one door per database](overview.md#one-door-per-database)).
 

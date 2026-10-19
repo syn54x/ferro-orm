@@ -1328,7 +1328,7 @@ class Query(Generic[T]):
         on columns, [`now`][ferro.now] for the database's clock, or
         `.merge()` on a JSON column (Postgres only). `NULL + 1` is `NULL`.
         The two forms cannot be mixed. See
-        [Recipe updates](../guide/mutations.md#recipe-updates).
+        [Expression updates](../guide/mutations.md#expression-updates).
 
         Args:
             *args: An optional recipe: a lambda that takes the row stand-in

@@ -14,7 +14,7 @@ This page lists the features Ferro does not have yet, each with the workaround t
     --8<-- "docs/examples/faq_annotated.py:models"
     ```
 
-Each block below runs inside `async with engines.session():`; see [Connections › Sessions](guide/connections.md#sessions-recommended).
+Each block below runs inside `async with engines.session():`; see [Connections › Sessions](guide/connections.md#sessions).
 
 ## Query features
 
@@ -83,7 +83,7 @@ await post.save()
 assert (await Post.get(1)).views == 3686
 ```
 
-The multiplication happens in Python, so the read and the write are two statements. See [Mutations](guide/mutations.md#recipe-updates) for the recipes that run in the database.
+The multiplication happens in Python, so the read and the write are two statements. See [Mutations](guide/mutations.md#expression-updates) for the recipes that run in the database.
 
 ## Connections
 
@@ -106,7 +106,7 @@ A readiness endpoint treats an exception from this query as unhealthy.
 
 ### Richer pool configuration
 
-`PoolConfig` has `max_connections`, `min_connections` and `settings_delivery`. Acquire timeouts, idle timeouts and a maximum connection lifetime are future work, and no issue tracks them yet. See [Connections](guide/connections.md#connection-pooling).
+`PoolConfig` has `max_connections`, `min_connections` and `settings_delivery`. Acquire timeouts, idle timeouts and a maximum connection lifetime are future work, and no issue tracks them yet. See [Connections](guide/connections.md#pool-size).
 
 ## Influencing priorities
 

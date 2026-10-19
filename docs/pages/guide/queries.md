@@ -15,7 +15,7 @@ Rent -1450
 To savings -500
 ```
 
-`where()` takes a lambda whose parameter stands for one row, and `order_by()` takes a lambda naming the column to sort by. Nothing reaches the database until you await `all()`. The values in a query are always sent as parameters, never pasted into the SQL. Every query on this page runs inside a session like this one; see [Sessions](connections.md#sessions-recommended) for why and how to open one.
+`where()` takes a lambda whose parameter stands for one row, and `order_by()` takes a lambda naming the column to sort by. Nothing reaches the database until you await `all()`. The values in a query are always sent as parameters, never pasted into the SQL. Every query on this page runs inside a session like this one; see [Sessions](connections.md#sessions) for why and how to open one.
 
 ## The ledger
 

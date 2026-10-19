@@ -262,7 +262,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
     database call runs inside a session, opened with
     `async with engines.session():`, and the examples on this page run in
     one. See [Models and fields](../guide/models-and-fields.md) to declare a
-    model and [Connections](../guide/connections.md#sessions-recommended) for
+    model and [Connections](../guide/connections.md#sessions) for
     sessions.
 
     A model declares table-wide constraints in class attributes:
@@ -667,7 +667,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         """Reload the instance's fields from its row, in place.
 
         A change made in memory and not saved is lost. See
-        [Refreshing from the database](../guide/mutations.md#refreshing-from-the-database).
+        [`refresh()`](../guide/mutations.md#refresh).
 
         Args:
             using: The named connection to read from. Defaults to `None`, the
@@ -885,7 +885,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         Every record is inserted or none is. Ferro splits a batch too large
         for one statement into several, inside the same all-or-nothing
         boundary. See
-        [Bulk operations and the identity map](../guide/mutations.md#bulk-operations-and-the-identity-map).
+        [Creating rows](../guide/mutations.md#creating-rows).
 
         Args:
             instances: The instances to insert.

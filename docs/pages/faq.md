@@ -14,7 +14,7 @@ Short answers about what Ferro is, what it supports and how to fix its most comm
     --8<-- "docs/examples/faq_annotated.py:models"
     ```
 
-An `Author` has many `Post` rows, and each `Post` points back at its `Author`. Every block below runs inside `async with engines.session():`; see [Connections › Sessions](guide/connections.md#sessions-recommended) for what a session is.
+An `Author` has many `Post` rows, and each `Post` points back at its `Author`. Every block below runs inside `async with engines.session():`; see [Connections › Sessions](guide/connections.md#sessions) for what a session is.
 
 ## What Ferro is
 
@@ -122,7 +122,7 @@ You ran a schema operation such as `ferro.create_tables()` before connecting. Im
 
 ### `No database route for this operation`
 
-You ran a query outside a session, with no `using=` or `session=`. Open a session around the work, as the first block on this page does, or route with `using=`. See [Connections › Sessions](guide/connections.md#sessions-recommended).
+You ran a query outside a session, with no `using=` or `session=`. Open a session around the work, as the first block on this page does, or route with `using=`. See [Connections › Sessions](guide/connections.md#sessions).
 
 ### `defines a relationship ... but ... does not have that field defined as BackRef()`
 

@@ -16,7 +16,7 @@ assert {transaction.memo for transaction in uncleared_debits} == {
 }
 ```
 
-Each comparison in the lambda returns a condition, and `where()` turns the conditions into the query's `WHERE` clause. The examples on this page use the ledger from the [Queries guide](../guide/queries.md#the-ledger) and run inside a [session](../guide/connections.md#sessions-recommended).
+Each comparison in the lambda returns a condition, and `where()` turns the conditions into the query's `WHERE` clause. The examples on this page use the ledger from the [Queries guide](../guide/queries.md#the-ledger) and run inside a [session](../guide/connections.md#sessions).
 
 ## Proxy validation
 

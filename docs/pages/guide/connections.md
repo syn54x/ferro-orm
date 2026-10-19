@@ -1,225 +1,319 @@
-# Connections & Databases
+# Connections
 
-Ferro talks to SQLite and PostgreSQL through connection pools managed by the Rust core (SQLx). Connect once at application startup with `await ferro.connect(url, ...)` before performing any database operation.
+Ferro reaches SQLite and PostgreSQL through connection pools: you connect once at startup, then run every ORM call inside a session.
+
+Connect to an in-memory SQLite database, open a session and run a query:
+
+```python {test=run prelude=connections}
+from ferro import connect, engines
+
+await connect("sqlite::memory:", auto_migrate=True)
+
+async with engines.session():
+    await Author.create(name="Ada Lovelace", email="ada@example.com")
+    print(await Author.select().count())
+```
+
+It prints `1`. `auto_migrate=True` created the `author` table as it connected, which suits development and tests.
+
+The examples on this page use the quickstart's models:
+
+=== "Assignment"
+
+    ```python
+    --8<-- "docs/examples/quickstart.py:models"
+    ```
+
+=== "Annotated"
+
+    ```python
+    --8<-- "docs/examples/quickstart_annotated.py:models"
+    ```
 
 ## Connecting
 
+`connect(url)` opens a pool for the database the URL names and registers it as the default connection.
+
 ### SQLite
 
-```python
-import ferro
+Pass a file path, or `:memory:` for a database that lives as long as the process:
 
-# File database — `mode=rwc` creates the file if it doesn't exist (recommended)
-await ferro.connect("sqlite:app.db?mode=rwc")
+```python {compile-only="creates app.db in the working directory"}
+from ferro import connect
 
-# In-memory database (great for tests)
-await ferro.connect("sqlite::memory:")
+await connect("sqlite:app.db?mode=rwc")
 ```
 
-Modes: `rwc` (read/write/create), `rw` (read/write, file must exist), `ro` (read-only).
+`mode=rwc` reads, writes and creates the file if it does not exist. `mode=rw` needs the file to exist, and `mode=ro` opens it read-only. `sqlite::memory:` gives an in-memory database, for tests.
 
 ### PostgreSQL
 
-```python
-import ferro
+Pass a `postgresql://` URL; add `sslmode=require` to require TLS:
 
-await ferro.connect("postgresql://user:password@localhost:5432/dbname")
+```python {compile-only="needs a PostgreSQL server"}
+from ferro import connect
 
-# Require TLS
-await ferro.connect("postgresql://user:password@localhost:5432/dbname?sslmode=require")
+await connect("postgresql://user:password@localhost:5432/app?sslmode=require")
 ```
 
-Load credentials from the environment rather than hard-coding them, and percent-encode reserved characters in passwords (`%24` for `$`, etc.) if you assemble URLs yourself.
+The pool connects over TLS. Load credentials from the environment rather than writing them into code, and percent-encode reserved characters in a password (`%24` for `$`) if you build the URL yourself.
 
 ### Supabase
 
-Supabase hosts PostgreSQL behind TLS; Ferro's driver stack ships with Rustls and the webpki CA bundle, so published wheels connect out of the box. Copy the exact URI from **Project Settings → Database** in the Supabase dashboard (pooler hostnames look like `*.pooler.supabase.com`, and the username may include the project ref), then ensure TLS is requested:
+Supabase hosts PostgreSQL behind TLS, and Ferro's published wheels ship with Rustls and the webpki CA bundle, so they connect without extra setup. Copy the URI from **Project Settings → Database** in the Supabase dashboard (pooler hostnames look like `*.pooler.supabase.com`, and the username may include the project ref), then make sure it requests TLS:
 
-```python
+```python {compile-only="needs a Supabase DATABASE_URL"}
 import os
 
-import ferro
+from ferro import connect
 
 url = os.environ["DATABASE_URL"]
 if "sslmode=" not in url:
-    sep = "&" if "?" in url else "?"
-    url = f"{url}{sep}sslmode=require"
+    separator = "&" if "?" in url else "?"
+    url = f"{url}{separator}sslmode=require"
 
-await ferro.connect(url)
+await connect(url)
 ```
 
-Keep service-role credentials server-side, and never make an elevated connection the default in user-facing runtimes.
+The connection now refuses to fall back to plain text. Keep service-role credentials on the server, and never make an elevated connection the default in a user-facing runtime.
 
-## Connection Options
+## Sessions
 
-`connect()` accepts:
+Every ORM and raw SQL call runs in a session. A session is one unit of work: it picks the connection the calls use and keeps an [identity map](../concepts/identity-map.md), so loading the same row twice gives you the same Python object. Open one with `async with engines.session():`:
 
-| Parameter | Default | Description |
-| :--- | :--- | :--- |
-| `url` | required | Database connection string. |
-| `auto_migrate` | `False` | Create tables for all registered models; existing tables are left untouched. |
-| `name` | `None` | Connection name. Omitted connections register as `"default"`. |
-| `default` | `False` | Make this named connection the default for unqualified operations. |
-| `pool` | `None` | A [`PoolConfig`](#connection-pooling); defaults apply when omitted. |
-| `identity_map` | `True` | Keep a per-connection [identity map](../concepts/identity-map.md) so one primary key maps to one Python instance. `False` trades the `a is b` guarantee for lower memory use. |
-| `migrate_updates` | `False` | Also `ALTER` existing tables to match the models (implies `auto_migrate`). See [Auto-migrate](schema/auto-migrate.md#applying-column-changes-with-migrate_updates). *Added in 0.11.0.* |
-| `migrate_destructive` | `False` | Also drop live columns removed from the models (implies `migrate_updates`). See [Auto-migrate](schema/auto-migrate.md#destructive-drops-with-migrate_destructive). *Added in 0.11.0.* |
+```python {test=run prelude=connections}
+from ferro import connect, engines
 
-## Connection Pooling
+await connect("sqlite::memory:", auto_migrate=True)
 
-Size each connection's pool with `PoolConfig`:
-
-```python
-import ferro
-
-await ferro.connect(
-    "postgresql://localhost/app",
-    pool=ferro.PoolConfig(max_connections=10, min_connections=1),
-)
+async with engines.session():
+    ada = await Author.create(name="Ada Lovelace", email="ada@example.com")
+    same = await Author.where(lambda author: author.email == "ada@example.com").first()
+    print(same is ada)
 ```
 
-`max_connections` defaults to 5, `min_connections` to 0, and `min_connections` may not exceed `max_connections`. For web applications, connect once at startup and let the long-lived pool serve all requests.
+It prints `True`: inside the session, one row maps to one instance. With no name, `engines.session()` opens a session on the [default connection](#the-default-connection).
 
-## Named Connections
+A call outside any session has no connection to run on, and raises:
 
-Ferro can hold multiple live pools in one process — separate databases, roles, or pool sizes:
+```python {test=run prelude=connections}
+from ferro import connect
 
-```python
---8<-- "docs/examples/multiple_databases.py:connect"
+await connect("sqlite::memory:", auto_migrate=True)
+
+try:
+    await Author.select().count()
+except RuntimeError as error:
+    print(error)
+else:
+    raise AssertionError("expected RuntimeError")
 ```
 
-Route individual operations with `Model.using("name")`, which exposes the full ORM surface (`create`, `get`, `where`, `bulk_create`, `get_or_create`, ...) bound to that connection:
+It prints:
 
-```python
---8<-- "docs/examples/multiple_databases.py:routing"
+```text
+No database route for this operation. Open a session (`async with ferro.engines.session(...)`) or pass `using=`/`session=` explicitly. Implicit default-connection routing was removed in v0.13 (deprecated since v0.12); see the sessions migration guide.
 ```
 
-Raw SQL routes the same way via `using=`: `await ferro.execute("...", using="analytics")`. Transactions opened with `transaction(using="analytics")` pin everything inside to that connection — see [Transactions](transactions.md#using-named-connections).
+The only other route is an explicit one: `Author.using("name")`, or `using=` / `session=` on a call. Explicit routes are covered under [Named connections](#named-connections).
 
-!!! warning "Connection names are code, not input"
-    Choose `using` values from constants or trusted server-side logic. Never bind connection names from request parameters, headers, or other untrusted input.
+### A session per request
 
-Ferro does not provide automatic router policies, read/write splitting, distributed transactions, or cross-connection joins — route each operation explicitly. See [Multiple Databases](../howto/multiple-databases.md) for fuller patterns.
+For a short unit of work, such as an HTTP handler, a script or a test, open a session for its length:
 
-## Sessions (recommended)
+```python {test=run prelude=connections}
+from ferro import connect, engines
 
-Session-scoped routing is now the preferred runtime model:
+await connect("sqlite::memory:", auto_migrate=True)
 
-```python
-import ferro
 
-async with ferro.engines.session("analytics") as s:
-    rows = await s.query(User).where(lambda t: t.active == True).all()  # noqa: E712
+async def list_authors() -> list[str]:
+    async with engines.session():
+        authors = await Author.select().order_by(lambda author: author.name).all()
+        return [author.name for author in authors]
+
+
+async with engines.session():
+    await Author.create(name="Grace Hopper", email="grace@example.com")
+    await Author.create(name="Ada Lovelace", email="ada@example.com")
+
+print(await list_authors())
 ```
 
-Inside an active session context, convenience APIs (`User.all()`, `User.where(...)`, `ferro.execute(...)`) automatically bind to that session's connection.
+It prints `['Ada Lovelace', 'Grace Hopper']`. Each request gets its own session, and with it its own identity map.
 
-### Request-scoped sessions
+### A session for the app's lifetime
 
-For short units of work (HTTP handlers, scripts, tests), use `async with`:
+When startup and shutdown run in different asyncio tasks, as with Textual's `on_mount` and `on_unmount`, open a session handle at startup and close it at shutdown:
 
-```python
-async with ferro.engines.session("analytics"):
-    rows = await User.where(lambda t: t.active == True).all()  # noqa: E712
-```
+```python {test=run prelude=connections}
+from ferro import connect, engines
 
-### Long-lived sessions (GUI, app lifecycle)
 
-When startup and shutdown run in different asyncio tasks (for example Textual `on_mount` / `on_unmount`), open a session handle at startup and close it explicitly at shutdown:
-
-```python
 class App:
     async def on_mount(self) -> None:
-        self.session = ferro.engines.session("default")
+        await connect("sqlite::memory:", auto_migrate=True)
+        self.session = engines.session()
         await self.session.__aenter__()
 
     async def on_unmount(self) -> None:
         await self.session.close()
+
+
+app = App()
+await app.on_mount()
+await Author.create(name="Ada Lovelace", email="ada@example.com")
+print(await Author.select().count())
+await app.on_unmount()
 ```
 
-`Session.close()` is safe across asyncio contexts and idempotent. Prefer explicit `session=` routing when ambient context may be unavailable in the closing task.
+It prints `1`: calls between `on_mount` and `on_unmount` run in the app's session. `Session.close()` works from any asyncio task, and closing twice does nothing. When the closing task may not see the session, pass it explicitly with `session=`.
 
-Close raises `RuntimeError` if session-scoped transactions are still open — exit all `transaction()` blocks before closing the session.
+Rules for closing a session:
 
-After a cross-context close, the enter task may still hold a stale ambient session object until a new session is opened; ambient operations then raise `RuntimeError` with a session-closed message (including when `using=` names another connection). If nested sessions are open, close inner sessions from the same task or via cross-context `close()` before closing the outer handle in the original task.
+- `close()` raises `RuntimeError` while a `transaction()` in the session is still open. Leave every `transaction()` block first.
+- A call on a closed session, ambient or passed as `session=`, raises `RuntimeError`. It never falls back to another route.
+- If you close a session from another task, the task that opened it may still hold it as its ambient session until it opens a new one. Calls there raise `RuntimeError` saying the session is closed.
+- With nested sessions, close the inner ones before the outer one.
 
-Operations on a closed session handle (ambient or explicit `session=`) raise `RuntimeError` rather than falling back to legacy default routing.
+`reset_engine()` tears down every connection. It exists for test isolation, not for closing one session.
 
-`ferro.reset_engine()` tears down **all** connections and is intended for test isolation — not per-session app lifecycle teardown.
+The [`Session`](../api/connection.md#ferro.Session) and [`engines`](../api/connection.md#ferro.engines) reference entries list every argument, including `settings=` for [row-level security](row-level-security.md#session-settings).
 
-Legacy implicit default-connection routing (calling unqualified operations outside a session) was removed in `0.13`; such calls now raise `RuntimeError`.
-See [Upgrade Guide: Connection routing requires a session](../howto/upgrade-guide.md#connection-routing-requires-a-session) to remove these legacy call sites.
+!!! note "Changed in 0.13"
+    Calls outside a session used to run on the default connection; they now raise `RuntimeError`. The [upgrade guide](../howto/upgrade-guide.md#connection-routing-requires-a-session) shows how to move old call sites into sessions.
 
-## The Default Connection
+## Connection options
 
-Unqualified operations (`User.all()`, top-level `execute(...)`) use the default connection. It is established three ways:
+Beyond the URL, `connect()` takes the options you will reach for most:
 
-1. `connect(url)` without a `name` registers as `"default"`.
-2. `connect(url, name="app", default=True)` makes a named connection the default.
-3. `ferro.set_default_connection("app")` switches the default at runtime.
+- `auto_migrate=True` creates the missing tables for every registered model; existing tables are left alone. `migrate_updates` and `migrate_destructive` also change existing tables; see [Auto-migrate](schema/auto-migrate.md).
+- `name="analytics"` registers a [named connection](#named-connections). Without a name, the connection registers as `"default"`.
+- `identity_map=False` turns off the identity map for sessions on this connection, trading the `a is b` guarantee for lower memory use.
+- `pool=PoolConfig(...)` sizes the pool, below.
 
-```python
-import ferro
+The [`connect`](../api/connection.md#ferro.connect) reference lists every option and its default.
 
-await ferro.connect("sqlite:app.db?mode=rwc", name="app", default=True)
-await ferro.connect("sqlite:analytics.db?mode=rwc", name="analytics")
+### Pool size
 
-ferro.set_default_connection("analytics")  # unqualified ops now hit analytics
-```
+Size a connection's pool with `PoolConfig`:
 
-## Creating Tables Manually
+```python {compile-only="needs a PostgreSQL server"}
+from ferro import PoolConfig, connect
 
-To control table creation yourself instead of `auto_migrate=True`, make sure your models are imported (importing registers them), then call `create_tables()`:
-
-```python
-import ferro
-
-
-async def init() -> None:
-    await ferro.connect("sqlite::memory:")
-
-    from myapp.models import Post, User  # noqa: F401 — importing registers models
-
-    await ferro.create_tables()                  # default connection
-    await ferro.create_tables(using="analytics")  # a named connection
-```
-
-`create_tables()` creates missing tables (including many-to-many join tables) and never modifies existing ones.
-
-## Postgres Schema Isolation
-
-Append the Ferro-specific `ferro_search_path` URL parameter to pin a connection to a PostgreSQL schema. Ferro strips the parameter from the URL before handing it to the driver and applies `SET search_path` on every pooled connection:
-
-```python
-import ferro
-
-await ferro.connect(
-    "postgresql://user:password@localhost:5432/app?ferro_search_path=tenant_a"
+await connect(
+    "postgresql://localhost/app",
+    pool=PoolConfig(max_connections=10, min_connections=1),
 )
 ```
 
-The value must be a single identifier of ASCII letters, digits, and underscores — anything else raises `ValueError`. This is handy for schema-per-tenant setups and for isolating test runs against one physical database.
+The pool holds up to ten connections and keeps one open. `max_connections` defaults to 5 and `min_connections` to 0, and `min_connections` may not exceed `max_connections`. In a web application, connect once at startup and let the pool serve every request. `PoolConfig(settings_delivery=...)` chooses how sessions send their [row-level security settings](row-level-security.md#connection-delivery-mode); the [`PoolConfig`](../api/connection.md#ferro.PoolConfig) reference covers every field.
 
-## Resetting the Engine
+## Named connections
 
-`ferro.reset_engine()` tears down all pools and connection state — primarily for test suites that reconnect with a fresh database per test:
+One process can hold several pools at once: separate databases, roles or pool sizes. Name each one with `name=`, and route to it with a named session or `Model.using(name)`:
 
-```python
-import ferro
+```python {test=run prelude=connections}
+from ferro import connect, engines
 
-ferro.reset_engine()
-await ferro.connect("sqlite::memory:", auto_migrate=True)
+await connect("sqlite::memory:", name="app", default=True, auto_migrate=True)
+await connect("sqlite::memory:", name="archive", auto_migrate=True)
+
+async with engines.session():  # the default connection, "app"
+    await Author.create(name="Ada Lovelace", email="ada@example.com")
+
+async with engines.session("archive"):
+    await Author.create(name="Grace Hopper", email="grace@example.com")
+
+print([author.name for author in await Author.using("archive").all()])
 ```
 
-See [Testing](../howto/testing.md) for a ready-made pytest fixture.
+It prints `['Grace Hopper']`: each connection is its own database. `Author.using("archive")` routes one call and needs no session.
 
-!!! note "No `disconnect()` yet"
-    An explicit `disconnect()` is **not yet implemented** — pools are cleaned up on process exit. See the [Roadmap](../roadmap.md).
+Raw SQL takes `using=` too (`await execute("...", using="archive")`), and `transaction(using="archive")` pins a whole transaction to one connection. [How to use several databases](../howto/multiple-databases.md) walks through routing, transactions and table creation across two databases.
 
-## See Also
+!!! warning "Connection names are code, not input"
+    Choose connection names from constants or trusted server-side logic. Never take one from a request parameter, a header or other untrusted input.
 
-- [Schema Management](schema/overview.md) — auto-migrate, migrations and Alembic
-- [Transactions](transactions.md) — connection affinity
-- [Multiple Databases](../howto/multiple-databases.md) — multi-connection patterns
-- [Testing](../howto/testing.md) — test database setup
-- [Database Backends](../concepts/backends.md) — SQLite vs PostgreSQL specifics
+Ferro has no automatic routing: no read/write splitting, distributed transactions or cross-connection joins. Each call goes where you route it.
+
+### The default connection
+
+`engines.session()` with no name opens a session on the default connection. The default is set three ways:
+
+1. `connect(url)` without a `name` registers it as `"default"`.
+2. `connect(url, name="app", default=True)` makes a named connection the default.
+3. `set_default_connection("archive")` switches the default at runtime.
+
+```python {test=run prelude=connections}
+from ferro import connect, engines, set_default_connection
+
+await connect("sqlite::memory:", name="app", default=True, auto_migrate=True)
+await connect("sqlite::memory:", name="archive", auto_migrate=True)
+
+set_default_connection("archive")
+
+async with engines.session():
+    await Author.create(name="Ada Lovelace", email="ada@example.com")
+
+print(len(await Author.using("archive").all()), len(await Author.using("app").all()))
+```
+
+It prints `1 0`: after the switch, a session with no name opens on `archive`.
+
+## Creating tables manually
+
+To create tables yourself instead of with `auto_migrate=True`, import your models (importing registers them), then call `create_tables()`:
+
+```python {test=run prelude=connections}
+from ferro import connect, create_tables
+
+await connect("sqlite::memory:")
+
+report = await create_tables()
+for statement in report.statements:
+    print(statement.sql)
+```
+
+On SQLite it prints:
+
+```text
+CREATE TABLE IF NOT EXISTS "author" ( "email" varchar NOT NULL, "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "name" varchar NOT NULL )
+CREATE UNIQUE INDEX IF NOT EXISTS "uq_author_email" ON "author" ("email")
+CREATE TABLE IF NOT EXISTS "post" ( "author_id" integer NOT NULL, "body" varchar NOT NULL, "created_at" DATETIME NOT NULL, "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "published" integer NOT NULL, "title" varchar NOT NULL, CONSTRAINT "fk_post_author_id_author" FOREIGN KEY ("author_id") REFERENCES "author" ("id") ON DELETE CASCADE )
+```
+
+`create_tables()` returns a [`PassReport`](../api/connection.md#ferro.PassReport) of the statements it ran, here two tables and the unique index on `email`. It creates missing tables, many-to-many join tables included, and never changes existing ones. `create_tables(using="archive")` targets a named connection.
+
+## Postgres schema isolation
+
+Add the `ferro_search_path` parameter to a PostgreSQL URL to pin the connection to one schema:
+
+```python {compile-only="needs a PostgreSQL server"}
+from ferro import connect
+
+await connect("postgresql://user:password@localhost:5432/app?ferro_search_path=tenant_a")
+```
+
+Ferro removes the parameter before passing the URL to the driver and runs `SET search_path` on every pooled connection, so unqualified table names resolve in `tenant_a`. The value must be one identifier of ASCII letters, digits and underscores; anything else raises `ValueError`. Use it for schema-per-tenant setups, or to isolate test runs that share one database.
+
+## Resetting the engine
+
+`reset_engine()` tears down every pool and all connection state, so a test suite can reconnect to a fresh database for each test:
+
+```python {test=run prelude=connections}
+from ferro import connect, reset_engine
+
+reset_engine()
+await connect("sqlite::memory:", auto_migrate=True)
+```
+
+The new connection registers as the default again. Pools also close when the process exits. [Testing](../howto/testing.md) has a ready-made pytest fixture.
+
+## See also
+
+- [Transactions](transactions.md): commit and roll back on one connection
+- [How to use several databases](../howto/multiple-databases.md): routing across named connections
+- [Schema management](schema/overview.md): auto-migrate, migrations and Alembic
+- [Database backends](../concepts/backends.md): SQLite and PostgreSQL differences
+- [Connection reference](../api/connection.md): `connect`, `PoolConfig`, `engines` and `Session`
