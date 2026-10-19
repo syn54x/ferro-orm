@@ -31,13 +31,13 @@ async with engines.session():
     assert inserted == 10_000
 ```
 
-Ten thousand rows went in with one call. Rust serialized and bound the whole batch and wrote it in as few statements as the backend's limit on bound parameters allows, all or nothing.
+Ten thousand rows went in with one call. Python dumped each instance to plain values once, and Rust bound the whole batch and wrote it as multi-row `INSERT` statements, as few as the backend's limit on bound parameters allows, all or nothing.
 
 ## Where Rust helps
 
 The Rust core helps where a pure-Python ORM spends its CPU time in Python:
 
-- **Bulk inserts.** `bulk_create` builds the parameter lists and the statements in Rust, so the per-row Python work is constructing and validating each instance.
+- **Bulk inserts.** `bulk_create` builds the statements and binds every value in Rust, so the per-row Python work is building, validating and dumping each instance.
 - **Large result sets.** Decoding rows and filling instances happens in Rust, not in a Python loop over the driver's rows.
 - **Concurrent work.** The database wait runs on Rust's tokio runtime without Python's interpreter lock, so other coroutines keep running while queries are in flight. [Architecture › Async from end to end](architecture.md#async-from-end-to-end) explains how.
 
