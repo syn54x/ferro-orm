@@ -1,8 +1,18 @@
-# Aggregations & Grouped Queries
+# Aggregations and grouped queries
 
-Ferro aggregates with five methods on the columns themselves — `count()`, `sum()`, `avg()`, `min()`, `max()` — inside the same `select()` lambda that projects columns. There is no `group_by()` chainer: **the record shape is the grouping**. Bare fields are the keys; aggregate fields are the measures.
+This guide shows how to total, count and average rows with the five aggregate methods (`count()`, `sum()`, `avg()`, `min()` and `max()`) inside a `select()` lambda, and how a record that mixes plain fields with aggregates becomes a grouped query. The full signatures are in the [aggregates reference](../api/queries.md#aggregates-and-grouped-queries).
 
-The examples on this page use this schema:
+Here is a whole program. It adds four transactions and asks for the sum of the amount, the largest amount and the average amount over all of them:
+
+```python
+--8<-- "docs/examples/aggregations.py:global"
+```
+
+The single record holds four numbers over the four rows: they total 115, so the average is 28.75. Every query on this page runs inside a session like this one; see [Sessions](connections.md#sessions) for why and how to open one.
+
+## The ledger
+
+Every example on this page queries one small ledger. An account holds transactions, and a transaction may have no account:
 
 === "Assignment"
 
@@ -16,147 +26,217 @@ The examples on this page use this schema:
     --8<-- "docs/examples/aggregations_annotated.py:schema"
     ```
 
-## Global Aggregates
+The ledger holds these four transactions:
 
-An aggregate is a method on a column reference: `t.amount.sum()`. Aggregate fields are **user-named** — they live in the dict selector form, where the key names the output field. A projection containing *only* aggregates collapses the whole result to exactly one record, read idiomatically with `first()`:
+| `id` | `memo` | `amount` | `price` | account |
+| ---: | :--- | ---: | ---: | :--- |
+| 1 | coffee | 10 | 1.25 | Checking |
+| 2 | lunch | 20 | 2.75 | Checking |
+| 3 | dinner | 45 | 5.00 | Savings |
+| 4 | orphan | 40 | | |
 
-```python
---8<-- "docs/examples/aggregations.py:global"
-```
+Checking totals 30, Savings totals 45, and the orphan has no account and no price.
 
-Aggregates measure whatever `where()` leaves in — relation traversal included:
+## Global aggregates
+
+An aggregate is a method on a column reference, such as `transaction.amount.sum()`. Aggregate fields are named by you, so they live in the dict form of `select()`, where each key names an output field. A projection of only aggregates collapses the result to exactly one record, which you read with `first()`, as the first example did.
+
+Aggregates measure whatever `where()` leaves in, relation traversal included:
 
 ```python
 --8<-- "docs/examples/aggregations.py:global-where"
 ```
 
-The source column may itself traverse (`t.account.balance.avg()`): the traversal narrows to rows where the relation exists, exactly like a `where()` predicate on the same path, and shares that path's join with any other clause that references it.
+Only the two Checking transactions are measured, so the total is 30. The source column can traverse as well (`transaction.account.label.min()`): the traversal keeps rows where the relation exists, the way a `where()` on the same path does, and shares that path's join with any other clause that uses it.
 
-### What each aggregate returns
+### Result types
 
-Result types are a **pinned cross-backend contract**, derived from the source column's Python type — the same query returns the same Python types on SQLite and Postgres, even where the databases themselves disagree (Postgres widens `SUM(bigint)` to `numeric`; SQLite averages everything as a float):
+The result type comes from the source column's Python type, so a query returns the same Python types on SQLite and Postgres, even where the databases differ (Postgres widens `SUM(bigint)` to `numeric`; SQLite averages everything as a float):
 
 | Aggregate | Source column | Result type |
 | :--- | :--- | :--- |
-| `count()` | any column | `int` — never `None` |
+| `count()` | any column | `int`, never `None` |
 | `sum()` | `int` / `float` / `Decimal` | the source numeric type |
 | `avg()` | `int` / `float` | `float` |
-| `avg()` | `Decimal` | `Decimal` — never a silently lossy `float` |
-| `min()` / `max()` | numeric, `str`, `datetime` / `date` / `time` | the source type, via the source codec |
+| `avg()` | `Decimal` | `Decimal`, never a lossy `float` |
+| `min()` / `max()` | numeric, `str`, `datetime` / `date` / `time` | the source type |
+
+For example, the average of the three prices stays a `Decimal`:
 
 ```python
 --8<-- "docs/examples/aggregations.py:decimal-contract"
 ```
 
-Every aggregate result except `count` is `T | None`, because of what comes next.
+The prices total 9.00 over three rows, so the average is `Decimal("3")`. Every aggregate result except `count()` can be `None`, as the next section shows.
 
-### Empty input: `None` and `0`, no COALESCE
+### Empty input
 
-SQL answers an aggregate over zero rows with `NULL` (`COUNT` with `0`), and Ferro passes that through verbatim — "sum of no rows" and "sum of rows totaling zero" are different facts, and zero would be the wrong identity for `min`/`max` anyway:
+SQL answers an aggregate over zero rows with `NULL` (`COUNT` answers `0`), and Ferro passes that through. "Sum of no rows" and "sum of rows that total zero" are different facts, and zero would be the wrong answer for `min()` and `max()` anyway:
 
 ```python
 --8<-- "docs/examples/aggregations.py:empty"
 ```
 
-### `count()` counts non-NULL values
+No transaction is over 10,000, so the query still returns one record: `n` is `0` and `total` is `None`.
 
-`t.price.count()` is SQL's `COUNT(price)`: it counts rows where *that column* is non-NULL. Count rows regardless of any column with the primary key (`t.id.count()`):
+### Counting a column
+
+`transaction.price.count()` is SQL's `COUNT(price)`: it counts the rows where that column is not `NULL`. To count rows whatever else they hold, count the primary key (`transaction.id.count()`):
 
 ```python
 --8<-- "docs/examples/aggregations.py:count-nulls"
 ```
 
-## Grouped Queries: Bare Fields Are the Keys
+All four transactions are counted by `id`, and three by `price`, because the orphan has no price.
 
-Mix a plain field into an aggregate projection and the query becomes **grouped** — every non-aggregate field is a group key, and each group collapses to exactly one record:
+## Grouped queries
+
+Mix a plain field into an aggregate projection and the query is grouped. Every plain field is a group key, and each group collapses to one record:
 
 ```python
 --8<-- "docs/examples/aggregations.py:grouped"
 ```
 
-This is SQL's own rule, made unwritable to violate: SQL already requires every bare selected column to be a group key, so declaring the grouping separately could only ever restate the projection or contradict it (Postgres rejects the contradiction at runtime; SQLite silently answers with an arbitrary row's value). Deriving `GROUP BY` from the record shape deletes that entire error class — the dict literal is the whole story.
+Account 1 totals 30 and account 2 totals 45, one record each. There is no `group_by()`: the record shape is the grouping. SQL already requires every selected bare column to be a group key, so a separate `group_by()` could only repeat the projection or contradict it. Postgres rejects the contradiction at run time, and SQLite answers with an arbitrary row's value. Deriving the grouping from the projection removes that whole class of error.
 
-Group keys may traverse, and traversal narrows exactly like a predicate:
+Group keys can traverse, and traversal narrows rows the way a predicate does:
 
 ```python
 --8<-- "docs/examples/aggregations.py:grouped-traversed"
 ```
 
-### "Has no relation" is a visible bucket
+The orphan has no account, so it drops out and the two labelled groups remain.
 
-Add `left_join()` and relation-less rows stay in — grouped under a `None` key instead of silently dropped:
+### The `None` group for missing relations
+
+Add `left_join()` and rows without a relation stay in, grouped under a `None` key instead of being dropped:
 
 ```python
 --8<-- "docs/examples/aggregations.py:none-bucket"
 ```
 
-### Zero rows, zero groups
+The orphan's 40 now appears as its own group.
 
-A grouped query over zero matching rows returns zero records — unlike a global aggregate, there is no group to report on:
+### Grouped queries over zero rows
+
+A grouped query over zero matching rows returns zero records. Unlike a global aggregate, there is no group to report on:
 
 ```python
 --8<-- "docs/examples/aggregations.py:zero-groups"
 ```
 
-### Grouping is not partitioning
+### Grouping and partitioning
 
-Grouping **collapses** rows: each group becomes one projected record of keys and measures, and the individual rows are gone. If you want complete model instances *bucketed* by a key — every transaction, arranged per account — that is a different, client-side operation over a full query:
+Grouping collapses rows: each group becomes one record of keys and measures, and the individual rows are gone. If you want whole model instances bucketed by a key, every transaction arranged per account, do that in Python over a full query:
 
-```python
+```python {test=run prelude=aggregations}
 from collections import defaultdict
 
 by_account: dict[int | None, list[Transaction]] = defaultdict(list)
-for txn in await Transaction.select().all():
-    by_account[txn.account_id].append(txn)
+for transaction in await Transaction.select().all():
+    by_account[transaction.account_id].append(transaction)
+
+assert {key: len(rows) for key, rows in by_account.items()} == {1: 2, 2: 1, None: 1}
 ```
 
-Reach for aggregation when you want *facts about groups*; partition in Python when you want *the rows themselves, organized*.
+Account 1 holds two transactions, account 2 holds one, and the orphan sits under `None`. Reach for aggregation when you want facts about groups, and partition in Python when you want the rows themselves, organized. This block runs inside a session, as [Sessions](connections.md#sessions) describes.
 
-## Ordering Grouped Results
+## Ordering grouped results
 
-`order_by` on a projected query follows SQL's own ORDER BY scoping, pinned as three rules.
+`order_by()` on a projected query follows SQL's own ORDER BY scoping. Three rules apply.
 
-**Strings resolve output field names first, then root columns.** `order_by("total")` sorts by the aggregate you named `total`, even if the model happens to have a column with the same name:
+### Sorting by an output name
+
+A string resolves output field names first, then root columns. `order_by("total")` sorts by the aggregate you named `total`, even if the model has a column of the same name. Combined with `limit()`, this is the top-N idiom: keys plus aggregates, ordered by the measure's output name, with `limit()` applied to the groups:
 
 ```python
 --8<-- "docs/examples/aggregations.py:top-n"
 ```
 
-That is the **top-N idiom** — keys plus aggregates, ordered by the measure's output name, `limit()` applied to the *groups*. `limit()`/`offset()` always act on groups in a grouped query, so pagination pages through the summary, not the underlying rows.
+Savings has the largest total, so it is the one group returned. `limit()` and `offset()` always act on groups in a grouped query, so pagination pages through the summary, not the underlying rows.
 
-**The lambda form spells source expressions — aggregates included.** Where strings name outputs, lambdas write the expression itself:
+### Sorting by an aggregate expression
+
+Where strings name outputs, a lambda writes the source expression itself, aggregates included:
 
 ```python
 --8<-- "docs/examples/aggregations.py:order-by-lambda"
 ```
 
-An aggregate sort key must match a projected aggregate field (same function, same column, same path); an expression you did not project is a build-time error telling you to name it in the projection.
+The groups come back with the largest total first. An aggregate sort key must match a projected aggregate (same function, same column, same path). An expression you did not project raises when you build the query and tells you to name it in the projection.
 
-**On an aggregate projection, every sort key must be a group key or an aggregate.** Sorting groups by a column that is neither is the arbitrary-row trap again — SQLite would happily pick *some* row's value per group — so Ferro rejects it when you build the query, whether the key is a string, a lambda, or was chained before the `select()`:
+### Allowed sort keys
+
+On an aggregate projection, every sort key must be a group key or an aggregate. Sorting groups by any other column is the arbitrary-row trap again, so Ferro rejects it when you build the query, whether the key is a string, a lambda, or was chained before the `select()`. On a plain, non-aggregate projection nothing changes: unselected root columns still sort.
+
+## Unsupported aggregate forms
+
+Each form below fails when you build the query, before any SQL is sent, with an error that names the fix. Each example runs inside a session and raises if the expected error does not appear.
+
+`sum()` and `avg()` take numeric columns (`int`, `float`, `Decimal`), `min()` and `max()` take orderable ones (numeric, text, date and time), and `count()` takes anything. Enum, UUID, JSON and `bool` columns are rejected, because `min()` over a UUID does not exist on Postgres and `max()` over a native enum differs between backends (definition order against lexical order):
+
+```python
+--8<-- "docs/examples/aggregations.py:error-family"
+```
 
 ```text
->>> Transaction.select(lambda t: {"acct": t.account_id, "total": t.amount.sum()}).order_by("memo")
+TypeError: t.memo.sum() is not supported: Transaction.memo is string-typed, and sum() takes a numeric column (int, float, or Decimal). No portable cross-backend meaning exists for this aggregate over a string column.
+```
+
+`where()` filters rows before aggregation, so it cannot hold an aggregate. The error points at `having()`, the post-aggregation filter, which does not exist yet. Until it does, filter rows with `where()` and compare the aggregated results in Python:
+
+```python
+--8<-- "docs/examples/aggregations.py:error-where"
+```
+
+```text
+TypeError: t.amount.sum() > ... is not a where() predicate: WHERE filters rows before aggregation, so an aggregate cannot appear in it. Post-aggregation filtering is having() ...
+```
+
+Python's builtin `sum()` over a column reference raises instead of failing obscurely. The error text writes the lambda parameter as `t`, whatever you named it:
+
+```python
+--8<-- "docs/examples/aggregations.py:error-builtin-sum"
+```
+
+```text
+TypeError: t.amount is a column reference and cannot be iterated; did you mean t.amount.sum()? ...
+```
+
+An aggregate outside the dict form has no output name, so it raises:
+
+```python
+--8<-- "docs/examples/aggregations.py:error-unnamed"
+```
+
+```text
+TypeError: aggregate fields are user-named ...: give t.amount.sum() an output name with the dict selector form (e.g. select(lambda t: {"total": t.amount.sum()})).
+```
+
+Sorting groups by a column that is not a group key raises, as the ordering rules above say:
+
+```python
+--8<-- "docs/examples/aggregations.py:error-order-key"
+```
+
+```text
 ValueError: order_by('memo') on an aggregate projection must name a group key or an aggregate: ...
 ```
 
-On a plain (non-aggregate) projection nothing changes: unselected root columns still sort, as they always have.
-
-## The Loud Limits
-
-Everything below fails **when you build the query** — before any SQL, with an error that names the fix:
-
-- **Source families with no portable meaning.** `sum()`/`avg()` take numeric columns (`int`, `float`, `Decimal`); `min()`/`max()` take orderable ones (numeric, text, date/time); `count()` takes anything. Enum, UUID, JSON, and bool columns are rejected — `min()` over a UUID does not exist on Postgres, and `max()` over a native enum silently diverges between backends (definition order vs. lexical order). Where no portable meaning exists, build time is the only honest place to fail.
-- **No aggregates in `where()`.** `WHERE` filters rows *before* aggregation, so `where(lambda t: t.amount.sum() > 100)` raises pointing at `having()` — the post-aggregation filter, tracked in [#291](https://github.com/syn54x/ferro-orm/issues/291). Until it lands, filter rows with `where()` and compare aggregated results in Python.
-- **The builtin-`sum` trap.** `sum(t.amount)` (Python's builtin over a column reference) raises `did you mean t.amount.sum()?` instead of failing obscurely.
-- **Aggregates are user-named.** An aggregate outside the dict form (`select(lambda t: t.amount.sum())`) raises: give it an output name.
-- **`count()`/`exists()` on an aggregate projection.** "Count" is ambiguous between rows and groups, so both raise with both spellings: count matching rows with an unprojected query (`Transaction.where(...).count()`), count groups with `len(await q.all())`.
+`count()` and `exists()` on an aggregate projection are ambiguous between rows and groups, so both raise and name both spellings. Count matching rows with an unprojected query (`Transaction.where(...).count()`), and count groups with `len(await query.all())`:
 
 ```python
---8<-- "docs/examples/aggregations.py:errors"
+--8<-- "docs/examples/aggregations.py:error-count"
 ```
 
-## See Also
+```text
+ValueError: count() on an aggregate projection is ambiguous: count the matching rows with an unprojected query (Model.where(...).count()), or count the groups with len(await q.all()).
+```
 
-- [Selecting a Column Subset](queries.md#selecting-a-column-subset) — projections, traversed fields, and output aliases, which aggregations build on
-- [Querying Across Relationships](queries.md#querying-across-relationships) — traversal and join semantics (ADR-0006)
-- [Typed Query Predicates](../concepts/query-typing.md#projected-queries) — how aggregate expressions type
+For the full list of aggregate forms and their result types, see [Aggregates and grouped queries](../api/queries.md#aggregates-and-grouped-queries) in the reference.
+
+## See also
+
+- [Selecting a column subset](queries.md#selecting-a-column-subset): projections, traversed fields and output aliases, which aggregations build on.
+- [Querying across relationships](queries.md#querying-across-relationships): traversal and join semantics.
+- [Typed query predicates](../concepts/query-typing.md#projected-queries): how aggregate expressions are typed.
