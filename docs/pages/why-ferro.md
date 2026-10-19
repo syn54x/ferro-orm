@@ -2,7 +2,7 @@
 
 Ferro is an async Python ORM that moves SQL generation, execution and row parsing into a Rust engine, so Python only builds a small filter description and receives finished model instances. This page explains what that buys, what it costs and when another ORM is the better choice.
 
-Here is a query on a blog's `Post` model. It runs inside an `async with engines.session():` block (see [Sessions](guide/connections.md#sessions-recommended)):
+Here is a query on a blog's `Post` model. It runs inside an `async with engines.session():` block (see [Sessions](guide/connections.md#sessions)):
 
 ```python {test=run prelude=reference}
 popular = await Post.where(lambda post: post.views >= 1000).all()

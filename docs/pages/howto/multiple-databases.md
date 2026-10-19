@@ -1,73 +1,118 @@
-# Multiple Databases
+# How to use several databases in one app
 
-One process can hold several named connections — a primary application database, a read replica, an analytics warehouse — each with its own pool. The common case still works untouched: `await connect(url)` registers and selects `"default"`. Named connections make everything else explicit.
+This how-to connects one process to two databases, an application database and an analytics database, and routes each call to the right one.
 
-## Registering Connections
-
-Give each connection a `name`; mark one as `default` for unqualified operations:
+Give each connection a name, mark one as the default, and route calls to each:
 
 ```python
 --8<-- "docs/examples/multiple_databases.py:connect"
 ```
 
-Each `connect()` call creates an independent pool, configurable per connection with `pool=PoolConfig(max_connections=...)`. You can change which named connection is the default later with [`set_default_connection(name)`](../api/connection.md).
+It prints:
 
-## Routing Queries
-
-Operations need a route: either an open session (ambient or explicit `session=`) or an explicit `using=`. Inside `async with engines.session():`, unqualified calls resolve to that session's connection — the default connection if you opened the session with no name. `Model.using(name)` returns a handle exposing the same API (`create`, `all`, `select`, `where`, `get`, `get_or_none`, `bulk_create`, `get_or_create`, `update_or_create`) pinned to the named connection, and it runs on its own — no session required:
-
-```python
---8<-- "docs/examples/multiple_databases.py:routing"
+```text
+1 1
 ```
 
-Routing is per-call: `using()` doesn't change any global state, so two coroutines can talk to different databases concurrently without interfering. A `using()` call made without a session, as `analytics_metrics` is above, runs with no identity map — every load is a fresh instance, with no `a is b` guarantee across calls. See [Identity Map](../concepts/identity-map.md#no-session-no-identity) for what that trades away.
+Each database holds one metric: `signups` went to the default connection, `app`, through the session, and `page_views` went to `analytics` through `.using()`. [Named connections](../guide/connections.md#named-connections) in the Connections guide explains how naming and the default work, and [Sessions](../guide/connections.md#sessions) explains the session.
 
-An explicit `using=` that names a connection different from the session you're ambiently inside of raises `ValueError` rather than silently running outside the session — and an operation with no session and no `using=` at all raises `RuntimeError`. There is no implicit default-connection fallback.
+The examples use one model, a named metric:
 
-For session-first workflows, use `engines.session(name)` to pin a full block:
+=== "Assignment"
+
+    ```python
+    --8<-- "docs/examples/multiple_databases.py:models"
+    ```
+
+=== "Annotated"
+
+    ```python
+    --8<-- "docs/examples/multiple_databases_annotated.py:models"
+    ```
+
+Each `connect()` call opens its own pool, sized with `pool=PoolConfig(...)`, and `auto_migrate=True` creates the `metric` table on each database.
+
+## Route calls to a connection
+
+Every call needs a route. Inside `async with engines.session():`, unqualified calls use the session's connection: the default connection when you open the session with no name. `Model.using(name)` routes one call and needs no session; it offers `create`, `upsert`, `all`, `select`, `where`, `get`, `get_or_none`, `bulk_create`, `get_or_create` and `update_or_create` (see [`Model.using`](../api/model.md#ferro.Model.using)).
+
+To run a whole block on one named connection, open a session on it:
 
 ```python
-import ferro
-
-async with ferro.engines.session("analytics") as s:
-    metrics = await s.query(Metric).where(lambda t: t.value > 0).all()
+--8<-- "docs/examples/multiple_databases.py:session"
 ```
 
-## Transactions on Named Connections
+It prints:
 
-`transaction(using=...)` pins a transaction to one named connection:
+```text
+['page_views']
+```
+
+Only the analytics database has a metric above 100.
+
+Inside a session, `.using()` must name the session's connection. Naming another one raises `ValueError` rather than running the call outside the session:
+
+```python
+--8<-- "docs/examples/multiple_databases.py:conflict"
+```
+
+It prints:
+
+```text
+Explicit `using='analytics'` conflicts with the ambient session bound to connection 'app'. Pass an explicit `session=` for that connection, or open a session on 'analytics'.
+```
+
+A call with no session and no `using=` raises `RuntimeError`; Ferro never falls back to the default connection on its own.
+
+Routing is per call: `.using()` changes no global state, so two coroutines can use different databases at once. A `.using()` call outside a session has no identity map, so every load returns a new instance; see [No session, no identity](../concepts/identity-map.md#no-session-no-identity).
+
+## Transactions on a named connection
+
+`transaction(using=name)` pins a transaction to one connection. Unqualified calls inside the block run on it, and routing a call elsewhere raises `ValueError`:
 
 ```python
 --8<-- "docs/examples/multiple_databases.py:transaction"
 ```
 
-Everything inside the block — including raw SQL via `execute()` / `fetch_all()` — inherits that connection. Nested `transaction()` blocks inherit it too. Ferro does not support distributed transactions: one `transaction()` spans exactly one named connection, so writes to two databases are never atomic together.
+It prints:
 
-## Per-Connection Schema Setup
-
-Schema creation targets one connection at a time:
-
-- `connect(url, name=..., auto_migrate=True)` runs auto-migration **on that connection** as part of connecting — each database gets tables for all registered models, as the example above shows.
-- [`create_tables(using=...)`](../api/connection.md) creates tables explicitly on a named connection after the fact:
-
-```python
-from ferro import create_tables
-
-await create_tables(using="analytics")
+```text
+Operations inside a transaction inherit the transaction connection
+2
 ```
 
-Don't run schema creation concurrently through multiple names that point at the same physical database. For production schema changes, use [migrations](../guide/schema/migrations.md): a project whose models live in separate databases [configures each one](../reference/configuration.md#several-databases) with its own migrations directory, and every command names it with `--database` ([Deploying migrations](../guide/schema/deploying.md#several-databases)).
+The `clicks` metric landed on `analytics`, which now holds two metrics; the call routed to `app` was refused. Raw SQL through `execute()` and `fetch_all()`, and nested `transaction()` blocks, inherit the connection too. Ferro has no distributed transactions: one transaction spans one connection, so writes to two databases never commit together.
 
-## Practical Notes
+## Create tables on one connection
 
-- **Typical roles.** A read replica for expensive list endpoints (`User.using("replica")`), an analytics database that receives event rows, or a separate service database owned by another team.
-- **Keep credentials server-side.** Elevated service-role connections belong in configuration, not source control — and never make a service-role connection the default in a user-facing runtime.
-- **Never route from untrusted input.** Don't pick the `using` name from request data.
-- **Pools isolate roles, not request context.** A named connection isolates credentials and pooling; it does not provide per-request RLS/JWT context inside one shared pool. Objects loaded through an elevated connection can contain elevated data — filter before returning them to users.
-- **No automatic routing.** Read/write splitting, cross-connection joins, and two-phase commit are not features; routing is always an explicit `using=`, `session=`, or `engines.session(name)` you name yourself — never inferred from query shape or request data.
+`connect(url, name=..., auto_migrate=True)` creates the tables on that connection as it connects. To create them later, call `create_tables(using=name)`:
 
-## See Also
+```python
+--8<-- "docs/examples/multiple_databases.py:create-tables"
+```
 
-- [Connections & Databases guide](../guide/connections.md) — URLs, pools, and connection lifecycle
-- [Transactions guide](../guide/transactions.md) — transaction semantics and nesting
-- [Connection & Registry API](../api/connection.md) — `connect`, `PoolConfig`, `set_default_connection`, `create_tables`
+It prints:
+
+```text
+['metric']
+```
+
+`create_tables()` returns a [`PassReport`](../guide/schema/auto-migrate.md#what-the-pass-did-passreport) of the statements it ran, here one `CREATE TABLE` for `metric`. Two connections that name the same database share its run lock, so their passes run one after the other ([Two processes at once](../guide/schema/auto-migrate.md#two-processes-at-once)).
+
+For production schema changes, use [migrations](../guide/schema/migrations.md): a project whose models live in separate databases [configures each one](../reference/configuration.md#several-databases) with its own migrations directory, and every command names it with `--database` ([Deploying migrations](../guide/schema/deploying.md#several-databases)).
+
+## Security and routing rules
+
+!!! warning "Never route from untrusted input"
+    Choose connection names from constants or trusted server-side logic. A name taken from a request parameter or header lets the caller pick the database.
+
+- **Typical roles.** A read replica for expensive list endpoints (`Metric.using("replica")`), an analytics database that receives event rows, or a database another team owns.
+- **Keep credentials server-side.** Elevated service-role connections belong in configuration, not source control, and a user-facing runtime never makes one its default.
+- **Pools isolate roles, not request context.** A named connection separates credentials and pooling; it does not give each request its own row-security context inside one shared pool. Objects loaded through an elevated connection can hold elevated data, so filter them before returning them to users.
+- **No automatic routing.** Ferro has no read/write splitting, cross-connection joins or two-phase commit. Every route is a `using=`, `session=` or `engines.session(name)` you write yourself.
+
+## See also
+
+- [Connections](../guide/connections.md): URLs, pools, sessions and the default connection
+- [Transactions](../guide/transactions.md): commit, rollback and savepoints
+- [Connection reference](../api/connection.md): `connect`, `PoolConfig`, `set_default_connection` and `create_tables`

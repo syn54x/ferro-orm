@@ -43,7 +43,7 @@ Connect to a database, then open a session. Every ORM call runs inside `async wi
 
 The new database has no authors yet, so the count is `0`. `connect()` takes a database URL: `sqlite::memory:` is a throwaway in-memory database, `sqlite:app.db?mode=rwc` is a file that is created if missing (`rwc` means read, write, create), and a `postgres://...` URL connects to PostgreSQL. `auto_migrate=True` creates a table for every registered model on connect. Use it in development and tests; for a database whose data you would mind losing, use [migrations](../guide/schema/migrations.md) (`ferro migrate new`, then `ferro migrate up`), which [Schema management](../guide/schema/overview.md) compares with auto-migrate.
 
-The blocks that follow run inside this session. See [Sessions](../guide/connections.md#sessions-recommended) for named connections and request-scoped sessions.
+The blocks that follow run inside this session. See [Sessions](../guide/connections.md#sessions) for named connections and request-scoped sessions.
 
 ## Create data
 

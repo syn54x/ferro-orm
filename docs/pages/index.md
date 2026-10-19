@@ -36,7 +36,7 @@ Only `alice` is active, so the script prints:
 Found 1 active users.
 ```
 
-Every ORM call runs inside `async with engines.session():`; see [Sessions](guide/connections.md#sessions-recommended). `auto_migrate=True` creates the table on connect, which suits development and tests.
+Every ORM call runs inside `async with engines.session():`; see [Sessions](guide/connections.md#sessions). `auto_migrate=True` creates the table on connect, which suits development and tests.
 
 ## Where to go next
 
