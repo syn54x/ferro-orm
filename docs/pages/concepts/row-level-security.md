@@ -67,6 +67,8 @@ A flow of several operations is cheaper inside one `transaction()` block, which 
 
 `set_config` also empties the session's identity map, so an instance loaded under the old value is never handed back under the new one. Setting a key to the value it already holds changes nothing and sends nothing.
 
+If delivering the new value to an already-open `transaction()` block fails, `set_config` raises `RuntimeError`, but the session's settings and identity map have already changed. The failed statement leaves that transaction aborted, so it cannot go on to read under the old value; roll it back and carry on with the new one.
+
 ### Nested sessions
 
 A session opened inside another starts from the outer session's settings and overrides them key by key. The merge is a snapshot taken when the inner session opens, and nothing flows back to the outer one:
@@ -104,8 +106,9 @@ What changes under connection delivery:
 - **One operation at a time.** Sibling tasks sharing one session run their operations one after another, and a sibling's operation waits for an open `transaction()` block instead of running inside it.
 - **A check on release.** While any session on the pool holds a connection, every connection released to that pool runs one `SELECT current_setting(...)`, including releases from sessions without settings. While none does, the check costs no query.
 - **`autocommit=True` stays scoped.** There is no wrap to opt out of, since the setting lives on the connection.
+- **A late first setting.** A session that opens without settings and gets its first one from `set_config` holds no connection yet, so it takes one at its next operation and sends the values then.
 - **`set_config` reaches running work.** The new value lands on the held connection at once, so a sibling task's operation that is already running sees it from its next statement. Under `transaction` delivery that operation would finish with its old value.
-- **Closing resets.** A closing session resets exactly the keys it set, to the value the connection started with. For a custom setting that is the empty string, which the `NULLIF` handles. A value configured with `ALTER ROLE ... SET` or `ALTER DATABASE ... SET` comes back instead, so never give a tenancy key a role or database default.
+- **Closing resets.** A closing session resets exactly the keys it set, to the value the connection started with, and nothing else: the `search_path` the pool sets on every connection stays. For a custom setting that is the empty string, which the `NULLIF` handles. A value configured with `ALTER ROLE ... SET` or `ALTER DATABASE ... SET` comes back instead, so never give a tenancy key a role or database default.
 - **Migrations wait.** `connect(migrate_updates=...)` and `migrate()` refresh the pool afterwards, and the refresh waits for every held connection to come back. Ferro warns with the number of connections it is waiting on. Run schema changes before opening tenant sessions.
 
 Sessions without settings never hold a connection, so they behave as they do under `transaction` delivery.
