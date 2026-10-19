@@ -98,6 +98,34 @@ def test_docs_example_scripts(script: Path) -> None:
     )
 
 
+@pytest.mark.postgres_only
+@pytest.mark.parametrize(
+    "script", ["row_level_security.py", "row_level_security_annotated.py"]
+)
+def test_row_level_security_example_runs_on_postgres(
+    script: str, db_url: str, pg_role
+) -> None:
+    """The row-level security pages' demo, on Postgres.
+
+    The script migrates as the test's (superuser) role, creates the
+    application's NOSUPERUSER login role and asserts what each session sees:
+    a tenant-scoped session reads its own two invoices, a session without
+    settings reads none, the migrating role reads all four, and a write into
+    another tenant is refused. Without arguments the script runs on SQLite
+    (``test_docs_example_scripts``), where no policy exists to check.
+    """
+    result = subprocess.run(
+        [sys.executable, str(DOCS_EXAMPLES / script), db_url, pg_role("app")],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        cwd=REPO_ROOT,
+    )
+    assert result.returncode == 0, (
+        f"{script} failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )
+
+
 def _page(tmp_path: Path, prefix: str, body: str) -> CodeExample:
     page = tmp_path / "page.md"
     page.write_text(f"# Page\n\n```{prefix}\n{body}\n```\n", encoding="utf-8")
