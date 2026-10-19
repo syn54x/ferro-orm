@@ -55,7 +55,7 @@ An `int` field is `integer` on both backends. For a 64-bit column, declare `db_t
 The ORM binds every value for you, with the casts the column needs. [Raw SQL](../guide/raw-sql.md) goes to the driver as you wrote it, so two differences show through:
 
 - **Placeholders are the backend's own:** `?` on SQLite, `$1`, `$2`, ... on PostgreSQL. Ferro does not translate them, and a mismatch fails with the database's own error. See [Raw SQL › Placeholders](../guide/raw-sql.md#placeholders).
-- **Bound values are not cast.** Raw SQL has no model to read types from, so a `UUID`, `datetime` or `Decimal` is sent as text, and rows come back as plain dicts. PostgreSQL rejects text compared with a `uuid` or `numeric` column until you write the cast (`$1::uuid`, `$2::numeric`); SQLite accepts it, so a raw query that works on SQLite can fail on PostgreSQL. See [Raw SQL › Type caveats](../guide/raw-sql.md#type-caveats).
+- **Bound values are not cast.** Raw SQL has no model to read types from, so a `UUID`, `datetime` or `Decimal` is sent as text, and rows come back as plain dicts. PostgreSQL rejects text compared with a `uuid` or `numeric` column until you write the cast (`$1::uuid`, `$2::numeric`); SQLite accepts it, so a raw query that works on SQLite can fail on PostgreSQL. See [Raw SQL › Bind types and casts](../guide/raw-sql.md#bind-types-and-casts).
 
 If you want typed values in and out, use the ORM.
 
