@@ -14,6 +14,10 @@ below reads the HTML a reader would get:
 - the API reference hides source blocks, dunder and ``__ferro_*__`` members,
   links the types in its signatures, renders ``Field`` once and gives
   ``Relation.all()`` / ``.first()`` their inherited docstrings;
+- every exported name has one API entry under its public path, every public
+  object and member has a docstring, no entry renders empty, each API page is
+  titled after its objects, and every link from an API page lands on an
+  anchor that exists;
 - the docs build in CI and in the publish workflow is strict.
 """
 
@@ -300,8 +304,7 @@ def _public_paths() -> set[str]:
     }
     paths |= {f"ferro.migrations.{name}" for name in ferro.migrations.__all__}
     paths |= {
-        f"ferro.migrations.testing.{name}"
-        for name in ferro.migrations.testing.__all__
+        f"ferro.migrations.testing.{name}" for name in ferro.migrations.testing.__all__
     }
     return paths | set(RETURNED_TYPES)
 
@@ -349,7 +352,9 @@ def test_api_pages_are_titled_after_their_objects(built_site: Path) -> None:
                 parts = path.split(".")
                 named |= {".".join(parts[:i]) for i in range(2, len(parts) + 1)}
                 named.add(parts[-1])
-        assert named & set(words), f"{url} is titled {words}, naming none of its objects"
+        assert named & set(words), (
+            f"{url} is titled {words}, naming none of its objects"
+        )
 
 
 def test_no_api_entry_renders_empty(built_site: Path) -> None:
@@ -359,13 +364,47 @@ def test_no_api_entry_renders_empty(built_site: Path) -> None:
     for url, page_html in rendered_pages(built_site):
         if not url.startswith("/api/"):
             continue
-        for section in re.split(r'(?=<h\d id="[\w.]+" class="doc doc-heading")', page_html)[1:]:
+        for section in re.split(
+            r'(?=<h\d id="[\w.]+" class="doc doc-heading")', page_html
+        )[1:]:
             anchor = _DOC_HEADING_ID.search(section)
             contents = section.split('class="doc doc-contents', 1)[-1]
-            contents = re.sub(r'<div class="[^"]*doc-signature.*?</div>', "", contents, flags=re.DOTALL)
+            contents = re.sub(
+                r'<div class="[^"]*doc-signature.*?</div>',
+                "",
+                contents,
+                flags=re.DOTALL,
+            )
             if not re.search(r"<p>", contents.split("doc doc-heading", 1)[0]):
                 empty.append(f"{url} {anchor.group(1) if anchor else '?'}")
     assert not empty, "API entries with no text:\n" + "\n".join(empty)
+
+
+def test_every_public_object_and_member_has_a_docstring() -> None:
+    """``show_if_no_docstring`` is off, so an undocumented member would vanish."""
+    import griffe
+
+    package = griffe.load(
+        "ferro",
+        search_paths=[str(REPO_ROOT / "src")],
+        extensions=griffe.load_extensions("griffe_inherited_docstrings"),
+        resolve_aliases=True,
+        resolve_external=False,
+    )
+    undocumented = []
+    for path in sorted(_public_paths()):
+        obj = package[path.removeprefix("ferro.")]
+        if not obj.docstring:
+            undocumented.append(path)
+        if obj.is_class:
+            undocumented += [
+                f"{path}.{name}"
+                for name, member in obj.members.items()
+                if not name.startswith("_")
+                and name != "model_config"
+                and not member.docstring
+            ]
+    assert not undocumented, f"public objects with no docstring: {undocumented}"
 
 
 _HREF = re.compile(r'<a\b[^>]*\bhref="([^"]+)"')
