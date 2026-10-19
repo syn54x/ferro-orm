@@ -45,7 +45,7 @@ Ferro has four ways to write a row, and each does only what its name says:
 
 The table now holds four customers. Fields you leave out take their defaults, so Carol's `plan` is `"free"`.
 
-Pass a related instance directly (`author=alice`) or set the foreign-key column (`author_id=alice.id`); see [Relationships](relationships.md). Pydantic validates each instance when it is built, so invalid data raises before Ferro sends anything to the database.
+To create a row with a foreign key, see [Relationships](relationships.md). Pydantic validates each instance when it is built, so invalid data raises before Ferro sends anything to the database.
 
 A batch can be any size. SQLite binds at most 32,766 parameters in one statement and PostgreSQL 65,535, so Ferro splits a large batch across as many `INSERT` statements as the database needs. The batch stays atomic: inside a [`transaction()`](transactions.md) block the transaction is the boundary, and outside one, a failing row (a unique violation late in the batch, say) leaves none of the batch inserted.
 

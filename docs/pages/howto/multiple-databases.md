@@ -34,7 +34,7 @@ Each `connect()` call opens its own pool, sized with `pool=PoolConfig(...)`, and
 
 ## Route calls to a connection
 
-Every call needs a route. Inside `async with engines.session():`, unqualified calls use the session's connection: the default connection when you open the session with no name. `Model.using(name)` routes one call and needs no session; it offers `create`, `upsert`, `all`, `select`, `where`, `get`, `get_or_none`, `bulk_create`, `get_or_create` and `update_or_create` (see [`Model.using`](../api/model.md#ferro.Model.using)).
+Every call needs a route. Inside `async with engines.session():`, unqualified calls use the session's connection: the default connection when you open the session with no name. [`Model.using(name)`](../api/model.md#ferro.Model.using) routes one call and needs no session.
 
 To run a whole block on one named connection, open a session on it:
 
@@ -97,7 +97,7 @@ It prints:
 ['metric']
 ```
 
-`create_tables()` returns a [`PassReport`](../guide/schema/auto-migrate.md#what-the-pass-did-passreport) of the statements it ran, here one `CREATE TABLE` for `metric`. Two connections that name the same database share its run lock, so their passes run one after the other ([Two processes at once](../guide/schema/auto-migrate.md#two-processes-at-once)).
+`create_tables()` returns a [`PassReport`](../api/connection.md#ferro.PassReport) of the statements it ran, here one `CREATE TABLE` for `metric`. Two connections that name the same database share its run lock, so their passes run one after the other ([Concurrent passes and the run lock](../guide/schema/auto-migrate.md#concurrent-passes-and-the-run-lock)).
 
 For production schema changes, use [migrations](../guide/schema/migrations.md): a project whose models live in separate databases [configures each one](../reference/configuration.md#several-databases) with its own migrations directory, and every command names it with `--database` ([Deploying migrations](../guide/schema/deploying.md#several-databases)).
 

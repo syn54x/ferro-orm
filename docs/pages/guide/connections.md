@@ -178,10 +178,10 @@ Rules for closing a session:
 
 `reset_engine()` tears down every connection. It exists for test isolation, not for closing one session.
 
+The [`Session`](../api/connection.md#ferro.Session) and [`engines`](../api/connection.md#ferro.engines) reference entries list every argument, including `settings=` for [row-level security](row-level-security.md#session-settings).
+
 !!! note "Changed in 0.13"
     Calls outside a session used to run on the default connection; they now raise `RuntimeError`. The [upgrade guide](../howto/upgrade-guide.md#connection-routing-requires-a-session) shows how to move old call sites into sessions.
-
-The [`Session`](../api/connection.md#ferro.Session) and [`engines`](../api/connection.md#ferro.engines) reference entries list every argument, including `settings=` for [row-level security](row-level-security.md#session-settings).
 
 ## Connection options
 
@@ -283,7 +283,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS "uq_author_email" ON "author" ("email")
 CREATE TABLE IF NOT EXISTS "post" ( "author_id" integer NOT NULL, "body" varchar NOT NULL, "created_at" DATETIME NOT NULL, "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "published" integer NOT NULL, "title" varchar NOT NULL, CONSTRAINT "fk_post_author_id_author" FOREIGN KEY ("author_id") REFERENCES "author" ("id") ON DELETE CASCADE )
 ```
 
-`create_tables()` returns a [`PassReport`](schema/auto-migrate.md#what-the-pass-did-passreport) of the statements it ran, here two tables and the unique index on `email`. It creates missing tables, many-to-many join tables included, and never changes existing ones. `create_tables(using="archive")` targets a named connection.
+`create_tables()` returns a [`PassReport`](../api/connection.md#ferro.PassReport) of the statements it ran, here two tables and the unique index on `email`. It creates missing tables, many-to-many join tables included, and never changes existing ones. `create_tables(using="archive")` targets a named connection.
 
 ## Postgres schema isolation
 
