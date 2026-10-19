@@ -1,3 +1,7 @@
+---
+description: "What Ferro's Rust engine buys you, what it costs and when another ORM is the better choice."
+---
+
 # Why Ferro
 
 Ferro is an async Python ORM that moves SQL generation, execution and row parsing into a Rust engine, so Python only builds a small filter description and receives finished model instances. This page explains what that buys, what it costs and when another ORM is the better choice.

@@ -18,7 +18,11 @@ below reads the HTML a reader would get:
   object and member has a docstring, no entry renders empty, each API page is
   titled after its objects, and every link from an API page lands on an
   anchor that exists;
-- the docs build in CI and in the publish workflow is strict.
+- the docs build in CI and in the publish workflow is strict;
+- the nav has six tabs holding every page once, each label equal to its
+  page's title; every page has a one-sentence description and new pages are
+  marked new; every moved page, and every anchor that moved, redirects to the
+  section that replaced it.
 """
 
 from __future__ import annotations
@@ -29,6 +33,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tomllib
 from collections.abc import Iterator
 from pathlib import Path
 from urllib.parse import urljoin
@@ -36,6 +41,7 @@ from urllib.parse import urljoin
 import pytest
 
 pytest.importorskip("zensical", reason="the docs dependency group is not installed")
+yaml = pytest.importorskip("yaml", reason="the docs dependency group is not installed")
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = REPO_ROOT / ".github" / "workflows"
@@ -427,3 +433,215 @@ def test_links_from_api_pages_land_on_existing_anchors(built_site: Path) -> None
             ):
                 dead.append(f"{url} -> {href}")
     assert not dead, "links to anchors that do not exist:\n" + "\n".join(dead)
+
+
+# --- Navigation, front matter and moved pages (#723) ---
+
+DOCS_PAGES = REPO_ROOT / "docs" / "pages"
+
+NAV_TABS = ["Get started", "Guide", "How-to", "Concepts", "Reference", "Project"]
+
+NEW_PAGES = {
+    "concepts/row-level-security.md",
+    "guide/schema/renames-and-retirements.md",
+    "guide/schema/squash.md",
+    "reference/migrations.md",
+    "reference/row-level-security.md",
+}
+"""Pages created by the docs rewrite (#698); they carry ``status: new``."""
+
+MOVED_PAGES = {
+    "getting-started/next-steps.md": "getting-started/quickstart.md#next-steps",
+    "howto/adopting-migrations.md": "guide/schema/adopting-migrations.md",
+    "howto/upgrade-guide.md": "upgrading.md",
+}
+"""Every page moved or deleted by the nav rework, and where its URL now goes."""
+
+_NEXT_STEPS = "getting-started/quickstart.md#next-steps"
+
+MOVED_ANCHORS = {
+    # The migrations guide split (#714): sections moved to their own pages,
+    # or renamed on the page they stayed on.
+    "guide/schema/migrations.md#renames": "guide/schema/renames-and-retirements.md#rename-hints",
+    "guide/schema/migrations.md#retiring-a-column": "guide/schema/renames-and-retirements.md#retiring-a-column",
+    "guide/schema/migrations.md#retiring-an-enum-label": "guide/schema/renames-and-retirements.md#retiring-an-enum-label",
+    "guide/schema/migrations.md#headers": "reference/migrations.md#step-file-headers",
+    "guide/schema/migrations.md#changes-existing-rows-need-a-value-for": "guide/schema/migrations.md#backfills",
+    "guide/schema/migrations.md#checking": "guide/schema/migrations.md#check-status-and-drift",
+    "guide/schema/migrations.md#going-back": "guide/schema/migrations.md#reverting-with-down",
+    "guide/schema/migrations.md#editing-a-migration": "guide/schema/migrations.md#edited-migrations",
+    "guide/schema/migrations.md#two-branches-one-number": "guide/schema/migrations.md#duplicate-migration-numbers-and-replace",
+    "guide/schema/migrations.md#squashing-an-epics-migrations": "guide/schema/squash.md",
+    "guide/schema/migrations.md#a-rename-inside-the-range": "guide/schema/squash.md#renames-inside-the-range",
+    "guide/schema/migrations.md#every-database-that-applied-the-originals-inherits-the-squash": "guide/schema/squash.md#inheritance-on-databases-that-ran-the-originals",
+    "guide/schema/migrations.md#a-squash-is-pre-release": "guide/schema/squash.md#squash-timing",
+    "guide/schema/migrations.md#squash-or---replace": "guide/schema/squash.md#squash-vs-replace",
+    # The row-level security split (#715): each section of the old guide and
+    # the page that holds it now.
+    "guide/row-level-security.md#the-pooler-constraint": "concepts/row-level-security.md#the-pooler-constraint",
+    "guide/row-level-security.md#deploy-ordering": "guide/row-level-security.md#deploy-order",
+    "guide/row-level-security.md#declaring-row-security": "guide/row-level-security.md#the-tenant-policy",
+    "guide/row-level-security.md#the-shorthand": "reference/row-level-security.md#the-shorthand",
+    "guide/row-level-security.md#multiple-policies-composing-permissive-and-restrictive": "reference/row-level-security.md#composing-policies",
+    "guide/row-level-security.md#the-raw-escape-hatch": "reference/row-level-security.md#the-sql-form",
+    "guide/row-level-security.md#session-settings": "concepts/row-level-security.md#session-settings",
+    "guide/row-level-security.md#opening-a-session-with-settings": "guide/row-level-security.md#tenant-scoped-sessions",
+    "guide/row-level-security.md#deferred-resolution-current_sessionset_config": "guide/row-level-security.md#a-tenant-known-after-the-session-opens",
+    "guide/row-level-security.md#nesting-and-inheritance": "concepts/row-level-security.md#nested-sessions",
+    "guide/row-level-security.md#scope-stability-mid-operation": "concepts/row-level-security.md#visibility-of-a-new-value",
+    "guide/row-level-security.md#the-nullif-contract": "concepts/row-level-security.md#policy-expressions",
+    "guide/row-level-security.md#bypassrls": "concepts/row-level-security.md#force-and-bypassrls",
+    "guide/row-level-security.md#the-json-claims-recipe": "guide/row-level-security.md#json-claims",
+    "guide/row-level-security.md#framework-integration": "guide/row-level-security.md#web-framework-middleware",
+    "guide/row-level-security.md#outside-the-request-context": "guide/row-level-security.md#background-jobs",
+    "guide/row-level-security.md#connection-delivery-mode": "concepts/row-level-security.md#connection-delivery",
+    "guide/row-level-security.md#raw-policies-and-drift": "concepts/row-level-security.md#drift-and-ownership",
+    "guide/row-level-security.md#migrations-and-alembic": "guide/row-level-security.md#deploy-order",
+    # The deleted Next steps page: every section lands on the quickstart's.
+    "getting-started/next-steps.md#learn-by-use-case": _NEXT_STEPS,
+    "getting-started/next-steps.md#building-an-api": _NEXT_STEPS,
+    "getting-started/next-steps.md#data-processing": _NEXT_STEPS,
+    "getting-started/next-steps.md#production-deployment": _NEXT_STEPS,
+    "getting-started/next-steps.md#common-patterns": _NEXT_STEPS,
+    "getting-started/next-steps.md#reference-material": _NEXT_STEPS,
+    "getting-started/next-steps.md#get-help": _NEXT_STEPS,
+}
+"""Every anchor that moved to another page, or was renamed on its own page,
+during the docs rewrite, and the section that replaced it."""
+
+
+def _site_config() -> dict:
+    with (REPO_ROOT / "zensical.toml").open("rb") as config:
+        return tomllib.load(config)["project"]
+
+
+def _nav_pages(
+    entries: list, trail: tuple[str, ...] = ()
+) -> Iterator[tuple[tuple[str, ...], str, str]]:
+    """Yield ``(sections, label, page)`` for every page in a nav subtree."""
+    for entry in entries:
+        ((label, target),) = entry.items()
+        if isinstance(target, list):
+            yield from _nav_pages(target, (*trail, label))
+        else:
+            yield trail, label, target
+
+
+def _front_matter(page: Path) -> dict:
+    text = page.read_text(encoding="utf-8")
+    match = re.match(r"---\n(.*?)\n---\n", text, re.DOTALL)
+    return (yaml.safe_load(match.group(1)) or {}) if match else {}
+
+
+def _url_path(page: str) -> str:
+    """The URL path of a page, without slashes: ``guide/queries.md`` → ``guide/queries``."""
+    return "" if page == "index.md" else page.removesuffix(".md")
+
+
+def _source_pages() -> list[str]:
+    return sorted(
+        page.relative_to(DOCS_PAGES).as_posix() for page in DOCS_PAGES.rglob("*.md")
+    )
+
+
+def test_nav_has_the_six_tabs() -> None:
+    tabs = [next(iter(entry)) for entry in _site_config()["nav"]]
+    assert tabs == NAV_TABS
+
+
+def test_every_page_is_in_the_nav_once() -> None:
+    in_nav = [page for _, _, page in _nav_pages(_site_config()["nav"])]
+    duplicated = sorted({page for page in in_nav if in_nav.count(page) > 1})
+    assert not duplicated, f"pages listed twice in the nav: {duplicated}"
+    missing = sorted(set(_source_pages()) - set(in_nav))
+    assert not missing, f"pages missing from the nav: {missing}"
+
+
+def test_nav_labels_are_unique() -> None:
+    labels = [label for _, label, _ in _nav_pages(_site_config()["nav"])]
+    assert sorted({label for label in labels if labels.count(label) > 1}) == []
+
+
+def _h1(page_html: str) -> str:
+    match = re.search(r"<h1\b[^>]*>(.*?)</h1>", page_html, re.DOTALL)
+    assert match, "page has no <h1>"
+    heading = re.sub(r'<a class="headerlink".*?</a>', "", match.group(1))
+    return html.unescape(_TAG.sub("", heading)).strip()
+
+
+def test_every_nav_label_equals_its_page_h1(built_site: Path) -> None:
+    mismatched = [
+        f"{page}: nav {label!r}, page {heading!r}"
+        for _, label, page in _nav_pages(_site_config()["nav"])
+        if (heading := _h1(_page(built_site, _url_path(page)))) != label
+    ]
+    assert not mismatched, "nav labels differ from page titles:\n" + "\n".join(
+        mismatched
+    )
+
+
+def test_every_page_has_a_one_sentence_description() -> None:
+    lacking = []
+    for page in _source_pages():
+        description = _front_matter(DOCS_PAGES / page).get("description")
+        if (
+            not isinstance(description, str)
+            or not description.endswith(".")
+            or ". " in description
+        ):
+            lacking.append(page)
+    assert not lacking, f"pages without a one-sentence description: {lacking}"
+
+
+def test_page_descriptions_reach_the_built_pages(built_site: Path) -> None:
+    for page in _source_pages():
+        description = _front_matter(DOCS_PAGES / page)["description"]
+        meta = re.search(
+            r'<meta name="description" content="([^"]*)"',
+            _page(built_site, _url_path(page)),
+        )
+        assert meta, f"{page} has no description meta tag"
+        assert html.unescape(meta.group(1)) == description, page
+
+
+def test_pages_new_in_the_rewrite_are_marked_new() -> None:
+    marked = {
+        page
+        for page in _source_pages()
+        if _front_matter(DOCS_PAGES / page).get("status") == "new"
+    }
+    assert marked == NEW_PAGES
+    assert "new" in _site_config()["extra"]["status"]
+
+
+@pytest.mark.parametrize("old", sorted(MOVED_PAGES))
+def test_moved_page_is_gone_and_its_url_redirects(built_site: Path, old: str) -> None:
+    assert not (DOCS_PAGES / old).exists(), f"{old} is still in the source"
+    old_url = f"https://ferro-orm.x54.sh/{_url_path(old)}/"
+    targets = _redirect_targets(_page(built_site, _url_path(old)))
+    path, _, fragment = MOVED_PAGES[old].partition("#")
+    expected = f"/{_url_path(path)}/" + (f"#{fragment}" if fragment else "")
+    assert urljoin(old_url, targets[""]) == urljoin(old_url, expected)
+    sitemap = (built_site / "sitemap.xml").read_text(encoding="utf-8")
+    assert f"/{_url_path(old)}/<" not in sitemap
+
+
+def test_moved_anchors_redirect_to_existing_sections(built_site: Path) -> None:
+    redirects = json.loads((built_site / "redirect.json").read_text(encoding="utf-8"))
+    for old, new in MOVED_ANCHORS.items():
+        old_page, _, old_fragment = old.partition("#")
+        new_page, _, new_fragment = new.partition("#")
+        key = f"{_url_path(old_page)}/#{old_fragment}"
+        expected = f"{_url_path(new_page)}/" + (
+            f"#{new_fragment}" if new_fragment else ""
+        )
+        assert redirects.get(key) == expected, (
+            f"{old} redirects to {redirects.get(key)}"
+        )
+        if new_fragment:
+            target = _page(built_site, _url_path(new_page))
+            assert f'id="{new_fragment}"' in target, f"{new} has no such anchor"
+        if (DOCS_PAGES / old_page).exists():
+            assert f'id="{old_fragment}"' not in _page(
+                built_site, _url_path(old_page)
+            ), f"{old} is a live section; redirecting it would hide it"

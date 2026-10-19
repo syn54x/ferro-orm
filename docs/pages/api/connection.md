@@ -1,3 +1,7 @@
+---
+description: "API reference for connect(), sessions and the model registry."
+---
+
 # connect, Session and the registry
 
 `connect()` registers a connection pool, optionally under a name, and `engines.session()` opens a session on one; every model call runs inside a session. `reset_engine()` closes every connection. See the [Connections and databases guide](../guide/connections.md).

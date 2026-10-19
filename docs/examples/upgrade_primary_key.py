@@ -1,5 +1,5 @@
 """Runnable companion for the Upgrade guide's primary-key recipe
-(docs/pages/howto/upgrade-guide.md).
+(docs/pages/upgrading.md).
 
 A model with two ``primary_key=True`` fields is refused at class definition.
 The Annotated twin is ``upgrade_primary_key_annotated.py``.

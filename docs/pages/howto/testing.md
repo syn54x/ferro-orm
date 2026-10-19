@@ -1,3 +1,7 @@
+---
+description: "Set up pytest so each test gets a fresh in-memory database with a session open, plus factories and a PostgreSQL fixture."
+---
+
 # How to test a Ferro app with pytest
 
 This page sets up pytest so that each test gets a fresh in-memory SQLite database with a session open, then shows a first test, factories for test data, and a fixture for tests against PostgreSQL.

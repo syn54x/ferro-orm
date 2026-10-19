@@ -1,3 +1,7 @@
+---
+description: "Filter rows with lambda predicates, order and page them, reach across relations and select only the columns you need."
+---
+
 # Queries
 
 This guide shows how to read rows with Ferro: filter them with a lambda, order and page them, reach across relations, populate related rows and select only the columns you need.
@@ -76,7 +80,7 @@ A predicate is the lambda you pass to `where()`. It is the only form `where()` a
 The lambda's return value is type-checked as well: `where()` expects a callable that returns a condition, so `lambda transaction: True` fails your type checker. [Typed query predicates](../concepts/query-typing.md) explains what the checker sees and where checking stops.
 
 !!! note "Changed in 0.14"
-    The operator style (`Transaction.where(Transaction.amount < 0)`) and the `col()` helper were removed in 0.14. [Upgrading to 0.14](../howto/upgrade-guide.md#predicates-operator-style-and-col-are-gone) shows how to rewrite them as lambdas.
+    The operator style (`Transaction.where(Transaction.amount < 0)`) and the `col()` helper were removed in 0.14. [Upgrading to 0.14](../upgrading.md#predicates-operator-style-and-col-are-gone) shows how to rewrite them as lambdas.
 
 ## Operators
 

@@ -1,3 +1,7 @@
+---
+description: "Count, total and average rows with count(), sum(), avg(), min() and max(), and group them by plain fields."
+---
+
 # Aggregations and grouped queries
 
 This guide shows how to total, count and average rows with the five aggregate methods (`count()`, `sum()`, `avg()`, `min()` and `max()`) inside a `select()` lambda, and how a record that mixes plain fields with aggregates becomes a grouped query. The full signatures are in the [aggregates reference](../api/queries.md#aggregates-and-grouped-queries).

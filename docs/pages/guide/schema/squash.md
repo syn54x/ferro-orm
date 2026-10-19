@@ -1,3 +1,8 @@
+---
+description: "Replace a feature branch's migrations with the one migration ferro migrate new would write across them."
+status: new
+---
+
 # Squashing a feature branch's migrations
 
 `ferro migrate squash` replaces a range of migrations, from the one you name through the newest, with the one migration `new` would have written across them. A feature branch collects one migration per task. Main stands at `0001_create_author`, the [Migrations](migrations.md) loop's `Author`, and the teams branch has added four on top of it:

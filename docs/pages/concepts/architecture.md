@@ -1,3 +1,7 @@
+---
+description: "How one model and one query travel through Ferro's Python layer, its Rust core and the database."
+---
+
 # Architecture
 
 This page follows one model and one query through Ferro's layers: what runs in Python, what crosses into Rust, and when the database is involved.

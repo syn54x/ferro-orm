@@ -1,3 +1,7 @@
+---
+description: "Build a small blog backend with two related models and run every core Ferro operation on SQLite."
+---
+
 # Quickstart
 
 This tutorial builds a small blog backend on an in-memory SQLite database: two related models, `Author` and `Post`, and every core Ferro operation: create, query, traverse a relationship, update, delete and run a transaction.

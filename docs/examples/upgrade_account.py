@@ -1,4 +1,4 @@
-"""The running example of the Upgrade guide (docs/pages/howto/upgrade-guide.md).
+"""The running example of the Upgrade guide (docs/pages/upgrading.md).
 
 One ``Account`` model, declared in the assignment style, and the session a
 current release runs its queries in. The Annotated twin is

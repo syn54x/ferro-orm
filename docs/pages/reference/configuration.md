@@ -1,3 +1,7 @@
+---
+description: "Every key of ferro.toml or [tool.ferro], which tells Ferro's tooling where the models are and which dialects to target."
+---
+
 # Configuration
 
 A project commits one file that tells Ferro's tooling where its models are and which dialects its migrations target. `ferro migrate init` writes it; every `ferro migrate` verb, `ferro.migrations.*`, the Alembic bridge's `get_metadata()`, and `connect()` with an auto-migrate flag read it through one class, `ferro.FerroSettings`.

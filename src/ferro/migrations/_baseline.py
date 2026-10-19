@@ -208,7 +208,7 @@ async def baseline(
     [`drift`][ferro.migrations.drift] checks it; when that finds anything,
     nothing is recorded and the report's `drift` lists it. There is no
     override. See
-    [Adopting migrations](../howto/adopting-migrations.md).
+    [Adopting migrations](../guide/schema/adopting-migrations.md).
 
     Args:
         settings: The project's configuration. Defaults to `FerroSettings()`.

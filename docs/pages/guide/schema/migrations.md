@@ -1,3 +1,7 @@
+---
+description: "Write, review and apply migration files with ferro migrate new, up, status and down."
+---
+
 # Migrations
 
 A migration is a numbered directory of steps that changes a database from one version of your models to the next. `ferro migrate new` writes it from the difference between your models and the previous migration; you read it, commit it, and `ferro migrate up` applies it. This is rung 3 of [the ladder](overview.md#the-ladder), and the door Ferro recommends for any database whose data you would mind losing.
@@ -282,7 +286,7 @@ The `nickname` column and its index are gone, and `0002_author_nickname` is pend
 - With no flag, `down` reverts the latest applied migration; `--to 0005` leaves `0005` fully applied, `--to 0007:02` leaves steps `01`–`02` of `0007` applied, `--to 0000` (or `--all`) reverts everything.
 - Without a terminal and without `--yes`, it prints the plan and refuses.
 - A down restores the schema of the previous snapshot, never the rows a drop removed. A step declared irreversible stops the whole run before anything is reverted.
-- A migration that `baseline` recorded created nothing on that database, so `down` refuses to go below it ([Adopting migrations](../../howto/adopting-migrations.md#undoing-a-baseline)).
+- A migration that `baseline` recorded created nothing on that database, so `down` refuses to go below it ([Adopting migrations](adopting-migrations.md#undoing-a-baseline)).
 
 ## Edited migrations
 

@@ -1,3 +1,7 @@
+---
+description: "Ferro is an async Python ORM with Pydantic models and a Rust core, for SQLite and PostgreSQL."
+---
+
 # Ferro ORM
 
 --8<-- "README.md:intro"

@@ -1,3 +1,7 @@
+---
+description: "Where SQLite and PostgreSQL still differ under Ferro: column types, raw SQL and schema changes."
+---
+
 # Database backends
 
 Ferro runs the same models, queries and transactions on SQLite and PostgreSQL; this page explains where the two backends still differ: column types, raw SQL and schema changes.

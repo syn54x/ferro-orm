@@ -1,3 +1,7 @@
+---
+description: "Install Ferro with pip or uv, add the optional extras and check the installed version."
+---
+
 # Installation
 
 Install Ferro with `pip` or `uv`, then check the installed version. Ferro ships pre-compiled wheels, so a normal install needs no Rust toolchain:

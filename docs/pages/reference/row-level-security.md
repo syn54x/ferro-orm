@@ -1,3 +1,8 @@
+---
+description: "API reference for RowSecurity, RowPolicy and the session settings their policies read."
+status: new
+---
+
 # Row-level security
 
 This page lists Ferro's row-level security API: `RowSecurity` and `RowPolicy`, which declare a table's policies, and the session settings the policies read.

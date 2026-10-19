@@ -1,3 +1,7 @@
+---
+description: "Declare a table as a Ferro model and add keys, constraints, indexes, defaults and column types with Field()."
+---
+
 # Models and fields
 
 A model is a Python class that declares one database table: each annotated attribute is a column, and [`Field()`](../api/fields.md#ferro.Field) adds the database options. This page builds one product catalog and adds a feature in each section. Here is the whole `Product` model, created in an in-memory SQLite database and saved once:
@@ -125,7 +129,7 @@ On SQLite both tokens store plain JSON text, so switching between them changes n
 A filter compares a JSON column as a whole value. The query builder has no containment or path operators (`@>`, `->`, `#>>`) and declares no GIN index. To change some keys of a stored object on PostgreSQL, use `.merge()` in a [recipe update](mutations.md#expression-updates).
 
 !!! note "Changed in 0.15"
-    Before 0.15, a `dict` or `list` field without `db_type` created a plain `json` column on PostgreSQL. Read [Upgrading to 0.15](../howto/upgrade-guide.md#upgrading-to-015) before you connect such a database with `migrate_updates`.
+    Before 0.15, a `dict` or `list` field without `db_type` created a plain `json` column on PostgreSQL. Read [Upgrading to 0.15](../upgrading.md#upgrading-to-015) before you connect such a database with `migrate_updates`.
 
 ## Primary keys
 

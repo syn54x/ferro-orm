@@ -1,3 +1,7 @@
+---
+description: "Link models with foreign keys, back-references and many-to-many join tables, and load related rows."
+---
+
 # Relationships
 
 This guide shows how to link models with foreign keys: a player belongs to a team, a team lists its players, and players enter tournaments through a join table Ferro creates.

@@ -1,3 +1,7 @@
+---
+description: "Run SQL you write yourself with execute(), fetch_all() and fetch_one(), for statements a model query cannot express."
+---
+
 # Raw SQL
 
 [`execute()`][ferro.execute], [`fetch_all()`][ferro.fetch_all] and [`fetch_one()`][ferro.fetch_one] run SQL you write yourself, for the statements a model query cannot express.

@@ -1,3 +1,7 @@
+---
+description: "Make the database match your models every time you connect, with no files to write or review."
+---
+
 # Auto-migrate
 
 Auto-migrate makes the database match the models when you connect, with no files and nothing to review. Take the overview's `Author`, which has just gained a `nickname`:
@@ -249,5 +253,5 @@ On Postgres the lock is a session-level advisory lock, so auto-migrate is refuse
 
 - [Schema management overview](overview.md): the ladder and one door per database
 - [Connections & Databases](../connections.md): `connect()` options
-- [Adopting migrations on an existing database](../../howto/adopting-migrations.md): moving a database auto-migrate built onto migrations
+- [Adopting migrations on an existing database](adopting-migrations.md): moving a database auto-migrate built onto migrations
 - [Connection API reference](../../api/connection.md#ferro.PassReport): `connect()`, `migrate()`, `create_tables()` and `PassReport`

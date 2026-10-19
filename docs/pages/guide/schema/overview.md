@@ -1,3 +1,7 @@
+---
+description: "How a database comes to match your models: auto-migrate for development, migration files for production."
+---
+
 # Schema management
 
 Schema management is how a database comes to match your models, which are the source of truth for its schema. Ferro gives you two doors for it:
@@ -50,7 +54,7 @@ The rule is per database, not per project. A throwaway test database built with 
 | :--- | :--- | :--- |
 | A database with migrations applied | `connect(..., auto_migrate=True)` (or either stronger flag), `create_tables()`, `migrate()` | Refused before any DDL, text above |
 | A database with migrations applied | `alembic revision --autogenerate` over Ferro models | Refused, naming `ferro migrate new` ([Alembic](alembic.md#what-autogenerate-refuses)) |
-| A database auto-migrate or Alembic built | `ferro migrate up` | Refused, naming `ferro migrate baseline` ([adopting migrations](../../howto/adopting-migrations.md)) |
+| A database auto-migrate or Alembic built | `ferro migrate up` | Refused, naming `ferro migrate baseline` ([adopting migrations](adopting-migrations.md)) |
 | A database auto-migrate built | `alembic revision --autogenerate` | Works: the first revision is empty when the database matches the models, since both doors plan with the same planner |
 
 ## What each door covers
@@ -67,7 +71,7 @@ The [door coverage table](../../reference/migrations.md#what-each-door-covers) l
 
 - **Starting out, or writing tests:** `auto_migrate=True`. Tests keep this posture even in a project with migrations; see [Testing migrations](testing.md).
 - **Developing, the schema still moving, the data disposable:** `migrate_updates=True`.
-- **The first time you would mind losing the data:** `ferro migrate init`, then `ferro migrate new initial`. If the database already exists, follow [Adopting migrations on an existing database](../../howto/adopting-migrations.md); it runs no DDL.
+- **The first time you would mind losing the data:** `ferro migrate init`, then `ferro migrate new initial`. If the database already exists, follow [Adopting migrations on an existing database](adopting-migrations.md); it runs no DDL.
 - **A server:** apply migrations in the deploy step and refuse to start behind them; see [Deploying migrations](deploying.md).
 - **A local-first app that ships a SQLite file to its users:** migrations, applied at start-up with `await ferro.migrations.up()` ([Deploying migrations](deploying.md#apps-that-migrate-at-start-up)).
 

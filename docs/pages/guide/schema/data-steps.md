@@ -1,3 +1,7 @@
+---
+description: "Write the Python step that gives existing rows their values when a migration adds or changes a column."
+---
+
 # Data steps and backfills
 
 A data step is a Python step inside a migration, for the part of a change only you can write: the value existing rows get. Add a required `slug` to a table that already has authors, and every existing row needs a slug before the column can be `NOT NULL`:

@@ -1,3 +1,7 @@
+---
+description: "Split query results into pages by page number with limit() and offset(), or by position with after() and before()."
+---
+
 # How to paginate query results
 
 This page splits a query's results into pages two ways: by page number with `limit()` and `offset()`, and by position with `after()` and `before()`. Use page numbers when users jump to page 7 of a small table; use positions for feeds, infinite scroll, APIs and large tables.

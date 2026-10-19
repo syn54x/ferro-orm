@@ -1,5 +1,5 @@
 """Runnable companion for the Upgrade guide's keep recipes
-(docs/pages/howto/upgrade-guide.md).
+(docs/pages/upgrading.md).
 
 ``Account`` with the three fields that opt out of a derived storage type that
 changed: a naive timestamp, an enum stored as text with a check, and plain-JSON

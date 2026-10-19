@@ -1,4 +1,8 @@
-# Typed Query Predicates
+---
+description: "How Ferro's lambda predicates are checked, by your type checker and when you build a query, and where checking stops."
+---
+
+# Typed query predicates
 
 This page explains how Ferro's lambda predicates are checked: what your type checker sees, what Ferro checks when you build a query, and where checking stops.
 

@@ -1,3 +1,7 @@
+---
+description: "Test a migration by seeding a database at the previous migration, applying the next one and reading the rows back."
+---
+
 # Testing migrations
 
 A migration test stands a database at one migration, seeds rows the way the tables stood then, applies the next migration and reads the result back. Take a project whose `0002_author_slug` adds a required `slug` and backfills it from the name:
