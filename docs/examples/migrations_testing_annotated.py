@@ -1,9 +1,12 @@
-# ruff: noqa: E402 - the models come first, as the docs page shows them
+# ruff: noqa: E402, F811 - the models come first, and each of the page's files imports what it uses
 """Runnable companion for testing migrations, Annotated style
 (docs/pages/guide/schema/testing.md).
 
 Generates two migrations (the second backfills a new required column), then
-runs the page's two harness tests against fresh SQLite files.
+runs the page's tests under pytest, in the project, the way a reader runs
+them: its ``conftest.py`` fixture, its test module and its pytest settings.
+Then it declares the backfill's down irreversible and runs the page's round
+trip that stops there.
 """
 
 # --8<-- [start:models]
@@ -21,6 +24,21 @@ class Author(Model):
 # --8<-- [end:models]
 
 
+# --8<-- [start:fixture]
+import pytest
+
+import ferro
+
+
+@pytest.fixture
+def database_url(tmp_path):
+    yield f"sqlite:{tmp_path / 'test.db'}?mode=rwc"
+    ferro.reset_engine()  # close the test's connection
+
+
+# --8<-- [end:fixture]
+
+
 # --8<-- [start:tests]
 import ferro
 from ferro.migrations.testing import harness
@@ -28,17 +46,17 @@ from ferro.migrations.testing import harness
 
 async def test_the_slug_backfill(database_url):
     await ferro.connect(database_url)
-    h = harness()
-    await h.apply_through("0001")
-    async with h.models_at("0001") as models:  # the table as 0001 left it
+    migrations = harness()
+    await migrations.apply_through("0001")
+    async with migrations.models_at("0001") as models:  # the table as 0001 left it
         await models.Author(name="Ada Lovelace").save()
-    await h.apply("0002")  # refused unless the database stands at 0001
-    async with h.models_at("0002") as models:
+    await migrations.apply("0002")  # refused unless the database stands at 0001
+    async with migrations.models_at("0002") as models:
         ada = await models.Author.where(
             lambda author: author.name == "Ada Lovelace"
         ).first()
         assert ada.slug == "ada-lovelace"
-    await h.revert_to("0001")
+    await migrations.revert_to("0001")
 
 
 async def test_every_migration_round_trips(database_url):
@@ -50,16 +68,58 @@ async def test_every_migration_round_trips(database_url):
 # --8<-- [end:tests]
 
 
-import asyncio
-import os
+# --8<-- [start:irreversible]
+import ferro
+from ferro.migrations.testing import RoundTripResult, harness
 
-from _migrations_project import project
+
+async def test_the_round_trip_stops_at_the_irreversible_step(database_url):
+    await ferro.connect(database_url)
+    result = await harness().round_trip()
+    assert result == RoundTripResult(
+        applied=["0001_create_author", "0002_author_slug"],
+        reverted_to="0002_author_slug",
+        irreversible=(
+            "0002_author_slug",
+            "02_backfill_author",
+            "the old slugs are gone",
+        ),
+    )
+
+
+# --8<-- [end:irreversible]
+
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+from _migrations_project import _region, project
 
 TODO = '        author.slug = todo("the slug for an existing author")\n'
 WRITTEN = '        author.slug = author.name.lower().replace(" ", "-")\n'
+NOTHING_TO_REVERSE = '@nothing_to_reverse("01_expand.down.sql drops the column")'
+IRREVERSIBLE = '@irreversible("the old slugs are gone")'
+PYTEST_SETTINGS = '[tool.pytest.ini_options]\nasyncio_mode = "auto"\n'
+
+
+def run_pytest(app, *modules: str, passed: int) -> None:
+    """``pytest`` over ``modules`` in the project, as a reader runs it."""
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *modules],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        cwd=app.root,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert f"{passed} passed" in result.stdout, result.stdout
 
 
 def main() -> None:
+    script = Path(__file__)
     with project(__file__) as app:
         app.models_before()
         app.ferro("migrate", "new", "create_author")
@@ -68,18 +128,24 @@ def main() -> None:
         backfill = app.migrations / "0002_author_slug" / "02_backfill_author.py"
         backfill.write_text(backfill.read_text().replace(TODO, WRITTEN))
 
-        # The harness reads the project's config from the working directory,
-        # as it does under pytest run from the project root.
-        cwd = os.getcwd()
-        os.chdir(app.root)
-        try:
-            for number, test in enumerate(
-                (test_the_slug_backfill, test_every_migration_round_trips)
-            ):
-                asyncio.run(test(f"sqlite:{app.root / f'test{number}.db'}?mode=rwc"))
-                ferro.reset_engine()
-        finally:
-            os.chdir(cwd)
+        # The page's files, in the project: pytest runs from its root, where the
+        # harness reads the project's configuration, as every ferro command does.
+        (app.root / "pyproject.toml").write_text(PYTEST_SETTINGS)
+        (app.root / "conftest.py").write_text(_region(script, "fixture"))
+        (app.root / "test_migrations.py").write_text(_region(script, "tests"))
+        run_pytest(app, "test_migrations.py", passed=2)
+
+        # A backfill whose down is declared irreversible ends the downward walk.
+        source = backfill.read_text()
+        assert NOTHING_TO_REVERSE in source
+        backfill.write_text(
+            source.replace(NOTHING_TO_REVERSE, IRREVERSIBLE).replace(
+                "import chunked, nothing_to_reverse, todo",
+                "import chunked, irreversible, todo",
+            )
+        )
+        (app.root / "test_round_trip.py").write_text(_region(script, "irreversible"))
+        run_pytest(app, "test_round_trip.py", passed=1)
 
 
 if __name__ == "__main__":
