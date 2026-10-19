@@ -52,7 +52,7 @@ Edit a model, generate, read, apply, commit. Starting from an `Author` with `id`
     --8<-- "docs/examples/migrations_quickstart_annotated.py:models"
     ```
 
-The `# new` comment marks the field the edit adds; `0001_create_author`, the first migration, created the table without it. `ferro migrate check` notices the edit, offline, and says what to run:, offline, and says what to run:
+The `# new` comment marks the field the edit adds; `0001_create_author`, the first migration, created the table without it. `ferro migrate check` notices the edit, offline, and says what to run:
 
 <!-- output: loop-check -->
 ```text

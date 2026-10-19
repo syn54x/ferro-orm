@@ -71,7 +71,7 @@ If you are moving from `0.12` or earlier straight past `0.14`, the deprecated AP
 - **Schema snapshots.** Every snapshot `0.25` writes uses a newer snapshot format. A `0.24` checkout refuses the first migration that carries one, so finish rolling out `0.25` before anyone runs `ferro migrate new`.
 - **Inherited rows.** A database that inherited a squash holds rows with `origin = inherited`. A `0.24` runner fails every verb on them with `the tracking table holds a row ferro cannot read (origin)`. A squash is made before a branch merges, so only development databases meet this.
 
-[Deploying migrations](../guide/schema/deploying.md) lists the three ways back from the second. Reference: [Squashing an epic's migrations](../guide/schema/migrations.md#squashing-an-epics-migrations).
+[Deploying migrations](../guide/schema/deploying.md) lists the three ways back from the second. Reference: [Squashing a feature branch's migrations](../guide/schema/squash.md).
 
 ## Upgrading to 0.24
 
@@ -97,7 +97,7 @@ If you are moving from `0.12` or earlier straight past `0.14`, the deprecated AP
 
 - **A start-up `baseline()` can branch on a type.** Two services that baseline one database at the same moment used to get a plain `MigrationRefused` from the loser. The loser now gets `AlreadyTrackedError`, a subclass, so `except MigrationRefused` still works and you can catch the narrower type. See [An app that migrates at start-up](adopting-migrations.md#an-app-that-migrates-at-start-up).
 
-Also new, and opt-in: [`Field(retired=True)`](../guide/schema/migrations.md#retiring-a-column) and retired enum labels, which let a column or a label leave in two releases, and [`allow_ahead="expand-only"`](../guide/schema/deploying.md), which lets an older release start beside a newer schema. A database whose last migration ran on `0.22` has its steps classed on the first run of `0.23`; [Deploying migrations](../guide/schema/deploying.md) says how.
+Also new, and opt-in: [`Field(retired=True)`](../guide/schema/renames-and-retirements.md#retiring-a-column) and retired enum labels, which let a column or a label leave in two releases, and [`allow_ahead="expand-only"`](../guide/schema/deploying.md), which lets an older release start beside a newer schema. A database whose last migration ran on `0.22` has its steps classed on the first run of `0.23`; [Deploying migrations](../guide/schema/deploying.md) says how.
 
 ??? example "Automate this: copy this prompt to your coding agent"
 
