@@ -78,9 +78,9 @@ class Document(Model):
 # --8<-- [end:composed]
 
 
-def app_url_for(admin_url: str, role: str) -> str:
-    """The same database as ``admin_url``, logged in as ``role``."""
-    parsed = urlparse(admin_url)
+def app_url_for(migrator_url: str, role: str) -> str:
+    """The same database as ``migrator_url``, logged in as ``role``."""
+    parsed = urlparse(migrator_url)
     netloc = f"{quote(role, safe='')}:{quote(APP_PASSWORD, safe='')}@{parsed.hostname}"
     if parsed.port:
         netloc += f":{parsed.port}"
@@ -102,14 +102,16 @@ async def create_app_role(role: str) -> None:
         await execute(f'GRANT USAGE ON ALL SEQUENCES IN SCHEMA "{schema}" TO "{role}"')
 
 
-async def on_postgres(admin_url: str, role: str) -> None:
-    await connect(admin_url, auto_migrate=True)
+async def on_postgres(migrator_url: str, role: str) -> None:
+    # --8<-- [start:connect_migrator]
+    await connect(migrator_url, auto_migrate=True)
+    # --8<-- [end:connect_migrator]
     await create_app_role(role)
-    app_url = app_url_for(admin_url, role)
+    app_url = app_url_for(migrator_url, role)
 
-    # --8<-- [start:connect]
+    # --8<-- [start:connect_app]
     await connect(app_url, name="app")
-    # --8<-- [end:connect]
+    # --8<-- [end:connect_app]
 
     # --8<-- [start:seed]
     async with engines.session():
@@ -227,8 +229,8 @@ async def on_sqlite() -> None:
 
 async def main(argv: list[str]) -> None:
     if argv:
-        admin_url, role = argv
-        await on_postgres(admin_url, role)
+        migrator_url, role = argv
+        await on_postgres(migrator_url, role)
     else:
         await on_sqlite()
     print("row_level_security example ran successfully")
