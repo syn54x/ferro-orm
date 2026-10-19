@@ -1,416 +1,267 @@
-# Models & Fields
+# Models and fields
 
-Models define your schema in plain Python type hints, validate data with Pydantic, and map to database tables in the Rust engine.
-
-## Defining a Model
-
-Inherit from `ferro.Model` and declare fields with standard type annotations:
+A model is a Python class that declares one database table: each annotated attribute is a column, and [`Field()`](../api/fields.md#ferro.Field) adds the database options. This page builds one product catalog and adds a feature in each section. Here is the whole `Product` model, created in an in-memory SQLite database and saved once:
 
 === "Assignment"
 
     ```python
-    --8<-- "docs/examples/quickstart.py:models"
+    --8<-- "docs/examples/models_and_fields.py:program"
     ```
 
 === "Annotated"
 
     ```python
-    --8<-- "docs/examples/quickstart_annotated.py:models"
+    --8<-- "docs/examples/models_and_fields_annotated.py:program"
     ```
 
-Every Ferro model is a full [Pydantic](https://docs.pydantic.dev/latest/) `BaseModel`, so validation, serialization (`model_dump()`, `model_dump_json()`), and `model_config` all work.
+Run it with `asyncio.run(main())`. The database assigns `id`, and `status` takes its default. `create_tables()` returns the statements it ran; this is the table it created:
 
-## Declaration Styles
+```sql
+--8<-- "docs/examples/models_and_fields.py:product-table"
+```
 
-Ferro's `Field()` merges database options (`primary_key`, `unique`, `index`, ...) with Pydantic's validation options in a single call. You can attach it in two equivalent ways:
+Columns are written in name order, and every annotation that does not allow `None` is `NOT NULL`. The rest of this page takes the model apart one feature at a time. Each later example runs inside the session the first one opens; see [Sessions](connections.md#sessions-recommended).
 
-=== "Assignment with Field()"
+Every Ferro model is also a [Pydantic](https://docs.pydantic.dev/latest/) `BaseModel`, so `model_dump()`, `model_dump_json()`, validators and `model_config` work as they do in Pydantic.
 
-    Put defaults and options on the assignment side — the classic Pydantic style:
+## Declaration styles
 
-    ```python
-    from decimal import Decimal
+`Field()` takes the database options (`primary_key`, `unique`, `index`, `db_type`) and Pydantic's validation options (`max_length`, `ge`, `pattern`) in one call. The two tabs above attach it in the two ways Ferro accepts, and they create the same schema:
 
-    from ferro import Field, Model
+- **Assignment** puts `Field(...)` on the right of `=`, the classic Pydantic style.
+- **Annotated** puts it inside `typing.Annotated[...]` and keeps the default as the assigned value, so a type checker sees the default.
 
+Pick one style per project. Every example in these docs shows both, in tabs. A forward foreign key is always written `Annotated[Author, ForeignKey(...)]`, in either style; see [Relationships](relationships.md).
 
-    class Product(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        slug: str = Field(unique=True, index=True)
-        name: str = Field(max_length=200, description="Display name")
-        price: Decimal = Field(ge=0, decimal_places=2)
-    ```
+## Field types
 
-=== "Annotated metadata"
+Ferro chooses each column's type from the annotation. The table lists what the create pass writes for each annotation, on each database:
 
-    Keep the plain type on the left and pass `Field(...)` inside `typing.Annotated`:
+--8<-- "docs/includes/field-types.md:annotations"
 
-    ```python
-    from decimal import Decimal
-    from typing import Annotated
+The table is generated from the code that chooses the type, so it matches the schema Ferro creates. A few rows need a sentence more:
 
-    from ferro import Field, Model
+- An annotation that allows `None`, such as `int | None`, drops `NOT NULL` and keeps the type.
+- `datetime` is `timestamp with time zone` on PostgreSQL. For a column without a time zone, declare `db_type="timestamp"`.
+- A `UUID` column is declared `CHAR(32)` on SQLite, and the value Ferro stores in it is the 36-character hyphenated string. SQLite does not enforce a declared length.
+- A JSON-family field, `dict`, `list`, `tuple`, `set` or a nested Pydantic model, is `jsonb` on PostgreSQL and `JSON` on SQLite. See [JSON storage](#json-storage-json-and-jsonb).
 
+### Column type overrides with `db_type`
 
-    class Product(Model):
-        id: Annotated[int | None, Field(default=None, primary_key=True)]
-        slug: Annotated[str, Field(unique=True, index=True)]
-        name: Annotated[str, Field(max_length=200, description="Display name")]
-        price: Annotated[Decimal, Field(ge=0, decimal_places=2)]
-    ```
-
-Both produce identical schemas — every example in these docs shows both styles in tabs; pick one and stay consistent within a project. The `Annotated` style keeps the bare type visible at a glance and is also how forward relationships are declared (`Annotated[Author, ForeignKey(...)]` — see [Relationships](relationships.md)).
-
-!!! note "Advanced: `FerroField`"
-    For a type-first style that carries only database flags (no Pydantic validation kwargs), you can attach `ferro.FerroField(...)` as `Annotated` metadata instead: `id: Annotated[int, FerroField(primary_key=True)]`. It accepts the same database options as `Field()`.
-
-## Field Types
-
-Ferro maps Python annotations to backend-appropriate column types:
-
-| Python type | SQLite | PostgreSQL | Notes |
-| :--- | :--- | :--- | :--- |
-| `int` | `INTEGER` | `INTEGER` / `BIGINT` | |
-| `str` | `TEXT` | `TEXT` | Override with `db_type=varchar(n)` |
-| `bool` | `BOOLEAN` (0/1) | `BOOLEAN` | |
-| `float` | `DOUBLE` | `DOUBLE PRECISION` | |
-| `datetime.datetime` | `TEXT` (ISO 8601) | `TIMESTAMP` / `TIMESTAMPTZ` | |
-| `datetime.date` | `TEXT` (ISO 8601) | `DATE` | |
-| `datetime.time` | `TEXT` (ISO 8601) | `TIME` | |
-| `uuid.UUID` | `TEXT` (36 chars) | `UUID` | |
-| `decimal.Decimal` | `NUMERIC` | `NUMERIC` | For money and other exact values |
-| `bytes` | `BLOB` | `BYTEA` | |
-| `enum.Enum` | `TEXT` | native `ENUM` | See note below |
-| `dict` / `list` | `TEXT` (JSON) | `JSONB` (default) | `db_type="json"` opts out |
-
-### Overriding the column type with `db_type`
-
-When the inferred type isn't what you want — for example `varchar(255)` instead of unbounded `TEXT` — pass a `db_type` token:
+When you want a different column type for a field, for example a length limit of `varchar(200)` instead of unbounded `varchar`, pass a `db_type` token:
 
 === "Assignment"
 
     ```python
-    from ferro import Field, Model, varchar
-
-
-    class Document(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        title: str = Field(db_type=varchar(255))
-        body: str = Field(db_type="text")
+    --8<-- "docs/examples/models_and_fields.py:db-type"
     ```
 
 === "Annotated"
 
     ```python
-    from typing import Annotated
-
-    from ferro import Field, Model, varchar
-
-
-    class Document(Model):
-        id: Annotated[int | None, Field(default=None, primary_key=True)]
-        title: Annotated[str, Field(db_type=varchar(255))]
-        body: Annotated[str, Field(db_type="text")]
+    --8<-- "docs/examples/models_and_fields_annotated.py:db-type"
     ```
 
-Valid values are the `DbTypeToken` literals — `"text"`, `"smallint"`, `"int"`, `"bigint"`, `"uuid"`, `"timestamp"`, `"timestamptz"`, `"date"`, `"time"`, `"json"`, `"jsonb"` — plus `varchar(n)` built with `ferro.varchar`. Prefer `varchar(255)` over the raw string `"varchar(255)"` so type checkers see a deliberate vocabulary choice. The override is validated against the Python annotation at class-definition time — on both declaration styles and on raw `json_schema_extra` declarations alike — so an incompatible combination fails immediately.
+The column becomes:
 
-!!! note "Enum storage"
-    `enum.Enum` fields are stored as text on SQLite and as named native `ENUM` types on PostgreSQL (created by every schema door: auto-migrate, [migrations](schema/migrations.md) and the [Alembic bridge](schema/alembic.md)). For closed-domain string columns with a DB-side `CHECK` constraint, combine `db_type` with `db_check=True`.
+```sql
+--8<-- "docs/examples/models_and_fields.py:name-column"
+```
+
+`max_length=200` is the Pydantic check that rejects a longer name before it reaches the database; `db_type` sets only the column. Build `varchar(n)` with [`ferro.varchar`](../api/fields.md#ferro.varchar) rather than the string `"varchar(200)"`, so a type checker sees a token it knows. These are the tokens and what each writes:
+
+--8<-- "docs/includes/field-types.md:db-type-tokens"
+
+Ferro checks the token against the annotation when the class is defined, so `x: int = Field(db_type="uuid")` raises `TypeError` when the class is defined, not at the first query.
+
+### Enums
+
+An `enum.Enum` field stores the enum's values. `Product.status` is a `StrEnum` with a default:
+
+```python
+--8<-- "docs/examples/models_and_fields.py:enum"
+```
+
+On SQLite the column is `varchar(n)`, sized to the longest value (`retired`, 7 characters):
+
+```sql
+--8<-- "docs/examples/models_and_fields.py:status-column"
+```
+
+On PostgreSQL the column uses a native enum type named after the class, `status`, which every schema door creates before the table: [auto-migrate](schema/auto-migrate.md), [migrations](schema/migrations.md) and the [Alembic bridge](schema/alembic.md). Either way the database holds the value, not the member name:
+
+```python
+--8<-- "docs/examples/models_and_fields.py:enum-value"
+```
+
+The row reads back `"active"`, the value of `Status.ACTIVE`. To keep a closed set of values in a plain column with a `CHECK` constraint instead, declare `Field(db_type="text", db_check=True)`; the constraint is named `ck_<table>_<column>`.
 
 ### JSON storage: `json` and `jsonb`
 
-Json-family fields — `dict`, `list` (any element type, including `list[SomeNestedModel]`), and nested Pydantic models — store as JSON documents. On PostgreSQL the default is **JSONB** (binary storage, GIN-indexable, containment operators — the type PostgreSQL itself recommends); declare `db_type="json"` per column to opt out into plain `json` when you need representation fidelity:
+A `dict`, a `list` or a nested Pydantic model is stored as one JSON document. `Product` has two:
 
 === "Assignment"
 
     ```python
-    from typing import Any
-
-    from pydantic import BaseModel
-
-    from ferro import Field, Model
-
-
-    class Payment(BaseModel):
-        currency: str
-        amount: int
-
-
-    class Transaction(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        raw_payload: dict[str, Any] = Field()                # JSONB (the default)
-        line_items: list[Payment] = Field(db_type="jsonb")   # explicit, same as default
-        audit_note: dict[str, str] = Field(db_type="json")   # plain-json opt-out
+    --8<-- "docs/examples/models_and_fields.py:json"
     ```
 
 === "Annotated"
 
     ```python
-    from typing import Annotated, Any
-
-    from pydantic import BaseModel
-
-    from ferro import Field, Model
-
-
-    class Payment(BaseModel):
-        currency: str
-        amount: int
-
-
-    class Transaction(Model):
-        id: Annotated[int | None, Field(default=None, primary_key=True)]
-        raw_payload: Annotated[dict[str, Any], Field()]                # JSONB (the default)
-        line_items: Annotated[list[Payment], Field(db_type="jsonb")]  # explicit, same as default
-        audit_note: Annotated[dict[str, str], Field(db_type="json")]  # plain-json opt-out
+    --8<-- "docs/examples/models_and_fields_annotated.py:json"
     ```
 
-Declaring `db_type="jsonb"` on anything outside the json family (an `int`, a `set`, ...) fails at class-definition time.
+Both columns are `jsonb` on PostgreSQL and `JSON` on SQLite, and a value reads back equal to the one saved:
 
-**SQLite lowering.** On SQLite both tokens store as plain JSON text — one model definition runs on both backends, and switching between `json` and `jsonb` never changes SQLite behavior.
+```python
+--8<-- "docs/examples/models_and_fields.py:json-round-trip"
+```
 
-**Round-trip contract is value equality, not byte fidelity.** PostgreSQL's `jsonb` does not preserve dict key order (keys come back sorted), duplicate keys, or whitespace — that's inherent to the storage type, not Ferro. Values compare equal with Python `==` (dict equality ignores order), but if you iterate keys and need insertion order — or need the stored text byte-for-byte — opt out with `db_type="json"`.
+`jsonb` is binary storage that PostgreSQL can index and compare, and it is the type PostgreSQL recommends. It does not keep the text you wrote: keys come back sorted, a duplicate key keeps its last value, and whitespace is dropped. Python's `==` ignores dict key order, so the assertions above hold. If you iterate the keys and need their insertion order, or need the stored text byte for byte, declare `db_type="json"` on that field. `db_type="jsonb"` on a field outside the JSON family, such as an `int`, raises `TypeError` when the class is defined.
 
-**Migrating between `json` and `jsonb` is a declaration edit.** With [`migrate_updates`](schema/auto-migrate.md) enabled, a storage change emits exactly one `ALTER TABLE ... TYPE ... USING ...` on PostgreSQL in either direction (existing values survive the cast). A [migration](schema/migrations.md) and the [Alembic bridge](schema/alembic.md) render the same DDL. On SQLite the same edit is a no-op.
+On SQLite both tokens store plain JSON text, so switching between them changes nothing there. On PostgreSQL the switch is a declaration edit: with [`migrate_updates`](schema/auto-migrate.md) on, the pass runs one `ALTER TABLE ... TYPE ... USING ...` and existing values survive the cast. A [migration](schema/migrations.md) and the [Alembic bridge](schema/alembic.md) write the same statement.
 
-!!! warning "Upgrading from a pre-JSONB-default release"
-    Databases created before the JSONB default carry plain `json` columns for derived `dict`/`list` fields. On your first connect with `migrate_updates=True`, each such column upgrades in place with one `ALTER ... TYPE jsonb USING ...` — values survive, but dict key order stops being preserved. To keep a column as plain `json`, add `db_type="json"` to its declaration **before** upgrading; the diff is then zero operations.
+A filter compares a JSON column as a whole value. The query builder has no containment or path operators (`@>`, `->`, `#>>`) and declares no GIN index. To change some keys of a stored object on PostgreSQL, use `.merge()` in a [recipe update](mutations.md#recipe-updates).
 
-!!! note "Querying inside JSONB"
-    Containment and path operators (`@>`, `->`, `#>>`) and GIN index declarations are not in the query builder yet — they're planned follow-ups. Today JSONB gives you honest storage and round-tripping; query the column as a whole.
+!!! note "Changed in 0.15"
+    Before 0.15, a `dict` or `list` field without `db_type` created a plain `json` column on PostgreSQL. Read [Derived JSON storage is JSONB on PostgreSQL](../howto/upgrade-guide.md#derived-json-storage-is-jsonb-on-postgresql) before you connect such a database with `migrate_updates`.
 
-## Field Options
-
-Database options accepted by `Field()` (and `FerroField()`):
-
-| Option | Type | Default | Description |
-| :--- | :--- | :--- | :--- |
-| `primary_key` | `bool` | `False` | Mark this column as the table's primary key. |
-| `autoincrement` | `bool \| None` | `None` | Database-generated values. Inferred `True` for integer primary keys; pass `False` for manual integer keys. |
-| `unique` | `bool` | `False` | Single-column uniqueness constraint. For multi-column uniqueness see [Composite Constraints](#composite-constraints). |
-| `index` | `bool` | `False` | Create a non-unique index on this column. |
-| `nullable` | `"infer" \| bool` | `"infer"` | Column nullability. `"infer"` follows whether the annotation allows `None`; `True`/`False` force it (useful when the Python type diverges from the column on purpose). |
-| `default` | any | — | Pydantic default value. Also used to backfill when [`migrate_updates`](schema/auto-migrate.md) adds a NOT NULL column — including a JSON object or array on a json-family field. |
-| `default_factory` | callable | — | Pydantic default factory, e.g. `default_factory=datetime.now`. On json-family fields (`dict` / `list` / nested model), `default_factory=dict` / `list` is snapshotted once as a backfill literal; `uuid4` and `datetime.now` are not. |
-| `db_type` | `DbType \| None` | `None` | Column-type override (see above). |
-| `db_check` | `bool` | `False` | Emit a DB-side `CHECK` constraint for closed-domain types; only valid with `db_type`. |
-| `renamed_from` | `str \| None` | `None` | The column's previous name: a rename hint. `ferro migrate new` writes `RENAME COLUMN` instead of a drop and an add, so every row keeps its value; `ForeignKey(..., renamed_from=...)` does the same for a relation's `*_id` column. Inert once its migration is generated. See [Renames](schema/migrations.md#renames). |
-| `retired` | `bool` | `False` | Retire the column: the field leaves the model (no attribute, no keyword, no statement the model issues names it) and the column stays in the schema, nullable, until the declaration is deleted in a later release. The annotation must allow `None`; `ForeignKey(retired=True)` does the same for a relation's `*_id` column. See [Retiring a column](schema/migrations.md#retiring-a-column). |
-
-On top of these, every Pydantic validation option works in the same call: `min_length`, `max_length`, `pattern`, `gt`, `ge`, `lt`, `le`, `multiple_of`, `decimal_places`, `description`, and the rest — see [Pydantic's Field docs](https://docs.pydantic.dev/latest/api/fields/#pydantic.fields.Field).
-
-## Primary Keys
+## Primary keys
 
 ### Auto-increment
 
-Integer primary keys auto-increment by default. Declare them as `int | None` with `default=None` so unsaved instances can exist before the database assigns an ID:
+An integer primary key is generated by the database. Declare it `int | None` with a default of `None`, so an instance can exist before it is saved:
 
 === "Assignment"
 
     ```python
-    from ferro import Field, Model
-
-
-    class User(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        name: str
+    --8<-- "docs/examples/models_and_fields.py:primary-key"
     ```
 
 === "Annotated"
 
     ```python
-    from typing import Annotated
-
-    from ferro import Field, Model
-
-
-    class User(Model):
-        id: Annotated[int | None, Field(default=None, primary_key=True)]
-        name: str
+    --8<-- "docs/examples/models_and_fields_annotated.py:primary-key"
     ```
 
-After `await user.save()` (or `User.create(...)`), the generated ID is written back onto the instance.
+It is `integer PRIMARY KEY AUTOINCREMENT` on SQLite and `serial PRIMARY KEY` on PostgreSQL. `save()` writes the generated value back onto the instance:
 
-### Manual
+```python
+--8<-- "docs/examples/models_and_fields.py:save"
+```
 
-For natural keys, or integer keys you assign yourself, disable auto-increment:
+The second product gets `id` 2. For an integer key that you assign yourself, pass `Field(primary_key=True, autoincrement=False)`.
+
+### Natural keys
+
+A column that already identifies the row, such as a category code, can be the primary key. `Category` uses its `code`:
 
 === "Assignment"
 
     ```python
-    from ferro import Field, Model
-
-
-    class Country(Model):
-        code: str = Field(primary_key=True)  # natural key, e.g. "US"
-        name: str
-
-
-    class LegacyRecord(Model):
-        id: int = Field(primary_key=True, autoincrement=False)
-        payload: str
+    --8<-- "docs/examples/models_and_fields.py:category"
     ```
 
 === "Annotated"
 
     ```python
-    from typing import Annotated
-
-    from ferro import Field, Model
-
-
-    class Country(Model):
-        code: Annotated[str, Field(primary_key=True)]  # natural key, e.g. "US"
-        name: str
-
-
-    class LegacyRecord(Model):
-        id: Annotated[int, Field(primary_key=True, autoincrement=False)]
-        payload: str
+    --8<-- "docs/examples/models_and_fields_annotated.py:category"
     ```
+
+The key is a plain `varchar` primary key, and you pass it on create: `Category.create(code="lighting", title="Lighting")`. `__ferro_table__` names the table; see [Custom table names](#custom-table-names).
 
 ### UUID primary keys
 
-Generate UUIDs client-side with `default_factory`:
+A `UUID` key is generated in Python, by a `default_factory`, before the row is written. `Order` uses `uuid.uuid4`:
 
 === "Assignment"
 
     ```python
-    import uuid
-
-    from ferro import Field, Model
-
-
-    class Order(Model):
-        id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
-        total_cents: int = 0
+    --8<-- "docs/examples/models_and_fields.py:order"
     ```
 
 === "Annotated"
 
     ```python
-    import uuid
-    from typing import Annotated
-
-    from ferro import Field, Model
-
-
-    class Order(Model):
-        id: Annotated[uuid.UUID, Field(default_factory=uuid.uuid4, primary_key=True)]
-        total_cents: int = 0
+    --8<-- "docs/examples/models_and_fields_annotated.py:order"
     ```
 
-On PostgreSQL this is a native `UUID` column; on SQLite it is stored as a 36-character string.
+On SQLite the column is declared `CHAR(32)`:
 
-## Composite Constraints
+```sql
+--8<-- "docs/examples/models_and_fields.py:order-ddl"
+```
+
+The value in it is the 36-character hyphenated string, as a raw query shows:
+
+```python
+--8<-- "docs/examples/models_and_fields.py:uuid-value"
+```
+
+On PostgreSQL the column is a native `uuid`.
+
+## Uniques and indexes
+
+### Single-column uniques
+
+`unique=True` on a field adds a unique index named `uq_<table>_<column>`. `Product.sku` has one:
+
+```sql
+--8<-- "docs/examples/models_and_fields.py:sku-unique"
+```
+
+`index=True` adds a plain index the same way, named `idx_<table>_<column>`.
 
 ### Composite uniques
 
-When a row must be unique across several columns *together* (e.g. one membership per `(user_id, org_id)` pair), per-column `unique=True` is not what you want. Declare the `ClassVar` `__ferro_composite_uniques__` instead:
+When a row must be unique across several columns together, declare the `ClassVar` `__ferro_composite_uniques__`. A product name must be unique within its category:
 
-=== "Assignment"
+```python
+--8<-- "docs/examples/models_and_fields.py:composite-uniques"
+```
 
-    ```python
-    import uuid
-    from typing import ClassVar
+The index is named after the table and its columns, in order:
 
-    from ferro import Field, Model
+```sql
+--8<-- "docs/examples/models_and_fields.py:composite-unique-ddl"
+```
 
+A second desk lamp in the lighting category fails on that index:
 
-    class OrgMembership(Model):
-        __ferro_composite_uniques__: ClassVar[tuple[tuple[str, ...], ...]] = (
-            ("user_id", "org_id"),
-        )
+```python
+--8<-- "docs/examples/models_and_fields.py:composite-unique-violation"
+```
 
-        id: int | None = Field(default=None, primary_key=True)
-        user_id: uuid.UUID
-        org_id: uuid.UUID
-    ```
+The error is a `UniqueViolationError`; SQLite's message names the two columns.
 
-=== "Annotated"
-
-    ```python
-    import uuid
-    from typing import Annotated, ClassVar
-
-    from ferro import Field, Model
-
-
-    class OrgMembership(Model):
-        __ferro_composite_uniques__: ClassVar[tuple[tuple[str, ...], ...]] = (
-            ("user_id", "org_id"),
-        )
-
-        id: Annotated[int | None, Field(default=None, primary_key=True)]
-        user_id: uuid.UUID
-        org_id: uuid.UUID
-    ```
-
-- Each inner tuple lists **database column names** (for a `ForeignKey` field named `user`, use the shadow column `user_id`).
+- Each inner tuple lists column names. For a `ForeignKey` field named `author`, use its column, `author_id`.
 - Declare several tuples for several independent composite uniques.
-- Unknown column names raise at model registration time.
+- An unknown column name raises when the class is defined.
 
-!!! note "NULL semantics"
-    SQL `UNIQUE` treats `NULL` values as distinct from each other, so nullable members of a composite unique can admit multiple rows that differ only by `NULL`. Prefer `NOT NULL` columns in composite uniques when you need strict "at most one row per pair" semantics.
+SQL `UNIQUE` treats `NULL` values as distinct, so a nullable column in a composite unique lets through rows that differ only by `NULL`. Declare the columns without `None` when you need at most one row per combination.
 
 ### Composite indexes
 
-For non-unique multi-column indexes — read-path optimization on common filter combinations like `(user_id, created_at)` — declare `__ferro_composite_indexes__` with the same shape:
+For a non-unique index over several columns, such as a common filter on `status` sorted by `created_at`, declare `__ferro_composite_indexes__` in the same shape:
 
-=== "Assignment"
+```python
+--8<-- "docs/examples/models_and_fields.py:composite-indexes"
+```
 
-    ```python
-    from datetime import datetime
-    from typing import ClassVar
+It creates:
 
-    from ferro import Field, Model
+```sql
+--8<-- "docs/examples/models_and_fields.py:composite-index-ddl"
+```
 
+Each tuple names at least two columns, in the order the index uses them, which matters because a query can use the index for any leading run of its columns. For one column, use `Field(index=True)`. If the same ordered tuple is also a composite unique, Ferro emits a `UserWarning` and drops the index, since the unique index already covers it.
 
-    class Comment(Model):
-        __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = (
-            ("user_id", "created_at"),
-        )
-
-        id: int | None = Field(default=None, primary_key=True)
-        user_id: int
-        created_at: datetime
-        body: str
-    ```
-
-=== "Annotated"
-
-    ```python
-    from datetime import datetime
-    from typing import Annotated, ClassVar
-
-    from ferro import Field, Model
-
-
-    class Comment(Model):
-        __ferro_composite_indexes__: ClassVar[tuple[tuple[str, ...], ...]] = (
-            ("user_id", "created_at"),
-        )
-
-        id: Annotated[int | None, Field(default=None, primary_key=True)]
-        user_id: int
-        created_at: datetime
-        body: str
-    ```
-
-Validation mirrors composite uniques: at least two columns per tuple, columns must exist, and **order is preserved** (it matters for leftmost-prefix optimization). For single-column indexes use `Field(index=True)`. Declaring the same ordered tuple in both `__ferro_composite_uniques__` and `__ferro_composite_indexes__` emits a `UserWarning` and drops the redundant index.
-
-Both ClassVars flow through to [migrations](schema/migrations.md) and to [Alembic autogenerate](schema/alembic.md) as matching `UniqueConstraint` / `Index` objects.
+Both `ClassVar`s reach [migrations](schema/migrations.md) and [Alembic autogenerate](schema/alembic.md) as the same `UniqueConstraint` and `Index` names.
 
 ### Table checks
 
-When a rule spans several columns on the same row — "at most one of these two sides may be set" — a per-column option is not enough. Declare a **table check**: a named predicate over this model's own columns in the `ClassVar` `__ferro_checks__`.
-
-Each entry is `Check(suffix, predicate)`. You supply a short suffix (for example `at_most_one_side`); ferro derives the live constraint name `ck_<table>_<suffix>` (here, `ck_pair_at_most_one_side`). The predicate is a ferro lambda with a **lowercase-singular** parameter named after the model (`pair` for `Pair`), using the same style as [`where()`](queries.md) filters — not a SQL string.
-
-The predicate is the root-column `where()` dialect: comparisons, `== None` / `!= None` (including on a forward foreign key or its shadow `*_id` column), `&` / `|` / `~`, `.in_()`, `.like()`, and column-to-column (`pair.left != pair.right`). Values are literals inlined into the CHECK — not bind parameters. Relation traversal, `.exists()`, aggregates, and closed-over variables fail at class definition.
-
-For a single-column closed domain (for example a `StrEnum` stored as text with `IN ('admin', 'user')`), use `Field(db_check=True)` instead — that emits `ck_<table>_<col>` and is a different artifact from table checks.
+When a rule spans several columns of one row, declare a table check: a named predicate in the `ClassVar` `__ferro_checks__`. A payment carries a card token or a bank account, never both:
 
 === "Assignment"
 
@@ -424,213 +275,125 @@ For a single-column closed domain (for example a `StrEnum` stored as text with `
     --8<-- "docs/examples/table_checks_annotated.py:models"
     ```
 
-- Each `Check` suffix must be a lowercase identifier (`[a-z][a-z0-9_]*`), unique per model, and must not collide with a column-check name (`ck_<table>_<col>`).
-- Unknown columns, duplicate suffixes, and unsupported predicate forms raise at model registration time.
-- Table checks are emitted **inline in `CREATE TABLE`** on both PostgreSQL and SQLite. See [Auto-migrate](schema/auto-migrate.md) for how they reconcile on existing tables, and [Migrations](schema/migrations.md#sqlite-table-rebuilds) for the SQLite table rebuild.
+Each entry is `Check(suffix, predicate)`. Ferro names the constraint `ck_<table>_<suffix>` and writes it inside `CREATE TABLE`, on both databases:
 
-A violating insert raises `CheckViolationError` (PostgreSQL also sets `exc.constraint` to the live `ck_*` name):
+```sql
+--8<-- "docs/examples/table_checks.py:ddl"
+```
+
+The predicate is a lambda written like a [`where()`](queries.md) filter, with its parameter named after the model in lowercase (`payment` for `Payment`). It accepts comparisons, `== None` and `!= None` (on a forward foreign key or its `*_id` column too), `&`, `|`, `~`, `.in_()`, `.like()`, and column-to-column comparisons. Values are written into the `CHECK` as literals, not bound as parameters. Relation traversal, `.exists()`, aggregates and variables from the enclosing scope raise when the class is defined.
+
+A row that breaks the check raises `CheckViolationError`, whose message names the constraint:
 
 ```python
 --8<-- "docs/examples/table_checks.py:violation"
 ```
 
+On PostgreSQL the error also sets `exc.constraint` to `ck_payment_at_most_one_method`.
+
+- A suffix is a lowercase identifier (`[a-z][a-z0-9_]*`), unique within the model, and must not collide with a column check's name (`ck_<table>_<column>`).
+- An unknown column, a repeated suffix or an unsupported predicate raises when the class is defined.
+- [Auto-migrate](schema/auto-migrate.md) explains how checks reconcile on a table that already exists, and [SQLite table rebuilds](schema/migrations.md#sqlite-table-rebuilds) how a migration changes one on SQLite.
+
+For a closed set of values in a single column, use `Field(db_check=True)` instead; see [Enums](#enums).
+
 ## Custom table names
 
-By default a model's table is its class name lowercased: `class User` →
-table `user`. Set `__ferro_table__` in the class body to choose the table
-name yourself:
-
-=== "Assignment"
-
-    ```python
-    from typing import ClassVar
-
-    from ferro import Field, Model
-
-
-    class User(Model):
-        __ferro_table__: ClassVar[str] = "app_users"
-
-        id: int | None = Field(default=None, primary_key=True)
-        email: str = Field(unique=True)
-    ```
-
-=== "Annotated"
-
-    ```python
-    from typing import Annotated, ClassVar
-
-    from ferro import Field, Model
-
-
-    class User(Model):
-        __ferro_table__: ClassVar[str] = "app_users"
-
-        id: Annotated[int | None, Field(default=None, primary_key=True)]
-        email: Annotated[str, Field(unique=True)]
-    ```
-
-Both declare a `User` model stored in `app_users` — every generated
-statement follows it:
-
-```sql
-CREATE TABLE IF NOT EXISTS "app_users" (
-  "email" varchar NOT NULL,
-  "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT
-);
-CREATE UNIQUE INDEX IF NOT EXISTS "uq_app_users_email" ON "app_users" ("email");
-```
-
-Relationships follow it too: a `ForeignKey` to `User` renders
-`REFERENCES "app_users" ("id")`, and default many-to-many join tables are
-named from the source model's table name and the relationship's field name —
-a `tags` relation on a model stored in `wiki_pages` gets the join table
-`wiki_pages_tags` — with join columns (`wiki_pages_id`, `wiki_tags_id`)
-following both participants' configured tables.
-
-`__ferro_table__` applies only to the class that declares it — a subclass
-gets its own default (`classname.lower()`) unless it declares its own.
-The name must be a 1–63 character identifier (`[A-Za-z_][A-Za-z0-9_]*`).
-
-Two distinct models cannot share one table: defining a second model that
-resolves to an already-claimed table name raises immediately at class
-definition, naming both models. Redefining the *same* class (in a REPL or
-re-imported module) is fine.
-
-## Pydantic Validation
-
-Ferro models *are* Pydantic models, so validation runs whenever an instance is constructed — including inside `Model.create(...)` and before `bulk_create(...)` hits the database:
-
-=== "Assignment"
-
-    ```python
-    from ferro import Field, Model
-
-
-    class Account(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        username: str = Field(unique=True, min_length=3, max_length=50)
-        email: str = Field(unique=True, pattern=r"^[\w\.-]+@[\w\.-]+\.\w+$")
-        age: int = Field(ge=0, le=150)
-    ```
-
-=== "Annotated"
-
-    ```python
-    from typing import Annotated
-
-    from ferro import Field, Model
-
-
-    class Account(Model):
-        id: Annotated[int | None, Field(default=None, primary_key=True)]
-        username: Annotated[str, Field(unique=True, min_length=3, max_length=50)]
-        email: Annotated[str, Field(unique=True, pattern=r"^[\w\.-]+@[\w\.-]+\.\w+$")]
-        age: Annotated[int, Field(ge=0, le=150)]
-    ```
+A model's table is its class name in lowercase: `class Product` is `product`. Set `__ferro_table__` in the class body to choose the name yourself, as [`Category`](#natural-keys) does:
 
 ```python
-from pydantic import ValidationError
-
-try:
-    await Account.create(username="ab", email="not-an-email", age=-1)
-except ValidationError as exc:
-    print(exc.error_count(), "validation errors — nothing was written")
+--8<-- "docs/examples/models_and_fields.py:table-name"
 ```
 
-Custom `@field_validator` / `@model_validator` methods and `model_config` settings (e.g. `validate_assignment=True`, `str_strip_whitespace=True`) work too, since they are plain Pydantic features.
+Every statement Ferro writes for the model uses the name you set:
 
-## Reusing Fields Across Models
+```sql
+--8<-- "docs/examples/models_and_fields.py:category-ddl"
+```
 
-!!! warning "Model subclasses cannot inherit fields"
-    You **cannot** declare fields on a `Model` base class and inherit them in subclasses. `Model`'s metaclass registers a table schema per concrete model class at class-creation time, so a "base model with shared columns" silently produces broken subclass defaults. Don't do this:
+A `ForeignKey` to `Category` renders `REFERENCES "categories" ("code")`. A default many-to-many join table is named from the source model's table and the relation's field: a `tags` relation on a model stored in `wiki_pages` gets the join table `wiki_pages_tags`.
 
-    ```python
-    class TimestampedModel(Model):  # WRONG — do not inherit fields from a Model
-        created_at: datetime = Field(default_factory=datetime.now)
+- `__ferro_table__` applies only to the class that declares it; a subclass gets the default name unless it sets its own.
+- The name is an identifier of 1 to 63 characters matching `[A-Za-z_][A-Za-z0-9_]*`.
+- Two models cannot share one table. Defining a second model that resolves to a table name already in use raises at class definition and names both models. Redefining the same class, in a REPL or a re-imported module, is allowed.
 
+## Validation
 
-    class Article(TimestampedModel):  # broken defaults
-        title: str
-    ```
-
-The supported pattern is a **plain mixin** (not a `Model` subclass) for shared *behavior*, with the fields declared on each concrete model:
+A model validates its fields whenever an instance is built, including inside `create()` and before `bulk_create()` sends anything. `Product.price` must not be negative:
 
 === "Assignment"
 
     ```python
-    from datetime import UTC, datetime
-
-    from ferro import Field, Model
-
-
-    def utcnow() -> datetime:
-        return datetime.now(UTC)
-
-
-    class TimestampMixin:
-        """Touch ``updated_at`` on every save. A plain class, not a Model."""
-
-        async def save(self, **kwargs) -> None:
-            self.updated_at = utcnow()
-            await super().save(**kwargs)
-
-
-    class Note(TimestampMixin, Model):
-        id: int | None = Field(default=None, primary_key=True)
-        text: str
-        created_at: datetime = Field(default_factory=utcnow)
-        updated_at: datetime = Field(default_factory=utcnow)
-
-
-    class Task(TimestampMixin, Model):
-        id: int | None = Field(default=None, primary_key=True)
-        title: str
-        created_at: datetime = Field(default_factory=utcnow)
-        updated_at: datetime = Field(default_factory=utcnow)
+    --8<-- "docs/examples/models_and_fields.py:validation-fields"
     ```
 
 === "Annotated"
 
     ```python
-    from datetime import UTC, datetime
-    from typing import Annotated
-
-    from ferro import Field, Model
-
-
-    def utcnow() -> datetime:
-        return datetime.now(UTC)
-
-
-    class TimestampMixin:
-        """Touch ``updated_at`` on every save. A plain class, not a Model."""
-
-        async def save(self, **kwargs) -> None:
-            self.updated_at = utcnow()
-            await super().save(**kwargs)
-
-
-    class Note(TimestampMixin, Model):
-        id: Annotated[int | None, Field(default=None, primary_key=True)]
-        text: str
-        created_at: Annotated[datetime, Field(default_factory=utcnow)]
-        updated_at: Annotated[datetime, Field(default_factory=utcnow)]
-
-
-    class Task(TimestampMixin, Model):
-        id: Annotated[int | None, Field(default=None, primary_key=True)]
-        title: str
-        created_at: Annotated[datetime, Field(default_factory=utcnow)]
-        updated_at: Annotated[datetime, Field(default_factory=utcnow)]
+    --8<-- "docs/examples/models_and_fields_annotated.py:validation-fields"
     ```
 
-The few repeated field lines are deliberate: each concrete model owns its full schema, and the mixin contributes behavior only. For complete worked examples, see [Timestamps](../howto/timestamps.md) and [Soft Deletes](../howto/soft-deletes.md).
+A negative price raises Pydantic's `ValidationError` before Ferro writes the row:
 
-## See Also
+```python
+--8<-- "docs/examples/models_and_fields.py:validation"
+```
 
-- [Relationships](relationships.md) — foreign keys, one-to-many, many-to-many
-- [Queries](queries.md) — fetching and filtering data
-- [Mutations](mutations.md) — creating, updating, and deleting records
-- [Schema Management](schema/overview.md) — how fields become DDL, and how a change reaches the database
-- [Identity Map](../concepts/identity-map.md) — instance caching semantics
+The error names the field and the rule it broke. `@field_validator`, `@model_validator` and `model_config` settings such as `validate_assignment=True` work as they do in Pydantic.
+
+## Fields on a model base class
+
+A class that subclasses `Model` is a model, with a table of its own, even when you meant it only as a base for others. Here `Timestamped` declares `created_at` for `Review` to inherit:
+
+=== "Assignment"
+
+    ```python
+    --8<-- "docs/examples/models_and_fields.py:base-class"
+    ```
+
+=== "Annotated"
+
+    ```python
+    --8<-- "docs/examples/models_and_fields_annotated.py:base-class"
+    ```
+
+`create_tables()` creates two tables. `review` has the inherited column, and `timestamped` is a second table with only `created_at`:
+
+```sql
+--8<-- "docs/examples/models_and_fields.py:base-class-ddl"
+```
+
+The subclass works: its rows go to `review`, and the inherited default fills `created_at`. Nothing is written to `timestamped`:
+
+```python
+--8<-- "docs/examples/models_and_fields.py:base-class-rows"
+```
+
+The `timestamped` table is the cost. Every schema door treats `Timestamped` as a model, so auto-migrate, a migration and the Alembic bridge all create its table, though no code stores a row there. To share fields without that table, declare the fields on each model and share behaviour through a plain class that does not subclass `Model`; [Timestamps](../howto/timestamps.md) and [Soft deletes](../howto/soft-deletes.md) show the pattern.
+
+## Field options
+
+`Field()` takes these database options, beside every Pydantic option (`min_length`, `max_length`, `pattern`, `gt`, `ge`, `lt`, `le`, `decimal_places`, `description` and the rest):
+
+| Option | Default | What it does |
+| :--- | :--- | :--- |
+| `primary_key` | `False` | Makes the column the primary key; see [Primary keys](#primary-keys). |
+| `autoincrement` | `None` | `None` turns it on for an integer primary key; `False` turns it off. |
+| `unique` | `False` | Adds a single-column unique index; see [Uniques and indexes](#uniques-and-indexes). |
+| `index` | `False` | Adds a single-column index. |
+| `nullable` | `"infer"` | `"infer"` follows whether the annotation allows `None`; `True` or `False` forces it. |
+| `default`, `default_factory` | none | Pydantic's default. [Auto-migrate](schema/auto-migrate.md) also uses a literal default to fill existing rows when it adds a `NOT NULL` column. |
+| `db_type` | `None` | Overrides the column type; see [Column type overrides](#column-type-overrides-with-db_type). |
+| `db_check` | `False` | Adds a `CHECK` for a closed set of values; needs `db_type`. |
+| `renamed_from` | `None` | The column's previous name; see [Renames](schema/migrations.md#renames). |
+| `retired` | `False` | Keeps the column in the schema after the field leaves the model; see [Retiring a column](schema/migrations.md#retiring-a-column). |
+
+The full signature is in the reference: [`Field`](../api/fields.md#ferro.Field), [`FerroField`](../api/fields.md#ferro.FerroField) and [`DbType`](../api/fields.md#ferro.DbType).
+
+## See also
+
+- [Relationships](relationships.md): foreign keys, one-to-many and many-to-many.
+- [Queries](queries.md): fetching and filtering rows.
+- [Mutations](mutations.md): creating, updating and deleting rows.
+- [Schema management](schema/overview.md): how fields become DDL, and how a change reaches the database.
+- [`Model`](../api/model.md) in the API reference.
