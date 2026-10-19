@@ -36,8 +36,10 @@ Hosted PostgreSQL services take the same `postgresql://` URL; [Connections › S
 Ferro reads the backend from the URL once, in `connect()`. From then on the engine holds a SQLite pool or a PostgreSQL pool, two separate types, and no operation looks at the URL again. Any other scheme fails in `connect()`, naming the ones it accepts:
 
 ```text
-Unsupported database URL scheme 'mysql'. Supported schemes: sqlite, postgres, postgresql
+InterfaceError: DB Connection failed for mysql://***: Unsupported database URL scheme 'mysql'. Supported schemes: sqlite, postgres, postgresql
 ```
+
+The failed call registers no connection, so you can fix the URL and call `connect()` again.
 
 ## Type mapping
 

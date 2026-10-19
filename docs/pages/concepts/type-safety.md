@@ -1,6 +1,6 @@
 # Type safety
 
-Ferro models are Pydantic models and Ferro's API is fully annotated, so every write is validated at runtime and a type checker knows what each query returns.
+Ferro models are Pydantic models and Ferro's API is fully annotated, so building an instance validates its fields at runtime and a type checker knows what each query returns.
 
 The examples on this page use this `User` model, with four users saved (ada, grace, alan and edsger):
 

@@ -114,7 +114,7 @@ taken = await User.where(lambda user: user.username == "grace").exists()
 assert taken
 ```
 
-SQLite and PostgreSQL can answer the lookup on `username` from the `uq_user_username` index. `exists()` runs a `COUNT` today, so it costs what `count()` costs; use whichever reads better. [Models and fields › Uniques and indexes](../guide/models-and-fields.md#uniques-and-indexes) covers both options.
+SQLite and PostgreSQL can answer the lookup on `username` from the `uq_user_username` index. `exists()` runs a `COUNT`, so it costs what `count()` costs; use whichever reads better. [Models and fields › Uniques and indexes](../guide/models-and-fields.md#uniques-and-indexes) covers both options.
 
 ### The identity map
 
@@ -126,7 +126,7 @@ Reading `post.author` on each post of a list runs one query per post. `Post.wher
 
 ## Benchmarking
 
-Ferro publishes no "N times faster" table: results depend on the database, hardware, network, batch size and row shape. If performance decides your choice, time your own workload:
+Ferro publishes no "N times faster" table: results depend on the database, hardware, network, batch size and row shape. If performance decides your choice, time your own workload. This block runs inside a [session](../guide/connections.md#sessions):
 
 ```python {test=run prelude=concepts}
 import time
