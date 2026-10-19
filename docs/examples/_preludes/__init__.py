@@ -49,10 +49,20 @@ def load_prelude(name: str) -> ModuleType:
 async def run_block(prelude: str, source: str, path: str, first_line: int) -> None:
     """Run ``source`` inside the prelude's ``opened()``, with its names in scope."""
     module = load_prelude(prelude)
-    namespace = {
-        name: value for name, value in vars(module).items() if not name.startswith("__")
-    }
-    namespace["__name__"] = "__main__"
+    # The block runs as a module of its own whose file is the page or
+    # docstring it came from. A model class the block declares then finds its
+    # source there: pydantic reads field docstrings from the class's source
+    # (``use_attribute_docstrings``), and under ``__main__`` it would read
+    # this runner instead.
+    block = ModuleType("_ferro_docs_block")
+    block.__file__ = path
+    sys.modules[block.__name__] = block
+    namespace = vars(block)
+    namespace.update(
+        (name, value)
+        for name, value in vars(module).items()
+        if not name.startswith("__")
+    )
     # Pad the source so line numbers in a traceback are the page's own.
     code = compile(
         "\n" * (first_line - 1) + source,
