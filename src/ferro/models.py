@@ -267,7 +267,8 @@ class Model(BaseModel, metaclass=ModelMetaclass):
 
     A model declares table-wide constraints in class attributes:
     `__ferro_composite_uniques__` and `__ferro_composite_indexes__` (see
-    [Composite constraints](../guide/models-and-fields.md#composite-constraints)),
+    [Composite uniques](../guide/models-and-fields.md#composite-uniques) and
+    [Composite indexes](../guide/models-and-fields.md#composite-indexes)),
     `__ferro_checks__` (see
     [Table checks](../guide/models-and-fields.md#table-checks)) and
     `__ferro_rls__` (see [Using with Postgres RLS](../guide/row-level-security.md)).

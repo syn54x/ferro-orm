@@ -897,7 +897,7 @@ class Query(Generic[T]):
         nullable relation, a `join()` with no condition drops the rows whose
         relation is empty. A `where()` or `order_by()` that reaches into the
         same relation shares the join. See
-        [Every traversed hop is an INNER join](../guide/queries.md#every-traversed-hop-is-an-inner-join).
+        [Join type for traversed relations](../guide/queries.md#join-type-for-traversed-relations).
 
         Args:
             selector: A lambda returning a relation, such as

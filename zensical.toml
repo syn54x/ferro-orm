@@ -193,14 +193,16 @@ merge_init_into_class = true
 show_source = false
 show_root_heading = true
 show_root_full_path = false
-show_category_heading = true
-# Stays on until every public object has a docstring (#722).
-show_if_no_docstring = true
+show_category_heading = false
+# A member with no docstring is not rendered; every public object has one.
+show_if_no_docstring = false
 members_order = "source"
 # Not "public": griffe counts every dunder as public, so "public" would render
 # __repr__, __post_init__ and the __ferro_*__ class attributes. A protocol a
 # reader uses (async with, len(), comparisons) belongs in the class docstring.
-filters = ["!^_"]
+# `model_config` is Pydantic's configuration, inherited with Pydantic's own
+# docstring; it is no part of a Ferro model's API.
+filters = ["!^_", "!^model_config$"]
 separate_signature = true
 show_signature_annotations = true
 signature_crossrefs = true

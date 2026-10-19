@@ -1,4 +1,4 @@
-# Migrations
+# ferro.migrations
 
 `ferro.migrations` is what an application, a data step, a test and an Alembic `env.py` import. The guides show each in use: [Deploying migrations](../guide/schema/deploying.md) for `up` and `require_applied`, [Data steps and backfills](../guide/schema/data-steps.md) for the declarations, [Testing migrations](../guide/schema/testing.md) for the harness, [Alembic](../guide/schema/alembic.md) for the bridge. The commands are in the [CLI reference](../reference/cli.md).
 
@@ -13,7 +13,16 @@ await ferro.migrations.require_applied()   # a server that migrates in its deplo
 
 ## Running migrations
 
-Each call reads the project configuration (`settings=None` is `FerroSettings()`) and picks its database (`database=None` is the one configured). The calls that read a database (`up`, `require_applied`, `status`, `drift`, `baseline` and `remove_baseline`) take `using=`, the open connection to work on, or `url=`, to open a private connection for the call and close it after; with neither they work on the default connection, and with both they refuse. `check` reads only the models and the migrations directory and takes no connection. A refusal is raised, never returned: a refused `up` raises `MigrationRefused` whose `.report` is the run's report, saying what it applied before it stopped.
+Each call takes these parameters to say which project, database and connection it works on:
+
+| Parameter | Meaning | Taken by |
+| :--- | :--- | :--- |
+| `settings=` | `None` is `FerroSettings()`, the project's config file | every call |
+| `database=` | `None` is the one database configured | every call |
+| `using=` | the open connection of that name; `None` is the default connection, unless `url=` is given | `up`, `require_applied`, `status`, `drift`, `baseline`, `remove_baseline` |
+| `url=` | a private connection opened for the call and closed after it | the same six |
+
+Passing both `using=` and `url=` raises `MigrationRefused`. `check` reads only the models and the migrations directory and takes no connection. A refusal is raised, never returned: a refused `up` raises `MigrationRefused` whose `.report` is the run's report, saying what it applied before it stopped.
 
 ::: ferro.migrations.up
 
@@ -22,6 +31,16 @@ Each call reads the project configuration (`settings=None` is `FerroSettings()`)
 ::: ferro.migrations.status
 
 ::: ferro.migrations.check
+
+### Reports
+
+`up()` returns a `RunReport`, `status()` a `StatusReport` and `check()` a `CheckReport`. None of the three is exported: you read them, you never build one.
+
+::: ferro.migrations.runner.RunReport
+
+::: ferro.migrations.report.StatusReport
+
+::: ferro.migrations.generate.CheckReport
 
 ## Baseline and drift
 
@@ -62,7 +81,7 @@ except ferro.migrations.DatabaseAheadError as ahead:
 
 ::: ferro.migrations.atomic
 
-::: ferro.migrations.steps.chunked
+::: ferro.migrations.chunked
 
 ::: ferro.migrations.irreversible
 
@@ -82,10 +101,10 @@ except ferro.migrations.DatabaseAheadError as ahead:
 
 ## The Alembic bridge
 
-Requires the `ferro-orm[alembic]` extra. These three load on first use, so the calls above never import Alembic.
+Requires the `ferro-orm[alembic]` extra. These three functions load on first use, so the calls above never import Alembic.
 
-::: ferro.migrations.alembic.get_metadata
+::: ferro.migrations.get_metadata
 
-::: ferro.migrations.alembic.ferro_options
+::: ferro.migrations.ferro_options
 
-::: ferro.migrations.alembic.render_item
+::: ferro.migrations.render_item

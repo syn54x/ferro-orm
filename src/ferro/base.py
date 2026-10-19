@@ -39,7 +39,7 @@ DbTypeToken = Literal[
 ]
 """SQL storage type names accepted by `db_type=` on [`Field`][ferro.Field].
 
-See [Overriding the column type with `db_type`](../guide/models-and-fields.md#overriding-the-column-type-with-db_type)
+See [Column type overrides with `db_type`](../guide/models-and-fields.md#column-type-overrides-with-db_type)
 for the types each name maps to on SQLite and Postgres.
 """
 

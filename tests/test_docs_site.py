@@ -275,10 +275,12 @@ RETURNED_TYPES = (
     "ferro.migrations.runner.RunReport",
     "ferro.migrations.report.StatusReport",
     "ferro.migrations.generate.CheckReport",
+    "ferro.pass_report.Subject",
 )
 """Objects no ``__all__`` exports that a public call returns or is called on:
-``Model.using()``, ``engines.session()``, ``up()``, ``status()`` and
-``check()``. They are documented under the module that defines them."""
+``Model.using()``, ``engines.session()``, ``up()``, ``status()``,
+``check()`` and ``Report.subject``. They are documented under the module that
+defines them."""
 
 _DOC_HEADING_ID = re.compile(r'id="([\w.]+)" class="doc doc-heading"')
 
