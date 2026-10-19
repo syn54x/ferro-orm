@@ -2,7 +2,7 @@
 
 A migration is a numbered directory of steps that changes a database from one version of your models to the next. `ferro migrate new` writes it from the difference between your models and the previous migration; you read it, commit it, and `ferro migrate up` applies it. This is rung 3 of [the ladder](overview.md#the-ladder), and the door Ferro recommends for any database whose data you would mind losing.
 
-## Install and set up
+## Installation and setup {#install-and-set-up}
 
 Install the CLI extra:
 
@@ -136,7 +136,7 @@ DROP TABLE "author";
 
 The table and the unique index on `email` are created together, and the down drops the table.
 
-### Headers
+### Step file headers
 
 A step file may open with `-- ferro: …` lines that say how the runner treats it: whether it discards data, runs outside a transaction, or turns SQLite's foreign-key checks off. The generator writes them, except `expand` and `irreversible`, which only a person writes; you read them in review. The [header table](../../reference/migrations.md#step-file-headers) lists every one.
 
@@ -238,7 +238,7 @@ Nothing was applied.
 
 The steps before the rebuild have run; the rebuild has not, and the table is as it was. An undeclared column is refused the same way (`declare it on the model in a migration, or drop it`).
 
-## Checking
+## `check`, `status` and `drift`
 
 Three verbs tell you where the models, the directory and a database stand:
 
