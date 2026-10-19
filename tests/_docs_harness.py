@@ -7,10 +7,21 @@ language:
     print(await Author.where(lambda author: author.id == 1).first())
     ```
 
-``test=run`` runs the block. With ``prelude=<name>`` it runs in a fresh
-interpreter after ``docs/examples/_preludes/<name>.py``, which declares the
-models, connects and opens a session; top-level ``await`` works there.
-``lint=check`` lints the block (docs pages only).
+``test`` says how the block is tested, and each mode takes one setting:
+
+- ``{test=run prelude=<name>}`` runs the block in a fresh interpreter after
+  ``docs/examples/_preludes/<name>.py``, which declares the models, connects
+  and opens a session; top-level ``await`` works there.
+- ``{test=compile reason="..."}`` only compiles the block and says why it
+  cannot run (it needs Postgres, or it is a generated file).
+- ``{test=pytest path="tests/<file>.py"}`` is a test module the testing
+  how-to hands readers; ``tests/test_docs_testing_fixtures.py`` writes it at
+  that path in a scratch project and runs pytest there.
+
+``lint=check`` also lints the block (docs pages only). Every Python fence on
+a docs page carries a ``test`` mode (``page_fence_mode``); a docstring fence
+without one is compiled. Any other setting, or a mode without its setting, is
+refused with the marker to write.
 """
 
 from __future__ import annotations
@@ -32,22 +43,81 @@ _SETTING = re.compile(r"""([A-Za-z_][\w-]*)=(?:"([^"]*)"|'([^']*)'|([^\s{}"']+))
 _FENCE = re.compile(r"(^ *```)( *)(.*?)\n(.+?)\1", flags=re.M | re.S)
 
 
+_TEST_MODES = ("run", "compile", "pytest")
+# The setting each test mode needs, and the only mode that takes it.
+_MODE_SETTING = {"run": "prelude", "compile": "reason", "pytest": "path"}
+_KNOWN_SETTINGS = frozenset({"test", "lint", *_MODE_SETTING.values()})
+_MODE_EXAMPLE = {
+    "run": "prelude=<name>",
+    "compile": 'reason="<why it cannot run>"',
+    "pytest": 'path="tests/<file>.py"',
+}
+
+
+def preludes() -> list[str]:
+    """Name every prelude a fence can ask for."""
+    return sorted(p.stem for p in PRELUDES.glob("*.py") if not p.stem.startswith("_"))
+
+
 def fence_settings(example: CodeExample) -> dict[str, str]:
     """Read the ``key=value`` settings after a fence's language.
 
-    Values may be bare (``test=run``) or quoted (``lint="check"``). A
-    ``prelude`` without ``test=run`` is refused: it would silently do nothing.
+    Values may be bare (``test=run``) or quoted (``lint="check"``). Any
+    setting the harness would silently ignore is refused, with the marker to
+    write instead: an unknown key (such as ``compile-only=``), a ``test``
+    mode other than ``run``, ``compile`` or ``pytest``, a mode without the
+    setting it needs, and ``prelude``, ``reason`` or ``path`` without its mode.
     """
     settings = {
         match.group(1): next(g for g in match.groups()[1:] if g is not None)
         for match in _SETTING.finditer(example.prefix)
     }
-    if "prelude" in settings and settings.get("test") != "run":
+    unknown = sorted(set(settings) - _KNOWN_SETTINGS)
+    if unknown:
         raise ValueError(
-            f"{example}: prelude={settings['prelude']} needs test=run; "
-            f"mark the fence {{test=run prelude={settings['prelude']}}}"
+            f"{example}: unknown setting {', '.join(unknown)}; a block that runs "
+            "is marked {test=run prelude=<name>}, one that cannot says why with "
+            '{test=compile reason="..."}'
         )
+    mode = settings.get("test")
+    if mode is not None and mode not in _TEST_MODES:
+        raise ValueError(
+            f"{example}: test={mode} is not run, compile or pytest; mark the fence "
+            '{test=run prelude=<name>} or {test=compile reason="..."}'
+        )
+    for needed_by, setting in _MODE_SETTING.items():
+        if mode == needed_by and not settings.get(setting):
+            hint = _MODE_EXAMPLE[needed_by]
+            if needed_by == "run":
+                hint += f" (one of: {', '.join(preludes())})"
+            raise ValueError(f"{example}: test={needed_by} needs {hint}")
+        if setting in settings and mode != needed_by:
+            raise ValueError(
+                f"{example}: {setting}={settings[setting]} needs test={needed_by}; "
+                f"mark the fence "
+                f"{{test={needed_by} {setting}={settings[setting]}}}"
+            )
+    if "lint" in settings and settings["lint"] != "check":
+        raise ValueError(f"{example}: lint={settings['lint']} is not lint=check")
     return settings
+
+
+def page_fence_mode(example: CodeExample) -> str:
+    """Return how a docs page's Python fence is tested: run, compile or pytest.
+
+    A page fence must say: one that runs is marked
+    ``{test=run prelude=<name>}``, one that cannot run says why with
+    ``{test=compile reason="..."}``. An unmarked fence is refused, so no block
+    is compile-only by accident.
+    """
+    mode = fence_settings(example).get("test")
+    if mode is None:
+        raise ValueError(
+            f"{example}: the fence says neither test=run nor test=compile; mark it "
+            '{test=run prelude=<name>}, or {test=compile reason="<why it cannot '
+            'run>"} when it cannot run'
+        )
+    return mode
 
 
 def fenced_examples(
@@ -120,7 +190,12 @@ def run_fence(example: CodeExample) -> str:
     between examples. A failure raises ``AssertionError`` carrying the
     traceback, whose frames name the example's own file and line.
     """
-    prelude = fence_settings(example)["prelude"]
+    settings = fence_settings(example)
+    if settings.get("test") != "run":
+        raise ValueError(
+            f"{example}: only a fence marked {{test=run prelude=<name>}} runs"
+        )
+    prelude = settings["prelude"]
     result = subprocess.run(
         [
             sys.executable,

@@ -76,7 +76,7 @@ async def main() -> None:
 
         # --8<-- [start:filter]
         published = (
-            await Post.where(lambda post: post.published == True)  # noqa: E712
+            await Post.where(lambda post: post.published == True)
             .order_by(lambda post: post.title)
             .limit(10)
             .all()
@@ -89,7 +89,7 @@ async def main() -> None:
 
         # --8<-- [start:aggregate]
         total = await Post.select().count()
-        has_drafts = await Post.where(lambda post: post.published == False).exists()  # noqa: E712
+        has_drafts = await Post.where(lambda post: post.published == False).exists()
         assert (total, has_drafts) == (3, True)
         # --8<-- [end:aggregate]
 
@@ -98,7 +98,7 @@ async def main() -> None:
         assert author.name == "Alice"
 
         alice_posts = await author.posts.where(
-            lambda post: post.published == True  # noqa: E712
+            lambda post: post.published == True
         ).all()
         assert len(alice_posts) == 2
         # --8<-- [end:relationships]
@@ -108,7 +108,7 @@ async def main() -> None:
         await post.save()
         assert (await Post.get(post.id)).title == "Why Ferro is really fast"
 
-        updated = await Post.where(lambda post: post.published == False).update(  # noqa: E712
+        updated = await Post.where(lambda post: post.published == False).update(
             published=True
         )
         assert updated == 1

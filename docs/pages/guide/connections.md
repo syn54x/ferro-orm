@@ -42,7 +42,7 @@ The examples on this page use the quickstart's models:
 
 Pass a file path, or `:memory:` for a database that lives as long as the process:
 
-```python {compile-only="creates app.db in the working directory"}
+```python {test=compile reason="creates app.db in the working directory"}
 from ferro import connect
 
 await connect("sqlite:app.db?mode=rwc")
@@ -54,7 +54,7 @@ await connect("sqlite:app.db?mode=rwc")
 
 Pass a `postgresql://` URL; add `sslmode=require` to require TLS:
 
-```python {compile-only="needs a PostgreSQL server"}
+```python {test=compile reason="needs a PostgreSQL server"}
 from ferro import connect
 
 await connect("postgresql://user:password@localhost:5432/app?sslmode=require")
@@ -66,7 +66,7 @@ The pool connects over TLS. Load credentials from the environment rather than wr
 
 Supabase hosts PostgreSQL behind TLS, and Ferro's published wheels ship with Rustls and the webpki CA bundle, so they connect without extra setup. Copy the URI from **Project Settings → Database** in the Supabase dashboard (pooler hostnames look like `*.pooler.supabase.com`, and the username may include the project ref), then make sure it requests TLS:
 
-```python {compile-only="needs a Supabase DATABASE_URL"}
+```python {test=compile reason="needs a Supabase DATABASE_URL"}
 import os
 
 from ferro import connect
@@ -202,7 +202,7 @@ The [`connect`](../api/connection.md#ferro.connect) reference lists every option
 
 Size a connection's pool with `PoolConfig`:
 
-```python {compile-only="needs a PostgreSQL server"}
+```python {test=compile reason="needs a PostgreSQL server"}
 from ferro import PoolConfig, connect
 
 await connect(
@@ -293,7 +293,7 @@ CREATE TABLE IF NOT EXISTS "post" ( "author_id" integer NOT NULL, "body" varchar
 
 Add the `ferro_search_path` parameter to a PostgreSQL URL to pin the connection to one schema:
 
-```python {compile-only="needs a PostgreSQL server"}
+```python {test=compile reason="needs a PostgreSQL server"}
 from ferro import connect
 
 await connect("postgresql://user:password@localhost:5432/app?ferro_search_path=tenant_a")

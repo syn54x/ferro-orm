@@ -47,7 +47,7 @@ async def main() -> None:
         # --8<-- [start:single]
         memos = (
             await Transaction.select(lambda transaction: transaction.memo)
-            .where(lambda transaction: transaction.cleared_on == None)  # noqa: E711
+            .where(lambda transaction: transaction.cleared_on == None)
             .order_by(lambda transaction: transaction.id)
             .all()
         )
@@ -185,7 +185,7 @@ async def main() -> None:
 
         # --8<-- [start:count]
         uncleared = Transaction.select(lambda transaction: transaction.memo).where(
-            lambda transaction: transaction.cleared_on == None  # noqa: E711
+            lambda transaction: transaction.cleared_on == None
         )
         assert await uncleared.count() == 3
         assert await uncleared.exists() is True

@@ -125,7 +125,7 @@ Place the middleware after authentication. `ASGIMiddleware` needs Litestar 2.15 
 
 === "ASGIMiddleware"
 
-    ```python {compile-only="needs Litestar and a Postgres connection"}
+    ```python {test=compile reason="needs Litestar and a Postgres connection"}
     from litestar import Litestar, get
     from litestar.enums import ScopeType
     from litestar.middleware import ASGIMiddleware
@@ -160,7 +160,7 @@ Place the middleware after authentication. `ASGIMiddleware` needs Litestar 2.15 
 
 === "AbstractMiddleware"
 
-    ```python {compile-only="needs Litestar and a Postgres connection"}
+    ```python {test=compile reason="needs Litestar and a Postgres connection"}
     from litestar import Litestar, get
     from litestar.middleware import AbstractMiddleware
     from litestar.types import Receive, Scope, Send
@@ -197,7 +197,7 @@ Both register the middleware for every route, and the path pattern and `skip_ten
 
 When the tenant is known only after a guard or dependency has run, open the session without settings in the middleware and set it later, as in [A tenant known after the session opens](#a-tenant-known-after-the-session-opens). The middleware's `handle` (or `__call__`) then opens a bare session:
 
-```python {compile-only="a fragment of the ASGIMiddleware class above"}
+```python {test=compile reason="a fragment of the ASGIMiddleware class above"}
 async def handle(
     self, scope: Scope, receive: Receive, send: Send, next_app: ASGIApp
 ) -> None:
@@ -211,7 +211,7 @@ The guard or dependency then calls `ferro.current_session().set_config("app.tena
 
 Add a `yield` dependency to the application itself, so it runs for every route:
 
-```python {compile-only="needs FastAPI and a Postgres connection"}
+```python {test=compile reason="needs FastAPI and a Postgres connection"}
 from fastapi import Depends, FastAPI, Request
 
 import ferro
@@ -234,7 +234,7 @@ app = FastAPI(dependencies=[Depends(tenant_session)])
 
 Any other ASGI framework takes the same shape as plain ASGI middleware:
 
-```python {compile-only="needs an ASGI server and a Postgres connection"}
+```python {test=compile reason="needs an ASGI server and a Postgres connection"}
 import ferro
 
 
@@ -310,7 +310,7 @@ $$;
 
 Send the claims as one setting:
 
-```python {compile-only="needs a Postgres connection and the auth_uid() function above"}
+```python {test=compile reason="needs a Postgres connection and the auth_uid() function above"}
 import json
 
 claims = {"sub": "5f0c1a4e-2b7d-4c1e-9a3f-6d8e2b1c0a94", "role": "editor"}
@@ -324,7 +324,7 @@ Every query in that session can read the claims through `auth_uid()`.
 
 Then call the function from a policy written in SQL, inside a scalar subquery:
 
-```python {compile-only="a RowPolicy argument, not a statement"}
+```python {test=compile reason="a RowPolicy argument, not a statement"}
 RowPolicy(
     name="owner",
     using="owner_id = (SELECT auth_uid())",

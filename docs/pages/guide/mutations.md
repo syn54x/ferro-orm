@@ -140,7 +140,7 @@ On PostgreSQL, `.merge()` merges a dict into a JSON object column, with the patc
 
 === "Assignment"
 
-    ```python {compile-only="needs a PostgreSQL database"}
+    ```python {test=compile reason="needs a PostgreSQL database"}
     from ferro import Field, Model
 
 
@@ -157,7 +157,7 @@ On PostgreSQL, `.merge()` merges a dict into a JSON object column, with the patc
 
 === "Annotated"
 
-    ```python {compile-only="needs a PostgreSQL database"}
+    ```python {test=compile reason="needs a PostgreSQL database"}
     from typing import Annotated
 
     from ferro import Field, Model

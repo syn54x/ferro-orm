@@ -35,7 +35,7 @@ rewrite it.
 
 Catch a duplicate insert without matching driver text:
 
-```python
+```python {test=compile reason="uses an application's User model with a unique email"}
 from ferro import UniqueViolationError
 
 try:
@@ -48,7 +48,7 @@ except UniqueViolationError as exc:
 
 The same pattern applies to table checks declared in `__ferro_checks__`. A row that violates the predicate raises `CheckViolationError`:
 
-```python
+```python {test=compile reason="uses the Pair model of the table checks guide"}
 from ferro import CheckViolationError
 
 try:
@@ -72,7 +72,7 @@ A refused migration call raises
 its subclasses; see [Errors](migrations.md#errors) in the migrations reference.
 Its `.report` says how far the call got:
 
-```python
+```python {test=compile reason="needs a project with a migrations directory"}
 import ferro.migrations
 from ferro.migrations import MigrationRefused
 

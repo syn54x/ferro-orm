@@ -28,7 +28,7 @@ nav = [
     { "Raw SQL" = "guide/raw-sql.md" },
     { "Connections" = "guide/connections.md" },
     { "Schema management" = [
-      { "Schema management" = "guide/schema/overview.md" },
+      { "Overview of schema management" = "guide/schema/overview.md" },
       { "Auto-migrate" = "guide/schema/auto-migrate.md" },
       { "Migrations" = "guide/schema/migrations.md" },
       { "Renaming and retiring columns and labels" = "guide/schema/renames-and-retirements.md" },
@@ -150,7 +150,7 @@ markdown_description = "Ferro is an async Python ORM: Pydantic models, a Rust co
 full_output = "llms-full.txt"
 
 [project.plugins.llmstxt.sections]
-"Start here" = [
+"Get started" = [
   "index.md",
   "why-ferro.md",
   "getting-started/installation.md",

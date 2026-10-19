@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from pytest_examples import CodeExample, EvalExample, find_examples
 
-from tests._docs_harness import fence_settings, run_fence
+from tests._docs_harness import fence_settings, page_fence_mode, run_fence
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DOCS_PAGES = REPO_ROOT / "docs" / "pages"
@@ -28,45 +28,31 @@ def _inline_examples() -> list[CodeExample]:
 
 @pytest.mark.parametrize("example", _inline_examples(), ids=str)
 def test_docs_examples(example: CodeExample, eval_example: EvalExample) -> None:
-    """Validate docs snippets, with opt-in linting/execution."""
-    # Baseline for all snippets: parse + compile as valid Python syntax.
+    """Every inline page block compiles; one marked to run, runs.
+
+    Each block says how it is tested (``tests._docs_harness.page_fence_mode``):
+    ``{test=run prelude=<name>}`` runs it after that prelude,
+    ``{test=compile reason="..."}`` compiles it and says why it cannot run,
+    ``{test=pytest path="tests/<file>.py"}`` runs it as a test module
+    (``tests/test_docs_testing_fixtures.py``). ``lint=check`` also lints it.
+    """
     compile(
         example.source,
         str(example.path),
         "exec",
         flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT,
     )
-
-    settings = fence_settings(example)
-
-    # Opt in for stricter linting:
-    # ```python {lint=check}
-    # ...
-    # ```
-    if settings.get("lint") == "check":
+    mode = page_fence_mode(example)
+    if fence_settings(example).get("lint") == "check":
         eval_example.set_config(
             # Docs snippets often intentionally use print statements or partial examples.
-            ruff_ignore=["D", "T", "B", "C4", "E721"],
+            ruff_ignore=["D", "T", "B", "C4", "E711", "E712", "E721"],
             line_length=100,
             target_version="py313",
         )
         eval_example.lint(example)
-
-    # Opt in for runnable snippets:
-    # ```python {test=run}
-    # ...
-    # ```
-    # With a prelude, the block runs in a subprocess after
-    # docs/examples/_preludes/<name>.py, inside its session:
-    # ```python {test=run prelude=reference}
-    # ...
-    # ```
-    if settings.get("test") == "run":
-        if "prelude" in settings:
-            run_fence(example)
-        else:
-            eval_example.run_print_check(example)
-            eval_example.run(example)
+    if mode == "run":
+        run_fence(example)
 
 
 @pytest.mark.parametrize(
@@ -171,9 +157,65 @@ def test_prelude_without_test_run_is_refused(tmp_path: Path) -> None:
 
 def test_fence_settings_read_bare_and_quoted_values() -> None:
     example = CodeExample.create(
-        "pass", prefix='python {test=run lint="check"}', path=Path("p.md")
+        "pass",
+        prefix='python {test=run prelude=reference lint="check"}',
+        path=Path("p.md"),
     )
-    assert fence_settings(example) == {"test": "run", "lint": "check"}
+    assert fence_settings(example) == {
+        "test": "run",
+        "prelude": "reference",
+        "lint": "check",
+    }
+
+
+def _fence(prefix: str) -> CodeExample:
+    return CodeExample.create("pass", prefix=prefix, path=Path("page.md"))
+
+
+def test_run_without_prelude_names_the_preludes() -> None:
+    with pytest.raises(ValueError, match=r"test=run needs prelude=<name>.*reference"):
+        fence_settings(_fence("python {test=run}"))
+
+
+def test_compile_without_reason_is_refused() -> None:
+    with pytest.raises(ValueError, match=r'test=compile needs reason="'):
+        fence_settings(_fence("python {test=compile}"))
+
+
+def test_pytest_without_path_is_refused() -> None:
+    with pytest.raises(ValueError, match=r'test=pytest needs path="tests/'):
+        fence_settings(_fence("python {test=pytest}"))
+
+
+def test_unknown_test_mode_is_refused() -> None:
+    with pytest.raises(ValueError, match=r"test=skip is not run, compile or pytest"):
+        fence_settings(_fence("python {test=skip}"))
+
+
+def test_other_compile_only_spelling_is_refused() -> None:
+    with pytest.raises(
+        ValueError, match=r'unknown setting compile-only.*test=compile reason="'
+    ):
+        fence_settings(_fence('python {compile-only="needs Postgres"}'))
+
+
+def test_reason_without_compile_is_refused() -> None:
+    with pytest.raises(ValueError, match=r"reason=x needs test=compile"):
+        fence_settings(_fence('python {test=run prelude=reference reason="x"}'))
+
+
+def test_unmarked_page_fence_must_say_how_it_is_tested() -> None:
+    with pytest.raises(
+        ValueError, match=r'says neither test=run.*test=compile reason="'
+    ):
+        page_fence_mode(_fence("python"))
+
+
+def test_compile_only_page_fence_states_its_reason() -> None:
+    assert (
+        page_fence_mode(_fence('python {test=compile reason="needs Postgres"}'))
+        == "compile"
+    )
 
 
 README = REPO_ROOT / "README.md"

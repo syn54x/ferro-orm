@@ -144,3 +144,9 @@ keep_trailing_newline = true
 allowed_tags = ["build", "chore", "ci", "docs", "feat", "fix", "perf", "style", "refactor", "test"]
 minor_tags = ["feat"]
 patch_tags = ["fix", "perf", "refactor"]
+
+[tool.ruff.lint.per-file-ignores]
+# Query lambdas compare with `== None` and `== True` on purpose: the lambda
+# builds SQL, and Python lets a column overload `==` but not `is`. The docs
+# embed these files, so the ignore lives here, not in a `# noqa` on the page.
+"docs/examples/*" = ["E711", "E712"]

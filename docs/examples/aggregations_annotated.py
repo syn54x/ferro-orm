@@ -54,7 +54,7 @@ async def main() -> None:
                     "total": transaction.amount.sum(),
                 }
             )
-            .where(lambda transaction: transaction.account_id != None)  # noqa: E711
+            .where(lambda transaction: transaction.account_id != None)
             .order_by("acct")
             .all()
         )

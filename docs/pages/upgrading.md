@@ -401,7 +401,7 @@ Unqualified operations (`Account.all()`, `ferro.execute(...)`) used to fall back
     ```python {test=compile reason="shows the pre-0.14 implicit routing, which now raises RuntimeError"}
     import ferro
 
-    accounts = await Account.where(lambda account: account.active == True).all()  # noqa: E712
+    accounts = await Account.where(lambda account: account.active == True).all()
     await ferro.execute("UPDATE account SET active = 1")
     ```
 
@@ -411,7 +411,7 @@ Unqualified operations (`Account.all()`, `ferro.execute(...)`) used to fall back
     import ferro
 
     async with ferro.engines.session():
-        accounts = await Account.where(lambda account: account.active == True).all()  # noqa: E712
+        accounts = await Account.where(lambda account: account.active == True).all()
         await ferro.execute("UPDATE account SET active = 1")
         assert len(accounts) == 3
     ```
@@ -485,20 +485,20 @@ Portable SQL has no `DELETE … LIMIT`. The pagination used to be silently dropp
 === "Before (limit silently ignored)"
 
     ```python {test=compile reason="shows the pre-0.14 behaviour, which deleted every active account"}
-    await Account.where(lambda account: account.active == True).limit(2).delete()  # noqa: E712
+    await Account.where(lambda account: account.active == True).limit(2).delete()
     ```
 
 === "After (bounded by a primary-key set)"
 
     ```python {test=run prelude=upgrade}
     try:
-        await Account.where(lambda account: account.active == True).limit(2).delete()  # noqa: E712
+        await Account.where(lambda account: account.active == True).limit(2).delete()
     except ValueError:
         pass  # the bounded delete is refused
     else:
         raise AssertionError("delete() accepted limit()")
 
-    batch = await Account.where(lambda account: account.active == True).order_by("id").limit(2).all()  # noqa: E712
+    batch = await Account.where(lambda account: account.active == True).order_by("id").limit(2).all()
     ids = [account.id for account in batch]
     await Account.where(lambda account: account.id.in_(ids)).delete()
     remaining = await Account.select().order_by("id").all()
@@ -668,7 +668,7 @@ The private helpers `ferro.migrations.alembic._build_sa_table` and `ferro.migrat
 
 === "After"
 
-    ```python {test=run}
+    ```python {test=run prelude=upgrade}
     from ferro.migrations import get_metadata
 
     target_metadata = get_metadata()

@@ -128,7 +128,7 @@ async def main() -> None:
                     "total": transaction.amount.sum(),
                 }
             )
-            .where(lambda transaction: transaction.account_id != None)  # noqa: E711
+            .where(lambda transaction: transaction.account_id != None)
             .order_by("acct")
             .all()
         )
@@ -201,7 +201,7 @@ async def main() -> None:
                     "total": transaction.amount.sum(),
                 }
             )
-            .where(lambda transaction: transaction.account_id != None)  # noqa: E711
+            .where(lambda transaction: transaction.account_id != None)
             .order_by(lambda transaction: transaction.amount.sum(), "desc")
             .all()
         )
@@ -229,7 +229,7 @@ async def main() -> None:
             Transaction.select(
                 lambda transaction: {"avg_price": transaction.price.avg()}
             )
-            .where(lambda transaction: transaction.price != None)  # noqa: E711
+            .where(lambda transaction: transaction.price != None)
             .first()
         )
         assert row is not None
