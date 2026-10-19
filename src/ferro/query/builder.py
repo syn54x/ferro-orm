@@ -2056,6 +2056,13 @@ class Relation(Query[T]):
 
         Returns:
             (list): The related instances, in the query's order.
+
+        Examples:
+            ```python {test=run prelude=reference}
+            grace = await Author.get(2)
+            posts = await grace.posts.all()
+            assert [post.title for post in posts] == ["The Education of a Computer"]
+            ```
         """
         return await super().all()
 
@@ -2064,6 +2071,13 @@ class Relation(Query[T]):
 
         Returns:
             (Any): The first related instance in the query's order, or `None`.
+
+        Examples:
+            ```python {test=run prelude=reference}
+            ada = await Author.get(1)
+            post = await ada.posts.order_by(lambda post: post.id).first()
+            assert post.title == "Notes on the Analytical Engine"
+            ```
         """
         return await super().first()
 
