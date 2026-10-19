@@ -1,3 +1,7 @@
+---
+description: "Why a row fetched twice in one session is the same Python object, refreshed to the database's current values."
+---
+
 # Identity map
 
 Within a session, Ferro's identity map makes one database row one Python object: fetching a row you already hold returns that same instance, refreshed to the database's current values.

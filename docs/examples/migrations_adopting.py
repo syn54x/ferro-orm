@@ -1,6 +1,6 @@
 # ruff: noqa: E402 - the models come first, as the other migrations examples
 """Runnable companion for adopting migrations at start-up
-(docs/pages/howto/adopting-migrations.md, "An app that migrates at start-up").
+(docs/pages/guide/schema/adopting-migrations.md, "An app that migrates at start-up").
 
 The previous release built its SQLite file with auto-migrate; this release
 generates ``0001`` from the same models and runs the page's ``start()``:

@@ -1,4 +1,8 @@
-# Alembic
+---
+description: "Let alembic revision --autogenerate write revisions for your Ferro models through the Alembic bridge."
+---
+
+# Alembic bridge
 
 Ferro bridges your models into the SQLAlchemy metadata [Alembic](https://alembic.sqlalchemy.org/) reads, so `alembic revision --autogenerate` writes revisions for them. Add a `nickname` to the overview's `Author`:
 
@@ -170,7 +174,7 @@ A rename hint whose old name is still declared is refused with the generator's r
 
 ## Moving from Alembic to Migrations
 
-A database Alembic manages can move to Ferro's migrations without running any DDL: bring it to `alembic upgrade head`, generate the first migration, and `ferro migrate baseline` it. [Adopting migrations on an existing database](../../howto/adopting-migrations.md#coming-from-alembic) walks through it.
+A database Alembic manages can move to Ferro's migrations without running any DDL: bring it to `alembic upgrade head`, generate the first migration, and `ferro migrate baseline` it. [Adopting migrations on an existing database](adopting-migrations.md#coming-from-alembic) walks through it.
 
 ## See also
 

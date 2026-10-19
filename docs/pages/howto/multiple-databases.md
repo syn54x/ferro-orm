@@ -1,3 +1,7 @@
+---
+description: "Connect one process to two databases and route each model call to the right one."
+---
+
 # How to use several databases in one app
 
 This how-to connects one process to two databases, an application database and an analytics database, and routes each call to the right one.

@@ -1,3 +1,7 @@
+---
+description: "Which workloads Ferro's Rust core speeds up, which it does not, and how to get the most from it."
+---
+
 # Performance
 
 Ferro builds SQL, binds values and turns rows into instances in compiled Rust, and waits on the database without holding Python's interpreter lock; this page explains which workloads that speeds up, which it does not, and how to get the most from it.

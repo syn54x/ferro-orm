@@ -1,3 +1,7 @@
+---
+description: "How Pydantic validates Ferro models at runtime and how a type checker knows what each query returns."
+---
+
 # Type safety
 
 Ferro models are Pydantic models and Ferro's API is fully annotated, so building an instance validates its fields at runtime and a type checker knows what each query returns.

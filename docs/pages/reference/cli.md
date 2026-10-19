@@ -1,3 +1,7 @@
+---
+description: "Every ferro migrate command, with its options, exit codes and output."
+---
+
 # CLI
 
 The `ferro` command ships with the core package; its command line needs the `cli` extra:
@@ -6,7 +10,7 @@ The `ferro` command ships with the core package; its command line needs the `cli
 pip install "ferro-orm[cli]"
 ```
 
-Without the extra, `ferro` prints `ferro's CLI needs the cli extra: pip install "ferro-orm[cli]"` and exits 2. Every verb lives under `ferro migrate`; the guides show them in use ([Migrations](../guide/schema/migrations.md), [Deploying](../guide/schema/deploying.md), [Adopting](../howto/adopting-migrations.md)).
+Without the extra, `ferro` prints `ferro's CLI needs the cli extra: pip install "ferro-orm[cli]"` and exits 2. Every verb lives under `ferro migrate`; the guides show them in use ([Migrations](../guide/schema/migrations.md), [Deploying](../guide/schema/deploying.md), [Adopting](../guide/schema/adopting-migrations.md)).
 
 ## Global options
 
@@ -328,7 +332,7 @@ recorded 0001_create_author … 0002_author_slug as baseline (2 steps)
 baseline checked what `ferro migrate drift` checks: objects ferro does not own (functions, triggers) were not compared
 ```
 
-On a terminal the first line is a green tick and a bold `recorded …`, with the step count dim, and the note under it is dim. [When baseline says no](../howto/adopting-migrations.md#when-baseline-says-no) shows the differences it prints instead.
+On a terminal the first line is a green tick and a bold `recorded …`, with the step count dim, and the note under it is dim. [When baseline says no](../guide/schema/adopting-migrations.md#when-baseline-says-no) shows the differences it prints instead.
 
 ## `ferro migrate rerecord MIGRATION:STEP`
 

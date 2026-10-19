@@ -1,3 +1,7 @@
+---
+description: "Short answers about what Ferro is, what it supports and how to fix its most common errors."
+---
+
 # FAQ
 
 Short answers about what Ferro is, what it supports and how to fix its most common errors. The answers share one pair of models, `Author` and `Post`, declared here once:

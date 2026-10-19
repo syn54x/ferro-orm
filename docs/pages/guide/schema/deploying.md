@@ -1,3 +1,7 @@
+---
+description: "Apply migrations in a deploy step or at application start-up, and refuse to serve a database they have not reached."
+---
+
 # Deploying migrations
 
 Migrations reach a database in one of two ways: a deploy step runs `ferro migrate up` before the new code starts, or the application applies them itself at start-up. Either way the application should refuse to serve a database its migrations have not reached.
@@ -71,7 +75,7 @@ Run `ferro migrate up` (or `await ferro.migrations.up()`) before serving.
 
 ### Concurrent pre-deploys
 
-Two services that share one database often run their pre-deploy steps at the same time. When that database is being [adopted](../../howto/adopting-migrations.md), both pre-deploys find no migration records and both call `baseline()`. The run lock lets the first one record. The second then finds a tracked database (its tracking table holds records now) and raises `AlreadyTrackedError`. Catch it by type and go on to `up()`:
+Two services that share one database often run their pre-deploy steps at the same time. When that database is being [adopted](adopting-migrations.md), both pre-deploys find no migration records and both call `baseline()`. The run lock lets the first one record. The second then finds a tracked database (its tracking table holds records now) and raises `AlreadyTrackedError`. Catch it by type and go on to `up()`:
 
 ```python {test=compile reason="needs a deployed project: its configuration, migrations and database"}
 import ferro
@@ -88,7 +92,7 @@ async def pre_deploy() -> None:
     await ferro.migrations.up()
 ```
 
-The target is pinned to the migration that describes what the previous release built, as in the [start-up recipe](../../howto/adopting-migrations.md#an-app-that-migrates-at-start-up). An unattended baseline must never record a step it did not run. Without a target it records every migration through the head, and a later data step would be marked applied without its backfill ever running; `up()` then applies those later migrations for real.
+The target is pinned to the migration that describes what the previous release built, as in the [start-up recipe](adopting-migrations.md#an-app-that-migrates-at-start-up). An unattended baseline must never record a step it did not run. Without a target it records every migration through the head, and a later data step would be marked applied without its backfill ever running; `up()` then applies those later migrations for real.
 
 `AlreadyTrackedError` is a `MigrationRefused`, and its message is the one `ferro migrate baseline` prints. `.applied` names the recorded migrations, `.head` the newest of them, and `.report` is the database's status report. Every other refusal from `baseline()` is still a plain `MigrationRefused`: a target the directory lacks, an empty directory, a lock wait that outlasts `lock_timeout`, or a configuration that names no single database. Two `up()` calls need no such care, because the second waits for the lock and finds nothing pending.
 
@@ -106,7 +110,7 @@ async def start() -> None:
     await ferro.migrations.up()
 ```
 
-`up()` takes the same run lock as `ferro migrate up`, so two instances starting together apply the migrations once. It raises instead of returning a refusal: an app must not go on serving a database the run did not reach. When a user opens a file a newer build migrated, it raises `DatabaseAheadError` (see below). A file that existed before the app had migrations is [baselined](../../howto/adopting-migrations.md#an-app-that-migrates-at-start-up) in the same start-up code.
+`up()` takes the same run lock as `ferro migrate up`, so two instances starting together apply the migrations once. It raises instead of returning a refusal: an app must not go on serving a database the run did not reach. When a user opens a file a newer build migrated, it raises `DatabaseAheadError` (see below). A file that existed before the app had migrations is [baselined](adopting-migrations.md#an-app-that-migrates-at-start-up) in the same start-up code.
 
 `up()` and `require_applied()` take no target: a migration is applied whole, always to the head, so an application never stops a database between two migrations. Both take `database=` when several databases are configured, and `using=` or `url=` to name the connection; the [API reference](../../api/migrations.md#running-migrations) lists every parameter.
 

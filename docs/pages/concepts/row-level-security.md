@@ -1,3 +1,8 @@
+---
+description: "How Postgres row-level security policies read session settings, and how Ferro delivers those settings on each connection."
+status: new
+---
+
 # Row-level security and session settings
 
 Postgres row-level security filters rows inside the database, using policies that read a setting on the connection; Ferro declares the policies on the model and sends the setting on every connection a session uses.

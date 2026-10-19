@@ -1,3 +1,7 @@
+---
+description: "Translate each SQLAlchemy 2.0 idiom, from models to sessions and queries, into its Ferro equivalent."
+---
+
 # Migrate from SQLAlchemy
 
 This page maps each SQLAlchemy 2.0 idiom to its Ferro equivalent, using one `User` and `Post` pair throughout. Ferro keeps a session, but it only routes calls to a connection and holds an identity map: there is no `add()`, `flush()` or `commit()`. Open one with `async with engines.session():` and write the call on the model:
@@ -210,7 +214,7 @@ context.configure(
 
 The block hands Alembic Ferro's metadata. Install the extra with `pip install "ferro-orm[alembic]"`. The bridge fits while the project is in transition, or while Alembic still manages SQLAlchemy tables beside your Ferro models; see [Alembic](../guide/schema/alembic.md).
 
-Once the models are all Ferro, move to Ferro's own [migrations](../guide/schema/migrations.md) (`pip install "ferro-orm[cli]"`), which also write backfills and SQLite table rebuilds. Bring each database to `alembic upgrade head` and [baseline it](adopting-migrations.md#coming-from-alembic); no DDL runs. For development and tests, `connect(url, auto_migrate=True)` creates tables without migration files. See [Schema management](../guide/schema/overview.md) and the [Migrations API](../api/migrations.md).
+Once the models are all Ferro, move to Ferro's own [migrations](../guide/schema/migrations.md) (`pip install "ferro-orm[cli]"`), which also write backfills and SQLite table rebuilds. Bring each database to `alembic upgrade head` and [baseline it](../guide/schema/adopting-migrations.md#coming-from-alembic); no DDL runs. For development and tests, `connect(url, auto_migrate=True)` creates tables without migration files. See [Schema management](../guide/schema/overview.md) and the [Migrations API](../api/migrations.md).
 
 ## Features without a Ferro equivalent
 

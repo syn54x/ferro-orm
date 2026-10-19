@@ -1,6 +1,10 @@
+---
+description: "Move a database that auto-migrate or Alembic built onto Ferro's migrations without running any DDL on it."
+---
+
 # Adopting migrations on an existing database
 
-This how-to moves a database that `connect(url, migrate_updates=True)` or an Alembic chain built onto [Migrations](../guide/schema/migrations.md), without running any DDL on it and without losing a row. The tool is a **baseline**: it records migrations as applied on a database that already has their schema. It runs nothing, and it records only after checking.
+This how-to moves a database that `connect(url, migrate_updates=True)` or an Alembic chain built onto [Migrations](migrations.md), without running any DDL on it and without losing a row. The tool is a **baseline**: it records migrations as applied on a database that already has their schema. It runs nothing, and it records only after checking.
 
 ## The four steps
 
@@ -139,7 +143,7 @@ The steps are the same, with Alembic as the old door:
 
 - Step 1 is `alembic upgrade head`.
 - In step 4, remove `get_metadata()` from `env.py`'s `target_metadata` once every database is baselined. Ferro's migrations ignore `alembic_version`; drop it when no database needs the Alembic chain any more.
-- A project whose Alembic chain also manages its own SQLAlchemy tables keeps that chain for them: drop `get_metadata()` from `target_metadata` and keep `**ferro_options()`, which keeps Alembic off Ferro's tables and tracking tables. See [Alembic](../guide/schema/alembic.md).
+- A project whose Alembic chain also manages its own SQLAlchemy tables keeps that chain for them: drop `get_metadata()` from `target_metadata` and keep `**ferro_options()`, which keeps Alembic off Ferro's tables and tracking tables. See [Alembic](alembic.md).
 
 ## An app that migrates at start-up
 
@@ -155,7 +159,7 @@ A file the previous release built matches `0001` and is recorded. A brand-new, e
 
 This also covers a race. Two instances that start together (two windows of the app, or two services' pre-deploys against one shared database) both find no records and both call `baseline()`. The run lock lets one of them record, and the other raises `AlreadyTrackedError`. Do not check `status()` first to decide whether to call `baseline()`: the answer can change before the baseline takes the lock. Every other refusal (a target the directory lacks, a lock wait that runs out) is still raised as `MigrationRefused`.
 
-The baseline still checks the file. A file that matches neither (an even older build, or one edited by hand) is not recorded: on drift, `baseline()` raises nothing and returns a [`BaselineReport`](../api/migrations.md#ferro.migrations.BaselineReport) whose `drift` lists the differences. `up()` then refuses to run `0001` over the file's tables, so the app fails loudly at start-up instead of serving a half-migrated file. To fail at the baseline instead, keep the report and call `report.raise_for_problems()`.
+The baseline still checks the file. A file that matches neither (an even older build, or one edited by hand) is not recorded: on drift, `baseline()` raises nothing and returns a [`BaselineReport`](../../api/migrations.md#ferro.migrations.BaselineReport) whose `drift` lists the differences. `up()` then refuses to run `0001` over the file's tables, so the app fails loudly at start-up instead of serving a half-migrated file. To fail at the baseline instead, keep the report and call `report.raise_for_problems()`.
 
 ## Undoing a baseline
 
@@ -179,6 +183,6 @@ In code, `ferro.migrations.baseline()` and `ferro.migrations.remove_baseline()` 
 
 ## See also
 
-- [Schema management overview](../guide/schema/overview.md): one door per database
-- [Deploying migrations](../guide/schema/deploying.md): what comes after the baseline
-- [CLI reference](../reference/cli.md#ferro-migrate-baseline-target) and [Migrations API reference](../api/migrations.md#ferro.migrations.baseline): every flag and parameter of `baseline`
+- [Schema management overview](overview.md): one door per database
+- [Deploying migrations](deploying.md): what comes after the baseline
+- [CLI reference](../../reference/cli.md#ferro-migrate-baseline-target) and [Migrations API reference](../../api/migrations.md#ferro.migrations.baseline): every flag and parameter of `baseline`

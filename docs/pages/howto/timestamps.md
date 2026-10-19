@@ -1,3 +1,7 @@
+---
+description: "Give a model created_at and updated_at fields that Ferro sets on create and on every save()."
+---
+
 # How to record created and updated times
 
 This page gives a model `created_at` and `updated_at` fields: a field default sets both when the row is created, and a mixin sets `updated_at` again in every `save()`.

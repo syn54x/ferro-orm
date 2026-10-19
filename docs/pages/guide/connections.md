@@ -1,3 +1,7 @@
+---
+description: "Connect Ferro to SQLite or PostgreSQL, configure the connection pool and run every ORM call inside a session."
+---
+
 # Connections
 
 Ferro reaches SQLite and PostgreSQL through connection pools: you connect once at startup, then run every ORM call inside a session.
@@ -181,7 +185,7 @@ Rules for closing a session:
 The [`Session`](../api/connection.md#ferro.Session) and [`engines`](../api/connection.md#ferro.engines) reference entries list every argument, including `settings=` for [row-level security](../concepts/row-level-security.md#session-settings).
 
 !!! note "Changed in 0.13"
-    Calls outside a session used to run on the default connection; they now raise `RuntimeError`. The [upgrade guide](../howto/upgrade-guide.md#connection-routing-requires-a-session) shows how to move old call sites into sessions.
+    Calls outside a session used to run on the default connection; they now raise `RuntimeError`. The [upgrade guide](../upgrading.md#connection-routing-requires-a-session) shows how to move old call sites into sessions.
 
 ## Connection options
 

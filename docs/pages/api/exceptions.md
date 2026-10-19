@@ -1,3 +1,7 @@
+---
+description: "API reference for FerroError and the subclasses Ferro raises, each catchable by type."
+---
+
 # FerroError and its subclasses
 
 Every database failure Ferro raises is catchable by type. The tree is

@@ -1,3 +1,7 @@
+---
+description: "Set up Postgres row-level security so each request reads and writes only its own tenant's rows."
+---
+
 # Scope rows by tenant with Postgres row-level security
 
 This page sets up Postgres row-level security so that each request reads and writes only its own tenant's rows, with no `where` filter in your code.

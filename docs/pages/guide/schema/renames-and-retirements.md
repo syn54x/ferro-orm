@@ -1,3 +1,8 @@
+---
+description: "Rename a table, column or enum label without losing rows, and retire a column or label over two releases."
+status: new
+---
+
 # Renaming and retiring columns and labels
 
 This page shows how to rename a table, a column or an enum label without losing the rows it holds, and how to retire a column or a label over two releases so the release still serving keeps working. Every section starts from this `Author`:

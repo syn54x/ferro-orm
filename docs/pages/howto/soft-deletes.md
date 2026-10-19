@@ -1,3 +1,7 @@
+---
+description: "Mark rows as deleted instead of removing them, and restore or filter them later with a mixin."
+---
+
 # How to soft-delete rows
 
 This page marks rows as deleted instead of removing them, so they can be audited or restored later: two fields on the model hold the mark, and a mixin supplies `soft_delete()`, `restore()` and `active()`.

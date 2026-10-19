@@ -407,7 +407,7 @@ OUTPUT_PAGES = [
     DOCS_PAGES / "guide" / "schema" / "squash.md",
     DOCS_PAGES / "guide" / "schema" / "data-steps.md",
     DOCS_PAGES / "guide" / "schema" / "deploying.md",
-    DOCS_PAGES / "howto" / "adopting-migrations.md",
+    DOCS_PAGES / "guide" / "schema" / "adopting-migrations.md",
 ]
 
 HEAD = "from ferro import Field, Model\n\n\n"

@@ -1,4 +1,9 @@
-# Migrations
+---
+description: "Step-file headers, step classes, what each schema door covers, what auto-migrate does per backend and what a PassReport holds."
+status: new
+---
+
+# Migrations reference
 
 This page lists the facts the schema-management guides link to: the headers a step file can carry, the class of each step, what each door covers, what auto-migrate does on each backend, and what a `PassReport` holds. A generated index step shows a header at work:
 

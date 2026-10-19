@@ -1,5 +1,5 @@
 """Runnable companion for the Upgrade guide's foreign-default recipe
-(docs/pages/howto/upgrade-guide.md).
+(docs/pages/upgrading.md).
 
 A database where someone set a server default by hand on ``seen_at``, a column
 the ``Account`` model declares without one. The pass reports it on every start.

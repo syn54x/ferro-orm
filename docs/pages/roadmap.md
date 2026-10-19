@@ -1,3 +1,7 @@
+---
+description: "Features Ferro does not have yet, each with the workaround to use today."
+---
+
 # Roadmap
 
 This page lists the features Ferro does not have yet, each with the workaround to use today. A filter on grouped results is the first gap; with the `Author` and `Post` models below, you filter the groups in Python after `all()`:

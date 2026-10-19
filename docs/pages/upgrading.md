@@ -1,3 +1,7 @@
+---
+description: "What upgrading Ferro asks of your code, release by release, and how to make each change."
+---
+
 <!--
   MAINTAINERS: This is the single, cumulative upgrade guide. When a release
   asks something of its users, ADD a new "## Upgrading to X.Y" section at the
@@ -9,9 +13,9 @@
   `docs/examples/upgrade_*.py` with an Annotated twin.
 -->
 
-# Upgrade guide
+# Upgrading between versions
 
-This guide lists what upgrading Ferro asks of your code, release by release from `0.11` to `0.25`; the [changelog](../changelog.md) is the exhaustive record. After an upgrade, a query reads like this, inside a session:
+This guide lists what upgrading Ferro asks of your code, release by release from `0.11` to `0.25`; the [changelog](changelog.md) is the exhaustive record. After an upgrade, a query reads like this, inside a session:
 
 ```python {test=run prelude=upgrade}
 from ferro import engines
@@ -35,7 +39,7 @@ The query returns the two accounts aged 40 or over, in name order. Every recipe 
     --8<-- "docs/examples/upgrade_account_annotated.py:models"
     ```
 
-Every block below that calls a model runs inside a session on four accounts, as the first block does; see [Connections › Sessions](../guide/connections.md#sessions). Each section shows only what changed.
+Every block below that calls a model runs inside a session on four accounts, as the first block does; see [Connections › Sessions](guide/connections.md#sessions). Each section shows only what changed.
 
 ## Which sections apply
 
@@ -66,12 +70,12 @@ If you are moving from `0.12` or earlier straight past `0.14`, the deprecated AP
 
 ## Upgrading to 0.25
 
-`0.25` adds [`ferro migrate squash`](../reference/cli.md#ferro-migrate-squash-name-from-target), which asks nothing of you. It also writes two things `0.24` cannot read, which matters only while both versions share one migrations directory and one database, as in a rolling deploy:
+`0.25` adds [`ferro migrate squash`](reference/cli.md#ferro-migrate-squash-name-from-target), which asks nothing of you. It also writes two things `0.24` cannot read, which matters only while both versions share one migrations directory and one database, as in a rolling deploy:
 
 - **Schema snapshots.** Every snapshot `0.25` writes uses a newer snapshot format. A `0.24` checkout refuses the first migration that carries one, so finish rolling out `0.25` before anyone runs `ferro migrate new`.
 - **Inherited rows.** A database that inherited a squash holds rows with `origin = inherited`. A `0.24` runner fails every verb on them with `the tracking table holds a row ferro cannot read (origin)`. A squash is made before a branch merges, so only development databases meet this.
 
-[Deploying migrations](../guide/schema/deploying.md) lists the three ways back from the second. Reference: [Squashing a feature branch's migrations](../guide/schema/squash.md).
+[Deploying migrations](guide/schema/deploying.md) lists the three ways back from the second. Reference: [Squashing a feature branch's migrations](guide/schema/squash.md).
 
 ## Upgrading to 0.24
 
@@ -81,7 +85,7 @@ If you are moving from `0.12` or earlier straight past `0.14`, the deprecated AP
 - The one-line results scripts grep for (`ok: models match`, `no drift against`, `nothing to apply`), every refusal sentence and every `warning:` line are unchanged.
 - A connection error masks the password as `***`; it used to print `<redacted>`.
 
-`rich` now ships in the `cli` extra, so `pip install "ferro-orm[cli]"` brings it. Reference: [What the output looks like](../reference/cli.md#what-the-output-looks-like).
+`rich` now ships in the `cli` extra, so `pip install "ferro-orm[cli]"` brings it. Reference: [What the output looks like](reference/cli.md#what-the-output-looks-like).
 
 ## Upgrading to 0.23
 
@@ -95,15 +99,15 @@ If you are moving from `0.12` or earlier straight past `0.14`, the deprecated AP
 
     The pass reports one warning and changes nothing. To silence it, drop the default yourself (`ALTER TABLE "account" ALTER COLUMN "seen_at" DROP DEFAULT` on Postgres), or run the pass with `migrate_destructive=True`. On SQLite only a table rebuild drops a default, so the warning names the hand-written step that does it.
 
-- **A start-up `baseline()` can branch on a type.** Two services that baseline one database at the same moment used to get a plain `MigrationRefused` from the loser. The loser now gets `AlreadyTrackedError`, a subclass, so `except MigrationRefused` still works and you can catch the narrower type. See [An app that migrates at start-up](adopting-migrations.md#an-app-that-migrates-at-start-up).
+- **A start-up `baseline()` can branch on a type.** Two services that baseline one database at the same moment used to get a plain `MigrationRefused` from the loser. The loser now gets `AlreadyTrackedError`, a subclass, so `except MigrationRefused` still works and you can catch the narrower type. See [An app that migrates at start-up](guide/schema/adopting-migrations.md#an-app-that-migrates-at-start-up).
 
-Also new, and opt-in: [`Field(retired=True)`](../guide/schema/renames-and-retirements.md#retiring-a-column) and retired enum labels, which let a column or a label leave in two releases, and [`allow_ahead="expand-only"`](../guide/schema/deploying.md), which lets an older release start beside a newer schema. A database whose last migration ran on `0.22` has its steps classed on the first run of `0.23`; [Deploying migrations](../guide/schema/deploying.md) says how.
+Also new, and opt-in: [`Field(retired=True)`](guide/schema/renames-and-retirements.md#retiring-a-column) and retired enum labels, which let a column or a label leave in two releases, and [`allow_ahead="expand-only"`](guide/schema/deploying.md), which lets an older release start beside a newer schema. A database whose last migration ran on `0.22` has its steps classed on the first run of `0.23`; [Deploying migrations](guide/schema/deploying.md) says how.
 
 ??? example "Automate this: copy this prompt to your coding agent"
 
     ```text
     You are helping upgrade a Python codebase from Ferro ORM 0.22.x to 0.23.
-    Reference: https://ferro-orm.x54.sh/howto/upgrade-guide/#upgrading-to-023
+    Reference: https://ferro-orm.x54.sh/upgrading/#upgrading-to-023
 
     1. Server defaults: search the repo's SQL and migration files for
        `SET DEFAULT` and `DEFAULT` clauses on columns no Ferro model declares a
@@ -116,10 +120,10 @@ Also new, and opt-in: [`Field(retired=True)`](../guide/schema/renames-and-retire
 
 ## Upgrading to 0.22
 
-`0.22` adds Ferro's own migrations door: the `ferro` command, a project configuration file and numbered migration directories (see [Schema management](../guide/schema/overview.md)). Nothing about adopting it is forced, but four things change for code that stays on auto-migrate:
+`0.22` adds Ferro's own migrations door: the `ferro` command, a project configuration file and numbered migration directories (see [Schema management](guide/schema/overview.md)). Nothing about adopting it is forced, but four things change for code that stays on auto-migrate:
 
-- **A database that has run a migration refuses auto-migrate.** `connect(auto_migrate=…)`, `create_tables()` and `migrate()` raise before any DDL on a database that carries the `_ferro_migrations` tracking table, and the message names the two ways out. A database that never ran a migration, such as a test database, is unaffected. See [One door per database](../guide/schema/overview.md#one-door-per-database).
-- **Postgres passes wait under timeouts.** Each DDL statement waits up to `ddl_lock_timeout` (default `5s`) for its table lock and is retried up to ten times. A pass waits up to `lock_timeout` (default `30s`) for another pass or run that holds the run lock, then fails. Set both in the [project configuration](../reference/configuration.md#ddl_lock_timeout) if your deploys hold locks longer.
+- **A database that has run a migration refuses auto-migrate.** `connect(auto_migrate=…)`, `create_tables()` and `migrate()` raise before any DDL on a database that carries the `_ferro_migrations` tracking table, and the message names the two ways out. A database that never ran a migration, such as a test database, is unaffected. See [One door per database](guide/schema/overview.md#one-door-per-database).
+- **Postgres passes wait under timeouts.** Each DDL statement waits up to `ddl_lock_timeout` (default `5s`) for its table lock and is retried up to ten times. A pass waits up to `lock_timeout` (default `30s`) for another pass or run that holds the run lock, then fails. Set both in the [project configuration](reference/configuration.md#ddl_lock_timeout) if your deploys hold locks longer.
 - **`migrate()` and `create_tables()` return a report.** They returned `None`; they now return a `PassReport` of the statements the pass ran. Code that ignored the return value needs no change:
 
     ```python {test=run prelude=upgrade}
@@ -157,7 +161,7 @@ Also new, and opt-in: [`Field(retired=True)`](../guide/schema/renames-and-retire
 
     The cancelled task left no `Ghost` row behind.
 
-The `ferro` command is in an extra: `pip install "ferro-orm[cli]"`. Reference: [Configuration](../reference/configuration.md) and [CLI](../reference/cli.md).
+The `ferro` command is in an extra: `pip install "ferro-orm[cli]"`. Reference: [Configuration](reference/configuration.md) and [CLI](reference/cli.md).
 
 ## Upgrading to 0.21
 
@@ -205,7 +209,7 @@ The value matches Ada's row. A string from `isoformat()` still misses, because t
 
     ```text
     You are helping upgrade a Python codebase from Ferro ORM 0.20.x to 0.21.
-    Reference: https://ferro-orm.x54.sh/howto/upgrade-guide/#upgrading-to-021
+    Reference: https://ferro-orm.x54.sh/upgrading/#upgrading-to-021
 
     1. Find every order_by() over a nullable column that omits `nulls=`. List
        each as file:line with the column, and ask me whether NULL should sort
@@ -218,11 +222,11 @@ The value matches Ada's row. A string from `isoformat()` still misses, because t
 
 ## Upgrading to 0.18
 
-`0.18` makes a grown enum reach an existing Postgres database. Under `migrate_updates=True`, the pass appends each label the model declares and the live type lacks (`ALTER TYPE … ADD VALUE`), and warns of each live label the model no longer declares. Under plain `auto_migrate=True` an existing enum type is never changed, so a new member passes every test that builds a fresh schema and fails in production with `invalid input value for enum`. If your enums evolve, connect with `migrate_updates=True` or generate the change as a migration. SQLite stores enums as text and needs nothing. Reference: [Evolving enums](../guide/schema/auto-migrate.md#evolving-enums-label-addition).
+`0.18` makes a grown enum reach an existing Postgres database. Under `migrate_updates=True`, the pass appends each label the model declares and the live type lacks (`ALTER TYPE … ADD VALUE`), and warns of each live label the model no longer declares. Under plain `auto_migrate=True` an existing enum type is never changed, so a new member passes every test that builds a fresh schema and fails in production with `invalid input value for enum`. If your enums evolve, connect with `migrate_updates=True` or generate the change as a migration. SQLite stores enums as text and needs nothing. Reference: [Evolving enums](guide/schema/auto-migrate.md#evolving-enums-label-addition).
 
 ## Upgrading to 0.17.1
 
-`0.17.1` makes the create pass leave existing tables alone: a plain `auto_migrate=True` no longer adds an index to a table that already exists. Add it under `migrate_updates=True`, or in a migration. The same release makes `migrate_updates` read live foreign keys, so a changed `on_delete` is now acted on: Postgres rebuilds the constraint, and SQLite warns, since it cannot alter one in place. Reference: [Applying column changes with `migrate_updates`](../guide/schema/auto-migrate.md#applying-column-changes-with-migrate_updates).
+`0.17.1` makes the create pass leave existing tables alone: a plain `auto_migrate=True` no longer adds an index to a table that already exists. Add it under `migrate_updates=True`, or in a migration. The same release makes `migrate_updates` read live foreign keys, so a changed `on_delete` is now acted on: Postgres rebuilds the constraint, and SQLite warns, since it cannot alter one in place. Reference: [Applying column changes with `migrate_updates`](guide/schema/auto-migrate.md#applying-column-changes-with-migrate_updates).
 
 ## Upgrading to 0.16.3
 
@@ -254,7 +258,7 @@ The class is refused at definition. Keep one primary key and let the other colum
     --8<-- "docs/examples/upgrade_account_annotated.py:primary-key"
     ```
 
-If the pair of columns together must be unique, declare a [composite unique](../guide/models-and-fields.md#composite-uniques). Reference: [Models and fields](../guide/models-and-fields.md).
+If the pair of columns together must be unique, declare a [composite unique](guide/models-and-fields.md#composite-uniques). Reference: [Models and fields](guide/models-and-fields.md).
 
 ## Releases that need no action
 
@@ -290,13 +294,13 @@ On the first connect with `migrate_updates=True`, each existing plain-`json` col
     --8<-- "docs/examples/upgrade_keep_annotated.py:keep-json"
     ```
 
-The column stays plain `json`, and `0.15` writes no migration for it. `db_type="jsonb"` stays valid and states the default. Alembic autogenerate proposes the same type changes; review the migration instead. Reference: [JSON storage](../guide/models-and-fields.md#json-storage-json-and-jsonb).
+The column stays plain `json`, and `0.15` writes no migration for it. `db_type="jsonb"` stays valid and states the default. Alembic autogenerate proposes the same type changes; review the migration instead. Reference: [JSON storage](guide/models-and-fields.md#json-storage-json-and-jsonb).
 
 ??? example "Automate this: copy this prompt to your coding agent"
 
     ```text
     You are helping upgrade a Python codebase from Ferro ORM 0.14.x to 0.15.
-    Reference: https://ferro-orm.x54.sh/howto/upgrade-guide/#upgrading-to-015
+    Reference: https://ferro-orm.x54.sh/upgrading/#upgrading-to-015
 
     The one breaking change: derived dict/list/nested-model fields now store as
     JSONB on PostgreSQL (previously plain json). On the first connect with
@@ -325,7 +329,7 @@ The column stays plain `json`, and `0.15` writes no migration for it. `db_type="
 
     ```text
     You are helping upgrade a Python codebase from Ferro ORM 0.13.x to 0.14.
-    Reference: https://ferro-orm.x54.sh/howto/upgrade-guide/#upgrading-to-014
+    Reference: https://ferro-orm.x54.sh/upgrading/#upgrading-to-014
 
     Work in two passes. Do NOT open a PR until I have reviewed Pass 2.
 
@@ -386,7 +390,7 @@ The column stays plain `json`, and `0.15` writes no migration for it. `db_type="
     assert [account.name for account in admins] == ["Ada Lovelace"]
     ```
 
-Both queries return the same rows they always did; only the predicate spelling changed. Reference: [Typed query predicates](../concepts/query-typing.md).
+Both queries return the same rows they always did; only the predicate spelling changed. Reference: [Typed query predicates](concepts/query-typing.md).
 
 ### Session routing {#connection-routing-requires-a-session}
 
@@ -412,11 +416,11 @@ Unqualified operations (`Account.all()`, `ferro.execute(...)`) used to fall back
         assert len(accounts) == 3
     ```
 
-The session routes both calls to its connection, and the query returns the three active accounts. Reference: [Identity map](../concepts/identity-map.md) and [Sessions](../guide/connections.md#sessions).
+The session routes both calls to its connection, and the query returns the three active accounts. Reference: [Identity map](concepts/identity-map.md) and [Sessions](guide/connections.md#sessions).
 
 ### `create()` on a primary-key conflict
 
-`create()` used to compile to `INSERT … ON CONFLICT (pk) DO UPDATE`, so a duplicate primary key silently **replaced** the existing row. It is a plain `INSERT` now: a duplicate raises [`UniqueViolationError`](../api/exceptions.md) and the stored row stays as it was:
+`create()` used to compile to `INSERT … ON CONFLICT (pk) DO UPDATE`, so a duplicate primary key silently **replaced** the existing row. It is a plain `INSERT` now: a duplicate raises [`UniqueViolationError`](api/exceptions.md) and the stored row stays as it was:
 
 === "Before (silent clobber)"
 
@@ -445,7 +449,7 @@ The session routes both calls to its connection, and the query returns the three
         raise AssertionError("create() overwrote the stored row")
     ```
 
-`upsert()` replaces the row; `create()` raises and leaves Ada at 36. Reference: [Mutations](../guide/mutations.md).
+`upsert()` replaces the row; `create()` raises and leaves Ada at 36. Reference: [Mutations](guide/mutations.md).
 
 ### `save()` and upserts
 
@@ -472,7 +476,7 @@ Where you used `save()` on purpose to insert or update, say so:
     assert grace.age == 46
     ```
 
-The save updated Grace's row. The conflict target is the primary key only, and the whole row is written on update; see [Upsert](../guide/mutations.md#upsert).
+The save updated Grace's row. The conflict target is the primary key only, and the whole row is written on update; see [Upsert](guide/mutations.md#upsert).
 
 ### `limit()` and `offset()` on mutations
 
@@ -501,11 +505,11 @@ Portable SQL has no `DELETE … LIMIT`. The pagination used to be silently dropp
     assert [account.name for account in remaining] == ["Alan Turing", "Linus Torvalds"]
     ```
 
-The delete removed Ada and Grace, the first two active accounts, and no others. Reference: [Mutations](../guide/mutations.md).
+The delete removed Ada and Grace, the first two active accounts, and no others. Reference: [Mutations](guide/mutations.md).
 
 ### Typed exceptions
 
-Database failures raise a hierarchy rooted at [`ferro.FerroError`](../api/exceptions.md) instead of bare `RuntimeError` or `ConnectionError`. Broad handlers keep working during the move (`FerroError` is still an `Exception`), but match on the type:
+Database failures raise a hierarchy rooted at [`ferro.FerroError`](api/exceptions.md) instead of bare `RuntimeError` or `ConnectionError`. Broad handlers keep working during the move (`FerroError` is still an `Exception`), but match on the type:
 
 === "Before"
 
@@ -530,7 +534,7 @@ Database failures raise a hierarchy rooted at [`ferro.FerroError`](../api/except
         raise AssertionError("a taken primary key was accepted")
     ```
 
-The handler runs on the type, with the driver's text kept as `driver_message`. `connect()` failures are `ferro.OperationalError` (server or environment) or `ferro.InterfaceError` (bad scheme or configuration) instead of `ConnectionError`. Reference: [Exceptions](../api/exceptions.md).
+The handler runs on the type, with the driver's text kept as `driver_message`. `connect()` failures are `ferro.OperationalError` (server or environment) or `ferro.InterfaceError` (bad scheme or configuration) instead of `ConnectionError`. Reference: [Exceptions](api/exceptions.md).
 
 ### Schema-emission defaults {#schema-emission-defaults}
 
@@ -629,7 +633,7 @@ The runtime emitter used to store a `datetime.time` field as `varchar` (the brid
 
     ```text
     You are helping upgrade a Python codebase from Ferro ORM 0.11.x to 0.12.
-    Reference: https://ferro-orm.x54.sh/howto/upgrade-guide/#upgrading-to-012
+    Reference: https://ferro-orm.x54.sh/upgrading/#upgrading-to-012
 
     All 0.12 changes are deprecation-based and safe to apply mechanically. Apply them,
     then verify.
@@ -671,7 +675,7 @@ The private helpers `ferro.migrations.alembic._build_sa_table` and `ferro.migrat
     assert target_metadata is not None
     ```
 
-`target_metadata` is the SQLAlchemy metadata Alembic compares against. Reference: [Alembic](../guide/schema/alembic.md).
+`target_metadata` is the SQLAlchemy metadata Alembic compares against. Reference: [Alembic](guide/schema/alembic.md).
 
 ### Deprecations of 0.12
 

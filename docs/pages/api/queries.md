@@ -1,3 +1,7 @@
+---
+description: "API reference for Query, the immutable builder that Model.where() and Model.select() return."
+---
+
 # Query
 
 `Model.where(...)` and `Model.select()` return a `Query`: an immutable, chainable builder that runs when you await `all()`, `first()`, `count()`, `exists()`, `update()` or `delete()`. Predicates are lambdas over a `QueryProxy`, which checks every column name against the model when the query is built:

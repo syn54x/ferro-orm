@@ -1,3 +1,7 @@
+---
+description: "Insert, update and delete rows with create(), save(), batch update() and delete(), and the insert-or-update helpers."
+---
+
 # Mutations
 
 This guide shows how to insert, update and delete rows: `create()`, `save()`, batch `update()` and `delete()`, and the insert-or-update helpers.

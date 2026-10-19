@@ -1,3 +1,7 @@
+---
+description: "Group database calls into one transaction that commits when its block exits and rolls back when it raises."
+---
+
 # Transactions
 
 `transaction()` groups database calls into one unit: the block commits when it exits cleanly and rolls back if it raises.

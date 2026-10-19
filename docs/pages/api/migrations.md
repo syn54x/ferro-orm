@@ -1,3 +1,7 @@
+---
+description: "API reference for ferro.migrations, which applications, data steps, tests and an Alembic env.py import."
+---
+
 # ferro.migrations
 
 `ferro.migrations` is what an application, a data step, a test and an Alembic `env.py` import. The guides show each in use: [Deploying migrations](../guide/schema/deploying.md) for `up` and `require_applied`, [Data steps and backfills](../guide/schema/data-steps.md) for the declarations, [Testing migrations](../guide/schema/testing.md) for the harness, [Alembic](../guide/schema/alembic.md) for the bridge. The commands are in the [CLI reference](../reference/cli.md).

@@ -596,9 +596,12 @@ def test_every_page_has_a_one_sentence_description() -> None:
 def test_page_descriptions_reach_the_built_pages(built_site: Path) -> None:
     for page in _source_pages():
         description = _front_matter(DOCS_PAGES / page)["description"]
-        page_html = _page(built_site, _url_path(page))
-        meta = f'<meta name="description" content="{html.escape(description)}"'
-        assert meta in page_html, f"{page} does not carry its description"
+        meta = re.search(
+            r'<meta name="description" content="([^"]*)"',
+            _page(built_site, _url_path(page)),
+        )
+        assert meta, f"{page} has no description meta tag"
+        assert html.unescape(meta.group(1)) == description, page
 
 
 def test_pages_new_in_the_rewrite_are_marked_new() -> None:
