@@ -93,7 +93,7 @@ def test_failing_docstring_example_names_its_file_line(tmp_path: Path) -> None:
     assert f'File "{module}", line 5' in str(failure.value)
 
 
-def test_docstring_example_can_declare_a_model(tmp_path: Path) -> None:
+def test_docstring_example_can_declare_related_models(tmp_path: Path) -> None:
     _scratch_package(
         tmp_path,
         '''
@@ -101,19 +101,30 @@ def test_docstring_example_can_declare_a_model(tmp_path: Path) -> None:
             """A library.
 
             ```python {test=run prelude=reference}
-            from ferro import Model, create_tables
+            from typing import Annotated
+
+            from ferro import BackRef, FerroField, ForeignKey, Model, Relation, create_tables
 
 
             class Shelf(Model):
-                id: int | None = None
+                id: Annotated[int | None, FerroField(primary_key=True)] = None
                 label: str
+                books: Relation[list["Book"]] = BackRef()
+
+
+            class Book(Model):
+                id: Annotated[int | None, FerroField(primary_key=True)] = None
+                title: str
+                shelf: Annotated[Shelf, ForeignKey(related_name="books")]
 
 
             await create_tables()
-            print((await Shelf.create(label="History")).label)
+            shelf = await Shelf.create(label="History")
+            await Book.create(title="Middlemarch", shelf=shelf)
+            print([book.title for book in await shelf.books.all()])
             ```
             """
         ''',
     )
     [example] = docstring_examples("scratch", tmp_path)
-    assert run_fence(example).strip() == "History"
+    assert run_fence(example).strip() == "['Middlemarch']"

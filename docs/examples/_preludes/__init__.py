@@ -64,11 +64,15 @@ async def run_block(prelude: str, source: str, path: str, first_line: int) -> No
         if not name.startswith("__")
     )
     # Pad the source so line numbers in a traceback are the page's own.
+    # ``dont_inherit``: the block must not pick up this file's
+    # ``from __future__ import annotations``, which would turn a declared
+    # model's annotations into strings a reader's own module never has.
     code = compile(
         "\n" * (first_line - 1) + source,
         path,
         "exec",
         flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT,
+        dont_inherit=True,
     )
     async with module.opened():
         result = eval(code, namespace)  # noqa: S307 - the docs block is ours
