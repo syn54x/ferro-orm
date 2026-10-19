@@ -1167,6 +1167,38 @@ def _label_removed(project: Path) -> None:
     _run_ok(project, "migrate", "new", "drop_canceled")
 
 
+INVOICE = """\
+import uuid
+from typing import ClassVar
+
+from ferro import Field, Model, RowPolicy, RowSecurity
+
+
+class Invoice(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    tenant_id: uuid.UUID
+    customer: str
+    total: int
+"""
+INVOICE_RLS = (
+    INVOICE
+    + """
+    __ferro_rls__: ClassVar = RowSecurity(
+        RowPolicy(column="tenant_id", setting="app.tenant_id")
+    )
+"""
+)
+
+
+def _invoice_rls(project: Path) -> None:
+    """The row-level security guide's ``Invoice``, which exists, gains its policy."""
+    _configured(project)
+    _write_models(project, INVOICE)
+    _run_ok(project, "migrate", "new", "create_invoice")
+    _write_models(project, INVOICE_RLS)
+    _run_ok(project, "migrate", "new", "invoice_rls")
+
+
 STEP_FILE_SOURCES: dict[tuple[str, ...], str | Callable[[Path], None]] = {
     ("guide/schema/migrations.md", "0001_create_author"): "migrations_quickstart",
     ("guide/schema/migrations.md", "0002_author_nickname"): "migrations_quickstart",
@@ -1192,6 +1224,7 @@ STEP_FILE_SOURCES: dict[tuple[str, ...], str | Callable[[Path], None]] = {
         "02_guard_author.py",
     ): _slug_guarded,
     ("guide/schema/data-steps.md", "0002_drop_canceled"): _label_removed,
+    ("guide/row-level-security.md", "0002_invoice_rls"): _invoice_rls,
     (
         "guide/schema/migrations.md",
         "0002_add_writer",

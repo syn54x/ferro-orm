@@ -125,7 +125,7 @@ def refuse_retired_label(
     [`refuse_retired_label_write`][ferro.metaclass.refuse_retired_label_write]
     calls it for the writes that skip validation. Each surfaces as a
     `ValidationError` of type `retired_enum_label`. See
-    [Retiring an enum label](../guide/schema/migrations.md#retiring-an-enum-label).
+    [Retiring an enum label](../guide/schema/renames-and-retirements.md#retiring-an-enum-label).
 
     Args:
         enum_cls: The column's enum class.
