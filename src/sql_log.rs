@@ -24,6 +24,7 @@ use ferro_ddl_lowering::Dialect;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyBytes, PyDict, PyTuple};
+use std::collections::HashSet;
 use std::future::Future;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -34,6 +35,18 @@ const DEBUG: i32 = 10;
 /// The `operation` of every statement the reconciliation pass or a run
 /// sends.
 pub const MIGRATE: &str = "migrate";
+
+/// The `operation` of a session's `SET LOCAL` / `set_config` batch, inside
+/// whichever operation's transaction it scopes.
+pub const SETTINGS: &str = "settings";
+
+/// The `operation` of the Postgres catalog probe an operation runs the first
+/// time it touches a table in a schema epoch.
+pub const CATALOG: &str = "catalog";
+
+/// The `operation` of a `transaction()` block's own statements: `BEGIN`,
+/// `SAVEPOINT`, `RELEASE`, `ROLLBACK TO`, `COMMIT`, `ROLLBACK`.
+pub const TRANSACTION: &str = "transaction";
 
 static LOGGER: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static EMITTER_MODULE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
@@ -61,7 +74,9 @@ pub fn enabled(py: Python<'_>) -> PyResult<bool> {
 #[derive(Clone, Debug)]
 pub struct StatementContext {
     /// What sent the statements: `"migrate"` for the reconciliation pass and
-    /// a run.
+    /// a run; the operation's name (`"fetch"`, `"save"`, `"raw"`, ...) for
+    /// an operation entry; `"transaction"`, `"settings"` or `"catalog"` for
+    /// what an operation sends on another's behalf (see [`with_operation`]).
     pub operation: &'static str,
     /// The connection's name (`"default"` unless named).
     pub connection: String,
@@ -168,6 +183,63 @@ pub async fn with_subject<F: Future>(subject: &str, fut: F) -> F::Output {
             ACTIVE.scope(Some(Arc::new(child)), fut).await
         }
         None => fut.await,
+    }
+}
+
+/// Run `fut` with the open scope's operation set to `operation`: the
+/// statements an operation sends on another's behalf (its session settings
+/// batch, its catalog probe). Outside a scope it is `fut` itself.
+pub async fn with_operation<F: Future>(operation: &'static str, fut: F) -> F::Output {
+    match current() {
+        Some(active) => {
+            let child = Active {
+                context: StatementContext {
+                    operation,
+                    ..active.context.clone()
+                },
+                failure: Arc::clone(&active.failure),
+            };
+            ACTIVE.scope(Some(Arc::new(child)), fut).await
+        }
+        None => fut.await,
+    }
+}
+
+/// The columns of `cls` whose field is a `SecretStr` / `SecretBytes`: the
+/// fields its hydration-converter registry records with kind `"secret"`.
+///
+/// # Errors
+/// The `PyErr` from reading a malformed converter registry.
+pub fn secret_columns_for(py: Python<'_>, cls: &Bound<'_, PyAny>) -> PyResult<HashSet<String>> {
+    Ok(crate::hydration::field_converters_for(py, cls)?
+        .into_iter()
+        .filter(|(_, converter)| converter.kind == "secret")
+        .map(|(field, _)| field)
+        .collect())
+}
+
+/// Add to `out` the binds a query literal's wire value makes: a string binds
+/// as text, a `bytes` literal (a list of byte values) as bytes, and a list
+/// (`IN`) as each of its items. Only the shapes a secret column can hold are
+/// collected; a number or a boolean is never a secret column's value.
+pub fn literal_secret_binds(kind: &str, value: &serde_json::Value, out: &mut Vec<EngineBindValue>) {
+    match value {
+        serde_json::Value::String(text) => out.push(EngineBindValue::String(text.clone())),
+        serde_json::Value::Array(items) if kind == "bytes" => {
+            let bytes: Option<Vec<u8>> = items
+                .iter()
+                .map(|item| item.as_u64().and_then(|byte| u8::try_from(byte).ok()))
+                .collect();
+            if let Some(bytes) = bytes {
+                out.push(EngineBindValue::Bytes(bytes));
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                literal_secret_binds("", item, out);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -326,6 +398,46 @@ mod tests {
         assert_eq!(inside.as_deref(), Some("author"));
         assert_eq!(after, None);
         assert_eq!(connection.as_deref(), Some("default"));
+    }
+
+    #[tokio::test]
+    async fn with_operation_renames_the_statements_inside_it_and_no_others() {
+        let seen = scope(Some(StatementContext::new("save", "default")), async {
+            let inside =
+                with_operation(SETTINGS, async { current().map(|a| a.context.operation) }).await;
+            let after = current().map(|a| a.context.operation);
+            Ok::<_, PyErr>((inside, after))
+        })
+        .await;
+        let (inside, after) = match seen {
+            Ok(seen) => seen,
+            Err(err) => panic!("scope failed: {err}"),
+        };
+        assert_eq!(inside, Some("settings"));
+        assert_eq!(after, Some("save"));
+    }
+
+    #[tokio::test]
+    async fn with_operation_outside_a_scope_opens_none() {
+        assert!(with_operation(CATALOG, async { current().is_none() }).await);
+    }
+
+    #[test]
+    fn literal_secret_binds_reads_strings_bytes_and_lists() {
+        let mut out = Vec::new();
+        literal_secret_binds("string", &serde_json::json!("hunter2"), &mut out);
+        literal_secret_binds("bytes", &serde_json::json!([0, 255]), &mut out);
+        literal_secret_binds("list", &serde_json::json!(["a", "b"]), &mut out);
+        literal_secret_binds("int", &serde_json::json!(7), &mut out);
+        assert_eq!(
+            out,
+            vec![
+                EngineBindValue::String("hunter2".into()),
+                EngineBindValue::Bytes(vec![0, 255]),
+                EngineBindValue::String("a".into()),
+                EngineBindValue::String("b".into()),
+            ]
+        );
     }
 
     #[tokio::test]

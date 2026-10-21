@@ -183,7 +183,8 @@ class Session:
                 # awaitable exists — when transactions are still open. So an
                 # exception from this line leaves the handle exactly as it
                 # was: still open, still usable.
-                releasing = _core_close_session(self.session_id)
+                assert self.connection_name is not None  # resolved at __aenter__
+                releasing = _core_close_session(self.session_id, self.connection_name)
                 self.session_id = None
 
             try:

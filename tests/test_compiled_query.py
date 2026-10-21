@@ -15,6 +15,8 @@ plain fields (#293).
 import json
 from typing import Annotated
 
+from pydantic import SecretStr
+
 from ferro import BackRef, Model, Relation
 from ferro.base import FerroField, ForeignKey
 from ferro.query.builder import Query
@@ -79,3 +81,54 @@ def test_hop_classes_cover_traversed_projection_paths():
 def test_mutation_verbs_compile_with_no_hop_classes():
     compiled = compile_query(Query(CQTransaction), "delete")
     assert compiled.hop_classes is None
+
+
+# -- secret_values: the secret-typed literals the compile unwrapped -------------
+
+
+def test_secret_values_is_empty_without_a_secret_literal():
+    compiled = compile_query(
+        Query(CQAccount).where(lambda account: account.label == "hunter2"), "fetch"
+    )
+    assert compiled.secret_values == ()
+
+
+def test_secret_values_carries_each_unwrapped_secret_literal_and_the_wire_is_unchanged():
+    plain = compile_query(
+        Query(CQAccount).where(lambda account: account.label == "hunter2"), "fetch"
+    )
+    secret = compile_query(
+        Query(CQAccount).where(lambda account: account.label == SecretStr("hunter2")),
+        "fetch",
+    )
+    assert secret.secret_values == ("hunter2",)
+    assert secret.wire_json == plain.wire_json
+
+
+def test_secret_values_reach_into_membership_lists_and_negations():
+    compiled = compile_query(
+        Query(CQAccount).where(
+            lambda account: (
+                ~account.label.in_([SecretStr("a"), "b"])
+                | (account.label == SecretStr("c"))
+            )
+        ),
+        "count",
+    )
+    assert compiled.secret_values == ("a", "c")
+
+
+def test_secret_values_carry_update_assignments():
+    secret = compile_query(
+        Query(CQAccount).where(lambda account: account.id == 1),
+        "update",
+        assignments={"label": SecretStr("hunter2")},
+    )
+    plain = compile_query(
+        Query(CQAccount).where(lambda account: account.id == 1),
+        "update",
+        assignments={"label": "hunter2"},
+    )
+    assert secret.secret_values == ("hunter2",)
+    assert plain.secret_values == ()
+    assert secret.wire_json == plain.wire_json
