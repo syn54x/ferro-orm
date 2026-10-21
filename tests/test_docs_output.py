@@ -423,3 +423,28 @@ def test_a_block_under_a_postgres_fence_holds_what_it_prints_there(
         return
     with pytest.raises(AssertionError, match="differs from what the fence at line 3"):
         check_printed(block, dialect="postgres", database_url=db_url)
+
+
+def test_the_pages_say_only_some_refusals_carry_a_kind() -> None:
+    """``RunRefused.kind`` is ``None`` on many refusals (the tracked-database
+    refusal of ``connect(auto_migrate=True)`` among them); no page or
+    docstring may say it always names the refusal."""
+    import ferro.migrations
+
+    pages = REPO_ROOT / "docs" / "pages"
+    overview = (pages / "guide/schema/overview.md").read_text(encoding="utf-8")
+    tree = (pages / "api/exceptions.md").read_text(encoding="utf-8")
+    [run_refused] = [line for line in tree.splitlines() if "RunRefused " in line]
+    import inspect
+
+    source = inspect.getsource(ferro.migrations.RunRefused.__init__)
+    kind_doc = source.split("self.kind = kind", 1)[1].split('"""', 2)[1]
+    for text in (overview, run_refused, kind_doc):
+        assert "names why" not in text
+        assert "names its refusal in `kind`" not in text
+    assert "connect(auto_migrate=True)" in run_refused
+    assert "Only some refusals carry a kind" in overview
+    assert "its `kind` is `None`" in overview
+    assert "Only some refusals carry a kind" in kind_doc
+    assert "connect(auto_migrate=True)" in kind_doc
+    assert "MigrationRefused" in kind_doc

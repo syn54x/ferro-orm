@@ -47,7 +47,7 @@ A database is managed by auto-migrate **or** by migrations, never both. Once a d
 RunRefused: connect(auto_migrate=…) is refused: main is governed by ferro migrations (main._ferro_migrations). Use ferro migrate up, or drop the tracking tables to leave migrations.
 ```
 
-Nothing has run, and the message names the two ways out. The error is a [`RunRefused`](../../api/migrations.md#ferro.migrations.RunRefused), a subclass of `MigrationRefused`, so `except ferro.migrations.MigrationRefused` catches it too. A `RunRefused` from a migration run names its refusal in `kind`; this one comes before any run, and its `kind` is `None`. `main` is SQLite's schema; on Postgres the message names the schema the connection works in, such as `public`.
+Nothing has run, and the message names the two ways out. The error is a [`RunRefused`](../../api/migrations.md#ferro.migrations.RunRefused), a subclass of `MigrationRefused`, so `except ferro.migrations.MigrationRefused` catches it too. Only some refusals carry a kind, and this one does not: its `kind` is `None`, so match it on its type or its message. `main` is SQLite's schema; on Postgres the message names the schema the connection works in, such as `public`.
 
 The rule is per database, not per project. A throwaway test database built with `connect(url, auto_migrate=True)` still works in a project that has migrations, because that database has never run one.
 

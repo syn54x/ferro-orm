@@ -22,7 +22,7 @@ FerroError
 └── MigrationRefused        a migration call refused; .report says how far it got
     ├── PendingMigrationsError
     ├── DatabaseAheadError
-    └── RunRefused          a migration run refused before it ran anything; .kind names why
+    └── RunRefused          a migration run, or connect(auto_migrate=True) on a tracked database, refused
         ├── AlreadyTrackedError
         └── AppliedAboveBaselineError
 ```
