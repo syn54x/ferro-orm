@@ -1382,6 +1382,250 @@ fn engine_bind_values_from_sea(values: &[SeaValue]) -> Vec<EngineBindValue> {
         .collect()
 }
 
+/// The statement-log context an operation entry opens (ADR-0057), or `None`
+/// when `ferro.sql` is not enabled for `DEBUG`. Asked once, while the entry
+/// holds the GIL; `secret_values` is called only when the log is on, so an
+/// operation with the log off builds no secret-value set.
+///
+/// # Errors
+/// The `PyErr` from asking the logger, or from `secret_values`.
+fn operation_log<F>(
+    py: Python<'_>,
+    operation: &'static str,
+    connection: &str,
+    secret_values: F,
+) -> PyResult<Option<crate::sql_log::StatementContext>>
+where
+    F: FnOnce(Python<'_>) -> PyResult<Vec<EngineBindValue>>,
+{
+    if !crate::sql_log::enabled(py)? {
+        return Ok(None);
+    }
+    let mut context = crate::sql_log::StatementContext::new(operation, connection);
+    context.secret_values = secret_values(py)?;
+    Ok(Some(context))
+}
+
+/// No secret values: an operation that binds none (a primary key, link ids,
+/// transaction control).
+fn no_secrets(_py: Python<'_>) -> PyResult<Vec<EngineBindValue>> {
+    Ok(Vec::new())
+}
+
+/// The binds the secret values Python collected make, through the same
+/// conversion a raw bind takes (a secret is a `str` or `bytes`).
+fn secret_binds_from_py(values: &[Bound<'_, PyAny>]) -> PyResult<Vec<EngineBindValue>> {
+    values.iter().map(python_to_engine_bind_value).collect()
+}
+
+/// The model classes the Python registry holds, keyed by identity.
+fn registered_model_classes(py: Python<'_>) -> PyResult<Bound<'_, pyo3::types::PyDict>> {
+    Ok(py
+        .import("ferro.registry")?
+        .getattr("REGISTRY")?
+        .call_method0("models")?
+        .cast_into::<pyo3::types::PyDict>()?)
+}
+
+/// The model class registered under `identity`.
+///
+/// # Errors
+/// `PyRuntimeError` when no model is registered under `identity`.
+fn model_class_for<'py>(py: Python<'py>, identity: &str) -> PyResult<Bound<'py, PyAny>> {
+    registered_model_classes(py)?
+        .get_item(identity)?
+        .ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "No model class is registered as '{identity}'"
+            ))
+        })
+}
+
+/// The model class whose table is `table`.
+///
+/// # Errors
+/// `PyRuntimeError` when no registered model owns the table.
+fn model_class_for_table<'py>(py: Python<'py>, table: &str) -> PyResult<Bound<'py, PyAny>> {
+    for (identity, cls) in registered_model_classes(py)?.iter() {
+        let identity = identity.extract::<String>()?;
+        if crate::state::registered_model(&identity).is_ok_and(|model| model.table_name == table) {
+            return Ok(cls);
+        }
+    }
+    Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+        "No registered model owns table '{table}'"
+    )))
+}
+
+/// The secret columns of each table a query touches, read once per table
+/// from its model class's converter registry.
+struct SecretColumns<'py> {
+    py: Python<'py>,
+    by_table: HashMap<String, HashSet<String>>,
+}
+
+impl<'py> SecretColumns<'py> {
+    fn new(py: Python<'py>, root_table: &str, root_cls: &Bound<'py, PyAny>) -> PyResult<Self> {
+        let mut by_table = HashMap::new();
+        by_table.insert(
+            root_table.to_string(),
+            crate::sql_log::secret_columns_for(py, root_cls)?,
+        );
+        Ok(Self { py, by_table })
+    }
+
+    fn contains(&mut self, table: &str, column: &str) -> PyResult<bool> {
+        if let Some(columns) = self.by_table.get(table) {
+            return Ok(columns.contains(column));
+        }
+        let cls = model_class_for_table(self.py, table)?;
+        let columns = crate::sql_log::secret_columns_for(self.py, &cls)?;
+        let found = columns.contains(column);
+        self.by_table.insert(table.to_string(), columns);
+        Ok(found)
+    }
+}
+
+/// The table a leaf's relation `path` reaches from `scope_table` through
+/// `joins`: the path's last hop's table.
+///
+/// # Errors
+/// `PyValueError` when no join carries the path.
+fn table_for_path(
+    scope_table: &str,
+    joins: &[ferro_schema_ir::QueryJoin],
+    path: &[String],
+) -> PyResult<String> {
+    let Some(last) = path.len().checked_sub(1) else {
+        return Ok(scope_table.to_string());
+    };
+    joins
+        .iter()
+        .find(|join| {
+            join.path.len() > last
+                && join
+                    .path
+                    .iter()
+                    .zip(path)
+                    .all(|(hop, name)| &hop.relation == name)
+        })
+        .and_then(|join| join.path.get(last))
+        .map(|hop| hop.to_table.clone())
+        .ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err(format!(
+                "relation path {path:?} has no matching join entry"
+            ))
+        })
+}
+
+fn collect_secret_leaf_binds(
+    node: &ferro_schema_ir::QueryNode,
+    scope_table: &str,
+    joins: &[ferro_schema_ir::QueryJoin],
+    secret: &mut SecretColumns<'_>,
+    out: &mut Vec<EngineBindValue>,
+) -> PyResult<()> {
+    use ferro_schema_ir::QueryNode;
+    match node {
+        QueryNode::Leaf {
+            column,
+            value,
+            path,
+            ..
+        } => {
+            let table = table_for_path(scope_table, joins, path)?;
+            if secret.contains(&table, column)? {
+                crate::sql_log::literal_secret_binds(&value.kind, &value.value, out);
+            }
+        }
+        QueryNode::Compound { left, right, .. } => {
+            collect_secret_leaf_binds(left, scope_table, joins, secret, out)?;
+            collect_secret_leaf_binds(right, scope_table, joins, secret, out)?;
+        }
+        QueryNode::Not { child } => {
+            collect_secret_leaf_binds(child, scope_table, joins, secret, out)?;
+        }
+        QueryNode::Exists {
+            hops,
+            where_clause,
+            joins: inner_joins,
+        } => {
+            if let Some(target) = hops.last() {
+                for inner in where_clause {
+                    collect_secret_leaf_binds(inner, &target.to_table, inner_joins, secret, out)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The values a query binds to secret columns: every predicate literal
+/// compared against a column whose field the model (or a traversed hop's
+/// model) declares `SecretStr` / `SecretBytes`, and every literal `SET` of
+/// one. Added to the operation's secret-value set, beside the secret-typed
+/// literals Python collected.
+///
+/// # Errors
+/// The `PyErr` from resolving a hop's model class or reading its converter
+/// registry; `PyValueError` for a relation path with no join entry.
+fn plan_secret_values(
+    py: Python<'_>,
+    root_cls: &Bound<'_, PyAny>,
+    plan: &QueryPlan,
+) -> PyResult<Vec<EngineBindValue>> {
+    let identity = crate::state::model_identity(root_cls)?;
+    let root_table = crate::state::registered_model(&identity)?
+        .table_name
+        .clone();
+    let mut secret = SecretColumns::new(py, &root_table, root_cls)?;
+    let mut out = Vec::new();
+    for node in &plan.where_clause {
+        collect_secret_leaf_binds(node, &root_table, &plan.joins, &mut secret, &mut out)?;
+    }
+    for assignment in &plan.set_assignments {
+        if let QueryValueExpr::Literal { value } = &assignment.value
+            && secret.contains(&root_table, &assignment.column)?
+        {
+            crate::sql_log::literal_secret_binds(&value.kind, &value.value, &mut out);
+        }
+    }
+    Ok(out)
+}
+
+/// The values save payloads bind to the secret columns of `identity`'s
+/// model.
+fn payload_secret_values(
+    py: Python<'_>,
+    identity: &str,
+    rows: &[Bound<'_, pyo3::types::PyDict>],
+) -> PyResult<Vec<EngineBindValue>> {
+    let cls = model_class_for(py, identity)?;
+    let columns = crate::sql_log::secret_columns_for(py, &cls)?;
+    let mut out = Vec::new();
+    for row in rows {
+        for column in &columns {
+            if let Some(value) = row.get_item(column)?
+                && !value.is_none()
+            {
+                out.push(python_to_engine_bind_value(&value)?);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The secret-value set of an operation: what Python collected, plus what
+/// the entry found bound to secret columns.
+fn operation_secret_values(
+    python_collected: &[Bound<'_, PyAny>],
+    found: Vec<EngineBindValue>,
+) -> PyResult<Vec<EngineBindValue>> {
+    let mut values = secret_binds_from_py(python_collected)?;
+    values.extend(found);
+    Ok(values)
+}
+
 /// One execution route for an operation: a transaction's dedicated
 /// connection, or the routed engine's pool (FF-G G2).
 ///
@@ -1567,12 +1811,14 @@ async fn postgres_catalog_rows(
 ) -> PyResult<Vec<EngineRow>> {
     engine.record_catalog_query();
     let values = [EngineBindValue::String(table_name.to_string())];
-    exec.fetch_all(sql, &values).await.map_err(|e| {
-        crate::errors::map_db_error(
-            &format!("Failed to inspect {} for '{}'", label, table_name),
-            e,
-        )
-    })
+    crate::sql_log::with_operation(crate::sql_log::CATALOG, exec.fetch_all(sql, &values))
+        .await
+        .map_err(|e| {
+            crate::errors::map_db_error(
+                &format!("Failed to inspect {} for '{}'", label, table_name),
+                e,
+            )
+        })
 }
 
 macro_rules! sea_query_build_for_backend {
@@ -1749,7 +1995,13 @@ pub fn begin_transaction(
     route: Py<crate::state::RouteHandle>,
     immediate: bool,
 ) -> PyResult<Bound<'_, PyAny>> {
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    let log = operation_log(
+        py,
+        crate::sql_log::TRANSACTION,
+        &route.get().connection_name,
+        no_secrets,
+    )?;
+    let operation = async move {
         let r = route.get();
         let tx_id = uuid::Uuid::new_v4().to_string();
         if let Some(parent_tx_id) = r.tx_id.clone() {
@@ -1815,7 +2067,24 @@ pub fn begin_transaction(
         }
 
         Ok(tx_id)
-    })
+    };
+    pyo3_async_runtimes::tokio::future_into_py(py, crate::sql_log::scope(log, operation))
+}
+
+/// The statement-log context of ending transaction `tx_id`: its statements
+/// are `transaction` statements on the connection it was opened on. An
+/// unknown id opens none (the entry fails before sending anything).
+fn transaction_log(
+    py: Python<'_>,
+    tx_id: &str,
+    session_id: Option<&str>,
+) -> PyResult<Option<crate::sql_log::StatementContext>> {
+    if !crate::sql_log::enabled(py)? {
+        return Ok(None);
+    }
+    Ok(tx_get(session_id, tx_id)?.map(|tx| {
+        crate::sql_log::StatementContext::new(crate::sql_log::TRANSACTION, tx.connection_name)
+    }))
 }
 
 /// Commit a transaction or release a nested savepoint.
@@ -1836,7 +2105,8 @@ pub fn commit_transaction(
     tx_id: String,
     session_id: Option<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    let log = transaction_log(py, &tx_id, session_id.as_deref())?;
+    let operation = async move {
         let tx_handle = tx_remove(session_id.as_deref(), &tx_id)?
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Transaction not found"))?;
 
@@ -1856,7 +2126,8 @@ pub fn commit_transaction(
             })?;
 
         Ok(())
-    })
+    };
+    pyo3_async_runtimes::tokio::future_into_py(py, crate::sql_log::scope(log, operation))
 }
 
 /// Give up on a session's pinned connection when ending a transaction on it
@@ -1916,7 +2187,8 @@ pub fn rollback_transaction(
     tx_id: String,
     session_id: Option<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    let log = transaction_log(py, &tx_id, session_id.as_deref())?;
+    let operation = async move {
         let tx_handle = tx_remove(session_id.as_deref(), &tx_id)?
             .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("Transaction not found"))?;
 
@@ -1945,7 +2217,8 @@ pub fn rollback_transaction(
         // Re-acquire the GIL before accessing identity map (async context has no GIL).
         pyo3::Python::attach(|_py| identity_map_clear(session_id.as_deref()))?;
         Ok(())
-    })
+    };
+    pyo3_async_runtimes::tokio::future_into_py(py, crate::sql_log::scope(log, operation))
 }
 
 /// Open a session that pins connection routing and isolates transaction/identity state.
@@ -2006,6 +2279,8 @@ pub fn open_session(
 ///
 /// Args:
 ///     session_id (str): Id returned by `open_session`.
+///     connection_name (str): The connection the session is bound to, which
+///         names the reset's records in the statement log.
 ///
 /// Returns:
 ///     None
@@ -2015,19 +2290,26 @@ pub fn open_session(
 /// unknown, or when the reset fails — in which case the session is closed
 /// regardless and its connection has been discarded rather than pooled.
 #[pyfunction]
-pub fn close_session(py: Python<'_>, session_id: String) -> PyResult<Bound<'_, PyAny>> {
+#[pyo3(signature = (session_id, connection_name))]
+pub fn close_session(
+    py: Python<'_>,
+    session_id: String,
+    connection_name: String,
+) -> PyResult<Bound<'_, PyAny>> {
+    let log = operation_log(py, crate::sql_log::SETTINGS, &connection_name, no_secrets)?;
     ensure_session_idle_for_close(&session_id)?;
     let session = unregister_session(&session_id).ok_or_else(|| {
         pyo3::exceptions::PyRuntimeError::new_err(format!("Session '{}' is not active", session_id))
     })?;
 
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    let operation = async move {
         let pin = session.pinned.lock().await.take();
         match pin {
             Some(pin) => release_pinned_connection(pin).await,
             None => Ok(()),
         }
-    })
+    };
+    pyo3_async_runtimes::tokio::future_into_py(py, crate::sql_log::scope(log, operation))
 }
 
 /// Mutate a live session's effective settings (`Session.set_config`, #411).
@@ -2117,8 +2399,9 @@ pub fn set_session_config(
         &connection_name,
         &[(key.clone(), value.clone())],
     )?;
+    let log = operation_log(py, crate::sql_log::SETTINGS, &connection_name, no_secrets)?;
 
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    let operation = async move {
         let session = session_state(&session_id)?;
         // Serializes this whole sequence — including the read below — against
         // any other `set_config` on this session (see the lost-update note
@@ -2145,7 +2428,8 @@ pub fn set_session_config(
         deliver_changed_settings(&engine, &session, &new_effective).await?;
 
         Ok(new_effective)
-    })
+    };
+    pyo3_async_runtimes::tokio::future_into_py(py, crate::sql_log::scope(log, operation))
 }
 
 /// Fetches all records for a given model class.
@@ -2170,8 +2454,9 @@ pub fn fetch_all<'py>(
 ) -> PyResult<Bound<'py, PyAny>> {
     let name = crate::state::model_identity(&cls)?;
     let cls_py = cls.unbind();
+    let log = operation_log(py, "fetch", &route.get().connection_name, no_secrets)?;
 
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    let operation = async move {
         let r = route.get();
         let (connection_name, engine, tx_conn, backend) = route_engine(r)?;
 
@@ -2271,7 +2556,8 @@ pub fn fetch_all<'py>(
         .await;
 
         scope.finish(outcome).await
-    })
+    };
+    pyo3_async_runtimes::tokio::future_into_py(py, crate::sql_log::scope(log, operation))
 }
 
 /// Fetches a single record by its primary key.
@@ -2301,8 +2587,9 @@ pub fn fetch_one<'py>(
     // No identity-map short-circuit before the query (FF-D D1b): the map is
     // an identity/dedup structure, not a query cache — every fetch reads the
     // database and refreshes the cached instance in place.
+    let log = operation_log(py, "fetch", &route.get().connection_name, no_secrets)?;
 
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    let operation = async move {
         let r = route.get();
         let (connection_name, engine, tx_conn, backend) = route_engine(r)?;
 
@@ -2410,7 +2697,8 @@ pub fn fetch_one<'py>(
         .await;
 
         scope.finish(outcome).await
-    })
+    };
+    pyo3_async_runtimes::tokio::future_into_py(py, crate::sql_log::scope(log, operation))
 }
 
 /// Render the INSERT statement for `save_record`.
@@ -2591,17 +2879,24 @@ fn build_update_by_pk_sql(
 /// Returns a `PyErr` if the engine is not initialized, the model is not
 /// registered, the mode is unknown, or a column value cannot be bound.
 #[pyfunction]
-#[pyo3(signature = (name, data, route, mode="insert"))]
+#[pyo3(signature = (name, data, route, mode="insert", *, secret_values=Vec::new()))]
 pub fn save_record<'py>(
     py: Python<'py>,
     name: String,
     data: Bound<'py, pyo3::types::PyDict>,
     route: Py<crate::state::RouteHandle>,
     mode: &str,
+    secret_values: Vec<Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let bind_inputs = bind_inputs_from_py(&data)?; // GIL held here, before the async move
     let mode = parse_save_mode(mode)?;
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    let log = operation_log(py, "save", &route.get().connection_name, |py| {
+        operation_secret_values(
+            &secret_values,
+            payload_secret_values(py, &name, std::slice::from_ref(&data))?,
+        )
+    })?;
+    let operation = async move {
         let r = route.get();
         let (_connection_name, engine, tx_conn, backend) = route_engine(r)?;
 
@@ -2666,7 +2961,8 @@ pub fn save_record<'py>(
         .await;
 
         scope.finish(outcome).await
-    })
+    };
+    pyo3_async_runtimes::tokio::future_into_py(py, crate::sql_log::scope(log, operation))
 }
 
 /// UPDATE one row by primary key: `UPDATE <table> SET <non-pk cols> WHERE <pk> = ?`.
@@ -2687,15 +2983,22 @@ pub fn save_record<'py>(
 /// is missing/null; `PyRuntimeError` on registry failures; typed
 /// `ferro.exceptions` subclasses on database errors.
 #[pyfunction]
-#[pyo3(signature = (name, data, route))]
+#[pyo3(signature = (name, data, route, *, secret_values=Vec::new()))]
 pub fn update_record<'py>(
     py: Python<'py>,
     name: String,
     data: Bound<'py, pyo3::types::PyDict>,
     route: Py<crate::state::RouteHandle>,
+    secret_values: Vec<Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let bind_inputs = bind_inputs_from_py(&data)?; // GIL held here, before the async move
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    let log = operation_log(py, "save", &route.get().connection_name, |py| {
+        operation_secret_values(
+            &secret_values,
+            payload_secret_values(py, &name, std::slice::from_ref(&data))?,
+        )
+    })?;
+    let operation = async move {
         let r = route.get();
         let (_connection_name, engine, tx_conn, backend) = route_engine(r)?;
 
@@ -2763,7 +3066,8 @@ pub fn update_record<'py>(
         .await;
 
         scope.finish(outcome).await
-    })
+    };
+    pyo3_async_runtimes::tokio::future_into_py(py, crate::sql_log::scope(log, operation))
 }
 
 /// Persist multiple model instances in as few batch `INSERT`s as the
@@ -2787,18 +3091,22 @@ pub fn update_record<'py>(
 /// # Errors
 /// `PyRuntimeError` on registry/execute failures; `PyTypeError` for unbindable values.
 #[pyfunction]
-#[pyo3(signature = (name, rows, route))]
+#[pyo3(signature = (name, rows, route, *, secret_values=Vec::new()))]
 pub fn save_bulk_records<'py>(
     py: Python<'py>,
     name: String,
     rows: Vec<Bound<'py, pyo3::types::PyDict>>,
     route: Py<crate::state::RouteHandle>,
+    secret_values: Vec<Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let record_inputs: Vec<Vec<(String, BindInput)>> = rows
         .iter()
         .map(bind_inputs_from_py)
         .collect::<PyResult<_>>()?;
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    let log = operation_log(py, "bulk_create", &route.get().connection_name, |py| {
+        operation_secret_values(&secret_values, payload_secret_values(py, &name, &rows)?)
+    })?;
+    let operation = async move {
         let r = route.get();
         let (_connection_name, engine, tx_conn, backend) = route_engine(r)?;
 
@@ -2923,7 +3231,8 @@ pub fn save_bulk_records<'py>(
         .await;
 
         scope.finish(outcome).await
-    })
+    };
+    pyo3_async_runtimes::tokio::future_into_py(py, crate::sql_log::scope(log, operation))
 }
 
 /// Rows per INSERT statement so `rows × columns` never exceeds the backend's
@@ -2989,7 +3298,9 @@ mod bulk_chunking_tests {
 ///     list[PyAny]: Hydrated model instances (populated when included), or
 ///     projected records.
 #[pyfunction]
-#[pyo3(signature = (cls, query_ir_json, route, record_cls=None, hop_classes=None))]
+#[pyo3(signature = (
+    cls, query_ir_json, route, record_cls=None, hop_classes=None, *, secret_values=Vec::new()
+))]
 pub fn fetch_filtered<'py>(
     py: Python<'py>,
     cls: Bound<'py, PyAny>,
@@ -2997,6 +3308,7 @@ pub fn fetch_filtered<'py>(
     route: Py<crate::state::RouteHandle>,
     record_cls: Option<Bound<'py, PyAny>>,
     hop_classes: Option<Bound<'py, pyo3::types::PyDict>>,
+    secret_values: Vec<Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let name = crate::state::model_identity(&cls)?;
     let cls_py = cls.unbind();
@@ -3064,8 +3376,14 @@ pub fn fetch_filtered<'py>(
             ));
         }
     };
+    let log = operation_log(py, "fetch", &route.get().connection_name, |py| {
+        operation_secret_values(
+            &secret_values,
+            plan_secret_values(py, cls_py.bind(py), &plan)?,
+        )
+    })?;
 
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    let operation = async move {
         let r = route.get();
         let (connection_name, engine, tx_conn, backend) = route_engine(r)?;
         let session_id = r.session_id.clone();
@@ -3231,7 +3549,7 @@ pub fn fetch_filtered<'py>(
                 let hop_classes_py = hop_classes_py.ok_or_else(|| {
                     pyo3::exceptions::PyRuntimeError::new_err(
                         "Query plan includes related rows but carries no hop classes to \
-                         hydrate them with",
+                     hydrate them with",
                     )
                 })?;
 
@@ -3255,7 +3573,7 @@ pub fn fetch_filtered<'py>(
                             hop_classes.get_item(hop.table.as_str())?.ok_or_else(|| {
                                 pyo3::exceptions::PyValueError::new_err(format!(
                                     "fetch_filtered(): hop_classes has no model class \
-                                     for included table {:?}.",
+                                 for included table {:?}.",
                                     hop.table
                                 ))
                             })?;
@@ -3442,7 +3760,8 @@ pub fn fetch_filtered<'py>(
         .await;
 
         scope.finish(outcome).await
-    })
+    };
+    pyo3_async_runtimes::tokio::future_into_py(py, crate::sql_log::scope(log, operation))
 }
 
 /// Return the number of rows matching a filtered query.
@@ -3453,28 +3772,50 @@ pub fn fetch_filtered<'py>(
 ///     tx_id (str | None): Optional active transaction.
 ///     using (str | None): Connection override.
 ///     session_id (str | None): Session-scoped routing when set.
+///     secret_values (list[object]): The secret-typed literals the query
+///         compiled with, masked in the statement log.
+///     operation (str): `"count"`, or `"exists"` when the count answers
+///         `exists()`; names the statement-log records.
 ///
 /// Returns:
 ///     int: Row count.
 ///
 /// # Errors
-/// `PyRuntimeError` on registry, planning, or SQL failures.
+/// `PyRuntimeError` on registry, planning, or SQL failures; `PyValueError`
+/// for an unknown `operation`.
 #[pyfunction]
-#[pyo3(signature = (name, query_ir_json, route))]
-pub fn count_filtered(
-    py: Python<'_>,
+#[pyo3(signature = (name, query_ir_json, route, *, secret_values=Vec::new(), operation="count"))]
+pub fn count_filtered<'py>(
+    py: Python<'py>,
     name: String,
     query_ir_json: String,
     route: Py<crate::state::RouteHandle>,
-) -> PyResult<Bound<'_, PyAny>> {
+    secret_values: Vec<Bound<'py, PyAny>>,
+    operation: &str,
+) -> PyResult<Bound<'py, PyAny>> {
+    let operation: &'static str = match operation {
+        "count" => "count",
+        "exists" => "exists",
+        other => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "count_filtered operation must be 'count' or 'exists', got {other:?}"
+            )));
+        }
+    };
     let mut plan = query_plan_from_ir_json(&query_ir_json)?;
     validate_paging_shape(&plan, "count")?;
     validate_set_shape(&plan, "count")?;
     // count() is unaffected by projection (PRD #277 verb table): the Python
     // builder always emits root_instances on count payloads, projected or not.
     reject_unsupported_materialization(&plan, "count_filtered")?;
+    let log = operation_log(py, operation, &route.get().connection_name, |py| {
+        operation_secret_values(
+            &secret_values,
+            plan_secret_values(py, &model_class_for(py, &name)?, &plan)?,
+        )
+    })?;
 
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    let operation = async move {
         let r = route.get();
         let (_, engine, tx_conn, backend) = route_engine(r)?;
 
@@ -3566,7 +3907,8 @@ pub fn count_filtered(
         .await;
 
         scope.finish(outcome).await
-    })
+    };
+    pyo3_async_runtimes::tokio::future_into_py(py, crate::sql_log::scope(log, operation))
 }
 
 /// Register a live Python instance in the identity map for deduplication.
@@ -3637,7 +3979,8 @@ pub fn delete_record(
     pk_val: String,
     route: Py<crate::state::RouteHandle>,
 ) -> PyResult<Bound<'_, PyAny>> {
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    let log = operation_log(py, "delete", &route.get().connection_name, no_secrets)?;
+    let operation = async move {
         let r = route.get();
         let (_, engine, tx_conn, backend) = route_engine(r)?;
 
@@ -3690,7 +4033,8 @@ pub fn delete_record(
         .await;
 
         scope.finish(outcome).await
-    })
+    };
+    pyo3_async_runtimes::tokio::future_into_py(py, crate::sql_log::scope(log, operation))
 }
 
 /// Delete rows matching a filtered query.
@@ -3708,20 +4052,27 @@ pub fn delete_record(
 /// # Errors
 /// `PyRuntimeError` on planning or execute failure.
 #[pyfunction]
-#[pyo3(signature = (name, query_ir_json, route))]
-pub fn delete_filtered(
-    py: Python<'_>,
+#[pyo3(signature = (name, query_ir_json, route, *, secret_values=Vec::new()))]
+pub fn delete_filtered<'py>(
+    py: Python<'py>,
     name: String,
     query_ir_json: String,
     route: Py<crate::state::RouteHandle>,
-) -> PyResult<Bound<'_, PyAny>> {
+    secret_values: Vec<Bound<'py, PyAny>>,
+) -> PyResult<Bound<'py, PyAny>> {
     let mut plan = query_plan_from_ir_json(&query_ir_json)?;
     validate_set_shape(&plan, "delete")?;
     validate_paging_shape(&plan, "delete")?;
     reject_traversal_on_mutation(&plan, "delete")?;
     reject_unsupported_materialization(&plan, "delete")?;
+    let log = operation_log(py, "delete", &route.get().connection_name, |py| {
+        operation_secret_values(
+            &secret_values,
+            plan_secret_values(py, &model_class_for(py, &name)?, &plan)?,
+        )
+    })?;
 
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    let operation = async move {
         let r = route.get();
         let (_, engine, tx_conn, backend) = route_engine(r)?;
         let session_id = r.session_id.clone();
@@ -3778,7 +4129,8 @@ pub fn delete_filtered(
         .await;
 
         scope.finish(outcome).await
-    })
+    };
+    pyo3_async_runtimes::tokio::future_into_py(py, crate::sql_log::scope(log, operation))
 }
 
 /// Update rows matching a filtered query using its canonical QueryIR SET section.
@@ -3796,12 +4148,13 @@ pub fn delete_filtered(
 /// # Errors
 /// `PyTypeError` for unbindable column values; `PyRuntimeError` on execute failure.
 #[pyfunction]
-#[pyo3(signature = (name, query_ir_json, route))]
+#[pyo3(signature = (name, query_ir_json, route, *, secret_values=Vec::new()))]
 pub fn update_filtered<'py>(
     py: Python<'py>,
     name: String,
     query_ir_json: String,
     route: Py<crate::state::RouteHandle>,
+    secret_values: Vec<Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let mut plan = query_plan_from_ir_json(&query_ir_json)?;
     validate_set_shape(&plan, "update")?;
@@ -3814,7 +4167,13 @@ pub fn update_filtered<'py>(
     validate_paging_shape(&plan, "update")?;
     reject_traversal_on_mutation(&plan, "update")?;
     reject_unsupported_materialization(&plan, "update")?;
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    let log = operation_log(py, "update", &route.get().connection_name, |py| {
+        operation_secret_values(
+            &secret_values,
+            plan_secret_values(py, &model_class_for(py, &name)?, &plan)?,
+        )
+    })?;
+    let operation = async move {
         let r = route.get();
         let (_, engine, tx_conn, backend) = route_engine(r)?;
         let session_id = r.session_id.clone();
@@ -3893,7 +4252,8 @@ pub fn update_filtered<'py>(
         .await;
 
         scope.finish(outcome).await
-    })
+    };
+    pyo3_async_runtimes::tokio::future_into_py(py, crate::sql_log::scope(log, operation))
 }
 
 /// Insert many-to-many association rows into a join table.
@@ -3931,7 +4291,8 @@ pub fn add_m2m_links<'py>(
         .map(|id| python_to_sea_value(id))
         .collect::<PyResult<Vec<_>>>()?;
 
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    let log = operation_log(py, "m2m_add", &route.get().connection_name, no_secrets)?;
+    let operation = async move {
         let r = route.get();
         let (_, engine, tx_conn, backend) = route_engine(r)?;
 
@@ -3984,7 +4345,8 @@ pub fn add_m2m_links<'py>(
         .await;
 
         scope.finish(outcome).await
-    })
+    };
+    pyo3_async_runtimes::tokio::future_into_py(py, crate::sql_log::scope(log, operation))
 }
 
 /// Delete specific many-to-many association rows from a join table.
@@ -4022,7 +4384,8 @@ pub fn remove_m2m_links<'py>(
         .map(|id| python_to_sea_value(id))
         .collect::<PyResult<Vec<_>>>()?;
 
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    let log = operation_log(py, "m2m_remove", &route.get().connection_name, no_secrets)?;
+    let operation = async move {
         let r = route.get();
         let (_, engine, tx_conn, backend) = route_engine(r)?;
 
@@ -4074,7 +4437,8 @@ pub fn remove_m2m_links<'py>(
         .await;
 
         scope.finish(outcome).await
-    })
+    };
+    pyo3_async_runtimes::tokio::future_into_py(py, crate::sql_log::scope(log, operation))
 }
 
 /// Delete all many-to-many links for a source row from a join table.
@@ -4102,8 +4466,9 @@ pub fn clear_m2m_links<'py>(
     route: Py<crate::state::RouteHandle>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let s_id = python_to_sea_value(source_id)?;
+    let log = operation_log(py, "m2m_clear", &route.get().connection_name, no_secrets)?;
 
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    let operation = async move {
         let r = route.get();
         let (_, engine, tx_conn, backend) = route_engine(r)?;
 
@@ -4140,7 +4505,8 @@ pub fn clear_m2m_links<'py>(
         .await;
 
         scope.finish(outcome).await
-    })
+    };
+    pyo3_async_runtimes::tokio::future_into_py(py, crate::sql_log::scope(log, operation))
 }
 
 /// Convert a Python value into a SeaQuery `Value` for M2M source / target IDs.
@@ -4588,13 +4954,14 @@ fn get_raw_tx_conn(
 ///   not a supported primitive (the Python `_marshal` wrapper guarantees this
 ///   never trips in normal use).
 #[pyfunction]
-#[pyo3(signature = (sql, args, route, autocommit=false))]
+#[pyo3(signature = (sql, args, route, autocommit=false, *, secret_values=Vec::new()))]
 pub fn raw_execute<'py>(
     py: Python<'py>,
     sql: String,
     args: Vec<Bound<'py, PyAny>>,
     route: Py<crate::state::RouteHandle>,
     autocommit: bool,
+    secret_values: Vec<Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let bind_values: Vec<EngineBindValue> = args
         .iter()
@@ -4613,8 +4980,11 @@ pub fn raw_execute<'py>(
         )
     };
     let tx_conn = get_raw_tx_conn(route_tx_id, route_session_id.as_deref())?;
+    let log = operation_log(py, "raw", &route_connection_name, |_| {
+        secret_binds_from_py(&secret_values)
+    })?;
 
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    let operation = async move {
         let engine = engine_for_connection(Some(route_connection_name))?;
         // `autocommit=True` is the caller telling us this statement cannot run
         // inside a transaction at all (`CREATE INDEX CONCURRENTLY`, `VACUUM`),
@@ -4645,7 +5015,8 @@ pub fn raw_execute<'py>(
         .await;
 
         scope.finish(outcome).await
-    })
+    };
+    pyo3_async_runtimes::tokio::future_into_py(py, crate::sql_log::scope(log, operation))
 }
 
 /// Run a raw SQL query and return all rows as a list of dicts.
@@ -4654,12 +5025,13 @@ pub fn raw_execute<'py>(
 /// UUID/datetime/JSON columns come back as strings — Ferro does not decode them
 /// for raw SQL. If you want typed rows, use the ORM.
 #[pyfunction]
-#[pyo3(signature = (sql, args, route))]
+#[pyo3(signature = (sql, args, route, *, secret_values=Vec::new()))]
 pub fn raw_fetch_all<'py>(
     py: Python<'py>,
     sql: String,
     args: Vec<Bound<'py, PyAny>>,
     route: Py<crate::state::RouteHandle>,
+    secret_values: Vec<Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let bind_values: Vec<EngineBindValue> = args
         .iter()
@@ -4674,8 +5046,11 @@ pub fn raw_fetch_all<'py>(
         )
     };
     let tx_conn = get_raw_tx_conn(route_tx_id, route_session_id.as_deref())?;
+    let log = operation_log(py, "raw", &route_connection_name, |_| {
+        secret_binds_from_py(&secret_values)
+    })?;
 
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    let operation = async move {
         let engine = engine_for_connection(Some(route_connection_name))?;
         let scope = OperationScope::open(
             &engine,
@@ -4704,7 +5079,8 @@ pub fn raw_fetch_all<'py>(
         .await;
 
         scope.finish(outcome).await
-    })
+    };
+    pyo3_async_runtimes::tokio::future_into_py(py, crate::sql_log::scope(log, operation))
 }
 
 /// Run a raw SQL query and return the first row as a dict, or `None`.
@@ -4722,12 +5098,13 @@ pub fn raw_fetch_all<'py>(
 /// Values are wire-close primitives (`str | int | float | bool | bytes | None`).
 /// UUID/datetime/JSON columns come back as strings — use the ORM for typed hydration.
 #[pyfunction]
-#[pyo3(signature = (sql, args, route))]
+#[pyo3(signature = (sql, args, route, *, secret_values=Vec::new()))]
 pub fn raw_fetch_one<'py>(
     py: Python<'py>,
     sql: String,
     args: Vec<Bound<'py, PyAny>>,
     route: Py<crate::state::RouteHandle>,
+    secret_values: Vec<Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let bind_values: Vec<EngineBindValue> = args
         .iter()
@@ -4742,8 +5119,11 @@ pub fn raw_fetch_one<'py>(
         )
     };
     let tx_conn = get_raw_tx_conn(route_tx_id, route_session_id.as_deref())?;
+    let log = operation_log(py, "raw", &route_connection_name, |_| {
+        secret_binds_from_py(&secret_values)
+    })?;
 
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+    let operation = async move {
         let engine = engine_for_connection(Some(route_connection_name))?;
         let scope = OperationScope::open(
             &engine,
@@ -4769,7 +5149,8 @@ pub fn raw_fetch_one<'py>(
         .await;
 
         scope.finish(outcome).await
-    })
+    };
+    pyo3_async_runtimes::tokio::future_into_py(py, crate::sql_log::scope(log, operation))
 }
 
 /// Lifetime catalog-introspection query count for a connection's engine.
