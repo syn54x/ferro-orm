@@ -477,7 +477,7 @@ The error prints:
 
 <!-- prints: mutations.py:mutation-guard -->
 ```text
-delete() does not support limit/offset/after/before: portable SQL has no DELETE ... LIMIT. Remove the .limit()/.offset()/.after()/.before() call, or fetch primary keys first and delete by primary-key set.
+ValueError: delete() does not support limit/offset/after/before: portable SQL has no DELETE ... LIMIT. Remove the .limit()/.offset()/.after()/.before() call, or fetch primary keys first and delete by primary-key set.
 ```
 
 To change a bounded set of rows, fetch their primary keys first, then filter on them:

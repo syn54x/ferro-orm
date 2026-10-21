@@ -66,7 +66,7 @@ Rules worth knowing:
 
     <!-- prints: auto_migrate_errors.py:required-column -->
     ```text
-    Cannot add NOT NULL column 'author.bio' to an existing table: it has no literal default to backfill existing rows. Make the field nullable, give it a literal default, or generate a reviewed migration with `ferro migrate new`.
+    ValueError: Cannot add NOT NULL column 'author.bio' to an existing table: it has no literal default to backfill existing rows. Make the field nullable, give it a literal default, or generate a reviewed migration with `ferro migrate new`.
     ```
 
     Nothing was added. A migration splits that change into an expand step, a [backfill](data-steps.md) you write, and a contract step.

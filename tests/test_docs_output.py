@@ -31,7 +31,13 @@ import re
 
 import pytest
 
-from tests._docs_harness import Fence, fenced_blocks, page_fences
+from tests._docs_harness import (
+    REPO_ROOT,
+    Fence,
+    fenced_blocks,
+    page_fences,
+    snippet_regions,
+)
 from tests._docs_sql import (
     PRINTS,
     Region,
@@ -79,19 +85,124 @@ def test_a_postgres_text_block_is_what_its_example_prints_there(
     )
 
 
+def _ferro_exception_names() -> list[str]:
+    """The name of every exception class Ferro defines."""
+    import ferro.migrations
+    import ferro.migrations._chunk_loop  # noqa: F401 - defines BatchFailed
+
+    found: set[str] = set()
+    pending: list[type] = [BaseException]
+    while pending:
+        cls = pending.pop()
+        pending.extend(cls.__subclasses__())
+        if cls.__module__.split(".")[0] == "ferro":
+            found.add(cls.__name__)
+    return sorted(found, key=lambda name: (-len(name), name))
+
+
 FERRO_OUTPUT = re.compile(
-    r"(?m)^(?:ferro\.|ferro auto-migrate:|[\w.]*(?:Error|Refused|Warning):"
-    r"|\d+ validation errors? for |connect\()"
+    r"(?m)^\s*(?:[^\s:]+:\d+: )?"  # a warning's or a traceback's `path:N: `
+    r"(?:ferro\."
+    r"|ferro (?:auto-)?migrate(?: [a-z]+)?: "
+    rf"|(?:[\w.]*\.)?(?:{'|'.join(_ferro_exception_names())}):"
+    r"|[\w.]*(?:Error|Refused|Warning|Exception):"
+    r"|Traceback \(most recent call last\)"
+    r'|File "[^"]+", line \d+, in '
+    r"|\d+ validation errors? for "
+    r"|connect\("
+    r"|No database route "
+    r"|Cannot add NOT NULL column "
+    r"|\S+ \u00b7 \S+$"  # the `<database> · <target>` line every verb but init opens with
+    r"|Wrote (?:ferro\.toml|\[tool\.ferro\]) "
+    r"|\S+\.toml: "
+    r"|\S+ holds two ferro configs"
+    r"|squash --from \S+: "
+    r"|changing the primary key of \S+ is not generated"
+    r")"
 )
-"""A line that reads like something Ferro prints, raises or warns."""
+"""A line that reads like something Ferro prints, raises or warns: an
+exception or warning line (with its ``path:N:`` prefix, if any), a
+``ferro migrate`` output or refusal, or one of Ferro's own messages."""
 
 
 VARIES = {
-    "guide/connections.md": "the statement log's lines end with how long each "
-    "statement took, which differs on every run",
+    "guide/connections.md:333": "the statement log's lines end with how long "
+    "each statement took, which differs on every run",
 }
-"""Pages whose ``shows:`` block holds Ferro's output that no run reproduces
-byte for byte, and why."""
+"""The ``shows:`` blocks holding Ferro's output that no run reproduces byte
+for byte, by page and line, and why."""
+
+
+_PRINTS_A_MESSAGE = re.compile(
+    r"print\((?:f\"\{type\((\w+)\)\.__name__\}: \{\1\}\"|\w+\.message)\)"
+)
+"""A ``print`` of what was raised (``f"{type(error).__name__}: {error}"``) or
+warned (``warning.message``), the forms the conventions give."""
+
+
+def _shows_a_message(block: Fence) -> bool:
+    """Whether a block shows Ferro's own words: ``ferro migrate``'s output or
+    a refusal, or a ``prints:`` block whose source prints what Ferro raised or
+    warned."""
+    kind, value = block.note or ("", "")
+    if kind in ("output", "refusal"):
+        return True
+    if kind != "prints":
+        return False
+    if value == "above":
+        fence = printing_fence(block)
+        source = fence.source if fence is not None else ""
+    else:
+        marker = PRINTS.match(value)
+        assert marker is not None, page_name(block)
+        script = REPO_ROOT / "docs" / "examples" / marker["example"]
+        regions = snippet_regions(script.read_text(encoding="utf-8"))
+        source = regions[marker["snippet"]].body
+    return _PRINTS_A_MESSAGE.search(source) is not None
+
+
+def _ferro_output_blocks() -> list[Fence]:
+    """Every block the pages show as Ferro's own words."""
+    return [block for block in page_fences("text") if _shows_a_message(block)]
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "No database route for this operation. Open a session",
+        "Cannot add NOT NULL column 'author.bio' to an existing table",
+        "ferro.exceptions.ModelDoesNotExist: Author with pk 7 does not exist",
+        '  File "app.py", line 3, in <module>',
+        "ferro.migrations.BatchFailed: batch 3 failed",
+        "app.py:12: UserWarning: Check constraint 'ck_author_kind' is declared",
+        "Traceback (most recent call last):",
+        "ferro migrate: this database has applied 0002_author_slug",
+        "ferro migrate squash: nothing to squash",
+    ],
+)
+def test_the_recogniser_knows_each_kind_of_ferro_output(line: str) -> None:
+    assert FERRO_OUTPUT.search(line), line
+
+
+@pytest.mark.parametrize("block", _ferro_output_blocks(), ids=page_name)
+def test_the_recogniser_matches_every_block_of_ferro_output(block: Fence) -> None:
+    """The ``shows:`` guard is only as good as this pattern: it must match every
+    block the pages already show as Ferro's output."""
+    assert FERRO_OUTPUT.search(block.body), (
+        f"{page_name(block)}: FERRO_OUTPUT does not recognise this block of "
+        f"Ferro's output, so a <!-- shows: --> block holding it would pass:\n"
+        f"{block.body}"
+    )
+
+
+def test_each_varies_entry_names_a_shows_block() -> None:
+    shows = {
+        page_name(block)
+        for block in page_fences("text")
+        if block.note and block.note[0] == "shows"
+    }
+    stale = sorted(set(VARIES) - shows)
+    assert not stale, f"VARIES names no shows: block at {stale}; update the line"
 
 
 @pytest.mark.parametrize(
@@ -100,7 +211,7 @@ byte for byte, and why."""
     ids=page_name,
 )
 def test_a_shows_block_holds_nothing_ferro_prints(block: Fence) -> None:
-    if page_name(block).rsplit(":", 1)[0] in VARIES:
+    if page_name(block) in VARIES:
         return
     line = FERRO_OUTPUT.search(block.body)
     assert line is None, (

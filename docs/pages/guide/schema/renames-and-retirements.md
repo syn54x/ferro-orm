@@ -167,7 +167,7 @@ The member stays, so a row that holds `paused` still loads as `Status.PAUSED`. W
 
 <!-- prints: migrations_retire_label.py:retired-write -->
 ```text
-1 validation error for Author
+ValidationError: 1 validation error for Author
 status
   Status.PAUSED ('paused') is retired in this release: the previous release may still write it, this one does not [type=retired_enum_label, input_value='paused', input_type=str]
 ```

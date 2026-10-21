@@ -41,7 +41,7 @@ from types import ModuleType
 import pytest
 
 import ferro.migrations
-from tests._docs_harness import fenced_blocks, run_python
+from tests._docs_harness import Fence, fenced_blocks, page_fences, run_python
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DOCS_PAGES = REPO_ROOT / "docs" / "pages"
@@ -227,17 +227,67 @@ REFUSALS = {
 }
 
 
+def _marked(kind: str, blocks: list[Fence] | None = None) -> dict[str, str]:
+    """Each ```text block marked ``<!-- <kind>: <id> -->``, by id.
+
+    ``blocks`` defaults to every block a docs page shows, so a marked block
+    on any page is compared: there is no page where the note goes unchecked.
+
+    Raises:
+        AssertionError: Two blocks carry one id.
+    """
+    found: dict[str, str] = {}
+    for fence in page_fences("text") if blocks is None else blocks:
+        if fence.note is None or fence.note[0] != kind:
+            continue
+        block_id = fence.note[1]
+        assert block_id not in found, (
+            f"{fence.where}: {kind} id {block_id!r} marks two blocks"
+        )
+        found[block_id] = fence.body
+    return found
+
+
+def _registry_gaps(
+    kind: str, registry: dict, blocks: list[Fence] | None = None
+) -> list[str]:
+    """What keeps the marked blocks and ``registry`` from naming the same ids."""
+    marked = _marked(kind, blocks)
+    return [
+        *(
+            f"<!-- {kind}: {block_id} --> has no entry in the registry"
+            for block_id in sorted(set(marked) - set(registry))
+        ),
+        *(
+            f"the registry's {block_id!r} marks no block"
+            for block_id in sorted(set(registry) - set(marked))
+        ),
+    ]
+
+
 def _quoted_refusals() -> dict[str, str]:
-    """Each ```text block the CLI reference marks ``<!-- refusal: <id> -->``."""
-    page = CLI_REFERENCE.read_text()
-    found = re.findall(
-        r"<!-- refusal: ([a-z-]+) -->\s*```text\n(.*?)```", page, flags=re.DOTALL
+    return _marked("refusal")
+
+
+def test_the_pages_quote_each_database_free_refusal() -> None:
+    assert _registry_gaps("refusal", REFUSALS) == []
+
+
+@pytest.mark.parametrize("kind", ["output", "refusal"])
+def test_a_marked_block_on_any_page_is_compared(kind: str) -> None:
+    """A typed block under ``output:`` or ``refusal:`` on a page outside the
+    migrations guides still has to name a registered scenario."""
+    page = DOCS_PAGES / "howto" / "testing.md"
+    fabricated = fenced_blocks(
+        page,
+        f"# Testing\n\n<!-- {kind}: made-up -->\n```text\nferro migrate: typed\n```\n",
+        "text",
     )
-    return {key: text for key, text in found}
-
-
-def test_the_cli_reference_quotes_each_database_free_refusal() -> None:
-    assert sorted(_quoted_refusals()) == sorted(REFUSALS)
+    registry = OUTPUTS if kind == "output" else REFUSALS
+    blocks = [*page_fences("text"), *fabricated]
+    assert _registry_gaps(kind, registry, blocks) == [
+        f"<!-- {kind}: made-up --> has no entry in the registry"
+    ]
 
 
 @pytest.mark.parametrize("refusal", sorted(REFUSALS))
@@ -1011,12 +1061,7 @@ def _quoted_blocks(page: Path) -> list[tuple[str | None, str | None, str, str]]:
 
 
 def _quoted_outputs() -> dict[str, str]:
-    return {
-        block_id: body
-        for page in OUTPUT_PAGES
-        for kind, block_id, _first, body in _quoted_blocks(page)
-        if kind == "output"
-    }
+    return _marked("output")
 
 
 def _normalise(text: str) -> str:
@@ -1036,14 +1081,7 @@ def _normalise(text: str) -> str:
 
 
 def test_every_output_block_has_a_registry_entry_and_the_reverse() -> None:
-    marked = [
-        block_id
-        for page in OUTPUT_PAGES
-        for kind, block_id, _first, _body in _quoted_blocks(page)
-        if kind == "output"
-    ]
-    assert len(marked) == len(set(marked)), "an output id marks two blocks"
-    assert sorted(marked) == sorted(OUTPUTS)
+    assert _registry_gaps("output", OUTPUTS) == []
 
 
 CLI_LINE = re.compile(

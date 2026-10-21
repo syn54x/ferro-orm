@@ -66,7 +66,7 @@ It prints:
 
 <!-- prints: multiple_databases.py:conflict -->
 ```text
-Explicit `using='analytics'` conflicts with the ambient session bound to connection 'app'. Pass an explicit `session=` for that connection, or open a session on 'analytics'.
+ValueError: Explicit `using='analytics'` conflicts with the ambient session bound to connection 'app'. Pass an explicit `session=` for that connection, or open a session on 'analytics'.
 ```
 
 A call with no session and no `using=` raises `RuntimeError`; Ferro never falls back to the default connection on its own.
@@ -85,7 +85,7 @@ It prints:
 
 <!-- prints: multiple_databases.py:transaction -->
 ```text
-Operations inside a transaction inherit the transaction connection
+ValueError: Operations inside a transaction inherit the transaction connection
 2
 ```
 

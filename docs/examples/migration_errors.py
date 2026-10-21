@@ -105,7 +105,7 @@ async def main() -> None:
         try:
             await ferro.connect(app.url, auto_migrate=True)
         except ferro.migrations.MigrationRefused as error:
-            print(error)
+            print(f"{type(error).__name__}: {error}")
         # --8<-- [end:tracked]
 
 
