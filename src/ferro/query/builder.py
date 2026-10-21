@@ -2141,6 +2141,7 @@ class Relation(Query[T]):
         all: ClassVar["_RelationAll"]  # type: ignore[assignment]
         first: ClassVar["_RelationFirst"]  # type: ignore[assignment]
     else:
+
         @terminal
         async def all(self):  # type: ignore[override]
             """Load every related record.
