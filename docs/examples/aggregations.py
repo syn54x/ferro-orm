@@ -2,9 +2,7 @@
 (docs/pages/guide/aggregations.md).
 
 Seeds a small ledger of four transactions, then runs every aggregate query
-the guide shows and asserts the exact records that come back. The
-``aggregations`` prelude imports ``Account``, ``Transaction`` and ``seed`` from
-here, so the guide's inline blocks run against the same rows.
+the guide shows and asserts the exact records that come back.
 """
 
 import asyncio
@@ -12,7 +10,7 @@ from collections import defaultdict
 from decimal import Decimal
 from typing import Annotated
 
-from ferro import BackRef, Field, ForeignKey, Model, Relation, connect, engines
+from ferro import BackRef, Field, ForeignKey, Model, Relation
 
 
 # --8<-- [start:schema]
@@ -50,11 +48,12 @@ async def seed() -> None:
 
 
 async def main() -> None:
-    await connect("sqlite::memory:", auto_migrate=True)
-
     # --8<-- [start:global]
+    from ferro import connect, engines
+
+    await connect("sqlite::memory:", auto_migrate=True)
     async with engines.session():
-        await seed()
+        await seed()  # adds the ledger's four transactions
 
         # An aggregate-only projection collapses to exactly one record,
         # read idiomatically with first().

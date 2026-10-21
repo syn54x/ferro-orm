@@ -76,6 +76,21 @@ def test_row_level_security_example_runs_on_postgres(
     run_python([str(DOCS_EXAMPLES / script), db_url, pg_role("app")])
 
 
+def test_every_prelude_is_cited_by_a_fence() -> None:
+    """A prelude no page or docstring fence asks for is dead weight; remove it."""
+    from tests._docs_harness import REPO_ROOT, docstring_examples, preludes
+
+    cited = {
+        fence_settings(example).get("prelude")
+        for example in [
+            *page_examples(),
+            *docstring_examples("ferro", REPO_ROOT / "src"),
+        ]
+    }
+    unused = sorted(set(preludes()) - cited)
+    assert not unused, f"no fence uses the preludes {unused}; delete them"
+
+
 def _page(tmp_path: Path, prefix: str, body: str) -> CodeExample:
     page = tmp_path / "page.md"
     page.write_text(f"# Page\n\n```{prefix}\n{body}\n```\n", encoding="utf-8")

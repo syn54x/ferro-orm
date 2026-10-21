@@ -6,13 +6,13 @@ description: "Count, total and average rows with count(), sum(), avg(), min() an
 
 This guide shows how to total, count and average rows with the five aggregate methods (`count()`, `sum()`, `avg()`, `min()` and `max()`) inside a `select()` lambda, and how a record that mixes plain fields with aggregates becomes a grouped query. The full signatures are in the [aggregates reference](../api/queries.md#aggregates-and-grouped-queries).
 
-Here is a whole program. It adds four transactions and asks for the sum of the amount, the largest amount and the average amount over all of them:
+Here is a program that connects, opens a session, adds the four transactions of [the ledger](#the-ledger) and asks for their count, total, average, smallest and largest amount in one query:
 
 ```python
 --8<-- "docs/examples/aggregations.py:global"
 ```
 
-The single record holds four numbers over the four rows: they total 115, so the average is 28.75. Every query on this page runs inside a session like this one; see [Sessions](connections.md#sessions) for why and how to open one.
+The single record holds five numbers over the four rows: a count of 4, a total of 115, an average of 28.75, a smallest amount of 10 and a largest of 45. Every query on this page runs inside a session like this one; see [Sessions](connections.md#sessions) for why and how to open one.
 
 Every example on this page is followed by the SQL it sends, captured from Ferro when the example runs. `first()` sends this statement; on PostgreSQL only the placeholders differ, `$1` where SQLite has `?`:
 
