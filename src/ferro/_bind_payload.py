@@ -41,6 +41,41 @@ def unwrap_secret(value: Any) -> Any:
     return value
 
 
+def secret_values_of(fields: Mapping[str, object]) -> tuple[object, ...]:
+    """Return what each `SecretStr` / `SecretBytes` among `fields`' values hides.
+
+    The statement log masks a bound parameter equal to any of these, so a
+    secret written through this mapping never reaches a record.
+
+    Args:
+        fields: Field or column names mapped to the values about to be bound.
+
+    Returns:
+        The unwrapped value of every secret in `fields`, in order; empty when
+        there is none.
+    """
+    return tuple(
+        unwrap_secret(value)
+        for value in fields.values()
+        if isinstance(value, (SecretStr, SecretBytes))
+    )
+
+
+def secret_values(instance: Any) -> tuple[object, ...]:
+    """Return what each secret field of a model instance hides.
+
+    Args:
+        instance: The model instance about to be saved.
+
+    Returns:
+        The unwrapped value of every field holding a `SecretStr` or
+        `SecretBytes`, in field order; empty when there is none.
+    """
+    return secret_values_of(
+        {name: getattr(instance, name, None) for name in type(instance).model_fields}
+    )
+
+
 def _raw_bound_fields(instance: Any) -> dict[str, Any]:
     """Fields that bind raw rather than through the JSON dump, with that value.
 

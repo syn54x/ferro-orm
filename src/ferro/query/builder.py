@@ -12,6 +12,7 @@ from typing import (
     Any,
     Callable,
     Generic,
+    Literal,
     NamedTuple,
     Never,
     NoReturn,
@@ -1253,6 +1254,7 @@ class Query(Generic[T]):
             compiled.wire_json,
             route,
             hop_classes=compiled.hop_classes,
+            secret_values=list(compiled.secret_values),
         )
         if self._before is not None:
             rows.reverse()
@@ -1269,12 +1271,18 @@ class Query(Generic[T]):
             >>> isinstance(total, int)
             True
         """
+        return await self._count("count")
+
+    async def _count(self, operation: Literal["count", "exists"]) -> int:
+        """Count the matching rows, naming the statement-log records `operation`."""
         compiled = compile_query(self, "count")
         route = await self._transaction_or_using()
         return await count_filtered(
             model_identity(self.model_cls),
             compiled.wire_json,
             route,
+            secret_values=list(compiled.secret_values),
+            operation=operation,
         )
 
     @overload
@@ -1346,6 +1354,7 @@ class Query(Generic[T]):
             model_identity(self.model_cls),
             compiled.wire_json,
             route,
+            secret_values=list(compiled.secret_values),
         )
 
     async def first(self) -> T | None:
@@ -1387,6 +1396,7 @@ class Query(Generic[T]):
             model_identity(self.model_cls),
             compiled.wire_json,
             route,
+            secret_values=list(compiled.secret_values),
         )
 
     async def exists(self) -> bool:
@@ -1400,7 +1410,7 @@ class Query(Generic[T]):
             >>> isinstance(found, bool)
             True
         """
-        return await self.count() > 0
+        return await self._count("exists") > 0
 
     async def add(self, *instances: Any) -> None:
         """Add links to a many-to-many relationship
@@ -1818,6 +1828,7 @@ class ProjectedQuery(Query[T]):
             route,
             record_cls=Row,
             hop_classes=compiled.hop_classes,
+            secret_values=list(compiled.secret_values),
         )
         if self._before is not None:
             records.reverse()

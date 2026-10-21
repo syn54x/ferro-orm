@@ -1,5 +1,6 @@
 """Define the core ORM model base and transaction helpers for Ferro."""
 
+import logging
 from contextlib import asynccontextmanager
 from enum import Enum
 from typing import (
@@ -26,7 +27,9 @@ from ._bind_payload import (
     apply_save_only,
     normalize_save_columns,
     save_bind_payload,
+    secret_values,
 )
+from ._sql_log import LOGGER as _SQL_LOG
 from ._core import (
     begin_transaction,
     commit_transaction,
@@ -53,6 +56,18 @@ from .state import (
     resolve_transaction_scope,
     route_for_transaction,
 )
+
+
+def _secrets_to_mask(instances: "list[Model]") -> list[object]:
+    """The secret field values of `instances` the statement log must mask.
+
+    Collected only while `ferro.sql` is enabled for `DEBUG`: with the log off
+    no record is written, so there is nothing to mask.
+    """
+    if not _SQL_LOG.isEnabledFor(logging.DEBUG):
+        return []
+    return [value for instance in instances for value in secret_values(instance)]
+
 
 _FERRO_CONNECTION_ATTR = "__ferro_connection_name"
 _FERRO_PERSISTED_ATTR = "__ferro_persisted"
@@ -459,6 +474,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                     "Use Query.update() for set-oriented or expression writes."
                 )
         route, identity_using = await _instance_transaction_route(self, using, session)
+        secrets = _secrets_to_mask([self])
         new_id = None
         if on_conflict == "update":
             new_id = await save_record(
@@ -466,6 +482,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                 save_bind_payload(self),
                 route,
                 mode="upsert",
+                secret_values=secrets,
             )
         elif _is_persisted(self):
             pk_field_name = self.__class__.__ferro_pk__
@@ -484,6 +501,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                 self.__class__.__ferro_identity__,
                 payload,
                 route,
+                secret_values=secrets,
             )
             if rows_affected == 0:
                 raise ModelDoesNotExist(self.__class__, pk_val)
@@ -493,6 +511,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                 save_bind_payload(self),
                 route,
                 mode="insert",
+                secret_values=secrets,
             )
 
         pk_val = None
@@ -804,7 +823,12 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             return 0
         data = [save_bind_payload(i) for i in instances]
         route = await _transaction_or_using(using, session)
-        return await save_bulk_records(cls.__ferro_identity__, data, route)
+        return await save_bulk_records(
+            cls.__ferro_identity__,
+            data,
+            route,
+            secret_values=_secrets_to_mask(list(instances)),
+        )
 
     @classmethod
     async def get_or_create(
