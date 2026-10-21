@@ -307,6 +307,7 @@ pub fn connect(
     let should_select_default = default || is_implicit_default;
 
     sqlx::any::install_default_drivers();
+    let logged = crate::sql_log::enabled(py)?;
 
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         if CONNECTION_REGISTRY
@@ -361,12 +362,20 @@ pub fn connect(
         // pass's error carries it.
         if auto_migrate || opts.updates {
             let mut report = PassReport::default();
-            internal_migrate(
-                engine_handle.clone(),
-                opts,
-                &tracking_schemas,
-                AutoMigrateDoor::Connect,
-                &mut report,
+            crate::sql_log::scope(
+                logged.then(|| {
+                    crate::sql_log::StatementContext::new(
+                        crate::sql_log::MIGRATE,
+                        connection_name.clone(),
+                    )
+                }),
+                internal_migrate(
+                    engine_handle.clone(),
+                    opts,
+                    &tracking_schemas,
+                    AutoMigrateDoor::Connect,
+                    &mut report,
+                ),
             )
             .await
             .map_err(|err| with_pass_report(err, &report))?;

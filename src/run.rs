@@ -1039,7 +1039,6 @@ pub async fn ensure_tracking_tables(
         .map_err(|e| db_error("creating the tracking tables", e))?;
     let result: Result<(), sqlx::Error> = async {
         for ddl in tracking_ddl(dialect, &tracking) {
-            crate::log_debug(format!("ferro migrate: {ddl}"));
             conn.execute_sql_unprepared(&ddl).await?;
         }
         let format_table = tracking.table(FORMAT_TABLE);
@@ -1057,7 +1056,6 @@ pub async fn ensure_tracking_tables(
                 .is_empty()
             {
                 let alter = format!("ALTER TABLE {} ADD COLUMN {ddl}", tracking.table(table));
-                crate::log_debug(format!("ferro migrate: {alter}"));
                 conn.execute_sql_unprepared(&alter).await?;
             }
         }
@@ -1562,10 +1560,6 @@ impl StepFailure {
             .iter()
             .any(|statement| statement.role == Role::Schema)
     }
-}
-
-pub(crate) fn log_step_statement(file: &str, statement: &str) {
-    crate::log_debug(format!("ferro migrate: {file}: {statement}"));
 }
 
 async fn run_statements(

@@ -62,16 +62,10 @@ from .settings import (
     parse_ddl_lock_timeout,
 )
 
-# Set up the Ferro logger
-_logger = logging.getLogger("ferro")
-# Only add a handler if none exists (to avoid duplicate logs)
-if not _logger.handlers:
-    _handler = logging.StreamHandler()
-    _handler.setFormatter(logging.Formatter("%(name)s: %(levelname)s: %(message)s"))
-    _logger.addHandler(_handler)
-    _logger.setLevel(logging.INFO)
-    # Prevent propagation to root logger to avoid duplicate messages
-    _logger.propagate = False
+# A library installs no output of its own: the `ferro` logger (and the
+# statement log on `ferro.sql` beneath it) propagates to whatever logging the
+# application configures. The `ferro` CLI, an application, installs its own.
+logging.getLogger("ferro").addHandler(logging.NullHandler())
 
 
 _RESOLVED_MODELSET_LOCK = threading.Lock()
