@@ -5,6 +5,7 @@ from enum import Enum
 from typing import (
     Annotated,
     Any,
+    Callable,
     ClassVar,
     ForwardRef,
     get_args,
@@ -12,7 +13,7 @@ from typing import (
     get_type_hints,
 )
 
-from pydantic import AfterValidator, BaseModel, ValidationError
+from pydantic import AfterValidator, BaseModel, SecretBytes, SecretStr, ValidationError
 from pydantic import Field as PydanticField
 from pydantic.fields import FieldInfo
 from pydantic_core import PydanticCustomError
@@ -99,6 +100,33 @@ def _reverse_relation_retired(model: str, field_name: str, m2m: bool) -> TypeErr
         f"{model}.{field_name}: a BackRef cannot be retired; it is not a column. "
         "Delete the BackRef"
     )
+
+
+class SecretHydrator:
+    """Wrap a decoded column value in the field's ``SecretStr`` / ``SecretBytes``.
+
+    The database stores what the secret hides, so a ``SecretStr`` column hands
+    back ``str`` and a ``SecretBytes`` column ``bytes``; any other value is
+    corrupt data and is refused. The refusal names the types only, never the
+    value, which may be the secret itself.
+    """
+
+    __slots__ = ("secret_class", "_stored_type")
+
+    def __init__(self, secret_class: type[SecretStr] | type[SecretBytes]) -> None:
+        self.secret_class = secret_class
+        self._stored_type = bytes if issubclass(secret_class, SecretBytes) else str
+
+    def __call__(self, value: Any) -> SecretStr | SecretBytes:
+        if type(value) is not self._stored_type:
+            raise TypeError(
+                f"{self.secret_class.__name__} stores {self._stored_type.__name__}, "
+                f"but the column holds {type(value).__name__}"
+            )
+        return self.secret_class(value)
+
+    def __repr__(self) -> str:
+        return f"SecretHydrator({self.secret_class.__name__})"
 
 
 def _written_retired_label(value: Any, labels: frozenset[str]) -> str | None:
@@ -228,6 +256,7 @@ class ModelMetaclass(type(BaseModel)):
         # else; these two bake *names only*, which are stable across epochs).
         cls.__ferro_query_columns__ = frozenset(cls.__ferro_columns__)
         mcs._register_enum_fields(cls)
+        mcs._register_hydration_converters(cls)
 
         return cls
 
@@ -750,6 +779,25 @@ class ModelMetaclass(type(BaseModel)):
         cls._enum_fields = enum_fields
         if retired_labels:
             ModelMetaclass._refuse_retired_labels(cls, retired_labels)
+
+    @staticmethod
+    def _register_hydration_converters(cls) -> None:
+        """Populate ``cls._hydration_converters``: the one per-field conversion
+        hydration applies to each non-null decoded value.
+
+        A column is written straight into the instance dict (I-2), so a field
+        whose declared type is not what the database hands back is converted
+        here: an enum field by its enum class, a secret field by
+        :class:`SecretHydrator`. Each entry is ``(kind, convert)``; ``kind``
+        names the field in a rejection (``Failed to hydrate enum field ...``).
+        """
+        converters: dict[str, tuple[str, Callable[[Any], Any]]] = {}
+        for field_name, spec in cls.__ferro_columns__.items():
+            if spec.enum_class is not None:
+                converters[field_name] = ("enum", spec.enum_class)
+            elif spec.secret_class is not None:
+                converters[field_name] = ("secret", SecretHydrator(spec.secret_class))
+        cls._hydration_converters = converters
 
     @staticmethod
     def _refuse_retired_labels(

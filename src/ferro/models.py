@@ -5,6 +5,7 @@ from enum import Enum
 from typing import (
     TYPE_CHECKING,
     Any,
+    Callable,
     ClassVar,
     Literal,
     Self,
@@ -278,6 +279,9 @@ class Model(BaseModel, metaclass=ModelMetaclass):
     #: retired relations and their shadow ``*_id`` columns.
     __ferro_retired_names__: ClassVar[frozenset[str]] = frozenset()
     _enum_fields: ClassVar[dict[str, type[Enum]]] = {}
+    #: Field → ``(kind, convert)``: the conversion hydration applies to each
+    #: non-null decoded value (an enum class, or a secret type's wrapper).
+    _hydration_converters: ClassVar[dict[str, tuple[str, Callable[[Any], Any]]]] = {}
 
     @classmethod
     def _reregister_ferro(cls) -> None:

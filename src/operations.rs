@@ -946,36 +946,39 @@ fn record_rows_to_parsed_data(
     Ok(parsed)
 }
 
-/// Build a record plan's enum catalog, keyed by OUTPUT field name (#293).
+/// Build a record plan's hydration converters, keyed by OUTPUT field name
+/// (#293).
 ///
-/// Each plain field's enum class (when its source column is enum-typed)
-/// resolves through the source's OWNING model — the root class for root
-/// fields, the hop table's class (from `hop_classes`) for traversed ones — so
-/// hydration converts exactly the values full hydration of that model would,
-/// under the record's output names. Aggregate fields never carry one: enum
-/// sources are rejected at build time and `count` decodes to a plain int
-/// (#294), so no aggregate output is enum-typed.
+/// Each plain field's converter (the enum class of an enum-typed source
+/// column, the secret wrapper of a secret one) resolves through the source's
+/// OWNING model — the root class for root fields, the hop table's class (from
+/// `hop_classes`) for traversed ones — so hydration converts exactly the
+/// values full hydration of that model would, under the record's output
+/// names. Aggregate fields never carry one: enum sources are rejected at
+/// build time and `count` decodes to a plain int (#294), so no aggregate
+/// output is converted.
 ///
 /// # Errors
 /// `PyValueError` when a traversed field's path has no join-plan table or its
 /// table is missing from `hop_classes` (the Python builder always passes
 /// every traversed path's hop classes — defense-in-depth).
-fn record_enum_classes_for<'py>(
+fn record_field_converters_for<'py>(
     py: Python<'py>,
     cls: &Bound<'py, PyAny>,
     fields: &[ProjectedField],
     hop_classes: Option<&Py<pyo3::types::PyDict>>,
     join_plan: &JoinPlan,
-) -> PyResult<HashMap<String, Bound<'py, PyAny>>> {
-    let root_enums = crate::hydration::enum_classes_for(py, cls);
-    let mut hop_enums: HashMap<String, HashMap<String, Bound<'py, PyAny>>> = HashMap::new();
-    let mut out: HashMap<String, Bound<'py, PyAny>> = HashMap::new();
+) -> PyResult<crate::hydration::FieldConverters<'py>> {
+    let root_converters = crate::hydration::field_converters_for(py, cls)?;
+    let mut hop_converters: HashMap<String, crate::hydration::FieldConverters<'py>> =
+        HashMap::new();
+    let mut out = crate::hydration::FieldConverters::new();
     for field in fields {
         let ProjectedSource::Column { column, path } = &field.source else {
             continue;
         };
-        let source_enums = if path.is_empty() {
-            &root_enums
+        let source_converters = if path.is_empty() {
+            &root_converters
         } else {
             let table = join_plan.prefix_table.get(path).ok_or_else(|| {
                 pyo3::exceptions::PyValueError::new_err(format!(
@@ -984,7 +987,7 @@ fn record_enum_classes_for<'py>(
                     field.name, path
                 ))
             })?;
-            if !hop_enums.contains_key(table) {
+            if !hop_converters.contains_key(table) {
                 let hop_cls = hop_classes
                     .and_then(|classes| classes.bind(py).get_item(table.as_str()).ok().flatten())
                     .ok_or_else(|| {
@@ -994,15 +997,15 @@ fn record_enum_classes_for<'py>(
                             field.name
                         ))
                     })?;
-                hop_enums.insert(
+                hop_converters.insert(
                     table.clone(),
-                    crate::hydration::enum_classes_for(py, &hop_cls),
+                    crate::hydration::field_converters_for(py, &hop_cls)?,
                 );
             }
-            &hop_enums[table]
+            &hop_converters[table]
         };
-        if let Some(enum_cls) = source_enums.get(column) {
-            out.insert(field.name.clone(), enum_cls.clone());
+        if let Some(converter) = source_converters.get(column) {
+            out.insert(field.name.clone(), converter.clone());
         }
     }
     Ok(out)
@@ -1189,7 +1192,7 @@ fn materialize_model_row<'py>(
     row_pk_val: Option<String>,
     fields: Vec<(String, crate::state::RustValue)>,
     py_col_names: &HashMap<String, Py<pyo3::types::PyString>>,
-    enum_classes: &HashMap<String, Bound<'py, PyAny>>,
+    converters: &crate::hydration::FieldConverters<'py>,
 ) -> PyResult<Bound<'py, PyAny>> {
     if use_identity_map
         && let Some(ref pk_val) = row_pk_val
@@ -1210,7 +1213,7 @@ fn materialize_model_row<'py>(
             &existing,
             fields,
             py_col_names,
-            enum_classes,
+            converters,
         )?;
         return Ok(existing);
     }
@@ -1221,7 +1224,7 @@ fn materialize_model_row<'py>(
         connection_name,
         fields,
         py_col_names,
-        enum_classes,
+        converters,
     )?;
 
     if use_identity_map && let Some(pk_val) = row_pk_val {
@@ -2218,7 +2221,7 @@ pub fn fetch_all<'py>(
                         );
                     }
                 }
-                let enum_classes = crate::hydration::enum_classes_for(py, cls);
+                let converters = crate::hydration::field_converters_for(py, cls)?;
 
                 for (row_pk_val, fields) in parsed_data {
                     if use_identity_map
@@ -2236,7 +2239,7 @@ pub fn fetch_all<'py>(
                             existing,
                             fields,
                             &py_col_names,
-                            &enum_classes,
+                            &converters,
                         )?;
                         results.append(existing)?;
                         continue;
@@ -2248,7 +2251,7 @@ pub fn fetch_all<'py>(
                         &connection_name,
                         fields,
                         &py_col_names,
-                        &enum_classes,
+                        &converters,
                     )?;
 
                     if use_identity_map && let Some(pk_val) = row_pk_val {
@@ -2362,7 +2365,7 @@ pub fn fetch_one<'py>(
                 Some(fields) => Python::attach(|py| {
                     let cls = cls_py.bind(py);
                     let py_col_names = HashMap::new();
-                    let enum_classes = crate::hydration::enum_classes_for(py, cls);
+                    let converters = crate::hydration::field_converters_for(py, cls)?;
 
                     if use_identity_map
                         && let Some(existing_obj) = identity_map_get(
@@ -2378,7 +2381,7 @@ pub fn fetch_one<'py>(
                             existing,
                             fields,
                             &py_col_names,
-                            &enum_classes,
+                            &converters,
                         )?;
                         return Ok(existing.clone().unbind());
                     }
@@ -2389,7 +2392,7 @@ pub fn fetch_one<'py>(
                         &connection_name,
                         fields,
                         &py_col_names,
-                        &enum_classes,
+                        &converters,
                     )?;
                     if use_identity_map {
                         identity_map_insert(
@@ -3034,7 +3037,7 @@ pub fn fetch_filtered<'py>(
     // The hop-class map travels the same way, paired to the plans that decode
     // or hydrate through another model's protocol: every instances plan
     // (population, #286) and a record plan with traversed PLAIN fields (each
-    // leaf's enum catalog resolves through its owning model's class, #293).
+    // leaf's hydration converters resolves through its owning model's class, #293).
     // Aggregate fields never need one — enum sources are rejected at build
     // time and count decodes to a plain int (#294).
     let needs_hop_classes = include_paths.is_some()
@@ -3238,12 +3241,12 @@ pub fn fetch_filtered<'py>(
                     let hop_classes = hop_classes_py.bind(py);
 
                     // Per-hop Python context, resolved once per fetch (not per
-                    // row): class, registry identity, enum catalog, interned
+                    // row): class, registry identity, hydration converters, interned
                     // column names.
                     struct HopPyCtx<'py> {
                         cls: Bound<'py, PyAny>,
                         identity: String,
-                        enum_classes: HashMap<String, Bound<'py, PyAny>>,
+                        converters: crate::hydration::FieldConverters<'py>,
                         py_col_names: HashMap<String, Py<pyo3::types::PyString>>,
                     }
                     let mut hop_ctx: Vec<HopPyCtx<'_>> = Vec::with_capacity(include_hops.len());
@@ -3257,7 +3260,7 @@ pub fn fetch_filtered<'py>(
                                 ))
                             })?;
                         let identity = crate::state::model_identity(&hop_cls)?;
-                        let enum_classes = crate::hydration::enum_classes_for(py, &hop_cls);
+                        let converters = crate::hydration::field_converters_for(py, &hop_cls)?;
                         let mut py_col_names = HashMap::new();
                         if let Some((_, first_hops)) = parsed_data.first() {
                             for (col_name, _) in &first_hops[i].1 {
@@ -3270,7 +3273,7 @@ pub fn fetch_filtered<'py>(
                         hop_ctx.push(HopPyCtx {
                             cls: hop_cls,
                             identity,
-                            enum_classes,
+                            converters,
                             py_col_names,
                         });
                     }
@@ -3284,7 +3287,7 @@ pub fn fetch_filtered<'py>(
                             );
                         }
                     }
-                    let enum_classes = crate::hydration::enum_classes_for(py, cls);
+                    let converters = crate::hydration::field_converters_for(py, cls)?;
 
                     for ((root_pk, root_fields), hop_rows) in parsed_data {
                         let root_obj = materialize_model_row(
@@ -3297,7 +3300,7 @@ pub fn fetch_filtered<'py>(
                             root_pk,
                             root_fields,
                             &py_col_names,
-                            &enum_classes,
+                            &converters,
                         )?;
 
                         // Walk the hops parent-before-child, tracking this row's
@@ -3341,7 +3344,7 @@ pub fn fetch_filtered<'py>(
                                 hop_pk,
                                 hop_fields,
                                 &ctx.py_col_names,
-                                &ctx.enum_classes,
+                                &ctx.converters,
                             )?;
                             crate::hydration::set_populated_relation(
                                 py,
@@ -3381,7 +3384,7 @@ pub fn fetch_filtered<'py>(
                 if let Some(record_cls) = record_cls_py {
                     // Record path (#279): direct-to-dict record construction,
                     // deliberately bypassing the identity map — no lookup, no
-                    // insert, no refresh of live instances. The enum catalog is
+                    // insert, no refresh of live instances. The hydration converters are
                     // built per OUTPUT field name from each source column's
                     // OWNING model (#293) — the root's for plain fields, the hop
                     // class's for traversed ones — so a projected enum column
@@ -3394,7 +3397,7 @@ pub fn fetch_filtered<'py>(
                             "Query plan builds records but projects no fields for them",
                         )
                     })?;
-                    let record_enum_classes = record_enum_classes_for(
+                    let record_converters = record_field_converters_for(
                         py,
                         cls,
                         fields_spec,
@@ -3408,15 +3411,15 @@ pub fn fetch_filtered<'py>(
                             record_cls,
                             fields,
                             &py_col_names,
-                            &record_enum_classes,
+                            &record_converters,
                         )?;
                         results.append(record)?;
                     }
                     return Ok(results.into_any().unbind());
                 }
 
-                // The MODEL's enum catalog for full hydration (FF-C C4).
-                let enum_classes = crate::hydration::enum_classes_for(py, cls);
+                // The MODEL's hydration converters for full hydration (FF-C C4).
+                let converters = crate::hydration::field_converters_for(py, cls)?;
 
                 for (row_pk_val, fields) in parsed_data {
                     let instance = materialize_model_row(
@@ -3429,7 +3432,7 @@ pub fn fetch_filtered<'py>(
                         row_pk_val,
                         fields,
                         &py_col_names,
-                        &enum_classes,
+                        &converters,
                     )?;
                     results.append(instance)?;
                 }

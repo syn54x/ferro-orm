@@ -26,27 +26,51 @@ pub(crate) const HANDLED_BASEMODEL_SLOTS: &[&str] = &[
     "__pydantic_private__",
 ];
 
-/// Resolve a model's enum-typed fields to their Python enum classes.
+/// The one per-field conversion hydration applies to a non-null decoded value.
 ///
-/// Built once per fetch (not per row) from `cls._enum_fields`, which the
-/// metaclass populates from resolved annotations. The model class itself is
-/// the registry holding the enum classes (FF-C C4), so no Python object ever
-/// enters static Rust state.
-pub fn enum_classes_for<'py>(
+/// A column is written straight into the instance dict (I-2), so a field
+/// whose declared type is not what the database hands back (an enum, a
+/// `SecretStr` / `SecretBytes`) is converted here, by one mechanism for every
+/// kind: `convert` is called on the value, and a rejection names the field
+/// with `kind` ("Failed to hydrate enum field Model.col: ...").
+#[derive(Clone)]
+pub struct FieldConverter<'py> {
+    /// What the field is, for the rejection message: `enum`, `secret`.
+    pub kind: String,
+    /// The Python callable applied to each non-null decoded value.
+    pub convert: Bound<'py, PyAny>,
+}
+
+/// Field name → its [`FieldConverter`].
+pub type FieldConverters<'py> = HashMap<String, FieldConverter<'py>>;
+
+/// Resolve a model's converted fields to their [`FieldConverter`]s.
+///
+/// Built once per fetch (not per row) from `cls._hydration_converters`
+/// (field → `(kind, convert)`), which the metaclass populates from the
+/// column specs. The model class itself is the registry holding the
+/// converters (FF-C C4), so no Python object ever enters static Rust state.
+///
+/// # Errors
+/// Returns a `PyErr` when `_hydration_converters` is not a dict of
+/// `str → (str, callable)`: a malformed registry must surface, never be
+/// skipped field by field.
+pub fn field_converters_for<'py>(
     py: Python<'py>,
     cls: &Bound<'py, PyAny>,
-) -> HashMap<String, Bound<'py, PyAny>> {
+) -> PyResult<FieldConverters<'py>> {
     let mut out = HashMap::new();
-    if let Ok(enum_fields) = cls.getattr(pyo3::intern!(py, "_enum_fields"))
-        && let Ok(dict) = enum_fields.cast::<pyo3::types::PyDict>()
-    {
-        for (field_name, enum_cls) in dict.iter() {
-            if let Ok(field_name) = field_name.extract::<String>() {
-                out.insert(field_name, enum_cls);
-            }
-        }
+    let Ok(registry) = cls.getattr(pyo3::intern!(py, "_hydration_converters")) else {
+        // A class that is not a Ferro model (a projected `Row`) converts nothing.
+        return Ok(out);
+    };
+    let dict = registry.cast::<pyo3::types::PyDict>()?;
+    for (field_name, entry) in dict.iter() {
+        let field_name = field_name.extract::<String>()?;
+        let (kind, convert) = entry.extract::<(String, Bound<'py, PyAny>)>()?;
+        out.insert(field_name, FieldConverter { kind, convert });
     }
-    out
+    Ok(out)
 }
 
 /// Initialize every slot in [`HANDLED_BASEMODEL_SLOTS`] on a freshly
@@ -106,22 +130,23 @@ fn init_handled_slots<'py>(
 /// * `connection_name` — Registered connection name stored on the instance for routing.
 /// * `fields` — `(column_name, decoded_value)` pairs in query result order.
 /// * `py_col_names` — Interned `PyString` handles for column names (avoids per-row allocation).
-/// * `enum_classes` — Enum class per enum-typed field, from [`enum_classes_for`];
-///   non-null values of those fields hydrate as enum members (FF-C C4).
+/// * `converters` — The per-field conversion, from [`field_converters_for`];
+///   non-null values of enum fields hydrate as enum members (FF-C C4) and of
+///   secret fields as `SecretStr` / `SecretBytes`.
 ///
 /// # Returns
 /// A bound model instance with `__pydantic_fields_set__` populated for assigned columns.
 ///
 /// # Errors
 /// Returns `PyErr` if `__new__`, dict/slot assignment, or `RustValue` → Python conversion
-/// fails, or if an enum column holds a value its enum class does not accept.
+/// fails, or if a converted column holds a value its converter does not accept.
 pub fn hydrate_model_instance<'py>(
     py: Python<'py>,
     cls: &Bound<'py, PyAny>,
     connection_name: &str,
     fields: Vec<(String, RustValue)>,
     py_col_names: &HashMap<String, pyo3::Py<pyo3::types::PyString>>,
-    enum_classes: &HashMap<String, Bound<'py, PyAny>>,
+    converters: &FieldConverters<'py>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let instance = cls.call_method1(pyo3::intern!(py, "__new__"), (cls,))?;
     let dict_attr = instance.getattr(pyo3::intern!(py, "__dict__"))?;
@@ -135,15 +160,7 @@ pub fn hydrate_model_instance<'py>(
     dict.set_item(pyo3::intern!(py, "__ferro_persisted"), true)?;
     let fields_set = pyo3::types::PySet::empty(py)?;
 
-    apply_decoded_fields(
-        py,
-        cls,
-        dict,
-        &fields_set,
-        fields,
-        py_col_names,
-        enum_classes,
-    )?;
+    apply_decoded_fields(py, cls, dict, &fields_set, fields, py_col_names, converters)?;
 
     init_handled_slots(py, cls, &instance, &fields_set)?;
     Ok(instance)
@@ -170,13 +187,13 @@ pub fn hydrate_model_instance<'py>(
 ///
 /// # Errors
 /// Returns `PyErr` on allocation/slot failure, `RustValue` conversion
-/// failure, or an enum column value its enum class rejects.
+/// failure, or a converted column value its converter rejects.
 pub fn hydrate_record_instance<'py>(
     py: Python<'py>,
     record_cls: &Bound<'py, PyAny>,
     fields: Vec<(String, RustValue)>,
     py_col_names: &HashMap<String, pyo3::Py<pyo3::types::PyString>>,
-    enum_classes: &HashMap<String, Bound<'py, PyAny>>,
+    converters: &FieldConverters<'py>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let instance = record_cls.call_method1(pyo3::intern!(py, "__new__"), (record_cls,))?;
     let extra = pyo3::types::PyDict::new(py);
@@ -189,7 +206,7 @@ pub fn hydrate_record_instance<'py>(
         &fields_set,
         fields,
         py_col_names,
-        enum_classes,
+        converters,
     )?;
 
     for slot in HANDLED_BASEMODEL_SLOTS {
@@ -229,23 +246,24 @@ fn apply_decoded_fields<'py>(
     fields_set: &Bound<'py, pyo3::types::PySet>,
     fields: Vec<(String, RustValue)>,
     py_col_names: &HashMap<String, pyo3::Py<pyo3::types::PyString>>,
-    enum_classes: &HashMap<String, Bound<'py, PyAny>>,
+    converters: &FieldConverters<'py>,
 ) -> PyResult<()> {
     for (col_name, val) in fields {
         let mut py_val = val.into_py_any(py)?;
-        if let Some(enum_cls) = enum_classes.get(&col_name)
+        if let Some(converter) = converters.get(&col_name)
             && !py_val.is_none()
         {
             // One plan-consistent conversion at the hydration boundary; a
-            // value the enum class rejects is real data corruption and must
+            // value the converter rejects is real data corruption and must
             // surface, not be silently passed through (FF-C C4, I-6).
-            py_val = enum_cls.call1((py_val,)).map_err(|err| {
+            py_val = converter.convert.call1((py_val,)).map_err(|err| {
                 let model = cls
                     .getattr(pyo3::intern!(py, "__name__"))
                     .and_then(|n| n.extract::<String>())
                     .unwrap_or_else(|_| "<model>".to_string());
                 pyo3::exceptions::PyValueError::new_err(format!(
-                    "Failed to hydrate enum field {model}.{col_name}: {err}"
+                    "Failed to hydrate {} field {model}.{col_name}: {err}",
+                    converter.kind
                 ))
             })?;
         }
@@ -285,20 +303,12 @@ pub fn refresh_model_instance<'py>(
     instance: &Bound<'py, PyAny>,
     fields: Vec<(String, RustValue)>,
     py_col_names: &HashMap<String, pyo3::Py<pyo3::types::PyString>>,
-    enum_classes: &HashMap<String, Bound<'py, PyAny>>,
+    converters: &FieldConverters<'py>,
 ) -> PyResult<()> {
     let dict_attr = instance.getattr(pyo3::intern!(py, "__dict__"))?;
     let dict = dict_attr.cast::<pyo3::types::PyDict>()?;
     let fields_set = pyo3::types::PySet::empty(py)?;
-    apply_decoded_fields(
-        py,
-        cls,
-        dict,
-        &fields_set,
-        fields,
-        py_col_names,
-        enum_classes,
-    )?;
+    apply_decoded_fields(py, cls, dict, &fields_set, fields, py_col_names, converters)?;
     instance.setattr(pyo3::intern!(py, "__pydantic_fields_set__"), fields_set)?;
     prune_stale_populations(py, cls, dict)?;
     Ok(())

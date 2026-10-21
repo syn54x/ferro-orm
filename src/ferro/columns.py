@@ -15,7 +15,7 @@ from enum import Enum
 from typing import Any, ForwardRef, Union, get_args, get_origin, get_type_hints
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, SecretBytes, SecretStr
 from pydantic_core import PydanticUndefined, to_json
 
 from ._annotation_utils import (
@@ -152,6 +152,9 @@ class ColumnSpec:
     enum_values: tuple[Any, ...] | None = None
     enum_type_name: str | None = None
     enum_class: type[Enum] | None = None
+    #: ``SecretStr`` / ``SecretBytes`` when the field is declared as one: it
+    #: stores the raw value and hydrates wrapped in this class again.
+    secret_class: type[SecretStr] | type[SecretBytes] | None = None
     db_type: str | None = None
     db_type_explicit: bool = False
     db_check: bool = False
@@ -271,6 +274,17 @@ def _resolve_nested_refs(
     return {**col_info, "anyOf": resolved_any_of}
 
 
+def secret_class_from_annotation(
+    hint: Any,
+) -> type[SecretStr] | type[SecretBytes] | None:
+    """``SecretStr`` / ``SecretBytes`` when ``hint`` declares one (``Annotated``
+    and ``| None`` stripped), else ``None``."""
+    hint = _strip_optional_and_annotated(hint)
+    if isinstance(hint, type) and issubclass(hint, (SecretStr, SecretBytes)):
+        return hint
+    return None
+
+
 def _logical_type(col_info: dict[str, Any]) -> str:
     """Map schema type metadata to SchemaIR ``logical_type``."""
     field_type, field_format = _effective_type_and_format(col_info)
@@ -340,7 +354,9 @@ def _effective_type_and_format(col_info: dict[str, Any]) -> tuple[Any, Any]:
             candidate_type = candidate.get("type")
             if candidate_type is None or candidate_type == "null":
                 continue
-            return candidate_type, candidate.get("format") or field_format
+            # A top-level format on a union is Ferro's own override (decimal,
+            # SecretBytes → binary), so it outranks the member's.
+            return candidate_type, field_format or candidate.get("format")
     return field_type, field_format
 
 
@@ -474,7 +490,15 @@ def build_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
             )
             db_check = prop.get("db_check") is True
 
-        fmt = "decimal" if annotation_is_decimal(ann) else prop.get("format")
+        secret_cls = secret_class_from_annotation(ann)
+        if annotation_is_decimal(ann):
+            fmt = "decimal"
+        elif secret_cls is SecretBytes:
+            # Pydantic schemas both secrets as ``format: password``; the
+            # column stores what the secret wraps, and SecretBytes wraps bytes.
+            fmt = "binary"
+        else:
+            fmt = prop.get("format")
         effective_prop = {**prop, "format": fmt} if fmt != prop.get("format") else prop
 
         enum_cls = enum_subclass_from_annotation(ann)
@@ -503,6 +527,7 @@ def build_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
             enum_values=tuple(enum_values) if isinstance(enum_values, list) else None,
             enum_type_name=enum_type_name,
             enum_class=enum_cls,
+            secret_class=secret_cls,
             db_type=db_type,
             db_type_explicit=bool(db_type),
             db_check=db_check,
