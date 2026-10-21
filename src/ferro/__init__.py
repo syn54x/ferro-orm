@@ -50,7 +50,7 @@ from .pass_report import (
     _carrying_report,
     _run_pass,
 )
-from .query import Relation, Row, Rows, now
+from .query import REDACTED, Relation, RenderedSql, Row, Rows, now
 from .raw import Transaction, execute, fetch_all, fetch_one
 from .rowsecurity import RowPolicy, RowSecurity
 from .session import Session, current_session, engines
@@ -587,6 +587,8 @@ __all__ = [
     "Relation",
     "Row",
     "Rows",
+    "RenderedSql",
+    "REDACTED",
     "version",
     "create_tables",
     "migrate",
