@@ -795,6 +795,33 @@ def _slug_late_row_reverted(project: Path) -> None:
     step.write_text(NOT_APPLICABLE)
 
 
+# The Deploying guide's two-release chain, as docs/examples/migration_errors.py
+# builds it: 0002_author_slug_nullable (one expand step), then
+# 0003_author_slug_required (backfill, add-constraint, contract), so the page
+# names one migration per number.
+
+REQUIRED = "0003_author_slug_required"
+
+
+def _chain_written(project: Path) -> None:
+    _slug_edited(project)
+    _write_models(project, NAMED_AUTHOR_OPTIONAL_SLUG)
+    _run_ok(project, "migrate", "new", "author_slug_nullable")
+    _write_models(project, NAMED_AUTHOR_SLUG)
+    _run_ok(project, "migrate", "new", "author_slug_required")
+    backfill = project / "migrations" / REQUIRED / "01_backfill_author.py"
+    backfill.write_text(backfill.read_text().replace(TODO, WRITTEN))
+
+
+def _chain_late_row_failed(project: Path) -> None:
+    """A writer inserts a row without a slug after the backfill, so the
+    contract step fails."""
+    _chain_written(project)
+    step = project / "migrations" / REQUIRED / "02_add_constraint.up.sqlite.sql"
+    step.write_text(LATE_ROW)
+    assert _ferro(project, "migrate", "up", scratch=True).returncode == 1
+
+
 # A database built by auto-migrate, about to be baselined.
 
 
@@ -1029,9 +1056,9 @@ OUTPUTS = {
     # deploying
     "run-lock-wait": (_lock_wait, ("migrate", "up", "--lock-timeout", "1s")),
     "ddl-lock-retry": (_ddl_lock_retry, ("migrate", "up")),
-    "ci-check": (_slug_written, ("migrate", "check")),
-    "server-up": (_slug_written, ("migrate", "up")),
-    "status-steps": (_slug_late_row_failed, ("migrate", "status", "--steps")),
+    "ci-check": (_chain_written, ("migrate", "check")),
+    "server-up": (_chain_written, ("migrate", "up")),
+    "status-steps": (_chain_late_row_failed, ("migrate", "status", "--steps")),
     "edited-up": (_loop_edited_step, ("migrate", "up")),
     "edited-rerecord": (_loop_edited_step, ("migrate", "rerecord", "0001:01")),
     # adopting
@@ -1467,3 +1494,13 @@ def test_a_quoted_revision_is_what_autogenerate_writes(
         f"guide/schema/alembic.md quotes revision {revision!r}; autogenerate writes:\n"
         f"{printed}"
     )
+
+
+def test_the_deploying_guide_names_one_migration_per_number() -> None:
+    """Every block and sentence of the Deploying guide follows one project, so
+    a number never names two migrations there."""
+    page = (DOCS_PAGES / "guide" / "schema" / "deploying.md").read_text()
+    names: dict[str, set[str]] = {}
+    for name in re.findall(r"\b(\d{4})_([a-z0-9_]+)", page):
+        names.setdefault(name[0], set()).add(name[1])
+    assert {number: sorted(n) for number, n in names.items() if len(n) > 1} == {}

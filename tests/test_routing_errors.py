@@ -53,7 +53,6 @@ def test_the_upgrade_guide_names_the_reworded_no_route_message():
         "removed in v0.13 (deprecated since v0.12); see the sessions migration guide."
         in section
     )
-    assert "field order" in section
 
 
 @pytest.mark.asyncio

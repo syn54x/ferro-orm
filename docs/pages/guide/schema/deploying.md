@@ -13,7 +13,7 @@ Migrations reach a database in one of two ways: a deploy step runs `ferro migrat
 <!-- output: ci-check -->
 ```text
 default · migrations
-ok: models match 0002_author_slug
+ok: models match 0003_author_slug_required
 ```
 
 The models match the newest migration, so the check passes. It exits 3, naming each problem, when a model change has no migration, the snapshot chain is broken, a number is duplicated or missing, a step lacks a target dialect's rendering, or a data step still says `todo(...)`. Run it on every pull request.
@@ -43,10 +43,10 @@ The deploy step applies every pending migration, in order, under the run lock:
 <!-- output: server-up -->
 ```text
 default · sqlite:///./app.db
-0002_author_slug  01_expand           applied (0 ms)
-0002_author_slug  02_backfill_author  applied (0 ms)
-0002_author_slug  03_add_constraint   applied (0 ms)
-0002_author_slug  04_contract         applied (1 ms)
+0002_author_slug_nullable  01_schema           applied (0 ms)
+0003_author_slug_required  01_backfill_author  applied (2 ms)
+0003_author_slug_required  02_add_constraint   applied (0 ms)
+0003_author_slug_required  03_contract         applied (1 ms)
 ```
 
 It exits 0 when it applied everything (or there was nothing to apply), 1 when it refused or a step failed; the message says why and how to go on, and the next `up` resumes at the failed step. The URL comes from `$DATABASE_URL` (or the variable the configuration's `url_env` names), or `--url`.
@@ -219,20 +219,21 @@ Two different waits apply:
 
 ## Database status
 
-`ferro migrate status` reads the tracking table without a lock and changes nothing. Here a contract step failed on a [late row](data-steps.md#when-a-late-row-arrives), so `0002_author_slug` is `partial` and the failed step carries its error:
+`ferro migrate status` reads the tracking table without a lock and changes nothing. Here a contract step failed on a [late row](data-steps.md#when-a-late-row-arrives), so `0003_author_slug_required` is `partial` and the failed step carries its error:
 
 <!-- output: status-steps -->
 ```text
 default · sqlite:///./app.db
 !! 1 failed · 1 pending  main._ferro_migrations
-  ok 0001_create_author  applied  2026-10-15 04:30Z
+  ok 0001_create_author         applied  2026-10-15 04:30Z
       01_schema.up.sqlite.sql  applied  expand
-  ~~ 0002_author_slug    partial, 3 of 4 steps  2026-10-15 04:30Z
-      01_expand.up.sqlite.sql          applied  expand
-      02_backfill_author.py            applied  expand
-      03_add_constraint.up.sqlite.sql  applied  expand
-      04_contract.up.sqlite.sql        failed  [data-dependent]  contract
-        1 row still has NULL "slug" in "author"; run ferro migrate down --to 0002:01 then ferro migrate up to re-run the backfill
+  ok 0002_author_slug_nullable  applied  2026-10-15 04:30Z
+      01_schema.up.sqlite.sql  applied  expand
+  ~~ 0003_author_slug_required  partial, 2 of 3 steps  2026-10-15 04:30Z
+      01_backfill_author.py            applied  expand
+      02_add_constraint.up.sqlite.sql  applied  expand
+      03_contract.up.sqlite.sql        failed  [data-dependent]  contract
+        1 row still has NULL "slug" in "author"; run ferro migrate down --to 0002 then ferro migrate up to re-run the backfill
 ```
 
 With `--steps`, each step's [class](#rolling-deploys-and-the-two-release-contract) follows its flags. Without it, only the migrations that need a look list their steps.
