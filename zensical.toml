@@ -39,7 +39,6 @@ nav = [
       { "Adopting migrations on an existing database" = "guide/schema/adopting-migrations.md" },
       { "Alembic bridge" = "guide/schema/alembic.md" },
     ] },
-    { "Scope rows by tenant with Postgres row-level security" = "guide/row-level-security.md" },
   ] },
   { "How-to" = [
     { "How to test a Ferro app with pytest" = "howto/testing.md" },
@@ -47,6 +46,7 @@ nav = [
     { "How to record created and updated times" = "howto/timestamps.md" },
     { "How to soft-delete rows" = "howto/soft-deletes.md" },
     { "How to use several databases in one app" = "howto/multiple-databases.md" },
+    { "Scope rows by tenant with Postgres row-level security" = "guide/row-level-security.md" },
     { "Migrate from SQLAlchemy" = "howto/migrate-from-sqlalchemy.md" },
   ] },
   { "Concepts" = [
@@ -191,6 +191,13 @@ full_output = "llms-full.txt"
 "getting-started/next-steps.md#get-help" = "getting-started/quickstart.md#next-steps"
 "howto/adopting-migrations.md" = "guide/schema/adopting-migrations.md"
 "howto/upgrade-guide.md" = "upgrading.md"
+# Sections renamed on pages the rewrite kept, linked from outside the docs.
+"guide/mutations.md#get-or-create" = "guide/mutations.md#get_or_create-and-update_or_create"
+"guide/transactions.md#nesting-behavior" = "guide/transactions.md#nested-transactions"
+"guide/connections.md#sessions-recommended" = "guide/connections.md#sessions"
+"faq.md#what-is-ferro" = "faq.md#what-ferro-is"
+"howto/testing.md#writing-your-first-test" = "howto/testing.md#a-first-test"
+"howto/upgrade-guide.md#save-no-longer-upserts" = "upgrading.md#save-and-upserts"
 # Sections the migrations guide split (#714) moved to other pages, or renamed.
 "guide/schema/migrations.md#renames" = "guide/schema/renames-and-retirements.md#rename-hints"
 "guide/schema/migrations.md#retiring-a-column" = "guide/schema/renames-and-retirements.md#retiring-a-column"
