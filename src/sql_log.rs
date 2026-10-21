@@ -385,6 +385,23 @@ mod tests {
         assert_eq!(mask_of(&binds, &[]), vec![false, false, false]);
     }
 
+    #[test]
+    fn shown_params_puts_none_where_a_bind_is_secret() {
+        let secret = EngineBindValue::String("hunter2".into());
+        let shown = Python::attach(|py| -> PyResult<(String, String)> {
+            let (params, mask) =
+                shown_params(py, &[EngineBindValue::I64(7), secret.clone()], &[secret])?;
+            Ok((params.repr()?.to_string(), mask.repr()?.to_string()))
+        });
+        match shown {
+            Ok((params, mask)) => {
+                assert_eq!(params, "(7, None)");
+                assert_eq!(mask, "(False, True)");
+            }
+            Err(err) => panic!("shown_params failed: {err}"),
+        }
+    }
+
     #[tokio::test]
     async fn outside_a_scope_there_is_no_context_and_observe_does_nothing() {
         assert!(current().is_none());
