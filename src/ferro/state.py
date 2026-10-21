@@ -54,8 +54,8 @@ def _ensure_active_session(session: SessionLike | None) -> None:
 _NO_ROUTE_MESSAGE = (
     "No database route for this operation. Open a session "
     "(`async with ferro.engines.session(...)`) or pass `using=`/`session=` "
-    "explicitly. Implicit default-connection routing was removed in v0.14 "
-    "(deprecated since v0.12); see the upgrade guide."
+    "explicitly. Implicit default-connection routing was removed in v0.13 "
+    "(deprecated since v0.12); see the sessions migration guide."
 )
 
 

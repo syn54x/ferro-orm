@@ -116,7 +116,7 @@ else:
 It prints:
 
 ```text
-No database route for this operation. Open a session (`async with ferro.engines.session(...)`) or pass `using=`/`session=` explicitly. Implicit default-connection routing was removed in v0.14 (deprecated since v0.12); see the upgrade guide.
+No database route for this operation. Open a session (`async with ferro.engines.session(...)`) or pass `using=`/`session=` explicitly. Implicit default-connection routing was removed in v0.13 (deprecated since v0.12); see the sessions migration guide.
 ```
 
 The only other route is an explicit one: `Author.using("name")`, or `using=` / `session=` on a call. Explicit routes are covered under [Named connections](#named-connections).
