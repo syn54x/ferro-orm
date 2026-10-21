@@ -28,6 +28,15 @@ class Customer(Model):
 # --8<-- [end:models]
 
 
+# --8<-- [start:conversation]
+class Conversation(Model):
+    id: Annotated[int | None, Field(primary_key=True)] = None
+    turns: Annotated[dict, Field(default_factory=dict)]
+
+
+# --8<-- [end:conversation]
+
+
 async def main() -> None:
     await connect("sqlite::memory:", auto_migrate=True)
 

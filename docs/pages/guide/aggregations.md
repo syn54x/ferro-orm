@@ -14,6 +14,18 @@ Here is a whole program. It adds four transactions and asks for the sum of the a
 
 The single record holds four numbers over the four rows: they total 115, so the average is 28.75. Every query on this page runs inside a session like this one; see [Sessions](connections.md#sessions) for why and how to open one.
 
+Every example on this page is followed by the SQL it sends, captured from Ferro when the example runs. `first()` sends this statement; on PostgreSQL only the placeholders differ, `$1` where SQLite has `?`:
+
+```sql
+-- aggregations.py:global (sqlite)
+SELECT COUNT("transaction"."id") AS "n", SUM("transaction"."amount") AS "total", AVG("transaction"."amount") AS "average", MIN("transaction"."amount") AS "smallest", MAX("transaction"."amount") AS "largest"
+FROM "transaction"
+WHERE TRUE
+LIMIT ?;
+```
+
+Each dict key names an aggregate with `AS`, and `first()` adds a `LIMIT` of 1.
+
 ## The ledger
 
 Every example on this page queries one small ledger. An account holds transactions, and a transaction may have no account:
@@ -53,6 +65,19 @@ Aggregates measure whatever `where()` leaves in, relation traversal included:
 
 Only the two Checking transactions are measured, so the total is 30. The source column can traverse as well (`transaction.account.label.min()`): the traversal keeps rows where the relation exists, the way a `where()` on the same path does, and shares that path's join with any other clause that uses it.
 
+The query sends this; on PostgreSQL only the placeholders differ:
+
+```sql
+-- aggregations.py:global-where (sqlite)
+SELECT SUM("transaction"."amount") AS "total"
+FROM "transaction"
+INNER JOIN "account" AS "j1_account" ON "transaction"."account_id" = "j1_account"."id"
+WHERE "j1_account"."label" = ?
+LIMIT ?;
+```
+
+The traversal is an `INNER JOIN` on `account`, so `SUM` measures only the joined rows.
+
 ### Result types
 
 The result type comes from the source column's Python type, so a query returns the same Python types on SQLite and Postgres, even where the databases differ (Postgres widens `SUM(bigint)` to `numeric`; SQLite averages everything as a float):
@@ -73,6 +98,18 @@ For example, the average of the three prices stays a `Decimal`:
 
 The prices total 9.00 over three rows, so the average is `Decimal("3")`. Every aggregate result except `count()` can be `None`, as the next section shows.
 
+The query sends this; on PostgreSQL only the placeholders differ:
+
+```sql
+-- aggregations.py:decimal-contract (sqlite)
+SELECT AVG("transaction"."price") AS "avg_price"
+FROM "transaction"
+WHERE "transaction"."price" IS NOT NULL
+LIMIT ?;
+```
+
+SQL's `AVG` returns a float on SQLite and a `numeric` on PostgreSQL; Ferro reads either back as a `Decimal`, because the source column is one.
+
 ### Empty input
 
 SQL answers an aggregate over zero rows with `NULL` (`COUNT` answers `0`), and Ferro passes that through. "Sum of no rows" and "sum of rows that total zero" are different facts, and zero would be the wrong answer for `min()` and `max()` anyway:
@@ -82,6 +119,18 @@ SQL answers an aggregate over zero rows with `NULL` (`COUNT` answers `0`), and F
 ```
 
 No transaction is over 10,000, so the query still returns one record: `n` is `0` and `total` is `None`.
+
+The query sends this; on PostgreSQL only the placeholders differ:
+
+```sql
+-- aggregations.py:empty (sqlite)
+SELECT COUNT("transaction"."id") AS "n", SUM("transaction"."amount") AS "total"
+FROM "transaction"
+WHERE "transaction"."amount" > ?
+LIMIT ?;
+```
+
+With no `GROUP BY`, SQL answers an aggregate-only `SELECT` with exactly one row, even over zero rows.
 
 ### Counting a column
 
@@ -93,6 +142,18 @@ No transaction is over 10,000, so the query still returns one record: `n` is `0`
 
 All four transactions are counted by `id`, and three by `price`, because the orphan has no price.
 
+The query sends this; on PostgreSQL only the placeholders differ:
+
+```sql
+-- aggregations.py:count-nulls (sqlite)
+SELECT COUNT("transaction"."id") AS "rows", COUNT("transaction"."price") AS "priced"
+FROM "transaction"
+WHERE TRUE
+LIMIT ?;
+```
+
+`COUNT("transaction"."price")` skips the `NULL` price; `COUNT("transaction"."id")` counts every row.
+
 ## Grouped queries
 
 Mix a plain field into an aggregate projection and the query is grouped. Every plain field is a group key, and each group collapses to one record:
@@ -103,6 +164,19 @@ Mix a plain field into an aggregate projection and the query is grouped. Every p
 
 Account 1 totals 30 and account 2 totals 45, one record each. There is no `group_by()`: the record shape is the grouping. SQL already requires every selected bare column to be a group key, so a separate `group_by()` could only repeat the projection or contradict it. Postgres rejects the contradiction at run time, and SQLite answers with an arbitrary row's value. Deriving the grouping from the projection removes that whole class of error.
 
+The query sends this; on PostgreSQL only the placeholders differ:
+
+```sql
+-- aggregations.py:grouped (sqlite)
+SELECT "transaction"."account_id" AS "acct", SUM("transaction"."amount") AS "total"
+FROM "transaction"
+WHERE "transaction"."account_id" IS NOT NULL
+GROUP BY "transaction"."account_id"
+ORDER BY "acct" ASC NULLS LAST;
+```
+
+The plain field became the `GROUP BY` key, and `order_by("acct")` sorts by its output name.
+
 Group keys can traverse, and traversal narrows rows the way a predicate does:
 
 ```python
@@ -110,6 +184,20 @@ Group keys can traverse, and traversal narrows rows the way a predicate does:
 ```
 
 The orphan has no account, so it drops out and the two labelled groups remain.
+
+The query sends this; on PostgreSQL only the placeholders differ:
+
+```sql
+-- aggregations.py:grouped-traversed (sqlite)
+SELECT "j1_account"."label" AS "account_label", SUM("transaction"."amount") AS "total"
+FROM "transaction"
+INNER JOIN "account" AS "j1_account" ON "transaction"."account_id" = "j1_account"."id"
+WHERE TRUE
+GROUP BY "j1_account"."label"
+ORDER BY "account_label" ASC NULLS LAST;
+```
+
+The `INNER JOIN` drops the orphan before grouping, and the joined `label` is the group key.
 
 ### The `None` group for missing relations
 
@@ -121,6 +209,19 @@ Add `left_join()` and rows without a relation stay in, grouped under a `None` ke
 
 The orphan's 40 now appears as its own group.
 
+The query sends this; on PostgreSQL only the placeholders differ:
+
+```sql
+-- aggregations.py:none-bucket (sqlite)
+SELECT "j1_account"."label" AS "account_label", SUM("transaction"."amount") AS "total"
+FROM "transaction"
+LEFT JOIN "account" AS "j1_account" ON "transaction"."account_id" = "j1_account"."id"
+WHERE TRUE
+GROUP BY "j1_account"."label";
+```
+
+The `LEFT JOIN` keeps the orphan, whose `label` is `NULL`, so it forms the `None` group.
+
 ### Grouped queries over zero rows
 
 A grouped query over zero matching rows returns zero records. Unlike a global aggregate, there is no group to report on:
@@ -129,21 +230,36 @@ A grouped query over zero matching rows returns zero records. Unlike a global ag
 --8<-- "docs/examples/aggregations.py:zero-groups"
 ```
 
+No transaction is over 10,000, so `rows` is empty. The query sends this; on PostgreSQL only the placeholders differ:
+
+```sql
+-- aggregations.py:zero-groups (sqlite)
+SELECT "transaction"."account_id" AS "acct", SUM("transaction"."amount") AS "total"
+FROM "transaction"
+WHERE "transaction"."amount" > ?
+GROUP BY "transaction"."account_id";
+```
+
+With a `GROUP BY` and no rows, SQL returns no groups at all.
+
 ### Grouping and partitioning
 
 Grouping collapses rows: each group becomes one record of keys and measures, and the individual rows are gone. If you want whole model instances bucketed by a key, every transaction arranged per account, do that in Python over a full query:
 
-```python {test=run prelude=aggregations}
-from collections import defaultdict
-
-by_account: dict[int | None, list[Transaction]] = defaultdict(list)
-for transaction in await Transaction.select().all():
-    by_account[transaction.account_id].append(transaction)
-
-assert {key: len(rows) for key, rows in by_account.items()} == {1: 2, 2: 1, None: 1}
+```python
+--8<-- "docs/examples/aggregations.py:partition"
 ```
 
-Account 1 holds two transactions, account 2 holds one, and the orphan sits under `None`. Reach for aggregation when you want facts about groups, and partition in Python when you want the rows themselves, organized. This block runs inside a session, as [Sessions](connections.md#sessions) describes.
+Account 1 holds two transactions, account 2 holds one, and the orphan sits under `None`. The query sends this; on PostgreSQL only the placeholders differ:
+
+```sql
+-- aggregations.py:partition (sqlite)
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."id", "transaction"."memo", "transaction"."price"
+FROM "transaction"
+WHERE TRUE;
+```
+
+It is a plain `SELECT` of whole rows, with no `GROUP BY`: the bucketing happens in Python. Reach for aggregation when you want facts about groups, and partition in Python when you want the rows themselves, organized.
 
 ## Ordering grouped results
 
@@ -159,6 +275,21 @@ A string resolves output field names first, then root columns. `order_by("total"
 
 Savings has the largest total, so it is the one group returned. `limit()` and `offset()` always act on groups in a grouped query, so pagination pages through the summary, not the underlying rows.
 
+The query sends this; on PostgreSQL only the placeholders differ:
+
+```sql
+-- aggregations.py:top-n (sqlite)
+SELECT "j1_account"."label" AS "account_label", SUM("transaction"."amount") AS "total"
+FROM "transaction"
+INNER JOIN "account" AS "j1_account" ON "transaction"."account_id" = "j1_account"."id"
+WHERE TRUE
+GROUP BY "j1_account"."label"
+ORDER BY "total" DESC NULLS LAST
+LIMIT ?;
+```
+
+`ORDER BY "total"` names the output field, and `LIMIT` applies to the groups.
+
 ### Sorting by an aggregate expression
 
 Where strings name outputs, a lambda writes the source expression itself, aggregates included:
@@ -168,6 +299,19 @@ Where strings name outputs, a lambda writes the source expression itself, aggreg
 ```
 
 The groups come back with the largest total first. An aggregate sort key must match a projected aggregate (same function, same column, same path). An expression you did not project raises when you build the query and tells you to name it in the projection.
+
+The query sends this; on PostgreSQL only the placeholders differ:
+
+```sql
+-- aggregations.py:order-by-lambda (sqlite)
+SELECT "transaction"."account_id" AS "acct", SUM("transaction"."amount") AS "total"
+FROM "transaction"
+WHERE "transaction"."account_id" IS NOT NULL
+GROUP BY "transaction"."account_id"
+ORDER BY "total" DESC NULLS LAST;
+```
+
+The lambda's `transaction.amount.sum()` matched the projected aggregate, so the sort reads its output name, `"total"`.
 
 ### Allowed sort keys
 

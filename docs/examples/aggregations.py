@@ -8,6 +8,7 @@ here, so the guide's inline blocks run against the same rows.
 """
 
 import asyncio
+from collections import defaultdict
 from decimal import Decimal
 from typing import Annotated
 
@@ -236,6 +237,16 @@ async def main() -> None:
         assert isinstance(row.avg_price, Decimal)
         assert row.avg_price == Decimal("3")
         # --8<-- [end:decimal-contract]
+
+        # --8<-- [start:partition]
+        # Whole instances bucketed by a key: partition a full query in Python.
+        by_account: dict[int | None, list[Transaction]] = defaultdict(list)
+        for transaction in await Transaction.select().all():
+            by_account[transaction.account_id].append(transaction)
+
+        sizes = {key: len(rows) for key, rows in by_account.items()}
+        assert sizes == {1: 2, 2: 1, None: 1}
+        # --8<-- [end:partition]
 
         # --8<-- [start:error-family]
         # sum() over a string column has no portable meaning.
