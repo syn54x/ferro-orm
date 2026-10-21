@@ -66,7 +66,7 @@ Rules worth knowing:
 
     <!-- prints: auto_migrate_errors.py:required-column -->
     ```text
-    Cannot add NOT NULL column 'author.bio' to an existing table: it has no literal default to backfill existing rows. Make the field nullable, give it a literal default, or generate a reviewed migration with `ferro migrate new`.
+    ValueError: Cannot add NOT NULL column 'author.bio' to an existing table: it has no literal default to backfill existing rows. Make the field nullable, give it a literal default, or generate a reviewed migration with `ferro migrate new`.
     ```
 
     Nothing was added. A migration splits that change into an expand step, a [backfill](data-steps.md) you write, and a contract step.
@@ -101,54 +101,34 @@ On PostgreSQL, a `StrEnum` field creates a **native enum type**, and a type that
 
 === "Assignment"
 
-    ```python {test=compile reason="declares models only; label addition needs Postgres"}
-    from enum import StrEnum
-
-    from ferro import Field, Model
-
-
-    class Plan(StrEnum):
-        FREE = "free"
-        PRO = "pro"  # new: the live type has only 'free'
-
-
-    class Author(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        name: str
-        email: str = Field(unique=True)
-        nickname: str | None = Field(default=None, index=True)
-        plan: Plan = Plan.FREE
+    ```python
+    --8<-- "docs/examples/enum_labels.py:models"
     ```
 
 === "Annotated"
 
-    ```python {test=compile reason="declares models only; label addition needs Postgres"}
-    from enum import StrEnum
-    from typing import Annotated
-
-    from ferro import Field, Model
-
-
-    class Plan(StrEnum):
-        FREE = "free"
-        PRO = "pro"  # new: the live type has only 'free'
-
-
-    class Author(Model):
-        id: Annotated[int | None, Field(primary_key=True)] = None
-        name: str
-        email: Annotated[str, Field(unique=True)]
-        nickname: Annotated[str | None, Field(index=True)] = None
-        plan: Plan = Plan.FREE
+    ```python
+    --8<-- "docs/examples/enum_labels_annotated.py:models"
     ```
 
 Connect to the Postgres database with `migrate_updates=True`:
 
-```python {test=run prelude=auto_migrate backend=postgres}
+```python {test=run prelude=label_addition backend=postgres}
 await ferro.connect("postgresql://localhost/app", migrate_updates=True)
+
+async with engines.session():
+    labels = await fetch_all("SELECT unnest(enum_range(NULL::plan))::text AS label")
+print([row["label"] for row in labels])
 ```
 
-The connect runs `ALTER TYPE "plan" ADD VALUE IF NOT EXISTS 'pro'`, and from then on an author can be saved with `plan=Plan.PRO`.
+The connect runs `ALTER TYPE "plan" ADD VALUE IF NOT EXISTS 'pro'`, so the type's labels are now:
+
+<!-- prints: above -->
+```text
+['free', 'pro']
+```
+
+From then on an author can be saved with `plan=Plan.PRO`.
 
 !!! warning "Existing enum types without `migrate_updates`"
     Under plain `auto_migrate=True`, an existing enum type is never updated: like every existing object, it belongs to the update pass. Every test suite that creates its schema fresh gets the complete enum and stays green, while every existing database rejects the new member at runtime with `invalid input value for enum`. No test against a throwaway schema can catch this. If your models' enums evolve, run with `migrate_updates=True`, or generate the change as a [migration](migrations.md) (the [Alembic bridge](alembic.md) sees the same drift).

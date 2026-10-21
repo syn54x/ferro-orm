@@ -86,7 +86,7 @@ async def required_column(url: str) -> None:
     try:
         await connect(url, migrate_updates=True)
     except ValueError as error:
-        print(error)
+        print(f"{type(error).__name__}: {error}")
     # --8<-- [end:required-column]
 
 

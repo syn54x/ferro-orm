@@ -46,6 +46,15 @@ import griffe
 from pytest_examples import CodeExample, EvalExample
 from pytest_examples.find_examples import remove_indent
 
+# Re-exported: the region reader and the connect redirect are the harness's,
+# kept stdlib-only in their own module for the scripts the harness starts.
+from tests._docs_shared import (  # noqa: F401
+    SnippetRegion,
+    point_connect_at,
+    redirected_url,
+    snippet_regions,
+)
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DOCS_PAGES = REPO_ROOT / "docs" / "pages"
 PRELUDES = REPO_ROOT / "docs" / "examples" / "_preludes"
@@ -234,7 +243,7 @@ def page_fences(language: str | None = None) -> list[Fence]:
                 continue  # Release tooling writes it; it holds no examples.
             included.add((target, match["section"] or ""))
     for target, section in sorted(included):
-        text, offset = _section(target, section)
+        text, offset = _included(target, section)
         blocks += fenced_blocks(target, text, language, line_offset=offset)
     return blocks
 
@@ -242,19 +251,16 @@ def page_fences(language: str | None = None) -> list[Fence]:
 _INCLUDE = re.compile(r'--8<-- "(?P<file>[^":]+\.md)(?::(?P<section>[A-Za-z_-]+))?"')
 
 
-def _section(path: Path, section: str) -> tuple[str, int]:
-    """The text of ``path`` between its ``[start:<section>]`` and
-    ``[end:<section>]`` lines, and the number of lines before it."""
-    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+def _included(path: Path, section: str) -> tuple[str, int]:
+    """The text of ``path``'s region ``section`` (all of it when ``section`` is
+    empty), and the number of lines before it."""
+    text = path.read_text(encoding="utf-8")
     if not section:
-        return "".join(lines), 0
-    start = next(
-        (n for n, line in enumerate(lines) if f"[start:{section}]" in line), None
-    )
-    end = next((n for n, line in enumerate(lines) if f"[end:{section}]" in line), None)
-    if start is None or end is None:
+        return text, 0
+    region = snippet_regions(text, where=str(path)).get(section)
+    if region is None:
         raise ValueError(f"{path} has no section {section!r}")
-    return "".join(lines[start + 1 : end]), start + 1
+    return region.body, region.start
 
 
 def fenced_examples(

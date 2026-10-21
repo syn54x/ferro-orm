@@ -47,8 +47,10 @@ from tests._docs_harness import (
     Fence,
     fence_settings,
     fenced_examples,
+    point_connect_at,
     run_fence,
     run_python,
+    snippet_regions,
 )
 
 DOCS_EXAMPLES = REPO_ROOT / "docs" / "examples"
@@ -65,9 +67,6 @@ PRINTS = re.compile(
 )
 """The value of a ```text block's ``<!-- prints: <example>.py:<snippet> -->``
 note, with `` (postgres)`` after it for what the region prints on PostgreSQL."""
-
-SNIPPET = re.compile(r"#\s*--8<--\s*\[(?P<edge>start|end):(?P<name>[A-Za-z0-9_-]+)\]")
-"""A snippet region's start or end line in an example script."""
 
 HIDDEN_OPERATIONS = frozenset({"migrate", "catalog", "settings", "transaction"})
 """Statement-log operations a block does not show: schema statements, the
@@ -156,19 +155,12 @@ def statements(sqls: list[str]) -> str:
     return "\n".join(f"{layout(sql)};\n" for sql in sqls)
 
 
-def snippet_ranges(source: str) -> dict[str, tuple[int, int]]:
-    """Return each snippet region of an example's ``source`` as its (start, end) lines."""
-    starts: dict[str, int] = {}
-    ranges: dict[str, tuple[int, int]] = {}
-    for number, line in enumerate(source.splitlines(), start=1):
-        match = SNIPPET.search(line)
-        if match is None:
-            continue
-        if match["edge"] == "start":
-            starts[match["name"]] = number
-        elif match["name"] in starts:
-            ranges[match["name"]] = (starts.pop(match["name"]), number)
-    return ranges
+def region_lines(source: str, *, where: str = "<source>") -> dict[str, tuple[int, int]]:
+    """Return each snippet region of an example's ``source`` as its marker lines."""
+    return {
+        name: (region.start, region.end)
+        for name, region in snippet_regions(source, where=where).items()
+    }
 
 
 # -- what a run records ----------------------------------------------------------
@@ -215,7 +207,7 @@ class Capture:
         self.path = str(path)
         self.dialect = dialect
         self.root = str(path.parent)
-        self.ranges = snippet_ranges(path.read_text(encoding="utf-8"))
+        self.ranges = region_lines(path.read_text(encoding="utf-8"), where=self.path)
         self.where: tuple[str, int] | None = None
         """The docs example file and line running now."""
         self.depth = 0
@@ -374,17 +366,13 @@ def _run_capture(path: Path, dialect: str, url: str | None, args: list[str]) -> 
 
     Terminal.__call__ = render_then_call  # type: ignore[method-assign]
 
-    connect, create_tables = ferro.connect, ferro.create_tables
-
-    async def connect_to(_url: str, *args: Any, **kwargs: Any) -> Any:
-        capture.snapshot()
-        return await connect(url or _url, *args, **kwargs)
+    create_tables = ferro.create_tables
 
     async def create_then_snapshot(*args: Any, **kwargs: Any) -> Any:
         capture.snapshot()
         return await create_tables(*args, **kwargs)
 
-    ferro.connect = connect_to  # type: ignore[assignment]
+    point_connect_at(url, before=capture.snapshot)
     ferro.create_tables = create_then_snapshot  # type: ignore[assignment]
 
     tool = 4
@@ -476,7 +464,7 @@ def sql_marker(block: Fence) -> re.Match[str] | None:
 def _named_region(where: str, example: str, snippet: str, named: str) -> None:
     path = DOCS_EXAMPLES / example
     assert path.is_file(), f"{named}: docs/examples/{example} does not exist"
-    ranges = snippet_ranges(path.read_text(encoding="utf-8"))
+    ranges = snippet_regions(path.read_text(encoding="utf-8"), where=str(path))
     assert snippet in ranges, f"{named}: {example} has no snippet region {snippet!r}"
 
 
@@ -563,6 +551,7 @@ def check_printed(
     run: Callable[[str, str], Run] = captured,
     *,
     dialect: str = "sqlite",
+    database_url: str | None = None,
 ) -> None:
     """Assert a ```text block says where it comes from, and holds what it says.
 
@@ -579,7 +568,10 @@ def check_printed(
         run: Given an example script's name and a dialect, its run's record.
             Defaults to ``captured``.
         dialect: The database this check runs against. A ``prints:`` block for
-            the other one only has its example and region checked.
+            the other one only has its example and region checked, or its
+            fence found.
+        database_url: The PostgreSQL database a ``prints: above`` block's
+            fence runs against when that fence is marked ``backend=postgres``.
 
     Raises:
         AssertionError: The block has no note, an unknown one, names an
@@ -600,8 +592,7 @@ def check_printed(
     if kind != "prints":
         return
     if value == "above":
-        if dialect == "sqlite":
-            _check_printed_above(block, where)
+        _check_printed_above(block, where, dialect, database_url)
         return
     marker = PRINTS.match(value)
     assert marker is not None, (
@@ -621,20 +612,37 @@ def check_printed(
     )
 
 
-def _check_printed_above(block: Fence, where: str) -> None:
+def printing_fence(block: Fence) -> Any:
+    """The Python fence a ``<!-- prints: above -->`` block shows the output of:
+    the nearest one above it, or ``None``."""
     path = Path(block.path)
     fences = [
         example
         for example in fenced_examples(path, path.read_text(encoding="utf-8"))
         if example.start_line < block.line
     ]
-    assert fences, f"{where}: <!-- prints: above --> has no Python fence above it"
-    above = fences[-1]
+    return fences[-1] if fences else None
+
+
+def on_postgres(fence: Any) -> bool:
+    """Whether a Python fence is marked ``backend=postgres``."""
+    return fence_settings(fence).get("backend") == "postgres"
+
+
+def _check_printed_above(
+    block: Fence, where: str, dialect: str, database_url: str | None
+) -> None:
+    above = printing_fence(block)
+    assert above is not None, (
+        f"{where}: <!-- prints: above --> has no Python fence above it"
+    )
     assert fence_settings(above).get("test") == "run", (
         f"{where}: <!-- prints: above --> needs the fence above "
         f"(line {above.start_line}) marked {{test=run prelude=<name>}}"
     )
-    printed = run_fence(above)
+    if dialect != ("postgres" if on_postgres(above) else "sqlite"):
+        return
+    printed = run_fence(above, database_url=database_url)
     assert block.body == printed, (
         f"{where}: the block differs from what the fence at line "
         f"{above.start_line} prints. It prints:\n{printed}"

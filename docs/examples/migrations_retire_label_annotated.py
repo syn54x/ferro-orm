@@ -84,7 +84,7 @@ def main() -> None:
                 status="paused",
             )
         except ValueError as error:
-            print(error)
+            print(f"{type(error).__name__}: {error}")
         # --8<-- [end:retired-write]
 
         subprocess.run(

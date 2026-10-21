@@ -165,7 +165,7 @@ async def main() -> None:
         try:
             await trial.limit(1).delete()
         except ValueError as error:
-            print(error)
+            print(f"{type(error).__name__}: {error}")
         else:
             raise AssertionError("expected ValueError")
         # --8<-- [end:mutation-guard]

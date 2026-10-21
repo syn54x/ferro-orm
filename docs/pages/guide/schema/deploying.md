@@ -13,7 +13,7 @@ Migrations reach a database in one of two ways: a deploy step runs `ferro migrat
 <!-- output: ci-check -->
 ```text
 default · migrations
-ok: models match 0002_author_slug
+ok: models match 0003_author_slug_required
 ```
 
 The models match the newest migration, so the check passes. It exits 3, naming each problem, when a model change has no migration, the snapshot chain is broken, a number is duplicated or missing, a step lacks a target dialect's rendering, or a data step still says `todo(...)`. Run it on every pull request.
@@ -43,10 +43,10 @@ The deploy step applies every pending migration, in order, under the run lock:
 <!-- output: server-up -->
 ```text
 default · sqlite:///./app.db
-0002_author_slug  01_expand           applied (0 ms)
-0002_author_slug  02_backfill_author  applied (0 ms)
-0002_author_slug  03_add_constraint   applied (0 ms)
-0002_author_slug  04_contract         applied (1 ms)
+0002_author_slug_nullable  01_schema           applied (0 ms)
+0003_author_slug_required  01_backfill_author  applied (2 ms)
+0003_author_slug_required  02_add_constraint   applied (0 ms)
+0003_author_slug_required  03_contract         applied (1 ms)
 ```
 
 It exits 0 when it applied everything (or there was nothing to apply), 1 when it refused or a step failed; the message says why and how to go on, and the next `up` resumes at the failed step. The URL comes from `$DATABASE_URL` (or the variable the configuration's `url_env` names), or `--url`.
@@ -67,8 +67,8 @@ Behind its migrations, it raises `PendingMigrationsError`:
 
 <!-- prints: migration_errors.py:behind -->
 ```text
-ferro.migrations.PendingMigrationsError: ferro.migrations: this database is behind its migrations.
-  pending  0002_author_slug
+PendingMigrationsError: ferro.migrations: this database is behind its migrations.
+  pending  0002_author_slug_nullable
 Run `ferro migrate up` (or `await ferro.migrations.up()`) before serving.
 ```
 
@@ -121,14 +121,14 @@ In a rolling deploy, old code keeps running while the migration applies. A migra
 
 | Release | Model | Migration | Old code during the deploy |
 | :--- | :--- | :--- | :--- |
-| 1 | `slug: str \| None = None` | `0002_author_slug`: one schema step, `ADD COLUMN`, nullable | runs against a database one migration ahead of it |
+| 1 | `slug: str \| None = None` | `0002_author_slug_nullable`: one schema step, `ADD COLUMN`, nullable | runs against a database one migration ahead of it |
 | 2 | `slug: str` | `0003_author_slug_required`: backfill, add-constraint, contract | release 1 code already writes `slug` |
 
 Between the two, release 0 code meets a database that has applied a migration its checkout does not have. `require_applied()` and `up()` refuse that by default:
 
 <!-- prints: migration_errors.py:ahead -->
 ```text
-ferro.migrations.DatabaseAheadError: ferro migrate: this database has applied 0002_author_slug, which is not in migrations/.
+DatabaseAheadError: ferro migrate: this database has applied 0002_author_slug_nullable, which is not in migrations/.
 The directory is behind the database: check out the branch that holds it. Nothing was applied.
 Pass allow_ahead=True to run beside them (a rolling deploy).
 ```
@@ -139,17 +139,17 @@ So the old release starts with `allow_ahead="expand-only"`:
 await ferro.migrations.require_applied(allow_ahead="expand-only")
 ```
 
-It lets the database through when every step the old checkout lacks is an *expand* step: one the old release's writes keep succeeding beside. `0002_author_slug` adds a nullable column, so release 0 starts. A database ahead by a *contract* step is refused, naming the first one (`ferro migrate up --allow-ahead=expand-only` does the same):
+It lets the database through when every step the old checkout lacks is an *expand* step: one the old release's writes keep succeeding beside. `0002_author_slug_nullable` adds a nullable column, so release 0 starts. Release 2's deploy is different: `0003_author_slug_required` ends in a *contract* step, and a database ahead by one is refused, naming the first (`ferro migrate up --allow-ahead=expand-only` does the same):
 
 <!-- prints: migration_errors.py:ahead-by-contract -->
 ```text
-ferro.migrations.DatabaseAheadError: ferro migrate: this database has applied 0003_drop_bio, which is not in migrations/.
+DatabaseAheadError: ferro migrate: this database has applied 0003_author_slug_required, which is not in migrations/.
 The directory is behind the database: check out the branch that holds it.
-It is ahead by contract steps, starting with 0003_drop_bio:01 (contract: a write the previous release makes can fail beside it), so allow_ahead="expand-only" does not let it through. Nothing was applied.
+It is ahead by contract steps, starting with 0003_author_slug_required:03 (contract: a write the previous release makes can fail beside it), so allow_ahead="expand-only" does not let it through. Nothing was applied.
 Pass allow_ahead=True to run beside them (a rolling deploy).
 ```
 
-`.contract_steps` lists every such step (`["0003_drop_bio:01"]`). Each step's class is decided from what the step does: adding a nullable column is expand, dropping a column is contract. The [step classes](../../reference/migrations.md#step-classes) table lists the class of every kind of step.
+`.contract_steps` lists every such step (`["0003_author_slug_required:03"]`). Each step's class is decided from what the step does: adding a nullable column is expand, making it required is contract, since a write that leaves it empty then fails. Release 1 code writes `slug` on every save, so it can run beside the contract; a deployment that knows this starts it with `allow_ahead=True` (below). The [step classes](../../reference/migrations.md#step-classes) table lists the class of every kind of step.
 
 The class is about **writes**. `expand` means the previous release's writes keep succeeding beside the step, not that its reads only meet values it knows. Adding a label is `expand`, yet release 0 reading a row that holds the new label gets a value its enum does not have. So add a label in one release and write it in the next.
 
@@ -210,29 +210,30 @@ Two different waits apply:
     <!-- output: ddl-lock-retry -->
     ```text
     default · postgresql://app:***@localhost/app
-    0002_author_slug  01_schema  waiting for a lock on "author" (attempt 1 of 10, retry in 1s)
-    0002_author_slug  01_schema  waiting for a lock on "author" (attempt 2 of 10, retry in 2s)
-    0002_author_slug  01_schema  applied (2214 ms)
+    0002_author_slug_nullable  01_schema  waiting for a lock on "author" (attempt 1 of 10, retry in 1s)
+    0002_author_slug_nullable  01_schema  waiting for a lock on "author" (attempt 2 of 10, retry in 2s)
+    0002_author_slug_nullable  01_schema  applied (2214 ms)
     ```
 
     It does not apply to data steps.
 
 ## Database status
 
-`ferro migrate status` reads the tracking table without a lock and changes nothing. Here a contract step failed on a [late row](data-steps.md#when-a-late-row-arrives), so `0002_author_slug` is `partial` and the failed step carries its error:
+`ferro migrate status` reads the tracking table without a lock and changes nothing. Here a contract step failed on a [late row](data-steps.md#when-a-late-row-arrives), so `0003_author_slug_required` is `partial` and the failed step carries its error:
 
 <!-- output: status-steps -->
 ```text
 default · sqlite:///./app.db
 !! 1 failed · 1 pending  main._ferro_migrations
-  ok 0001_create_author  applied  2026-10-15 04:30Z
+  ok 0001_create_author         applied  2026-10-15 04:30Z
       01_schema.up.sqlite.sql  applied  expand
-  ~~ 0002_author_slug    partial, 3 of 4 steps  2026-10-15 04:30Z
-      01_expand.up.sqlite.sql          applied  expand
-      02_backfill_author.py            applied  expand
-      03_add_constraint.up.sqlite.sql  applied  expand
-      04_contract.up.sqlite.sql        failed  [data-dependent]  contract
-        1 row still has NULL "slug" in "author"; run ferro migrate down --to 0002:01 then ferro migrate up to re-run the backfill
+  ok 0002_author_slug_nullable  applied  2026-10-15 04:30Z
+      01_schema.up.sqlite.sql  applied  expand
+  ~~ 0003_author_slug_required  partial, 2 of 3 steps  2026-10-15 04:30Z
+      01_backfill_author.py            applied  expand
+      02_add_constraint.up.sqlite.sql  applied  expand
+      03_contract.up.sqlite.sql        failed  [data-dependent]  contract
+        1 row still has NULL "slug" in "author"; run ferro migrate down --to 0002 then ferro migrate up to re-run the backfill
 ```
 
 With `--steps`, each step's [class](#rolling-deploys-and-the-two-release-contract) follows its flags. Without it, only the migrations that need a look list their steps.

@@ -44,7 +44,7 @@ A database is managed by auto-migrate **or** by migrations, never both. Once a d
 
 <!-- prints: migration_errors.py:tracked -->
 ```text
-connect(auto_migrate=…) is refused: main is governed by ferro migrations (main._ferro_migrations). Use ferro migrate up, or drop the tracking tables to leave migrations.
+RunRefused: connect(auto_migrate=…) is refused: main is governed by ferro migrations (main._ferro_migrations). Use ferro migrate up, or drop the tracking tables to leave migrations.
 ```
 
 Nothing has run, and the message names the two ways out. `main` is SQLite's schema; on Postgres the message names the schema the connection works in, such as `public`.

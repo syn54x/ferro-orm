@@ -53,14 +53,14 @@ class RoundTripResult:
 
     For a chain whose every down reaches its parent:
 
-    ```python {test=compile reason="shows the value round_trip returns"}
+    ```python {test=compile reason="a value `round_trip` returns; `RoundTripResult` is not imported here"}
     RoundTripResult(applied=["0001_create_author", "0002_add_slug"],
                     reverted_to=None, irreversible=None)
     ```
 
     and for one whose `0002` declares a step irreversible:
 
-    ```python {test=compile reason="shows the value round_trip returns"}
+    ```python {test=compile reason="a value `round_trip` returns; `RoundTripResult` is not imported here"}
     RoundTripResult(applied=["0001_create_author", "0002_add_slug"],
                     reverted_to="0002_add_slug",
                     irreversible=("0002_add_slug", "01_schema", "the index is shared"))

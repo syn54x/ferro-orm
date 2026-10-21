@@ -54,7 +54,7 @@ await connect("sqlite:app.db?mode=rwc")
 
 Pass a `postgresql://` URL; add `sslmode=require` to require TLS:
 
-```python {test=run prelude=connections backend=postgres}
+```python {test=compile reason="needs a TLS-enabled server"}
 from ferro import connect
 
 await connect("postgresql://user:password@localhost:5432/app?sslmode=require")
@@ -108,7 +108,7 @@ await connect("sqlite::memory:", auto_migrate=True)
 try:
     await Author.select().count()
 except RuntimeError as error:
-    print(error)
+    print(f"{type(error).__name__}: {error}")
 else:
     raise AssertionError("expected RuntimeError")
 ```
@@ -117,7 +117,7 @@ It prints:
 
 <!-- prints: above -->
 ```text
-No database route for this operation. Open a session (`async with ferro.engines.session(...)`) or pass `using=`/`session=` explicitly. Implicit default-connection routing was removed in v0.14 (deprecated since v0.12); see the upgrade guide.
+RuntimeError: No database route for this operation. Open a session (`async with ferro.engines.session(...)`) or pass `using=`/`session=` explicitly. Implicit default-connection routing was removed in v0.14 (deprecated since v0.12); see the upgrade guide.
 ```
 
 The only other route is an explicit one: `Author.using("name")`, or `using=` / `session=` on a call. Explicit routes are covered under [Named connections](#named-connections).

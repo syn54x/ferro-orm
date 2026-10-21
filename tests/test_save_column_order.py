@@ -21,6 +21,7 @@ declared place too.
 
 import logging
 import re
+from pathlib import Path
 from typing import Annotated
 
 import pytest
@@ -187,3 +188,45 @@ async def test_query_update_lists_columns_in_keyword_order(statement_records):
 
     (update,) = _sent(statement_records, "UPDATE")
     assert _set_columns(update) == ["e", "a", "d"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("saved_row")
+async def test_query_update_keeps_a_raw_column_where_the_call_puts_it(
+    statement_records,
+):
+    async with engines.session():
+        await ColOrder.where(lambda col_order: col_order.id == 1).update(
+            e="x", blob=b"y", a="z"
+        )
+
+    (update,) = _sent(statement_records, "UPDATE")
+    assert _set_columns(update) == ["e", "blob", "a"]
+
+
+def _upgrade_bullet() -> str:
+    guide = (
+        Path(__file__).resolve().parents[1] / "docs/pages/upgrading.md"
+    ).read_text()
+    section = guide.split("## Upgrading to 0.26", 1)[1].split("\n## ", 1)[0]
+    [bullet] = [line for line in section.splitlines() if "field order" in line]
+    return bullet
+
+
+def test_the_upgrade_guide_states_each_write_door_s_column_order():
+    """The 0.26 note says what the tests above pin: the save doors and
+    ``bulk_create`` write in field order, ``update()`` in the call's order."""
+    bullet = _upgrade_bullet()
+    field_order, _, rest = bullet.partition("field order")
+    for door in (
+        "`save()`",
+        "`save(only=...)`",
+        "`save(exclude=...)`",
+        "`bulk_create()`",
+    ):
+        assert door in field_order, door
+    assert "update()" not in field_order
+    assert (
+        "`update()` is unchanged: it lists the columns in the order the call passes them"
+        in rest
+    )

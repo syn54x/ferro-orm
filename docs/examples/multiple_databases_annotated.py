@@ -50,7 +50,7 @@ async def main() -> None:
         try:
             await Metric.using("analytics").all()
         except ValueError as error:
-            print(error)
+            print(f"{type(error).__name__}: {error}")
         else:
             raise AssertionError("expected ValueError")
     # --8<-- [end:conflict]
@@ -61,7 +61,7 @@ async def main() -> None:
         try:
             await Metric.using("app").create(name="clicks", value=42)
         except ValueError as error:
-            print(error)
+            print(f"{type(error).__name__}: {error}")
         else:
             raise AssertionError("expected ValueError")
 

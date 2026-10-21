@@ -14,7 +14,8 @@ Run a block by piping its source to this file:
 points at the docs page or docstring, not at this runner. With
 ``FERRO_DOCS_DATABASE_URL`` set (a ``backend=postgres`` fence), every
 ``connect()`` the prelude or the block makes goes to that database instead of
-the URL it names.
+the URL it names, keeping the PostgreSQL query options that URL carries
+(``tests._docs_shared.point_connect_at``).
 """
 
 from __future__ import annotations
@@ -29,6 +30,10 @@ from pathlib import Path
 from types import ModuleType
 
 PRELUDES = Path(__file__).resolve().parent
+
+# The docs harness's connect redirect, the one the SQL capture installs too.
+sys.path.insert(0, str(PRELUDES.parents[2]))
+from tests._docs_shared import point_connect_at  # noqa: E402
 
 
 def load_prelude(name: str) -> ModuleType:
@@ -82,18 +87,6 @@ async def run_block(prelude: str, source: str, path: str, first_line: int) -> No
         result = eval(code, namespace)  # noqa: S307 - the docs block is ours
         if inspect.iscoroutine(result):
             await result
-
-
-def point_connect_at(url: str) -> None:
-    """Send every ``ferro.connect`` call to ``url``, whatever URL it names."""
-    import ferro
-
-    connect = ferro.connect
-
-    async def connect_to(_url: str, *args: object, **kwargs: object) -> None:
-        await connect(url, *args, **kwargs)
-
-    ferro.connect = connect_to
 
 
 def main(argv: list[str]) -> None:

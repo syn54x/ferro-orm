@@ -41,7 +41,7 @@ from types import ModuleType
 import pytest
 
 import ferro.migrations
-from tests._docs_harness import fenced_blocks, run_python
+from tests._docs_harness import Fence, fenced_blocks, page_fences, run_python
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DOCS_PAGES = REPO_ROOT / "docs" / "pages"
@@ -227,17 +227,67 @@ REFUSALS = {
 }
 
 
+def _marked(kind: str, blocks: list[Fence] | None = None) -> dict[str, str]:
+    """Each ```text block marked ``<!-- <kind>: <id> -->``, by id.
+
+    ``blocks`` defaults to every block a docs page shows, so a marked block
+    on any page is compared: there is no page where the note goes unchecked.
+
+    Raises:
+        AssertionError: Two blocks carry one id.
+    """
+    found: dict[str, str] = {}
+    for fence in page_fences("text") if blocks is None else blocks:
+        if fence.note is None or fence.note[0] != kind:
+            continue
+        block_id = fence.note[1]
+        assert block_id not in found, (
+            f"{fence.where}: {kind} id {block_id!r} marks two blocks"
+        )
+        found[block_id] = fence.body
+    return found
+
+
+def _registry_gaps(
+    kind: str, registry: dict, blocks: list[Fence] | None = None
+) -> list[str]:
+    """What keeps the marked blocks and ``registry`` from naming the same ids."""
+    marked = _marked(kind, blocks)
+    return [
+        *(
+            f"<!-- {kind}: {block_id} --> has no entry in the registry"
+            for block_id in sorted(set(marked) - set(registry))
+        ),
+        *(
+            f"the registry's {block_id!r} marks no block"
+            for block_id in sorted(set(registry) - set(marked))
+        ),
+    ]
+
+
 def _quoted_refusals() -> dict[str, str]:
-    """Each ```text block the CLI reference marks ``<!-- refusal: <id> -->``."""
-    page = CLI_REFERENCE.read_text()
-    found = re.findall(
-        r"<!-- refusal: ([a-z-]+) -->\s*```text\n(.*?)```", page, flags=re.DOTALL
+    return _marked("refusal")
+
+
+def test_the_pages_quote_each_database_free_refusal() -> None:
+    assert _registry_gaps("refusal", REFUSALS) == []
+
+
+@pytest.mark.parametrize("kind", ["output", "refusal"])
+def test_a_marked_block_on_any_page_is_compared(kind: str) -> None:
+    """A typed block under ``output:`` or ``refusal:`` on a page outside the
+    migrations guides still has to name a registered scenario."""
+    page = DOCS_PAGES / "howto" / "testing.md"
+    fabricated = fenced_blocks(
+        page,
+        f"# Testing\n\n<!-- {kind}: made-up -->\n```text\nferro migrate: typed\n```\n",
+        "text",
     )
-    return {key: text for key, text in found}
-
-
-def test_the_cli_reference_quotes_each_database_free_refusal() -> None:
-    assert sorted(_quoted_refusals()) == sorted(REFUSALS)
+    registry = OUTPUTS if kind == "output" else REFUSALS
+    blocks = [*page_fences("text"), *fabricated]
+    assert _registry_gaps(kind, registry, blocks) == [
+        f"<!-- {kind}: made-up --> has no entry in the registry"
+    ]
 
 
 @pytest.mark.parametrize("refusal", sorted(REFUSALS))
@@ -745,6 +795,33 @@ def _slug_late_row_reverted(project: Path) -> None:
     step.write_text(NOT_APPLICABLE)
 
 
+# The Deploying guide's two-release chain, as docs/examples/migration_errors.py
+# builds it: 0002_author_slug_nullable (one expand step), then
+# 0003_author_slug_required (backfill, add-constraint, contract), so the page
+# names one migration per number.
+
+REQUIRED = "0003_author_slug_required"
+
+
+def _chain_written(project: Path) -> None:
+    _slug_edited(project)
+    _write_models(project, NAMED_AUTHOR_OPTIONAL_SLUG)
+    _run_ok(project, "migrate", "new", "author_slug_nullable")
+    _write_models(project, NAMED_AUTHOR_SLUG)
+    _run_ok(project, "migrate", "new", "author_slug_required")
+    backfill = project / "migrations" / REQUIRED / "01_backfill_author.py"
+    backfill.write_text(backfill.read_text().replace(TODO, WRITTEN))
+
+
+def _chain_late_row_failed(project: Path) -> None:
+    """A writer inserts a row without a slug after the backfill, so the
+    contract step fails."""
+    _chain_written(project)
+    step = project / "migrations" / REQUIRED / "02_add_constraint.up.sqlite.sql"
+    step.write_text(LATE_ROW)
+    assert _ferro(project, "migrate", "up", scratch=True).returncode == 1
+
+
 # A database built by auto-migrate, about to be baselined.
 
 
@@ -858,7 +935,7 @@ def _ddl_lock_retry(project: Path) -> None:
     _run_ok(project, "migrate", "new", "create_author")
     _run_ok(project, "migrate", "up")
     _write_models(project, NAMED_AUTHOR_OPTIONAL_SLUG)
-    _run_ok(project, "migrate", "new", "author_slug")
+    _run_ok(project, "migrate", "new", "author_slug_nullable")
 
 
 @contextmanager
@@ -979,9 +1056,9 @@ OUTPUTS = {
     # deploying
     "run-lock-wait": (_lock_wait, ("migrate", "up", "--lock-timeout", "1s")),
     "ddl-lock-retry": (_ddl_lock_retry, ("migrate", "up")),
-    "ci-check": (_slug_written, ("migrate", "check")),
-    "server-up": (_slug_written, ("migrate", "up")),
-    "status-steps": (_slug_late_row_failed, ("migrate", "status", "--steps")),
+    "ci-check": (_chain_written, ("migrate", "check")),
+    "server-up": (_chain_written, ("migrate", "up")),
+    "status-steps": (_chain_late_row_failed, ("migrate", "status", "--steps")),
     "edited-up": (_loop_edited_step, ("migrate", "up")),
     "edited-rerecord": (_loop_edited_step, ("migrate", "rerecord", "0001:01")),
     # adopting
@@ -1011,12 +1088,7 @@ def _quoted_blocks(page: Path) -> list[tuple[str | None, str | None, str, str]]:
 
 
 def _quoted_outputs() -> dict[str, str]:
-    return {
-        block_id: body
-        for page in OUTPUT_PAGES
-        for kind, block_id, _first, body in _quoted_blocks(page)
-        if kind == "output"
-    }
+    return _marked("output")
 
 
 def _normalise(text: str) -> str:
@@ -1036,14 +1108,7 @@ def _normalise(text: str) -> str:
 
 
 def test_every_output_block_has_a_registry_entry_and_the_reverse() -> None:
-    marked = [
-        block_id
-        for page in OUTPUT_PAGES
-        for kind, block_id, _first, _body in _quoted_blocks(page)
-        if kind == "output"
-    ]
-    assert len(marked) == len(set(marked)), "an output id marks two blocks"
-    assert sorted(marked) == sorted(OUTPUTS)
+    assert _registry_gaps("output", OUTPUTS) == []
 
 
 CLI_LINE = re.compile(
@@ -1429,3 +1494,13 @@ def test_a_quoted_revision_is_what_autogenerate_writes(
         f"guide/schema/alembic.md quotes revision {revision!r}; autogenerate writes:\n"
         f"{printed}"
     )
+
+
+def test_the_deploying_guide_names_one_migration_per_number() -> None:
+    """Every block and sentence of the Deploying guide follows one project, so
+    a number never names two migrations there."""
+    page = (DOCS_PAGES / "guide" / "schema" / "deploying.md").read_text()
+    names: dict[str, set[str]] = {}
+    for name in re.findall(r"\b(\d{4})_([a-z0-9_]+)", page):
+        names.setdefault(name[0], set()).add(name[1])
+    assert {number: sorted(n) for number, n in names.items() if len(n) > 1} == {}
