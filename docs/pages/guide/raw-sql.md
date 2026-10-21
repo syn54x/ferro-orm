@@ -28,6 +28,7 @@ Here is a whole program. It connects, opens a session, adds two clicks and a sig
 
 It prints:
 
+<!-- prints: raw_sql.py:first -->
 ```text
 [{'kind': 'click', 'n': 2}, {'kind': 'signup', 'n': 1}]
 ```
@@ -65,7 +66,7 @@ Both clicks matched, so `execute()` returns `2`. Pass one statement per call; a 
 
 A few Postgres statements refuse to run inside a transaction block: `CREATE INDEX CONCURRENTLY`, `VACUUM`, and `ALTER TYPE ... ADD VALUE` before Postgres 12. In a session that carries settings, Ferro runs every operation inside a transaction, so these statements fail with error `25001`. Pass `autocommit=True` to run one outside it:
 
-```python {test=compile reason="needs a Postgres database"}
+```python {test=run prelude=raw_sql backend=postgres}
 async with engines.session(settings={"myapp.tenant_id": "acme"}):
     await execute(
         "CREATE INDEX CONCURRENTLY idx_event_kind ON event (kind)",
@@ -94,7 +95,7 @@ Ferro hands your SQL to the driver unchanged, so you write each backend's own pl
 
     Numbered `$1`, `$2`, ... placeholders:
 
-    ```python {test=compile reason="needs a Postgres database"}
+    ```python {test=run prelude=raw_sql backend=postgres}
     rows = await fetch_all(
         "SELECT id, kind FROM event WHERE kind = $1 AND id >= $2", "click", 2
     )
@@ -126,7 +127,7 @@ Raw SQL has no schema map, so Ferro does not cast bind values for you, as asyncp
 
 On PostgreSQL, write the cast in the SQL wherever the column type is stricter than text:
 
-```python {test=compile reason="needs a Postgres database"}
+```python {test=run prelude=raw_sql backend=postgres}
 from datetime import UTC, datetime
 
 since = datetime(2026, 3, 2, 9, 5, tzinfo=UTC)

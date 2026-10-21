@@ -23,8 +23,8 @@ below reads the HTML a reader would get:
   job runs every docs test file and the docs lint;
 - the nav has six tabs holding every page once, each label equal to its
   page's title; every page has a one-sentence description and new pages are
-  marked new; every moved page, and every anchor that moved, redirects to the
-  section that replaced it;
+  marked new; every moved page, and every anchor ``MOVED_ANCHORS`` lists,
+  redirects to the section that replaced it;
 - no page renders a literal Sphinx role, an unresolved cross-reference, a
   list merged into a paragraph, a docstring section as prose or a section
   table row that stops mid-sentence, and griffe reads every docstring without
@@ -313,13 +313,23 @@ def test_docs_build_in_workflows_is_strict(workflow: str) -> None:
 
 def test_ci_docs_job_runs_every_docs_test_and_the_lint() -> None:
     jobs = yaml.safe_load((WORKFLOWS / "ci.yml").read_text(encoding="utf-8"))["jobs"]
+    """The job runs every module matching ``tests/test_doc*.py``, by glob, and
+    every test module that uses the docs harness is named to match it."""
     commands = "\n".join(step.get("run", "") for step in jobs["docs"]["steps"])
-    docs_tests = sorted(
-        path.relative_to(REPO_ROOT).as_posix()
-        for path in (REPO_ROOT / "tests").glob("test_doc*.py")
+    assert re.search(
+        r"pytest [^\n]*tests/test_doc\*\.py", commands.replace("\\\n", " ")
+    ), "the CI docs job must run pytest over tests/test_doc*.py"
+    helpers = ("tests._docs_harness", "tests._docs_sql", "tests._docs_twins")
+    misnamed = sorted(
+        path.name
+        for path in (REPO_ROOT / "tests").glob("test_*.py")
+        if not path.name.startswith("test_doc")
+        and any(helper in path.read_text(encoding="utf-8") for helper in helpers)
     )
-    missing = [test for test in docs_tests if test not in commands]
-    assert not missing, f"the CI docs job does not run: {missing}"
+    assert not misnamed, (
+        f"{misnamed} use the docs harness but the CI docs job's glob, "
+        "tests/test_doc*.py, does not reach them; rename them test_docs_*.py"
+    )
     assert "python -m tests._docs_checks docs/pages docs/examples src/ferro" in commands
 
 
@@ -542,6 +552,14 @@ MOVED_ANCHORS = {
     "guide/row-level-security.md#connection-delivery-mode": "concepts/row-level-security.md#connection-delivery",
     "guide/row-level-security.md#raw-policies-and-drift": "concepts/row-level-security.md#drift-and-ownership",
     "guide/row-level-security.md#migrations-and-alembic": "guide/row-level-security.md#deploy-order",
+    # Sections renamed on pages the rewrite kept, the ones linked from outside
+    # the docs (the README, issues, the old upgrade guide).
+    "guide/mutations.md#get-or-create": "guide/mutations.md#get_or_create-and-update_or_create",
+    "guide/transactions.md#nesting-behavior": "guide/transactions.md#nested-transactions",
+    "guide/connections.md#sessions-recommended": "guide/connections.md#sessions",
+    "faq.md#what-is-ferro": "faq.md#what-ferro-is",
+    "howto/testing.md#writing-your-first-test": "howto/testing.md#a-first-test",
+    "howto/upgrade-guide.md#save-no-longer-upserts": "upgrading.md#save-and-upserts",
     # The deleted Next steps page: every section lands on the quickstart's.
     "getting-started/next-steps.md#learn-by-use-case": _NEXT_STEPS,
     "getting-started/next-steps.md#building-an-api": _NEXT_STEPS,
@@ -551,8 +569,14 @@ MOVED_ANCHORS = {
     "getting-started/next-steps.md#reference-material": _NEXT_STEPS,
     "getting-started/next-steps.md#get-help": _NEXT_STEPS,
 }
-"""Every anchor that moved to another page, or was renamed on its own page,
-during the docs rewrite, and the section that replaced it."""
+"""The anchors the docs rewrite redirects, and the section that replaced each.
+
+They are every section of the split pages (the migrations guide and the
+row-level security guide) and of the deleted Next steps page, and the renamed
+sections that outside links point at. The rewrite renamed most other sections
+of the pages it rewrote without a redirect: an old link to one lands at the
+top of its page, which still exists (``MOVED_PAGES`` redirects each page that
+does not)."""
 
 
 def _site_config() -> dict:
@@ -592,6 +616,15 @@ def _source_pages() -> list[str]:
 def test_nav_has_the_six_tabs() -> None:
     tabs = [next(iter(entry)) for entry in _site_config()["nav"]]
     assert tabs == NAV_TABS
+
+
+def test_the_row_level_security_split_sits_in_its_three_tabs() -> None:
+    """The RLS guide split into a how-to, an explanation and a reference; each
+    part sits in the tab of its kind."""
+    tabs = {page: trail[0] for trail, _, page in _nav_pages(_site_config()["nav"])}
+    assert tabs["guide/row-level-security.md"] == "How-to"
+    assert tabs["concepts/row-level-security.md"] == "Concepts"
+    assert tabs["reference/row-level-security.md"] == "Reference"
 
 
 def test_every_page_is_in_the_nav_once() -> None:

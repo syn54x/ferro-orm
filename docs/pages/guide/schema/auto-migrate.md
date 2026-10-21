@@ -64,6 +64,7 @@ Rules worth knowing:
 
 - **A new required column needs a literal default.** Existing rows must get a value, so a new required field without a literal default fails the connect:
 
+    <!-- prints: auto_migrate_errors.py:required-column -->
     ```text
     Cannot add NOT NULL column 'author.bio' to an existing table: it has no literal default to backfill existing rows. Make the field nullable, give it a literal default, or generate a reviewed migration with `ferro migrate new`.
     ```
@@ -87,8 +88,9 @@ Rules worth knowing:
 
 SQLite cannot add, change or drop a constraint, a type or a nullability on a table that exists; the only way is to create the table again in its new shape and copy the rows across (a *table rebuild*). Auto-migrate never rebuilds a table, because a rebuild drops whatever the copy does not carry. It raises a `UserWarning` naming the object and the door that can, and changes nothing. Declare `db_check=True` on an existing column `author.kind`, for example, and the connect warns:
 
+<!-- prints: auto_migrate_errors.py:sqlite-check -->
 ```text
-Check constraint 'ck_author_kind' on column 'author.kind' is declared but missing from the live table, and SQLite cannot add a constraint to an existing column (it requires a full table rebuild). The invariant is not database-enforced; generate a reviewed migration with `ferro migrate new` to apply it.
+ferro auto-migrate: Check constraint 'ck_author_kind' on column 'author.kind' is declared but missing from the live table, and SQLite cannot add a constraint to an existing column (it requires a full table rebuild). The invariant is not database-enforced; generate a reviewed migration with `ferro migrate new` to apply it.
 ```
 
 The connect goes on, and the column stays unchecked. [Migrations](migrations.md#sqlite-table-rebuilds) generate the rebuild as a reviewed step. A *foreign default* (a server default on a column that no model declares, [below](#destructive-drops-with-migrate_destructive)) is the one exception: no migration plans it, since the migrations' snapshots never hold it, so the warning names the hand rebuild that drops it, or a hand-written SQL step that does (`ferro migrate new <name> --sql-step drop_default`). Row-level security is Postgres-only on every door: SQLite gets one warning per table and no DDL.
@@ -142,7 +144,7 @@ On PostgreSQL, a `StrEnum` field creates a **native enum type**, and a type that
 
 Connect to the Postgres database with `migrate_updates=True`:
 
-```python {test=compile reason="label addition needs a Postgres database"}
+```python {test=run prelude=auto_migrate backend=postgres}
 await ferro.connect("postgresql://localhost/app", migrate_updates=True)
 ```
 
@@ -185,8 +187,9 @@ ALTER TABLE "author" ALTER COLUMN "slug" DROP DEFAULT
 
 Under `migrate_updates` alone the default stays, and the pass warns on every start:
 
+<!-- prints: auto_migrate_errors.py:foreign-default (postgres) -->
 ```text
-author.slug has default '' in the database, none declared; it is left in place: connect(..., migrate_destructive=True) drops it, or run ALTER TABLE "author" ALTER COLUMN "slug" DROP DEFAULT.
+ferro auto-migrate: author.slug has default '' in the database, none declared; it is left in place: connect(..., migrate_destructive=True) drops it, or run ALTER TABLE "author" ALTER COLUMN "slug" DROP DEFAULT.
 ```
 
 Ferro's own two defaults are never foreign: a `serial` key's sequence on Postgres (recognised by the sequence the column owns, so a renamed table's still counts), and on SQLite a literal default on a `NOT NULL` column (what `migrate_updates` keeps when it adds a required column, above). On SQLite any other default (an expression such as `CURRENT_TIMESTAMP`, or any default on a nullable column) is foreign, and the pass warns and leaves it, since only a rebuild drops a default there. `ferro migrate drift` and `ferro migrate baseline` report the same defaults.
@@ -224,20 +227,22 @@ except ferro.OperationalError as error:
     changed = {s.subject for s in error.report.statements if s.role == "schema"}
 ```
 
-`changed` names every table whose changes committed. `connect(..., auto_migrate=True)` runs the same pass and returns nothing; its failure carries the same `.report`. Each statement is also a record on the `ferro.sql` logger as it finishes, with its `sql`, `subject` and duration as attributes (see [Logging](../connections.md#logging)); the log is for watching, and the report is still the structured answer.
+`changed` names every table whose changes committed. On SQLite the pass applies its statements one at a time, so a failure can leave earlier statements of the same table applied; when a change must land whole, make it a [migration](migrations.md) instead. `connect(..., auto_migrate=True)` runs the same pass and returns nothing; its failure carries the same `.report`. Each statement is also a record on the `ferro.sql` logger as it finishes, with its `sql`, `subject` and duration as attributes (see [Logging](../connections.md#logging)); the log is for watching, and the report is still the structured answer.
 
 ## Concurrent passes and the run lock
 
 Every auto-migrate pass takes the same run lock `ferro migrate up` takes, so two processes booting together never collide: the second waits, saying so with a `UserWarning`, and sees the first one's DDL:
 
+<!-- prints: auto_migrate_errors.py:lock-wait -->
 ```text
-connect(auto_migrate=…) is waiting: another ferro migration run or auto-migrate pass holds the run lock on this database. It goes on once that one finishes.
+ferro auto-migrate: connect(auto_migrate=…) is waiting: another ferro migration run or auto-migrate pass holds the run lock on this database. It goes on once that one finishes.
 ```
 
-It waits up to the project's [`lock_timeout`](../../reference/configuration.md#lock_timeout) (default `30s`; the setting's `"0"` waits without a limit, unlike the CLI's `--lock-timeout 0`, which refuses at once), then refuses:
+It waits up to the project's [`lock_timeout`](../../reference/configuration.md#lock_timeout) (default `30s`; the setting's `"0"` waits without a limit, unlike the CLI's `--lock-timeout 0`, which refuses at once), then refuses. With `lock_timeout = "1s"`, on SQLite (whose schema is `main`):
 
+<!-- prints: auto_migrate_errors.py:lock-timeout -->
 ```text
-connect(auto_migrate=…) gave up waiting for the run lock on public: another ferro migration run or auto-migrate pass held it longer than lock_timeout (30s). Nothing was applied. Wait for that run to finish and try again, or raise lock_timeout; `ferro migrate status` shows a migration run while it holds the lock.
+connect(auto_migrate=…) gave up waiting for the run lock on main: another ferro migration run or auto-migrate pass held it longer than lock_timeout (1s). Nothing was applied. Wait for that run to finish and try again, or raise lock_timeout; `ferro migrate status` shows a migration run while it holds the lock.
 ```
 
 The refused process applied nothing. A database Ferro migrations govern is refused before the pass waits at all, so a boot never sits behind a `ferro migrate up` only to be refused once it finishes.

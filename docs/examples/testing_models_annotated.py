@@ -1,4 +1,9 @@
-"""Annotated-style companion to testing_models.py (AGENTS.md I-7)."""
+"""The models of the testing how-to (docs/pages/howto/testing.md).
+
+The page's readers keep these in ``myapp/models.py``;
+``tests/test_docs_testing_fixtures.py`` copies this file there and runs the
+page's tests against it.
+"""
 
 import asyncio
 
@@ -34,7 +39,7 @@ async def main() -> None:
         post = await Post.create(title="Notes", content="On the engine", author=ada)
         assert (await post.author).username == "ada"
 
-    print("testing_models_annotated example ran successfully")
+    print("testing_models example ran successfully")
 
 
 if __name__ == "__main__":

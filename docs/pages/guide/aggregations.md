@@ -6,13 +6,13 @@ description: "Count, total and average rows with count(), sum(), avg(), min() an
 
 This guide shows how to total, count and average rows with the five aggregate methods (`count()`, `sum()`, `avg()`, `min()` and `max()`) inside a `select()` lambda, and how a record that mixes plain fields with aggregates becomes a grouped query. The full signatures are in the [aggregates reference](../api/queries.md#aggregates-and-grouped-queries).
 
-Here is a whole program. It adds four transactions and asks for the sum of the amount, the largest amount and the average amount over all of them:
+Here is a program that connects, opens a session, adds the four transactions of [the ledger](#the-ledger) and asks for their count, total, average, smallest and largest amount in one query:
 
 ```python
 --8<-- "docs/examples/aggregations.py:global"
 ```
 
-The single record holds four numbers over the four rows: they total 115, so the average is 28.75. Every query on this page runs inside a session like this one; see [Sessions](connections.md#sessions) for why and how to open one.
+The single record holds five numbers over the four rows: a count of 4, a total of 115, an average of 28.75, a smallest amount of 10 and a largest of 45. Every query on this page runs inside a session like this one; see [Sessions](connections.md#sessions) for why and how to open one.
 
 Every example on this page is followed by the SQL it sends, captured from Ferro when the example runs. `first()` sends this statement; on PostgreSQL only the placeholders differ, `$1` where SQLite has `?`:
 
@@ -327,6 +327,7 @@ Each form below fails when you build the query, before any SQL is sent, with an 
 --8<-- "docs/examples/aggregations.py:error-family"
 ```
 
+<!-- prints: aggregations.py:error-family -->
 ```text
 TypeError: t.memo.sum() is not supported: Transaction.memo is string-typed, and sum() takes a numeric column (int, float, or Decimal). No portable cross-backend meaning exists for this aggregate over a string column.
 ```
@@ -337,8 +338,9 @@ TypeError: t.memo.sum() is not supported: Transaction.memo is string-typed, and 
 --8<-- "docs/examples/aggregations.py:error-where"
 ```
 
+<!-- prints: aggregations.py:error-where -->
 ```text
-TypeError: t.amount.sum() > ... is not a where() predicate: WHERE filters rows before aggregation, so an aggregate cannot appear in it. Post-aggregation filtering is having() ...
+TypeError: t.amount.sum() > ... is not a where() predicate: WHERE filters rows before aggregation, so an aggregate cannot appear in it. Post-aggregation filtering is having() (#291); until it lands, filter rows with where() and compare the aggregated result in Python.
 ```
 
 Python's builtin `sum()` over a column reference raises instead of failing obscurely. The error text writes the lambda parameter as `t`, whatever you named it:
@@ -347,8 +349,9 @@ Python's builtin `sum()` over a column reference raises instead of failing obscu
 --8<-- "docs/examples/aggregations.py:error-builtin-sum"
 ```
 
+<!-- prints: aggregations.py:error-builtin-sum -->
 ```text
-TypeError: t.amount is a column reference and cannot be iterated; did you mean t.amount.sum()? ...
+TypeError: t.amount is a column reference and cannot be iterated; did you mean t.amount.sum()? Aggregates are methods on the column (.count()/.sum()/.avg()/.min()/.max()).
 ```
 
 An aggregate outside the dict form has no output name, so it raises:
@@ -357,8 +360,9 @@ An aggregate outside the dict form has no output name, so it raises:
 --8<-- "docs/examples/aggregations.py:error-unnamed"
 ```
 
+<!-- prints: aggregations.py:error-unnamed -->
 ```text
-TypeError: aggregate fields are user-named ...: give t.amount.sum() an output name with the dict selector form (e.g. select(lambda t: {"total": t.amount.sum()})).
+TypeError: aggregate fields are user-named (#294): give t.amount.sum() an output name with the dict selector form (e.g. select(lambda t: {"total": t.amount.sum()})).
 ```
 
 Sorting groups by a column that is not a group key raises, as the ordering rules above say:
@@ -367,8 +371,9 @@ Sorting groups by a column that is not a group key raises, as the ordering rules
 --8<-- "docs/examples/aggregations.py:error-order-key"
 ```
 
+<!-- prints: aggregations.py:error-order-key -->
 ```text
-ValueError: order_by('memo') on an aggregate projection must name a group key or an aggregate: ...
+ValueError: order_by('memo') on an aggregate projection must name a group key or an aggregate: it is neither an output field nor a group key's source column, so each group would answer with an arbitrary row's value. Sort by an output field name, or project the column as a group key.
 ```
 
 `count()` and `exists()` on an aggregate projection are ambiguous between rows and groups, so both raise and name both spellings. Count matching rows with an unprojected query (`Transaction.where(...).count()`), and count groups with `len(await query.all())`:
@@ -377,6 +382,7 @@ ValueError: order_by('memo') on an aggregate projection must name a group key or
 --8<-- "docs/examples/aggregations.py:error-count"
 ```
 
+<!-- prints: aggregations.py:error-count -->
 ```text
 ValueError: count() on an aggregate projection is ambiguous: count the matching rows with an unprojected query (Model.where(...).count()), or count the groups with len(await q.all()).
 ```

@@ -39,6 +39,13 @@ Hosted PostgreSQL services take the same `postgresql://` URL; [Connections › S
 
 Ferro reads the backend from the URL once, in `connect()`. From then on the engine holds a SQLite pool or a PostgreSQL pool, two separate types, and no operation looks at the URL again. Any other scheme fails in `connect()`, naming the ones it accepts:
 
+```python
+--8<-- "docs/examples/concepts.py:unsupported-scheme"
+```
+
+It prints:
+
+<!-- prints: concepts.py:unsupported-scheme -->
 ```text
 InterfaceError: DB Connection failed for mysql://***: Unsupported database URL scheme 'mysql'. Supported schemes: sqlite, postgres, postgresql
 ```
@@ -78,7 +85,7 @@ Because SQLite stores any value in any column, a SQLite column whose declared ty
 
 Add `ferro_search_path` to a PostgreSQL URL and every pooled connection runs `SET search_path` to that schema:
 
-```python {test=compile reason="needs a PostgreSQL server"}
+```python {test=run prelude=connections backend=postgres}
 from ferro import connect
 
 await connect(

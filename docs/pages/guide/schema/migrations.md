@@ -101,6 +101,7 @@ The example `docs/examples/migrations_quickstart.py` in the repository runs the 
 
 `new` writes one directory per migration:
 
+<!-- shows: the directory tree ferro migrate new writes -->
 ```text
 migrations/
   .gitattributes                         written once: the directory is byte-exact (no line-ending conversion)

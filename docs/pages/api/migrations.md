@@ -62,13 +62,13 @@ Passing both `using=` and `url=` raises `MigrationRefused`. `check` reads only t
 
 ## Errors
 
-A database ahead of the checkout raises `DatabaseAheadError`: `.ahead` names the migrations it has applied that the directory lacks, and `.contract_steps` each of their steps whose class is not `expand` (`["0008_drop_bio:01"]`), the steps `allow_ahead="expand-only"` refuses on. The [rolling-deploy recipe](../guide/schema/deploying.md#rolling-deploys-and-the-two-release-contract) shows it in use.
+A database ahead of the checkout raises `DatabaseAheadError`: `.ahead` names the migrations it has applied that the directory lacks, and `.contract_steps` each of their steps whose class is not `expand` (`["0003_drop_bio:01"]`), the steps `allow_ahead="expand-only"` refuses on. The [rolling-deploy recipe](../guide/schema/deploying.md#rolling-deploys-and-the-two-release-contract) shows it in use.
 
 ```python {test=compile reason="needs a database ahead of the checkout"}
 try:
     await ferro.migrations.require_applied(allow_ahead="expand-only")
 except ferro.migrations.DatabaseAheadError as ahead:
-    print(ahead.contract_steps)   # ['0008_drop_bio:01']
+    print(ahead.contract_steps)   # ['0003_drop_bio:01']
 ```
 
 ::: ferro.migrations.MigrationRefused

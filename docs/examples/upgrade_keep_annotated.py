@@ -3,7 +3,7 @@
 
 ``Account`` with the three fields that opt out of a derived storage type that
 changed: a naive timestamp, an enum stored as text with a check, and plain-JSON
-storage. The assignment twin is ``upgrade_keep.py``.
+storage. The Annotated twin is ``upgrade_keep_annotated.py``.
 """
 
 import asyncio
@@ -30,7 +30,7 @@ class Account(Model):
     role: Annotated[Role, Field(db_type="text", db_check=True)] = Role.MEMBER
     # --8<-- [end:keep-varchar]
     # --8<-- [start:keep-json]
-    prefs: Annotated[dict, Field(db_type="json", default_factory=dict)]
+    prefs: Annotated[dict, Field(db_type="json")] = Field(default_factory=dict)
     # --8<-- [end:keep-json]
 
 

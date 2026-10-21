@@ -54,7 +54,7 @@ await connect("sqlite:app.db?mode=rwc")
 
 Pass a `postgresql://` URL; add `sslmode=require` to require TLS:
 
-```python {test=compile reason="needs a PostgreSQL server"}
+```python {test=run prelude=connections backend=postgres}
 from ferro import connect
 
 await connect("postgresql://user:password@localhost:5432/app?sslmode=require")
@@ -115,6 +115,7 @@ else:
 
 It prints:
 
+<!-- prints: above -->
 ```text
 No database route for this operation. Open a session (`async with ferro.engines.session(...)`) or pass `using=`/`session=` explicitly. Implicit default-connection routing was removed in v0.14 (deprecated since v0.12); see the upgrade guide.
 ```
@@ -202,7 +203,7 @@ The [`connect`](../api/connection.md#ferro.connect) reference lists every option
 
 Size a connection's pool with `PoolConfig`:
 
-```python {test=compile reason="needs a PostgreSQL server"}
+```python {test=run prelude=connections backend=postgres}
 from ferro import PoolConfig, connect
 
 await connect(
@@ -281,6 +282,7 @@ for statement in report.statements:
 
 On SQLite it prints:
 
+<!-- prints: above -->
 ```text
 CREATE TABLE IF NOT EXISTS "author" ( "email" varchar NOT NULL, "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT, "name" varchar NOT NULL )
 CREATE UNIQUE INDEX IF NOT EXISTS "uq_author_email" ON "author" ("email")
@@ -293,7 +295,7 @@ CREATE TABLE IF NOT EXISTS "post" ( "author_id" integer NOT NULL, "body" varchar
 
 Add the `ferro_search_path` parameter to a PostgreSQL URL to pin the connection to one schema:
 
-```python {test=compile reason="needs a PostgreSQL server"}
+```python {test=run prelude=connections backend=postgres}
 from ferro import connect
 
 await connect("postgresql://user:password@localhost:5432/app?ferro_search_path=tenant_a")
@@ -327,6 +329,7 @@ logging.getLogger("ferro.sql").setLevel(logging.DEBUG)
 
 A schema change now prints each statement it runs, with its parameters and how long it took:
 
+<!-- shows: two sample log lines; timings and the elided column list vary -->
 ```text
 ferro.sql DEBUG CREATE TABLE IF NOT EXISTS "post" (...) params=() 1.2ms
 ferro.sql DEBUG ALTER TABLE "author" ADD COLUMN "bio" varchar params=() 0.8ms

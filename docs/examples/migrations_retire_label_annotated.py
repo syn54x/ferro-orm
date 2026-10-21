@@ -1,5 +1,5 @@
 # ruff: noqa: E402 - the models come first, as the docs page shows them
-"""Runnable companion for retiring an enum label, Annotated style
+"""Runnable companion for retiring an enum label
 (docs/pages/guide/schema/renames-and-retirements.md).
 
 Release A writes ``paused``. Release B retires it: the member stays so rows
@@ -74,6 +74,18 @@ def main() -> None:
         assert "no schema change" in app.ferro("migrate", "new", "retire_paused")
         assert not (app.migrations / "0002_retire_paused").exists()
         app.ferro("migrate", "check")
+
+        # --8<-- [start:retired-write]
+        try:
+            Author(
+                name="Grace Hopper",
+                email="grace@example.com",
+                bio="Admiral",
+                status="paused",
+            )
+        except ValueError as error:
+            print(error)
+        # --8<-- [end:retired-write]
 
         subprocess.run(
             [sys.executable, "-c", PROBE], cwd=app.root, check=True, timeout=120

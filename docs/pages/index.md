@@ -36,6 +36,7 @@ Connect, open a session, create two users and query the active ones:
 
 Only `alice` is active, so the script prints:
 
+<!-- prints: readme_quickstart.py:query -->
 ```text
 Found 1 active users.
 ```

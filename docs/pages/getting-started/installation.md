@@ -77,6 +77,7 @@ print(ferro.version())
 
 The number is the installed Ferro version:
 
+<!-- shows: an example version number; yours is the version installed -->
 ```text
 0.25.0
 ```

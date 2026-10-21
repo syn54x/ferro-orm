@@ -14,6 +14,7 @@ Give each connection a name, mark one as the default, and route calls to each:
 
 It prints:
 
+<!-- prints: multiple_databases.py:connect -->
 ```text
 1 1
 ```
@@ -48,6 +49,7 @@ To run a whole block on one named connection, open a session on it:
 
 It prints:
 
+<!-- prints: multiple_databases.py:session -->
 ```text
 ['page_views']
 ```
@@ -62,6 +64,7 @@ Inside a session, `.using()` must name the session's connection. Naming another 
 
 It prints:
 
+<!-- prints: multiple_databases.py:conflict -->
 ```text
 Explicit `using='analytics'` conflicts with the ambient session bound to connection 'app'. Pass an explicit `session=` for that connection, or open a session on 'analytics'.
 ```
@@ -80,6 +83,7 @@ Routing is per call: `.using()` changes no global state, so two coroutines can u
 
 It prints:
 
+<!-- prints: multiple_databases.py:transaction -->
 ```text
 Operations inside a transaction inherit the transaction connection
 2
@@ -97,6 +101,7 @@ The `clicks` metric landed on `analytics`, which now holds two metrics; the call
 
 It prints:
 
+<!-- prints: multiple_databases.py:create-tables -->
 ```text
 ['metric']
 ```

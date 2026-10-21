@@ -1,6 +1,5 @@
 # ruff: noqa: E402 - the models come first, as the docs page shows them
-"""Runnable companion for the Migrations loop, Annotated style
-(docs/pages/guide/schema/migrations.md).
+"""Runnable companion for the Migrations loop (docs/pages/guide/schema/migrations.md).
 
 init, new, up; then a model edit, check, new, up, drift, down, on SQLite.
 """

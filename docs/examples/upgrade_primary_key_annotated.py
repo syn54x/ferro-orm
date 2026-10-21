@@ -2,7 +2,7 @@
 (docs/pages/upgrading.md).
 
 A model with two ``primary_key=True`` fields is refused at class definition.
-The assignment twin is ``upgrade_primary_key.py``.
+The Annotated twin is ``upgrade_primary_key_annotated.py``.
 """
 
 from typing import Annotated

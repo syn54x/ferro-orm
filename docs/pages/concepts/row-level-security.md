@@ -92,6 +92,7 @@ Settings a session declares itself must be honoured, so opening a session with `
 
 A setting made with plain `SET` stays on the server connection. Behind a pooler in transaction mode (PgBouncer's default, and the front door of most managed Postgres services), that server connection passes to another client between transactions, so two requests can share it seconds apart:
 
+<!-- shows: a sketch of two tenants sharing one pooled server connection -->
 ```text
 tenant A → pooler → server connection 7: SET app.tenant_id = 'A'
 tenant B → pooler → server connection 7: SELECT … FROM invoice

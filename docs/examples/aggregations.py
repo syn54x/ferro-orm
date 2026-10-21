@@ -2,9 +2,7 @@
 (docs/pages/guide/aggregations.md).
 
 Seeds a small ledger of four transactions, then runs every aggregate query
-the guide shows and asserts the exact records that come back. The
-``aggregations`` prelude imports ``Account``, ``Transaction`` and ``seed`` from
-here, so the guide's inline blocks run against the same rows.
+the guide shows and asserts the exact records that come back.
 """
 
 import asyncio
@@ -12,7 +10,7 @@ from collections import defaultdict
 from decimal import Decimal
 from typing import Annotated
 
-from ferro import BackRef, Field, ForeignKey, Model, Relation, connect, engines
+from ferro import BackRef, Field, ForeignKey, Model, Relation
 
 
 # --8<-- [start:schema]
@@ -50,11 +48,12 @@ async def seed() -> None:
 
 
 async def main() -> None:
-    await connect("sqlite::memory:", auto_migrate=True)
-
     # --8<-- [start:global]
+    from ferro import connect, engines
+
+    await connect("sqlite::memory:", auto_migrate=True)
     async with engines.session():
-        await seed()
+        await seed()  # adds the ledger's four transactions
 
         # An aggregate-only projection collapses to exactly one record,
         # read idiomatically with first().
@@ -253,12 +252,7 @@ async def main() -> None:
         try:
             Transaction.select(lambda transaction: {"x": transaction.memo.sum()})
         except TypeError as exc:
-            assert str(exc) == (
-                "t.memo.sum() is not supported: Transaction.memo is string-typed, "
-                "and sum() takes a numeric column (int, float, or Decimal). No "
-                "portable cross-backend meaning exists for this aggregate over a "
-                "string column."
-            )
+            print(f"{type(exc).__name__}: {exc}")
         else:
             raise AssertionError("expected TypeError")
         # --8<-- [end:error-family]
@@ -268,11 +262,7 @@ async def main() -> None:
         try:
             Transaction.where(lambda transaction: transaction.amount.sum() > 100)
         except TypeError as exc:
-            assert str(exc).startswith(
-                "t.amount.sum() > ... is not a where() predicate: WHERE filters "
-                "rows before aggregation, so an aggregate cannot appear in it. "
-                "Post-aggregation filtering is having()"
-            )
+            print(f"{type(exc).__name__}: {exc}")
         else:
             raise AssertionError("expected TypeError")
         # --8<-- [end:error-where]
@@ -286,10 +276,7 @@ async def main() -> None:
                 }
             )
         except TypeError as exc:
-            assert str(exc).startswith(
-                "t.amount is a column reference and cannot be iterated; "
-                "did you mean t.amount.sum()?"
-            )
+            print(f"{type(exc).__name__}: {exc}")
         else:
             raise AssertionError("expected TypeError")
         # --8<-- [end:error-builtin-sum]
@@ -299,8 +286,7 @@ async def main() -> None:
         try:
             Transaction.select(lambda transaction: transaction.amount.sum())
         except TypeError as exc:
-            assert str(exc).startswith("aggregate fields are user-named")
-            assert "give t.amount.sum() an output name" in str(exc)
+            print(f"{type(exc).__name__}: {exc}")
         else:
             raise AssertionError("expected TypeError")
         # --8<-- [end:error-unnamed]
@@ -315,10 +301,7 @@ async def main() -> None:
                 }
             ).order_by("memo")
         except ValueError as exc:
-            assert str(exc).startswith(
-                "order_by('memo') on an aggregate projection must name a group key "
-                "or an aggregate"
-            )
+            print(f"{type(exc).__name__}: {exc}")
         else:
             raise AssertionError("expected ValueError")
         # --8<-- [end:error-order-key]
@@ -333,11 +316,7 @@ async def main() -> None:
                 }
             ).count()
         except ValueError as exc:
-            assert str(exc) == (
-                "count() on an aggregate projection is ambiguous: count the matching "
-                "rows with an unprojected query (Model.where(...).count()), or count "
-                "the groups with len(await q.all())."
-            )
+            print(f"{type(exc).__name__}: {exc}")
         else:
             raise AssertionError("expected ValueError")
         # --8<-- [end:error-count]

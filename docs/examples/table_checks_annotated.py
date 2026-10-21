@@ -1,9 +1,23 @@
-"""Annotated-style companion to table_checks.py (AGENTS.md I-7)."""
+"""Runnable companion for table checks (docs/pages/guide/models-and-fields.md).
+
+A payment carries a card token or a bank account, never both. The SQL block
+on the page is the ``DDL`` section below, checked against the statement
+``create_tables()`` ran.
+"""
 
 import asyncio
+import re
 from typing import Annotated, ClassVar
 
-from ferro import Check, CheckViolationError, Field, Model, connect, engines
+from ferro import (
+    Check,
+    CheckViolationError,
+    Field,
+    Model,
+    connect,
+    create_tables,
+    engines,
+)
 
 
 # --8<-- [start:models]
@@ -24,13 +38,34 @@ class Payment(Model):
 
 # --8<-- [end:models]
 
+DDL = """
+# --8<-- [start:ddl]
+CREATE TABLE IF NOT EXISTS "payment" (
+  "bank_account" varchar,
+  "card_token" varchar,
+  "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT,
+  CONSTRAINT "ck_payment_at_most_one_method" CHECK (("card_token" IS NULL) OR ("bank_account" IS NULL))
+);
+# --8<-- [end:ddl]
+"""
+
+
+def _normalized(sql: str) -> str:
+    return re.sub(r"\s+", " ", sql).strip().rstrip(";").strip()
+
 
 async def main() -> None:
-    await connect("sqlite::memory:", auto_migrate=True)
+    await connect("sqlite::memory:")
+    report = await create_tables()
+    [created] = [statement.sql for statement in report.statements]
+    expected = "\n".join(line for line in DDL.splitlines() if "--8<--" not in line)
+    assert _normalized(created) == _normalized(expected), created
 
     async with engines.session():
         await Payment.create(card_token="tok_visa_4242")
+        await Payment.create(bank_account="GB33BUKB20201555555555")
 
+        # --8<-- [start:violation]
         try:
             await Payment.create(
                 card_token="tok_visa_4242",
@@ -38,10 +73,13 @@ async def main() -> None:
             )
         except CheckViolationError as exc:
             assert "ck_payment_at_most_one_method" in str(exc)
+        # --8<-- [end:violation]
         else:
             raise AssertionError("expected CheckViolationError")
 
-    print("table_checks_annotated example ran successfully")
+        assert await Payment.select().count() == 2
+
+    print("table_checks example ran successfully")
 
 
 if __name__ == "__main__":

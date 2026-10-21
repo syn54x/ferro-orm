@@ -113,6 +113,7 @@ Also new, and opt-in: [`Field(retired=True)`](guide/schema/renames-and-retiremen
 
 ??? example "Automate this: copy this prompt to your coding agent"
 
+    <!-- shows: a prompt to paste into a coding agent -->
     ```text
     You are helping upgrade a Python codebase from Ferro ORM 0.22.x to 0.23.
     Reference: https://ferro-orm.x54.sh/upgrading/#upgrading-to-023
@@ -215,6 +216,7 @@ The value matches Ada's row. A string from `isoformat()` still misses, because t
 
 ??? example "Automate this: copy this prompt to your coding agent"
 
+    <!-- shows: a prompt to paste into a coding agent -->
     ```text
     You are helping upgrade a Python codebase from Ferro ORM 0.20.x to 0.21.
     Reference: https://ferro-orm.x54.sh/upgrading/#upgrading-to-021
@@ -306,6 +308,7 @@ The column stays plain `json`, and `0.15` writes no migration for it. `db_type="
 
 ??? example "Automate this: copy this prompt to your coding agent"
 
+    <!-- shows: a prompt to paste into a coding agent -->
     ```text
     You are helping upgrade a Python codebase from Ferro ORM 0.14.x to 0.15.
     Reference: https://ferro-orm.x54.sh/upgrading/#upgrading-to-015
@@ -335,6 +338,7 @@ The column stays plain `json`, and `0.15` writes no migration for it. `db_type="
 
 ??? example "Automate this: copy this prompt to your coding agent"
 
+    <!-- shows: a prompt to paste into a coding agent -->
     ```text
     You are helping upgrade a Python codebase from Ferro ORM 0.13.x to 0.14.
     Reference: https://ferro-orm.x54.sh/upgrading/#upgrading-to-014
@@ -639,6 +643,7 @@ The runtime emitter used to store a `datetime.time` field as `varchar` (the brid
 
 ??? example "Automate this: copy this prompt to your coding agent"
 
+    <!-- shows: a prompt to paste into a coding agent -->
     ```text
     You are helping upgrade a Python codebase from Ferro ORM 0.11.x to 0.12.
     Reference: https://ferro-orm.x54.sh/upgrading/#upgrading-to-012

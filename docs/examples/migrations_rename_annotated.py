@@ -1,5 +1,5 @@
 # ruff: noqa: E402, F811 - the models come first, as the docs page shows them: before, then after
-"""Runnable companion for rename hints, Annotated style
+"""Runnable companion for rename hints
 (docs/pages/guide/schema/renames-and-retirements.md).
 
 A table, a column and an enum label renamed in one migration, applied over a

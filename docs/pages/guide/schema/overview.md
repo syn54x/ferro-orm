@@ -42,6 +42,7 @@ Rungs 1 and 2 are the first door ([Auto-migrate](auto-migrate.md)); each flag im
 
 A database is managed by auto-migrate **or** by migrations, never both. Once a database has run a migration, it carries the tracking table `_ferro_migrations`, and `connect()` refuses every auto-migrate flag on it before running any DDL:
 
+<!-- prints: migration_errors.py:tracked -->
 ```text
 connect(auto_migrate=…) is refused: main is governed by ferro migrations (main._ferro_migrations). Use ferro migrate up, or drop the tracking tables to leave migrations.
 ```

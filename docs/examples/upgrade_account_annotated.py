@@ -1,8 +1,8 @@
 """The running example of the Upgrade guide (docs/pages/upgrading.md).
 
-One ``Account`` model, declared in the Annotated style, and the session a
-current release runs its queries in. The assignment twin is
-``upgrade_account.py``.
+One ``Account`` model, declared in the assignment style, and the session a
+current release runs its queries in. The Annotated twin is
+``upgrade_account_annotated.py``.
 """
 
 import asyncio
@@ -29,7 +29,7 @@ class Account(Model):
     age: int
     active: bool = True
     seen_at: datetime | None = None
-    prefs: Annotated[dict, Field(default_factory=dict)]
+    prefs: dict = Field(default_factory=dict)
 
 
 # --8<-- [end:models]

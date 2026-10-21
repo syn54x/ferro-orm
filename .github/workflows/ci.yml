@@ -102,18 +102,10 @@ jobs:
           uv run --no-sync python -m tests._docs_checks docs/pages docs/examples src/ferro
 
       - name: Run the docs tests
+        # Every docs test module is named test_doc*.py, which
+        # tests/test_docs_site.py pins, so a new one runs here unlisted.
         run: |
-          uv run --no-sync pytest --no-cov -p no:cacheprovider \
-            tests/test_docs_site.py \
-            tests/test_docs_examples.py \
-            tests/test_docstring_examples.py \
-            tests/test_docs_migrations.py \
-            tests/test_docs_sql.py \
-            tests/test_docs_testing_fixtures.py \
-            tests/test_docs_checks.py \
-            tests/test_docs_lint.py \
-            tests/test_docs_field_type_table.py \
-            tests/test_documentation_features.py
+          uv run --no-sync pytest --no-cov -p no:cacheprovider tests/test_doc*.py
 
   test-rust:
     name: Rust tests
