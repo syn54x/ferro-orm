@@ -277,8 +277,11 @@ def _resolve_nested_refs(
 def secret_class_from_annotation(
     hint: Any,
 ) -> type[SecretStr] | type[SecretBytes] | None:
-    """``SecretStr`` / ``SecretBytes`` when ``hint`` declares one (``Annotated``
-    and ``| None`` stripped), else ``None``."""
+    """Return the secret type ``hint`` declares, or ``None``.
+
+    ``Annotated`` and ``| None`` are stripped first, so
+    ``Annotated[SecretBytes | None, ...]`` gives ``SecretBytes``.
+    """
     hint = _strip_optional_and_annotated(hint)
     if isinstance(hint, type) and issubclass(hint, (SecretStr, SecretBytes)):
         return hint
@@ -521,7 +524,14 @@ def build_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
             autoincrement=autoincrement,
             unique=unique,
             index=index,
-            default=_column_default(prop, field_info, ann),
+            # A secret's default never becomes a schema default: the JSON
+            # schema holds its mask, and the real value has no place in DDL,
+            # snapshots or migration files.
+            default=(
+                None
+                if secret_cls is not None
+                else _column_default(prop, field_info, ann)
+            ),
             format=fmt,
             python_type=python_type,
             enum_values=tuple(enum_values) if isinstance(enum_values, list) else None,

@@ -3037,7 +3037,7 @@ pub fn fetch_filtered<'py>(
     // The hop-class map travels the same way, paired to the plans that decode
     // or hydrate through another model's protocol: every instances plan
     // (population, #286) and a record plan with traversed PLAIN fields (each
-    // leaf's hydration converters resolves through its owning model's class, #293).
+    // leaf's hydration converter resolves through its owning model's class, #293).
     // Aggregate fields never need one — enum sources are rejected at build
     // time and count decodes to a plain int (#294).
     let needs_hop_classes = include_paths.is_some()

@@ -103,7 +103,7 @@ def _reverse_relation_retired(model: str, field_name: str, m2m: bool) -> TypeErr
 
 
 class SecretHydrator:
-    """Wrap a decoded column value in the field's ``SecretStr`` / ``SecretBytes``.
+    """A hydration converter that wraps a decoded value in its secret type.
 
     The database stores what the secret hides, so a ``SecretStr`` column hands
     back ``str`` and a ``SecretBytes`` column ``bytes``; any other value is
@@ -782,14 +782,14 @@ class ModelMetaclass(type(BaseModel)):
 
     @staticmethod
     def _register_hydration_converters(cls) -> None:
-        """Populate ``cls._hydration_converters``: the one per-field conversion
-        hydration applies to each non-null decoded value.
+        """Populate ``cls._hydration_converters`` from the column specs.
 
-        A column is written straight into the instance dict (I-2), so a field
-        whose declared type is not what the database hands back is converted
-        here: an enum field by its enum class, a secret field by
-        :class:`SecretHydrator`. Each entry is ``(kind, convert)``; ``kind``
-        names the field in a rejection (``Failed to hydrate enum field ...``).
+        Hydration writes each column straight into the instance dict, never
+        through ``__init__``, so a field whose declared type is not what the
+        database hands back is converted, value by value, by the one entry
+        recorded here: an enum field by its enum class, a secret field by a
+        `SecretHydrator`. Each entry is ``(kind, convert)``; ``kind`` names the
+        field in a rejection (``Failed to hydrate enum field ...``).
         """
         converters: dict[str, tuple[str, Callable[[Any], Any]]] = {}
         for field_name, spec in cls.__ferro_columns__.items():

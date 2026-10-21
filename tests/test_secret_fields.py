@@ -17,6 +17,11 @@ from pydantic import SecretBytes, SecretStr, field_serializer
 
 import ferro
 from ferro import BackRef, FerroField, ForeignKey, Model, Relation
+from ferro._bind_payload import (
+    canonicalize_wire_scalar,
+    save_bind_payload,
+    update_bind_payload,
+)
 from ferro.raw import execute, fetch_all, fetch_one
 
 pytestmark = pytest.mark.backend_matrix
@@ -297,3 +302,37 @@ async def test_enum_rejection_keeps_its_message_through_the_shared_converter(db_
     assert "Failed to hydrate enum field SFPlan.tier: ValueError:" in str(caught.value)
     assert SFPlan._hydration_converters["tier"] == ("enum", SFTier)
     assert SFPlan._hydration_converters["token"][0] == "secret"
+
+
+# ---------------------------------------------------------------------------
+# Unit pins: one unwrap for every write door (I-13), and no secret in a
+# schema artifact.
+# ---------------------------------------------------------------------------
+
+
+def test_query_literal_and_update_bind_what_save_binds():
+    account = _account(7)
+    saved = save_bind_payload(account)
+    updated = update_bind_payload(
+        {name: getattr(account, name) for name in ("token", "blob", "maybe_blob")}
+    )
+
+    for name in ("token", "blob", "maybe_token", "maybe_blob"):
+        assert canonicalize_wire_scalar(getattr(account, name)) == saved[name]
+    for name in ("token", "blob", "maybe_blob"):
+        assert updated[name] == saved[name]
+    assert saved["token"] == "hunter7"
+    assert saved["blob"] == b"k\x00\xff\x07"
+
+
+class SFDefaulted(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    token: SecretStr = SecretStr("factory-token")
+    blob: SecretBytes | None = SecretBytes(b"factory-blob")
+
+
+def test_secret_default_is_never_a_schema_default():
+    columns = SFDefaulted.__ferro_columns__
+    assert columns["token"].default is None
+    assert columns["blob"].default is None
+    assert columns["blob"].logical_type == "binary"

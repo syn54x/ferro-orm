@@ -29,7 +29,7 @@ _SAVE_COLUMN_USAGE = {
 
 
 def unwrap_secret(value: Any) -> Any:
-    """The value a ``SecretStr`` / ``SecretBytes`` hides; any other value as is.
+    """Return the value a `SecretStr` / `SecretBytes` hides, or `value` as is.
 
     The one place every write door (``save``, ``bulk_create``, ``update`` and
     query literals) turns a secret into what the database stores: a secret
@@ -252,19 +252,20 @@ def apply_save_exclude(
 def update_bind_payload(fields: Mapping[str, Any]) -> dict[str, Any]:
     """Column->value map for ``Query.update(**fields)``.
 
-    A secret is unwrapped first (``unwrap_secret``), as ``save()`` binds it.
-    Non-bytes values go through ``canonicalize_wire_scalar`` then dict-level
-    ``to_json`` (enums still stringify on this door). Bytes are overlaid raw.
+    Every value goes through ``canonicalize_wire_scalar`` (which unwraps a
+    secret as ``save()`` binds it), then dict-level ``to_json`` (enums still
+    stringify on this door). Bytes, an unwrapped ``SecretBytes`` included, are
+    overlaid raw.
     """
-    fields = {key: unwrap_secret(value) for key, value in fields.items()}
+    scalars = {key: canonicalize_wire_scalar(value) for key, value in fields.items()}
     non_bytes = {
-        key: canonicalize_wire_scalar(value)
-        for key, value in fields.items()
+        key: value
+        for key, value in scalars.items()
         if not isinstance(value, (bytes, bytearray))
     }
     canonical = json.loads(to_json(non_bytes)) if non_bytes else {}
     payload: dict[str, Any] = {}
-    for key, value in fields.items():
+    for key, value in scalars.items():
         payload[key] = (
             bytes(value) if isinstance(value, (bytes, bytearray)) else canonical[key]
         )
