@@ -304,7 +304,18 @@ class PoolConfig(BaseModel):
     """
 
     @model_validator(mode="after")
-    def _check_bounds(self) -> "PoolConfig":
+    def validate(self) -> "PoolConfig":
+        """Check that `min_connections` does not exceed `max_connections`.
+
+        Pydantic runs it on construction, so a `PoolConfig` you hold has
+        already passed it.
+
+        Returns:
+            This configuration, unchanged.
+
+        Raises:
+            ValueError: `min_connections` exceeds `max_connections`.
+        """
         if self.min_connections > self.max_connections:
             raise ValueError("min_connections cannot exceed max_connections")
         return self
