@@ -318,7 +318,7 @@ The new connection registers as the default again. Pools also close when the pro
 
 The `ferro.sql` logger is the statement log: one `DEBUG` record for each statement Ferro sends, written as the statement finishes. Turn it on with your usual logging setup:
 
-```python
+```python {test=run prelude=connections}
 import logging
 
 logging.basicConfig(format="%(name)s %(levelname)s %(message)s")

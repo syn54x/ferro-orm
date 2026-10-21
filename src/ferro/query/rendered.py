@@ -59,8 +59,7 @@ class RenderedSql:
     sql: str
     """The SQL text, with the dialect's placeholders (`$1` or `?`)."""
     params: tuple[object, ...]
-    """The bound values in placeholder order; a secret value is
-    [`REDACTED`][ferro.REDACTED]."""
+    """The bound values in placeholder order, a secret value shown as [`REDACTED`][ferro.REDACTED]."""
     dialect: Literal["postgres", "sqlite"]
     """The dialect of the database the call would run on."""
 
@@ -158,8 +157,8 @@ class Terminal(Generic[P, R_co]):
 
         Returns:
             The SQL, parameters and dialect the call would send, as the
-            statement log would record them, with each secret value shown
-            as [`REDACTED`][ferro.REDACTED].
+                statement log records them, with each secret value shown as
+                [`REDACTED`][ferro.REDACTED].
 
         Raises:
             RuntimeError: No database route: the call is outside a session
@@ -189,7 +188,7 @@ class Terminal(Generic[P, R_co]):
 
 
 class TerminalMethod(Generic[S, P, R_co]):
-    """A query terminal on its class: reading it from a query binds a [`Terminal`][ferro.query.rendered.Terminal]."""
+    """A query terminal on its class: reading it from a query binds a [`Terminal`][ferro.query.Terminal]."""
 
     def __init__(self, method: Callable[Concatenate[S, P], Awaitable[R_co]]) -> None:
         self._method = method
@@ -227,6 +226,6 @@ def terminal(
 
     Returns:
         The terminal, read from a query as a bound
-        [`Terminal`][ferro.query.rendered.Terminal].
+        [`Terminal`][ferro.query.Terminal].
     """
     return TerminalMethod(method)

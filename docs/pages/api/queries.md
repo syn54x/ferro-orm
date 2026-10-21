@@ -59,7 +59,7 @@ See [Aggregations and grouped queries](../guide/aggregations.md).
 
 ::: ferro.REDACTED
 
-::: ferro.query.rendered.Terminal
+::: ferro.query.Terminal
 
 ::: ferro.query.ProjectedQuery
 

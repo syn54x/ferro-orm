@@ -16,7 +16,7 @@ from .nodes import (
     ValueExpr,
     now,
 )
-from .rendered import REDACTED, RenderedSql
+from .rendered import REDACTED, RenderedSql, Terminal
 from .rows import Row, Rows
 
 __all__ = [
@@ -31,6 +31,7 @@ __all__ = [
     "Relation",
     "RelationProxy",
     "RenderedSql",
+    "Terminal",
     "Row",
     "RowSelector",
     "Rows",

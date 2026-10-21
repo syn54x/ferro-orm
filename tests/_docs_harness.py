@@ -166,7 +166,9 @@ def docstring_examples(package: str, search_path: Path) -> list[CodeExample]:
     griffe finds each docstring and its lines; the fences are read from the
     file's own lines, so every example carries its real file and line.
     """
-    root = griffe.load(package, search_paths=[str(search_path)])
+    # Static only: once ``ferro`` is imported, griffe would otherwise inspect
+    # the compiled ``_core`` module and hand back its ``.so`` as a source file.
+    root = griffe.load(package, search_paths=[str(search_path)], allow_inspection=False)
     examples: list[CodeExample] = []
     seen: set[tuple[Path, int]] = set()
     for obj in _documented(root):
@@ -174,7 +176,9 @@ def docstring_examples(package: str, search_path: Path) -> list[CodeExample]:
         if docstring is None or docstring.lineno is None:
             continue
         path = Path(obj.filepath) if not isinstance(obj.filepath, list) else None
-        if path is None or (path, docstring.lineno) in seen:
+        if path is None or path.suffix not in {".py", ".pyi"}:
+            continue
+        if (path, docstring.lineno) in seen:
             continue
         seen.add((path, docstring.lineno))
         lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
