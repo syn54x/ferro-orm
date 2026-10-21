@@ -77,6 +77,8 @@ except ferro.migrations.DatabaseAheadError as ahead:
 
 ::: ferro.migrations.DatabaseAheadError
 
+::: ferro.migrations.RunRefused
+
 ::: ferro.migrations.AlreadyTrackedError
 
 ::: ferro.migrations.AppliedAboveBaselineError

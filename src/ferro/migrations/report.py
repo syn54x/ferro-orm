@@ -47,10 +47,23 @@ class RunRefused(MigrationRefused):
     """A migration run's refusal before it ran anything, naming the fix.
 
     Raised for every refusal the run planner, the run lock and the tracking
-    tables make; its message is the operator's text. A planner refusal also
-    carries what it is about, so a caller matches on `kind` rather than on
-    the text. A kind with a class of its own (`AlreadyTrackedError`,
-    `AppliedAboveBaselineError`) arrives as that class.
+    tables make, and by `connect(auto_migrate=True)` on a database that
+    migrations manage; its message is the operator's text. It is a
+    `MigrationRefused`, so `except MigrationRefused` catches it too. Some
+    refusals also carry what they are about in `kind`, so a caller matches
+    on it rather than on the text; on the others `kind` is `None`. A kind with a class of its own
+    (`AlreadyTrackedError`, `AppliedAboveBaselineError`) arrives as that
+    class.
+
+    Examples:
+        ```python {test=compile reason="needs a project with a migrations directory"}
+        try:
+            await ferro.migrations.up()
+        except ferro.migrations.RunRefused as refused:
+            if refused.kind == "edited_applied":
+                print(refused)   # names the applied migration that was edited
+            raise
+        ```
     """
 
     def __init__(
@@ -68,10 +81,12 @@ class RunRefused(MigrationRefused):
     ) -> None:
         super().__init__(message)
         self.kind = kind
-        """The planner's refusal kind (`"irreversible"`, `"edited_applied"`, ...), or `None`.
+        """The refusal's kind (`"irreversible"`, `"edited_applied"`, ...), or `None`.
 
-        `None` for a refusal that is not the planner's (a lost lock, a
-        missing schema).
+        Only some refusals carry a kind. `connect(auto_migrate=True)` on a
+        database that migrations manage, a lost run lock and a data step
+        that does not load are among those whose `kind` is `None`; match
+        those on the message, or catch the `MigrationRefused` base.
         """
         self.migration = migration
         """The migration number the refusal names, or `None`."""
