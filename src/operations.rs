@@ -588,7 +588,7 @@ fn projected_record_fields(plan: &QueryPlan) -> PyResult<Option<Vec<ProjectedFie
 }
 
 /// True when a record plan contains at least one aggregate field — the plan
-/// is then an AGGREGATE PROJECTION (CONTEXT.md): every plain field is a
+/// is then an AGGREGATE PROJECTION (GLOSSARY.md): every plain field is a
 /// group key and the renderer derives GROUP BY from the plan (#295).
 fn record_plan_has_aggregate(fields: &[ProjectedField]) -> bool {
     fields

@@ -1,6 +1,6 @@
 # Auto-migrate pass ownership: the create pass creates missing tables; the reconciliation pass owns every existing table
 
-The auto-migrate **create pass** (`CONTEXT.md`) brings missing tables into
+The auto-migrate **create pass** (`GLOSSARY.md`) brings missing tables into
 existence — table, columns, indexes, constraints, together — and leaves a
 table that already exists completely untouched, whatever its shape. All DDL
 against an existing table belongs to the **reconciliation pass**

@@ -344,7 +344,7 @@ class _ProjectedField(NamedTuple):
     """One projected record field, resolved at build time (#279/#293/#294).
 
     ``name`` is the output field name on the record — the dict key when the
-    selector is dict-returning (an output alias, CONTEXT.md), the bare leaf
+    selector is dict-returning (an output alias, GLOSSARY.md), the bare leaf
     column name otherwise. ``column`` is the source column and ``path`` the
     relation path to its table (``()`` = root model; non-empty is traversed
     projection). ``agg`` is the aggregate function applied to the source
@@ -374,7 +374,7 @@ def _resolve_projection_selector(
     field (``lambda t: t.amount``), a tuple/list of fields
     (``lambda t: (t.id, t.account.name)``), or a dict whose keys name the
     output fields (``lambda t: {"account_name": t.account.name}`` — output
-    aliases, CONTEXT.md). Fields may traverse declared forward-FK relations
+    aliases, GLOSSARY.md). Fields may traverse declared forward-FK relations
     at any depth; every hop validates at build time with did-you-mean,
     exactly like ``where()``/``order_by()``. Mixed nesting — a dict inside a
     tuple, a tuple inside a dict — is rejected: one selector, one shape.
@@ -457,7 +457,7 @@ def _projection_item_field(item: Any, *, context: str) -> _ProjectedField:
 
     Shared by the single-field and tuple forms; ``context`` names the
     selector shape in error messages. The output name defaults to the bare
-    leaf column name (CONTEXT.md: Traversed projection).
+    leaf column name (GLOSSARY.md: Traversed projection).
     """
     if isinstance(item, dict):
         raise TypeError(
@@ -506,7 +506,7 @@ def _collect_tuple_projection(items: tuple[Any, ...]) -> tuple[_ProjectedField, 
 def _collect_dict_projection(result: dict[Any, Any]) -> tuple[_ProjectedField, ...]:
     """Validate a dict selector into aliased fields (#293).
 
-    Keys are output field names (CONTEXT.md: Output alias) and must be
+    Keys are output field names (GLOSSARY.md: Output alias) and must be
     strings; values are field references (which may traverse) or aggregate
     expressions (``t.amount.sum()`` — #294, dict-only: aggregate fields are
     user-named). Nesting a tuple, list, or dict as a value is rejected —
@@ -1601,7 +1601,7 @@ class ProjectedQuery(Query[T]):
                 )
 
     def _has_aggregate(self) -> bool:
-        """True when this is an AGGREGATE PROJECTION (CONTEXT.md): at least
+        """True when this is an AGGREGATE PROJECTION (GLOSSARY.md): at least
         one aggregate field, so every plain field is a group key (#295)."""
         return any(field.agg for field in self._projection)
 

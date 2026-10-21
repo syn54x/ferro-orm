@@ -1,4 +1,4 @@
-"""``compile_query`` returns one CompiledQuery artifact (CONTEXT.md term).
+"""``compile_query`` returns one CompiledQuery artifact (GLOSSARY.md term).
 
 The wire JSON and the hop-class map are two views of the same compile: the
 map is collected from the hop facts the payload itself carries, so the two

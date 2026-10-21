@@ -122,7 +122,7 @@ the marker to write instead, so `{compile-only="..."}` or a bare
 Acronyms in prose (DDL, RLS, FK, PK, GUC, FFI, IR, ...) get a hover
 definition from one glossary, `docs/includes/abbreviations.md`, appended to
 every page by `pymdownx.snippets.auto_append` (#701). Its wording follows
-`CONTEXT.md` where `CONTEXT.md` defines the term. A new term goes into that
+`GLOSSARY.md` where `GLOSSARY.md` defines the term. A new term goes into that
 file, never into a page's own abbreviation list.
 
 ### One Annotated idiom for I-7 twins

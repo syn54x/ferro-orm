@@ -3,7 +3,7 @@
 A native Postgres enum type that already exists is an existing schema object,
 so evolving its label set belongs to the **reconciliation pass**
 (`migrate_updates`), not the create pass — the same line ADR-0010 drew for
-indexes. The reconciliation pass performs **label addition** (`CONTEXT.md`):
+indexes. The reconciliation pass performs **label addition** (`GLOSSARY.md`):
 it appends model-declared labels missing from a live ferro-owned enum type,
 and does nothing else. Labels the database has but the model lacks are warned
 about loudly and never removed — rows may still hold them, and old code may

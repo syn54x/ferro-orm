@@ -1,6 +1,6 @@
 # Model instances are never partial; projection returns records via an explicit materialization plan
 
-A model instance always carries a complete row (`CONTEXT.md`: Complete-instance
+A model instance always carries a complete row (`GLOSSARY.md`: Complete-instance
 invariant). Selecting a subset of columns — or an aggregate that belongs to no
 model — returns a **projected record** (`Row`, in the list-like `Rows`
 container), never a partial model instance and never a lazily-completed one.

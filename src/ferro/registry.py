@@ -5,7 +5,7 @@ the metaclass writes to it at import time) owns the model registry, per-model
 SchemaIR envelope + fingerprint caches, join-table bundles, pending
 relations, the modelset artifact, and the provisional/resolved generation
 counters (see "Provisional registration" and "Resolved registration" in
-`CONTEXT.md`).
+`GLOSSARY.md`).
 
 The stores are private; every reader and writer goes through the interface,
 so their agreement invariants have exactly one home:

@@ -365,7 +365,7 @@ ferro/
 ├── .github/
 │   └── workflows/       # CI/CD workflows
 ├── AGENTS.md            # project invariants
-├── CONTEXT.md           # domain vocabulary
+├── GLOSSARY.md           # domain vocabulary
 ├── Cargo.toml           # Rust workspace
 ├── pyproject.toml       # Python package
 └── README.md

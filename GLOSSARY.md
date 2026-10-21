@@ -446,3 +446,11 @@ _Avoid_: Banner, header line, connection line
 **Change summary**:
 What `new` and `check` say a *migration* adds, changes, drops or renames, as counted lists of names by kind (models, enum types, and so on). It is data first and prose second: one plain rendering serves `check`'s `ungenerated` message and the library's error text, and `new` (in both forms) and `check` on a terminal lay their output out from the data.
 _Avoid_: Diff, summary string, change list
+
+**Statement log**:
+Every statement ferro sends to a database, each as one record on the `ferro.sql` logger as it finishes: the SQL with its placeholders, the parameters apart, secrets replaced by `***`, the duration, and the operation it belongs to. Queries, mutations, raw SQL, transaction control, session settings, the catalog probe and DDL alike. Turning the logger on is the only switch.
+_Avoid_: Query log, SQL echo, debug SQL, verbose mode
+
+**Rendered statement**:
+What one `Query` terminal would send, returned by its `.sql()` without sending it: the same SQL and parameters the *statement log* records for the call, produced by the same function, for the database the call would run on. Secrets are `***` here too.
+_Avoid_: Compiled query (that is `compile_query`'s artifact), SQL preview, dry run, pretty-printed query
