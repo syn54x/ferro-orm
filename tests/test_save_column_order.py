@@ -230,3 +230,30 @@ def test_the_upgrade_guide_states_each_write_door_s_column_order():
         "`update()` is unchanged: it lists the columns in the order the call passes them"
         in rest
     )
+
+
+def _upgrade_section() -> str:
+    guide = (
+        Path(__file__).resolve().parents[1] / "docs/pages/upgrading.md"
+    ).read_text()
+    return guide.split("## Upgrading to 0.26", 1)[1].split("\n## ", 1)[0]
+
+
+def test_the_upgrade_guide_states_the_secret_column_change():
+    """0.25 wrote a secret column as the mask, in field order, and made a
+    ``SecretBytes`` column ``varchar``; the 0.26 note says so and says what
+    a 0.25 user must do."""
+    section = _upgrade_section()
+    assert "secret column came last" not in _upgrade_bullet()
+    [bullet] = [line for line in section.splitlines() if "`SecretStr`" in line]
+    for fact in (
+        "`SecretBytes`",
+        "`**********`",
+        "cannot be recovered",
+        "`varchar`",
+        "`BYTEA`",
+        "`BLOB`",
+        "migration",
+    ):
+        assert fact in bullet, fact
+    assert section.split(":", 1)[0].strip().startswith("Five changes")
