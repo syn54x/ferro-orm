@@ -162,6 +162,7 @@ When you know no existing row needs a value (the table is new in production, or 
 
 The two migrations side by side:
 
+<!-- shows: the two migration directories side by side -->
 ```text
 ferro migrate new author_slug                  ferro migrate new author_slug --no-backfill author.slug
 

@@ -87,6 +87,7 @@ How long a DDL statement Ferro runs on Postgres, in a migration step or in an au
 
 How long a run waits for the run lock while another run holds it: `"500ms"`, `"30s"`, `"1m"`, a number of seconds, or `"0"` to wait without a limit. It is the default of `--lock-timeout` on `ferro migrate up`, `down`, `baseline` and `rerecord` (and of `lock_timeout=` on their Python calls); the flag wins. An auto-migrate pass (`connect(auto_migrate=…)`, `ferro.create_tables()`, `ferro.migrate()`) waits for it too, so a replica booting while another one's pass runs waits instead of failing:
 
+<!-- shows: the error a pass raises once lock_timeout runs out -->
 ```text
 connect(auto_migrate=…) gave up waiting for the run lock on public: another ferro migration run or auto-migrate pass held it longer than lock_timeout (30s). Nothing was applied. Wait for that run to finish and try again, or raise lock_timeout; `ferro migrate status` shows a migration run while it holds the lock.
 ```

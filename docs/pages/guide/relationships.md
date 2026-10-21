@@ -14,6 +14,7 @@ Here is a whole program. It creates the tables, adds a team and a player, then r
 
 It prints:
 
+<!-- prints: relationships.py:first -->
 ```text
 Rustaceans ['Ferris']
 ```
@@ -214,6 +215,7 @@ Awaiting a forward relation in a loop runs one query per row. When a query will 
 
 It prints:
 
+<!-- prints: relationships.py:populated -->
 ```text
 Corro | Rustaceans
 Ferris | Rustaceans

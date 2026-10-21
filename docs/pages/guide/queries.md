@@ -14,6 +14,7 @@ Here is a whole program. It connects, opens a session, and asks for every transa
 
 It prints:
 
+<!-- prints: predicates.py:first-query -->
 ```text
 Rent -1450
 To savings -500
@@ -1321,6 +1322,7 @@ Reading a relation runs a query. A list of 100 transactions that shows each acco
 
 It prints:
 
+<!-- prints: populated_relations.py:basic -->
 ```text
 Weekly shop | Checking
 Office coffee | Petty cash

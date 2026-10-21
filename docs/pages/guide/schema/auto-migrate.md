@@ -64,6 +64,7 @@ Rules worth knowing:
 
 - **A new required column needs a literal default.** Existing rows must get a value, so a new required field without a literal default fails the connect:
 
+    <!-- shows: the error connect() raises for this change on an existing table -->
     ```text
     Cannot add NOT NULL column 'author.bio' to an existing table: it has no literal default to backfill existing rows. Make the field nullable, give it a literal default, or generate a reviewed migration with `ferro migrate new`.
     ```
@@ -87,6 +88,7 @@ Rules worth knowing:
 
 SQLite cannot add, change or drop a constraint, a type or a nullability on a table that exists; the only way is to create the table again in its new shape and copy the rows across (a *table rebuild*). Auto-migrate never rebuilds a table, because a rebuild drops whatever the copy does not carry. It raises a `UserWarning` naming the object and the door that can, and changes nothing. Declare `db_check=True` on an existing column `author.kind`, for example, and the connect warns:
 
+<!-- shows: the error connect() raises for this change on an existing SQLite table -->
 ```text
 Check constraint 'ck_author_kind' on column 'author.kind' is declared but missing from the live table, and SQLite cannot add a constraint to an existing column (it requires a full table rebuild). The invariant is not database-enforced; generate a reviewed migration with `ferro migrate new` to apply it.
 ```
@@ -185,6 +187,7 @@ ALTER TABLE "author" ALTER COLUMN "slug" DROP DEFAULT
 
 Under `migrate_updates` alone the default stays, and the pass warns on every start:
 
+<!-- shows: the warning the pass gives on every start -->
 ```text
 author.slug has default '' in the database, none declared; it is left in place: connect(..., migrate_destructive=True) drops it, or run ALTER TABLE "author" ALTER COLUMN "slug" DROP DEFAULT.
 ```
@@ -230,12 +233,14 @@ except ferro.OperationalError as error:
 
 Every auto-migrate pass takes the same run lock `ferro migrate up` takes, so two processes booting together never collide: the second waits, saying so with a `UserWarning`, and sees the first one's DDL:
 
+<!-- shows: the warning a pass gives while another holds the run lock -->
 ```text
 connect(auto_migrate=…) is waiting: another ferro migration run or auto-migrate pass holds the run lock on this database. It goes on once that one finishes.
 ```
 
 It waits up to the project's [`lock_timeout`](../../reference/configuration.md#lock_timeout) (default `30s`; the setting's `"0"` waits without a limit, unlike the CLI's `--lock-timeout 0`, which refuses at once), then refuses:
 
+<!-- shows: the error a pass raises once lock_timeout runs out -->
 ```text
 connect(auto_migrate=…) gave up waiting for the run lock on public: another ferro migration run or auto-migrate pass held it longer than lock_timeout (30s). Nothing was applied. Wait for that run to finish and try again, or raise lock_timeout; `ferro migrate status` shows a migration run while it holds the lock.
 ```

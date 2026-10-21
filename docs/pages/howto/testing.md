@@ -76,6 +76,7 @@ async def test_email_is_unique(db):
 
 Run the file:
 
+<!-- shows: a shell session running pytest -->
 ```text
 $ pytest -q tests/test_users.py
 ..                                                                       [100%]

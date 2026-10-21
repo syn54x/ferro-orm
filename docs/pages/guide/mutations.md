@@ -475,6 +475,7 @@ SQL has no portable `UPDATE ... LIMIT` or `DELETE ... LIMIT`. Rather than change
 
 The error prints:
 
+<!-- prints: mutations.py:mutation-guard -->
 ```text
 delete() does not support limit/offset/after/before: portable SQL has no DELETE ... LIMIT. Remove the .limit()/.offset()/.after()/.before() call, or fetch primary keys first and delete by primary-key set.
 ```
@@ -729,6 +730,7 @@ Every database failure raises a typed exception under `FerroError`, so you never
 
 On SQLite it prints:
 
+<!-- prints: mutations.py:handling-errors -->
 ```text
 2067
 None

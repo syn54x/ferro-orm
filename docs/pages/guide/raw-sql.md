@@ -28,6 +28,7 @@ Here is a whole program. It connects, opens a session, adds two clicks and a sig
 
 It prints:
 
+<!-- prints: raw_sql.py:first -->
 ```text
 [{'kind': 'click', 'n': 2}, {'kind': 'signup', 'n': 1}]
 ```

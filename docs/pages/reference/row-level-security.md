@@ -203,6 +203,7 @@ A session that only inherits settings from an outer Postgres session opens on SQ
 
 `connect(migrate_updates=True)` (or `migrate_destructive=True`) warns when the connecting role is neither a superuser nor `BYPASSRLS` and an existing table it migrates declares `RowSecurity(force=True)`:
 
+<!-- shows: the warning connect() gives for a forced table -->
 ```text
 ferro auto-migrate: The connected role is neither a superuser nor BYPASSRLS, and this migration touches table(s) 'invoice' with FORCE ROW LEVEL SECURITY. Row policies apply to the migrating role too, so a backfill or data step can silently see and update zero rows. Migrate as a role with BYPASSRLS if this pass moves data.
 ```

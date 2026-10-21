@@ -165,6 +165,7 @@ Removing a label in the release that stops writing it breaks the release still s
 
 The member stays, so a row that holds `paused` still loads as `Status.PAUSED`. Writing the label is refused, at construction and by attribute assignment. `Author(name="Grace Hopper", email="grace@example.com", bio="Admiral", status="paused")` raises a validation error:
 
+<!-- shows: the validation error for a retired label -->
 ```text
 1 validation error for Author
 status

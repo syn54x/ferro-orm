@@ -126,6 +126,20 @@ async def backends(url: str = "sqlite::memory:") -> None:
     # --8<-- [end:backends]
 
 
+async def unsupported_scheme() -> None:
+    reset_engine()
+    # --8<-- [start:unsupported-scheme]
+    from ferro import InterfaceError, connect
+
+    try:
+        await connect("mysql://user:password@localhost:3306/app")
+    except InterfaceError as error:
+        print(f"InterfaceError: {error}")
+    else:
+        raise AssertionError("expected InterfaceError")
+    # --8<-- [end:unsupported-scheme]
+
+
 async def main() -> None:
     # --8<-- [start:connect]
     await connect("sqlite::memory:", auto_migrate=True)
@@ -136,6 +150,7 @@ async def main() -> None:
     await sessionless()
     await without_identity_map()
     await backends()
+    await unsupported_scheme()
     print("concepts: ok")
 
 

@@ -65,6 +65,7 @@ async def start() -> None:
 
 Behind its migrations, it raises `PendingMigrationsError`:
 
+<!-- shows: the error require_applied() raises on a database behind its migrations -->
 ```text
 ferro.migrations.PendingMigrationsError: ferro.migrations: this database is behind its migrations.
   pending  0002_author_slug
@@ -125,6 +126,7 @@ In a rolling deploy, old code keeps running while the migration applies. A migra
 
 Between the two, release 0 code meets a database that has applied a migration its checkout does not have. `require_applied()` and `up()` refuse that by default:
 
+<!-- shows: the error require_applied() raises on a database ahead of its checkout -->
 ```text
 ferro.migrations.DatabaseAheadError: ferro migrate: this database has applied 0008_author_slug, which is not in migrations/.
 The directory is behind the database: check out the branch that holds it. Nothing was applied.
@@ -139,6 +141,7 @@ await ferro.migrations.require_applied(allow_ahead="expand-only")
 
 It lets the database through when every step the old checkout lacks is an *expand* step: one the old release's writes keep succeeding beside. `0008_author_slug` adds a nullable column, so release 0 starts. A database ahead by a *contract* step is refused, naming the first one (`ferro migrate up --allow-ahead=expand-only` does the same):
 
+<!-- shows: the error allow_ahead="expand-only" raises for a contract step -->
 ```text
 ferro.migrations.DatabaseAheadError: ferro migrate: this database has applied 0008_drop_bio, which is not in migrations/.
 The directory is behind the database: check out the branch that holds it.
