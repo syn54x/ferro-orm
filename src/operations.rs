@@ -13,6 +13,7 @@ use crate::session_settings::{
     hold_pinned_connection, merge_setting, pinned_session, release_pinned_connection,
     settings_changed,
 };
+use crate::sql_log::SecretValues;
 use crate::state::{
     ConnectionSlot, Dialect, TRANSACTION_REGISTRY, TransactionConnection, TransactionHandle,
     connection_for_route, engine_for_connection, ensure_session_idle_for_close, register_session,
@@ -1401,9 +1402,11 @@ impl BuiltStatement {
 }
 
 /// The statement-log context an operation entry opens (ADR-0057), or `None`
-/// when `ferro.sql` is not enabled for `DEBUG`. Asked once, while the entry
-/// holds the GIL; `secret_values` is called only when the log is on, so an
-/// operation with the log off builds no secret-value set.
+/// when `ferro.sql` is not enabled for `DEBUG`. This is the operation's one
+/// read of the switch, made while the entry holds the GIL; `secret_values`
+/// is called only when the log is on, so an operation with the log off
+/// builds no secret-value set and, when Python hands its values over as a
+/// lazy iterable, collects none.
 ///
 /// # Errors
 /// The `PyErr` from asking the logger, or from `secret_values`.
@@ -1414,26 +1417,40 @@ fn operation_log<F>(
     secret_values: F,
 ) -> PyResult<Option<crate::sql_log::StatementContext>>
 where
-    F: FnOnce(Python<'_>) -> PyResult<Vec<EngineBindValue>>,
+    F: FnOnce(Python<'_>) -> PyResult<SecretValues>,
 {
     if !crate::sql_log::enabled(py)? {
         return Ok(None);
     }
     let mut context = crate::sql_log::StatementContext::new(operation, connection);
-    context.secret_values = secret_values(py)?;
+    context.secret_values = std::sync::Arc::new(secret_values(py)?);
     Ok(Some(context))
 }
 
 /// No secret values: an operation that binds none (a primary key, link ids,
 /// transaction control).
-fn no_secrets(_py: Python<'_>) -> PyResult<Vec<EngineBindValue>> {
-    Ok(Vec::new())
+fn no_secrets(_py: Python<'_>) -> PyResult<SecretValues> {
+    Ok(SecretValues::default())
 }
 
-/// The binds the secret values Python collected make, through the same
-/// conversion a raw bind takes (a secret is a `str` or `bytes`).
-fn secret_binds_from_py(values: &[Bound<'_, PyAny>]) -> PyResult<Vec<EngineBindValue>> {
-    values.iter().map(python_to_engine_bind_value).collect()
+/// Add to `out` the secret values Python collected (any iterable, `None` for
+/// none), each through the conversion a raw bind takes (a secret is a `str`
+/// or `bytes`). Iterating is what runs a lazy Python collector.
+fn secret_binds_from_py(values: Option<&Bound<'_, PyAny>>, out: &mut SecretValues) -> PyResult<()> {
+    if let Some(values) = values {
+        for value in values.try_iter()? {
+            out.insert(python_to_engine_bind_value(&value?)?);
+        }
+    }
+    Ok(())
+}
+
+/// The secret-value set Python handed over, and nothing else: a raw
+/// statement, whose binds no column names.
+fn python_secret_values(values: Option<&Bound<'_, PyAny>>) -> PyResult<SecretValues> {
+    let mut out = SecretValues::default();
+    secret_binds_from_py(values, &mut out)?;
+    Ok(out)
 }
 
 /// The model classes the Python registry holds, keyed by identity.
@@ -1541,7 +1558,7 @@ fn collect_secret_leaf_binds(
     scope_table: &str,
     joins: &[ferro_schema_ir::QueryJoin],
     secret: &mut SecretColumns<'_>,
-    out: &mut Vec<EngineBindValue>,
+    out: &mut SecretValues,
 ) -> PyResult<()> {
     use ferro_schema_ir::QueryNode;
     match node {
@@ -1578,11 +1595,13 @@ fn collect_secret_leaf_binds(
     Ok(())
 }
 
-/// The values a query binds to secret columns: every predicate literal
-/// compared against a column whose field the model (or a traversed hop's
-/// model) declares `SecretStr` / `SecretBytes`, and every literal `SET` of
-/// one. Added to the operation's secret-value set, beside the secret-typed
-/// literals Python collected.
+/// Add to `out` the values a query binds to secret columns: every
+/// predicate literal compared against a column whose field the model (or a
+/// traversed hop's model) declares `SecretStr` / `SecretBytes`, every
+/// literal `SET` of one, and every keyset position (`after` / `before`)
+/// value bound against a secret order key, root or traversed. A `SET`
+/// expression (`+`, `-`, `merge`) never targets a secret column: it takes a
+/// numeric or JSON column only.
 ///
 /// # Errors
 /// The `PyErr` from resolving a hop's model class or reading its converter
@@ -1591,57 +1610,81 @@ fn plan_secret_values(
     py: Python<'_>,
     root_cls: &Bound<'_, PyAny>,
     plan: &QueryPlan,
-) -> PyResult<Vec<EngineBindValue>> {
+    out: &mut SecretValues,
+) -> PyResult<()> {
     let identity = crate::state::model_identity(root_cls)?;
     let root_table = crate::state::registered_model(&identity)?
         .table_name
         .clone();
     let mut secret = SecretColumns::new(py, &root_table, root_cls)?;
-    let mut out = Vec::new();
     for node in &plan.where_clause {
-        collect_secret_leaf_binds(node, &root_table, &plan.joins, &mut secret, &mut out)?;
+        collect_secret_leaf_binds(node, &root_table, &plan.joins, &mut secret, out)?;
     }
     for assignment in &plan.set_assignments {
         if let QueryValueExpr::Literal { value } = &assignment.value
             && secret.contains(&root_table, &assignment.column)?
         {
-            crate::sql_log::literal_secret_binds(&value.kind, &value.value, &mut out);
+            crate::sql_log::literal_secret_binds(&value.kind, &value.value, out);
         }
     }
+    for position in [&plan.after, &plan.before].into_iter().flatten() {
+        for (order, value) in plan.order_by.iter().zip(position) {
+            let table = table_for_path(&root_table, &plan.joins, &order.path)?;
+            if secret.contains(&table, &order.column)? {
+                crate::sql_log::literal_secret_binds(&value.kind, &value.value, out);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The secret-value set of one query terminal, the same for the call and
+/// its `.sql()`: the secret-typed literals Python collected as it compiled
+/// (`python_collected`), and every value the plan binds to a secret column.
+///
+/// # Errors
+/// As [`plan_secret_values`], and the `PyErr` from converting a value Python
+/// collected.
+fn query_secret_values(
+    py: Python<'_>,
+    name: &str,
+    plan: &QueryPlan,
+    python_collected: Option<&Bound<'_, PyAny>>,
+) -> PyResult<SecretValues> {
+    let mut out = SecretValues::default();
+    secret_binds_from_py(python_collected, &mut out)?;
+    plan_secret_values(py, &model_class_for(py, name)?, plan, &mut out)?;
     Ok(out)
 }
 
-/// The values save payloads bind to the secret columns of `identity`'s
-/// model.
+/// The secret-value set of a write of `rows` to `identity`'s model: the
+/// secret values Python collected from the instances (`python_collected`),
+/// and every value a row binds to a secret column. Both name the same
+/// values for a declared secret field; the set holds each once.
+///
+/// # Errors
+/// The `PyErr` from resolving the model class, reading its converter
+/// registry, or converting a value.
 fn payload_secret_values(
     py: Python<'_>,
     identity: &str,
     rows: &[Bound<'_, pyo3::types::PyDict>],
-) -> PyResult<Vec<EngineBindValue>> {
+    python_collected: Option<&Bound<'_, PyAny>>,
+) -> PyResult<SecretValues> {
+    let mut out = SecretValues::default();
+    secret_binds_from_py(python_collected, &mut out)?;
     let cls = model_class_for(py, identity)?;
     let columns = crate::sql_log::secret_columns_for(py, &cls)?;
-    let mut out = Vec::new();
     for row in rows {
         for column in &columns {
             if let Some(value) = row.get_item(column)?
                 && !value.is_none()
             {
-                out.push(python_to_engine_bind_value(&value)?);
+                out.insert(python_to_engine_bind_value(&value)?);
             }
         }
     }
     Ok(out)
-}
-
-/// The secret-value set of an operation: what Python collected, plus what
-/// the entry found bound to secret columns.
-fn operation_secret_values(
-    python_collected: &[Bound<'_, PyAny>],
-    found: Vec<EngineBindValue>,
-) -> PyResult<Vec<EngineBindValue>> {
-    let mut values = secret_binds_from_py(python_collected)?;
-    values.extend(found);
-    Ok(values)
 }
 
 /// One execution route for an operation: a transaction's dedicated
@@ -2897,21 +2940,23 @@ fn build_update_by_pk_sql(
 /// Returns a `PyErr` if the engine is not initialized, the model is not
 /// registered, the mode is unknown, or a column value cannot be bound.
 #[pyfunction]
-#[pyo3(signature = (name, data, route, mode="insert", *, secret_values=Vec::new()))]
+#[pyo3(signature = (name, data, route, mode="insert", *, secret_values=None))]
 pub fn save_record<'py>(
     py: Python<'py>,
     name: String,
     data: Bound<'py, pyo3::types::PyDict>,
     route: Py<crate::state::RouteHandle>,
     mode: &str,
-    secret_values: Vec<Bound<'py, PyAny>>,
+    secret_values: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let bind_inputs = bind_inputs_from_py(&data)?; // GIL held here, before the async move
     let mode = parse_save_mode(mode)?;
     let log = operation_log(py, "save", &route.get().connection_name, |py| {
-        operation_secret_values(
-            &secret_values,
-            payload_secret_values(py, &name, std::slice::from_ref(&data))?,
+        payload_secret_values(
+            py,
+            &name,
+            std::slice::from_ref(&data),
+            secret_values.as_ref(),
         )
     })?;
     let operation = async move {
@@ -3001,19 +3046,21 @@ pub fn save_record<'py>(
 /// is missing/null; `PyRuntimeError` on registry failures; typed
 /// `ferro.exceptions` subclasses on database errors.
 #[pyfunction]
-#[pyo3(signature = (name, data, route, *, secret_values=Vec::new()))]
+#[pyo3(signature = (name, data, route, *, secret_values=None))]
 pub fn update_record<'py>(
     py: Python<'py>,
     name: String,
     data: Bound<'py, pyo3::types::PyDict>,
     route: Py<crate::state::RouteHandle>,
-    secret_values: Vec<Bound<'py, PyAny>>,
+    secret_values: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let bind_inputs = bind_inputs_from_py(&data)?; // GIL held here, before the async move
     let log = operation_log(py, "save", &route.get().connection_name, |py| {
-        operation_secret_values(
-            &secret_values,
-            payload_secret_values(py, &name, std::slice::from_ref(&data))?,
+        payload_secret_values(
+            py,
+            &name,
+            std::slice::from_ref(&data),
+            secret_values.as_ref(),
         )
     })?;
     let operation = async move {
@@ -3109,20 +3156,20 @@ pub fn update_record<'py>(
 /// # Errors
 /// `PyRuntimeError` on registry/execute failures; `PyTypeError` for unbindable values.
 #[pyfunction]
-#[pyo3(signature = (name, rows, route, *, secret_values=Vec::new()))]
+#[pyo3(signature = (name, rows, route, *, secret_values=None))]
 pub fn save_bulk_records<'py>(
     py: Python<'py>,
     name: String,
     rows: Vec<Bound<'py, pyo3::types::PyDict>>,
     route: Py<crate::state::RouteHandle>,
-    secret_values: Vec<Bound<'py, PyAny>>,
+    secret_values: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let record_inputs: Vec<Vec<(String, BindInput)>> = rows
         .iter()
         .map(bind_inputs_from_py)
         .collect::<PyResult<_>>()?;
     let log = operation_log(py, "bulk_create", &route.get().connection_name, |py| {
-        operation_secret_values(&secret_values, payload_secret_values(py, &name, &rows)?)
+        payload_secret_values(py, &name, &rows, secret_values.as_ref())
     })?;
     let operation = async move {
         let r = route.get();
@@ -3560,7 +3607,7 @@ async fn build_fetch(
 ///     projected records.
 #[pyfunction]
 #[pyo3(signature = (
-    cls, query_ir_json, route, record_cls=None, hop_classes=None, *, secret_values=Vec::new()
+    cls, query_ir_json, route, record_cls=None, hop_classes=None, *, secret_values=None
 ))]
 pub fn fetch_filtered<'py>(
     py: Python<'py>,
@@ -3569,7 +3616,7 @@ pub fn fetch_filtered<'py>(
     route: Py<crate::state::RouteHandle>,
     record_cls: Option<Bound<'py, PyAny>>,
     hop_classes: Option<Bound<'py, pyo3::types::PyDict>>,
-    secret_values: Vec<Bound<'py, PyAny>>,
+    secret_values: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let name = crate::state::model_identity(&cls)?;
     let (mut plan, request) = fetch_request(&query_ir_json, record_cls, hop_classes)?;
@@ -3581,10 +3628,7 @@ pub fn fetch_filtered<'py>(
     } = request;
     let cls_py = cls.unbind();
     let log = operation_log(py, "fetch", &route.get().connection_name, |py| {
-        operation_secret_values(
-            &secret_values,
-            plan_secret_values(py, cls_py.bind(py), &plan)?,
-        )
+        query_secret_values(py, &name, &plan, secret_values.as_ref())
     })?;
 
     let operation = async move {
@@ -3979,7 +4023,7 @@ async fn build_count(
 ///     tx_id (str | None): Optional active transaction.
 ///     using (str | None): Connection override.
 ///     session_id (str | None): Session-scoped routing when set.
-///     secret_values (list[object]): The secret-typed literals the query
+///     secret_values (Iterable[object]): The secret-typed literals the query
 ///         compiled with, masked in the statement log.
 ///     operation (str): `"count"`, or `"exists"` when the count answers
 ///         `exists()`; names the statement-log records.
@@ -3991,21 +4035,18 @@ async fn build_count(
 /// `PyRuntimeError` on registry, planning, or SQL failures; `PyValueError`
 /// for an unknown `operation`.
 #[pyfunction]
-#[pyo3(signature = (name, query_ir_json, route, *, secret_values=Vec::new(), operation="count"))]
+#[pyo3(signature = (name, query_ir_json, route, *, secret_values=None, operation="count"))]
 pub fn count_filtered<'py>(
     py: Python<'py>,
     name: String,
     query_ir_json: String,
     route: Py<crate::state::RouteHandle>,
-    secret_values: Vec<Bound<'py, PyAny>>,
+    secret_values: Option<Bound<'py, PyAny>>,
     operation: &str,
 ) -> PyResult<Bound<'py, PyAny>> {
     let (mut plan, operation) = count_plan(&query_ir_json, operation)?;
     let log = operation_log(py, operation, &route.get().connection_name, |py| {
-        operation_secret_values(
-            &secret_values,
-            plan_secret_values(py, &model_class_for(py, &name)?, &plan)?,
-        )
+        query_secret_values(py, &name, &plan, secret_values.as_ref())
     })?;
 
     let operation = async move {
@@ -4236,20 +4277,17 @@ async fn build_delete(
 /// # Errors
 /// `PyRuntimeError` on planning or execute failure.
 #[pyfunction]
-#[pyo3(signature = (name, query_ir_json, route, *, secret_values=Vec::new()))]
+#[pyo3(signature = (name, query_ir_json, route, *, secret_values=None))]
 pub fn delete_filtered<'py>(
     py: Python<'py>,
     name: String,
     query_ir_json: String,
     route: Py<crate::state::RouteHandle>,
-    secret_values: Vec<Bound<'py, PyAny>>,
+    secret_values: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let mut plan = delete_plan(&query_ir_json)?;
     let log = operation_log(py, "delete", &route.get().connection_name, |py| {
-        operation_secret_values(
-            &secret_values,
-            plan_secret_values(py, &model_class_for(py, &name)?, &plan)?,
-        )
+        query_secret_values(py, &name, &plan, secret_values.as_ref())
     })?;
 
     let operation = async move {
@@ -4385,20 +4423,17 @@ async fn build_update(
 /// # Errors
 /// `PyTypeError` for unbindable column values; `PyRuntimeError` on execute failure.
 #[pyfunction]
-#[pyo3(signature = (name, query_ir_json, route, *, secret_values=Vec::new()))]
+#[pyo3(signature = (name, query_ir_json, route, *, secret_values=None))]
 pub fn update_filtered<'py>(
     py: Python<'py>,
     name: String,
     query_ir_json: String,
     route: Py<crate::state::RouteHandle>,
-    secret_values: Vec<Bound<'py, PyAny>>,
+    secret_values: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let mut plan = update_plan(&name, &query_ir_json)?;
     let log = operation_log(py, "update", &route.get().connection_name, |py| {
-        operation_secret_values(
-            &secret_values,
-            plan_secret_values(py, &model_class_for(py, &name)?, &plan)?,
-        )
+        query_secret_values(py, &name, &plan, secret_values.as_ref())
     })?;
     let operation = async move {
         let r = route.get();
@@ -4447,12 +4482,13 @@ pub fn update_filtered<'py>(
 /// The `PyErr` from converting a bind to Python.
 fn rendered_parts(
     statement: &BuiltStatement,
-    secrets: &[EngineBindValue],
+    secrets: &SecretValues,
     backend: Dialect,
 ) -> PyResult<Py<PyAny>> {
     use pyo3::IntoPyObjectExt;
+    let mask = secrets.mask(&statement.binds);
     Python::attach(|py| {
-        let (params, mask) = crate::sql_log::shown_params(py, &statement.binds, secrets)?;
+        let (params, mask) = crate::sql_log::shown_params(py, &statement.binds, &mask)?;
         Ok(pyo3::types::PyTuple::new(
             py,
             [
@@ -4496,7 +4532,7 @@ macro_rules! render_on_route {
 ///     route (RouteHandle): The resolved route.
 ///     record_cls (PyAny | None): As for `fetch_filtered`.
 ///     hop_classes (dict[str, type] | None): As for `fetch_filtered`.
-///     secret_values (list[object]): The secret-typed literals the query
+///     secret_values (Iterable[object]): The secret-typed literals the query
 ///         compiled with, masked in the answer.
 ///
 /// Returns:
@@ -4507,7 +4543,7 @@ macro_rules! render_on_route {
 /// The errors `fetch_filtered` raises before it sends.
 #[pyfunction]
 #[pyo3(signature = (
-    cls, query_ir_json, route, record_cls=None, hop_classes=None, *, secret_values=Vec::new()
+    cls, query_ir_json, route, record_cls=None, hop_classes=None, *, secret_values=None
 ))]
 pub fn render_fetch<'py>(
     py: Python<'py>,
@@ -4516,11 +4552,11 @@ pub fn render_fetch<'py>(
     route: Py<crate::state::RouteHandle>,
     record_cls: Option<Bound<'py, PyAny>>,
     hop_classes: Option<Bound<'py, pyo3::types::PyDict>>,
-    secret_values: Vec<Bound<'py, PyAny>>,
+    secret_values: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let name = crate::state::model_identity(&cls)?;
     let (mut plan, request) = fetch_request(&query_ir_json, record_cls, hop_classes)?;
-    let secrets = operation_secret_values(&secret_values, plan_secret_values(py, &cls, &plan)?)?;
+    let secrets = query_secret_values(py, &name, &plan, secret_values.as_ref())?;
     let log = operation_log(py, "fetch", &route.get().connection_name, no_secrets)?;
     let rendering = async move {
         render_on_route!(route, secrets, |engine, exec, backend| async {
@@ -4547,7 +4583,7 @@ pub fn render_fetch<'py>(
 ///     name (str): Model class name.
 ///     query_ir_json (str): Serialized Query IR envelope JSON.
 ///     route (RouteHandle): The resolved route.
-///     secret_values (list[object]): The secret-typed literals the query
+///     secret_values (Iterable[object]): The secret-typed literals the query
 ///         compiled with, masked in the answer.
 ///     operation (str): `"count"` or `"exists"`, as for `count_filtered`.
 ///
@@ -4558,20 +4594,17 @@ pub fn render_fetch<'py>(
 /// # Errors
 /// The errors `count_filtered` raises before it sends.
 #[pyfunction]
-#[pyo3(signature = (name, query_ir_json, route, *, secret_values=Vec::new(), operation="count"))]
+#[pyo3(signature = (name, query_ir_json, route, *, secret_values=None, operation="count"))]
 pub fn render_count<'py>(
     py: Python<'py>,
     name: String,
     query_ir_json: String,
     route: Py<crate::state::RouteHandle>,
-    secret_values: Vec<Bound<'py, PyAny>>,
+    secret_values: Option<Bound<'py, PyAny>>,
     operation: &str,
 ) -> PyResult<Bound<'py, PyAny>> {
     let (mut plan, operation) = count_plan(&query_ir_json, operation)?;
-    let secrets = operation_secret_values(
-        &secret_values,
-        plan_secret_values(py, &model_class_for(py, &name)?, &plan)?,
-    )?;
+    let secrets = query_secret_values(py, &name, &plan, secret_values.as_ref())?;
     let log = operation_log(py, operation, &route.get().connection_name, no_secrets)?;
     let rendering = async move {
         render_on_route!(route, secrets, |engine, exec, backend| build_count(
@@ -4588,7 +4621,7 @@ pub fn render_count<'py>(
 ///     name (str): Model class name.
 ///     query_ir_json (str): Serialized Query IR envelope JSON.
 ///     route (RouteHandle): The resolved route.
-///     secret_values (list[object]): The secret-typed literals the query
+///     secret_values (Iterable[object]): The secret-typed literals the query
 ///         compiled with, masked in the answer.
 ///
 /// Returns:
@@ -4598,19 +4631,16 @@ pub fn render_count<'py>(
 /// # Errors
 /// The errors `update_filtered` raises before it sends.
 #[pyfunction]
-#[pyo3(signature = (name, query_ir_json, route, *, secret_values=Vec::new()))]
+#[pyo3(signature = (name, query_ir_json, route, *, secret_values=None))]
 pub fn render_update<'py>(
     py: Python<'py>,
     name: String,
     query_ir_json: String,
     route: Py<crate::state::RouteHandle>,
-    secret_values: Vec<Bound<'py, PyAny>>,
+    secret_values: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let mut plan = update_plan(&name, &query_ir_json)?;
-    let secrets = operation_secret_values(
-        &secret_values,
-        plan_secret_values(py, &model_class_for(py, &name)?, &plan)?,
-    )?;
+    let secrets = query_secret_values(py, &name, &plan, secret_values.as_ref())?;
     let log = operation_log(py, "update", &route.get().connection_name, no_secrets)?;
     let rendering = async move {
         render_on_route!(route, secrets, |engine, exec, backend| build_update(
@@ -4627,7 +4657,7 @@ pub fn render_update<'py>(
 ///     name (str): Model class name.
 ///     query_ir_json (str): Serialized Query IR envelope JSON.
 ///     route (RouteHandle): The resolved route.
-///     secret_values (list[object]): The secret-typed literals the query
+///     secret_values (Iterable[object]): The secret-typed literals the query
 ///         compiled with, masked in the answer.
 ///
 /// Returns:
@@ -4637,19 +4667,16 @@ pub fn render_update<'py>(
 /// # Errors
 /// The errors `delete_filtered` raises before it sends.
 #[pyfunction]
-#[pyo3(signature = (name, query_ir_json, route, *, secret_values=Vec::new()))]
+#[pyo3(signature = (name, query_ir_json, route, *, secret_values=None))]
 pub fn render_delete<'py>(
     py: Python<'py>,
     name: String,
     query_ir_json: String,
     route: Py<crate::state::RouteHandle>,
-    secret_values: Vec<Bound<'py, PyAny>>,
+    secret_values: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let mut plan = delete_plan(&query_ir_json)?;
-    let secrets = operation_secret_values(
-        &secret_values,
-        plan_secret_values(py, &model_class_for(py, &name)?, &plan)?,
-    )?;
+    let secrets = query_secret_values(py, &name, &plan, secret_values.as_ref())?;
     let log = operation_log(py, "delete", &route.get().connection_name, no_secrets)?;
     let rendering = async move {
         render_on_route!(route, secrets, |engine, exec, backend| build_delete(
@@ -5357,14 +5384,14 @@ fn get_raw_tx_conn(
 ///   not a supported primitive (the Python `_marshal` wrapper guarantees this
 ///   never trips in normal use).
 #[pyfunction]
-#[pyo3(signature = (sql, args, route, autocommit=false, *, secret_values=Vec::new()))]
+#[pyo3(signature = (sql, args, route, autocommit=false, *, secret_values=None))]
 pub fn raw_execute<'py>(
     py: Python<'py>,
     sql: String,
     args: Vec<Bound<'py, PyAny>>,
     route: Py<crate::state::RouteHandle>,
     autocommit: bool,
-    secret_values: Vec<Bound<'py, PyAny>>,
+    secret_values: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let bind_values: Vec<EngineBindValue> = args
         .iter()
@@ -5384,7 +5411,7 @@ pub fn raw_execute<'py>(
     };
     let tx_conn = get_raw_tx_conn(route_tx_id, route_session_id.as_deref())?;
     let log = operation_log(py, "raw", &route_connection_name, |_| {
-        secret_binds_from_py(&secret_values)
+        python_secret_values(secret_values.as_ref())
     })?;
 
     let operation = async move {
@@ -5428,13 +5455,13 @@ pub fn raw_execute<'py>(
 /// UUID/datetime/JSON columns come back as strings — Ferro does not decode them
 /// for raw SQL. If you want typed rows, use the ORM.
 #[pyfunction]
-#[pyo3(signature = (sql, args, route, *, secret_values=Vec::new()))]
+#[pyo3(signature = (sql, args, route, *, secret_values=None))]
 pub fn raw_fetch_all<'py>(
     py: Python<'py>,
     sql: String,
     args: Vec<Bound<'py, PyAny>>,
     route: Py<crate::state::RouteHandle>,
-    secret_values: Vec<Bound<'py, PyAny>>,
+    secret_values: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let bind_values: Vec<EngineBindValue> = args
         .iter()
@@ -5450,7 +5477,7 @@ pub fn raw_fetch_all<'py>(
     };
     let tx_conn = get_raw_tx_conn(route_tx_id, route_session_id.as_deref())?;
     let log = operation_log(py, "raw", &route_connection_name, |_| {
-        secret_binds_from_py(&secret_values)
+        python_secret_values(secret_values.as_ref())
     })?;
 
     let operation = async move {
@@ -5501,13 +5528,13 @@ pub fn raw_fetch_all<'py>(
 /// Values are wire-close primitives (`str | int | float | bool | bytes | None`).
 /// UUID/datetime/JSON columns come back as strings — use the ORM for typed hydration.
 #[pyfunction]
-#[pyo3(signature = (sql, args, route, *, secret_values=Vec::new()))]
+#[pyo3(signature = (sql, args, route, *, secret_values=None))]
 pub fn raw_fetch_one<'py>(
     py: Python<'py>,
     sql: String,
     args: Vec<Bound<'py, PyAny>>,
     route: Py<crate::state::RouteHandle>,
-    secret_values: Vec<Bound<'py, PyAny>>,
+    secret_values: Option<Bound<'py, PyAny>>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let bind_values: Vec<EngineBindValue> = args
         .iter()
@@ -5523,7 +5550,7 @@ pub fn raw_fetch_one<'py>(
     };
     let tx_conn = get_raw_tx_conn(route_tx_id, route_session_id.as_deref())?;
     let log = operation_log(py, "raw", &route_connection_name, |_| {
-        secret_binds_from_py(&secret_values)
+        python_secret_values(secret_values.as_ref())
     })?;
 
     let operation = async move {

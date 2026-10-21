@@ -25,12 +25,9 @@ import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Mapping
 
-from pydantic import SecretBytes, SecretStr
-
+from .. import _bind_payload
 from .._bind_payload import (
     canonicalize_wire_scalar,
-    secret_values_of,
-    unwrap_secret,
     update_bind_payload,
 )
 from ..state import resolve_compile_connection_name
@@ -947,29 +944,20 @@ class CompiledQuery:
     masks a bound parameter equal to any of these."""
 
 
-def _collect_secret_literals(value: Any, out: list[object]) -> None:
-    """Append what each secret in one literal hides, reaching into lists."""
-    if isinstance(value, (SecretStr, SecretBytes)):
-        out.append(unwrap_secret(value))
-    elif isinstance(value, (list, tuple, set, frozenset)):
-        for item in value:
-            _collect_secret_literals(item, out)
-
-
-def _collect_node_secrets(node: QueryNode, out: list[object]) -> None:
-    """Append the secret literals of one predicate tree, depth first."""
+def _collect_node_literals(node: QueryNode, out: list[object]) -> None:
+    """Append the literals of one predicate tree, depth first."""
     if node.child is not None:
-        _collect_node_secrets(node.child, out)
+        _collect_node_literals(node.child, out)
     elif node.exists is not None:
         for inner in node.exists.where:
-            _collect_node_secrets(inner, out)
+            _collect_node_literals(inner, out)
     elif node.is_compound:
         if node.left is not None:
-            _collect_node_secrets(node.left, out)
+            _collect_node_literals(node.left, out)
         if node.right is not None:
-            _collect_node_secrets(node.right, out)
+            _collect_node_literals(node.right, out)
     else:
-        _collect_secret_literals(node.value, out)
+        out.append(node.value)
 
 
 def _secret_literals(
@@ -982,19 +970,19 @@ def _secret_literals(
 
     Read from the same values the payload compiles from (predicate literals,
     the SET values of an update, a fetch's position bounds), so the set and
-    the wire cannot disagree about which literals were secrets.
+    the wire cannot disagree about which literals were secrets, and collected
+    in one call to the one collector.
     """
-    out: list[object] = []
+    literals: list[object] = []
     for node in query.where_clause:
-        _collect_node_secrets(node, out)
+        _collect_node_literals(node, literals)
     if verb == "update":
-        out.extend(
-            secret_values_of(recipe if recipe is not None else assignments or {})
-        )
+        sets = recipe if recipe is not None else assignments or {}
+        literals.extend(sets.values())
     if verb == "fetch":
         for bound in (query._after, query._before):
-            _collect_secret_literals(bound or (), out)
-    return tuple(out)
+            literals.extend(bound or ())
+    return _bind_payload.secret_values_in(literals)
 
 
 def _payload_hop_classes(payload: QueryIrPayload) -> dict[str, type] | None:

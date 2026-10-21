@@ -16,6 +16,7 @@ collected and the emitter is never called.
 """
 
 import logging
+import time
 from typing import Annotated
 
 import pytest
@@ -822,6 +823,43 @@ async def test_a_secret_literal_against_a_plain_column_is_redacted(
 
 
 @pytest.mark.asyncio
+async def test_a_plain_position_on_a_secret_order_key_is_redacted(
+    db_url, statement_records
+):
+    """A page token decodes to a plain `str`, and a keyset position binds it
+    against its order key: on a secret key it is masked like any value bound
+    to a secret column, forward, backward and through a traversed key."""
+    await _connect(db_url)
+    async with engines.session():
+        ada = _ada()
+        await ada.save()
+        await SlogNote(id=1, label="hello", account=ada).save()
+        statement_records.clear()
+
+        by_token = (
+            SlogAccount.select()
+            .order_by(lambda account: account.token)
+            .order_by(lambda account: account.id)
+        )
+        await by_token.after(("sk_live_CURSOR", 0)).all()
+        await by_token.before(("sk_live_CURSOR", 0)).all()
+        await (
+            SlogNote.select()
+            .order_by(lambda note: note.account.token)
+            .order_by(lambda note: note.id)
+            .after(("sk_live_CURSOR", 0))
+            .all()
+        )
+
+    records = _sent(statement_records)
+    assert len(records) == 3
+    for record in records:
+        assert REDACTED in record.params
+        assert 0 in record.params
+    _assert_hidden(statement_records, "sk_live_CURSOR")
+
+
+@pytest.mark.asyncio
 async def test_a_secret_raw_argument_is_redacted(db_url, db_backend, statement_records):
     await _connect(db_url)
     ph = _ph(db_backend)
@@ -846,32 +884,36 @@ async def test_a_secret_raw_argument_is_redacted(db_url, db_backend, statement_r
 
 
 @pytest.mark.asyncio
-async def test_with_the_log_off_no_operation_emits_or_collects_secrets(
-    db_url, db_backend, monkeypatch
+@pytest.mark.parametrize("logged", [True, False], ids=["log-on", "log-off"])
+async def test_secret_values_are_collected_once_and_only_when_needed(
+    db_url, db_backend, monkeypatch, logged
 ):
-    import ferro.models
-    import ferro.raw
+    """Every operation collects its secret values through one function,
+    `ferro._bind_payload.secret_values_in`. A query collects them once, as it
+    compiles, because its `.sql()` masks with the same values; every other
+    operation collects them only when the engine, reading the log's one
+    switch, asks for them. With the log off nothing is emitted."""
+    import ferro._bind_payload
 
-    calls: list[dict] = []
-    collected: list[str] = []
-    monkeypatch.setattr(ferro._sql_log, "emit", calls.append)
-    for module, name in (
-        (ferro.models, "secret_values"),
-        (ferro.raw, "secret_values_of"),
-    ):
-        original = getattr(module, name)
+    emitted: list[dict] = []
+    collected: list[object] = []
+    collect = ferro._bind_payload.secret_values_in
 
-        def counting(*args, _original=original, _name=name, **kwargs):
-            collected.append(_name)
-            return _original(*args, **kwargs)
+    def counting(values):
+        found = collect(values)
+        collected.append(found)
+        return found
 
-        monkeypatch.setattr(module, name, counting)
+    monkeypatch.setattr(ferro._sql_log, "emit", emitted.append)
+    monkeypatch.setattr(ferro._bind_payload, "secret_values_in", counting)
     logger = logging.getLogger("ferro.sql")
     level = logger.level
-    logger.setLevel(logging.WARNING)
+    logger.setLevel(logging.DEBUG if logged else logging.WARNING)
+    ph = _ph(db_backend)
     try:
         await _connect(db_url)
         async with engines.session():
+            collected.clear()
             account = _ada()
             await account.save()
             account.token = SecretStr("sk_live_2")
@@ -879,18 +921,80 @@ async def test_with_the_log_off_no_operation_emits_or_collects_secrets(
             await SlogAccount.bulk_create(
                 [SlogAccount(id=2, email="b@example.com", token=SecretStr("sk_b"))]
             )
-            await SlogAccount.where(lambda account: account.token == "sk_b").count()
-            await raw.execute(
-                f"UPDATE slogaccount SET token = {_ph(db_backend)}",
-                SecretStr("sk_live_3"),
-            )
+            await raw.execute(f"UPDATE slogaccount SET token = {ph}", SecretStr("sk_3"))
+            await raw.fetch_one(f"SELECT id FROM slogaccount WHERE token = {ph}", "x")
+            await raw.fetch_all(f"SELECT id FROM slogaccount WHERE id = {ph}", 1)
             async with transaction():
                 await SlogTag(id=1, name="a").save()
+            writes = list(collected)
+
+            collected.clear()
+            by_token = SlogAccount.where(lambda account: account.token == "sk_b")
+            await by_token.first()
+            await by_token.count()
+            await by_token.exists()
+            await by_token.update(token=SecretStr("sk_c"))
+            await SlogAccount.where(lambda account: account.token == "sk_c").delete()
+            await account.delete()
+            queries = list(collected)
     finally:
         logger.setLevel(level)
 
-    assert calls == []
-    assert collected == []
+    assert len(queries) == 6
+    if logged:
+        assert len(writes) == 7
+        assert ("sk_live_1", b"k\x00\xff") in writes
+        assert emitted
+    else:
+        assert writes == []
+        assert emitted == []
+
+
+class _Discard(logging.Handler):
+    """Handles every record and keeps none."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        pass
+
+
+async def _timed_bulk_create(first_id: int, rows: int) -> float:
+    started = time.perf_counter()
+    async with engines.session():
+        await SlogAccount.bulk_create(
+            [
+                SlogAccount(
+                    id=first_id + i,
+                    email=f"{first_id + i}@example.com",
+                    token=SecretStr(f"sk_{first_id + i}"),
+                )
+                for i in range(rows)
+            ]
+        )
+    return time.perf_counter() - started
+
+
+@pytest.mark.asyncio
+async def test_redacting_a_bulk_create_costs_one_lookup_per_bind(db_url):
+    """Each bind is one lookup in the operation's secret-value set, so the log
+    adds cost in proportion to the rows. Matched against a list of every
+    row's secret, every chunk scanned all of them: 20k rows took seconds
+    with the log on against a tenth of a second off."""
+    rows = 20_000
+    await _connect(db_url)
+    logger = logging.getLogger("ferro.sql")
+    level = logger.level
+    handler = _Discard(level=logging.DEBUG)
+    logger.addHandler(handler)
+    try:
+        logger.setLevel(logging.WARNING)
+        off = await _timed_bulk_create(0, rows)
+        logger.setLevel(logging.DEBUG)
+        on = await _timed_bulk_create(rows, rows)
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(level)
+
+    assert on < 4 * off + 1.0, f"log on {on:.2f}s against log off {off:.2f}s"
 
 
 @pytest.mark.asyncio
