@@ -25,16 +25,14 @@ import datetime
 import decimal
 import enum
 import json
-import logging
 import uuid
 from typing import Any
 
-from ._bind_payload import secret_values_of, unwrap_secret
+from ._bind_payload import deferred_secret_values, unwrap_secret
 from ._core import RouteHandle
 from ._core import raw_execute as _raw_execute
 from ._core import raw_fetch_all as _raw_fetch_all
 from ._core import raw_fetch_one as _raw_fetch_one
-from ._sql_log import LOGGER as _SQL_LOG
 from .state import resolve_operation_scope
 
 __all__ = ["execute", "fetch_all", "fetch_one", "Transaction"]
@@ -66,17 +64,6 @@ def _marshal(val: Any) -> bool | int | float | str | bytes | None:
         f"Supported: str, int, float, bool, bytes, None, UUID, datetime, date, "
         f"time, Decimal, Enum, dict, list, SecretStr, SecretBytes."
     )
-
-
-def _secrets_to_mask(args: tuple[Any, ...]) -> list[object]:
-    """The secret arguments the statement log must mask, unwrapped.
-
-    Collected only while `ferro.sql` is enabled for `DEBUG`: with the log off
-    no record is written, so there is nothing to mask.
-    """
-    if not _SQL_LOG.isEnabledFor(logging.DEBUG):
-        return []
-    return list(secret_values_of({str(index): arg for index, arg in enumerate(args)}))
 
 
 def _check_sql(sql: str) -> None:
@@ -130,7 +117,7 @@ async def execute(
     marshalled = [_marshal(a) for a in args]
     route = _transaction_or_using(using, session)
     return await _raw_execute(
-        sql, marshalled, route, autocommit, secret_values=_secrets_to_mask(args)
+        sql, marshalled, route, autocommit, secret_values=deferred_secret_values(args)
     )
 
 
@@ -146,7 +133,7 @@ async def fetch_all(
     marshalled = [_marshal(a) for a in args]
     route = _transaction_or_using(using, session)
     return await _raw_fetch_all(
-        sql, marshalled, route, secret_values=_secrets_to_mask(args)
+        sql, marshalled, route, secret_values=deferred_secret_values(args)
     )
 
 
@@ -161,7 +148,7 @@ async def fetch_one(
     marshalled = [_marshal(a) for a in args]
     route = _transaction_or_using(using, session)
     return await _raw_fetch_one(
-        sql, marshalled, route, secret_values=_secrets_to_mask(args)
+        sql, marshalled, route, secret_values=deferred_secret_values(args)
     )
 
 
@@ -188,19 +175,19 @@ class Transaction:
         _check_sql(sql)
         marshalled = [_marshal(a) for a in args]
         return await _raw_execute(
-            sql, marshalled, self._route, secret_values=_secrets_to_mask(args)
+            sql, marshalled, self._route, secret_values=deferred_secret_values(args)
         )
 
     async def fetch_all(self, sql: str, *args: Any) -> list[dict[str, Any]]:
         _check_sql(sql)
         marshalled = [_marshal(a) for a in args]
         return await _raw_fetch_all(
-            sql, marshalled, self._route, secret_values=_secrets_to_mask(args)
+            sql, marshalled, self._route, secret_values=deferred_secret_values(args)
         )
 
     async def fetch_one(self, sql: str, *args: Any) -> dict[str, Any] | None:
         _check_sql(sql)
         marshalled = [_marshal(a) for a in args]
         return await _raw_fetch_one(
-            sql, marshalled, self._route, secret_values=_secrets_to_mask(args)
+            sql, marshalled, self._route, secret_values=deferred_secret_values(args)
         )

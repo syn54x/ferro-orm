@@ -170,6 +170,45 @@ CASES: list[tuple[str, Terminal, tuple[Any, ...], dict[str, Any], bool]] = [
         {},
         True,
     ),
+    (
+        "all-after-plain-position-on-a-secret-key",
+        lambda ada: (
+            RsAccount.select()
+            .order_by(lambda account: account.token)
+            .order_by(lambda account: account.id)
+            .after(("sk_live_CURSOR", 0))
+            .all
+        ),
+        (),
+        {},
+        True,
+    ),
+    (
+        "all-before-plain-position-on-a-secret-key",
+        lambda ada: (
+            RsAccount.select()
+            .order_by(lambda account: account.token)
+            .order_by(lambda account: account.id)
+            .before(("sk_live_CURSOR", 0))
+            .all
+        ),
+        (),
+        {},
+        True,
+    ),
+    (
+        "first-after-plain-position-on-a-traversed-secret-key",
+        lambda ada: (
+            RsNote.select()
+            .order_by(lambda note: note.account.token)
+            .order_by(lambda note: note.id)
+            .after(("sk_live_CURSOR", 0))
+            .first
+        ),
+        (),
+        {},
+        True,
+    ),
     ("relation-all", lambda ada: ada.notes.all, (), {}, False),
     ("relation-first", lambda ada: ada.notes.first, (), {}, False),
 ]

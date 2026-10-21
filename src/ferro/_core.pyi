@@ -1,4 +1,4 @@
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any, Literal, Optional
 
@@ -651,14 +651,14 @@ async def fetch_filtered(
     record_cls: type | None = None,
     hop_classes: dict[str, type] | None = None,
     *,
-    secret_values: list[object] = ...,
+    secret_values: Iterable[object] = ...,
 ) -> list[Any]: ...
 async def count_filtered(
     name: str,
     query_ir_json: str,
     route: RouteHandle,
     *,
-    secret_values: list[object] = ...,
+    secret_values: Iterable[object] = ...,
     operation: Literal["count", "exists"] = "count",
 ) -> int: ...
 async def fetch_one(
@@ -672,21 +672,21 @@ async def save_record(
     route: RouteHandle,
     mode: str = "insert",
     *,
-    secret_values: list[object] = ...,
+    secret_values: Iterable[object] = ...,
 ) -> int | None: ...
 async def update_record(
     name: str,
     data: dict[str, Any],
     route: RouteHandle,
     *,
-    secret_values: list[object] = ...,
+    secret_values: Iterable[object] = ...,
 ) -> int: ...
 async def save_bulk_records(
     name: str,
     rows: list[dict[str, Any]],
     route: RouteHandle,
     *,
-    secret_values: list[object] = ...,
+    secret_values: Iterable[object] = ...,
 ) -> int: ...
 async def delete_record(
     name: str,
@@ -698,14 +698,14 @@ async def delete_filtered(
     query_ir_json: str,
     route: RouteHandle,
     *,
-    secret_values: list[object] = ...,
+    secret_values: Iterable[object] = ...,
 ) -> int: ...
 async def update_filtered(
     name: str,
     query_ir_json: str,
     route: RouteHandle,
     *,
-    secret_values: list[object] = ...,
+    secret_values: Iterable[object] = ...,
 ) -> int: ...
 
 RenderedParts = tuple[str, tuple[object, ...], tuple[bool, ...], str]
@@ -719,14 +719,14 @@ async def render_fetch(
     record_cls: type | None = None,
     hop_classes: dict[str, type] | None = None,
     *,
-    secret_values: list[object] = ...,
+    secret_values: Iterable[object] = ...,
 ) -> RenderedParts: ...
 async def render_count(
     name: str,
     query_ir_json: str,
     route: RouteHandle,
     *,
-    secret_values: list[object] = ...,
+    secret_values: Iterable[object] = ...,
     operation: Literal["count", "exists"] = "count",
 ) -> RenderedParts: ...
 async def render_update(
@@ -734,14 +734,14 @@ async def render_update(
     query_ir_json: str,
     route: RouteHandle,
     *,
-    secret_values: list[object] = ...,
+    secret_values: Iterable[object] = ...,
 ) -> RenderedParts: ...
 async def render_delete(
     name: str,
     query_ir_json: str,
     route: RouteHandle,
     *,
-    secret_values: list[object] = ...,
+    secret_values: Iterable[object] = ...,
 ) -> RenderedParts: ...
 async def add_m2m_links(
     join_table: str,
@@ -791,21 +791,21 @@ async def raw_execute(
     route: RouteHandle,
     autocommit: bool = False,
     *,
-    secret_values: list[object] = ...,
+    secret_values: Iterable[object] = ...,
 ) -> int: ...
 async def raw_fetch_all(
     sql: str,
     args: list[Any],
     route: RouteHandle,
     *,
-    secret_values: list[object] = ...,
+    secret_values: Iterable[object] = ...,
 ) -> list[dict[str, Any]]: ...
 async def raw_fetch_one(
     sql: str,
     args: list[Any],
     route: RouteHandle,
     *,
-    secret_values: list[object] = ...,
+    secret_values: Iterable[object] = ...,
 ) -> dict[str, Any] | None: ...
 def register_instance(
     name: str,

@@ -1305,7 +1305,7 @@ class Query(Generic[T]):
             compiled.wire_json,
             route,
             hop_classes=compiled.hop_classes,
-            secret_values=list(compiled.secret_values),
+            secret_values=compiled.secret_values,
         )
         if self._before is not None:
             rows.reverse()
@@ -1333,7 +1333,7 @@ class Query(Generic[T]):
             model_identity(self.model_cls),
             compiled.wire_json,
             route,
-            secret_values=list(compiled.secret_values),
+            secret_values=compiled.secret_values,
             operation=operation,
         )
 
@@ -1401,7 +1401,7 @@ class Query(Generic[T]):
             model_identity(self.model_cls),
             compiled.wire_json,
             route,
-            secret_values=list(compiled.secret_values),
+            secret_values=compiled.secret_values,
         )
 
     @terminal
@@ -1445,7 +1445,7 @@ class Query(Generic[T]):
             model_identity(self.model_cls),
             compiled.wire_json,
             route,
-            secret_values=list(compiled.secret_values),
+            secret_values=compiled.secret_values,
         )
 
     @terminal
@@ -1881,7 +1881,7 @@ class ProjectedQuery(Query[T]):
             route,
             record_cls=Row,
             hop_classes=compiled.hop_classes,
-            secret_values=list(compiled.secret_values),
+            secret_values=compiled.secret_values,
         )
         if self._before is not None:
             records.reverse()

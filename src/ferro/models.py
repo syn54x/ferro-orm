@@ -1,6 +1,5 @@
 """Define the core ORM model base and transaction helpers for Ferro."""
 
-import logging
 from contextlib import asynccontextmanager
 from enum import Enum
 from typing import (
@@ -25,11 +24,11 @@ from pydantic import BaseModel, ConfigDict, model_validator
 from ._bind_payload import (
     apply_save_exclude,
     apply_save_only,
+    deferred_secret_values,
+    field_values,
     normalize_save_columns,
     save_bind_payload,
-    secret_values,
 )
-from ._sql_log import LOGGER as _SQL_LOG
 from ._core import (
     begin_transaction,
     commit_transaction,
@@ -56,17 +55,6 @@ from .state import (
     resolve_transaction_scope,
     route_for_transaction,
 )
-
-
-def _secrets_to_mask(instances: "list[Model]") -> list[object]:
-    """The secret field values of `instances` the statement log must mask.
-
-    Collected only while `ferro.sql` is enabled for `DEBUG`: with the log off
-    no record is written, so there is nothing to mask.
-    """
-    if not _SQL_LOG.isEnabledFor(logging.DEBUG):
-        return []
-    return [value for instance in instances for value in secret_values(instance)]
 
 
 _FERRO_CONNECTION_ATTR = "__ferro_connection_name"
@@ -474,7 +462,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                     "Use Query.update() for set-oriented or expression writes."
                 )
         route, identity_using = await _instance_transaction_route(self, using, session)
-        secrets = _secrets_to_mask([self])
+        secrets = deferred_secret_values(field_values([self]))
         new_id = None
         if on_conflict == "update":
             new_id = await save_record(
@@ -827,7 +815,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             cls.__ferro_identity__,
             data,
             route,
-            secret_values=_secrets_to_mask(list(instances)),
+            secret_values=deferred_secret_values(field_values(instances)),
         )
 
     @classmethod

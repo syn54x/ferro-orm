@@ -83,8 +83,8 @@ pub struct StatementContext {
     /// The table, enum type or step file the statement belongs to, when
     /// there is one (see [`with_subject`]).
     pub subject: Option<String>,
-    /// Bound values a record shows as `***`.
-    pub secret_values: Vec<EngineBindValue>,
+    /// Bound values a record shows as `***`, shared by every nested scope.
+    pub secret_values: Arc<SecretValues>,
 }
 
 impl StatementContext {
@@ -95,7 +95,7 @@ impl StatementContext {
             operation,
             connection: connection.into(),
             subject: None,
-            secret_values: Vec::new(),
+            secret_values: Arc::new(SecretValues::default()),
         }
     }
 }
@@ -205,6 +205,98 @@ pub async fn with_operation<F: Future>(operation: &'static str, fut: F) -> F::Ou
     }
 }
 
+/// An operation's secret-value set: every value a record shows as `***`.
+///
+/// A bind is masked when it equals a member, so redaction costs one hash
+/// lookup per bind however many secrets the operation carries (a
+/// `bulk_create` of 100k rows carries 100k), and a value collected twice (by
+/// Python from a `SecretStr`, and by the engine from the secret column it is
+/// bound to) is held once. Text and bytes, the shapes a secret takes, are
+/// looked up without copying the bind. Any other value is held by its
+/// equality class (a float by its bits, `-0.0` as `0.0`), so membership
+/// agrees with `EngineBindValue`'s own equality except that a `NaN` matches
+/// a `NaN`, which over-masks. `NULL` is never a secret.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SecretValues {
+    text: HashSet<String>,
+    bytes: HashSet<Vec<u8>>,
+    scalars: HashSet<SecretScalar>,
+}
+
+/// A secret that is neither text nor bytes, in a hashable form.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum SecretScalar {
+    Bool(bool),
+    I64(i64),
+    F64(u64),
+    Uuid(sqlx::types::Uuid),
+}
+
+impl SecretScalar {
+    fn of(value: &EngineBindValue) -> Option<Self> {
+        match value {
+            EngineBindValue::Bool(value) => Some(Self::Bool(*value)),
+            EngineBindValue::I64(value) => Some(Self::I64(*value)),
+            EngineBindValue::F64(value) => Some(Self::F64(if *value == 0.0 {
+                0.0_f64.to_bits()
+            } else {
+                value.to_bits()
+            })),
+            EngineBindValue::Uuid(value) => Some(Self::Uuid(*value)),
+            EngineBindValue::String(_) | EngineBindValue::Bytes(_) | EngineBindValue::Null(_) => {
+                None
+            }
+        }
+    }
+}
+
+impl SecretValues {
+    /// Add `value` to the set; a `NULL` is ignored.
+    pub fn insert(&mut self, value: EngineBindValue) {
+        match value {
+            EngineBindValue::String(text) => {
+                self.text.insert(text);
+            }
+            EngineBindValue::Bytes(bytes) => {
+                self.bytes.insert(bytes);
+            }
+            other => {
+                if let Some(scalar) = SecretScalar::of(&other) {
+                    self.scalars.insert(scalar);
+                }
+            }
+        }
+    }
+
+    /// Whether `bind` equals a member: one lookup.
+    pub fn contains(&self, bind: &EngineBindValue) -> bool {
+        match bind {
+            EngineBindValue::String(text) => self.text.contains(text.as_str()),
+            EngineBindValue::Bytes(bytes) => self.bytes.contains(bytes.as_slice()),
+            other => SecretScalar::of(other).is_some_and(|scalar| self.scalars.contains(&scalar)),
+        }
+    }
+
+    /// The number of distinct secret values.
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.text.len() + self.bytes.len() + self.scalars.len()
+    }
+
+    /// Which of `binds` are secret, position by position.
+    pub fn mask(&self, binds: &[EngineBindValue]) -> Vec<bool> {
+        binds.iter().map(|bind| self.contains(bind)).collect()
+    }
+}
+
+impl Extend<EngineBindValue> for SecretValues {
+    fn extend<I: IntoIterator<Item = EngineBindValue>>(&mut self, values: I) {
+        for value in values {
+            self.insert(value);
+        }
+    }
+}
+
 /// The columns of `cls` whose field is a `SecretStr` / `SecretBytes`: the
 /// fields its hydration-converter registry records with kind `"secret"`.
 ///
@@ -222,16 +314,16 @@ pub fn secret_columns_for(py: Python<'_>, cls: &Bound<'_, PyAny>) -> PyResult<Ha
 /// as text, a `bytes` literal (a list of byte values) as bytes, and a list
 /// (`IN`) as each of its items. Only the shapes a secret column can hold are
 /// collected; a number or a boolean is never a secret column's value.
-pub fn literal_secret_binds(kind: &str, value: &serde_json::Value, out: &mut Vec<EngineBindValue>) {
+pub fn literal_secret_binds(kind: &str, value: &serde_json::Value, out: &mut SecretValues) {
     match value {
-        serde_json::Value::String(text) => out.push(EngineBindValue::String(text.clone())),
+        serde_json::Value::String(text) => out.insert(EngineBindValue::String(text.clone())),
         serde_json::Value::Array(items) if kind == "bytes" => {
             let bytes: Option<Vec<u8>> = items
                 .iter()
                 .map(|item| item.as_u64().and_then(|byte| u8::try_from(byte).ok()))
                 .collect();
             if let Some(bytes) = bytes {
-                out.push(EngineBindValue::Bytes(bytes));
+                out.insert(EngineBindValue::Bytes(bytes));
             }
         }
         serde_json::Value::Array(items) => {
@@ -257,12 +349,16 @@ pub fn observe(
         return;
     };
     let duration_ms = started.elapsed().as_secs_f64() * 1000.0;
+    // Decided before the GIL is taken, which is held only to hand the
+    // record over.
+    let mask = active.context.secret_values.mask(binds);
     let written = Python::attach(|py| {
         emit(
             py,
             &active.context,
             sql,
             binds,
+            &mask,
             dialect,
             duration_ms,
             outcome,
@@ -273,27 +369,22 @@ pub fn observe(
     }
 }
 
-/// Which of `binds` are secret: equal to one of `secrets`.
-fn mask_of(binds: &[EngineBindValue], secrets: &[EngineBindValue]) -> Vec<bool> {
-    binds.iter().map(|bind| secrets.contains(bind)).collect()
-}
-
 /// A statement's parameters as a record shows them: each bind as its
-/// Python value, `None` where it equals one of `secrets`, beside the mask
-/// that marks those positions. The statement log and a rendered statement
-/// (`.sql()`) both show parameters through this one function.
+/// Python value, `None` where `mask` marks it secret, beside the mask
+/// itself. The statement log and a rendered statement (`.sql()`) both show
+/// parameters through this one function, with the mask
+/// [`SecretValues::mask`] decides.
 ///
 /// # Errors
 /// The `PyErr` from converting a bind to Python.
 pub fn shown_params<'py>(
     py: Python<'py>,
     binds: &[EngineBindValue],
-    secrets: &[EngineBindValue],
+    mask: &[bool],
 ) -> PyResult<(Bound<'py, PyTuple>, Bound<'py, PyTuple>)> {
-    let mask = mask_of(binds, secrets);
     let params = binds
         .iter()
-        .zip(&mask)
+        .zip(mask)
         .map(|(bind, &masked)| {
             if masked {
                 Ok(py.None().into_bound(py))
@@ -333,16 +424,18 @@ fn bind_to_py<'py>(py: Python<'py>, bind: &EngineBindValue) -> PyResult<Bound<'p
 
 /// Hand one statement's data to `ferro._sql_log.emit`, looked up on its
 /// module at each call so the emitter is always the module's current one.
+#[allow(clippy::too_many_arguments)]
 fn emit(
     py: Python<'_>,
     context: &StatementContext,
     sql: &str,
     binds: &[EngineBindValue],
+    mask: &[bool],
     dialect: Dialect,
     duration_ms: f64,
     outcome: Result<Option<u64>, &sqlx::Error>,
 ) -> PyResult<()> {
-    let (params, mask) = shown_params(py, binds, &context.secret_values)?;
+    let (params, mask) = shown_params(py, binds, mask)?;
     let (rows, error) = match outcome {
         Ok(rows) => (rows, None),
         Err(err) => (None, Some(err.to_string())),
@@ -373,6 +466,12 @@ mod tests {
     use super::*;
     use crate::backend::NullKind;
 
+    fn secrets(values: impl IntoIterator<Item = EngineBindValue>) -> SecretValues {
+        let mut set = SecretValues::default();
+        set.extend(values);
+        set
+    }
+
     #[test]
     fn a_bind_is_masked_when_it_equals_a_secret_value() {
         let secret = EngineBindValue::String("hunter2".into());
@@ -381,16 +480,64 @@ mod tests {
             secret.clone(),
             EngineBindValue::Null(NullKind::String),
         ];
-        assert_eq!(mask_of(&binds, &[secret]), vec![false, true, false]);
-        assert_eq!(mask_of(&binds, &[]), vec![false, false, false]);
+        assert_eq!(secrets([secret]).mask(&binds), vec![false, true, false]);
+        assert_eq!(
+            SecretValues::default().mask(&binds),
+            vec![false, false, false]
+        );
+    }
+
+    #[test]
+    fn a_value_collected_twice_is_held_once() {
+        // Python's `SecretStr` and the engine's secret column name the same
+        // value for every row of a bulk_create; the set holds each once.
+        let rows = (0..1000).map(|i| EngineBindValue::String(format!("sk_{i}")));
+        let set = secrets(rows.clone().chain(rows));
+        assert_eq!(set.len(), 1000);
+    }
+
+    #[test]
+    fn membership_is_by_value_for_every_kind_of_bind() {
+        let uuid = sqlx::types::Uuid::nil();
+        let set = secrets([
+            EngineBindValue::String("s".into()),
+            EngineBindValue::Bytes(vec![0, 255]),
+            EngineBindValue::I64(7),
+            EngineBindValue::F64(-0.0),
+            EngineBindValue::Bool(true),
+            EngineBindValue::Uuid(uuid),
+            EngineBindValue::Null(NullKind::String),
+        ]);
+        assert_eq!(set.len(), 6, "NULL is never a secret");
+        for bind in [
+            EngineBindValue::String("s".into()),
+            EngineBindValue::Bytes(vec![0, 255]),
+            EngineBindValue::I64(7),
+            EngineBindValue::F64(0.0),
+            EngineBindValue::Bool(true),
+            EngineBindValue::Uuid(uuid),
+        ] {
+            assert!(set.contains(&bind), "{bind:?} is a member");
+        }
+        for bind in [
+            EngineBindValue::String("t".into()),
+            EngineBindValue::Bytes(b"s".to_vec()),
+            EngineBindValue::I64(8),
+            EngineBindValue::F64(7.0),
+            EngineBindValue::Bool(false),
+            EngineBindValue::Null(NullKind::String),
+            EngineBindValue::Null(NullKind::Untyped),
+        ] {
+            assert!(!set.contains(&bind), "{bind:?} is not a member");
+        }
     }
 
     #[test]
     fn shown_params_puts_none_where_a_bind_is_secret() {
         let secret = EngineBindValue::String("hunter2".into());
         let shown = Python::attach(|py| -> PyResult<(String, String)> {
-            let (params, mask) =
-                shown_params(py, &[EngineBindValue::I64(7), secret.clone()], &[secret])?;
+            let binds = [EngineBindValue::I64(7), secret.clone()];
+            let (params, mask) = shown_params(py, &binds, &secrets([secret]).mask(&binds))?;
             Ok((params.repr()?.to_string(), mask.repr()?.to_string()))
         });
         match shown {
@@ -458,19 +605,19 @@ mod tests {
 
     #[test]
     fn literal_secret_binds_reads_strings_bytes_and_lists() {
-        let mut out = Vec::new();
+        let mut out = SecretValues::default();
         literal_secret_binds("string", &serde_json::json!("hunter2"), &mut out);
         literal_secret_binds("bytes", &serde_json::json!([0, 255]), &mut out);
         literal_secret_binds("list", &serde_json::json!(["a", "b"]), &mut out);
         literal_secret_binds("int", &serde_json::json!(7), &mut out);
         assert_eq!(
             out,
-            vec![
+            secrets([
                 EngineBindValue::String("hunter2".into()),
                 EngineBindValue::Bytes(vec![0, 255]),
                 EngineBindValue::String("a".into()),
                 EngineBindValue::String("b".into()),
-            ]
+            ])
         );
     }
 
