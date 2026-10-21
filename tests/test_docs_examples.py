@@ -1,58 +1,40 @@
 from __future__ import annotations
 
-import ast
 import re
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
-from pytest_examples import CodeExample, EvalExample, find_examples
+from pytest_examples import CodeExample, EvalExample
 
-from tests._docs_harness import fence_settings, page_fence_mode, run_fence
+from tests._docs_harness import (
+    check_fence,
+    fence_mode,
+    fence_settings,
+    fenced_blocks,
+    fenced_examples,
+    page_examples,
+    run_fence,
+    run_python,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DOCS_PAGES = REPO_ROOT / "docs" / "pages"
 DOCS_EXAMPLES = REPO_ROOT / "docs" / "examples"
 
 
-def _inline_examples() -> list[CodeExample]:
-    # Snippet directives (--8<--) are expanded by the docs build, not by
-    # pytest-examples, so blocks containing them are not valid Python here.
-    return [
-        example
-        for example in find_examples(str(DOCS_PAGES))
-        if "--8<--" not in example.source
-    ]
-
-
-@pytest.mark.parametrize("example", _inline_examples(), ids=str)
+@pytest.mark.parametrize("example", page_examples(), ids=str)
 def test_docs_examples(example: CodeExample, eval_example: EvalExample) -> None:
     """Every inline page block compiles; one marked to run, runs.
 
-    Each block says how it is tested (``tests._docs_harness.page_fence_mode``):
-    ``{test=run prelude=<name>}`` runs it after that prelude,
-    ``{test=compile reason="..."}`` compiles it and says why it cannot run,
-    ``{test=pytest path="tests/<file>.py"}`` runs it as a test module
-    (``tests/test_docs_testing_fixtures.py``). ``lint=check`` also lints it.
+    The blocks are every Python fence a page shows, including those of the
+    Markdown a page pulls in (``CONTRIBUTING.md``). Each says how it is tested
+    (``tests._docs_harness.fence_mode``): ``{test=run prelude=<name>}`` runs it
+    after that prelude, ``{test=compile reason="..."}`` compiles it and says
+    why it cannot run, ``{test=pytest path="tests/<file>.py"}`` runs it as a
+    test module (``tests/test_docs_testing_fixtures.py``). ``lint=check`` also
+    lints it.
     """
-    compile(
-        example.source,
-        str(example.path),
-        "exec",
-        flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT,
-    )
-    mode = page_fence_mode(example)
-    if fence_settings(example).get("lint") == "check":
-        eval_example.set_config(
-            # Docs snippets often intentionally use print statements or partial examples.
-            ruff_ignore=["D", "T", "B", "C4", "E711", "E712", "E721"],
-            line_length=100,
-            target_version="py313",
-        )
-        eval_example.lint(example)
-    if mode == "run":
-        run_fence(example)
+    check_fence(example, eval_example=eval_example)
 
 
 @pytest.mark.parametrize(
@@ -72,16 +54,7 @@ def test_docs_example_scripts(script: Path) -> None:
     examples build their project in a temporary directory and drive
     ``ferro migrate`` against SQLite there.
     """
-    result = subprocess.run(
-        [sys.executable, str(script)],
-        capture_output=True,
-        text=True,
-        timeout=120,
-        cwd=REPO_ROOT,
-    )
-    assert result.returncode == 0, (
-        f"{script.name} failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    )
+    run_python([str(script)])
 
 
 @pytest.mark.postgres_only
@@ -100,22 +73,13 @@ def test_row_level_security_example_runs_on_postgres(
     another tenant is refused. Without arguments the script runs on SQLite
     (``test_docs_example_scripts``), where no policy exists to check.
     """
-    result = subprocess.run(
-        [sys.executable, str(DOCS_EXAMPLES / script), db_url, pg_role("app")],
-        capture_output=True,
-        text=True,
-        timeout=120,
-        cwd=REPO_ROOT,
-    )
-    assert result.returncode == 0, (
-        f"{script} failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    )
+    run_python([str(DOCS_EXAMPLES / script), db_url, pg_role("app")])
 
 
 def _page(tmp_path: Path, prefix: str, body: str) -> CodeExample:
     page = tmp_path / "page.md"
     page.write_text(f"# Page\n\n```{prefix}\n{body}\n```\n", encoding="utf-8")
-    [example] = find_examples(str(page))
+    [example] = fenced_examples(page, page.read_text(encoding="utf-8"))
     return example
 
 
@@ -208,40 +172,31 @@ def test_unmarked_page_fence_must_say_how_it_is_tested() -> None:
     with pytest.raises(
         ValueError, match=r'says neither test=run.*test=compile reason="'
     ):
-        page_fence_mode(_fence("python"))
+        fence_mode(_fence("python"))
 
 
 def test_compile_only_page_fence_states_its_reason() -> None:
     assert (
-        page_fence_mode(_fence('python {test=compile reason="needs Postgres"}'))
-        == "compile"
+        fence_mode(_fence('python {test=compile reason="needs Postgres"}')) == "compile"
     )
 
 
 README = REPO_ROOT / "README.md"
-_README_FENCE = re.compile(r"^```python\n(.*?)^```", flags=re.M | re.S)
 _MODELS_SECTION = re.compile(
     r"# --8<-- \[start:models\]\n(.*?)# --8<-- \[end:models\]", flags=re.S
 )
 
 
 def _readme_quick_start() -> str:
-    [source] = _README_FENCE.findall(README.read_text(encoding="utf-8"))
-    return source
+    [fence] = fenced_blocks(README, README.read_text(encoding="utf-8"), "python")
+    return fence.body
 
 
 def test_readme_quick_start_runs_and_prints_what_it_claims(tmp_path: Path) -> None:
     """The README's Python block runs as written and prints its stated output."""
     script = tmp_path / "readme_quick_start.py"
     script.write_text(_readme_quick_start(), encoding="utf-8")
-    result = subprocess.run(
-        [sys.executable, str(script)],
-        capture_output=True,
-        text=True,
-        timeout=120,
-        cwd=tmp_path,
-    )
-    assert result.returncode == 0, result.stderr
+    result = run_python([str(script)], cwd=tmp_path)
     assert "Found 1 active users." in README.read_text(encoding="utf-8")
     assert result.stdout.strip() == "Found 1 active users."
 

@@ -41,6 +41,7 @@ from types import ModuleType
 import pytest
 
 import ferro.migrations
+from tests._docs_harness import fenced_blocks, run_python
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DOCS_PAGES = REPO_ROOT / "docs" / "pages"
@@ -71,16 +72,7 @@ def _files(root: Path) -> dict[str, bytes]:
 
 
 def _run_example(name: str, project: Path) -> None:
-    result = subprocess.run(
-        [sys.executable, str(DOCS_EXAMPLES / f"{name}.py"), str(project)],
-        capture_output=True,
-        text=True,
-        timeout=180,
-        cwd=REPO_ROOT,
-    )
-    assert result.returncode == 0, (
-        f"{name} failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    )
+    run_python([str(DOCS_EXAMPLES / f"{name}.py"), str(project)])
 
 
 @pytest.mark.parametrize("name", MIGRATION_EXAMPLES)
@@ -1010,18 +1002,11 @@ def _quoted_blocks(page: Path) -> list[tuple[str | None, str | None, str, str]]:
     """Every ```text block of ``page`` as (kind, id, first line, body), the kind and
     id from the ``<!-- output|refusal: <id> -->`` marker above it, if any."""
     blocks = []
-    pattern = re.compile(
-        r"^(?P<indent>[ \t]*)(?:<!-- (?P<kind>output|refusal): (?P<id>[a-z0-9-]+) -->\n"
-        r"(?P=indent))?```text\n(?P<body>.*?)^(?P=indent)```",
-        flags=re.DOTALL | re.MULTILINE,
-    )
-    for match in pattern.finditer(page.read_text()):
-        indent = match["indent"]
-        body = "".join(
-            line.removeprefix(indent)
-            for line in match["body"].splitlines(keepends=True)
-        )
-        blocks.append((match["kind"], match["id"], body.split("\n", 1)[0], body))
+    for fence in fenced_blocks(page, page.read_text(), "text"):
+        kind, block_id = fence.note or (None, None)
+        if kind not in ("output", "refusal"):
+            kind = block_id = None
+        blocks.append((kind, block_id, fence.body.split("\n", 1)[0], fence.body))
     return blocks
 
 
@@ -1238,26 +1223,6 @@ from elsewhere (an unwritten backfill, a guard step in place of it). ``None`` ma
 data step the page shows already written by hand, which nothing generates."""
 
 
-def _fenced_blocks(page: Path) -> list[tuple[int, str]]:
-    """Every fenced block of ``page`` as (line number of its opening fence, body),
-    the body dedented by the fence's own indentation."""
-    pattern = re.compile(
-        r"^(?P<indent>[ \t]*)```[^\n]*\n(?P<body>.*?)^(?P=indent)```",
-        flags=re.DOTALL | re.MULTILINE,
-    )
-    text = page.read_text()
-    return [
-        (
-            text.count("\n", 0, match.start()) + 1,
-            "".join(
-                line.removeprefix(match["indent"])
-                for line in match["body"].splitlines(keepends=True)
-            ),
-        )
-        for match in pattern.finditer(text)
-    ]
-
-
 def _step_files_in(body: str) -> list[tuple[str, str, str]]:
     """The step files one block quotes, as (migration, file, text): the text runs
     from under its header line to the next header or the block's end, blank lines
@@ -1288,7 +1253,9 @@ def _quoted_step_files() -> list[tuple[str, int, str, str, str]]:
     return [
         (page.relative_to(DOCS_PAGES).as_posix(), line, migration, file, text)
         for page in sorted(DOCS_PAGES.rglob("*.md"))
-        for line, body in _fenced_blocks(page)
+        for line, body in (
+            (f.line, f.body) for f in fenced_blocks(page, page.read_text())
+        )
         for migration, file, text in _step_files_in(body)
     ]
 
@@ -1450,15 +1417,12 @@ def test_a_quoted_revision_is_what_autogenerate_writes(
     printed = ""
     for models, step in ((before, "create"), (after, "render")):
         _write_models(project, models)
-        result = subprocess.run(
-            [sys.executable, "autogenerate.py", step],
-            capture_output=True,
-            text=True,
+        result = run_python(
+            ["autogenerate.py", step],
             timeout=120,
             cwd=project,
-            env={**os.environ, "PYTHONPATH": str(project)},
+            env={"PYTHONPATH": str(project)},
         )
-        assert result.returncode == 0, result.stderr
         printed = result.stdout
 
     assert printed == _quoted_revisions().get(revision), (

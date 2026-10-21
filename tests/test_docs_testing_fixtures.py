@@ -15,21 +15,22 @@ pytest-asyncio mode the page configures, not this suite's.
 
 from __future__ import annotations
 
-import os
 import re
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 
-from tests._docs_harness import fence_settings, fenced_examples
+from tests._docs_harness import (
+    fence_settings,
+    fenced_blocks,
+    fenced_examples,
+    run_python,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PAGE = REPO_ROOT / "docs" / "pages" / "howto" / "testing.md"
 EXAMPLES = REPO_ROOT / "docs" / "examples"
 
-_TOML_FENCE = re.compile(r"^```toml\n(.*?)^```", flags=re.M | re.S)
 _PYTEST_OUTPUT = re.compile(
     r"^```text\n\$ pytest -q (?P<target>\S+)\n.*?^(?P<passed>\d+) passed",
     flags=re.M | re.S,
@@ -50,9 +51,9 @@ def _page_test_modules() -> dict[str, str]:
 def _write_project(root: Path, extra: dict[str, str] | None = None) -> None:
     text = PAGE.read_text(encoding="utf-8")
     [pyproject] = [
-        block
-        for block in _TOML_FENCE.findall(text)
-        if "[tool.pytest.ini_options]" in block
+        fence.body
+        for fence in fenced_blocks(PAGE, text, "toml")
+        if "[tool.pytest.ini_options]" in fence.body
     ]
     (root / "pyproject.toml").write_text(pyproject, encoding="utf-8")
     (root / "myapp").mkdir()
@@ -71,17 +72,11 @@ def _write_project(root: Path, extra: dict[str, str] | None = None) -> None:
 
 
 def _pytest(root: Path, *args: str, env: dict[str, str] | None = None) -> str:
-    result = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", *args],
-        capture_output=True,
-        text=True,
+    result = run_python(
+        ["-m", "pytest", "-q", "-p", "no:cacheprovider", *args],
         timeout=120,
         cwd=root,
-        env={**os.environ, **(env or {})},
-    )
-    assert result.returncode == 0, (
-        f"pytest failed in the testing how-to's project\n"
-        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        env=env,
     )
     return result.stdout
 

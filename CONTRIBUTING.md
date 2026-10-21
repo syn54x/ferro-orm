@@ -314,7 +314,7 @@ Version bumps are determined by commit types:
 
 Tests that cross the Python and Rust bridge, or exercise Pydantic models, live in `tests/`. A test connects with the `db_url` fixture, opens a session and asserts on what comes back:
 
-```python
+```python {test=compile reason="a test for this repository's suite, which supplies its db_url fixture"}
 import pytest
 
 from ferro import Field, Model, connect, engines

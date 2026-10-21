@@ -1,21 +1,29 @@
-"""Docstring examples in ``src/ferro``: every one compiles, marked ones run.
+"""Docstring examples in ``src/ferro``: every one is marked, compiles, and runs
+when marked to.
 
-A fenced Python example in a docstring is compiled. One marked
-``{test=run prelude=<name>}`` also runs in a subprocess after
-``docs/examples/_preludes/<name>.py``, inside its session, the way a marked
-fence on a docs page does.
+A fenced Python example in a docstring holds to the contract a docs page fence
+does (``tests._docs_harness.check_fence``): it says how it is tested, compiles,
+and one marked ``{test=run prelude=<name>}`` runs in a subprocess after
+``docs/examples/_preludes/<name>.py``, inside its session. An unmarked fence is
+refused. The entry points the reference leads with each keep an example that
+runs (``RUNNING_ENTRY_POINTS``).
 """
 
 from __future__ import annotations
 
-import ast
 import textwrap
 from pathlib import Path
 
+import griffe
 import pytest
 from pytest_examples import CodeExample
 
-from tests._docs_harness import docstring_examples, fence_settings, run_fence
+from tests._docs_harness import (
+    check_fence,
+    docstring_examples,
+    fence_settings,
+    run_fence,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -24,14 +32,114 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
     "example", docstring_examples("ferro", REPO_ROOT / "src"), ids=str
 )
 def test_docstring_example(example: CodeExample) -> None:
-    compile(
-        example.source,
-        str(example.path),
-        "exec",
-        flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT,
+    check_fence(example)
+
+
+RUNNING_ENTRY_POINTS = [
+    "models.Model.create",
+    "models.Model.get",
+    "models.Model.where",
+    "models.Model.save",
+    "models.Model.delete",
+    "query.builder.Query.after",
+    "query.builder.Query.before",
+    "query.builder.Query.position_of",
+    "migrate",
+]
+"""The entry points whose docstrings must each keep an ``Examples:`` fence
+marked ``{test=run prelude=<name>}``, as paths inside the ``ferro`` package."""
+
+
+def entry_points_without_a_running_example(
+    package: str, search_path: Path, paths: list[str]
+) -> list[str]:
+    """Name each of ``paths`` whose docstring holds no fence marked ``test=run``.
+
+    Args:
+        package: The package to load, such as ``ferro``.
+        search_path: The directory that holds the package.
+        paths: Objects inside the package, such as ``models.Model.create``.
+
+    Returns:
+        The paths with no running example, or with no docstring at all.
+    """
+    root = griffe.load(package, search_paths=[str(search_path)], allow_inspection=False)
+    running: dict[Path, list[int]] = {}
+    for example in docstring_examples(package, search_path):
+        if fence_settings(example).get("test") == "run":
+            running.setdefault(Path(example.path), []).append(example.start_line)
+    missing = []
+    for path in paths:
+        obj = root[path]
+        docstring = obj.docstring
+        lines = running.get(Path(str(obj.filepath)), [])
+        if docstring is None or not any(
+            docstring.lineno <= line <= (docstring.endlineno or 0) for line in lines
+        ):
+            missing.append(path)
+    return missing
+
+
+def test_each_entry_point_keeps_a_running_example() -> None:
+    assert (
+        entry_points_without_a_running_example(
+            "ferro", REPO_ROOT / "src", RUNNING_ENTRY_POINTS
+        )
+        == []
     )
-    if fence_settings(example).get("test") == "run":
-        run_fence(example)
+
+
+def test_an_entry_point_whose_example_only_compiles_is_named(tmp_path: Path) -> None:
+    _scratch_package(
+        tmp_path,
+        '''
+        def first_author():
+            """Return the first author.
+
+            Examples:
+                ```python {test=compile reason="shows a call"}
+                first_author()
+                ```
+            """
+
+
+        def last_author():
+            """Return the last author.
+
+            Examples:
+                ```python {test=run prelude=reference}
+                print(1)
+                ```
+            """
+
+
+        def any_author():
+            """Return an author."""
+        ''',
+    )
+    assert entry_points_without_a_running_example(
+        "scratch",
+        tmp_path,
+        ["library.first_author", "library.last_author", "library.any_author"],
+    ) == ["library.first_author", "library.any_author"]
+
+
+def test_an_unmarked_docstring_fence_is_refused(tmp_path: Path) -> None:
+    _scratch_package(
+        tmp_path,
+        '''
+        def first_author():
+            """Return the first author.
+
+            ```python
+            first_author()
+            ```
+            """
+        ''',
+    )
+    [example] = docstring_examples("scratch", tmp_path)
+    with pytest.raises(ValueError, match=r"says neither test=run nor test=compile"):
+        check_fence(example)
 
 
 def _scratch_package(tmp_path: Path, body: str) -> Path:
