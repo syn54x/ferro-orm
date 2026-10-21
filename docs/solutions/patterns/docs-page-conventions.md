@@ -7,6 +7,7 @@ related_files:
   - docs/examples/
   - docs/includes/abbreviations.md
   - tests/test_docs_examples.py
+  - tests/test_docs_sql.py
   - zensical.toml
 related_issues: [698, 700, 701, 703, 704, 725]
 related_prs: []
@@ -79,11 +80,60 @@ session (`{test=run prelude=<name>}`, from #704).
 
 ### Generated SQL beside each query
 
-Each query and each schema feature shows the SQL Ferro sends, for each
-dialect where it differs. The SQL is captured by the example's own test run,
-never typed by hand; a hand-simplified block drifts (unquoted reserved
-words, invented aliases). This lands once #700 ships a public way to read a
-query's SQL (#725 applies it to the guides).
+Each query and each mutation an example runs shows the SQL Ferro sends, in a
+`sql` fence below the example's result sentence. A page never carries SQL a
+person typed: a hand-simplified block drifts (unquoted reserved words,
+invented aliases), and the four such blocks the audit found on the Queries
+guide had. The block's first line is a marker naming where its SQL comes from:
+
+```sql
+-- predicates.py:first-query (sqlite)
+SELECT "transaction"."account_id", ...
+FROM "transaction"
+WHERE "transaction"."amount" <= ?
+ORDER BY "transaction"."amount" ASC NULLS LAST;
+```
+
+`<example>.py` is a script in `docs/examples/`, `first-query` one of its
+snippet regions (`# --8<-- [start:first-query]`), and `(sqlite)` or
+`(postgres)` the dialect. The block holds every statement the region sends,
+in order: a query terminal's statement as its `.sql()` renders it, and any
+other statement (`save()`, `create()`, `bulk_create()`, an instance's
+`delete()`, a many-to-many `add()`, a raw `execute()`) as the statement log
+records it. Schema statements, the Postgres catalog probe, session settings
+and a `transaction()` block's own `BEGIN` / `COMMIT` are left out. A region
+that sends nothing but prints statements (a `create_tables()` report's
+`statement.sql`) shows what it prints.
+
+`tests/test_docs_sql.py` regenerates every `sql` fence on the pages it lists
+(`PAGES`: Queries, Aggregations, Relationships, Mutations) and compares byte
+for byte, failing with the page, the line and the example. To add a block:
+
+1. Write the query in a snippet region of an example script; the region is
+   what the block shows, so keep one example per region.
+2. Below the example's result sentence, write a lead-in naming the call and
+   saying whether only the placeholders differ on PostgreSQL ("The query
+   sends this; on PostgreSQL only the placeholders differ:"), then a `sql`
+   fence holding just the marker line.
+3. Fill the fence from the test's failure message, which prints what the
+   region sends, then write the sentence after it: what in the SQL the reader
+   should notice.
+4. Where PostgreSQL differs in more than placeholders (casts, `RETURNING`,
+   `serial`), show both as `=== "SQLite"` / `=== "PostgreSQL"` tabs, the
+   second marked `(postgres)`. Under `--db-backends=sqlite,postgres` the test
+   checks a `(postgres)` block exactly and a lone SQLite block once both
+   sides read each placeholder as `?`, so "only the placeholders differ"
+   stays true.
+
+Each statement is laid out one clause per line (`FROM`, `JOIN`, `WHERE`,
+`GROUP BY`, `ORDER BY`, `LIMIT` and the rest, at the top level only), a
+`CREATE TABLE` one column per line, and ends with `;`. Unindenting the lines
+and joining them with single spaces gives back the statement Ferro sent. The
+example runs with `PYTHONHASHSEED=0`, because a partial `save(only=...)`
+writes its `SET` columns in set order. An example that a `(postgres)` block
+or a lone SQLite block names must run on PostgreSQL too: `ferro.connect` is
+pointed at the test database, so raw SQL in it uses `$1` placeholders, which
+SQLite also accepts.
 
 ### Quoted migration files are regenerated, never pasted
 

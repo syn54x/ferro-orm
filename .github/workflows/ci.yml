@@ -108,6 +108,7 @@ jobs:
             tests/test_docs_examples.py \
             tests/test_docstring_examples.py \
             tests/test_docs_migrations.py \
+            tests/test_docs_sql.py \
             tests/test_docs_testing_fixtures.py \
             tests/test_docs_checks.py \
             tests/test_docs_lint.py \
