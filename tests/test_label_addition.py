@@ -1,5 +1,5 @@
 """Label addition (#329/#330): the reconciliation pass appends model-declared
-labels missing from a live ferro-owned enum type. See ADR-0011 and CONTEXT.md
+labels missing from a live ferro-owned enum type. See ADR-0011 and GLOSSARY.md
 (*enum label*, *label addition*)."""
 
 from enum import StrEnum

@@ -1,4 +1,4 @@
-"""The QueryIR payload: Ferro's single query wire contract (CONTEXT.md).
+"""The QueryIR payload: Ferro's single query wire contract (GLOSSARY.md).
 
 Every query the ORM executes crosses the Python→Rust seam as one versioned
 JSON envelope. This module is the only place that wire shape exists on the
@@ -909,7 +909,7 @@ def _reject_mutation_misuse(query: "Query[Any]", operation: str) -> None:
 
 @dataclass(frozen=True)
 class CompiledQuery:
-    """One compiled artifact per query — CONTEXT.md "Compiled query".
+    """One compiled artifact per query — GLOSSARY.md "Compiled query".
 
     ``wire_json`` and ``hop_classes`` are two views of the same compile:
     the map is collected from the hop facts the payload itself carries, so

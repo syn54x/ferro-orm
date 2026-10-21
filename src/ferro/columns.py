@@ -1,4 +1,4 @@
-"""Column specs: each column fact derived exactly once (CONTEXT.md "Column spec").
+"""Column specs: each column fact derived exactly once (GLOSSARY.md "Column spec").
 
 One frozen ``ColumnSpec`` per column, built from the field declaration at
 class-body time (provisional) and replaced during relationship resolution

@@ -29,7 +29,7 @@ desugars to an IS NULL check on the shadow FK column.
 
 - Traversing a nullable relation **narrows** the result to rows where the
   relation exists. This is the documented meaning of traversal (see
-  `CONTEXT.md`: Relation traversal); `.left_join` is the opt-out, not a
+  `GLOSSARY.md`: Relation traversal); `.left_join` is the opt-out, not a
   schema-derived surprise.
 - Changing a FK's nullability never changes the meaning of any existing query.
 - A bare `.join(lambda t: t.account)` with no predicate is a meaningful

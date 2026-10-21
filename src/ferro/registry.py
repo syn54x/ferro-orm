@@ -4,7 +4,7 @@ One :class:`Registry` instance (:data:`REGISTRY` — process-global by nature:
 the metaclass writes to it at import time) owns the model registry, per-model
 SchemaIR envelope + fingerprint caches, join-table bundles, pending
 relations, the modelset artifact, and the provisional/resolved generation
-counters (CONTEXT.md "Provisional registration" / "Resolved registration").
+counters (GLOSSARY.md "Provisional registration" / "Resolved registration").
 
 The stores are private; every reader and writer goes through the interface,
 so their agreement invariants have exactly one home:

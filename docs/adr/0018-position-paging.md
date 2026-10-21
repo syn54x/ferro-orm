@@ -32,4 +32,4 @@ on `order_by`); an opaque Position type (Pinch must rebuild from a decoded
 cursor); silently appending the PK (hidden extra sort); requiring `nulls=`
 only when paging (ADR-0017).
 
-See `CONTEXT.md`: Paging, Position, Order key. Grilled with #372.
+See `GLOSSARY.md`: Paging, Position, Order key. Grilled with #372.

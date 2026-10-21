@@ -3,7 +3,7 @@
 Aggregation rides the `record` materialization plan (ADR-0007): aggregate
 fields (`t.amount.sum()` — methods on scalar field proxies; the closed set
 `count/sum/avg/min/max`) land in projected records, and a projection
-containing any aggregate is an **aggregate projection** (`CONTEXT.md`) in
+containing any aggregate is an **aggregate projection** (`GLOSSARY.md`) in
 which every non-aggregate field is a group key — GROUP BY is **derived from
 the projection, never declared**; there is no `group_by()` chainer. Aggregate
 result types are a **pinned cross-backend contract** derived from the source

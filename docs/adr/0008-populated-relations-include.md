@@ -1,7 +1,7 @@
 # Populated relations: include() is the data axis; populated access is plain attribute access
 
 A query opts into joined-row hydration with an explicit `.include(lambda t:
-t.account.owner)` (`CONTEXT.md`: Include, Populated relation). A populated
+t.account.owner)` (`GLOSSARY.md`: Include, Populated relation). A populated
 forward-FK relation is accessed as a plain attribute — `txn.account` *is* the
 complete related instance, matching the field's declared annotation — while an
 unpopulated relation keeps today's awaitable contract unchanged. Awaiting a

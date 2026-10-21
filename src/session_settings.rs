@@ -48,7 +48,7 @@ use std::sync::RwLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::Mutex;
 
-/// How a session's settings reach the database (CONTEXT.md, *Settings
+/// How a session's settings reach the database (GLOSSARY.md, *Settings
 /// delivery*). Chosen per connection pool, never auto-detected: a transaction
 /// pooler is invisible to its clients, and guessing wrong is a cross-tenant
 /// leak.
@@ -1066,7 +1066,7 @@ pub async fn release_pinned_connection(pin: Arc<PinnedConnection>) -> PyResult<(
 /// The wrap is per *operation*, never per statement — a `save()` that probes
 /// the table catalog before its `INSERT` sends both inside one wrap, and a
 /// chunked `bulk_create` sends every chunk inside one wrap. That is the
-/// operation-atomicity invariant (CONTEXT.md): an operation issues one
+/// operation-atomicity invariant (GLOSSARY.md): an operation issues one
 /// statement, or several inside one transaction. Settings delivery rides it
 /// rather than inventing a second boundary.
 ///

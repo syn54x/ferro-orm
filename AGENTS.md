@@ -559,7 +559,7 @@ Canonical five-role vocabulary (`needs-triage`, `needs-info`, `ready-for-agent`,
 
 ### Domain docs
 
-Single-context — `CONTEXT.md` at repo root, ADRs in `docs/adr/`. See `docs/agents/domain.md`.
+Single-context — `GLOSSARY.md` at repo root, ADRs in `docs/adr/`. See `docs/agents/domain.md`.
 
 <!-- sdd-routing -->
 ## Agent workflow
@@ -571,5 +571,5 @@ Single-context — `CONTEXT.md` at repo root, ADRs in `docs/adr/`. See `docs/age
 - Readiness = open + not blocked + unassigned + `ready-for-agent`. Claim by assigning yourself. Unclaim if you stop without a PR.
 - Progress is one comment per issue under `<!-- sdd-progress -->`, rewritten in place. Never post a second one.
 - Mode: org. Sizes: `size:S/M/L` labels. Priority: none.
-- Upstream feedback: on. When on, `close-epic` may propose skill-defect issues on syn54x/skills-plus-plus, allowlisted fields only, each one shown and approved by a human before filing; never from a non-interactive run.
+- Upstream feedback: detailed. Unless off, `close-epic` may propose skill-defect issues on syn54x/skills-plus-plus, the profile's allowlisted fields only, each one shown and approved by a human before filing; never from a non-interactive run.
 <!-- /sdd-routing -->
