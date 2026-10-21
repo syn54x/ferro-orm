@@ -46,7 +46,7 @@ use ferro_migrate::snapshot::encode_checksum;
 use ferro_schema_ir::SchemaModel;
 use once_cell::sync::Lazy;
 use pyo3::prelude::*;
-use sqlx::{Connection, Row};
+use sqlx::Connection;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -650,6 +650,28 @@ const HELD_BY_ANY_SESSION: &str = "SELECT EXISTS (SELECT 1 FROM pg_locks \
      AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) \
      AND classid::bigint = $1 AND objid::bigint = $2)";
 
+/// Send one of the run lock's statements on its own session and read the
+/// boolean it answers. The statement goes through the engine's fetch layer,
+/// so it is a record in the statement log under the run's scope.
+///
+/// # Errors
+/// The database's error; `RowNotFound` or a decode error when the answer is
+/// not one boolean.
+async fn lock_answer(
+    conn: &mut sqlx::PgConnection,
+    sql: &str,
+    binds: &[EngineBindValue],
+) -> Result<bool, sqlx::Error> {
+    let rows = crate::backend::fetch_all_detached_pg_unprepared(conn, sql, binds).await?;
+    match rows.first().and_then(|row| column(row, 0)) {
+        Some(EngineValue::Bool(answer)) => Ok(*answer),
+        Some(other) => Err(sqlx::Error::Decode(
+            format!("the run lock's `{sql}` answered {other:?}, not a boolean").into(),
+        )),
+        None => Err(sqlx::Error::RowNotFound),
+    }
+}
+
 impl RunLock {
     /// Take the run lock for the governed `schema` (the connection's current
     /// schema when `None`), waiting up to `timeout`. `on_wait` is called once,
@@ -711,13 +733,13 @@ impl RunLock {
                     .map_err(|e| db_error("opening the run lock's connection", e))?
                     .detach();
                 loop {
-                    let taken: bool = sqlx::query("SELECT pg_try_advisory_lock($1)")
-                        .bind(key)
-                        .persistent(false)
-                        .fetch_one(&mut conn)
-                        .await
-                        .and_then(|row| row.try_get(0))
-                        .map_err(|e| db_error("taking the run lock", e))?;
+                    let taken = lock_answer(
+                        &mut conn,
+                        "SELECT pg_try_advisory_lock($1)",
+                        &[EngineBindValue::I64(key)],
+                    )
+                    .await
+                    .map_err(|e| db_error("taking the run lock", e))?;
                     if taken {
                         break;
                     }
@@ -820,13 +842,12 @@ impl RunLock {
             None => false,
             Some(conn) => {
                 let (classid, objid) = lock_ids(*key);
-                let probe = sqlx::query(HELD_BY_THIS_SESSION)
-                    .bind(classid)
-                    .bind(objid)
-                    .persistent(false)
-                    .fetch_one(conn)
-                    .await
-                    .and_then(|row| row.try_get::<bool, _>(0));
+                let probe = lock_answer(
+                    conn,
+                    HELD_BY_THIS_SESSION,
+                    &[EngineBindValue::I64(classid), EngineBindValue::I64(objid)],
+                )
+                .await;
                 match probe {
                     Ok(held) => held,
                     Err(err) if !first && probe_lost_the_session(&err) => false,
@@ -848,11 +869,12 @@ impl RunLock {
         match &mut self.state {
             LockState::Postgres { conn, key, .. } => {
                 if let Some(mut conn) = conn.take() {
-                    let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
-                        .bind(*key)
-                        .persistent(false)
-                        .execute(&mut conn)
-                        .await;
+                    let _ = lock_answer(
+                        &mut conn,
+                        "SELECT pg_advisory_unlock($1)",
+                        &[EngineBindValue::I64(*key)],
+                    )
+                    .await;
                     let _ = conn.close().await;
                 }
             }

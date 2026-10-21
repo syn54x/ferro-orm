@@ -877,16 +877,7 @@ impl EngineConnection {
                     .await
                     .map(|rows| rows.iter().map(materialize_engine_row).collect())
             }
-            EngineConnection::Postgres(conn) => {
-                let mut query = sqlx::query(sql).persistent(false);
-                for value in values {
-                    query = bind_engine_value(query, value);
-                }
-                query
-                    .fetch_all(&mut **conn)
-                    .await
-                    .map(|rows| rows.iter().map(materialize_pg_row).collect())
-            }
+            EngineConnection::Postgres(conn) => fetch_all_pg_unprepared(conn, sql, values).await,
         };
         observe_fetch(sql, values, dialect, started, &result);
         result
@@ -1020,6 +1011,42 @@ impl EngineConnection {
     pub async fn detach_and_close(self) -> Result<(), sqlx::Error> {
         self.detach().close().await
     }
+}
+
+/// Fetch on a Postgres connection the pool no longer owns, without entering
+/// its prepared-statement cache, and write the statement to the statement
+/// log: the run lock's own session (`crate::run::RunLock`) sends its
+/// `pg_try_advisory_lock`, its held-by-this-session check and its
+/// `pg_advisory_unlock` through here, so they are records like any other.
+///
+/// # Errors
+/// The `sqlx::Error` the database returned; it is in the record too.
+pub async fn fetch_all_detached_pg_unprepared(
+    conn: &mut sqlx::PgConnection,
+    sql: &str,
+    values: &[EngineBindValue],
+) -> Result<Vec<EngineRow>, sqlx::Error> {
+    let started = Instant::now();
+    let result = fetch_all_pg_unprepared(conn, sql, values).await;
+    observe_fetch(sql, values, Dialect::Postgres, started, &result);
+    result
+}
+
+/// The Postgres fetch both an [`EngineConnection`] and a detached connection
+/// send; the caller writes the record.
+async fn fetch_all_pg_unprepared(
+    conn: &mut sqlx::PgConnection,
+    sql: &str,
+    values: &[EngineBindValue],
+) -> Result<Vec<EngineRow>, sqlx::Error> {
+    let mut query = sqlx::query(sql).persistent(false);
+    for value in values {
+        query = bind_engine_value(query, value);
+    }
+    query
+        .fetch_all(conn)
+        .await
+        .map(|rows| rows.iter().map(materialize_pg_row).collect())
 }
 
 /// The statement log's record of an unbound execute that returned `result`'s
