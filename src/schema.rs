@@ -6,7 +6,7 @@
 use crate::backend::EngineHandle;
 use crate::ddl_exec::{DdlError, DdlExecutor, Door, Failed, Unit};
 use crate::migrate::{PassReport, pass_attempt_warning, pass_lock_timeout_error};
-use crate::state::{Dialect, MODEL_REGISTRY, engine_for_connection};
+use crate::state::{Dialect, MODEL_REGISTRY};
 use ferro_migrate::Subject;
 use ferro_migrate::plan::{
     hint_refusal_warning, pending_table_rename_warning, refuse_hints, table_rename_hint,
@@ -458,16 +458,22 @@ pub fn create_tables(
     let opts = crate::migrate::MigrateOptions::laddered(false, false)
         .with_ddl_lock_timeout_seconds(ddl_lock_timeout_s)?
         .with_lock_timeout_seconds(lock_timeout_s)?;
+    let logged = crate::sql_log::enabled(py)?;
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let engine = engine_for_connection(using)?;
+        let (connection, engine) = crate::state::connection_for_route(using)?;
         // `create_tables()` is the create pass on its own (no `updates`):
         // nothing reconciles an existing table afterwards, so a declaration
         // on one is reported. It shares the lock-then-guard path.
-        crate::migrate::run_pass_for_python(
-            engine,
-            opts,
-            &tracking_schemas,
-            crate::migrate::AutoMigrateDoor::CreateTables,
+        crate::sql_log::scope(
+            logged.then(|| {
+                crate::sql_log::StatementContext::new(crate::sql_log::MIGRATE, connection)
+            }),
+            crate::migrate::run_pass_for_python(
+                engine,
+                opts,
+                &tracking_schemas,
+                crate::migrate::AutoMigrateDoor::CreateTables,
+            ),
         )
         .await
     })

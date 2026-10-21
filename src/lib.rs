@@ -22,6 +22,7 @@ mod run;
 mod schema;
 mod schema_bind;
 mod session_settings;
+mod sql_log;
 mod state;
 
 use pyo3::prelude::*;

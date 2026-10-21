@@ -17,8 +17,8 @@
 //!
 //! A caller hands [`DdlExecutor::run`] a statement list and the [`Unit`] it
 //! runs as; the executor owns the rest: the connection, the transaction, the
-//! lock-timeout statements, the debug line before each statement, the
-//! retries, and which statement failed ([`Failed::index`]). Every statement
+//! lock-timeout statements, each statement's subject in the statement log,
+//! the retries, and which statement failed ([`Failed::index`]). Every statement
 //! runs unprepared, so no connection keeps a statement prepared against a
 //! schema the next migration changes
 //! (`docs/solutions/patterns/ddl-on-live-engine.md`).
@@ -181,8 +181,8 @@ pub enum Unit {
     Unwrapped,
 }
 
-/// Whose statements a unit runs: the subject of every statement, and the
-/// voice of the debug line logged before it.
+/// Whose statements a unit runs: the subject of every statement, in the
+/// report and in its statement log record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Door<'a> {
     /// The create or reconciliation pass, on this table or enum type.
@@ -198,17 +198,6 @@ impl Door<'_> {
             subject: subject.to_string(),
             sql: sql.to_string(),
             role,
-        }
-    }
-
-    /// The debug line logged before `statement` runs: free text, one per
-    /// statement. What a pass ran is its [`crate::migrate::PassReport`], never
-    /// this line.
-    fn log(self, statement: &Statement) {
-        let (subject, sql) = (statement.subject.as_str(), statement.sql.as_str());
-        match self {
-            Door::Pass(_) => crate::log_debug(format!("ferro auto-migrate: {subject}: {sql}")),
-            Door::Run(_) => crate::run::log_step_statement(subject, sql),
         }
     }
 }
@@ -246,8 +235,8 @@ pub struct Executed {
 }
 
 impl Executed {
-    /// Log `sql` as `door`'s, run it unprepared on `conn`, and record it once
-    /// it succeeded.
+    /// Run `sql` unprepared on `conn` as `door`'s, its statement log record
+    /// under `door`'s subject, and record it once it succeeded.
     ///
     /// # Errors
     /// The database error; nothing is recorded.
@@ -259,8 +248,9 @@ impl Executed {
         sql: &str,
     ) -> Result<u64, sqlx::Error> {
         let statement = door.statement(role, sql);
-        door.log(&statement);
-        let affected = conn.execute_sql_unprepared(sql).await?;
+        let affected =
+            crate::sql_log::with_subject(&statement.subject, conn.execute_sql_unprepared(sql))
+                .await?;
         self.statements.push(statement);
         Ok(affected)
     }
@@ -278,15 +268,16 @@ impl Executed {
         sql: &str,
     ) -> Result<u64, sqlx::Error> {
         let statement = door.statement(role, sql);
-        door.log(&statement);
-        let affected = engine.execute_sql_unprepared(sql).await?;
+        let affected =
+            crate::sql_log::with_subject(&statement.subject, engine.execute_sql_unprepared(sql))
+                .await?;
         self.statements.push(statement);
         Ok(affected)
     }
 
-    /// Log the read `sql` as `door`'s, run it unprepared on a connection out
-    /// of `engine`'s pool, and record it as [`Role::Probe`] once it
-    /// succeeded.
+    /// Run the read `sql` unprepared as `door`'s on a connection out of
+    /// `engine`'s pool, its statement log record under `door`'s subject, and
+    /// record it as [`Role::Probe`] once it succeeded.
     ///
     /// # Errors
     /// The pool's or the database's error; nothing is recorded.
@@ -297,8 +288,9 @@ impl Executed {
         sql: &str,
     ) -> Result<Vec<crate::backend::EngineRow>, sqlx::Error> {
         let statement = door.statement(Role::Probe, sql);
-        door.log(&statement);
-        let rows = engine.fetch_all_sql_unprepared(sql).await?;
+        let rows =
+            crate::sql_log::with_subject(&statement.subject, engine.fetch_all_sql_unprepared(sql))
+                .await?;
         self.statements.push(statement);
         Ok(rows)
     }
