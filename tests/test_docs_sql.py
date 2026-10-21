@@ -28,6 +28,7 @@ block with that record. A block marked ``(postgres)`` runs under the
 
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import logging
@@ -35,7 +36,7 @@ import os
 import re
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -214,7 +215,9 @@ def _snippet_ranges(source: str) -> dict[str, tuple[int, int]]:
     return ranges
 
 
-def check_block(block: SqlBlock, sent: Callable[[str, str], dict[str, list[str]]]) -> None:
+def check_block(
+    block: SqlBlock, sent: Callable[[str, str], dict[str, list[str]]]
+) -> None:
     """Assert ``block`` is marked and holds what its example's region sends.
 
     Args:
@@ -263,7 +266,7 @@ def test_layout_only_adds_line_breaks() -> None:
         'FROM "t"',
         'INNER JOIN "a" AS "x" ON "x"."id" = "t"."a_id"',
         'WHERE EXISTS (SELECT 1 FROM "s" WHERE "s"."t_id" = "t"."id") '
-        "AND \"t\".\"memo\" = 'FROM x'",
+        'AND "t"."memo" = \'FROM x\'',
         'ORDER BY "t"."id" ASC',
         "LIMIT ?",
         "OFFSET ?",
@@ -289,7 +292,11 @@ def test_layout_puts_each_column_of_a_create_table_on_its_own_line() -> None:
     assert _unlaid(laid) == sql
 
 
-SENT = {"predicates.py": {"first-query": ['SELECT "id" FROM "transaction" WHERE "amount" <= ?']}}
+SENT = {
+    "predicates.py": {
+        "first-query": ['SELECT "id" FROM "transaction" WHERE "amount" <= ?']
+    }
+}
 
 
 def _fake_sent(example: str, dialect: str) -> dict[str, list[str]]:
@@ -531,6 +538,56 @@ class _Capture:
         if self.where is not None and self.where[0] == self.path:
             self.sent.append((self.where[1], sql))
 
+    @property
+    def line(self) -> str:
+        """The example line running now, as ``<example>:<line>``."""
+        if self.where is None:
+            return f"{Path(self.path).name}:?"
+        return f"{Path(self.where[0]).name}:{self.where[1]}"
+
+    async def run_terminal(
+        self, render: Callable[[], Awaitable[Any]], call: Awaitable[Any]
+    ) -> Any:
+        """Record what a terminal sends, rendered by its ``.sql()``, then run it.
+
+        A terminal another terminal runs is not rendered again: the outer
+        rendering already holds its statement. Its own statements reach the
+        statement log while ``depth`` is up, and are not recorded twice.
+
+        When ``.sql()`` raises, the call must raise the same exception type,
+        having sent nothing; a call that then succeeds, or fails otherwise,
+        would send a statement no block could show, so it fails the capture
+        naming the example line.
+        """
+        if self.depth:
+            return await call
+        self.depth += 1
+        try:
+            line = self.line
+            try:
+                rendered = await render()
+            except Exception as refused:
+                try:
+                    result = await call
+                except type(refused):
+                    raise
+                except Exception as other:
+                    raise AssertionError(
+                        f"{line}: .sql() raised {refused!r} but the call raised "
+                        f"{other!r}; a terminal must refuse the same way in both"
+                    ) from other
+                raise AssertionError(
+                    f"{line}: .sql() raised {refused!r} but the call succeeded "
+                    f"(returned {result!r}), so what it sent cannot be shown"
+                ) from refused
+            assert rendered.dialect == self.dialect, (
+                f"{line}: rendered for {rendered.dialect}, ran on {self.dialect}"
+            )
+            self.record(str(rendered))
+            return await call
+        finally:
+            self.depth -= 1
+
     def write(self, text: str) -> None:
         """Record each line the example prints, at the example line printing it."""
         self.pending += text
@@ -554,8 +611,74 @@ class _Capture:
         return regions
 
 
+class _Rendered:
+    def __init__(self, sql: str, dialect: str = "sqlite") -> None:
+        self.sql, self.dialect = sql, dialect
+
+    def __str__(self) -> str:
+        return self.sql
+
+
+def _capture_at(line: int) -> _Capture:
+    capture = _Capture(DOCS_EXAMPLES / "predicates.py", "sqlite")
+    capture.where = (capture.path, line)
+    return capture
+
+
+async def _returns(value: Any) -> Any:
+    return value
+
+
+async def _raises(error: Exception) -> Any:
+    raise error
+
+
+def test_a_terminal_whose_sql_raises_but_whose_call_succeeds_fails_the_capture() -> (
+    None
+):
+    capture = _capture_at(42)
+    with pytest.raises(AssertionError) as raised:
+        asyncio.run(
+            capture.run_terminal(
+                lambda: _raises(ValueError("cannot render")), _returns([1, 2])
+            )
+        )
+    assert str(raised.value).startswith(
+        "predicates.py:42: .sql() raised ValueError('cannot render') but the call "
+        "succeeded"
+    ), str(raised.value)
+
+
+def test_a_terminal_whose_sql_and_call_refuse_differently_fails_the_capture() -> None:
+    capture = _capture_at(7)
+    with pytest.raises(AssertionError, match=r"^predicates\.py:7: \.sql\(\) raised"):
+        asyncio.run(
+            capture.run_terminal(
+                lambda: _raises(ValueError("no")), _raises(TypeError("no"))
+            )
+        )
+
+
+def test_a_terminal_that_refuses_in_both_raises_its_error_and_records_nothing() -> None:
+    capture = _capture_at(7)
+    with pytest.raises(ValueError, match="refused"):
+        asyncio.run(
+            capture.run_terminal(
+                lambda: _raises(ValueError("cannot")), _raises(ValueError("refused"))
+            )
+        )
+    assert capture.sent == [] and capture.depth == 0
+
+
+def test_a_terminal_records_its_rendering_and_returns_its_result() -> None:
+    capture = _capture_at(9)
+    result = asyncio.run(
+        capture.run_terminal(lambda: _returns(_Rendered("SELECT 1")), _returns(3))
+    )
+    assert (result, capture.sent, capture.depth) == (3, [(9, "SELECT 1")], 0)
+
+
 def _run_capture(example: str, dialect: str, url: str | None) -> dict[str, list[str]]:
-    import asyncio  # noqa: F401  (the example's own import, made early)
     import runpy
 
     import ferro
@@ -578,23 +701,7 @@ def _run_capture(example: str, dialect: str, url: str | None) -> dict[str, list[
         # an awaitable raises here, where the example expects it.
         awaitable = call(self, *args, **kwargs)
 
-        async def run() -> Any:
-            if capture.depth:  # a terminal another terminal runs: not rendered again
-                return await awaitable
-            capture.depth += 1
-            try:
-                try:
-                    rendered = await self.sql(*args, **kwargs)
-                except Exception:  # the call raises it too, and sends nothing
-                    rendered = None
-                if rendered is not None:
-                    assert rendered.dialect == dialect, rendered.dialect
-                    capture.record(str(rendered))
-                return await awaitable
-            finally:
-                capture.depth -= 1
-
-        return run()
+        return capture.run_terminal(lambda: self.sql(*args, **kwargs), awaitable)
 
     Terminal.__call__ = render_then_call  # type: ignore[method-assign]
 
