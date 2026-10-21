@@ -246,6 +246,8 @@ Show which migrations this database has applied, without changing it or taking a
 | :--- | :--- |
 | `--steps` | Print every migration's steps, not only those needing attention. |
 | `--json` | Print the report as a JSON document, and nothing else on stdout. It carries `url` (the database's URL, password masked), `applied_at` on each migration and `finished_at` on each step, beside the keys it always had. |
+| `--no-steps` | Print only the steps needing attention. This is the default. |
+| `--no-json` | Print the plain report. This is the default. |
 
 Exit 0 when everything is applied, 3 when something is pending, 4 when something needs attention.
 

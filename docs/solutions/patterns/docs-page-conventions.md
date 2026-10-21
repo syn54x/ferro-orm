@@ -167,8 +167,8 @@ Each statement is laid out one clause per line (`FROM`, `JOIN`, `WHERE`,
 `GROUP BY`, `ORDER BY`, `LIMIT` and the rest, at the top level only), a
 `CREATE TABLE` one column per line, and ends with `;`. Unindenting the lines
 and joining them with single spaces gives back the statement Ferro sent. The
-example runs with `PYTHONHASHSEED=0`, because a partial `save(only=...)`
-writes its `SET` columns in set order. An example that a `(postgres)` block
+example runs under the interpreter's own hash seed, so output that varies from
+run to run fails the gate. An example that a `(postgres)` block
 or a lone SQLite block names must run on PostgreSQL too: `ferro.connect` is
 pointed at the test database, so raw SQL in it uses `$1` placeholders, which
 SQLite also accepts.
