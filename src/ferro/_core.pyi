@@ -707,6 +707,41 @@ async def update_filtered(
     *,
     secret_values: list[object] = ...,
 ) -> int: ...
+RenderedParts = tuple[str, tuple[object, ...], tuple[bool, ...], str]
+"""A rendering entry's answer: the SQL, the parameters (`None` where
+masked), the mask (`True` where the parameter is a secret) and the dialect."""
+
+async def render_fetch(
+    cls: object,
+    query_ir_json: str,
+    route: RouteHandle,
+    record_cls: type | None = None,
+    hop_classes: dict[str, type] | None = None,
+    *,
+    secret_values: list[object] = ...,
+) -> RenderedParts: ...
+async def render_count(
+    name: str,
+    query_ir_json: str,
+    route: RouteHandle,
+    *,
+    secret_values: list[object] = ...,
+    operation: Literal["count", "exists"] = "count",
+) -> RenderedParts: ...
+async def render_update(
+    name: str,
+    query_ir_json: str,
+    route: RouteHandle,
+    *,
+    secret_values: list[object] = ...,
+) -> RenderedParts: ...
+async def render_delete(
+    name: str,
+    query_ir_json: str,
+    route: RouteHandle,
+    *,
+    secret_values: list[object] = ...,
+) -> RenderedParts: ...
 async def add_m2m_links(
     join_table: str,
     source_col: str,

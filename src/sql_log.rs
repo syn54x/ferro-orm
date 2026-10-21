@@ -278,7 +278,35 @@ fn mask_of(binds: &[EngineBindValue], secrets: &[EngineBindValue]) -> Vec<bool> 
     binds.iter().map(|bind| secrets.contains(bind)).collect()
 }
 
-fn dialect_name(dialect: Dialect) -> &'static str {
+/// A statement's parameters as a record shows them: each bind as its
+/// Python value, `None` where it equals one of `secrets`, beside the mask
+/// that marks those positions. The statement log and a rendered statement
+/// (`.sql()`) both show parameters through this one function.
+///
+/// # Errors
+/// The `PyErr` from converting a bind to Python.
+pub fn shown_params<'py>(
+    py: Python<'py>,
+    binds: &[EngineBindValue],
+    secrets: &[EngineBindValue],
+) -> PyResult<(Bound<'py, PyTuple>, Bound<'py, PyTuple>)> {
+    let mask = mask_of(binds, secrets);
+    let params = binds
+        .iter()
+        .zip(&mask)
+        .map(|(bind, &masked)| {
+            if masked {
+                Ok(py.None().into_bound(py))
+            } else {
+                bind_to_py(py, bind)
+            }
+        })
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok((PyTuple::new(py, params)?, PyTuple::new(py, mask)?))
+}
+
+/// The name a record gives `dialect`: `"postgres"` or `"sqlite"`.
+pub fn dialect_name(dialect: Dialect) -> &'static str {
     match dialect {
         Dialect::Postgres => "postgres",
         Dialect::Sqlite => "sqlite",
@@ -314,26 +342,15 @@ fn emit(
     duration_ms: f64,
     outcome: Result<Option<u64>, &sqlx::Error>,
 ) -> PyResult<()> {
-    let mask = mask_of(binds, &context.secret_values);
-    let params = binds
-        .iter()
-        .zip(&mask)
-        .map(|(bind, &masked)| {
-            if masked {
-                Ok(py.None().into_bound(py))
-            } else {
-                bind_to_py(py, bind)
-            }
-        })
-        .collect::<PyResult<Vec<_>>>()?;
+    let (params, mask) = shown_params(py, binds, &context.secret_values)?;
     let (rows, error) = match outcome {
         Ok(rows) => (rows, None),
         Err(err) => (None, Some(err.to_string())),
     };
     let record = PyDict::new(py);
     record.set_item("sql", sql)?;
-    record.set_item("params", PyTuple::new(py, params)?)?;
-    record.set_item("mask", PyTuple::new(py, mask)?)?;
+    record.set_item("params", params)?;
+    record.set_item("mask", mask)?;
     record.set_item("dialect", dialect_name(dialect))?;
     record.set_item("duration_ms", duration_ms)?;
     record.set_item("operation", context.operation)?;

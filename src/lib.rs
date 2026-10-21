@@ -135,6 +135,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(operations::fetch_all, m)?)?;
     m.add_function(wrap_pyfunction!(operations::fetch_filtered, m)?)?;
     m.add_function(wrap_pyfunction!(operations::count_filtered, m)?)?;
+    m.add_function(wrap_pyfunction!(operations::render_fetch, m)?)?;
+    m.add_function(wrap_pyfunction!(operations::render_count, m)?)?;
+    m.add_function(wrap_pyfunction!(operations::render_update, m)?)?;
+    m.add_function(wrap_pyfunction!(operations::render_delete, m)?)?;
     m.add_function(wrap_pyfunction!(operations::fetch_one, m)?)?;
     m.add_function(wrap_pyfunction!(operations::register_instance, m)?)?;
     m.add_function(wrap_pyfunction!(operations::evict_instance, m)?)?;
