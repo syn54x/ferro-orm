@@ -428,10 +428,10 @@ class StatusReport:
     For a database with `0006_add_teams` applied and `0007_nickname`
     part-way:
 
-    ```python
-    report.head_applied.name   # "0006_add_teams"
-    report.unfinished.name     # "0007_nickname"
-    report.pending             # True
+    ```python {test=compile reason="needs a database with a migration part-way applied"}
+    assert report.head_applied.name == "0006_add_teams"
+    assert report.unfinished.name == "0007_nickname"
+    assert report.pending
     ```
     """
 

@@ -1,6 +1,6 @@
 """What a data step is handed: `StepContext` and `HistoricalModels`.
 
-```python
+```python {test=compile reason="a data step body; the migration runner calls it"}
 @atomic
 async def up(ctx):
     for author in await ctx.models.Author.where(lambda author: author.slug == None).all():

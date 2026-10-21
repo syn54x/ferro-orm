@@ -204,7 +204,7 @@ class ForeignKey:
     that `related_name` names. The models these examples run against declare
     the pair like this, other fields left out:
 
-    ```python
+    ```python {test=compile reason="the reference prelude already declares these models"}
     class Author(Model):
         ...
         posts: Relation[list["Post"]] = BackRef()

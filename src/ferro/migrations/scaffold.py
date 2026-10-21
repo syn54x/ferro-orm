@@ -8,7 +8,7 @@ A backfill. `Author` gains a required `slug`;
 `ferro migrate new author_slug` writes it between the expand and the
 contract:
 
-```python
+```python {test=compile reason="a generated data step file; the migration runner calls it"}
 # migrations/0012_author_slug/02_backfill_author.py
 from ferro.migrations import chunked, nothing_to_reverse, todo
 
@@ -39,7 +39,7 @@ A label removed from a `StrEnum` is a backfill over the rows still holding
 it, each given another label (the historical model's enum still declares
 the removed one, and the label written is looked up in it):
 
-```python
+```python {test=compile reason="a generated data step body; the migration runner calls it"}
 @chunked(
     lambda models: models.Order.where(lambda order: order.status == "canceled")
     .order_by(lambda order: order.id),
@@ -58,7 +58,7 @@ any row still needs a value, so a step number is never a gap.
 A hand-requested data step
 (`ferro migrate new backfill_slugs --data-step Author`):
 
-```python
+```python {test=compile reason="a generated data step file; the migration runner calls it"}
 from ferro.migrations import atomic, todo
 
 

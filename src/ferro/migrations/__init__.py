@@ -9,7 +9,7 @@ otherwise. `down` and `rerecord` stay CLI verbs: they are operator
 decisions with prompts. A refusal is raised, never returned: an application
 that called `up()` must not go on serving a database the run did not reach.
 
-```python
+```python {test=compile reason="needs a project with a migrations directory"}
 await ferro.connect(url)
 await ferro.migrations.up()                # a desktop app with no deploy step
 await ferro.migrations.require_applied()   # a server that migrates in its deploy step

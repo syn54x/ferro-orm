@@ -1,6 +1,6 @@
 """The database a migration verb works on, and the connection that reaches it.
 
-```python
+```python {test=compile reason="needs a project with a migrations directory"}
 await ferro.migrations.up()                          # the configured database, default connection
 await ferro.migrations.up(database="analytics", using="reporting")
 await ferro.migrations.up(url="postgres://…/app")    # a private connection, closed after
