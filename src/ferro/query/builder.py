@@ -18,6 +18,7 @@ from typing import (
     NamedTuple,
     Never,
     NoReturn,
+    Protocol,
     Self,
     Type,
     TypeVar,
@@ -559,6 +560,48 @@ def _collect_dict_projection(result: dict[Any, Any]) -> tuple[_ProjectedField, .
             )
         fields.append(_ProjectedField(name=key, column=value.column, path=value.path))
     return tuple(fields)
+
+
+if TYPE_CHECKING:
+    from .rendered import RenderedSql
+
+    class _UpdateTerminal(Protocol[E]):
+        """`query.update` as a type checker reads it: a recipe or keyword
+        literals, never both, on the call and on `.sql()` alike."""
+
+        @overload
+        def __call__(
+            self, recipe: Callable[[QueryProxy[E]], dict[str, Any]], /
+        ) -> Awaitable[int]: ...
+        @overload
+        def __call__(self, /, **fields: Any) -> Awaitable[int]: ...
+        @overload
+        def sql(
+            self, recipe: Callable[[QueryProxy[E]], dict[str, Any]], /
+        ) -> Awaitable[RenderedSql]: ...
+        @overload
+        def sql(self, /, **fields: Any) -> Awaitable[RenderedSql]: ...
+
+    class _UpdateMethod(Protocol):
+        """`Query.update` as a type checker reads it: reading it from a
+        `Query[E]` binds an `_UpdateTerminal[E]`."""
+
+        @overload
+        def __get__(self, query: None, owner: Any) -> "_UpdateMethod": ...
+        @overload
+        def __get__(self, query: "Query[E]", owner: Any) -> _UpdateTerminal[E]: ...
+
+
+def _update_terminal(method: Callable[..., Awaitable[int]]) -> "_UpdateMethod":
+    """Make `Query.update` a [`terminal`][ferro.query.rendered.terminal] that
+    keeps its two forms apart statically.
+
+    A terminal carries its method's one signature, and `update` has two
+    (a recipe, or keyword literals), so a type checker reads this terminal
+    through `_UpdateMethod`, whose call and `.sql()` are overloaded per form.
+    At runtime it is `terminal(method)`.
+    """
+    return cast("_UpdateMethod", terminal(method))
 
 
 class Query(Generic[T]):
@@ -1294,7 +1337,7 @@ class Query(Generic[T]):
             operation=operation,
         )
 
-    @terminal
+    @_update_terminal
     async def update(
         self: "Query[T]",
         recipe: Callable[[QueryProxy[T]], dict[str, Any]] | None = None,
