@@ -199,6 +199,8 @@ Apply every pending migration, in order, under the run lock. Prints one line per
 | Flag | What it does |
 | :--- | :--- |
 | `--lock-timeout DURATION` | How long to wait for another run's lock: `30s`, `500ms`, `1m`, a number of seconds, or `0` to refuse at once. Defaults to the database's [`lock_timeout`](configuration.md#lock_timeout) (`30s`); the flag wins. |
+| `--allow-ahead=expand-only` | Run beside a database that has applied migrations this directory lacks, when every step they hold is an expand step: the previous release of a [rolling deploy](../guide/schema/deploying.md#rolling-deploys-and-the-two-release-contract). Refused, naming the first contract step, otherwise. |
+| `--allow-ahead` | Run beside a database that has applied migrations this directory lacks, whatever steps they hold. Without either form, `up` refuses a database ahead of its directory. |
 
 <!-- output: up -->
 ```text
