@@ -7,14 +7,18 @@ verb policy, and the versioned envelope — lives behind ``wire.compile_query``.
 """
 
 import copy
+from collections.abc import Awaitable
 from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
+    ClassVar,
     Generic,
+    Literal,
     NamedTuple,
     Never,
     NoReturn,
+    Protocol,
     Self,
     Type,
     TypeVar,
@@ -29,6 +33,10 @@ from .._core import (
     delete_filtered,
     fetch_filtered,
     remove_m2m_links,
+    render_count,
+    render_delete,
+    render_fetch,
+    render_update,
     update_filtered,
 )
 from .nodes import (
@@ -43,6 +51,7 @@ from .nodes import (
     ValueExpr,
     validate_query_column,
 )
+from .rendered import Terminal, send, terminal
 from .rows import Row, Rows
 from .wire import (
     M2mContext,
@@ -551,6 +560,48 @@ def _collect_dict_projection(result: dict[Any, Any]) -> tuple[_ProjectedField, .
             )
         fields.append(_ProjectedField(name=key, column=value.column, path=value.path))
     return tuple(fields)
+
+
+if TYPE_CHECKING:
+    from .rendered import RenderedSql
+
+    class _UpdateTerminal(Protocol[E]):
+        """`query.update` as a type checker reads it: a recipe or keyword
+        literals, never both, on the call and on `.sql()` alike."""
+
+        @overload
+        def __call__(
+            self, recipe: Callable[[QueryProxy[E]], dict[str, Any]], /
+        ) -> Awaitable[int]: ...
+        @overload
+        def __call__(self, /, **fields: Any) -> Awaitable[int]: ...
+        @overload
+        def sql(
+            self, recipe: Callable[[QueryProxy[E]], dict[str, Any]], /
+        ) -> Awaitable[RenderedSql]: ...
+        @overload
+        def sql(self, /, **fields: Any) -> Awaitable[RenderedSql]: ...
+
+    class _UpdateMethod(Protocol):
+        """`Query.update` as a type checker reads it: reading it from a
+        `Query[E]` binds an `_UpdateTerminal[E]`."""
+
+        @overload
+        def __get__(self, query: None, owner: Any) -> "_UpdateMethod": ...
+        @overload
+        def __get__(self, query: "Query[E]", owner: Any) -> _UpdateTerminal[E]: ...
+
+
+def _update_terminal(method: Callable[..., Awaitable[int]]) -> "_UpdateMethod":
+    """Make `Query.update` a [`terminal`][ferro.query.rendered.terminal] that
+    keeps its two forms apart statically.
+
+    A terminal carries its method's one signature, and `update` has two
+    (a recipe, or keyword literals), so a type checker reads this terminal
+    through `_UpdateMethod`, whose call and `.sql()` are overloaded per form.
+    At runtime it is `terminal(method)`.
+    """
+    return cast("_UpdateMethod", terminal(method))
 
 
 class Query(Generic[T]):
@@ -1235,7 +1286,8 @@ class Query(Generic[T]):
         new._before = bound
         return new
 
-    async def all(self) -> list[T]:
+    @terminal
+    async def all(self: "Query[T]") -> list[T]:
         """Return all model instances that match the current query
 
         Returns:
@@ -1248,17 +1300,19 @@ class Query(Generic[T]):
         """
         compiled = compile_query(self, "fetch")
         route = await self._transaction_or_using()
-        rows = await fetch_filtered(
+        rows = await send(fetch_filtered, render_fetch)(
             self.model_cls,
             compiled.wire_json,
             route,
             hop_classes=compiled.hop_classes,
+            secret_values=compiled.secret_values,
         )
         if self._before is not None:
             rows.reverse()
         return rows
 
-    async def count(self) -> int:
+    @terminal
+    async def count(self: "Query[T]") -> int:
         """Return the number of records that match the current query
 
         Returns:
@@ -1269,23 +1323,27 @@ class Query(Generic[T]):
             >>> isinstance(total, int)
             True
         """
+        return await self._count("count")
+
+    async def _count(self, operation: Literal["count", "exists"]) -> int:
+        """Count the matching rows, naming the statement-log records `operation`."""
         compiled = compile_query(self, "count")
         route = await self._transaction_or_using()
-        return await count_filtered(
+        return await send(count_filtered, render_count)(
             model_identity(self.model_cls),
             compiled.wire_json,
             route,
+            secret_values=compiled.secret_values,
+            operation=operation,
         )
 
-    @overload
+    @_update_terminal
     async def update(
-        self, recipe: Callable[[QueryProxy[T]], dict[str, Any]], /
-    ) -> int: ...
-
-    @overload
-    async def update(self, /, **fields: Any) -> int: ...
-
-    async def update(self, *args: Any, **fields: Any) -> int:
+        self: "Query[T]",
+        recipe: Callable[[QueryProxy[T]], dict[str, Any]] | None = None,
+        /,
+        **fields: Any,
+    ) -> int:
         """Update all records matching the current query.
 
         Two doors, one SET wire: keyword literals (``update(name="x")``) or a
@@ -1298,10 +1356,10 @@ class Query(Generic[T]):
         cannot be mixed.
 
         Args:
-            *args: Optional positional recipe callable receiving a
+            recipe: Optional positional recipe callable receiving a
                 :class:`QueryProxy` and returning a non-empty ``dict`` of
-                root-column assignments. Nameless so a keyword ``recipe=``
-                still SETs a column of that name.
+                root-column assignments. Positional-only, so a keyword
+                ``recipe=`` still SETs a column of that name.
             **fields: Field names and literal values to update.
 
         Returns:
@@ -1327,9 +1385,6 @@ class Query(Generic[T]):
             ...     }
             ... )
         """
-        if len(args) > 1:
-            raise TypeError("update() takes at most one positional recipe")
-        recipe = args[0] if args else None
         if recipe is not None and fields:
             raise TypeError(
                 "update() accepts either a recipe callable or keyword "
@@ -1342,13 +1397,15 @@ class Query(Generic[T]):
         else:
             compiled = compile_query(self, "update", assignments=fields)
         route = await self._transaction_or_using()
-        return await update_filtered(
+        return await send(update_filtered, render_update)(
             model_identity(self.model_cls),
             compiled.wire_json,
             route,
+            secret_values=compiled.secret_values,
         )
 
-    async def first(self) -> T | None:
+    @terminal
+    async def first(self: "Query[T]") -> T | None:
         """Return the first matching record, or None
 
         Returns:
@@ -1362,7 +1419,8 @@ class Query(Generic[T]):
         results = await self.limit(1).all()
         return results[0] if results else None
 
-    async def delete(self) -> int:
+    @terminal
+    async def delete(self: "Query[T]") -> int:
         """Delete all records matching the current query
 
         Returns:
@@ -1383,13 +1441,15 @@ class Query(Generic[T]):
         """
         compiled = compile_query(self, "delete")
         route = await self._transaction_or_using()
-        return await delete_filtered(
+        return await send(delete_filtered, render_delete)(
             model_identity(self.model_cls),
             compiled.wire_json,
             route,
+            secret_values=compiled.secret_values,
         )
 
-    async def exists(self) -> bool:
+    @terminal
+    async def exists(self: "Query[T]") -> bool:
         """Return whether at least one record matches the current query
 
         Returns:
@@ -1400,7 +1460,7 @@ class Query(Generic[T]):
             >>> isinstance(found, bool)
             True
         """
-        return await self.count() > 0
+        return await self._count("exists") > 0
 
     async def add(self, *instances: Any) -> None:
         """Add links to a many-to-many relationship
@@ -1714,7 +1774,8 @@ class ProjectedQuery(Query[T]):
             for field in self._projection
         )
 
-    def count(self):  # type: ignore[override]
+    @terminal
+    def count(self: "ProjectedQuery[T]") -> Awaitable[int]:
         """Count matching rows — or raise on an aggregate projection (#295).
 
         On a plain projection ``count()`` stays projection-blind (#279's
@@ -1735,7 +1796,8 @@ class ProjectedQuery(Query[T]):
             )
         return super().count()
 
-    def exists(self):  # type: ignore[override]
+    @terminal
+    def exists(self: "ProjectedQuery[T]") -> Awaitable[bool]:
         """Existence check — or raise on an aggregate projection (#295).
 
         Raises:
@@ -1798,7 +1860,8 @@ class ProjectedQuery(Query[T]):
             )
         return getattr(row, name)
 
-    async def all(self) -> Rows[Row]:  # type: ignore[override]  # ty: ignore[invalid-method-override]
+    @terminal
+    async def all(self: "ProjectedQuery[T]") -> Rows[Row]:  # type: ignore[override]
         """Return the projected records for every matching row.
 
         Returns:
@@ -1812,18 +1875,20 @@ class ProjectedQuery(Query[T]):
         """
         compiled = compile_query(self, "fetch")
         route = await self._transaction_or_using()
-        records = await fetch_filtered(
+        records = await send(fetch_filtered, render_fetch)(
             self.model_cls,
             compiled.wire_json,
             route,
             record_cls=Row,
             hop_classes=compiled.hop_classes,
+            secret_values=compiled.secret_values,
         )
         if self._before is not None:
             records.reverse()
         return _ROWS_OF_ROW._wrap(records)
 
-    async def first(self) -> Row | None:  # type: ignore[override]  # ty: ignore[invalid-method-override]
+    @terminal
+    async def first(self: "ProjectedQuery[T]") -> Row | None:  # type: ignore[override]
         """Return the first matching projected record, or None.
 
         Examples:
@@ -1920,6 +1985,41 @@ class ProjectedQuery(Query[T]):
         )
 
 
+if TYPE_CHECKING:
+
+    class _RelationAll:
+        """`Relation.all` as a type checker reads it: its rows are instances
+        of `E` whether the relation is written `Relation[list[E]]` or
+        `Relation[E]`."""
+
+        @overload
+        def __get__(self, query: None, owner: Any) -> "_RelationAll": ...
+        @overload
+        def __get__(
+            self, query: "Relation[list[E]]", owner: Any
+        ) -> Terminal[[], list[E]]: ...
+        @overload
+        def __get__(
+            self, query: "Relation[E]", owner: Any
+        ) -> Terminal[[], list[E]]: ...
+        def __get__(self, query: Any, owner: Any) -> Any: ...
+
+    class _RelationFirst:
+        """`Relation.first` as a type checker reads it (see `_RelationAll`)."""
+
+        @overload
+        def __get__(self, query: None, owner: Any) -> "_RelationFirst": ...
+        @overload
+        def __get__(
+            self, query: "Relation[list[E]]", owner: Any
+        ) -> Terminal[[], E | None]: ...
+        @overload
+        def __get__(
+            self, query: "Relation[E]", owner: Any
+        ) -> Terminal[[], E | None]: ...
+        def __get__(self, query: Any, owner: Any) -> Any: ...
+
+
 class Relation(Query[T]):
     """Represent lazy collection relationship queries with typing support
 
@@ -1950,24 +2050,8 @@ class Relation(Query[T]):
     # Relation[T] as a query whose *rows* are model instances, regardless of whether
     # T is written as Model or list[Model] in the field annotation.
     if TYPE_CHECKING:
-
-        @overload
-        async def all(self: "Relation[list[E]]") -> list[E]: ...
-
-        @overload
-        async def all(self: "Relation[E]") -> list[E]: ...
-
-        @overload
-        async def first(self: "Relation[list[E]]") -> E | None: ...
-
-        @overload
-        async def first(self: "Relation[E]") -> E | None: ...
-
-    async def all(self):  # type: ignore[override]
-        return await super().all()
-
-    async def first(self):  # type: ignore[override]
-        return await super().first()
+        all: ClassVar["_RelationAll"]  # type: ignore[assignment]
+        first: ClassVar["_RelationFirst"]  # type: ignore[assignment]
 
     @classmethod
     def __get_pydantic_core_schema__(cls, _source_type, _handler):

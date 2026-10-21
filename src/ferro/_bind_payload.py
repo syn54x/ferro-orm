@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Iterable, Iterator
 from datetime import date, datetime, time
 from decimal import Decimal
 from enum import Enum
@@ -39,6 +40,63 @@ def unwrap_secret(value: Any) -> Any:
     if isinstance(value, (SecretStr, SecretBytes)):
         return value.get_secret_value()
     return value
+
+
+def secret_values_in(values: Iterable[object]) -> tuple[object, ...]:
+    """Return what each `SecretStr` / `SecretBytes` among `values` hides.
+
+    The one collector of an operation's secret values: a query's compile, a
+    write and a raw statement each call it once. The statement log and a
+    rendered statement mask a bound parameter equal to any of these.
+
+    Args:
+        values: The values about to be bound. A list, tuple or set among them
+            is searched too, so a secret inside an `IN` list is found.
+
+    Returns:
+        The unwrapped value of every secret in `values`, in order; empty when
+        there is none.
+    """
+    found: list[object] = []
+    pending = list(values)
+    pending.reverse()
+    while pending:
+        value = pending.pop()
+        if isinstance(value, (SecretStr, SecretBytes)):
+            found.append(unwrap_secret(value))
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            pending.extend(reversed(list(value)))
+    return tuple(found)
+
+
+def deferred_secret_values(values: Iterable[object]) -> Iterator[object]:
+    """Yield the secret values in `values`, collected on first read.
+
+    A write or a raw statement hands this to the engine, which reads it only
+    when the statement log is on: the engine's one read of the log's switch
+    decides whether anything is collected.
+
+    Args:
+        values: The values about to be bound, read lazily.
+
+    Yields:
+        The unwrapped value of every secret in `values`, in order.
+    """
+    yield from secret_values_in(values)
+
+
+def field_values(instances: Iterable[Any]) -> Iterator[object]:
+    """Yield every field value of each model instance, in field order.
+
+    Args:
+        instances: The model instances about to be saved.
+
+    Yields:
+        Each instance's field values, as the instance holds them.
+    """
+    for instance in instances:
+        for name in type(instance).model_fields:
+            yield getattr(instance, name, None)
 
 
 def _raw_bound_fields(instance: Any) -> dict[str, Any]:

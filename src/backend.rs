@@ -14,6 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
 /// Infer the SQL dialect / backend from a connection-URL scheme.
 pub fn dialect_from_url(url: &str) -> Result<Dialect, UnsupportedDatabaseUrl> {
@@ -791,12 +792,24 @@ impl EngineHandle {
                 } else {
                     "BEGIN"
                 };
-                sqlx::query(begin).execute(&mut *conn).await?;
+                let started = Instant::now();
+                let result = sqlx::query(begin)
+                    .execute(&mut *conn)
+                    .await
+                    .map(|done| done.rows_affected());
+                observe_rows(begin, Dialect::Sqlite, started, &result);
+                result?;
                 Ok(EngineConnection::Sqlite(conn))
             }
             BackendPool::Postgres(pool) => {
                 let mut conn = pool.acquire().await?;
-                sqlx::query("BEGIN").execute(&mut *conn).await?;
+                let started = Instant::now();
+                let result = sqlx::query("BEGIN")
+                    .execute(&mut *conn)
+                    .await
+                    .map(|done| done.rows_affected());
+                observe_rows("BEGIN", Dialect::Postgres, started, &result);
+                result?;
                 Ok(EngineConnection::Postgres(conn))
             }
         }
@@ -825,22 +838,22 @@ impl EngineConnection {
     /// Migration DDL must use this: caching a statement against a schema the
     /// same migration is about to change would poison the connection.
     pub async fn execute_sql_unprepared(&mut self, sql: &str) -> Result<u64, sqlx::Error> {
-        match self {
-            EngineConnection::Sqlite(conn) => {
-                let result = sqlx::query(sql)
-                    .persistent(false)
-                    .execute(&mut **conn)
-                    .await?;
-                Ok(result.rows_affected())
-            }
-            EngineConnection::Postgres(conn) => {
-                let result = sqlx::query(sql)
-                    .persistent(false)
-                    .execute(&mut **conn)
-                    .await?;
-                Ok(result.rows_affected())
-            }
-        }
+        let dialect = self.dialect();
+        let started = Instant::now();
+        let result = match self {
+            EngineConnection::Sqlite(conn) => sqlx::query(sql)
+                .persistent(false)
+                .execute(&mut **conn)
+                .await
+                .map(|done| done.rows_affected()),
+            EngineConnection::Postgres(conn) => sqlx::query(sql)
+                .persistent(false)
+                .execute(&mut **conn)
+                .await
+                .map(|done| done.rows_affected()),
+        };
+        observe_rows(sql, dialect, started, &result);
+        result
     }
 
     /// Fetch without entering the connection's prepared-statement cache — the
@@ -851,24 +864,23 @@ impl EngineConnection {
         sql: &str,
         values: &[EngineBindValue],
     ) -> Result<Vec<EngineRow>, sqlx::Error> {
-        match self {
+        let dialect = self.dialect();
+        let started = Instant::now();
+        let result = match self {
             EngineConnection::Sqlite(conn) => {
                 let mut query = sqlx::query(sql).persistent(false);
                 for value in values {
                     query = bind_engine_value(query, value);
                 }
-                let rows = query.fetch_all(&mut **conn).await?;
-                Ok(rows.iter().map(materialize_engine_row).collect())
+                query
+                    .fetch_all(&mut **conn)
+                    .await
+                    .map(|rows| rows.iter().map(materialize_engine_row).collect())
             }
-            EngineConnection::Postgres(conn) => {
-                let mut query = sqlx::query(sql).persistent(false);
-                for value in values {
-                    query = bind_engine_value(query, value);
-                }
-                let rows = query.fetch_all(&mut **conn).await?;
-                Ok(rows.iter().map(materialize_pg_row).collect())
-            }
-        }
+            EngineConnection::Postgres(conn) => fetch_all_pg_unprepared(conn, sql, values).await,
+        };
+        observe_fetch(sql, values, dialect, started, &result);
+        result
     }
 
     pub async fn execute_sql_with_binds(
@@ -887,30 +899,44 @@ impl EngineConnection {
         sql: &str,
         values: &[EngineBindValue],
     ) -> Result<EngineExecuteResult, sqlx::Error> {
-        match self {
+        let dialect = self.dialect();
+        let started = Instant::now();
+        let result = match self {
             EngineConnection::Sqlite(conn) => {
                 let mut query = sqlx::query(sql);
                 for value in values {
                     query = bind_engine_value(query, value);
                 }
-                let result = query.execute(&mut **conn).await?;
-                Ok(EngineExecuteResult {
-                    rows_affected: result.rows_affected(),
-                    last_insert_id: Some(result.last_insert_rowid()),
-                })
+                query
+                    .execute(&mut **conn)
+                    .await
+                    .map(|done| EngineExecuteResult {
+                        rows_affected: done.rows_affected(),
+                        last_insert_id: Some(done.last_insert_rowid()),
+                    })
             }
             EngineConnection::Postgres(conn) => {
                 let mut query = sqlx::query(sql);
                 for value in values {
                     query = bind_engine_value(query, value);
                 }
-                let result = query.execute(&mut **conn).await?;
-                Ok(EngineExecuteResult {
-                    rows_affected: result.rows_affected(),
-                    last_insert_id: None,
-                })
+                query
+                    .execute(&mut **conn)
+                    .await
+                    .map(|done| EngineExecuteResult {
+                        rows_affected: done.rows_affected(),
+                        last_insert_id: None,
+                    })
             }
-        }
+        };
+        crate::sql_log::observe(
+            sql,
+            values,
+            dialect,
+            started,
+            result.as_ref().map(|done| Some(done.rows_affected)),
+        );
+        result
     }
 
     pub async fn fetch_all_sql_with_binds(
@@ -918,24 +944,32 @@ impl EngineConnection {
         sql: &str,
         values: &[EngineBindValue],
     ) -> Result<Vec<EngineRow>, sqlx::Error> {
-        match self {
+        let dialect = self.dialect();
+        let started = Instant::now();
+        let result = match self {
             EngineConnection::Sqlite(conn) => {
                 let mut query = sqlx::query(sql);
                 for value in values {
                     query = bind_engine_value(query, value);
                 }
-                let rows = query.fetch_all(&mut **conn).await?;
-                Ok(rows.iter().map(materialize_engine_row).collect())
+                query
+                    .fetch_all(&mut **conn)
+                    .await
+                    .map(|rows| rows.iter().map(materialize_engine_row).collect())
             }
             EngineConnection::Postgres(conn) => {
                 let mut query = sqlx::query(sql);
                 for value in values {
                     query = bind_engine_value(query, value);
                 }
-                let rows = query.fetch_all(&mut **conn).await?;
-                Ok(rows.iter().map(materialize_pg_row).collect())
+                query
+                    .fetch_all(&mut **conn)
+                    .await
+                    .map(|rows| rows.iter().map(materialize_pg_row).collect())
             }
-        }
+        };
+        observe_fetch(sql, values, dialect, started, &result);
+        result
     }
 
     pub async fn commit(&mut self) -> Result<(), sqlx::Error> {
@@ -977,6 +1011,65 @@ impl EngineConnection {
     pub async fn detach_and_close(self) -> Result<(), sqlx::Error> {
         self.detach().close().await
     }
+}
+
+/// Fetch on a Postgres connection the pool no longer owns, without entering
+/// its prepared-statement cache, and write the statement to the statement
+/// log: the run lock's own session (`crate::run::RunLock`) sends its
+/// `pg_try_advisory_lock`, its held-by-this-session check and its
+/// `pg_advisory_unlock` through here, so they are records like any other.
+///
+/// # Errors
+/// The `sqlx::Error` the database returned; it is in the record too.
+pub async fn fetch_all_detached_pg_unprepared(
+    conn: &mut sqlx::PgConnection,
+    sql: &str,
+    values: &[EngineBindValue],
+) -> Result<Vec<EngineRow>, sqlx::Error> {
+    let started = Instant::now();
+    let result = fetch_all_pg_unprepared(conn, sql, values).await;
+    observe_fetch(sql, values, Dialect::Postgres, started, &result);
+    result
+}
+
+/// The Postgres fetch both an [`EngineConnection`] and a detached connection
+/// send; the caller writes the record.
+async fn fetch_all_pg_unprepared(
+    conn: &mut sqlx::PgConnection,
+    sql: &str,
+    values: &[EngineBindValue],
+) -> Result<Vec<EngineRow>, sqlx::Error> {
+    let mut query = sqlx::query(sql).persistent(false);
+    for value in values {
+        query = bind_engine_value(query, value);
+    }
+    query
+        .fetch_all(conn)
+        .await
+        .map(|rows| rows.iter().map(materialize_pg_row).collect())
+}
+
+/// The statement log's record of an unbound execute that returned `result`'s
+/// rows affected.
+fn observe_rows(sql: &str, dialect: Dialect, started: Instant, result: &Result<u64, sqlx::Error>) {
+    crate::sql_log::observe(
+        sql,
+        &[],
+        dialect,
+        started,
+        result.as_ref().map(|n| Some(*n)),
+    );
+}
+
+/// The statement log's record of a fetch: it reports no rows affected.
+fn observe_fetch(
+    sql: &str,
+    binds: &[EngineBindValue],
+    dialect: Dialect,
+    started: Instant,
+    result: &Result<Vec<EngineRow>, sqlx::Error>,
+) {
+    crate::sql_log::observe(sql, binds, dialect, started, result.as_ref().map(|_| None));
 }
 
 fn materialize_engine_row<R>(row: &R) -> EngineRow

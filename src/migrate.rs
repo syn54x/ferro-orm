@@ -1216,9 +1216,16 @@ pub fn migrate(
     let opts = MigrateOptions::laddered(updates, destructive)
         .with_ddl_lock_timeout_seconds(ddl_lock_timeout_s)?
         .with_lock_timeout_seconds(lock_timeout_s)?;
+    let logged = crate::sql_log::enabled(py)?;
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let engine = engine_for_connection(using)?;
-        run_pass_for_python(engine, opts, &tracking_schemas, AutoMigrateDoor::Migrate).await
+        let (connection, engine) = crate::state::connection_for_route(using)?;
+        crate::sql_log::scope(
+            logged.then(|| {
+                crate::sql_log::StatementContext::new(crate::sql_log::MIGRATE, connection)
+            }),
+            run_pass_for_python(engine, opts, &tracking_schemas, AutoMigrateDoor::Migrate),
+        )
+        .await
     })
 }
 

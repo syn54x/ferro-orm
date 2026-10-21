@@ -267,7 +267,11 @@ pub async fn apply_settings_batch(
     let Some((sql, binds)) = render_set_config_batch(settings, is_local) else {
         return Ok(());
     };
-    conn.execute_sql_with_binds(&sql, &binds).await?;
+    crate::sql_log::with_operation(
+        crate::sql_log::SETTINGS,
+        conn.execute_sql_with_binds(&sql, &binds),
+    )
+    .await?;
     Ok(())
 }
 
@@ -1036,7 +1040,11 @@ pub async fn release_pinned_connection(pin: Arc<PinnedConnection>) -> PyResult<(
         let conn = guard
             .live()
             .map_err(|e| crate::errors::map_db_error("Failed to reset session settings", e))?;
-        match conn.execute_sql_with_binds(&sql, &binds).await {
+        let reset = crate::sql_log::with_operation(
+            crate::sql_log::SETTINGS,
+            conn.execute_sql_with_binds(&sql, &binds),
+        );
+        match reset.await {
             // Taken out of the slot deliberately: dropping it *after* the
             // guard is what returns it to the pool, clean.
             Ok(_) => Ok(guard.release()),

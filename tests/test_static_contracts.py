@@ -45,6 +45,27 @@ def test_mutating_query_methods_cannot_carry_pagination():
         assert "compile_query" in called, (
             f"Query.{method_name}() must build its payload via compile_query"
         )
+        # `.sql()` runs this same body with the send swapped for its render
+        # twin, so the contract above covers `update.sql` / `delete.sql` too.
+        decorators = {
+            dec.id for dec in method.decorator_list if isinstance(dec, ast.Name)
+        }
+        # `update` is `_update_terminal`: `terminal` at runtime, its two forms
+        # overloaded for the type checker.
+        assert decorators & {"terminal", "_update_terminal"}, (
+            f"Query.{method_name} must be a @terminal so .sql() shares its body"
+        )
+        sends = [
+            tuple(arg.id for arg in node.args if isinstance(arg, ast.Name))
+            for node in ast.walk(method)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "send"
+        ]
+        assert sends == [(f"{method_name}_filtered", f"render_{method_name}")], (
+            f"Query.{method_name}() must send through "
+            f"send({method_name}_filtered, render_{method_name})"
+        )
 
 
 def _models_module_tree() -> ast.Module:
@@ -211,6 +232,26 @@ def test_projected_shape_misuse_fails_the_type_checker():
     assert "invalid-assignment" in result.stdout
     assert result.stdout.count("invalid-argument-type") >= 2, (
         "update() and delete() on a projected query must each be a static error"
+    )
+
+
+def test_each_update_form_passes_the_type_checker():
+    """The recipe form and the keyword form each type-check, on `update()`
+    and on `update.sql()`."""
+    result = _run_ty(FIXTURES / "good_updates.py")
+    assert result.returncode == 0, (
+        f"update() forms must type-check cleanly:\n{result.stdout}\n{result.stderr}"
+    )
+
+
+def test_mixing_update_forms_fails_the_type_checker():
+    """A recipe and keyword literals together is a static error on
+    `update()` and on `update.sql()`, not only the runtime `TypeError`."""
+    result = _run_ty(FIXTURES / "bad_updates.py")
+    assert result.returncode != 0, "bad_updates.py must fail ty"
+    assert result.stdout.count("no-matching-overload") == 2, (
+        "the mixed form on update() and on update.sql() must each be a "
+        f"static error:\n{result.stdout}"
     )
 
 

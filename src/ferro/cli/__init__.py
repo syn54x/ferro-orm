@@ -20,8 +20,10 @@ which names the fix, and the command exits :data:`exit_codes.REFUSED`.
 A bad flag or a missing ``cli`` extra exits :data:`exit_codes.USAGE`.
 """
 
+import logging
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
@@ -79,11 +81,36 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     tokens = list(sys.argv[1:] if argv is None else argv)
     try:
-        result = _app()(tokens)
+        with _ferro_log_to_stderr():
+            result = _app()(tokens)
     except cyclopts.CycloptsError:
         # cyclopts has already printed the error, naming the bad token.
         return exit_codes.USAGE
     return exit_codes.OK if result is None else int(result)
+
+
+@contextmanager
+def _ferro_log_to_stderr() -> Iterator[None]:
+    """Print the ``ferro`` logger's ``INFO`` lines to stderr while a verb runs.
+
+    The library installs only a ``NullHandler``; the command is an
+    application, so it shows what a data step's ``ctx.log.info(...)`` says.
+    The handler and level are put back afterwards, so calling :func:`main`
+    in-process leaves the caller's logging as it found it.
+    """
+    logger = logging.getLogger("ferro")
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(logging.Formatter("%(name)s: %(levelname)s: %(message)s"))
+    level = logger.level
+    logger.addHandler(handler)
+    if logger.getEffectiveLevel() > logging.INFO:
+        logger.setLevel(logging.INFO)
+    try:
+        yield
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(level)
 
 
 _built: "App | None" = None

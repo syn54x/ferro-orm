@@ -18,7 +18,6 @@ set and the statements are what they were.
 from __future__ import annotations
 
 import asyncio
-import logging
 import threading
 import time
 from typing import Annotated, Any
@@ -57,31 +56,6 @@ ADD_SLUG = (
     'INSERT INTO "attempt_log" VALUES (1);\n'
     'ALTER TABLE "author" ADD COLUMN "slug" text;\n'
 )
-
-
-class _Collect(logging.Handler):
-    def __init__(self) -> None:
-        super().__init__(level=logging.DEBUG)
-        self.messages: list[str] = []
-
-    def emit(self, record: logging.LogRecord) -> None:
-        self.messages.append(record.getMessage())
-
-
-@pytest.fixture
-def ferro_log():
-    """Every message on the ``ferro`` logger (which does not propagate to
-    pytest's capture), as executed statements are logged before they run."""
-    logger = logging.getLogger("ferro")
-    handler = _Collect()
-    level = logger.level
-    logger.addHandler(handler)
-    logger.setLevel(logging.DEBUG)
-    try:
-        yield handler.messages
-    finally:
-        logger.removeHandler(handler)
-        logger.setLevel(level)
 
 
 def _postgres_only(db) -> None:
@@ -300,7 +274,7 @@ async def test_a_down_waits_under_the_same_timeout(project, pkg, db):
 )
 @pytest.mark.parametrize("no_transaction", [False, True], ids=["transaction", "none"])
 async def test_the_step_runs_under_the_configured_timeout_and_zero_sets_none(
-    project, pkg, db, ferro_log, extra, shown, no_transaction
+    project, pkg, db, statement_records, extra, shown, no_transaction
 ):
     _postgres_only(db)
     settings, database = await _project(project, pkg, db, extra)
@@ -317,7 +291,9 @@ async def test_the_step_runs_under_the_configured_timeout_and_zero_sets_none(
     assert report.refusal is None
     assert db.rows('SELECT v FROM "seen"') == [(shown,)]
     if shown == "0":
-        assert not [m for m in ferro_log if "SET" in m and "lock_timeout" in m]
+        assert not [
+            r for r in statement_records if "SET" in r.sql and "lock_timeout" in r.sql
+        ]
     else:
         ms = {"5s": 5000, "1s": 1000}[shown]
         expected = (
@@ -325,8 +301,9 @@ async def test_the_step_runs_under_the_configured_timeout_and_zero_sets_none(
             if no_transaction
             else f"SET LOCAL lock_timeout = '{ms}ms'"
         )
-        assert any(m.endswith(expected) for m in ferro_log)
-        assert any(m.endswith("RESET lock_timeout") for m in ferro_log) == (
+        step = "0003_seen/01_seen.up.sql"
+        assert (step, expected) in [(r.subject, r.sql) for r in statement_records]
+        assert any(r.sql == "RESET lock_timeout" for r in statement_records) == (
             no_transaction
         )
 
@@ -345,7 +322,7 @@ async def test_zero_waits_for_the_lock_without_a_retry(project, pkg, db):
 
 
 async def test_sqlite_sets_nothing_and_runs_the_file_as_written(
-    project, pkg, db, ferro_log
+    project, pkg, db, statement_records
 ):
     if db.backend != "sqlite":
         pytest.skip("the SQLite half")
@@ -355,12 +332,16 @@ async def test_sqlite_sets_nothing_and_runs_the_file_as_written(
     report, _ = await _up(settings, database, db)
 
     assert report.refusal is None
-    executed = [m for m in ferro_log if m.startswith("ferro migrate: 0003_")]
-    assert executed == [
-        'ferro migrate: 0003_add_slug/01_add_slug.up.sql: INSERT INTO "attempt_log" VALUES (1)',
-        'ferro migrate: 0003_add_slug/01_add_slug.up.sql: ALTER TABLE "author" ADD COLUMN "slug" text',
+    executed = [
+        r.sql
+        for r in statement_records
+        if r.subject == "0003_add_slug/01_add_slug.up.sql"
     ]
-    assert not [m for m in ferro_log if "lock_timeout" in m]
+    assert executed == [
+        'INSERT INTO "attempt_log" VALUES (1)',
+        'ALTER TABLE "author" ADD COLUMN "slug" text',
+    ]
+    assert not [r for r in statement_records if "lock_timeout" in r.sql]
 
 
 # -- the reconciliation pass ---------------------------------------------------------------
