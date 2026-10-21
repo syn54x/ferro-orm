@@ -242,11 +242,27 @@ A statement the database rejects ends its line with `failed: <error>`, and the e
 | `params` | The bound parameters, as a tuple |
 | `dialect` | `"sqlite"` or `"postgres"` |
 | `duration_ms` | Time the database took, in milliseconds |
-| `operation` | What sent it: `"migrate"` for the reconciliation pass and `ferro migrate` |
+| `operation` | What sent it: one of the values below |
 | `subject` | The table or enum type a pass statement changes, or the step file (`0003_add_slug/01_add_slug.up.sql`) a migration statement comes from; `None` otherwise |
 | `connection` | The connection's name |
 | `rows` | Rows affected, or `None` for a read |
 | `error` | The database's error text, or `None` |
+
+| `operation` | Sent by |
+| --- | --- |
+| `"fetch"` | `all()`, `first()`, `get()` and relation loads |
+| `"count"` / `"exists"` | `count()` / `exists()` |
+| `"save"` | `save()`, insert or update |
+| `"bulk_create"` | `bulk_create()`, one record per chunk |
+| `"update"` / `"delete"` | A query's `update()` / `delete()`; `delete()` on an instance |
+| `"m2m_add"` / `"m2m_remove"` / `"m2m_clear"` | A many-to-many relation's `add()` / `remove()` / `clear()` |
+| `"raw"` | `ferro.raw.execute()`, `fetch_all()` and `fetch_one()` |
+| `"transaction"` | A `transaction()` block's `BEGIN`, `SAVEPOINT`, `RELEASE`, `ROLLBACK TO`, `COMMIT` and `ROLLBACK` |
+| `"settings"` | A session's settings batch (`SET LOCAL`, `set_config`) and its reset |
+| `"catalog"` | The Postgres catalog read the first time an operation touches a table |
+| `"migrate"` | The reconciliation pass and `ferro migrate`, the run lock's statements included |
+
+Statements a Postgres pool sends on its own, outside any operation, are not in the log: the `SET search_path` it runs on each new connection, and, with `settings_delivery="connection"`, the check it runs on each returned connection while a session has one pinned.
 
 The logger is the only switch: while `ferro.sql` is not enabled for `DEBUG`, Ferro collects nothing. Ferro installs only a `NullHandler` on its `ferro` logger, which propagates, so your logging configuration (and pytest's `caplog`) decides where the records go. The `ferro` command line installs its own handler, so a data step's `ctx.log.info(...)` lines still print there.
 
