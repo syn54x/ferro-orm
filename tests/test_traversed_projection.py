@@ -4,7 +4,7 @@
 ``select()`` reaches across relations, end to end: lambda selectors traverse
 forward-FK paths at any depth (``select(lambda t: (t.amount,
 t.account.name))``), and the dict-returning lambda names output fields
-(``select(lambda t: {"account_name": t.account.name})`` — CONTEXT.md: Output
+(``select(lambda t: {"account_name": t.account.name})`` — GLOSSARY.md: Output
 alias, Traversed projection). Covers depth-2 traversal in both selector
 forms, decode parity vs full hydration, INNER-narrowing and the ``left_join``
 opt-out (rows kept, ``None`` fields, NULL-tolerant decode), shared-path join

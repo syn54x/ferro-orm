@@ -330,7 +330,7 @@ def test_column_check_on_a_new_column_rides_its_add_column_exactly_once():
 
 
 def test_a_new_column_lands_before_the_check_that_references_it():
-    """The single-deploy shape (CONTEXT.md *reconciliation pass*)."""
+    """The single-deploy shape (GLOSSARY.md *reconciliation pass*)."""
     _define_reconcile_with_check()
     without_right = [
         column for column in RECONCILE_LIVE_COLUMNS if column["name"] != "right"

@@ -5,7 +5,7 @@ Ferro accepts column facts from two declaration paths: `ferro.Field()` /
 `json_schema_extra={"primary_key": True}` (the **raw path**). Historically each
 path derived some facts under its own rules, in different modules. The
 `ColumnSpec` refactor (#255) compiles every column fact exactly once in
-`ferro.columns` (the Column spec — see `CONTEXT.md`), which forced the two rule
+`ferro.columns` (the Column spec — see `GLOSSARY.md`), which forced the two rule
 sets into one place and exposed where they disagreed.
 
 The sharpest disagreement was **autoincrement defaulting**. The ferro path

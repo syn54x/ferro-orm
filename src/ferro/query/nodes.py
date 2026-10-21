@@ -257,7 +257,7 @@ class QueryNode:
 
 @dataclass(frozen=True)
 class ExistsTest:
-    """The facts of one existence test (CONTEXT.md, ADR-0007).
+    """The facts of one existence test (GLOSSARY.md, ADR-0007).
 
     ``hops`` is the correlation hop path in the ``joins``-section hop-fact
     shape (``QueryJoinHop`` — typed loosely here because the wire module

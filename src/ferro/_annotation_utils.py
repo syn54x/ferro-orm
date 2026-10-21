@@ -195,7 +195,7 @@ def _is_time(hint: Any) -> bool:
 
 
 def _is_json_family(hint: Any) -> bool:
-    """Json-family field (see ``CONTEXT.md``): ``dict``/``list`` in any
+    """Json-family field (see ``GLOSSARY.md``): ``dict``/``list`` in any
     parameterization — element type unrestricted, so ``list[NestedModel]``
     qualifies — or a nested Pydantic model. Deliberately narrow (ADR-0004):
     wider object-schema shapes (``TypedDict``, dataclass, ``set``, ``tuple``)

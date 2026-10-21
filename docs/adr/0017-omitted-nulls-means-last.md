@@ -23,4 +23,4 @@ is required sometimes and not others); requiring it on every key only when
 `after`/`before` is set (same smell); leaving omitted as `native` (pages
 are not portable).
 
-See `CONTEXT.md`: Null placement. Grilled with #372.
+See `GLOSSARY.md`: Null placement. Grilled with #372.
