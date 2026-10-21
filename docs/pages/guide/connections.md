@@ -216,6 +216,40 @@ See [Testing](../howto/testing.md) for a ready-made pytest fixture.
 !!! note "No `disconnect()` yet"
     An explicit `disconnect()` is **not yet implemented** — pools are cleaned up on process exit. See the [Roadmap](../roadmap.md).
 
+## Logging
+
+The `ferro.sql` logger is the statement log: one `DEBUG` record for each statement Ferro sends, written as the statement finishes. Turn it on with your usual logging setup:
+
+```python
+import logging
+
+logging.basicConfig(format="%(name)s %(levelname)s %(message)s")
+logging.getLogger("ferro.sql").setLevel(logging.DEBUG)
+```
+
+A schema change now prints each statement it runs, with its parameters and how long it took:
+
+```text
+ferro.sql DEBUG CREATE TABLE IF NOT EXISTS "post" (...) params=() 1.2ms
+ferro.sql DEBUG ALTER TABLE "author" ADD COLUMN "bio" varchar params=() 0.8ms
+```
+
+A statement the database rejects ends its line with `failed: <error>`, and the error still raises. Each record also carries the statement as attributes, so a structured handler reads fields instead of parsing the line:
+
+| Attribute | Value |
+| --- | --- |
+| `sql` | The statement, placeholders included |
+| `params` | The bound parameters, as a tuple |
+| `dialect` | `"sqlite"` or `"postgres"` |
+| `duration_ms` | Time the database took, in milliseconds |
+| `operation` | What sent it: `"migrate"` for the reconciliation pass and `ferro migrate` |
+| `subject` | The table or enum type a pass statement changes, or the step file (`0003_add_slug/01_add_slug.up.sql`) a migration statement comes from; `None` otherwise |
+| `connection` | The connection's name |
+| `rows` | Rows affected, or `None` for a read |
+| `error` | The database's error text, or `None` |
+
+The logger is the only switch: while `ferro.sql` is not enabled for `DEBUG`, Ferro collects nothing. Ferro installs only a `NullHandler` on its `ferro` logger, which propagates, so your logging configuration (and pytest's `caplog`) decides where the records go. The `ferro` command line installs its own handler, so a data step's `ctx.log.info(...)` lines still print there.
+
 ## See Also
 
 - [Schema Management](schema/overview.md) — auto-migrate, migrations and Alembic

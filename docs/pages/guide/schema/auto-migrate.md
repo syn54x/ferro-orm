@@ -254,7 +254,7 @@ except ferro.OperationalError as error:
     changed = {s.subject for s in error.report.statements if s.role == "schema"}
 ```
 
-`connect(..., auto_migrate=True)` runs the same pass and returns nothing; its failure carries the same `.report`. The `ferro` logger's debug lines name each statement as it runs, but they are free text: read the report, not the log.
+`connect(..., auto_migrate=True)` runs the same pass and returns nothing; its failure carries the same `.report`. Each statement is also a record on the `ferro.sql` logger as it finishes, with its `sql`, `subject` and duration as attributes (see [Logging](../connections.md#logging)); the log is for watching, and the report is still the structured answer.
 
 ## Two processes at once
 
