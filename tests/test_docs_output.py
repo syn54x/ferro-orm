@@ -85,19 +85,65 @@ def test_a_postgres_text_block_is_what_its_example_prints_there(
     )
 
 
-def _ferro_exception_names() -> list[str]:
-    """The name of every exception class Ferro defines."""
+def _defined_exception_classes() -> set[type]:
+    """Every exception class Ferro defines, internal ones included."""
     import ferro.migrations
     import ferro.migrations._chunk_loop  # noqa: F401 - defines BatchFailed
 
-    found: set[str] = set()
+    found: set[type] = set()
     pending: list[type] = [BaseException]
     while pending:
         cls = pending.pop()
         pending.extend(cls.__subclasses__())
         if cls.__module__.split(".")[0] == "ferro":
-            found.add(cls.__name__)
-    return sorted(found, key=lambda name: (-len(name), name))
+            found.add(cls)
+    return found
+
+
+def _public_exception_names() -> set[str]:
+    """The exception classes a reader can import by the name a page prints:
+    those in ``ferro.__all__`` or ``ferro.migrations.__all__``, and the public
+    classes ``ferro.exceptions`` defines."""
+    import ferro
+    import ferro.exceptions
+    import ferro.migrations
+
+    exported = {
+        exported
+        for module in (ferro, ferro.migrations)
+        for name in module.__all__
+        if isinstance(exported := vars(module).get(name), type)
+    }
+    return {
+        cls.__name__
+        for cls in _defined_exception_classes()
+        if cls in exported
+        or (cls.__module__ == "ferro.exceptions" and not cls.__name__.startswith("_"))
+    }
+
+
+def _ferro_exception_names() -> list[str]:
+    """The name of every public exception class Ferro defines, longest first."""
+    return sorted(_public_exception_names(), key=lambda name: (-len(name), name))
+
+
+def _internal_exception_names() -> set[str]:
+    """The exception classes Ferro defines that no public path exports."""
+    return {cls.__name__ for cls in _defined_exception_classes()} - set(
+        _public_exception_names()
+    )
+
+
+_EXCEPTION_LINE = re.compile(r"(?m)^\s*(?:[^\s:]+:\d+: )?(?:[\w.]*\.)?(\w+): ")
+"""A line opening with an exception's name, as ``print`` of a raised error or
+a traceback's last line shows it."""
+
+
+def internal_exception_names_in(body: str) -> list[str]:
+    """The internal Ferro exception classes a block prints by name; a reader
+    who writes ``except`` with one of them gets a ``NameError``."""
+    internal = _internal_exception_names()
+    return [name for name in _EXCEPTION_LINE.findall(body) if name in internal]
 
 
 FERRO_OUTPUT = re.compile(
@@ -193,6 +239,33 @@ def test_the_recogniser_matches_every_block_of_ferro_output(block: Fence) -> Non
         f"Ferro's output, so a <!-- shows: --> block holding it would pass:\n"
         f"{block.body}"
     )
+
+
+@pytest.mark.parametrize("block", page_fences("text"), ids=page_name)
+def test_a_printed_exception_name_is_one_a_reader_can_import(block: Fence) -> None:
+    internal = internal_exception_names_in(block.body)
+    assert not internal, (
+        f"{page_name(block)}: the block prints {internal}, which neither "
+        "ferro nor ferro.migrations exports; export and document the class, "
+        "or print its nearest public base"
+    )
+
+
+def test_a_block_naming_an_internal_exception_class_fails() -> None:
+    assert "StepRefused" in _internal_exception_names()
+    assert internal_exception_names_in(
+        "Step refused:\nStepRefused: the step needs a reason\n"
+    ) == ["StepRefused"]
+    assert internal_exception_names_in(
+        "ferro.migrations.steps.StepRefused: the step needs a reason\n"
+    ) == ["StepRefused"]
+    assert internal_exception_names_in("MigrationRefused: refused\n") == []
+
+
+def test_the_recogniser_names_only_public_exception_classes() -> None:
+    names = set(_ferro_exception_names())
+    assert "MigrationRefused" in names
+    assert not names & _internal_exception_names()
 
 
 def test_each_varies_entry_names_a_shows_block() -> None:

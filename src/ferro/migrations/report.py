@@ -47,10 +47,23 @@ class RunRefused(MigrationRefused):
     """A migration run's refusal before it ran anything, naming the fix.
 
     Raised for every refusal the run planner, the run lock and the tracking
-    tables make; its message is the operator's text. A planner refusal also
-    carries what it is about, so a caller matches on `kind` rather than on
-    the text. A kind with a class of its own (`AlreadyTrackedError`,
-    `AppliedAboveBaselineError`) arrives as that class.
+    tables make, and by `connect(auto_migrate=True)` on a database that
+    migrations manage; its message is the operator's text. It is a
+    `MigrationRefused`, so `except MigrationRefused` catches it too. A
+    planner refusal also carries what it is about, so a caller matches on
+    `kind` rather than on the text. A kind with a class of its own
+    (`AlreadyTrackedError`, `AppliedAboveBaselineError`) arrives as that
+    class.
+
+    Examples:
+        ```python {test=compile reason="needs a project with a migrations directory"}
+        try:
+            await ferro.migrations.up()
+        except ferro.migrations.RunRefused as refused:
+            if refused.kind == "edited_applied":
+                print(refused)   # names the applied migration that was edited
+            raise
+        ```
     """
 
     def __init__(

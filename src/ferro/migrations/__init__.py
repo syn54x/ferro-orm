@@ -31,7 +31,7 @@ from ._baseline import BaselineReport, baseline, remove_baseline
 from ._drift import DriftReport, drift, render_op
 from .errors import DatabaseAheadError, MigrationRefused, PendingMigrationsError
 from .generate import check
-from .report import AlreadyTrackedError, AppliedAboveBaselineError
+from .report import AlreadyTrackedError, AppliedAboveBaselineError, RunRefused
 from .runner import require_applied, status, up
 from .steps import atomic, chunked, irreversible, nothing_to_reverse, todo
 
@@ -46,6 +46,7 @@ __all__ = [
     "DriftReport",
     "MigrationRefused",
     "PendingMigrationsError",
+    "RunRefused",
     "atomic",
     "baseline",
     "check",

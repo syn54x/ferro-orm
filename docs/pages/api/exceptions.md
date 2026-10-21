@@ -22,8 +22,9 @@ FerroError
 └── MigrationRefused        a migration call refused; .report says how far it got
     ├── PendingMigrationsError
     ├── DatabaseAheadError
-    ├── AlreadyTrackedError
-    └── AppliedAboveBaselineError
+    └── RunRefused          a migration run refused before it ran anything; .kind names why
+        ├── AlreadyTrackedError
+        └── AppliedAboveBaselineError
 ```
 
 `ForeignKeyViolationError` covers every foreign-key rejection: a dangling
