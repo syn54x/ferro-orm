@@ -45,6 +45,25 @@ def test_mutating_query_methods_cannot_carry_pagination():
         assert "compile_query" in called, (
             f"Query.{method_name}() must build its payload via compile_query"
         )
+        # `.sql()` runs this same body with the send swapped for its render
+        # twin, so the contract above covers `update.sql` / `delete.sql` too.
+        decorators = {
+            dec.id for dec in method.decorator_list if isinstance(dec, ast.Name)
+        }
+        assert "terminal" in decorators, (
+            f"Query.{method_name} must be a @terminal so .sql() shares its body"
+        )
+        sends = [
+            tuple(arg.id for arg in node.args if isinstance(arg, ast.Name))
+            for node in ast.walk(method)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "send"
+        ]
+        assert sends == [(f"{method_name}_filtered", f"render_{method_name}")], (
+            f"Query.{method_name}() must send through "
+            f"send({method_name}_filtered, render_{method_name})"
+        )
 
 
 def _models_module_tree() -> ast.Module:

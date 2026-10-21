@@ -37,6 +37,12 @@ An aggregate-only projection collapses to one record (read with `first()`). Mixi
 
 ::: ferro.query.builder.ProjectedQuery
 
+::: ferro.RenderedSql
+
+::: ferro.REDACTED
+
+::: ferro.query.rendered.Terminal
+
 ::: ferro.query.Row
 
 ::: ferro.query.Rows

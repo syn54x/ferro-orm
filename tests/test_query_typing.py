@@ -170,3 +170,46 @@ if TYPE_CHECKING:
 
     # FieldProxy comparisons resolve to QueryNode (the lambda mechanism)
     assert_type(FieldProxy("archived") == False, QueryNode)  # noqa: E712
+
+    # Every terminal's `.sql()` renders with the terminal's own arguments and
+    # returns a RenderedSql, through the Relation and ProjectedQuery overrides
+    # too, while the call keeps its own return shape.
+    from ferro import RenderedSql, Row, Rows
+
+    class _StaticAuthor(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        posts: Relation[list["_StaticPost"]] = BackRef()
+
+    class _StaticPost(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        author: Annotated[_StaticAuthor, ForeignKey(related_name="posts")]
+
+    async def _rendered_statement_shapes(author: _StaticAuthor) -> None:
+        query = Query(_StaticUser).where(lambda user: user.archived == False)  # noqa: E712
+        assert_type(await query.all(), list[_StaticUser])
+        assert_type(await query.all.sql(), RenderedSql)
+        assert_type(await query.first(), _StaticUser | None)
+        assert_type(await query.first.sql(), RenderedSql)
+        assert_type(await query.count(), int)
+        assert_type(await query.count.sql(), RenderedSql)
+        assert_type(await query.exists.sql(), RenderedSql)
+        assert_type(await query.update(email="x"), int)
+        assert_type(await query.update.sql(email="x"), RenderedSql)
+        assert_type(
+            await query.update.sql(lambda user: {"email": user.email}), RenderedSql
+        )
+        assert_type(await query.delete.sql(), RenderedSql)
+
+        assert_type(await author.posts.all(), list[_StaticPost])
+        assert_type(await author.posts.all.sql(), RenderedSql)
+        assert_type(await author.posts.first(), _StaticPost | None)
+        assert_type(await author.posts.first.sql(), RenderedSql)
+        assert_type(await author.posts.count.sql(), RenderedSql)
+
+        projected = _StaticUser.select(lambda user: user.email)
+        assert_type(await projected.all(), Rows[Row])
+        assert_type(await projected.all.sql(), RenderedSql)
+        assert_type(await projected.first(), Row | None)
+        assert_type(await projected.first.sql(), RenderedSql)
+        assert_type(await projected.count(), int)
+        assert_type(await projected.count.sql(), RenderedSql)

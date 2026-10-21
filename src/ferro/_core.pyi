@@ -707,6 +707,7 @@ async def update_filtered(
     *,
     secret_values: list[object] = ...,
 ) -> int: ...
+
 RenderedParts = tuple[str, tuple[object, ...], tuple[bool, ...], str]
 """A rendering entry's answer: the SQL, the parameters (`None` where
 masked), the mask (`True` where the parameter is a secret) and the dialect."""
