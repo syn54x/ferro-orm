@@ -35,6 +35,21 @@ def test_docstring_example(example: CodeExample) -> None:
     check_fence(example)
 
 
+@pytest.mark.postgres_only
+@pytest.mark.parametrize(
+    "example",
+    [
+        example
+        for example in docstring_examples("ferro", REPO_ROOT / "src")
+        if fence_settings(example).get("backend") == "postgres"
+    ],
+    ids=str,
+)
+def test_docstring_example_on_postgres(example: CodeExample, db_url: str) -> None:
+    """A docstring fence marked ``backend=postgres`` runs against PostgreSQL."""
+    check_fence(example, database_url=db_url)
+
+
 RUNNING_ENTRY_POINTS = [
     "models.Model.create",
     "models.Model.get",
