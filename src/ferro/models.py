@@ -5,6 +5,7 @@ from enum import Enum
 from typing import (
     TYPE_CHECKING,
     Any,
+    Callable,
     ClassVar,
     Literal,
     Self,
@@ -23,6 +24,8 @@ from pydantic import BaseModel, ConfigDict, model_validator
 from ._bind_payload import (
     apply_save_exclude,
     apply_save_only,
+    deferred_secret_values,
+    field_values,
     normalize_save_columns,
     save_bind_payload,
 )
@@ -52,6 +55,7 @@ from .state import (
     resolve_transaction_scope,
     route_for_transaction,
 )
+
 
 _FERRO_CONNECTION_ATTR = "__ferro_connection_name"
 _FERRO_PERSISTED_ATTR = "__ferro_persisted"
@@ -305,6 +309,9 @@ class Model(BaseModel, metaclass=ModelMetaclass):
     #: retired relations and their shadow ``*_id`` columns.
     __ferro_retired_names__: ClassVar[frozenset[str]] = frozenset()
     _enum_fields: ClassVar[dict[str, type[Enum]]] = {}
+    #: Field → ``(kind, convert)``: the conversion hydration applies to each
+    #: non-null decoded value (an enum class, or a secret type's wrapper).
+    _hydration_converters: ClassVar[dict[str, tuple[str, Callable[[Any], Any]]]] = {}
 
     @classmethod
     def _reregister_ferro(cls) -> None:
@@ -483,6 +490,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                     "Use Query.update() for set-oriented or expression writes."
                 )
         route, identity_using = await _instance_transaction_route(self, using, session)
+        secrets = deferred_secret_values(field_values([self]))
         new_id = None
         if on_conflict == "update":
             new_id = await save_record(
@@ -490,6 +498,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                 save_bind_payload(self),
                 route,
                 mode="upsert",
+                secret_values=secrets,
             )
         elif _is_persisted(self):
             pk_field_name = self.__class__.__ferro_pk__
@@ -508,6 +517,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                 self.__class__.__ferro_identity__,
                 payload,
                 route,
+                secret_values=secrets,
             )
             if rows_affected == 0:
                 raise ModelDoesNotExist(self.__class__, pk_val)
@@ -517,6 +527,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                 save_bind_payload(self),
                 route,
                 mode="insert",
+                secret_values=secrets,
             )
 
         pk_val = None
@@ -913,7 +924,12 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             return 0
         data = [save_bind_payload(i) for i in instances]
         route = await _transaction_or_using(using, session)
-        return await save_bulk_records(cls.__ferro_identity__, data, route)
+        return await save_bulk_records(
+            cls.__ferro_identity__,
+            data,
+            route,
+            secret_values=deferred_secret_values(field_values(instances)),
+        )
 
     @classmethod
     async def get_or_create(

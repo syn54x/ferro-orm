@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import sys
 import uuid
@@ -354,3 +355,31 @@ def _ferro_registry_isolation():
     # keep in agreement by convention: function-local models drop with their
     # envelope + fingerprint entries, module-scope state survives.
     REGISTRY.restore(snapshot)
+
+
+class _StatementRecords(logging.Handler):
+    """Keeps every record it handles, in order."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.DEBUG)
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+@pytest.fixture
+def statement_records() -> Iterator[list[logging.LogRecord]]:
+    """The statement log of this test: every record on ``ferro.sql``, in the
+    order the statements finished, with ``ferro.sql`` at ``DEBUG`` for the
+    test's duration."""
+    logger = logging.getLogger("ferro.sql")
+    handler = _StatementRecords()
+    level = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+    try:
+        yield handler.records
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(level)

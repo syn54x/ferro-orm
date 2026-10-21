@@ -20,6 +20,7 @@ import json
 import uuid
 from typing import Any
 
+from ._bind_payload import deferred_secret_values, unwrap_secret
 from ._core import RouteHandle
 from ._core import raw_execute as _raw_execute
 from ._core import raw_fetch_all as _raw_fetch_all
@@ -31,6 +32,7 @@ __all__ = ["execute", "fetch_all", "fetch_one", "Transaction"]
 
 def _marshal(val: Any) -> bool | int | float | str | bytes | None:
     """Convert a Python value into a primitive accepted by the FFI bind path."""
+    val = unwrap_secret(val)
     if val is None:
         return None
     if isinstance(val, bool):
@@ -52,7 +54,7 @@ def _marshal(val: Any) -> bool | int | float | str | bytes | None:
     raise TypeError(
         f"Cannot bind {type(val).__name__} to raw SQL parameter (value={val!r}). "
         f"Supported: str, int, float, bool, bytes, None, UUID, datetime, date, "
-        f"time, Decimal, Enum, dict, list."
+        f"time, Decimal, Enum, dict, list, SecretStr, SecretBytes."
     )
 
 
@@ -124,7 +126,9 @@ async def execute(
     _check_sql(sql)
     marshalled = [_marshal(a) for a in args]
     route = _transaction_or_using(using, session)
-    return await _raw_execute(sql, marshalled, route, autocommit)
+    return await _raw_execute(
+        sql, marshalled, route, autocommit, secret_values=deferred_secret_values(args)
+    )
 
 
 async def fetch_all(
@@ -171,7 +175,9 @@ async def fetch_all(
     _check_sql(sql)
     marshalled = [_marshal(a) for a in args]
     route = _transaction_or_using(using, session)
-    return await _raw_fetch_all(sql, marshalled, route)
+    return await _raw_fetch_all(
+        sql, marshalled, route, secret_values=deferred_secret_values(args)
+    )
 
 
 async def fetch_one(
@@ -217,7 +223,9 @@ async def fetch_one(
     _check_sql(sql)
     marshalled = [_marshal(a) for a in args]
     route = _transaction_or_using(using, session)
-    return await _raw_fetch_one(sql, marshalled, route)
+    return await _raw_fetch_one(
+        sql, marshalled, route, secret_values=deferred_secret_values(args)
+    )
 
 
 class Transaction:
@@ -262,7 +270,9 @@ class Transaction:
         """
         _check_sql(sql)
         marshalled = [_marshal(a) for a in args]
-        return await _raw_execute(sql, marshalled, self._route)
+        return await _raw_execute(
+            sql, marshalled, self._route, secret_values=deferred_secret_values(args)
+        )
 
     async def fetch_all(self, sql: str, *args: Any) -> list[dict[str, Any]]:
         """Run one SQL query on this transaction's connection and return every row.
@@ -282,7 +292,9 @@ class Transaction:
         """
         _check_sql(sql)
         marshalled = [_marshal(a) for a in args]
-        return await _raw_fetch_all(sql, marshalled, self._route)
+        return await _raw_fetch_all(
+            sql, marshalled, self._route, secret_values=deferred_secret_values(args)
+        )
 
     async def fetch_one(self, sql: str, *args: Any) -> dict[str, Any] | None:
         """Run one SQL query on this transaction's connection and return its first row.
@@ -302,4 +314,6 @@ class Transaction:
         """
         _check_sql(sql)
         marshalled = [_marshal(a) for a in args]
-        return await _raw_fetch_one(sql, marshalled, self._route)
+        return await _raw_fetch_one(
+            sql, marshalled, self._route, secret_values=deferred_secret_values(args)
+        )

@@ -16,9 +16,11 @@ from .nodes import (
     ValueExpr,
     now,
 )
+from .rendered import REDACTED, RenderedSql
 from .rows import Row, Rows
 
 __all__ = [
+    "REDACTED",
     "AggregateExpr",
     "FieldProxy",
     "Predicate",
@@ -28,6 +30,7 @@ __all__ = [
     "QueryProxy",
     "Relation",
     "RelationProxy",
+    "RenderedSql",
     "Row",
     "RowSelector",
     "Rows",

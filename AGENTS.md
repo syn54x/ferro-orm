@@ -246,6 +246,15 @@ Phantom diffs are the canonical symptom that this invariant has been broken.
   pin the names (`test_index_name_matches_rust_runtime_*`).
 - `docs/solutions/patterns/cross-emitter-ddl-parity.md` documents the rule and
   the recipes below.
+- On the query side, the rendered-statement parity pin in
+  `tests/test_rendered_statement.py` is the counterpart of the cross-emitter
+  pins: for every `Query` terminal (`all`, `first`, `count`, `exists`,
+  `update` in both forms, `delete`, through `Relation` and `ProjectedQuery`
+  too) on both dialects, with a secret column, `await query.<terminal>.sql()`
+  equals the `ferro.sql` record the executed call writes in `sql`, `params`
+  (the `REDACTED` sentinel included) and `dialect`. Both doors build the
+  statement through one `build_<terminal>` function in `src/operations.rs`,
+  which the executing entry sends and its `render_<terminal>` twin returns.
 
 ### Adding a new emitter
 

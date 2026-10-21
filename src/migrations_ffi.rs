@@ -435,10 +435,33 @@ pub fn _tracking_tables_for(
     using: Option<String>,
     schema: Option<String>,
 ) -> PyResult<Bound<'_, PyAny>> {
+    let logged = crate::sql_log::enabled(py)?;
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let engine = crate::state::engine_for_connection(using)?;
-        to_json(&crate::run::tracking_tables_for(&engine, schema.as_deref()).await?)
+        let (connection, engine) = crate::state::connection_for_route(using)?;
+        crate::sql_log::scope(run_context(logged, &connection), async {
+            to_json(&crate::run::tracking_tables_for(&engine, schema.as_deref()).await?)
+        })
+        .await
     })
+}
+
+/// A run's statement log context on `connection` when the log is on.
+fn run_context(logged: bool, connection: &str) -> Option<crate::sql_log::StatementContext> {
+    logged.then(|| crate::sql_log::StatementContext::new(crate::sql_log::MIGRATE, connection))
+}
+
+/// `future_into_py` for a run's work on `connection`: every statement `fut`
+/// sends is a statement log record of `migrate` when the log is on.
+///
+/// # Errors
+/// The `PyErr` from asking whether the log is on.
+fn logged<'py, F, T>(py: Python<'py>, connection: &str, fut: F) -> PyResult<Bound<'py, PyAny>>
+where
+    F: std::future::Future<Output = PyResult<T>> + Send + 'static,
+    T: for<'a> IntoPyObject<'a> + Send + 'static,
+{
+    let context = run_context(crate::sql_log::enabled(py)?, connection);
+    pyo3_async_runtimes::tokio::future_into_py(py, crate::sql_log::scope(context, fut))
 }
 
 /// A value as the Python object its JSON reads as (`dict`, `list`, ...).
@@ -561,12 +584,17 @@ pub fn _open_tracked(
     ddl_lock_timeout_s: f64,
 ) -> PyResult<Bound<'_, PyAny>> {
     let ddl = crate::ddl_exec::DdlExecutor::from_seconds(ddl_lock_timeout_s)?;
+    let logged = crate::sql_log::enabled(py)?;
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        let engine = crate::state::engine_for_connection(using)?;
-        let tracked =
-            crate::run::Tracked::open(engine, tracking_schema, Path::new(&directory)).await?;
+        let (connection, engine) = crate::state::connection_for_route(using)?;
+        let tracked = crate::sql_log::scope(
+            run_context(logged, &connection),
+            crate::run::Tracked::open(engine, tracking_schema, Path::new(&directory)),
+        )
+        .await?;
         Ok(TrackedDatabase {
             inner: Arc::new(tracked),
+            connection: connection.into(),
             ddl: Arc::new(ddl),
         })
     })
@@ -807,6 +835,8 @@ mod reads {
 #[pyclass(frozen, module = "ferro._core")]
 pub struct TrackedDatabase {
     inner: Arc<crate::run::Tracked>,
+    /// The connection's name, the `connection` of its statement log records.
+    connection: Arc<str>,
     ddl: Arc<crate::ddl_exec::DdlExecutor>,
 }
 
@@ -854,7 +884,11 @@ impl TrackedDatabase {
     /// Whether any run holds the run lock, asked without taking it.
     fn lock_held<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let tracked = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move { tracked.lock_held().await })
+        logged(
+            py,
+            &self.connection,
+            async move { tracked.lock_held().await },
+        )
     }
 
     /// `ferro migrate status`'s document: every migration's steps, the
@@ -897,7 +931,7 @@ impl TrackedDatabase {
             .map(|declared_kind| declared_kinds(self.inner.inheritance_data_steps(), declared_kind))
             .transpose()?;
         let tracked = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        logged(py, &self.connection, async move {
             let plan = match &kinds {
                 Some(kinds) => {
                     tracked
@@ -934,6 +968,7 @@ impl TrackedDatabase {
     ) -> PyResult<LockScope> {
         Ok(LockScope {
             tracked: Arc::clone(&self.inner),
+            connection: Arc::clone(&self.connection),
             ddl: Arc::clone(&self.ddl),
             timeout: lock_timeout(timeout_s)?,
             on_wait,
@@ -949,6 +984,7 @@ impl TrackedDatabase {
     fn _locked_unacquired_for_test(&self) -> LockScope {
         LockScope {
             tracked: Arc::clone(&self.inner),
+            connection: Arc::clone(&self.connection),
             ddl: Arc::clone(&self.ddl),
             timeout: std::time::Duration::ZERO,
             on_wait: None,
@@ -975,6 +1011,7 @@ fn dialect_name(dialect: Dialect) -> &'static str {
 #[pyclass(frozen, module = "ferro._core")]
 pub struct LockScope {
     tracked: Arc<crate::run::Tracked>,
+    connection: Arc<str>,
     ddl: Arc<crate::ddl_exec::DdlExecutor>,
     timeout: std::time::Duration,
     on_wait: Option<Py<PyAny>>,
@@ -1003,7 +1040,8 @@ impl LockScope {
         let on_wait = self.on_wait.as_ref().map(|c| c.clone_ref(py));
         let (timeout, unacquired, classes) = (self.timeout, self.unacquired, self.classes);
         let entered = Arc::clone(&self.entered);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let connection = Arc::clone(&self.connection);
+        logged(py, &self.connection, async move {
             let locked = if unacquired {
                 tracked.lock_unacquired_for_test(classes).await?
             } else {
@@ -1025,7 +1063,11 @@ impl LockScope {
             };
             let locked = Arc::new(locked);
             *entered.lock().map_err(|_| scope_poisoned())? = Some(Arc::clone(&locked));
-            Ok(LockedDatabase { inner: locked, ddl })
+            Ok(LockedDatabase {
+                inner: locked,
+                connection,
+                ddl,
+            })
         })
     }
 
@@ -1036,7 +1078,7 @@ impl LockScope {
         _exc: &Bound<'py, pyo3::types::PyTuple>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let locked = self.entered.lock().map_err(|_| scope_poisoned())?.take();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        logged(py, &self.connection, async move {
             if let Some(locked) = locked {
                 locked.release().await?;
             }
@@ -1122,6 +1164,7 @@ fn record_kind(kind: &str) -> PyResult<ferro_migrate::RecordKind> {
 #[pyclass(frozen, module = "ferro._core")]
 pub struct LockedDatabase {
     inner: Arc<crate::run::Locked>,
+    connection: Arc<str>,
     ddl: Arc<crate::ddl_exec::DdlExecutor>,
 }
 
@@ -1176,10 +1219,9 @@ impl LockedDatabase {
     /// Whether any run holds the run lock (this one does).
     fn lock_held<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let locked = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(
-            py,
-            async move { locked.tracked().lock_held().await },
-        )
+        logged(py, &self.connection, async move {
+            locked.tracked().lock_held().await
+        })
     }
 
     /// `ferro migrate status`'s document, as of the records read under the
@@ -1213,7 +1255,7 @@ impl LockedDatabase {
             .unwrap_or_default();
         let order_keys = order_keys_arg(order_keys)?;
         let locked = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        logged(py, &self.connection, async move {
             let plan = locked
                 .tracked()
                 .plan(direction, allow_ahead, order_keys.as_ref())
@@ -1242,7 +1284,7 @@ impl LockedDatabase {
     ) -> PyResult<Bound<'py, PyAny>> {
         let kinds = declared_kinds(self.inner.tracked().inheritance_data_steps(), declared_kind)?;
         let locked = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        logged(py, &self.connection, async move {
             let inherited = locked.inherit(&kinds).await?;
             to_py_attached(&inherited)
         })
@@ -1268,7 +1310,7 @@ impl LockedDatabase {
         let planned = Arc::clone(owned(&step, &self.inner)?);
         let down = step.down;
         let (locked, ddl) = (Arc::clone(&self.inner), Arc::clone(&self.ddl));
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        logged(py, &self.connection, async move {
             // A callback that raises is the caller's bug: its first error is
             // raised once the step has settled its record (stopping mid-step
             // would leave the record started with nothing running).
@@ -1303,7 +1345,7 @@ impl LockedDatabase {
         let standing = step.standing.clone();
         let kind = record_kind(kind)?;
         let locked = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        logged(py, &self.connection, async move {
             locked.start(&planned, kind, standing.as_ref()).await
         })
     }
@@ -1351,7 +1393,7 @@ impl LockedDatabase {
         let position = position(cursor, rows_done)?;
         let slot = tx.map(|route| transaction_slot(route.get())).transpose()?;
         let locked = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        logged(py, &self.connection, async move {
             locked.finish(&planned, ms, slot.as_ref(), position).await
         })
     }
@@ -1371,7 +1413,7 @@ impl LockedDatabase {
         let planned = Arc::clone(owned(&step, &self.inner)?);
         let position = position(cursor, rows_done)?;
         let locked = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        logged(py, &self.connection, async move {
             locked.fail(&planned, ms, error, position).await
         })
     }
@@ -1389,7 +1431,7 @@ impl LockedDatabase {
         let planned = Arc::clone(owned(&step, &self.inner)?);
         let position = (cursor, rows(rows_done)?);
         let locked = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        logged(py, &self.connection, async move {
             locked.fail_revert(&planned, error, position).await
         })
     }
@@ -1404,7 +1446,7 @@ impl LockedDatabase {
         let planned = Arc::clone(owned(&step, &self.inner)?);
         let slot = transaction_slot(tx.get())?;
         let locked = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        logged(py, &self.connection, async move {
             locked.remove(&planned, &slot).await
         })
     }
@@ -1440,7 +1482,7 @@ impl LockedDatabase {
         planned_here(plan.owner, &self.inner, "baseline")?;
         let plan = Arc::clone(&plan.plan);
         let locked = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        logged(py, &self.connection, async move {
             locked.write_baseline(&plan, &kinds).await
         })
     }
@@ -1449,10 +1491,9 @@ impl LockedDatabase {
     /// of each record removed (empty when there was no baseline).
     fn remove_baseline<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let locked = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(
-            py,
-            async move { locked.remove_baseline().await },
-        )
+        logged(py, &self.connection, async move {
+            locked.remove_baseline().await
+        })
     }
 
     /// Plan `ferro migrate rerecord <target>`: `mode` is `"record"`,
@@ -1489,7 +1530,7 @@ impl LockedDatabase {
         planned_here(action.owner, &self.inner, "rerecord")?;
         let action = Arc::clone(&action.action);
         let locked = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        logged(py, &self.connection, async move {
             locked.rerecord(&action, kind).await
         })
     }
@@ -1498,7 +1539,7 @@ impl LockedDatabase {
     /// dropped network connection would. Test-only.
     fn _close_lock_connection_for_test<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let locked = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        logged(py, &self.connection, async move {
             locked.close_lock_connection_for_test().await;
             Ok(())
         })
@@ -1529,7 +1570,7 @@ impl LockedDatabase {
         let position = batch_position(cursor, rows_done)?;
         let slot = transaction_slot(tx.get())?;
         let locked = Arc::clone(&self.inner);
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        logged(py, &self.connection, async move {
             locked.advance(&planned, position, &slot, reverting).await
         })
     }

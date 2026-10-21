@@ -20,7 +20,7 @@ from uuid import UUID
 
 import pytest
 import sqlalchemy as sa
-from pydantic import BaseModel
+from pydantic import BaseModel, SecretBytes, SecretStr
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.schema import CreateTable
 
@@ -133,7 +133,7 @@ _TOKEN_CASES = [
 # ---------------------------------------------------------------------------
 
 
-_COL_RE_TEMPLATE = r'"?{col}"?\s+([A-Z][A-Z0-9_()\s]*?)(?:\s+(?:NOT\s+NULL|NULL|PRIMARY|DEFAULT|UNIQUE|REFERENCES|\)|,))'
+_COL_RE_TEMPLATE = r'"?{col}"?\s+([A-Z][A-Z0-9_()\s]*?)(?:\s+(?:NOT\s+NULL|NULL|PRIMARY|DEFAULT|UNIQUE|REFERENCES|\)|,)|\s*,)'
 
 
 def _extract_col_type(sql: str, col_name: str) -> str:
@@ -234,6 +234,18 @@ _DERIVED_CASES = [
     pytest.param(dt.time, {"postgres": "TIME", "sqlite": "TIME"}, id="derived-time"),
     pytest.param(UUID, {"postgres": "UUID"}, id="derived-uuid-pg"),
     pytest.param(bytes, {"postgres": "BYTEA", "sqlite": "BLOB"}, id="derived-bytes"),
+    # A secret type stores its raw value as the type it wraps (#760).
+    pytest.param(
+        SecretStr, {"postgres": "VARCHAR", "sqlite": "VARCHAR"}, id="derived-secret-str"
+    ),
+    pytest.param(
+        SecretBytes, {"postgres": "BYTEA", "sqlite": "BLOB"}, id="derived-secret-bytes"
+    ),
+    pytest.param(
+        SecretBytes | None,
+        {"postgres": "BYTEA", "sqlite": "BLOB"},
+        id="derived-optional-secret-bytes",
+    ),
     # Default flip (ADR-0005): derived json-family storage is JSONB on
     # Postgres; SQLite lowers to JSON either way.
     pytest.param(dict, {"postgres": "JSONB", "sqlite": "JSON"}, id="derived-json"),

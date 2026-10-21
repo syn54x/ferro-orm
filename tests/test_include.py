@@ -455,7 +455,7 @@ async def test_count_payload_stays_root_instances_under_include(db_url, monkeypa
     root_instances and no include joins — pinned on the wire."""
     captured = {}
 
-    async def _capture(name, query_ir_json, route):
+    async def _capture(name, query_ir_json, route, **_statement_log):
         captured["envelope"] = json.loads(query_ir_json)
         return 0
 

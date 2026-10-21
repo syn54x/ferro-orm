@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Iterable, Iterator
 from datetime import date, datetime, time
 from decimal import Decimal
 from enum import Enum
 from typing import Any, Mapping
 
+from pydantic import SecretBytes, SecretStr
 from pydantic_core import to_json
 
 from .base import ForeignKey
@@ -27,25 +29,105 @@ _SAVE_COLUMN_USAGE = {
 }
 
 
-def _bytes_field_names(instance: Any) -> set[str]:
-    """Fields whose *current value* is bytes-like (value-driven: catches
-    ``bytes``, ``bytes | None``, and ``Any``-typed bytes)."""
-    return {
-        name
-        for name in type(instance).model_fields
-        if isinstance(getattr(instance, name, None), (bytes, bytearray))
-    }
+def unwrap_secret(value: Any) -> Any:
+    """Return the value a `SecretStr` / `SecretBytes` hides, or `value` as is.
+
+    The one place every write door (``save``, ``bulk_create``, ``update`` and
+    query literals) turns a secret into what the database stores: a secret
+    type only protects display, so the column holds the real value. An
+    unwrapped ``SecretBytes`` is ``bytes`` and takes the bytes path.
+    """
+    if isinstance(value, (SecretStr, SecretBytes)):
+        return value.get_secret_value()
+    return value
+
+
+def secret_values_in(values: Iterable[object]) -> tuple[object, ...]:
+    """Return what each `SecretStr` / `SecretBytes` among `values` hides.
+
+    The one collector of an operation's secret values: a query's compile, a
+    write and a raw statement each call it once. The statement log and a
+    rendered statement mask a bound parameter equal to any of these.
+
+    Args:
+        values: The values about to be bound. A list, tuple or set among them
+            is searched too, so a secret inside an `IN` list is found.
+
+    Returns:
+        The unwrapped value of every secret in `values`, in order; empty when
+        there is none.
+    """
+    found: list[object] = []
+    pending = list(values)
+    pending.reverse()
+    while pending:
+        value = pending.pop()
+        if isinstance(value, (SecretStr, SecretBytes)):
+            found.append(unwrap_secret(value))
+        elif isinstance(value, (list, tuple, set, frozenset)):
+            pending.extend(reversed(list(value)))
+    return tuple(found)
+
+
+def deferred_secret_values(values: Iterable[object]) -> Iterator[object]:
+    """Yield the secret values in `values`, collected on first read.
+
+    A write or a raw statement hands this to the engine, which reads it only
+    when the statement log is on: the engine's one read of the log's switch
+    decides whether anything is collected.
+
+    Args:
+        values: The values about to be bound, read lazily.
+
+    Yields:
+        The unwrapped value of every secret in `values`, in order.
+    """
+    yield from secret_values_in(values)
+
+
+def field_values(instances: Iterable[Any]) -> Iterator[object]:
+    """Yield every field value of each model instance, in field order.
+
+    Args:
+        instances: The model instances about to be saved.
+
+    Yields:
+        Each instance's field values, as the instance holds them.
+    """
+    for instance in instances:
+        for name in type(instance).model_fields:
+            yield getattr(instance, name, None)
+
+
+def _raw_bound_fields(instance: Any) -> dict[str, Any]:
+    """Fields that bind raw rather than through the JSON dump, with that value.
+
+    Value-driven, so ``bytes``, ``bytes | None`` and ``Any``-typed bytes are
+    caught (as ``bytes``), and so is every secret (as its unwrapped value): a
+    JSON dump would write its mask, and a field serializer whatever it returns.
+    """
+    raw: dict[str, Any] = {}
+    for name in type(instance).model_fields:
+        value = getattr(instance, name, None)
+        unwrapped = unwrap_secret(value)
+        if isinstance(unwrapped, (bytes, bytearray)):
+            raw[name] = bytes(unwrapped)
+        elif unwrapped is not value:
+            raw[name] = unwrapped
+    return raw
 
 
 def canonicalize_wire_scalar(value: Any) -> Any:
     """Canonical JSON form for query and ``update()`` literals (I-13).
 
-    ``datetime`` / ``date`` / ``time`` / UUID / Decimal go through pydantic
-    ``to_json`` so they match ``save_bind_payload``. Containers recurse.
-    Bytes, ``Enum``, int, str, bool, and ``None`` are unchanged. Any other
-    object with ``isoformat`` raises — no silent ``datetime.isoformat()``
-    spelling (``…+00:00`` vs ``…Z`` on SQLite TEXT).
+    A secret is unwrapped first (``unwrap_secret``), so a literal binds what
+    ``save()`` wrote. ``datetime`` / ``date`` / ``time`` / UUID / Decimal go
+    through pydantic ``to_json`` so they match ``save_bind_payload``.
+    Containers recurse. Bytes, ``Enum``, int, str, bool, and ``None`` are
+    unchanged. Any other object with ``isoformat`` raises — no silent
+    ``datetime.isoformat()`` spelling (``…+00:00`` vs ``…Z`` on SQLite TEXT).
     """
+    value = unwrap_secret(value)
     if isinstance(value, (bytes, bytearray)):
         return value
     if isinstance(value, Enum):
@@ -68,13 +150,13 @@ def canonicalize_wire_scalar(value: Any) -> Any:
 def save_bind_payload(instance: Any) -> dict[str, Any]:
     """Column->value map for ``save``/``bulk_create``.
 
-    Non-bytes columns go through pydantic ``model_dump(mode="json")`` (byte-identical
-    to today, honoring field serializers/aliases); bytes columns are overlaid raw.
+    Columns go through pydantic ``model_dump(mode="json")`` (honoring field
+    serializers/aliases), except bytes and secret columns, which are overlaid
+    raw: bytes verbatim, a secret as ``unwrap_secret`` gives it.
     """
-    bytes_fields = _bytes_field_names(instance)
-    payload: dict[str, Any] = instance.model_dump(mode="json", exclude=bytes_fields)
-    for name in bytes_fields:
-        payload[name] = bytes(getattr(instance, name))
+    raw = _raw_bound_fields(instance)
+    payload: dict[str, Any] = instance.model_dump(mode="json", exclude=set(raw))
+    payload.update(raw)
     return payload
 
 
@@ -228,17 +310,20 @@ def apply_save_exclude(
 def update_bind_payload(fields: Mapping[str, Any]) -> dict[str, Any]:
     """Column->value map for ``Query.update(**fields)``.
 
-    Non-bytes values go through ``canonicalize_wire_scalar`` then dict-level
-    ``to_json`` (enums still stringify on this door). Bytes are overlaid raw.
+    Every value goes through ``canonicalize_wire_scalar`` (which unwraps a
+    secret as ``save()`` binds it), then dict-level ``to_json`` (enums still
+    stringify on this door). Bytes, an unwrapped ``SecretBytes`` included, are
+    overlaid raw.
     """
+    scalars = {key: canonicalize_wire_scalar(value) for key, value in fields.items()}
     non_bytes = {
-        key: canonicalize_wire_scalar(value)
-        for key, value in fields.items()
+        key: value
+        for key, value in scalars.items()
         if not isinstance(value, (bytes, bytearray))
     }
     canonical = json.loads(to_json(non_bytes)) if non_bytes else {}
     payload: dict[str, Any] = {}
-    for key, value in fields.items():
+    for key, value in scalars.items():
         payload[key] = (
             bytes(value) if isinstance(value, (bytes, bytearray)) else canonical[key]
         )

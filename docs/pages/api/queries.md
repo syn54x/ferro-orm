@@ -55,6 +55,12 @@ See [Aggregations and grouped queries](../guide/aggregations.md).
       # documented on ferro.Relation.
       filters: ["!^_", "!^(add|remove|clear)$"]
 
+::: ferro.RenderedSql
+
+::: ferro.REDACTED
+
+::: ferro.query.rendered.Terminal
+
 ::: ferro.query.ProjectedQuery
 
 ## Predicates

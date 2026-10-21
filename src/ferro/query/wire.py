@@ -22,7 +22,11 @@ import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, Mapping
 
-from .._bind_payload import canonicalize_wire_scalar, update_bind_payload
+from .. import _bind_payload
+from .._bind_payload import (
+    canonicalize_wire_scalar,
+    update_bind_payload,
+)
 from ..state import resolve_compile_connection_name
 from .nodes import (
     BinaryValueExpr,
@@ -1064,6 +1068,52 @@ class CompiledQuery:
     `None` unless the results are built through related models: with
     `include()`, or a projection that reads a related model's column.
     """
+    secret_values: tuple[object, ...] = ()
+    """What each `SecretStr` / `SecretBytes` literal the query compiled with
+    hides, unwrapped, in the order the compile met them; empty when there is
+    none. It travels beside the payload, never inside it: the statement log
+    masks a bound parameter equal to any of these."""
+
+
+def _collect_node_literals(node: QueryNode, out: list[object]) -> None:
+    """Append the literals of one predicate tree, depth first."""
+    if node.child is not None:
+        _collect_node_literals(node.child, out)
+    elif node.exists is not None:
+        for inner in node.exists.where:
+            _collect_node_literals(inner, out)
+    elif node.is_compound:
+        if node.left is not None:
+            _collect_node_literals(node.left, out)
+        if node.right is not None:
+            _collect_node_literals(node.right, out)
+    else:
+        out.append(node.value)
+
+
+def _secret_literals(
+    query: "Query[Any]",
+    verb: QueryVerb,
+    assignments: Mapping[str, Any] | None,
+    recipe: Mapping[str, Any] | None,
+) -> tuple[object, ...]:
+    """What every secret-typed literal the compile unwraps hides.
+
+    Read from the same values the payload compiles from (predicate literals,
+    the SET values of an update, a fetch's position bounds), so the set and
+    the wire cannot disagree about which literals were secrets, and collected
+    in one call to the one collector.
+    """
+    literals: list[object] = []
+    for node in query.where_clause:
+        _collect_node_literals(node, literals)
+    if verb == "update":
+        sets = recipe if recipe is not None else assignments or {}
+        literals.extend(sets.values())
+    if verb == "fetch":
+        for bound in (query._after, query._before):
+            literals.extend(bound or ())
+    return _bind_payload.secret_values_in(literals)
 
 
 def _payload_hop_classes(payload: QueryIrPayload) -> dict[str, type] | None:
@@ -1188,6 +1238,7 @@ def compile_query(
         payload=payload,
         wire_json=to_wire_json(payload),
         hop_classes=_payload_hop_classes(payload),
+        secret_values=_secret_literals(query, verb, assignments, recipe),
     )
 
 
