@@ -89,3 +89,31 @@ def test_help_summary_is_one_line(path, command) -> None:
         f"{' '.join(('ferro', *path))}: summary {summary!r} is not one capitalised line ending "
         "with a period"
     )
+
+
+@pytest.mark.parametrize(
+    ("flag", "parameter", "value"),
+    [
+        ("--steps", "steps", True),
+        ("--no-steps", "steps", False),
+        ("--json", "json_", True),
+        ("--no-json", "json_", False),
+    ],
+)
+def test_status_accepts_both_spellings_of_its_flags(flag, parameter, value) -> None:
+    # `--no-steps` and `--no-json` shipped with `ferro migrate status`; a
+    # script that passes them must keep parsing.
+    _, bound, _ = app["migrate"].parse_args(
+        ["status", flag], exit_on_error=False, print_error=False
+    )
+    assert bound.arguments[parameter] is value
+
+
+def test_status_help_lists_the_negative_flags(capsys) -> None:
+    try:
+        app(["migrate", "status", "--help"])
+    except SystemExit:
+        pass
+    out = capsys.readouterr().out
+    assert "--no-steps" in out
+    assert "--no-json" in out

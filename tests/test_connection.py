@@ -492,6 +492,12 @@ async def test_pool_config_rejects_min_connections_above_max(tmp_path):
         ferro.PoolConfig(max_connections=1, min_connections=2)
 
 
+def test_pool_config_validate_returns_the_instance():
+    """`PoolConfig.validate` is the public bounds check, not pydantic's classmethod."""
+    pool = ferro.PoolConfig(max_connections=3, min_connections=1)
+    assert pool.validate() is pool
+
+
 @pytest.mark.asyncio
 async def test_connect_passes_pool_config_to_core(monkeypatch):
     """Validated pool configuration should cross the Python/Rust API boundary."""

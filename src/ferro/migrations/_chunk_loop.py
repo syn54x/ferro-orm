@@ -3,7 +3,7 @@
 The public declaration is [`chunked`][ferro.migrations.chunked]; this
 private module runs it.
 
-```python
+```python {test=compile reason="a data step file; the migration runner calls it"}
 @chunked(
     lambda models: models.Author.where(lambda author: author.slug == None)
     .order_by(lambda author: author.id),

@@ -8,14 +8,14 @@ models   = ["myapp.models"]
 dialects = ["postgres", "sqlite"]
 ```
 
-```python
+```python {test=compile reason="needs a project with a ferro.toml and its database URL set"}
 from ferro import FerroSettings
 
 settings = FerroSettings()
 db = settings.database()           # implied: there is one
-db.directory                       # <config dir>/migrations
-db.url_for()                       # $DATABASE_URL, never the file
-db.import_models()                 # imports myapp.models, returns its models
+directory = db.directory           # <config dir>/migrations
+url = db.url_for()                 # $DATABASE_URL, never the file
+models = db.import_models()        # imports myapp.models, returns its models
 ```
 
 The rules, each enforced here with a refusal that names its fix:

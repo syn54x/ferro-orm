@@ -20,6 +20,23 @@ async def test_operation_with_no_route_raises(db_url):
         await RtA.all()
 
 
+NO_ROUTE_MESSAGE = (
+    "No database route for this operation. Open a session "
+    "(`async with ferro.engines.session(...)`) or pass `using=`/`session=` "
+    "explicitly. Implicit default-connection routing was removed in v0.14 "
+    "(deprecated since v0.12); see the upgrade guide."
+)
+
+
+@pytest.mark.asyncio
+async def test_no_route_message_is_the_shipped_text(db_url):
+    # Callers match on this text; it is part of the error's surface.
+    await connect(db_url, auto_migrate=True)
+    with pytest.raises(RuntimeError) as raised:
+        await execute("SELECT 1")
+    assert str(raised.value) == NO_ROUTE_MESSAGE
+
+
 @pytest.mark.asyncio
 async def test_raw_with_no_route_raises(db_url):
     await connect(db_url, auto_migrate=True)

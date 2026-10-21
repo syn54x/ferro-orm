@@ -1,6 +1,6 @@
 """Data step declarations, `todo()`, and the loader that reads a step file.
 
-```python
+```python {test=compile reason="a data step file; the migration runner calls it"}
 # migrations/0011_backfill_slugs/01_backfill_author.py
 from ferro.migrations import atomic, nothing_to_reverse, todo
 

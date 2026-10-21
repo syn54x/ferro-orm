@@ -791,9 +791,11 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                 [`ProjectedQuery`][ferro.query.builder.ProjectedQuery].
 
         Raises:
+            AttributeError: A selector names a column the model does not have.
             TypeError: The selectors mix a lambda with column names, or are
                 not a lambda or strings.
-            ValueError: A selector names a field the model does not have.
+            ValueError: The selection is empty, two fields share an output
+                name, or a string names a related column.
 
         Examples:
             ```python {test=run prelude=reference}

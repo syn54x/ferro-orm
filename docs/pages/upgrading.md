@@ -15,7 +15,7 @@ description: "What upgrading Ferro asks of your code, release by release, and ho
 
 # Upgrading between versions
 
-This guide lists what upgrading Ferro asks of your code, release by release from `0.11` to `0.25`; the [changelog](changelog.md) is the exhaustive record. After an upgrade, a query reads like this, inside a session:
+This guide lists what upgrading Ferro asks of your code, release by release from `0.11` to `0.26`; the [changelog](changelog.md) is the exhaustive record. After an upgrade, a query reads like this, inside a session:
 
 ```python {test=run prelude=upgrade}
 from ferro import engines
@@ -47,11 +47,12 @@ Sections run newest first. From version X, read every section for a release newe
 
 | You are on | Moving to | Read |
 | --- | --- | --- |
-| `0.24.x` | `0.25` | [Upgrading to 0.25](#upgrading-to-025) |
-| `0.15.x` | `0.25` | Every `0.16` to `0.25` section, and the [no-action table](#releases-that-need-no-action) |
-| `0.14.x` | `0.25` | The `0.15` section as well |
-| `0.12.x` or `0.13.x` | `0.25` | The `0.14` section as well |
-| `0.11.x` or earlier | `0.25` | Every section |
+| `0.25.x` | `0.26` | [Upgrading to 0.26](#upgrading-to-026) |
+| `0.24.x` | `0.26` | [Upgrading to 0.26](#upgrading-to-026) and [Upgrading to 0.25](#upgrading-to-025) |
+| `0.15.x` | `0.26` | Every `0.16` to `0.26` section, and the [no-action table](#releases-that-need-no-action) |
+| `0.14.x` | `0.26` | The `0.15` section as well |
+| `0.12.x` or `0.13.x` | `0.26` | The `0.14` section as well |
+| `0.11.x` or earlier | `0.26` | Every section |
 | `0.11.x` or earlier | `0.13` | [Upgrading to 0.12](#upgrading-to-012) only |
 
 Each section with code to change includes a copy/paste prompt for a coding agent. If you cross more than one boundary, run the prompts **newest first, one at a time**, and run your tests between them.
@@ -67,6 +68,13 @@ uv run pytest -W error::DeprecationWarning
 The run catches every change a release announced with a `DeprecationWarning`. It does not catch the silent behaviour changes in `0.14` (`create()` and `save()` stop upserting, and `limit()` or `offset()` on a mutation raise), the `NULL` ordering change in `0.21`, or the Postgres timeouts of `0.22`: those emit no warning, so read their sections.
 
 If you are moving from `0.12` or earlier straight past `0.14`, the deprecated APIs are already removed there and fail with `AttributeError` or `RuntimeError`, not a warning, so the run above catches nothing. Run your suite on `0.13` first, or apply the prompts before you upgrade.
+
+## Upgrading to 0.26
+
+`0.26` asks nothing of code that runs today. Two changes can show up in a type checker or an import:
+
+- `Session.query` is now typed: it takes `type[M]` and returns `Query[M]`, so a type checker may flag a call that passes a class that is not a `Model`.
+- The undocumented module `ferro.migrations.chunked` is now the private `ferro.migrations._chunk_loop`. `from ferro.migrations import chunked` still imports the [`chunked`](api/migrations.md#ferro.migrations.chunked) decorator, unchanged.
 
 ## Upgrading to 0.25
 

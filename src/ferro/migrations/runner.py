@@ -6,7 +6,7 @@ $ ferro migrate up
 0002_add_teams      01_schema  applied (9 ms)
 ```
 
-```python
+```python {test=compile reason="needs a project with a migrations directory"}
 await ferro.migrations.up()                # the same run, in-process
 await ferro.migrations.require_applied()   # where it stands, raised when behind
 ```

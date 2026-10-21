@@ -1,6 +1,6 @@
 """The Alembic bridge: Ferro's models as Alembic metadata, and one comparator that writes what the planner decides.
 
-```python
+```python {test=compile reason="an Alembic env.py fragment; Alembic runs it"}
 # env.py
 from ferro.migrations import ferro_options, get_metadata
 

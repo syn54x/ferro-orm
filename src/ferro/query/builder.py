@@ -784,6 +784,7 @@ class Query(Generic[T]):
                 [`ProjectedQuery`][ferro.query.builder.ProjectedQuery].
 
         Raises:
+            AttributeError: A selector names a column the model does not have.
             TypeError: The selectors mix a lambda with column names, select a
                 relation or a comparison instead of a field, or nest a dict
                 and a tuple.

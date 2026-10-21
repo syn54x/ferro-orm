@@ -1,12 +1,12 @@
 """The Alembic bridge's translator: the one planner's ops as Alembic ops.
 
-```python
+```python {test=compile reason="a model fragment; its imports are left out"}
 class Card(Model):
     flavor: str | None = None                      # new
     __ferro_checks__ = (Check("flavor_set", lambda card: card.flavor != None),)
 ```
 
-```python
+```python {test=compile reason="the revision Alembic writes; Alembic runs it"}
 def upgrade():
     op.add_column('card', sa.Column('flavor', sa.String(), nullable=True))
     op.execute(sa.DDL('ALTER TABLE "card" ADD CONSTRAINT "ck_card_flavor_set" CHECK (...)'))

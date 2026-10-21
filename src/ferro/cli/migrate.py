@@ -557,15 +557,11 @@ def status(
     steps: Annotated[
         bool,
         Parameter(
-            help="Print every migration's steps, not only those needing attention.",
-            negative="",
+            help="Print every migration's steps, not only those needing attention."
         ),
     ] = False,
     json_: Annotated[
-        bool,
-        Parameter(
-            name="--json", negative="", help="Print the report as a JSON document."
-        ),
+        bool, Parameter(name="--json", help="Print the report as a JSON document.")
     ] = False,
     glob: Annotated[Global, Parameter(parse=False)],
 ) -> int:

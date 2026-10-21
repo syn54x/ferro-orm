@@ -184,7 +184,7 @@ Rules for closing a session:
 
 The [`Session`](../api/connection.md#ferro.Session) and [`engines`](../api/connection.md#ferro.engines) reference entries list every argument, including `settings=` for [row-level security](../concepts/row-level-security.md#session-settings).
 
-!!! note "Changed in 0.13"
+!!! note "Changed in 0.14"
     Calls outside a session used to run on the default connection; they now raise `RuntimeError`. The [upgrade guide](../upgrading.md#connection-routing-requires-a-session) shows how to move old call sites into sessions.
 
 ## Connection options

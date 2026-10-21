@@ -1,6 +1,6 @@
 """What the migration calls raise.
 
-```python
+```python {test=compile reason="needs a database behind its migrations directory"}
 await ferro.connect(url)
 await ferro.migrations.require_applied()
 # PendingMigrationsError: ferro.migrations: this database is behind its migrations.
