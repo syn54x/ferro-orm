@@ -1,5 +1,7 @@
-# Contributing
+---
+description: "Set up a development environment, run the tests and linters, and open a pull request against Ferro."
+---
 
-Ferro welcomes contributions — bug reports, docs fixes, and code across both the Python and Rust layers. The guide below is the canonical contributor reference from the repository.
+# Contributing
 
 --8<-- "CONTRIBUTING.md:contributing"

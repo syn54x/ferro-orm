@@ -148,16 +148,28 @@ def canonicalize_wire_scalar(value: Any) -> Any:
 
 
 def save_bind_payload(instance: Any) -> dict[str, Any]:
-    """Column->value map for ``save``/``bulk_create``.
+    """Column->value map for ``save``/``bulk_create``, in field order.
 
     Columns go through pydantic ``model_dump(mode="json")`` (honoring field
-    serializers/aliases), except bytes and secret columns, which are overlaid
+    serializers/aliases), except bytes and secret columns, which are bound
     raw: bytes verbatim, a secret as ``unwrap_secret`` gives it.
+
+    The map is in field declaration order, so a statement lists its columns
+    the same way on every call: the dump follows the instance's ``__dict__``,
+    which a fetch fills in the ``SELECT``'s column order, and the raw columns
+    are bound apart from it.
     """
     raw = _raw_bound_fields(instance)
     payload: dict[str, Any] = instance.model_dump(mode="json", exclude=set(raw))
-    payload.update(raw)
-    return payload
+    ordered: dict[str, Any] = {}
+    for name in type(instance).model_fields:
+        if name in raw:
+            ordered[name] = raw[name]
+        elif name in payload:
+            ordered[name] = payload[name]
+    for name, value in payload.items():
+        ordered.setdefault(name, value)
+    return ordered
 
 
 def normalize_save_columns(names: object, *, param: str) -> set[str]:
@@ -255,7 +267,8 @@ def _keep_write_set(
             f"save({param}=...) bind payload is missing "
             f"{sorted(missing)!r}. Legal persisted columns: {legal}."
         )
-    return {key: payload[key] for key in keep}
+    # The payload is in field order; a set's order changes with the hash seed.
+    return {key: value for key, value in payload.items() if key in keep}
 
 
 def apply_save_only(

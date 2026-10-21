@@ -4,6 +4,8 @@ Every operation needs an explicit route: a session (ambient or session=) or
 using=. The silent using-bypasses-session path is a ValueError.
 """
 
+from pathlib import Path
+
 import pytest
 
 from ferro import Field, Model, connect, engines, execute
@@ -18,6 +20,39 @@ async def test_operation_with_no_route_raises(db_url):
     await connect(db_url, auto_migrate=True)
     with pytest.raises(RuntimeError, match="No database route"):
         await RtA.all()
+
+
+NO_ROUTE_MESSAGE = (
+    "No database route for this operation. Open a session "
+    "(`async with ferro.engines.session(...)`) or pass `using=`/`session=` "
+    "explicitly. Implicit default-connection routing was removed in v0.14 "
+    "(deprecated since v0.12); see the upgrade guide."
+)
+
+
+@pytest.mark.asyncio
+async def test_no_route_message_is_the_current_wording(db_url):
+    # Pins today's wording (reworded since 0.25.0, which said "removed in
+    # v0.13 ... see the sessions migration guide"); the upgrade guide's 0.26
+    # section names the change for callers that match on the text.
+    await connect(db_url, auto_migrate=True)
+    with pytest.raises(RuntimeError) as raised:
+        await execute("SELECT 1")
+    assert str(raised.value) == NO_ROUTE_MESSAGE
+
+
+def test_the_upgrade_guide_names_the_reworded_no_route_message():
+    guide = (
+        Path(__file__).resolve().parents[1] / "docs/pages/upgrading.md"
+    ).read_text()
+    section = guide.split("## Upgrading to 0.26", 1)[1].split("\n## ", 1)[0]
+    assert "asks nothing" not in section
+    new_tail = NO_ROUTE_MESSAGE.split("routing was ", 1)[1]
+    assert new_tail in section, new_tail
+    assert (
+        "removed in v0.13 (deprecated since v0.12); see the sessions migration guide."
+        in section
+    )
 
 
 @pytest.mark.asyncio

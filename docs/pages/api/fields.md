@@ -1,8 +1,15 @@
-# Fields & Types
+---
+description: "API reference for Field, FerroField, DbType and the other field metadata."
+---
 
-Fields are declared as type annotations on a [`Model`](model.md), with `Field(...)` supplying database options (primary key, unique, index, defaults). The lower-level types on this page — `FerroField`, `DbType`, and friends — power `Annotated[...]` declarations and explicit column-type overrides.
+# Field, FerroField and DbType
+
+Fields are declared as type annotations on a [`Model`](model.md), with `Field(...)` supplying database options (primary key, unique, index, defaults). The other entries on this page (`FerroField`, `FerroNullable`, `varchar`, `DbType` and `DbTypeToken`) describe the field metadata and the explicit column types `db_type=` takes.
 
 ::: ferro.Field
+    options:
+      show_overloads: false
+      parameter_headings: true
 
 ::: ferro.FerroField
 

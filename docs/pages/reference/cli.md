@@ -1,3 +1,7 @@
+---
+description: "Every ferro migrate command, with its options, exit codes and output."
+---
+
 # CLI
 
 The `ferro` command ships with the core package; its command line needs the `cli` extra:
@@ -6,7 +10,7 @@ The `ferro` command ships with the core package; its command line needs the `cli
 pip install "ferro-orm[cli]"
 ```
 
-Without the extra, `ferro` prints `ferro's CLI needs the cli extra: pip install "ferro-orm[cli]"` and exits 2. Every verb lives under `ferro migrate`; the guides show them in use ([Migrations](../guide/schema/migrations.md), [Deploying](../guide/schema/deploying.md), [Adopting](../howto/adopting-migrations.md)).
+Without the extra, `ferro` prints `ferro's CLI needs the cli extra: pip install "ferro-orm[cli]"` and exits 2. Every verb lives under `ferro migrate`; the guides show them in use ([Migrations](../guide/schema/migrations.md), [Deploying](../guide/schema/deploying.md), [Adopting](../guide/schema/adopting-migrations.md)).
 
 ## Global options
 
@@ -106,7 +110,7 @@ On a terminal the heading is bold with a green tick, and each file's stem is col
 | `--data-only` | Write only the `--data-step`: no DDL, and a full copy of the previous migration's snapshot. |
 | `--no-backfill TABLE.COLUMN` | Replace the generated backfill of this column with a guard step that fails the migration while any row still needs a value. Repeatable. |
 | `--verbose` | Show every name in a long list of the change summary; a terminal otherwise shows the first few (a list past 12 names shows its first 6). |
-| `--replace NNNN_NAME` | Regenerate this migration (or `NNNN`, when one migration carries the number) on top of the newest snapshot below it, carrying its data steps and hand-written SQL steps across byte for byte; the number is kept when free. Only the newest migration can be replaced. See [Two branches, one number](../guide/schema/migrations.md#two-branches-one-number). |
+| `--replace NNNN_NAME` | Regenerate this migration (or `NNNN`, when one migration carries the number) on top of the newest snapshot below it, carrying its data steps and hand-written SQL steps across byte for byte; the number is kept when free. Only the newest migration can be replaced. See [Duplicate migration numbers and `--replace`](../guide/schema/migrations.md#duplicate-migration-numbers-and-replace). |
 
 Exit 0 when written (or nothing to write), 1 when refused. A primary-key change is refused, writing nothing:
 
@@ -119,12 +123,12 @@ That section is [Changing a primary key](../guide/schema/migrations.md#changing-
 
 ## `ferro migrate squash NAME --from TARGET`
 
-Replace a range of migrations, from `TARGET` through the newest, with the one migration `new` would have written across it. A feature branch wrote `0002_add_bio` (with a hand-written SQL step `fix_rows`) and `0003_add_team`; `ferro migrate squash epic --from 0002` writes:
+Replace a range of migrations, from `TARGET` through the newest, with the one migration `new` would have written across it. A feature branch wrote `0002_add_bio` (with a hand-written SQL step `fix_rows`) and `0003_add_team`; `ferro migrate squash teams --from 0002` writes:
 
 <!-- output: squash -->
 ```text
 default · migrations
-ok Wrote migrations/0002_epic/  (replaces 0002_add_bio … 0003_add_team, now deleted)
+ok Wrote migrations/0002_teams/  (replaces 0002_add_bio … 0003_add_team, now deleted)
   01_schema.up.postgres.sql    schema step, up (postgres)    regenerated
   01_schema.down.postgres.sql  schema step, down (postgres)  regenerated
   01_schema.up.sqlite.sql      schema step, up (sqlite)      regenerated
@@ -139,7 +143,7 @@ ok Wrote migrations/0002_epic/  (replaces 0002_add_bio … 0003_add_team, now de
     Author
 ```
 
-The DDL is planned once, from the snapshot below the range to the range's last snapshot, with every rename the range declared composed into it: a column renamed in `0002` whose hint `0003` dropped is still a `RENAME COLUMN`, never a drop and an add. Every data step and hand-written SQL step of the range is carried byte for byte, in chain order, each marked `carried, review it` with the file it was; a carried data step still holding `todo(...)` still needs writing, except one that is byte for byte the generator's unwritten scaffold when the squashed plan does not scaffold it again: that one is dropped with a note (`<file> from <migration> was the generator's unwritten scaffold and the squashed plan needs no backfill of <table>.<col>: dropped`), and any hand-written byte means it is carried. The squashed migration takes the first migration's number, and its `ir.json` records which migrations it replaced. The range's directories are deleted. It reads the migrations directory only: never the models, never a database. A database that applied the originals inherits the squash on its next `up`, running nothing; [Squashing an epic's migrations](../guide/schema/migrations.md#squashing-an-epics-migrations) walks through the recipe, inheritance and when to squash.
+The DDL is planned once, from the snapshot below the range to the range's last snapshot, with every rename the range declared composed into it: a column renamed in `0002` whose hint `0003` dropped is still a `RENAME COLUMN`, never a drop and an add. Every data step and hand-written SQL step of the range is carried byte for byte, in chain order, each marked `carried, review it` with the file it was; a carried data step still holding `todo(...)` still needs writing, except one that is byte for byte the generator's unwritten scaffold when the squashed plan does not scaffold it again: that one is dropped with a note (`<file> from <migration> was the generator's unwritten scaffold and the squashed plan needs no backfill of <table>.<col>: dropped`), and any hand-written byte means it is carried. The squashed migration takes the first migration's number, and its `ir.json` records which migrations it replaced. The range's directories are deleted. It reads the migrations directory only: never the models, never a database. A database that applied the originals inherits the squash on its next `up`, running nothing; [Squashing a feature branch's migrations](../guide/schema/squash.md) walks through the recipe, inheritance and when to squash.
 
 On a terminal the file table is laid out as `new`'s is, with the last column, what became of each file, in the default colour.
 
@@ -195,6 +199,8 @@ Apply every pending migration, in order, under the run lock. Prints one line per
 | Flag | What it does |
 | :--- | :--- |
 | `--lock-timeout DURATION` | How long to wait for another run's lock: `30s`, `500ms`, `1m`, a number of seconds, or `0` to refuse at once. Defaults to the database's [`lock_timeout`](configuration.md#lock_timeout) (`30s`); the flag wins. |
+| `--allow-ahead=expand-only` | Run beside a database that has applied migrations this directory lacks, when every step they hold is an expand step: the previous release of a [rolling deploy](../guide/schema/deploying.md#rolling-deploys-and-the-two-release-contract). Refused, naming the first contract step, otherwise. |
+| `--allow-ahead` | Run beside a database that has applied migrations this directory lacks, whatever steps they hold. Without either form, `up` refuses a database ahead of its directory. |
 
 <!-- output: up -->
 ```text
@@ -240,6 +246,8 @@ Show which migrations this database has applied, without changing it or taking a
 | :--- | :--- |
 | `--steps` | Print every migration's steps, not only those needing attention. |
 | `--json` | Print the report as a JSON document, and nothing else on stdout. It carries `url` (the database's URL, password masked), `applied_at` on each migration and `finished_at` on each step, beside the keys it always had. |
+| `--no-steps` | Print only the steps needing attention. This is the default. |
+| `--no-json` | Print the plain report. This is the default. |
 
 Exit 0 when everything is applied, 3 when something is pending, 4 when something needs attention.
 
@@ -328,7 +336,7 @@ recorded 0001_create_author … 0002_author_slug as baseline (2 steps)
 baseline checked what `ferro migrate drift` checks: objects ferro does not own (functions, triggers) were not compared
 ```
 
-On a terminal the first line is a green tick and a bold `recorded …`, with the step count dim, and the note under it is dim. [When baseline says no](../howto/adopting-migrations.md#when-baseline-says-no) shows the differences it prints instead.
+On a terminal the first line is a green tick and a bold `recorded …`, with the step count dim, and the note under it is dim. [When baseline says no](../guide/schema/adopting-migrations.md#when-baseline-says-no) shows the differences it prints instead.
 
 ## `ferro migrate rerecord MIGRATION:STEP`
 

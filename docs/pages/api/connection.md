@@ -1,12 +1,12 @@
-# Connection & Registry
+---
+description: "API reference for connect(), sessions and the model registry."
+---
 
-Functions for managing database connections and the global model registry. `connect()` registers a (optionally named) connection pool. `reset_engine()` tears everything down. The registry helpers control schema creation and the identity map. Sessionized routing is exposed via `ferro.engines.session(name)` / `ferro.Session`. See the [Connections & Databases guide](../guide/connections.md).
+# connect, Session and the registry
 
-::: ferro.Session
+`connect()` registers a connection pool, optionally under a name, and `engines.session()` opens a session on one; every model call runs inside a session. `reset_engine()` closes every connection. See the [Connections and databases guide](../guide/connections.md).
 
-::: ferro.engines
-
-::: ferro.current_session
+## Connecting
 
 ::: ferro.connect
 
@@ -15,6 +15,20 @@ Functions for managing database connections and the global model registry. `conn
 ::: ferro.set_default_connection
 
 ::: ferro.reset_engine
+
+::: ferro.version
+
+## Sessions
+
+::: ferro.engines
+
+::: ferro.session.EngineManager
+
+::: ferro.Session
+
+::: ferro.current_session
+
+## Registry
 
 ::: ferro.create_tables
 
@@ -26,19 +40,19 @@ Functions for managing database connections and the global model registry. `conn
 
 ::: ferro.evict_instance
 
-::: ferro.version
+## Auto-migrate reports
 
-## What an auto-migrate pass did
+`ferro.migrate()` and `ferro.create_tables()` return a `PassReport`, built from the statements the database actually ran. A pass that fails partway raises its usual error with `.report` set to what committed before the failure:
 
-`ferro.migrate()` and `ferro.create_tables()` return a `PassReport`, built from the statements the database actually ran. A pass that fails partway raises its usual error with `.report` set to what committed before the failure.
-
-```python
+```python {test=compile reason="needs a database one column behind its models"}
 report = await ferro.migrate(updates=True)
 [(s.subject, s.sql) for s in report.statements if s.role == "schema"]
 # [('author', 'ALTER TABLE "author" ADD COLUMN "slug" TEXT')]
 [(w.kind, str(w)) for w in report.warnings]
 # []
 ```
+
+Each `ExecutedStatement` names its table (`subject`) and its `role`; each warning is a typed `Report`.
 
 ::: ferro.PassReport
 

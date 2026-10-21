@@ -1,4 +1,4 @@
-"""``ferro migrate up``, ``down`` and ``status``: the run loop (ADR-0028, ADR-0048).
+"""`ferro migrate up`, `down` and `status`: the run loop.
 
 ```text
 $ ferro migrate up
@@ -6,59 +6,62 @@ $ ferro migrate up
 0002_add_teams      01_schema  applied (9 ms)
 ```
 
-```python
+```python {test=compile reason="needs a project with a migrations directory"}
 await ferro.migrations.up()                # the same run, in-process
 await ferro.migrations.require_applied()   # where it stands, raised when behind
 ```
 
 Each verb here is one function the CLI and the application both call,
-``(settings=None, database=None, *, using=None, url=None, ...)``: the
-database and connection come from :meth:`Target.resolve
-<ferro.migrations.target.Target.resolve>`. A refused or failed run raises
-:class:`~ferro.migrations.errors.MigrationRefused` carrying its
-:class:`RunReport` as ``.report``, for every caller; the CLI prints the
-report's refusal and exits 1.
+`(settings=None, database=None, *, using=None, url=None, ...)`: the
+database and connection come from `Target.resolve`. A refused or failed run
+raises `MigrationRefused` carrying its `RunReport` as `.report`, for every
+caller; the CLI prints the report's refusal and exits 1.
 
-Python sequences a run; the Rust core decides and executes it. :func:`up`
-opens the database as one object (``_core._open_tracked``: its records and
-one read of the migrations directory, held), takes the run lock as a block
-(``tracked.locked(...)``, whose run object re-reads the records under the
-lock), asks that run for its plan, and walks the plan's opaque step
-handles: ``run.execute(step)`` runs a SQL step from the held bytes and
-settles its record. Nothing here decides which step runs, how, or whether
-a file may run at all, and nothing here builds a step record.
+Python sequences a run; the core decides and executes it. `up` opens the
+database as one object (its records and one read of the migrations
+directory, held), takes the run lock as a block (whose run object re-reads
+the records under the lock), asks that run for its plan, and walks the
+plan's opaque step handles: `run.execute(step)` runs a SQL step from the
+held bytes and settles its record. Nothing here decides which step runs,
+how, or whether a file may run at all, and nothing here builds a step
+record.
 
 Each SQL step waits for table locks under the database's
-``ddl_lock_timeout`` (ADR-0044); a step that times out is retried from its
-first statement, and each attempt is a progress line::
+`ddl_lock_timeout`; a step that times out is retried from its first
+statement, and each attempt is a progress line:
 
-    0003_add_slug  01_expand  waiting for a lock on "author" (attempt 1 of 10, retry in 1s)
-    0003_add_slug  01_expand  applied (2214 ms)
+```text
+0003_add_slug  01_expand  waiting for a lock on "author" (attempt 1 of 10, retry in 1s)
+0003_add_slug  01_expand  applied (2214 ms)
+```
 
-:func:`down` walks back (ADR-0033) through the same walk over the run's
-``Down`` plan, each step's ``.down`` file run by the same executor, which
-removes the step's record in the down's own transaction::
+`down` walks back through the same walk over the run's down plan, each
+step's `.down` file run by the same executor, which removes the step's
+record in the down's own transaction:
 
-    $ ferro migrate down
-    Revert 0002_add_teams (1 step)? [y/N] y
-    0002_add_teams  01_schema  reverted (8 ms)
+```text
+$ ferro migrate down
+Revert 0002_add_teams (1 step)? [y/N] y
+0002_add_teams  01_schema  reverted (8 ms)
+```
 
-A data step (``NN_<name>.py``, ADR-0024) is Python's to run: every planned
-one is loaded before anything runs (its checksum checked, its declarations
-read, every ``todo`` refused by file and line), then each runs on the run's
-connection inside one transaction under its migration's historical models
-(:meth:`ferro.registry.Registry.swap`), its record moved through the run's
-named transitions (``start``, then ``finish`` inside the step's
-transaction)::
+A data step (`NN_<name>.py`) is Python's to run: every planned one is
+loaded before anything runs (its checksum checked, its declarations read,
+every `todo` refused by file and line), then each runs on the run's
+connection inside one transaction under its migration's historical models,
+its record moved through the run's named transitions (`start`, then
+`finish` inside the step's transaction):
 
-    0011_backfill_slugs  01_backfill_author  applied (40 ms)
+```text
+0011_backfill_slugs  01_backfill_author  applied (40 ms)
+```
 
-A ``@chunked`` step runs one transaction per batch instead, its cursor
-committed with each batch (:mod:`ferro.migrations.chunked`), and its query
-is checked over the historical models before anything runs.
+A `@chunked` step runs one transaction per batch instead, its cursor
+committed with each batch, and its query is checked over the historical
+models before anything runs.
 
-:func:`status` and :func:`require_applied` read the same object with no
-lock and create nothing.
+`status` and `require_applied` read the same object with no lock and
+create nothing.
 """
 
 from __future__ import annotations
@@ -80,7 +83,7 @@ from ..registry import REGISTRY
 from ..settings import MAX_LOCK_TIMEOUT_S, SettingsError, parse_lock_timeout
 from ..state import resolve_operation_scope
 from . import historical
-from .chunked import BatchFailed, order_keys, run_chunked
+from ._chunk_loop import BatchFailed, order_keys, run_chunked
 from .context import HistoricalModels, StepContext
 from .errors import DatabaseAheadError, MigrationRefused, PendingMigrationsError
 from .historical import HistoricalModelError
@@ -127,10 +130,12 @@ __all__ = [
 ]
 
 AllowAhead: TypeAlias = bool | Literal["expand-only"]
-"""How far :func:`up` and :func:`require_applied` let a database ahead of
-the checkout through (ADR-0038, ADR-0054): ``False`` refuses any applied
-migration the directory lacks, ``"expand-only"`` admits them when every
-step they hold is of class ``expand``, ``True`` admits any distance."""
+"""How far `up` and `require_applied` let a database ahead of the checkout through.
+
+`False` refuses any applied migration the directory lacks, `"expand-only"`
+admits them when every step they hold is of class `expand`, `True` admits
+any distance.
+"""
 
 
 _STEP_STEM = re.compile(r"(\.(up|down)(\.[a-z]+)?\.sql|\.py)$")
@@ -138,44 +143,44 @@ _TARGET = re.compile(r"(\d{4})(?::(\d{2}))?")
 
 
 class AppliedStep(NamedTuple):
-    """One step a run applied."""
+    """One step a run applied or reverted."""
 
     migration: str
-    """``NNNN_<name>``."""
+    """The migration, `NNNN_<name>`."""
     step: str
-    """``NN_<name>``."""
+    """The step, `NN_<name>`."""
     ms: int
+    """How long the step ran, in milliseconds."""
 
 
 @dataclass(frozen=True)
 class StepFailure:
-    """The step a run stopped at: its error and, apart, what the failure
-    left applied and how to resume. :attr:`RunReport.refusal` is
-    :attr:`message`."""
+    """The step a run stopped at: its error, what the failure left applied, and how to resume.
+
+    The run report's `refusal` is its `message`.
+    """
 
     migration: str
-    """``NNNN_<name>``."""
+    """The migration, `NNNN_<name>`."""
     file: str
-    """The step's file (``02_backfill_account.py``)."""
+    """The step's file (`02_backfill_account.py`)."""
     duration_ms: int
+    """How long the step ran before it failed, in milliseconds."""
     error: str
-    """What failed (``NotNullViolationError: null value in column ...``)."""
+    """What failed (`NotNullViolationError: null value in column ...`)."""
     hint: str
-    """What stayed applied and how to resume, ending ``Nothing after it
-    ran.``"""
+    """What stayed applied and how to resume (its last sentence is `Nothing after it ran.`)."""
     rows_done: int | None = None
-    """The rows a chunked step's committed batches did before it failed;
-    ``None`` for any other step."""
+    """The rows a chunked step's committed batches did before it failed; `None` for any other step."""
 
     @property
     def stem(self) -> str:
-        """The step's name, its file without the suffix (``01_expand``)."""
+        """The step's name, its file without the suffix (`01_expand`)."""
         return _stem(self.file)
 
     @property
     def message(self) -> str:
-        """``ferro migrate: <migration>/<file> failed: <error>``, then the
-        hint on its own line."""
+        """The failure as the run prints it: `ferro migrate: <migration>/<file> failed: <error>`, then the hint."""
         return (
             f"ferro migrate: {self.migration}/{self.file} failed: {self.error}\n"
             f"{self.hint}"
@@ -184,20 +189,20 @@ class StepFailure:
 
 @dataclass(frozen=True)
 class InheritedMigration:
-    """A squash a run inherited before it planned (ADR-0056): the database had
-    applied every migration it replaced, so the run swapped their step
-    records for the squash's and ran nothing."""
+    """A squash a run inherited before it planned.
+
+    The database had applied every migration the squash replaced, so the run
+    swapped their step records for the squash's and ran nothing.
+    """
 
     squash: str
-    """``NNNN_<name>`` of the squash."""
+    """The squash, `NNNN_<name>`."""
     replaced: list[str]
-    """``NNNN_<name>`` of each migration whose records it replaced, in chain
-    order: what the database had applied."""
+    """Each migration whose records it replaced (`NNNN_<name>`), in chain order: what the database had applied."""
 
     @property
     def line(self) -> str:
-        """``inherited <squash>: this database had applied <first> … <last>;
-        nothing was run``."""
+        """The line a run prints: `inherited <squash>: this database had applied <first> … <last>; nothing was run`."""
         return (
             f"inherited {self.squash}: this database had applied "
             f"{migration_span(self.replaced)}; nothing was run"
@@ -206,42 +211,57 @@ class InheritedMigration:
 
 @dataclass
 class RunReport:
-    """What :func:`up` or :func:`down` did."""
+    """What a migration run did: what [`up`][ferro.migrations.up] returns.
+
+    A refused run raises `MigrationRefused` with this report as `.report`,
+    saying what the run applied before it stopped.
+
+    Examples:
+        ```python {test=compile reason="needs a migrations project and a database"}
+        report = await ferro.migrations.up()
+        for step in report.applied:
+            print(step.migration, step.step, step.ms)
+        # 0002_add_teams 01_schema 9
+        ```
+    """
 
     inherited: list[InheritedMigration] = field(default_factory=list)
     """The squashes the run inherited before anything else, in order."""
     applied: list[AppliedStep] = field(default_factory=list)
     """The steps applied, in order."""
     reverted: list[AppliedStep] = field(default_factory=list)
-    """The steps :func:`down` reverted, newest first."""
+    """The steps a down run reverted, newest first."""
     declined: bool = False
-    """:func:`down`'s ``confirm`` said no: nothing was reverted."""
+    """Whether a down run's `confirm` said no, so nothing was reverted."""
     refusal: str | None = None
-    """Why the run stopped: a refusal before anything ran, a lost lock, or a
-    failed step (its error and how to resume). ``None`` when it finished."""
+    """Why the run stopped: a refusal before anything ran, a lost lock, or a failed step; `None` when it finished.
+
+    For a failed step it holds the error and how to resume.
+    """
     refused: RunRefused | None = None
-    """The refusal itself when the run was refused (``refusal`` is its
-    text): its ``kind``, ``migration``, ``step`` and ``reason`` say what it
-    is about. ``None`` when the run finished or a step failed."""
+    """The refusal itself when the run was refused; `None` when it finished or a step failed.
+
+    `refusal` is its text; its `kind`, `migration`, `step` and `reason` say
+    what it is about.
+    """
     notes: list[str] = field(default_factory=list)
     """What the run accepted on the way (an edited unfinished step)."""
     ahead: list[str] = field(default_factory=list)
-    """Applied migrations the directory lacks: let through by
-    ``allow_ahead``, or, when they alone refused the run
-    (``refused.ahead_only``), the ones that did."""
+    """Applied migrations the directory lacks: let through by `allow_ahead`, or the ones that refused the run."""
     failed: StepFailure | None = None
-    """The step the run stopped at when one failed (``refusal`` is its
-    message); ``None`` when the run finished or was refused."""
+    """The step the run stopped at when one failed (`refusal` is its message); `None` otherwise."""
     direction: Literal["up", "down"] = "up"
-    """Which way the run went: :func:`up` or :func:`down`."""
+    """Which way the run went: `"up"` or `"down"`."""
 
     def _refuse(self, refused: RunRefused) -> None:
         self.refusal, self.refused = str(refused), refused
 
     def _raise_if_refused(self) -> RunReport:
-        """This report, or :class:`MigrationRefused` carrying it when the run
-        refused or a step failed: :class:`DatabaseAheadError` when applied
-        migrations the directory lacks were the only thing in the way."""
+        """Return this report, or raise `MigrationRefused` carrying it when the run refused or a step failed.
+
+        The error is a `DatabaseAheadError` when applied migrations the
+        directory lacks were the only thing in the way.
+        """
         if self.refusal is None:
             return self
         if self.refused is not None and self.refused.ahead_only:
@@ -255,19 +275,35 @@ class RunReport:
 
 
 def tracking_schema_for(database: DatabaseSettings, dialect: str) -> str | None:
-    """Where ``database``'s tracking tables live on ``dialect``: its
-    ``tracking_schema`` on Postgres, else the governed schema (``None``)."""
+    """Return the schema a database's tracking tables live in on a dialect.
+
+    Args:
+        database: The configured database.
+        dialect: `"postgres"` or `"sqlite"`.
+
+    Returns:
+        The database's `tracking_schema` on Postgres; `None` (the governed
+            schema) otherwise.
+    """
     return database.tracking_schema if dialect == "postgres" else None
 
 
 async def open_tracked(name: str, database: DatabaseSettings) -> TrackedDatabase:
-    """``database``'s tracking tables and migrations directory on open
-    connection ``name``: its records and one read of the directory, held
-    (ADR-0048). Creates nothing and takes no lock.
+    """Open a database's tracking tables and migrations directory on an open connection.
+
+    The result holds its records and one read of the directory. Creates
+    nothing and takes no lock.
+
+    Args:
+        name: The open connection's name.
+        database: The configured database.
+
+    Returns:
+        The tracked database.
 
     Raises:
-        SettingsError: ``name`` is not open, or ``database`` does not target
-            its dialect.
+        SettingsError: `name` is not open, or `database` does not target its
+            dialect.
     """
     dialect = connection_dialect(name, database)
     return await _core._open_tracked(
@@ -279,17 +315,28 @@ async def open_tracked(name: str, database: DatabaseSettings) -> TrackedDatabase
 
 
 def say_waiting(text: str) -> None:
-    """Say on stderr, at once, that a run waits for another run's lock."""
+    """Say on stderr, at once, that a run waits for another run's lock.
+
+    Args:
+        text: The line to print.
+    """
     print(text, file=sys.stderr, flush=True)
 
 
 def warn_unclassified(run: LockedDatabase) -> list[str]:
-    """Warn, once per migration, of the records taking the lock left without
-    a class (ADR-0054): a verb that reads no class (``down``, ``rerecord``,
-    ``baseline --remove``) does not refuse on a migration that does not
-    regenerate. Those records read as ``contract`` until the next ``up`` or
-    ``baseline`` classifies them or refuses naming the fix. Returns the
-    warnings."""
+    """Warn, once per migration, of the records taking the lock left without a class.
+
+    A verb that reads no class (`down`, `rerecord`, `baseline --remove`)
+    does not refuse on a migration that does not regenerate. Those records
+    read as `contract` until the next `up` or `baseline` classifies them or
+    refuses naming the fix.
+
+    Args:
+        run: The locked database.
+
+    Returns:
+        The warnings, each also raised as a `UserWarning`.
+    """
     deferred = list(run.class_warnings)
     for text in deferred:
         warnings.warn(text, UserWarning, stacklevel=3)
@@ -302,22 +349,24 @@ def _stem(file: str) -> str:
 
 @dataclass(frozen=True)
 class StepEvent:
-    """One step a run finished: applied, reverted, reverted with nothing to
-    reverse, or failed. :meth:`line` is the line ``progress`` receives for
-    it (``0002_add_team  01_expand  applied (412 ms)``); a failed step's is
-    ``None``, as ``progress`` hears nothing of it (its message is the run's
-    refusal, :attr:`RunReport.failed`)."""
+    """One step a run finished: applied, reverted, reverted with nothing to reverse, or failed.
+
+    `line()` is the line `progress` receives for it
+    (`0002_add_team  01_expand  applied (412 ms)`); a failed step's is
+    `None`, as `progress` hears nothing of it (its message is the run's
+    refusal, in the report's `failed`).
+    """
 
     migration: str
-    """``NNNN_<name>``."""
+    """The migration, `NNNN_<name>`."""
     file: str
-    """The step's file (``01_expand.up.postgres.sql``)."""
+    """The step's file (`01_expand.up.postgres.sql`)."""
     outcome: Literal["applied", "reverted", "nothing to reverse", "failed"]
+    """What happened: `"applied"`, `"reverted"`, `"nothing to reverse"` or `"failed"`."""
     duration_ms: int | None
-    """How long the step ran; ``None`` when it had nothing to reverse."""
+    """How long the step ran; `None` when it had nothing to reverse."""
     reason: str | None
-    """Why its down runs no statement, when ``outcome`` is ``nothing to
-    reverse``."""
+    """Why its down runs no statement, when `outcome` is `"nothing to reverse"`."""
     name_width: int = 0
     """The run's migration column width: its longest migration name."""
     stem_width: int = 0
@@ -325,13 +374,12 @@ class StepEvent:
 
     @property
     def stem(self) -> str:
-        """The step's name, its file without the suffix (``01_expand``)."""
+        """The step's name, its file without the suffix (`01_expand`)."""
         return _stem(self.file)
 
     @property
     def said(self) -> str:
-        """What happened, as the line ends it: ``applied (412 ms)``,
-        ``reverted (8 ms)`` or ``nothing to reverse: <reason>``."""
+        """What happened, as the line ends it: `applied (412 ms)`, `reverted (8 ms)` or `nothing to reverse: <reason>`."""
         if self.outcome == "nothing to reverse":
             return f"nothing to reverse: {self.reason}"
         return f"{self.outcome} ({self.duration_ms} ms)"
@@ -339,8 +387,15 @@ class StepEvent:
     def line(
         self, name_width: int | None = None, stem_width: int | None = None
     ) -> str | None:
-        """``<migration>  <step>  <said>``, the columns padded to the run's
-        widths unless others are given; ``None`` for a failed step."""
+        """Render the progress line `<migration>  <step>  <said>`.
+
+        Args:
+            name_width: The migration column's width. Defaults to the run's.
+            stem_width: The step column's width. Defaults to the run's.
+
+        Returns:
+            The line, or `None` for a failed step.
+        """
         if self.outcome == "failed":
             return None
         names = self.name_width if name_width is None else name_width
@@ -350,30 +405,43 @@ class StepEvent:
 
 @dataclass(frozen=True)
 class RunNote:
-    """Any other line a run says: a step waiting for a table lock
-    (``0003_add_slug  01_add_slug  waiting for a lock on "author" ...``), an
-    edited unfinished step re-recorded before it runs."""
+    """Any other line a run says, such as a step waiting for a table lock.
+
+    For example `0003_add_slug  01_add_slug  waiting for a lock on "author" ...`,
+    or an edited unfinished step re-recorded before it runs.
+    """
 
     text: str
+    """The line."""
 
     def line(self) -> str:
-        """The line ``progress`` receives: the text itself."""
+        """Return the line `progress` receives: the text itself.
+
+        Returns:
+            The text.
+        """
         return self.text
 
 
 @dataclass(frozen=True)
 class InheritedEvent:
-    """A squash the run inherited, said before any step
-    (``inherited 0005_teams_epic: this database had applied 0005_add_teams …
-    0009_fix_rows; nothing was run``)."""
+    """A squash the run inherited, said before any step.
+
+    Its line reads `inherited 0005_teams_epic: this database had applied
+    0005_add_teams … 0009_fix_rows; nothing was run`.
+    """
 
     squash: str
-    """``NNNN_<name>`` of the squash."""
+    """The squash, `NNNN_<name>`."""
     replaced: list[str]
-    """``NNNN_<name>`` of each migration whose records it replaced."""
+    """Each migration whose records it replaced, `NNNN_<name>`."""
 
     def line(self) -> str:
-        """The line ``progress`` receives (:attr:`InheritedMigration.line`)."""
+        """Return the line `progress` receives.
+
+        Returns:
+            The same line the run report's `InheritedMigration.line` holds.
+        """
         return InheritedMigration(self.squash, list(self.replaced)).line
 
 
@@ -384,7 +452,7 @@ RunEvent: TypeAlias = StepEvent | RunNote | InheritedEvent
 def _declared_kind(path: Path) -> str:
     """The shape (``atomic`` / ``chunked``) an inherited data step's ``up``
     declares, read from its syntax tree: inheritance runs no step, so its
-    record holds the declaration, as a baseline's does (ADR-0056)."""
+    record holds the declaration, as a baseline's does."""
     try:
         return declared_up_kind(Path(path))
     except StepRefused as refused:
@@ -395,7 +463,7 @@ async def _inherit(
     run: LockedDatabase, tell: Callable[[RunEvent], None]
 ) -> list[InheritedMigration]:
     """Inherit, on ``run``, every squash whose witness its records hold, before
-    anything is planned (ADR-0056), telling ``tell`` one event per squash
+    anything is planned, telling ``tell`` one event per squash
     inherited. Raises ``RunRefused`` (``partial_witness``) on a squash the
     records hold part of, and (``mixed_witness``) on one a baseline
     recorded part of, with nothing written."""
@@ -423,42 +491,57 @@ async def up(
     progress: Callable[[str], Any] | None = None,
     on_event: Callable[[RunEvent], Any] | None = None,
 ) -> RunReport:
-    """Apply every pending step of every pending migration, in order, under
-    the run lock (``ferro migrate up``).
+    """Apply every pending migration, in order, under the run lock.
 
-    Works on ``database`` of ``settings`` over ``using``, a private
-    connection to ``url``, or the default connection
-    (:meth:`~ferro.migrations.target.Target.resolve`). A second run waits up
-    to ``lock_timeout`` (the database's configured ``lock_timeout`` when
-    ``None``), saying so on stderr at once. ``allow_ahead`` lets a
-    database holding migrations the directory lacks through (ADR-0038):
-    ``"expand-only"`` when every step they hold is ``expand`` (ADR-0054),
-    ``True`` whatever they hold (:data:`AllowAhead`).
-    ``progress`` receives each line as the run goes: one per squash it
-    inherits (before any step, ADR-0056), one per applied step, and one per
-    attempt a step makes while it waits for a table lock under the
-    database's ``ddl_lock_timeout``. ``on_event`` receives the same lines as
-    data, each just before ``progress`` receives its ``line()``: an
-    :class:`InheritedEvent` per squash inherited (its ``squash`` and the
-    ``replaced`` migrations, with no ``.text`` or ``.step``), a
-    :class:`StepEvent` per applied step, a :class:`RunNote` for any other;
-    a failed step is a ``StepEvent`` too, with no line for ``progress``.
+    This is `ferro migrate up`. A second run waits for the lock, saying so
+    on stderr at once. See
+    [Deploying migrations](../guide/schema/deploying.md).
 
-    Returns the :class:`RunReport` of what it did: ``.inherited`` the squashes
-    it inherited, in order (an :class:`InheritedMigration` each), then
-    ``.applied`` the steps it applied.
+    Args:
+        settings: The project's configuration. Defaults to `FerroSettings()`.
+        database: The configured database. Defaults to the only one
+            configured.
+        using: An open connection to work on. Defaults to the default
+            connection.
+        url: A URL to open a private connection to, closed after the call.
+            Refused together with `using`.
+        lock_timeout: How long to wait for another run's lock: `"30s"`,
+            `"500ms"`, `"1m"` or a number of seconds; `0` refuses at once.
+            Defaults to the database's `lock_timeout`.
+        allow_ahead: Run beside a database that has applied migrations the
+            directory lacks: `"expand-only"` when every step they hold is
+            `expand` (the previous release of a rolling deploy), `True`
+            whatever they hold. Defaults to `False`, which refuses.
+        progress: Receives each line as the run goes: one per squash it
+            inherits (before any step), one per applied step, and one per
+            attempt a step makes while it waits for a table lock.
+        on_event: Receives the same lines as data, each just before
+            `progress` receives its `line()`: an `InheritedEvent` per squash
+            inherited, a `StepEvent` per applied step, a `RunNote` for any
+            other. A failed step is a `StepEvent` too, with no line for
+            `progress`.
+
+    Returns:
+        What the run did: the squashes it inherited, in order, then the
+            steps it applied.
 
     Raises:
-        DatabaseAheadError: the database has applied migrations the
-            directory lacks, and nothing else is in the way
-            (``allow_ahead=True`` runs beside them; ``.contract_steps`` names
-            the steps ``"expand-only"`` refuses on).
-        MigrationRefused: the run refused or a step failed; the message says
-            why and how to resume, and ``.report`` is the run's report. Also
-            the configuration naming no single database, and a connection
-            the run cannot work on.
-        TypeError: ``allow_ahead`` is not ``False``, ``True`` or
-            ``"expand-only"``.
+        DatabaseAheadError: The database has applied migrations the
+            directory lacks, and nothing else is in the way.
+        MigrationRefused: The run refused or a step failed; the message says
+            why and how to resume, and `.report` is the run's report. Also
+            raised when the configuration names no single database, or for
+            a connection the run cannot work on.
+        TypeError: `allow_ahead` is not `False`, `True` or `"expand-only"`.
+
+    Examples:
+        ```python {test=compile reason="needs a migrations project and a database"}
+        await ferro.connect(url)
+        report = await ferro.migrations.up(progress=print)
+        # 0002_add_teams  01_schema  applied (9 ms)
+        print([step.migration for step in report.applied])
+        # ['0002_add_teams']
+        ```
     """
     allow_ahead = _core._allow_ahead(allow_ahead)
     target = Target.resolve(settings, database, using=using, url=url)
@@ -483,16 +566,16 @@ async def _up(
     on_event: Callable[[RunEvent], Any] | None = None,
     through: str | None = None,
 ) -> RunReport:
-    """:func:`up` on open connection ``name``, raising as it does.
+    """`up` on open connection ``name``, raising as it does.
 
     ``through`` (``"0007"``, a migration number) stops the run after that
     migration: only pending steps of migrations up to and including it run.
-    It is the test harness's target (ADR-0045); the application's ``up()``
-    has none (ADR-0040), so it is reachable only here. A number the
+    It is the test harness's target; the application's ``up()``
+    has none, so it is reachable only here. A number the
     directory lacks is refused, and so is a step (``"0007:02"``): neither is
     a target. A ``through`` at or below the last applied migration has
     nothing pending to run: the run applies nothing and reverts nothing
-    (going down is :func:`down`'s).
+    (going down is `down`'s).
     """
     timeout = database.lock_wait(lock_timeout)
     direction: dict[str, Any] = {"direction": "up"}
@@ -646,13 +729,20 @@ def _key(step: StepHandle) -> tuple[int, int]:
 
 
 def historical_models(migrations: dict[str, Any], number: int) -> HistoricalModels:
-    """The historical models of migration ``number`` (ADR-0035), built from
-    the held directory read (``run.migrations``): its snapshot over its
-    parent's. The one builder, for a data step's run and for the order keys
-    of an edited chunked step alike.
+    """Build the historical models of one migration: its snapshot over its parent's.
+
+    The one builder, for a data step's run and for the order keys of an
+    edited chunked step alike.
+
+    Args:
+        migrations: The held read of the migrations directory.
+        number: The migration's number.
+
+    Returns:
+        The historical models.
 
     Raises:
-        HistoricalModelError: the snapshots do not build.
+        HistoricalModelError: The snapshots do not build.
     """
     by_number = {m["number"]: m for m in migrations["migrations"]}
     own = by_number[number]
@@ -667,21 +757,25 @@ def historical_models(migrations: dict[str, Any], number: int) -> HistoricalMode
 def order_keys_on_disk(
     tracked: TrackedDatabase | LockedDatabase,
 ) -> list[tuple[int, int, list[str]]]:
-    """The order keys each cursor-holding chunked step's file pages over
-    today, as the run planner reads them (``[(migration, step, ["author.id",
-    ...]), ...]``; an empty list for a step whose function is no longer
-    ``@chunked``).
+    """Read the order keys each cursor-holding chunked step's file pages over today.
 
-    A fact only Python can read (the query is a function of the migration's
-    historical models), read for every record that is an unfinished
-    chunked step holding a cursor: its ``up``'s keys for an up that stopped
-    part-way, its ``down``'s for a record ``reverting`` at a revert cursor.
-    The planner decides whether its file was edited and whether its cursor
-    is still a position in the edited query (ADR-0030). A directory that
-    does not read gives no facts; the planner refuses it with its own text.
+    Only Python can read this (the query is a function of the migration's
+    historical models). It is read for every record that is an unfinished
+    chunked step holding a cursor: its `up`'s keys for an up that stopped
+    part-way, its `down`'s for a record `reverting` at a revert cursor. The
+    planner decides whether its file was edited and whether its cursor is
+    still a position in the edited query. A directory that does not read
+    gives no facts; the planner refuses it with its own text.
+
+    Args:
+        tracked: The tracked database, locked or not.
+
+    Returns:
+        Each step as `(migration, step, ["author.id", ...])`; the list is
+            empty for a step whose function is no longer `@chunked`.
 
     Raises:
-        MigrationRefused: such a step's file does not load, or its query
+        MigrationRefused: Such a step's file does not load, or its query
             does not build over its historical models.
     """
     wanted = sorted(
@@ -726,7 +820,7 @@ def order_keys_on_disk(
 def _order_keys_for(
     run: LockedDatabase, nothing: str
 ) -> list[tuple[int, int, list[str]]]:
-    """:func:`order_keys_on_disk` for a run that refuses on a file that does
+    """`order_keys_on_disk` for a run that refuses on a file that does
     not load (``Nothing was <nothing>.``)."""
     try:
         return order_keys_on_disk(run)
@@ -746,7 +840,7 @@ def _load_data_steps(
     the loaded steps, and going down each data step whose down declares
     ``nothing_to_reverse`` with its reason (it runs no function). A
     ``@chunked`` query is checked once its historical models are built
-    (:func:`_check_chunked`)."""
+    (`_check_chunked`)."""
     nothing = "applied" if direction == "up" else "reverted"
     loaded: dict[tuple[int, int], LoadedStep] = {}
     reasons: dict[tuple[int, int], str] = {}
@@ -793,7 +887,7 @@ def _check_chunked(
     direction: str,
 ) -> None:
     """Refuse the run before anything runs when a ``@chunked`` step's query
-    cannot be paged by keyset (:func:`~ferro.migrations.steps.chunked_query`),
+    cannot be paged by keyset (`chunked_query`),
     built over its migration's historical models."""
     nothing = "applied" if direction == "up" else "reverted"
     for step in steps:
@@ -812,7 +906,7 @@ def _check_chunked(
 class _HistoricalSwaps:
     """The registry swap of the migration whose data step is running: one
     swap per migration with data steps, held until the run leaves that
-    migration (ADR-0035), restored on exit, error and cancellation. Built
+    migration, restored on exit, error and cancellation. Built
     from the run's held directory read, never from disk again."""
 
     def __init__(self, run: LockedDatabase) -> None:
@@ -865,11 +959,11 @@ def _route() -> Any:
 
 class _DataStep:
     """Run one planned data step, its record moved through the run's
-    transitions (ADR-0024, ADR-0048).
+    transitions.
 
     An atomic step is one transaction on the run's connection, its record
     finished (going up) or removed (going down) inside that transaction. A
-    chunked step runs through :func:`~ferro.migrations.chunked.run_chunked`,
+    chunked step runs through `run_chunked`,
     one transaction per batch with its cursor committed in it.
 
     A failure rolls back what it was running and is recorded only where the
@@ -1085,13 +1179,21 @@ async def status_of(
     *,
     lock_held: bool | None = None,
 ) -> StatusReport:
-    """Where ``tracked`` stands against its held directory read: each step's
-    state (a run holding the lock makes its step ``running``), and the
-    refusal ``up`` would meet. Takes no lock and creates nothing.
+    """Report where a tracked database stands against its held directory read.
 
-    ``lock_held`` is whether a run holds the lock; ``None`` asks the
-    database. A locked run that executes nothing (a refused baseline) passes
-    ``False``: its own lock puts no step in progress."""
+    Each step's state (a run holding the lock makes its step `running`), and
+    the refusal `up` would meet. Takes no lock and creates nothing.
+
+    Args:
+        tracked: The tracked database, locked or not.
+        database: The configured database.
+        lock_held: Whether a run holds the lock. Defaults to asking the
+            database. A locked run that executes nothing (a refused
+            baseline) passes `False`: its own lock puts no step in progress.
+
+    Returns:
+        The status report.
+    """
     try:
         keys: list[tuple[int, int, list[str]]] | None = order_keys_on_disk(tracked)
     except MigrationRefused:
@@ -1125,12 +1227,36 @@ async def status(
     using: str | None = None,
     url: str | None = None,
 ) -> StatusReport:
-    """Where the database stands against its migrations directory
-    (``ferro migrate status``).
+    """Report where the database stands against its migrations directory.
 
-    Takes no lock and creates nothing: a database without the tracking
-    table reports every migration pending. The refusal ``up`` would meet
-    (an edited file, a broken chain, ...) is part of the report.
+    This is `ferro migrate status`. It takes no lock and creates nothing: a
+    database without the tracking table reports every migration pending.
+    The refusal `up` would meet (an edited file, a broken chain) is part of
+    the report.
+
+    Args:
+        settings: The project's configuration. Defaults to `FerroSettings()`.
+        database: The configured database. Defaults to the only one
+            configured.
+        using: An open connection to work on. Defaults to the default
+            connection.
+        url: A URL to open a private connection to, closed after the call.
+            Refused together with `using`.
+
+    Returns:
+        The status report: each migration's state, and whether anything is
+            pending or needs attention.
+
+    Raises:
+        MigrationRefused: The configuration names no single database, or
+            there is no connection to work on.
+
+    Examples:
+        ```python {test=compile reason="needs a migrations project and a database"}
+        report = await ferro.migrations.status()
+        print(report.head_applied.name, report.pending)
+        # 0006_add_teams True
+        ```
     """
     target = Target.resolve(settings, database, using=using, url=url)
     async with target.open() as name:
@@ -1147,32 +1273,45 @@ async def require_applied(
     url: str | None = None,
     allow_ahead: AllowAhead = False,
 ) -> None:
-    """Return when the database stands at the head of its migrations; raise
-    otherwise. Takes no lock and changes nothing.
+    """Return when the database stands at the head of its migrations; raise otherwise.
 
-    ``allow_ahead`` lets a database holding migrations this checkout lacks
-    through (:data:`AllowAhead`): ``"expand-only"`` when every step they hold
-    is ``expand`` (the previous release of a rolling deploy), ``True``
-    whatever they hold. A step's class is read from its step record, written
-    when it was applied; a record an older ferro wrote holds none and reads
-    as ``contract`` until the first run of this ferro on the database
-    classifies it.
+    Takes no lock and changes nothing. The answer is the run planner's: the
+    plan `up` would make, read with no lock, after the squash inheritance it
+    would make first. A database that applied a squash's originals is
+    pending that squash, never ahead by them, whatever `allow_ahead` says.
+    A step's class is read from its step record; a record an older Ferro
+    wrote holds none and reads as `contract` until the first run of this
+    Ferro on the database classifies it.
 
-    The answer is the run planner's: the plan ``up`` would make, read with
-    no lock, after the inheritance it would make first (ADR-0056). A database
-    that applied a squash's originals is pending that squash, never ahead
-    by them, whatever ``allow_ahead`` says (ADR-0040); one that applied
-    them in part carries the run's ``partial_witness`` refusal.
+    Args:
+        settings: The project's configuration. Defaults to `FerroSettings()`.
+        database: The configured database. Defaults to the only one
+            configured.
+        using: An open connection to work on. Defaults to the default
+            connection.
+        url: A URL to open a private connection to, closed after the call.
+            Refused together with `using`.
+        allow_ahead: Let a database that has applied migrations this
+            checkout lacks through: `"expand-only"` when every step they
+            hold is `expand` (the previous release of a rolling deploy),
+            `True` whatever they hold. Defaults to `False`, which refuses.
 
     Raises:
-        PendingMigrationsError: a migration is pending (``.pending``), or the
-            tracking table refuses a run (``.refusals``: an interrupted run,
-            an edited applied file, ...).
-        DatabaseAheadError: the database has applied migrations this
-            checkout lacks (``allow_ahead=True`` lets it through;
-            ``.contract_steps`` names the steps ``"expand-only"`` refuses on).
-        TypeError: ``allow_ahead`` is not ``False``, ``True`` or
-            ``"expand-only"``.
+        PendingMigrationsError: A migration is pending, or the tracking
+            table refuses a run (an interrupted run, an edited applied file).
+        DatabaseAheadError: The database has applied migrations this
+            checkout lacks.
+        TypeError: `allow_ahead` is not `False`, `True` or `"expand-only"`.
+
+    Examples:
+        ```python {test=compile reason="needs a migrations project and a database"}
+        try:
+            await ferro.migrations.require_applied(allow_ahead="expand-only")
+        except ferro.migrations.DatabaseAheadError as ahead:
+            print(ahead.contract_steps)  # ['0008_drop_bio:01']
+        else:
+            print("the database is at the head")
+        ```
     """
     allow_ahead = _core._allow_ahead(allow_ahead)
     target = Target.resolve(settings, database, using=using, url=url)
@@ -1208,27 +1347,33 @@ async def require_applied(
 
 
 class DownStep(NamedTuple):
-    """One step :func:`down` would revert."""
+    """One step a down run would revert."""
 
     migration: str
-    """``NNNN_<name>``."""
+    """The migration, `NNNN_<name>`."""
     step: str
-    """``NN_<name>``."""
+    """The step, `NN_<name>`."""
     nothing_to_reverse: str | None
     """Why its down runs no statement, when it runs none."""
     file: str
-    """The step's file (``01_schema.up.postgres.sql``), which names its kind."""
+    """The step's file (`01_schema.up.postgres.sql`), which names its kind."""
 
 
 @dataclass
 class DownPlan:
-    """What a ``down`` would revert, newest first, or why it would not."""
+    """What a down run would revert, newest first, or why it would not."""
 
     steps: list[DownStep] = field(default_factory=list)
+    """The steps it would revert, newest first."""
     refusal: str | None = None
+    """Why it would be refused, or `None`."""
 
     def describe(self) -> str:
-        """The plan as the prompt shows it, one line per step."""
+        """Render the plan as the prompt shows it, one line per step.
+
+        Returns:
+            The plan, or `nothing to revert`.
+        """
         if not self.steps:
             return "nothing to revert"
         name_width = max(len(step.migration) for step in self.steps)
@@ -1241,7 +1386,11 @@ class DownPlan:
         return "\n".join(lines)
 
     def question(self) -> str:
-        """``Revert 0002_add_teams (1 step)?``"""
+        """Render the prompt's question, such as `Revert 0002_add_teams (1 step)?`.
+
+        Returns:
+            The question.
+        """
         migrations = list(dict.fromkeys(step.migration for step in self.steps))
         count = len(self.steps)
         return (
@@ -1250,9 +1399,21 @@ class DownPlan:
 
 
 def parse_target(target: str | None = None, *, all: bool = False) -> dict[str, Any]:
-    """The run planner's target for ``down``: the latest migration, ``"0005"``
-    (keep 0005 applied; ``"0000"`` reverts everything), ``"0007:02"`` (keep
-    steps 01-02 of 0007), or ``all``."""
+    """Parse where a down run stops into the run planner's target.
+
+    Args:
+        target: `"0005"` keeps 0005 applied (`"0000"` reverts everything);
+            `"0007:02"` keeps steps 01-02 of 0007 applied. Defaults to
+            reverting the latest migration.
+        all: Revert everything. Refused together with `target`.
+
+    Returns:
+        The planner's direction and target.
+
+    Raises:
+        SettingsError: Both `target` and `all` are given, or `target` is not
+            a migration or a step.
+    """
     if all and target is not None:
         raise SettingsError("pass --to or --all, not both")
     if all:
@@ -1279,7 +1440,7 @@ async def _preview_down(
 ) -> tuple[Plan, DownPlan]:
     """What a ``down`` would revert, planned on ``tracked`` with no lock, as
     the run plans it once it has inherited every squash whose witness the
-    records hold (ADR-0056): a data step's down declares itself in Python,
+    records hold: a data step's down declares itself in Python,
     so an irreversible one refuses here too (before any lock), and a
     nothing-to-reverse one says so.
 
@@ -1315,8 +1476,23 @@ async def plan_down(
     target: str | None = None,
     all: bool = False,
 ) -> DownPlan:
-    """What :func:`down` would revert, read with no lock, changing nothing.
-    ``DownPlan.refusal`` says why it would be refused."""
+    """Report what a down run would revert, read with no lock, changing nothing.
+
+    Args:
+        settings: The project's configuration. Defaults to `FerroSettings()`.
+        database: The configured database. Defaults to the only one
+            configured.
+        using: An open connection to work on. Defaults to the default
+            connection.
+        url: A URL to open a private connection to, closed after the call.
+            Refused together with `using`.
+        target: Where to stop, as `parse_target` reads it. Defaults to the
+            latest migration.
+        all: Revert everything.
+
+    Returns:
+        The plan; its `refusal` says why the run would be refused.
+    """
     direction = parse_target(target, all=all)
     where = Target.resolve(settings, database, using=using, url=url)
     async with where.open() as name:
@@ -1330,16 +1506,16 @@ async def plan_down(
 _INHERITANCE_STAMP = ("started_at", "finished_at", "ferro_version")
 """What an inherited record holds of the moment it was inherited: the preview
 plans over the records inheritance would write, the run over the ones it
-wrote a moment later (ADR-0056)."""
+wrote a moment later."""
 
 
 def _records_as_shown(locked: list[Any], shown: list[Any]) -> bool:
     """Whether the steps planned under the lock stand on the records the
     preview showed. Taking the lock gives a record an older ferro wrote
-    without a class the class ADR-0054 decides for it; that fills a gap and
+    without a class the class the lock decides for it; that fills a gap and
     changes nothing the plan was shown, so a class the preview read as
     missing is not compared. An inherited record is compared without the time
-    and version it was inherited at (:data:`_INHERITANCE_STAMP`)."""
+    and version it was inherited at (`_INHERITANCE_STAMP`)."""
 
     def standing(step: Any, missing_class: bool) -> dict[str, Any] | None:
         record = step.standing
@@ -1372,42 +1548,53 @@ async def down(
     progress: Callable[[str], Any] | None = None,
     on_event: Callable[[RunEvent], Any] | None = None,
 ) -> RunReport:
-    """Revert every applied step above ``target``, newest first, under the
-    run lock (``ferro migrate down``, ADR-0033), on the database and
-    connection :func:`up` would work on.
+    """Revert applied steps, newest first, under the run lock.
 
-    ``target`` is ``None`` (the latest migration with a record, a partly
-    applied one included), ``"0005"`` (leave 0005 fully applied; ``"0000"``
-    reverts everything), or ``"0007:02"`` (leave steps 01-02 of 0007
-    applied); ``all`` reverts everything. A step whose down is declared
+    This is `ferro migrate down`. A step whose down is declared
     irreversible, or one a baseline recorded, refuses the whole run before
-    anything is reverted.
+    anything is reverted. Once the lock is held the plan is made again, and
+    a database that changed since `confirm` saw it is refused rather than
+    reverted unseen. Under the lock and before it plans, a down inherits
+    every squash whose witness the records hold, as `up` does.
 
-    ``confirm`` is shown the plan before the lock is taken; when it returns
-    false nothing is reverted (``declined``). Once the lock is held the plan
-    is made again, and a database that changed in between is refused rather
-    than reverted unseen. Under the lock and before it plans, a ``down``
-    inherits every squash whose witness the records hold, as ``up`` does
-    (ADR-0056). ``progress`` receives one line per squash inherited, then one
-    per reverted step; ``on_event`` receives each as data just before
-    ``progress`` receives its ``line()``: an :class:`InheritedEvent` per
-    squash inherited (its ``squash`` and the ``replaced`` migrations, with no
-    ``.text`` or ``.step``), a :class:`StepEvent` per reverted step, a
-    :class:`RunNote` for any other line; a failed down is a ``StepEvent``
-    with no line.
+    Args:
+        settings: The project's configuration. Defaults to `FerroSettings()`.
+        database: The configured database. Defaults to the only one
+            configured.
+        using: An open connection to work on. Defaults to the default
+            connection.
+        url: A URL to open a private connection to, closed after the call.
+            Refused together with `using`.
+        target: Where to stop: `"0005"` leaves 0005 fully applied (`"0000"`
+            reverts everything), `"0007:02"` leaves steps 01-02 of 0007
+            applied. Defaults to the latest migration with a record, a
+            partly applied one included.
+        all: Revert everything. Refused together with `target`.
+        lock_timeout: How long to wait for another run's lock: `"30s"`,
+            `"500ms"`, `"1m"` or a number of seconds; `0` refuses at once.
+            Defaults to the database's `lock_timeout`.
+        confirm: Shown the plan before the lock is taken; when it returns
+            false nothing is reverted. Defaults to reverting without asking.
+        progress: Receives one line per squash inherited, then one per
+            reverted step.
+        on_event: Receives each line as data just before `progress`
+            receives its `line()`: an `InheritedEvent` per squash inherited,
+            a `StepEvent` per reverted step, a `RunNote` for any other. A
+            failed down is a `StepEvent` with no line.
 
-    Returns the :class:`RunReport` of what it did: ``.inherited`` the squashes
-    it inherited, in order (an :class:`InheritedMigration` each), then
-    ``.reverted`` the steps it reverted, newest first (``.declined`` when
-    ``confirm`` said no).
+    Returns:
+        What the run did: the squashes it inherited, then the steps it
+            reverted, newest first (`declined` when `confirm` said no).
 
     Raises:
-        MigrationRefused: the run refused or a down failed; ``.report`` is
-            the run's report. A failed down that rolled back whole leaves its
+        MigrationRefused: The run refused or a down failed; `.report` is the
+            run's report. A failed down that rolled back whole leaves its
             step applied and its record as it was; one that left part of
-            itself applied (a no-transaction SQL down, a chunked down past its
-            first batch) leaves the record carrying the error, a chunked one
-            still ``reverting`` at its cursor. The next ``down`` resumes at it.
+            itself applied (a no-transaction SQL down, a chunked down past
+            its first batch) leaves the record carrying the error, a chunked
+            one still `reverting` at its cursor. The next down resumes at it.
+        SettingsError: `target` is not a migration or a step, or both
+            `target` and `all` are given.
     """
     direction = parse_target(target, all=all)
     report = RunReport(direction="down")

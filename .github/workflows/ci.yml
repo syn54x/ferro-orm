@@ -59,6 +59,54 @@ jobs:
         run: |
           uv run --no-sync --python 3.13 prek run --all-files
 
+  docs:
+    name: Docs build and docs tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install UV
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1
+          cache-on-failure: true
+
+      - name: Install documentation and test dependencies
+        run: |
+          uv sync --only-group ci-test --only-group docs --no-install-project --python 3.13
+
+      - name: Build Rust extension
+        run: |
+          uv run maturin develop
+
+      - name: Build Zensical site
+        run: |
+          uv run --no-sync zensical build --clean --strict
+
+      - name: Run the docs lint
+        run: |
+          uv run --no-sync python -m tests._docs_checks docs/pages docs/examples src/ferro
+
+      - name: Run the docs tests
+        # Every docs test module is named test_doc*.py, which
+        # tests/test_docs_site.py pins, so a new one runs here unlisted.
+        run: |
+          uv run --no-sync pytest --no-cov -p no:cacheprovider tests/test_doc*.py
+
   test-rust:
     name: Rust tests
     runs-on: ubuntu-latest
@@ -119,7 +167,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          uv sync --only-group ci-test --no-install-project --python 3.13
+          uv sync --only-group ci-test --only-group docs --no-install-project --python 3.13
 
       - name: Build Rust extension
         run: |
@@ -170,7 +218,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          uv sync --only-group ci-test --no-install-project --python ${{ matrix.python-version }}
+          uv sync --only-group ci-test --only-group docs --no-install-project --python ${{ matrix.python-version }}
 
       - name: Build Rust extension
         run: |
@@ -296,7 +344,7 @@ jobs:
 
   all-checks:
     name: All Checks Passed
-    needs: [lint-and-format, test-python-pr, test-python-main, test-python-backend-matrix, test-rust]
+    needs: [lint-and-format, docs, test-python-pr, test-python-main, test-python-backend-matrix, test-rust]
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -310,5 +358,6 @@ jobs:
           if ! ok "${{ needs.test-python-main.result }}"; then exit 1; fi
           if ! ok "${{ needs.test-python-backend-matrix.result }}"; then exit 1; fi
           if ! ok "${{ needs.test-rust.result }}"; then exit 1; fi
+          if ! ok "${{ needs.docs.result }}"; then exit 1; fi
 
           echo "All checks passed!"

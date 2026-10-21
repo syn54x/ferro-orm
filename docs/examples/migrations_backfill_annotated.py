@@ -1,6 +1,5 @@
 # ruff: noqa: E402 - the models come first, as the docs page shows them
-"""Runnable companion for backfills and guards, Annotated style
-(docs/pages/guide/schema/data-steps.md).
+"""Runnable companion for backfills and guards (docs/pages/guide/schema/data-steps.md).
 
 A required column added to a table that has rows: the guard refuses, the
 backfill is written where it says todo(...), the late-row recovery is
@@ -10,12 +9,12 @@ backfill is written where it says todo(...), the late-row recovery is
 # --8<-- [start:models]
 from typing import Annotated
 
-from ferro import FerroField, Model
+from ferro import Field, Model
 
 
 class Author(Model):
-    id: Annotated[int | None, FerroField(primary_key=True)] = None
-    name: Annotated[str, FerroField(index=True)]
+    id: Annotated[int | None, Field(primary_key=True)] = None
+    name: Annotated[str, Field(index=True)]
     slug: str  # new
 
 

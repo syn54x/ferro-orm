@@ -1,22 +1,14 @@
-"""Raw SQL escape hatch — ``execute``, ``fetch_all``, ``fetch_one``.
+"""Raw SQL: `execute`, `fetch_all`, `fetch_one` and the `Transaction` handle.
 
-Raw SQL is an escape hatch. Bind values cross the FFI as wire-close primitives,
-and rows come back as ``dict[str, str | int | float | bool | bytes | None]``.
-UUID / datetime / JSON columns are returned as strings. **If you want typed
-rows, use the ORM.**
+Bound values are sent as plain primitives, and rows come back as
+`dict[str, str | int | float | bool | bytes | None]`: UUID, datetime and JSON
+columns come back as strings. For typed rows, use the ORM.
 
-Two interchangeable surfaces, both backed by the same Rust functions:
-
-* :class:`Transaction` — handle yielded by ``async with transaction() as tx``.
-  Hard-to-misuse path; ``tx.execute(...)`` cannot be spelled outside the tx
-  block.
-* Top-level :func:`execute` / :func:`fetch_all` / :func:`fetch_one` — auto-pick
-  up the active tx via the same ``_CURRENT_TRANSACTION`` ContextVar that
-  ``Model.create()`` uses. Outside any tx, they run on a one-off pool
-  connection.
-
-See ``docs/api/raw-sql.md`` for the full bind type table and the Postgres cast
-cheat-sheet.
+The top-level functions run in the current session, or inside the enclosing
+`transaction()` block; the `Transaction` handle a block yields has the same
+three methods, bound to its connection. The Raw SQL guide
+(`docs/pages/guide/raw-sql.md`) has the bind type table and the Postgres
+casts.
 """
 
 from __future__ import annotations
@@ -82,36 +74,54 @@ async def execute(
     session: Any | None = None,
     autocommit: bool = False,
 ) -> int:
-    """Run a raw SQL statement, returning rows affected.
+    """Run one SQL statement and return the number of rows it changed.
 
-    Honors the active ``transaction()`` block via the ``_CURRENT_TRANSACTION``
-    ContextVar. Outside any transaction, runs on a one-off pool connection.
-    Two consecutive top-level ``execute`` calls outside a transaction may use
-    different pool connections — wrap in ``transaction()`` if you need
-    connection affinity (e.g. ``SET LOCAL``, advisory locks, ``LISTEN/NOTIFY``).
+    It runs inside the enclosing `transaction()` block, if any. Outside one,
+    two calls may run on different pooled connections; wrap statements that
+    need one connection (`SET LOCAL`, an advisory lock) in `transaction()`.
+    See [Raw SQL](../guide/raw-sql.md).
+
+    !!! warning "`autocommit=True` drops the session's settings"
+        Under the default settings delivery, an `autocommit` statement
+        carries none of the session's settings, so a row-security policy
+        sees no tenant while it runs. Use it for maintenance statements,
+        never for statements that read or write rows a policy protects.
 
     Args:
-        autocommit: Run the statement outside any transaction Ferro would open
-            for it. A few Postgres statements refuse to run inside a
-            transaction block — ``CREATE INDEX CONCURRENTLY``, ``VACUUM``,
-            ``ALTER TYPE ... ADD VALUE`` before PG 12 — and in a session that
-            carries settings, Ferro otherwise wraps every operation in one, so
-            they would fail with ``25001``. Set this for those statements::
+        sql: One SQL statement, with `?` placeholders on SQLite and `$1`,
+            `$2`, ... on Postgres.
+        *args: The values bound to the placeholders, in order: `str`, `int`,
+            `float`, `bool`, `bytes`, `None`, `UUID`, `datetime`, `date`,
+            `time`, `Decimal`, an `Enum` member, or a `dict` or `list` sent
+            as JSON text.
+        using: The connection to run on, outside a session. Defaults to
+            `None`, the current session's connection.
+        session: The session to run in. Defaults to `None`, the one opened
+            by the enclosing `async with engines.session():`.
+        autocommit: Run the statement outside the transaction Ferro opens for
+            each operation in a session with settings, for the Postgres
+            statements that refuse one (`CREATE INDEX CONCURRENTLY`,
+            `VACUUM`). Defaults to `False`. Inside an explicit
+            `transaction()` block it changes nothing. See
+            [Statements that refuse a transaction](../guide/raw-sql.md#statements-that-refuse-a-transaction).
 
-                async with engines.session(settings={"myapp.tenant_id": "acme"}):
-                    await execute(
-                        "CREATE INDEX CONCURRENTLY idx_invoice_status "
-                        "ON invoice (status)",
-                        autocommit=True,
-                    )
+    Returns:
+        The number of rows the statement changed.
 
-            Plainly: an ``autocommit`` statement is **not** tenant-scoped. It
-            carries none of the session's settings, so a row-security policy
-            reading ``current_setting(...)`` sees nothing during it. That is the
-            right trade for maintenance DDL, which is not tenant data; do not
-            use it for statements that read or write rows a policy governs.
-            Inside an explicit ``transaction()`` block it changes nothing — you
-            asked for a transaction, and Postgres will reject the statement.
+    Raises:
+        ValueError: `sql` is empty, or `using` names another connection than
+            the session's or the transaction's.
+        TypeError: A value in `args` has a type that cannot be bound.
+        RuntimeError: No session is open and neither `using` nor `session`
+            was given.
+
+    Examples:
+        ```python {test=run prelude=reference}
+        from ferro import execute
+
+        changed = await execute('UPDATE "post" SET "views" = "views" + 1 WHERE "published" = ?', True)
+        assert changed == 2
+        ```
     """
     _check_sql(sql)
     marshalled = [_marshal(a) for a in args]
@@ -124,10 +134,43 @@ async def execute(
 async def fetch_all(
     sql: str, *args: Any, using: str | None = None, session: Any | None = None
 ) -> list[dict[str, Any]]:
-    """Run a raw SQL query and return all rows as a list of dicts.
+    """Run one SQL query and return every row as a dict.
 
-    Values are wire-close primitives. UUID/datetime/JSON columns come back as
-    strings. If you want typed rows, use the ORM.
+    It runs inside the enclosing `transaction()` block, if any. Values come
+    back as plain primitives: UUID, datetime and JSON columns as strings.
+
+    Args:
+        sql: One SQL statement, with `?` placeholders on SQLite and `$1`,
+            `$2`, ... on Postgres.
+        *args: The values bound to the placeholders, in order: `str`, `int`,
+            `float`, `bool`, `bytes`, `None`, `UUID`, `datetime`, `date`,
+            `time`, `Decimal`, an `Enum` member, or a `dict` or `list` sent
+            as JSON text.
+        using: The connection to run on, outside a session. Defaults to
+            `None`, the current session's connection.
+        session: The session to run in. Defaults to `None`, the one opened
+            by the enclosing `async with engines.session():`.
+
+    Returns:
+        One dict per row, keyed by column name, in the query's order.
+
+    Raises:
+        ValueError: `sql` is empty, or `using` names another connection than
+            the session's or the transaction's.
+        TypeError: A value in `args` has a type that cannot be bound.
+        RuntimeError: No session is open and neither `using` nor `session`
+            was given.
+
+    Examples:
+        ```python {test=run prelude=reference}
+        from ferro import fetch_all
+
+        rows = await fetch_all('SELECT "title", "views" FROM "post" WHERE "views" > ? ORDER BY "views"', 900)
+        assert rows == [
+            {"title": "The Education of a Computer", "views": 952},
+            {"title": "Notes on the Analytical Engine", "views": 1843},
+        ]
+        ```
     """
     _check_sql(sql)
     marshalled = [_marshal(a) for a in args]
@@ -140,9 +183,42 @@ async def fetch_all(
 async def fetch_one(
     sql: str, *args: Any, using: str | None = None, session: Any | None = None
 ) -> dict[str, Any] | None:
-    """Run a raw SQL query and return the first row as a dict, or ``None``.
+    """Run one SQL query and return its first row as a dict, or `None`.
 
-    Callers should ``LIMIT 1`` if the query may return more than one row.
+    It runs inside the enclosing `transaction()` block, if any. Ferro does
+    not add `LIMIT 1`; write it when more than one row can match, so the
+    database stops at the first.
+
+    Args:
+        sql: One SQL statement, with `?` placeholders on SQLite and `$1`,
+            `$2`, ... on Postgres.
+        *args: The values bound to the placeholders, in order: `str`, `int`,
+            `float`, `bool`, `bytes`, `None`, `UUID`, `datetime`, `date`,
+            `time`, `Decimal`, an `Enum` member, or a `dict` or `list` sent
+            as JSON text.
+        using: The connection to run on, outside a session. Defaults to
+            `None`, the current session's connection.
+        session: The session to run in. Defaults to `None`, the one opened
+            by the enclosing `async with engines.session():`.
+
+    Returns:
+        The first row, keyed by column name, or `None` when no row matched.
+
+    Raises:
+        ValueError: `sql` is empty, or `using` names another connection than
+            the session's or the transaction's.
+        TypeError: A value in `args` has a type that cannot be bound.
+        RuntimeError: No session is open and neither `using` nor `session`
+            was given.
+
+    Examples:
+        ```python {test=run prelude=reference}
+        from ferro import fetch_one
+
+        row = await fetch_one('SELECT "name" FROM "author" WHERE "email" = ?', "ada@example.com")
+        assert row == {"name": "Ada Lovelace"}
+        assert await fetch_one('SELECT "name" FROM "author" WHERE "id" = ?', 99) is None
+        ```
     """
     _check_sql(sql)
     marshalled = [_marshal(a) for a in args]
@@ -153,17 +229,22 @@ async def fetch_one(
 
 
 class Transaction:
-    """Handle for a live transaction.
+    """The handle `async with transaction() as tx` yields, for raw SQL on its connection.
 
-    Obtained via ``async with transaction() as tx``. Methods delegate to the
-    top-level :func:`execute` / :func:`fetch_all` / :func:`fetch_one` with this
-    transaction's route (a :class:`RouteHandle` built by
-    ``models.transaction()``) passed explicitly, so they don't depend on the
-    ContextVar state. This makes the connection-affinity invariant
-    structurally impossible to violate from inside the ``async with`` block.
+    Its methods take the same `sql` and `*args` as the top-level
+    [`execute`][ferro.execute], [`fetch_all`][ferro.fetch_all] and
+    [`fetch_one`][ferro.fetch_one], and always run on the transaction's
+    connection. After the block exits, every call raises `RuntimeError`.
 
-    The handle becomes invalid once the ``async with`` block exits — any
-    subsequent call raises :class:`RuntimeError`.
+    Examples:
+        ```python {test=run prelude=reference}
+        from ferro import transaction
+
+        async with transaction() as tx:
+            await tx.execute('UPDATE "post" SET "views" = 0 WHERE "id" = ?', 1)
+            row = await tx.fetch_one('SELECT "views" FROM "post" WHERE "id" = ?', 1)
+        assert row == {"views": 0}
+        ```
     """
 
     __slots__ = ("_route",)
@@ -172,6 +253,21 @@ class Transaction:
         self._route = route
 
     async def execute(self, sql: str, *args: Any) -> int:
+        """Run one SQL statement on this transaction's connection.
+
+        Args:
+            sql: One SQL statement, with `?` placeholders on SQLite and `$1`,
+                `$2`, ... on Postgres.
+            *args: The values bound to the placeholders, in order.
+
+        Returns:
+            The number of rows the statement changed.
+
+        Raises:
+            ValueError: `sql` is empty.
+            TypeError: A value in `args` has a type that cannot be bound.
+            RuntimeError: The transaction's block has exited.
+        """
         _check_sql(sql)
         marshalled = [_marshal(a) for a in args]
         return await _raw_execute(
@@ -179,6 +275,21 @@ class Transaction:
         )
 
     async def fetch_all(self, sql: str, *args: Any) -> list[dict[str, Any]]:
+        """Run one SQL query on this transaction's connection and return every row.
+
+        Args:
+            sql: One SQL query, with `?` placeholders on SQLite and `$1`,
+                `$2`, ... on Postgres.
+            *args: The values bound to the placeholders, in order.
+
+        Returns:
+            One dict per row, keyed by column name.
+
+        Raises:
+            ValueError: `sql` is empty.
+            TypeError: A value in `args` has a type that cannot be bound.
+            RuntimeError: The transaction's block has exited.
+        """
         _check_sql(sql)
         marshalled = [_marshal(a) for a in args]
         return await _raw_fetch_all(
@@ -186,6 +297,21 @@ class Transaction:
         )
 
     async def fetch_one(self, sql: str, *args: Any) -> dict[str, Any] | None:
+        """Run one SQL query on this transaction's connection and return its first row.
+
+        Args:
+            sql: One SQL query, with `?` placeholders on SQLite and `$1`,
+                `$2`, ... on Postgres.
+            *args: The values bound to the placeholders, in order.
+
+        Returns:
+            The first row, keyed by column name, or `None` when no row matched.
+
+        Raises:
+            ValueError: `sql` is empty.
+            TypeError: A value in `args` has a type that cannot be bound.
+            RuntimeError: The transaction's block has exited.
+        """
         _check_sql(sql)
         marshalled = [_marshal(a) for a in args]
         return await _raw_fetch_one(

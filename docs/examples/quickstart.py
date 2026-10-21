@@ -1,21 +1,17 @@
 """Runnable companion to the Quickstart tutorial (docs/pages/getting-started/quickstart.md)."""
 
+# --8<-- [start:imports]
 import asyncio
 
+from ferro import connect, engines, transaction
+
+# --8<-- [end:imports]
+
 # --8<-- [start:models]
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated
 
-from ferro import (
-    BackRef,
-    Field,
-    ForeignKey,
-    Model,
-    Relation,
-    connect,
-    engines,
-    transaction,
-)
+from ferro import BackRef, Field, ForeignKey, Model, Relation
 
 
 class Author(Model):
@@ -30,7 +26,7 @@ class Post(Model):
     title: str
     body: str
     published: bool = False
-    created_at: datetime = Field(default_factory=datetime.now)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     author: Annotated[Author, ForeignKey(related_name="posts")]
 
 
@@ -40,92 +36,95 @@ class Post(Model):
 async def main() -> None:
     # --8<-- [start:connect]
     await connect("sqlite::memory:", auto_migrate=True)
-    # --8<-- [end:connect]
 
     async with engines.session():
+        assert await Author.select().count() == 0
+        # --8<-- [end:connect]
+
         # --8<-- [start:create]
         alice = await Author.create(name="Alice", email="alice@example.com")
-
         post = await Post.create(
-            title="Why Ferro is Fast",
-            body="Ferro hands SQL generation and row hydration to a Rust engine...",
+            title="Why Ferro is fast",
+            body="Ferro hands SQL generation and row hydration to a Rust engine.",
             published=True,
             author=alice,
         )
+        assert post.id == 1  # the database assigned it
 
-        # Insert many rows in a single statement
         await Post.bulk_create(
             [
                 Post(
-                    title="Async Patterns",
-                    body="...",
+                    title="Async patterns",
+                    body="One event loop, many queries.",
                     published=True,
-                    author_id=alice.id,
+                    author=alice,
                 ),
-                Post(title="Unfinished Draft", body="...", author_id=alice.id),
+                Post(
+                    title="Unfinished draft",
+                    body="Still to write.",
+                    author=alice,
+                ),
             ]
         )
+        assert await Post.select().count() == 3
         # --8<-- [end:create]
-        assert post.id is not None
 
-        # --8<-- [start:query]
-        # Fetch by primary key
+        # --8<-- [start:get]
         same_post = await Post.get(post.id)
+        assert same_post is post  # one row, one object
+        # --8<-- [end:get]
 
-        # Filter, order, and slice
+        # --8<-- [start:filter]
         published = (
-            await Post.where(lambda post: post.published == True)  # noqa: E712
-            .order_by(lambda post: post.created_at, "desc")
+            await Post.where(lambda post: post.published == True)
+            .order_by(lambda post: post.title)
             .limit(10)
             .all()
         )
+        assert [post.title for post in published] == [
+            "Async patterns",
+            "Why Ferro is fast",
+        ]
+        # --8<-- [end:filter]
 
-        # Aggregate terminals
+        # --8<-- [start:aggregate]
         total = await Post.select().count()
-        has_drafts = await Post.where(lambda post: post.published == False).exists()  # noqa: E712
-        # --8<-- [end:query]
-        assert same_post is post  # identity map: same Python object
-        assert len(published) == 2
-        assert total == 3
-        assert has_drafts
+        has_drafts = await Post.where(lambda post: post.published == False).exists()
+        assert (total, has_drafts) == (3, True)
+        # --8<-- [end:aggregate]
 
         # --8<-- [start:relationships]
-        # Forward access: awaiting the foreign key loads the related instance
-        author = await same_post.author
-
-        # Reverse access: the BackRef is a chainable query
-        alice_posts = await author.posts.where(
-            lambda post: post.published == True  # noqa: E712
-        ).all()
-        # --8<-- [end:relationships]
+        author = await post.author
         assert author.name == "Alice"
+
+        alice_posts = await author.posts.where(
+            lambda post: post.published == True
+        ).all()
         assert len(alice_posts) == 2
+        # --8<-- [end:relationships]
 
         # --8<-- [start:update-delete]
-        # Update one instance
-        post.title = "Why Ferro is *Really* Fast"
+        post.title = "Why Ferro is really fast"
         await post.save()
+        assert (await Post.get(post.id)).title == "Why Ferro is really fast"
 
-        # Update many rows at once
-        updated = await Post.where(lambda post: post.published == False).update(  # noqa: E712
+        updated = await Post.where(lambda post: post.published == False).update(
             published=True
         )
-
-        # Delete
-        deleted = await Post.where(
-            lambda post: post.title == "Unfinished Draft"
-        ).delete()
-        # --8<-- [end:update-delete]
         assert updated == 1
+
+        deleted = await Post.where(
+            lambda post: post.title == "Unfinished draft"
+        ).delete()
         assert deleted == 1
+        # --8<-- [end:update-delete]
 
         # --8<-- [start:transaction]
         async with transaction():
             bob = await Author.create(name="Bob", email="bob@example.com")
-            await Post.create(title="Hello", body="...", author=bob)
-        # Commits on success, rolls back if the block raises
+            await Post.create(title="Hello", body="First post.", author=bob)
+        assert await Author.select().count() == 2  # both writes committed
         # --8<-- [end:transaction]
-        assert await Author.select().count() == 2
 
     print("quickstart example ran successfully")
 

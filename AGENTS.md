@@ -422,38 +422,47 @@ preferred declaration style.
 
 ---
 
-## I-8: Lambda predicates are the official query style
+## I-8: Queries are lambda predicates named after the model
 
-Documentation and examples use the lambda predicate style for all queries:
+A query filters with a lambda whose parameter is named after the model, in
+lowercase singular:
 
 ```python
 adults = await User.where(lambda user: user.age >= 18).all()
+recent = await Post.order_by(lambda post: post.published_at, "desc").all()
 ```
+
+Lambdas are the only predicate form. `where()` raises `TypeError` on anything
+that is not a callable; the `col()` and operator-style predicates were removed
+in 0.14.
 
 Rules:
 
-- **Every query example** in docs, docstring `Examples:` sections, and
-  `docs/examples/` scripts uses lambda predicates.
-- Name the lambda parameter after the model in **lowercase singular**
-  (`user` for `User`, `post` for `Post`) so filters read naturally.
-- When the predicate styles themselves are documented, present them in
-  order **lambda > `col()` > operator**, with lambda labeled the officially
-  recommended style.
-- **Operator style** (`User.where(User.age >= 18)`) is compatible today but
-  is slated for deprecation in a future release and fails static type
-  checking (`User.age >= 18` types as `bool`; `where()` expects
-  `QueryNode | Predicate`). Docs say so explicitly wherever the style is
-  shown.
-- **`order_by` is not a predicate**, but its lambda selector
-  (`order_by(lambda u: u.age, "desc")`) is validated and is the documented
-  style — and it is the ONLY way to order by a related column
-  (`order_by(lambda t: t.account.label)`), which relation traversal requires.
-  Attribute style is not accepted — `order_by` takes a column-name string or
-  a lambda selector (anything else raises `TypeError`).
+- **Every query example** in docs pages, docstring `Examples:` sections and
+  `docs/examples/` scripts passes lambdas to query methods (`where`,
+  `select`, `order_by`, `include`, `exists`, `count`, `aggregate`,
+  `group_by`, `after`, `before` and every other method that takes a
+  callable).
+- **Name the parameter after the model in lowercase singular**: `user` for
+  `User`, `post` for `Post`, `line_item` for `LineItem`, so the predicate
+  reads as the sentence it means. A traversal keeps the root model's name
+  (`lambda transaction: transaction.account.label`).
+- **`order_by`** takes a column-name string (`order_by("created_at",
+  "desc")`) or a lambda selector (`order_by(lambda post: post.created_at,
+  "desc")`); anything else raises `TypeError`. The lambda is the documented
+  form, and the only one that orders by a related column
+  (`order_by(lambda transaction: transaction.account.label)`).
+- **The lint** `uv run --no-sync python -m tests._docs_checks PATH...` lists
+  every lambda passed to a query method whose parameter is one character,
+  as `path:line: message`, and exits 1. It reads Python files, Python fences
+  in Markdown and docstrings. `tests/test_docs_lint.py` runs it over
+  `docs/pages`, `docs/examples` and `src/ferro`, so a violation fails the
+  suite; run it yourself over every docs page, example and docstring you
+  touch.
 
-The canonical comparisons live in `docs/pages/guide/queries.md`
-("Predicate Styles") and `docs/pages/concepts/query-typing.md`; everywhere
-else uses lambda without restating the trade-offs.
+`docs/pages/guide/queries.md` and `docs/pages/concepts/query-typing.md`
+explain how lambda predicates are evaluated and typed; every other page uses
+them without restating that.
 
 ---
 
@@ -528,8 +537,8 @@ key:
 pinned_at = datetime(2026, 3, 1, 15, 0, tzinfo=UTC)
 await Message(id=2, pinned_at=pinned_at, ...).save()
 page = await (
-    Message.order_by(lambda m: m.pinned_at)
-    .order_by(lambda m: m.id)
+    Message.order_by(lambda message: message.pinned_at)
+    .order_by(lambda message: message.id)
     .after((pinned_at, 2))
     .all()
 )
@@ -553,6 +562,72 @@ Pinned by helper-vs-save unit equality for those five types and by a SQLite
 `save` then `after((original_python_datetime, pk))` paging test.
 Architecture review: I-22 in #428. See PRD #430 and
 `docs/solutions/patterns/wire-scalar-canonicalization.md`.
+
+---
+
+## I-14: Docstrings are short Google-style reference entries
+
+The API reference is rendered from docstrings by mkdocstrings and griffe, so
+a docstring is a reference entry, written once in one form:
+
+```python
+async def get(cls, pk: Any, *, session: Session | None = None) -> Self:
+    """Fetch one record by primary key.
+
+    Args:
+        pk: The primary key value to look up.
+        session: The session to run in. Defaults to the one opened by the
+            enclosing `async with engines.session():`.
+
+    Returns:
+        The record whose primary key is `pk`.
+
+    Raises:
+        ModelDoesNotExist: No row has that key. Use
+            [`get_or_none`][ferro.Model.get_or_none] to get `None` instead.
+
+    Examples:
+        ```python {test=run prelude=reference}
+        author = await Author.get(1)
+        print(author)
+        ```
+    """
+```
+
+Rules:
+
+- **Google style as griffe parses it**: `Args:`, `Returns:`, `Yields:`,
+  `Raises:`, `Attributes:`, `Examples:`, each a section griffe recognises,
+  with entries indented under it. A section griffe drops or splits into
+  table rows is a bug in the docstring.
+- **The summary is one line ending with a period.** A function or method
+  summary is an infinitive ("Fetch one record by primary key."); a class
+  summary is a noun phrase ("A lazy query over one model's rows."). The
+  body starts after a blank line.
+- **Every parameter is in `Args:`**, keyword-only ones included
+  (`session`, `using`, `nulls`), with the default stated when it is not
+  obvious from the signature.
+- **Every public dataclass or Pydantic field** has a one-line docstring: a
+  string literal on the line below the field.
+- **Cross-references are Markdown autorefs**:
+  `` [`Model.where`][ferro.Model.where] `` or `[Model][ferro.Model]`.
+  Sphinx roles (`:class:`, `:func:`, `:meth:`, `:data:`) render as literal
+  text.
+- **Every reference is one the reader can follow.** Docstrings carry no ADR
+  numbers, issue numbers, internal codenames or Rust internals (crate,
+  function and FFI names); a link to a docs page carries the reasoning.
+- **Examples use lambda predicates (I-8) against the shared reference
+  prelude** (`docs/examples/_preludes/reference.py`: `Author` and `Post`,
+  connected, inside a session), in a fence marked
+  `{test=run prelude=reference}` so the docs harness
+  (`tests/test_docstring_examples.py`) runs it.
+- **An explanation longer than one paragraph lives in a guide or concepts
+  page**, and the docstring links to it.
+
+`docs/solutions/patterns/docstring-conventions.md` shows each rule as a
+before/after pair. Page-level conventions (running examples, snippet
+markers, the session wrapper, the Annotated idiom for I-7 twins) are in
+`docs/solutions/patterns/docs-page-conventions.md`.
 
 ---
 

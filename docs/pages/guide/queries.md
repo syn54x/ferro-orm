@@ -1,876 +1,1859 @@
+---
+description: "Filter rows with lambda predicates, order and page them, reach across relations and select only the columns you need."
+---
+
 # Queries
 
-Ferro builds queries in Python and executes them on the Rust engine. All values are parameterized — user input is never concatenated into SQL.
+This guide shows how to read rows with Ferro: filter them with a lambda, order and page them, reach across relations, populate related rows and select only the columns you need.
 
-The examples on this page use this model:
+Here is a whole program. It connects, opens a session, and asks for every transaction of 100 or more going out, largest first:
+
+```python
+--8<-- "docs/examples/predicates.py:first-query"
+```
+
+It prints:
+
+<!-- prints: predicates.py:first-query -->
+```text
+Rent -1450
+To savings -500
+```
+
+`where()` takes a lambda whose parameter stands for one row, and `order_by()` takes a lambda naming the column to sort by. Nothing reaches the database until you await `all()`. The values in a query are always sent as parameters, never pasted into the SQL. Every query on this page runs inside a session like this one; see [Sessions](connections.md#sessions) for why and how to open one.
+
+Every example on this page is followed by the SQL it sends, captured from Ferro when the example runs. Awaiting `all()` sends this statement; on PostgreSQL only the placeholders differ, `$1` where SQLite has `?`:
+
+```sql
+-- predicates.py:first-query (sqlite)
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+FROM "transaction"
+WHERE "transaction"."amount" <= ?
+ORDER BY "transaction"."amount" ASC NULLS LAST;
+```
+
+The query names every column of `transaction`, the filter compares `amount` with a placeholder, and `NULLS LAST` fixes where `NULL` values sort on both databases.
+
+## The ledger
+
+Every example on this page queries one small ledger. An owner holds accounts, an account holds transactions, a transaction may have a category and split lines, a transfer links the two halves of a move between accounts, and tags attach to transactions many-to-many:
 
 === "Assignment"
 
     ```python
-    --8<-- "docs/examples/predicates.py:setup"
+    --8<-- "docs/examples/predicates.py:models"
     ```
 
 === "Annotated"
 
     ```python
-    --8<-- "docs/examples/predicates_annotated.py:setup"
+    --8<-- "docs/examples/predicates_annotated.py:models"
     ```
 
-## Queries Are Immutable
+`Category.parent` points back at `Category`. A class cannot name itself in its own annotation, so the self-reference is a string (`"Category"`) and `nullable=True` makes the column optional.
 
-Every chain call — `.where()`, `.order_by()`, `.limit()`, `.offset()` — returns a **new** `Query`. None of them mutate the query they were called on, so a partially-built query is safe to keep around and reuse as the base for several different follow-ups:
+The ledger holds these nine transactions:
 
-```python
-base = User.where(lambda user: user.role == "admin")
+| `id` | `memo` | `amount` | `posted_on` | `cleared_on` | account | category |
+| ---: | :--- | ---: | :--- | :--- | :--- | :--- |
+| 1 | Salary | 3200.00 | 2026-03-01 | 2026-03-02 | Checking | |
+| 2 | Rent | -1450.00 | 2026-03-02 | 2026-03-03 | Checking | Housing |
+| 3 | Market run | -86.40 | 2026-03-05 | 2026-03-06 | Checking | Groceries |
+| 4 | To savings | -500.00 | 2026-03-07 | 2026-03-08 | Checking | |
+| 5 | From checking | 500.00 | 2026-03-07 | 2026-03-08 | Savings | |
+| 6 | Train to Lyon | -64.00 | 2026-03-09 | | Travel | |
+| 7 | Dinner in Lyon | -48.50 | 2026-03-10 | | Travel | Dining |
+| 8 | Office coffee | -12.75 | 2026-03-11 | 2026-03-12 | Petty cash | Dining |
+| 9 | Weekly shop | -95.00 | 2026-03-12 | | Checking | |
 
-page1 = base.limit(10)             # first 10 admins
-page2 = base.limit(10).offset(10)  # next 10 admins
-```
+Ada Lovelace owns Checking and Savings, Grace Hopper owns Travel, and Petty cash has no owner. Groceries and Dining sit under Food. Weekly shop is split into a Groceries line of -72.00 and a Dining line of -23.00. One transfer links To savings (its outflow) with From checking (its inflow). Rent carries the tag `tax`; Train to Lyon and Dinner in Lyon carry `reimbursable`.
 
-`base` still matches every admin with no `limit()` applied — building `page1` and `page2` from it doesn't change it, and `page1` and `page2` don't affect each other either. This is what makes patterns like "build a filtered base query, then branch into a count and a page of results" safe:
+## Filtering with `where()`
 
-```python
-active = User.where(lambda user: user.archived == False)  # noqa: E712
-
-total = await active.count()
-first_page = await active.order_by(lambda user: user.id).limit(20).all()
-```
-
-`active` is never consumed or altered by either await — you can keep branching off it as many times as you like.
-
-## Fetching by Primary Key
-
-`Model.get(pk)` loads exactly one row and returns your model type — not `YourModel | None`. If no row exists it raises `ModelDoesNotExist`, a `LookupError` subclass carrying `.model` and `.pk` (handy for HTTP 404s and structured logging). When a missing row is a normal outcome, use `Model.get_or_none(pk)` instead:
-
-```python
-from ferro import ModelDoesNotExist
-
-user = await User.get(42)  # User — raises if missing
-
-try:
-    user = await User.get(client_supplied_id)
-except ModelDoesNotExist:
-    ...  # e.g. return 404 from your HTTP layer
-
-maybe = await User.get_or_none(999)  # User | None — never raises for "not found"
-```
-
-Both methods also exist on `Model.using("name")` for [named connections](connections.md#named-connections).
-
-## Filtering with where()
-
-`Model.where(...)` starts a chainable query; terminals like `.all()` execute it. Predicates are written as lambdas — the parameter (`t` by convention) is a query proxy whose attributes stand in for your model's columns:
+[`where()`][ferro.query.builder.Query.where] takes a lambda. Its parameter, named after the model in lowercase (`transaction` for `Transaction`), stands for one row; each attribute on it is a column, and comparing a column builds a condition:
 
 ```python
 --8<-- "docs/examples/predicates.py:filtering"
 ```
 
-`Model.select()` starts an unfiltered query — useful when you only want ordering, slicing, or a count.
+The three transactions with no `cleared_on` come back. `Model.where(...)` starts a query and the `await ... .all()` runs it; `Model.select()` starts a query with no filter, for when you only want to order, page or count.
 
-## Predicate Style
+The query sends this; on PostgreSQL only the placeholders differ:
 
-`where()` accepts a lambda predicate — a callable that receives a query proxy and returns a comparison. The proxy's attributes are validated against your model's columns at build time (a misspelled column raises `AttributeError` naming the closest match, before any query reaches the database):
+```sql
+-- predicates.py:filtering (sqlite)
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+FROM "transaction"
+WHERE "transaction"."cleared_on" IS NULL;
+```
+
+`== None` became `IS NULL`: in SQL, `= NULL` matches no row.
+
+Ferro checks every column name when you build the query, before anything reaches the database. A misspelled column raises `AttributeError` with the closest match and every column and relation you can use:
 
 ```python
---8<-- "docs/examples/predicates.py:lambda-style"
+--8<-- "docs/examples/predicates.py:typo"
 ```
 
-Typo a column name and you find out immediately, not after the query round-trips to the database:
+The list includes the `account_id` and `category_id` columns that each foreign key adds, so you can filter on them directly.
 
-```text
->>> await User.where(lambda user: user.naem == "alice").all()
-AttributeError: User has no queryable column 'naem'. Did you mean 'name'? Valid columns: age, archived, id, name, role.
-```
+## Predicate style
 
-The valid-columns list includes shadow `{fk}_id` foreign-key columns (see [Querying Across Relationships](#querying-across-relationships)), so the error is always a complete picture of what you can filter on.
+A predicate is the lambda you pass to `where()`. It is the only form `where()` accepts: anything that is not callable raises `TypeError` naming the lambda form. Name the parameter after the model in lowercase singular, so the predicate reads as a sentence: `lambda transaction: transaction.amount < 0`.
 
-Lambda predicates keep the call site fully type-checked: the proxy's attributes are real `FieldProxy` objects in the type checker's eyes, not your Pydantic annotations. See [Typed Query Predicates](../concepts/query-typing.md) for the full reasoning.
+The lambda's return value is type-checked as well: `where()` expects a callable that returns a condition, so `lambda transaction: True` fails your type checker. [Typed query predicates](../concepts/query-typing.md) explains what the checker sees and where checking stops.
+
+!!! note "Changed in 0.14"
+    The operator style (`Transaction.where(Transaction.amount < 0)`) and the `col()` helper were removed in 0.14. [Upgrading to 0.14](../upgrading.md#predicates-operator-style-and-col-are-gone) shows how to rewrite them as lambdas.
 
 ## Operators
 
+Each comparison maps to one SQL operator:
+
 | Python | SQL | Example |
 | :--- | :--- | :--- |
-| `==` | `=` | `lambda user: user.role == "admin"` |
-| `!=` | `!=` | `lambda user: user.role != "admin"` |
-| `>` | `>` | `lambda user: user.age > 18` |
-| `>=` | `>=` | `lambda user: user.age >= 21` |
-| `<` | `<` | `lambda user: user.age < 100` |
-| `<=` | `<=` | `lambda user: user.age <= 65` |
-| `.like(pattern)` | `LIKE` | `lambda user: user.name.like("a%")` |
-| `.in_(values)` | `IN` | `lambda user: user.role.in_(["admin", "moderator"])` |
-| `== None` | `IS NULL` | `lambda user: user.deleted_at == None` |
-| `!= None` | `IS NOT NULL` | `lambda user: user.deleted_at != None` |
-| `~` | `NOT` | `lambda user: ~user.role.in_(["admin", "moderator"])` |
-| `.exists(...)` | `EXISTS (SELECT 1 …)` | `lambda user: user.posts.exists(lambda post: post.published == True)` — reverse/M2M relations only; see [Existence Tests](#existence-tests-on-reverse-many-to-many-relations) |
+| `==` | `=` | `lambda transaction: transaction.memo == "Rent"` |
+| `!=` | `!=` | `lambda transaction: transaction.memo != "Rent"` |
+| `>` `>=` `<` `<=` | `>` `>=` `<` `<=` | `lambda transaction: transaction.amount < 0` |
+| `.like(pattern)` | `LIKE` | `lambda transaction: transaction.memo.like("%coffee")` |
+| `.in_(values)` | `IN` | `lambda transaction: transaction.account_id.in_([1, 2])` |
+| `== None` | `IS NULL` | `lambda transaction: transaction.cleared_on == None` |
+| `!= None` | `IS NOT NULL` | `lambda transaction: transaction.cleared_on != None` |
+| `~` | `NOT` | `lambda transaction: ~transaction.memo.like("%Lyon")` |
+| `&` | `AND` | `lambda transaction: (transaction.amount < 0) & (transaction.cleared_on == None)` |
+| `\|` | `OR` | `lambda transaction: (transaction.amount < -1000) \| (transaction.amount > 1000)` |
+| `.exists(...)` | `EXISTS (...)` | `lambda transaction: transaction.lines.exists()`; see [existence tests](#existence-tests-on-reverse-many-to-many-relations) |
+
+`.like()` and `.in_()` work on any column, a date included:
 
 ```python
 --8<-- "docs/examples/predicates.py:operators"
 ```
 
-## Combining Conditions
+`%` in a `LIKE` pattern matches any run of characters, so `"%coffee"` matches Office coffee, and the two dates match the two Lyon rows.
 
-Combine predicates with `&` (AND) and `|` (OR), or chain multiple `.where()` calls (which AND together):
+The two queries send these statements. PostgreSQL also casts each date parameter to `date`:
+
+=== "SQLite"
+
+    ```sql
+    -- predicates.py:operators (sqlite)
+    SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+    FROM "transaction"
+    WHERE "transaction"."memo" LIKE ?;
+
+    SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+    FROM "transaction"
+    WHERE "transaction"."posted_on" IN (?, ?);
+    ```
+
+=== "PostgreSQL"
+
+    ```sql
+    -- predicates.py:operators (postgres)
+    SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+    FROM "transaction"
+    WHERE "transaction"."memo" LIKE $1;
+
+    SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+    FROM "transaction"
+    WHERE "transaction"."posted_on" IN (CAST($1 AS date), CAST($2 AS date));
+    ```
+
+`.like()` became `LIKE`, and `.in_()` became `IN` with one placeholder per value.
+
+## Combining conditions
+
+Join conditions with `&` (and) and `|` (or), or chain several `where()` calls, which are joined with and:
 
 ```python
 --8<-- "docs/examples/predicates.py:combining"
 ```
 
-!!! warning "Always parenthesize `&` and `|` operands"
-    Python's `&` and `|` bind tighter than comparison operators, so `user.age < 18 | user.archived == True` parses as `user.age < (18 | user.archived) == True` — not what you meant. Wrap each condition in parentheses: `(user.age < 18) | (user.archived == True)`.
+Only the two Lyon rows are uncleared and above -90; Weekly shop is uncleared but spent -95.00. The chained query keeps the debits posted on or after 10 March.
 
-## Negating Conditions
+The two queries send these statements. PostgreSQL also casts the date parameter to `date`:
 
-Prefix `~` negates **any** predicate — a comparison, `.in_()`, `.like()`, or a whole `&`/`|` group. It is the one negation rule in Ferro: there are no per-operator negative forms (no `not_in()`, no `not_like()`), because `~` already covers every predicate the same way:
+=== "SQLite"
+
+    ```sql
+    -- predicates.py:combining (sqlite)
+    SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+    FROM "transaction"
+    WHERE "transaction"."cleared_on" IS NULL AND "transaction"."amount" > ?;
+
+    SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+    FROM "transaction"
+    WHERE "transaction"."amount" < ? AND "transaction"."posted_on" >= ?;
+    ```
+
+=== "PostgreSQL"
+
+    ```sql
+    -- predicates.py:combining (postgres)
+    SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+    FROM "transaction"
+    WHERE "transaction"."cleared_on" IS NULL AND "transaction"."amount" > $1;
+
+    SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+    FROM "transaction"
+    WHERE "transaction"."amount" < $1 AND "transaction"."posted_on" >= CAST($2 AS date);
+    ```
+
+`&` and the chained `where()` both became `AND`.
+
+!!! warning "Parenthesize each side of `&` and `|`"
+    In Python, `&` and `|` bind tighter than comparisons, so `transaction.amount < 0 & transaction.cleared_on == None` parses as `transaction.amount < (0 & transaction.cleared_on) == None`. Wrap each condition in parentheses: `(transaction.amount < 0) & (transaction.cleared_on == None)`.
+
+Python's own `and`, `or` and `not` cannot combine conditions: Python asks each side whether it is true, and a condition has no answer until the database runs it. Ferro raises `TypeError` and names `&`, `|` and `~` instead.
+
+## Negating conditions
+
+Put `~` in front of any condition to negate it: a comparison, `.like()`, `.in_()` or a whole group in parentheses. There is no `not_like()` or `not_in()`; `~` covers them all:
 
 ```python
 --8<-- "docs/examples/predicates.py:negation"
 ```
 
-Each `~` renders as a faithful SQL `NOT (...)` over the condition it wraps. The last example above ships to the database as:
+The four debits below -50 come back, minus Train to Lyon, whose memo matches `"%Lyon"`. Each `~` becomes SQL `NOT (...)` around the condition it wraps, so negated conditions combine with `&` and `|` like any other, and `~~` cancels out.
+
+The query sends this; on PostgreSQL only the placeholders differ:
 
 ```sql
-SELECT ... FROM user WHERE NOT (user.age < 18 OR user.archived = TRUE)
+-- predicates.py:negation (sqlite)
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+FROM "transaction"
+WHERE (NOT "transaction"."memo" LIKE ?) AND "transaction"."amount" < ?;
 ```
 
-Negated conditions compose exactly like un-negated ones — mix them into `&`/`|` trees at any depth, chain `.order_by()`/`.limit()` after them, and double negation (`~~p`) means what it says. Adding a `~` never restructures your query.
+`~` wrapped the `LIKE` in `NOT`, kept in parentheses beside the `AND`.
 
 ### Negation and NULL values
 
-SQL comparisons follow **three-valued logic**: a comparison against `NULL` is neither true nor false but *unknown*, and a `WHERE` clause only keeps rows whose condition is **true**. `NOT` maps unknown to unknown — so a negated comparison still excludes rows where the column is `NULL`. `~` is SQL's `NOT`, not Python's set complement.
-
-Concretely, with a nullable column:
-
-=== "Assignment"
-
-    ```python
-    --8<-- "docs/examples/predicates.py:nullable-model"
-    ```
-
-=== "Annotated"
-
-    ```python
-    --8<-- "docs/examples/predicates_annotated.py:nullable-model"
-    ```
-
-`~(invoice.amount > 100)` renders as:
-
-```sql
-SELECT ... FROM invoice WHERE NOT (invoice.amount > 100)
-```
-
-For a row where `amount` is `NULL`, `amount > 100` is unknown, `NOT unknown` is still unknown, and the row is excluded — from the negated query *and* from the original one. This matches the `!=` operator you already use (`invoice.amount != 100` excludes `NULL` rows too); `~` just makes the rule visible on every predicate. When you want the `NULL` rows kept, say so explicitly with an `IS NULL` branch:
+SQL compares `NULL` to nothing: `cleared_on < '2026-03-05'` is neither true nor false for a row whose `cleared_on` is `NULL`, and `WHERE` keeps only the rows where the condition is true. `NOT` of an unknown is still unknown, so a negated comparison drops the `NULL` rows too:
 
 ```python
 --8<-- "docs/examples/predicates.py:three-valued"
 ```
 
-## Ordering, Limit & Offset
+Two transactions cleared before 5 March and four cleared later, which leaves out the three uncleared ones from both lists. `!=` behaves the same way: `transaction.cleared_on != date(2026, 3, 2)` also leaves out the uncleared rows.
 
-Sort with `.order_by(field, direction, *, nulls=...)` and slice with `.limit()` / `.offset()`. Direction defaults to ascending; pass `"desc"` to reverse.
+The two queries send these statements. PostgreSQL also casts the date parameter to `date`:
 
-Omitted `nulls=` means `NULL`s sort last on every backend. Pass `nulls="first"` to lead with `NULL`s, or `nulls="native"` for each dialect's default placement.
+=== "SQLite"
 
-`field` is a lambda naming the column (`order_by(lambda u: u.created_at, "desc")`, matching the `where()` predicate style) or a column-name string (`order_by("created_at", "desc")`). Both forms are validated against the model's queryable columns at build time.
+    ```sql
+    -- predicates.py:three-valued (sqlite)
+    SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+    FROM "transaction"
+    WHERE "transaction"."cleared_on" < ?;
 
-A pinned-first list is the usual reason to care — put unpinned cards (`pinned_at IS NULL`) after pinned ones, then break ties by recency:
-
-=== "Assignment"
-
-    ```python
-    --8<-- "docs/examples/predicates.py:card-model"
+    SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+    FROM "transaction"
+    WHERE NOT "transaction"."cleared_on" < ?;
     ```
 
-=== "Annotated"
+=== "PostgreSQL"
 
-    ```python
-    --8<-- "docs/examples/predicates_annotated.py:card-model"
+    ```sql
+    -- predicates.py:three-valued (postgres)
+    SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+    FROM "transaction"
+    WHERE "transaction"."cleared_on" < CAST($1 AS date);
+
+    SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+    FROM "transaction"
+    WHERE NOT "transaction"."cleared_on" < CAST($1 AS date);
     ```
+
+Neither `WHERE` mentions `NULL`, so neither keeps the uncleared rows.
+
+To keep the `NULL` rows, ask for them with an `== None` branch:
 
 ```python
---8<-- "docs/examples/predicates.py:nulls-ordering"
+--8<-- "docs/examples/predicates.py:keep-nulls"
 ```
+
+The four later rows and the three uncleared rows come back.
+
+The query sends this. PostgreSQL also casts the date parameter to `date`:
+
+=== "SQLite"
+
+    ```sql
+    -- predicates.py:keep-nulls (sqlite)
+    SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+    FROM "transaction"
+    WHERE (NOT "transaction"."cleared_on" < ?) OR "transaction"."cleared_on" IS NULL;
+    ```
+
+=== "PostgreSQL"
+
+    ```sql
+    -- predicates.py:keep-nulls (postgres)
+    SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+    FROM "transaction"
+    WHERE (NOT "transaction"."cleared_on" < CAST($1 AS date)) OR "transaction"."cleared_on" IS NULL;
+    ```
+
+The `IS NULL` branch is what brings the uncleared rows back.
+
+## Fetching by primary key
+
+[`Model.get(pk)`][ferro.models.Model.get] loads one row by its primary key and returns the model, never `None`. A missing row raises `ModelDoesNotExist`, a `LookupError` that carries `.model` and `.pk`, so an HTTP layer can turn it into a 404. When a missing row is normal, use [`get_or_none()`][ferro.models.Model.get_or_none]:
+
+```python
+--8<-- "docs/examples/predicates.py:get"
+```
+
+`get(2)` returns Rent, `get(99)` raises, and `get_or_none(99)` returns `None`. Both methods also exist on `Model.using("name")` for [named connections](connections.md#named-connections).
+
+The three calls send one statement each, the same statement; on PostgreSQL only the placeholders differ:
 
 ```sql
-ORDER BY pinned_at DESC NULLS LAST, updated_at DESC, id DESC
+-- predicates.py:get (sqlite)
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+FROM "transaction"
+WHERE "transaction"."id" = ?
+LIMIT ?;
+
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+FROM "transaction"
+WHERE "transaction"."id" = ?
+LIMIT ?;
+
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+FROM "transaction"
+WHERE "transaction"."id" = ?
+LIMIT ?;
 ```
 
-Omitting `nulls=` on a nullable sort key means `NULLS LAST` on every backend. Pass `nulls="first"` to lead with `NULL`s, or `nulls="native"` when you want each dialect's default (PostgreSQL and SQLite disagree on `DESC`).
+Each is a primary-key filter with a `LIMIT` of 1. `get(99)` sent its statement too; the error comes from the empty result.
+
+## Ordering, limit & offset
+
+[`order_by()`][ferro.query.builder.Query.order_by] takes a lambda naming the column, and an optional direction (`"asc"`, the default, or `"desc"`). `limit()` and `offset()` cut a slice out of the ordered rows:
 
 ```python
 --8<-- "docs/examples/predicates.py:ordering-slicing"
 ```
 
-Chain `.order_by()` multiple times for multi-column sorts.
+The first three are the largest debits; `offset(3)` skips them and returns the next three. Chain `order_by()` again to break ties on a second column.
 
-To page forward from a known row, pass that row's place in the declared order to `.after()`. The bound is exclusive and the order keys must include the primary key. `None` is legal in every non-PK slot — that is how a pinned-first list continues through unpinned rows:
+The two queries send these statements; on PostgreSQL only the placeholders differ:
+
+```sql
+-- predicates.py:ordering-slicing (sqlite)
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+FROM "transaction"
+WHERE TRUE
+ORDER BY "transaction"."amount" ASC NULLS LAST
+LIMIT ?;
+
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+FROM "transaction"
+WHERE TRUE
+ORDER BY "transaction"."amount" ASC NULLS LAST
+LIMIT ?
+OFFSET ?;
+```
+
+`WHERE TRUE` stands in for the missing filter, and `limit()` and `offset()` became `LIMIT` and `OFFSET`.
+
+`order_by()` also accepts a column name as a string (`order_by("amount", "desc")`). The lambda is the documented form because only a lambda can [order by a related column](#ordering-by-a-related-column).
+
+`NULL` values sort last on every database unless you say otherwise. Pass `nulls="first"` to put them first, or `nulls="native"` for each database's own default, which differs between PostgreSQL and SQLite for `"desc"`:
+
+```python
+--8<-- "docs/examples/predicates.py:nulls-ordering"
+```
+
+The three uncleared transactions lead, then the latest cleared one, Office coffee.
+
+The query sends this; on PostgreSQL only the placeholders differ:
+
+```sql
+-- predicates.py:nulls-ordering (sqlite)
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+FROM "transaction"
+WHERE TRUE
+ORDER BY "transaction"."cleared_on" DESC NULLS FIRST, "transaction"."id" ASC NULLS LAST
+LIMIT ?;
+```
+
+`nulls="first"` became `NULLS FIRST`; the tie-breaker on `id` keeps the default, `NULLS LAST`.
+
+## Paging with `after()` and `before()`
+
+[`after()`][ferro.query.builder.Query.after] starts a page right after a row you already have, in the order the query declares. Pass it the last row of the page you showed:
 
 ```python
 --8<-- "docs/examples/predicates.py:after-paging"
 ```
 
-`after(row)` is the same as `after(position_of(row))`. `after()` cannot be combined with `offset()` — a query has one start. For the pinned-first shape (`order_by(pinned_at, "desc")`, omitted `nulls=` → last), `after((None, id))` continues through the remaining unpinned rows:
+The second page starts at To savings, the row after Market run. Unlike `offset()`, it does not skip or repeat rows when rows are added or removed between the two requests.
+
+The two pages send these statements. PostgreSQL also casts the date parameters to `date`:
+
+=== "SQLite"
+
+    ```sql
+    -- predicates.py:after-paging (sqlite)
+    SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+    FROM "transaction"
+    WHERE TRUE
+    ORDER BY "transaction"."posted_on" ASC NULLS LAST, "transaction"."id" ASC NULLS LAST
+    LIMIT ?;
+
+    SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+    FROM "transaction"
+    WHERE "transaction"."posted_on" > ? OR "transaction"."posted_on" IS NULL OR ("transaction"."posted_on" = ? AND ("transaction"."id" > ? OR "transaction"."id" IS NULL))
+    ORDER BY "transaction"."posted_on" ASC NULLS LAST, "transaction"."id" ASC NULLS LAST
+    LIMIT ?;
+    ```
+
+=== "PostgreSQL"
+
+    ```sql
+    -- predicates.py:after-paging (postgres)
+    SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+    FROM "transaction"
+    WHERE TRUE
+    ORDER BY "transaction"."posted_on" ASC NULLS LAST, "transaction"."id" ASC NULLS LAST
+    LIMIT $1;
+
+    SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+    FROM "transaction"
+    WHERE "transaction"."posted_on" > CAST($1 AS date) OR "transaction"."posted_on" IS NULL OR ("transaction"."posted_on" = CAST($2 AS date) AND ("transaction"."id" > $3 OR "transaction"."id" IS NULL))
+    ORDER BY "transaction"."posted_on" ASC NULLS LAST, "transaction"."id" ASC NULLS LAST
+    LIMIT $4;
+    ```
+
+The second page starts with a condition on the order keys instead of an `OFFSET`: a later `posted_on`, or Market run's `posted_on` with a larger `id`. The `IS NULL` branches match the `NULLS LAST` order.
+
+`after()` follows four rules:
+
+- The order keys must include the primary key, so every row has exactly one place in the order. Ferro does not add it for you: `after()` raises `ValueError` if `id` is missing. Here, To savings and From checking share a `posted_on`, and `id` settles which comes first.
+- The bound is exclusive: the row you pass is not on the next page.
+- A query has one start. `after()` cannot be combined with `offset()` or with `before()`.
+- Any order key except the primary key may be `None`.
+
+`after(row)` reads the row's order-key values for you. [`position_of()`][ferro.query.builder.Query.position_of] returns those values as a tuple, which you can put in a cursor and pass back later:
 
 ```python
---8<-- "docs/examples/predicates.py:after-null-paging"
+--8<-- "docs/examples/predicates.py:position-of"
 ```
 
-To page backward, `.before(position)` is the other start. With a limit it is the **adjacent previous page**, still yielded in the declared order. Without a limit it is every earlier row in declared order — a prefix, not a page. The bound is exclusive. `after` and `before` cannot share a query.
+Market run's position is its `posted_on` and its `id`, and paging after that tuple returns the same page as paging after the row. `query.after(row)` is `query.after(query.position_of(row))`.
+
+Paging after the tuple sends the same statement as paging after the row. PostgreSQL also casts the date parameters to `date`:
+
+=== "SQLite"
+
+    ```sql
+    -- predicates.py:position-of (sqlite)
+    SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+    FROM "transaction"
+    WHERE "transaction"."posted_on" > ? OR "transaction"."posted_on" IS NULL OR ("transaction"."posted_on" = ? AND ("transaction"."id" > ? OR "transaction"."id" IS NULL))
+    ORDER BY "transaction"."posted_on" ASC NULLS LAST, "transaction"."id" ASC NULLS LAST
+    LIMIT ?;
+    ```
+
+=== "PostgreSQL"
+
+    ```sql
+    -- predicates.py:position-of (postgres)
+    SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+    FROM "transaction"
+    WHERE "transaction"."posted_on" > CAST($1 AS date) OR "transaction"."posted_on" IS NULL OR ("transaction"."posted_on" = CAST($2 AS date) AND ("transaction"."id" > $3 OR "transaction"."id" IS NULL))
+    ORDER BY "transaction"."posted_on" ASC NULLS LAST, "transaction"."id" ASC NULLS LAST
+    LIMIT $4;
+    ```
+
+`position_of()` itself sends nothing; it reads the values off the row.
+
+[`before()`][ferro.query.builder.Query.before] pages backwards. With a limit it returns the page immediately before the bound, still in the declared order; without one it returns every earlier row:
 
 ```python
 --8<-- "docs/examples/predicates.py:before-paging"
 ```
 
-On unbounded `before()`, `first()` and `all()[0]` disagree: `first()` is `limit(1)` (the adjacent previous row) and `all()[0]` is the head of the prefix (the earliest earlier row). That is accepted.
+`before(...).limit(2)` returns the two rows before To savings, and `before(...)` alone returns all three earlier rows. `first()` returns the row immediately before the bound, while `all()[0]` returns the earliest row, so use `first()` for "the previous row".
 
-The same chainers work when an order key is a related column (`order_by(lambda t: t.account.label)`) or the query is a projected record: pass a tuple of the order-key values. `position_of` on a model instance requires those relations populated; `position_of` on a `Row` requires every order key to be in the projection.
+The three queries send these statements. PostgreSQL also casts the date parameters to `date`:
 
-For pagination patterns, see [Pagination](../howto/pagination.md).
+=== "SQLite"
 
-## Executing Queries
+    ```sql
+    -- predicates.py:before-paging (sqlite)
+    SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+    FROM "transaction"
+    WHERE "transaction"."posted_on" < ? OR ("transaction"."posted_on" = ? AND "transaction"."id" < ?)
+    ORDER BY "transaction"."posted_on" DESC NULLS FIRST, "transaction"."id" DESC NULLS FIRST
+    LIMIT ?;
 
-Queries are lazy — nothing hits the database until you await a terminal:
+    SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+    FROM "transaction"
+    WHERE "transaction"."posted_on" < ? OR ("transaction"."posted_on" = ? AND "transaction"."id" < ?)
+    ORDER BY "transaction"."posted_on" DESC NULLS FIRST, "transaction"."id" DESC NULLS FIRST;
+
+    SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+    FROM "transaction"
+    WHERE "transaction"."posted_on" < ? OR ("transaction"."posted_on" = ? AND "transaction"."id" < ?)
+    ORDER BY "transaction"."posted_on" DESC NULLS FIRST, "transaction"."id" DESC NULLS FIRST
+    LIMIT ?;
+    ```
+
+=== "PostgreSQL"
+
+    ```sql
+    -- predicates.py:before-paging (postgres)
+    SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+    FROM "transaction"
+    WHERE "transaction"."posted_on" < CAST($1 AS date) OR ("transaction"."posted_on" = CAST($2 AS date) AND "transaction"."id" < $3)
+    ORDER BY "transaction"."posted_on" DESC NULLS FIRST, "transaction"."id" DESC NULLS FIRST
+    LIMIT $4;
+
+    SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+    FROM "transaction"
+    WHERE "transaction"."posted_on" < CAST($1 AS date) OR ("transaction"."posted_on" = CAST($2 AS date) AND "transaction"."id" < $3)
+    ORDER BY "transaction"."posted_on" DESC NULLS FIRST, "transaction"."id" DESC NULLS FIRST;
+
+    SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+    FROM "transaction"
+    WHERE "transaction"."posted_on" < CAST($1 AS date) OR ("transaction"."posted_on" = CAST($2 AS date) AND "transaction"."id" < $3)
+    ORDER BY "transaction"."posted_on" DESC NULLS FIRST, "transaction"."id" DESC NULLS FIRST
+    LIMIT $4;
+    ```
+
+`before()` flips each comparison and reverses each sort key with its `NULLS` placement, so the `LIMIT` keeps the rows nearest the bound; Ferro puts them back in the declared order.
+
+A `None` order-key value is how paging continues through `NULL`s. Ordered by `cleared_on` descending, the uncleared rows sort last; to continue after Train to Lyon, pass `None` for its `cleared_on`:
+
+```python
+--8<-- "docs/examples/predicates.py:after-null-paging"
+```
+
+The two uncleared rows after Train to Lyon come back. The same methods page a query ordered by a [related column](#ordering-by-a-related-column) or a [projected query](#composing-projections). [Pagination](../howto/pagination.md) shows how to wire this into an API.
+
+The query sends this; on PostgreSQL only the placeholders differ:
+
+```sql
+-- predicates.py:after-null-paging (sqlite)
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+FROM "transaction"
+WHERE "transaction"."cleared_on" IS NULL AND ("transaction"."id" > ? OR "transaction"."id" IS NULL)
+ORDER BY "transaction"."cleared_on" DESC NULLS LAST, "transaction"."id" ASC NULLS LAST;
+```
+
+With `None` for `cleared_on`, the condition stays among the `NULL` rows and continues by `id`.
+
+## Executing queries
+
+A query runs when you await one of its terminals: [`all()`][ferro.query.builder.Query.all] returns a list of instances, [`first()`][ferro.query.builder.Query.first] returns the first row or `None`, [`count()`][ferro.query.builder.Query.count] returns how many rows match, and [`exists()`][ferro.query.builder.Query.exists] returns whether any does:
 
 ```python
 --8<-- "docs/examples/predicates.py:terminals"
 ```
 
-| Terminal | Returns | Semantics |
-| :--- | :--- | :--- |
-| `.all()` | `list[Model]` | All matching rows, hydrated to instances. |
-| `.first()` | `Model \| None` | First matching row, or `None` if there are no matches. |
-| `.count()` | `int` | `COUNT(*)` of matching rows — no instances hydrated. |
-| `.exists()` | `bool` | `True` if at least one row matches; stops at the first match. |
+`count()` and `exists()` hydrate no instances. `Model.all()` is short for `Model.select().all()`.
 
-!!! tip "Prefer `.exists()` over `.count() > 0`"
-    `.exists()` lets the database stop at the first match instead of counting every row.
+The four calls send these statements; on PostgreSQL only the placeholders differ:
 
-`Model.all()` is shorthand for `Model.select().all()`.
+```sql
+-- predicates.py:terminals (sqlite)
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+FROM "transaction";
 
-On a **projected** query (`select(lambda t: (t.id, t.amount))`), `.all()` returns `Rows[Row]` and `.first()` returns `Row | None` — records, not model instances; `count()` and `exists()` are unchanged on a plain projection (on an aggregate projection they raise with guidance). See [Selecting a Column Subset](#selecting-a-column-subset) and [Aggregations & Grouped Queries](aggregations.md).
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+FROM "transaction"
+WHERE TRUE
+ORDER BY "transaction"."posted_on" DESC NULLS LAST
+LIMIT ?;
 
-## Querying Across Relationships
+SELECT COUNT(*)
+FROM "transaction"
+WHERE "transaction"."cleared_on" IS NULL;
 
-A `where()` or `order_by()` lambda can reach *through* a `ForeignKey` to a column on the related model. Write the relation field, then keep going:
-
-```python
-ledger_a = await Ledger.get(1)
-
-rows = await Transaction.where(
-    lambda transaction: transaction.account.ledger_id == ledger_a.id
-).all()
+SELECT COUNT(*)
+FROM "transaction"
+WHERE "transaction"."memo" LIKE ?;
 ```
 
-That is one SQL statement — a `SELECT` over `transactions` with a join to `accounts` — and it returns the transactions whose account belongs to ledger A. You never write the join; the relation you traverse (`transaction.account`) *is* the join.
+`count()` and `exists()` both send `SELECT COUNT(*)`; `exists()` compares the count with zero.
 
-The examples below use this schema — a `Transaction` points at an `Account`, and an `Account` points at both a `Ledger` and an `Owner`:
+## Query immutability
 
-=== "Assignment"
+`where()`, `order_by()`, `limit()` and the other chain methods each return a new query and leave the one you called them on unchanged. You can keep a base query and branch from it:
 
-    ```python
-    --8<-- "docs/examples/traversal.py:schema"
-    ```
+```python
+--8<-- "docs/examples/predicates.py:immutability"
+```
 
-=== "Annotated"
+The three queries built from `debits` are independent, and `debits` still counts all seven debits afterwards.
 
-    ```python
-    --8<-- "docs/examples/traversal_annotated.py:schema"
-    ```
+The four calls send these statements; on PostgreSQL only the placeholders differ:
+
+```sql
+-- predicates.py:immutability (sqlite)
+SELECT COUNT(*)
+FROM "transaction"
+WHERE "transaction"."amount" < ?;
+
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+FROM "transaction"
+WHERE "transaction"."amount" < ?
+ORDER BY "transaction"."amount" ASC NULLS LAST
+LIMIT ?;
+
+SELECT COUNT(*)
+FROM "transaction"
+WHERE "transaction"."amount" < ? AND "transaction"."cleared_on" IS NULL;
+
+SELECT COUNT(*)
+FROM "transaction"
+WHERE "transaction"."amount" < ?;
+```
+
+Every statement carries the `amount < ?` filter of `debits`; only the branches add to it.
+
+## Querying across relationships
+
+A `where()` or `order_by()` lambda can follow a foreign key to the related model's columns. Write the relation, then the column:
+
+```python
+--8<-- "docs/examples/traversal.py:basic"
+```
+
+`transaction.account.label` reads the label of each transaction's account, and From checking is the one transaction on Savings. You do not write the join: following `transaction.account` is the join, and the query still returns `Transaction` instances. These examples run inside the session from [the first block](#queries). The query sends this; on PostgreSQL only the placeholders differ:
+
+```sql
+-- traversal.py:basic (sqlite)
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+FROM "transaction"
+INNER JOIN "account" AS "j1_account" ON "transaction"."account_id" = "j1_account"."id"
+WHERE "j1_account"."label" = ?;
+```
+
+Following `transaction.account` became one `INNER JOIN` on `account`, under the alias `j1_account`.
 
 ### Traversing at any depth
 
-Each hop resolves against the related model, so you can chain as many as the schema allows. `transaction.account.owner.email` walks `Transaction → Account → Owner` in a single statement with two joins:
+Each step resolves against the next model, so you can chain as far as the foreign keys go. `transaction.account.owner.email` walks from `Transaction` to `Account` to `Owner` in one statement:
 
 ```python
 --8<-- "docs/examples/traversal.py:multi-hop"
 ```
 
-Every hop is validated when you build the query — before anything reaches the database. A misspelled column or relation raises `AttributeError` naming the model at that hop and the closest match, and the suggestion pool spans both columns *and* relations:
+Grace Hopper owns Travel, so both Travel transactions come back. The query sends this; on PostgreSQL only the placeholders differ:
 
-```text
->>> Transaction.where(lambda transaction: transaction.accont.ledger_id == 1)
-AttributeError: Transaction has no queryable column 'accont'. Did you mean 'account'? Valid columns: account_id, amount, id. Valid relations: account.
-
->>> Transaction.where(lambda transaction: transaction.account.owner.emial == "x")
-AttributeError: Owner has no queryable column 'emial'. Did you mean 'email'? Valid columns: email, id.
+```sql
+-- traversal.py:multi-hop (sqlite)
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+FROM "transaction"
+INNER JOIN "account" AS "j1_account" ON "transaction"."account_id" = "j1_account"."id"
+INNER JOIN "owner" AS "j2_owner" ON "j1_account"."owner_id" = "j2_owner"."id"
+WHERE "j2_owner"."email" = ?;
 ```
 
-### Every traversed hop is an INNER join
+Each step is one more join: `j2_owner` joins on the account's `owner_id`. Ferro checks each step against its own model when you build the query, and a misspelled step names that model and the closest match:
 
-Traversal always renders an **INNER** join, at every hop, no matter whether the foreign key is nullable (ADR-0006). To see what that means for nullable relations, the narrowing examples in this and the following sections add a `Note` model whose `account` relation is **optional** — a note may or may not be attached to an account:
+```python
+--8<-- "docs/examples/traversal.py:typo"
+```
 
-=== "Assignment"
+The error comes from `Owner`, the model at the misspelled step.
 
-    ```python
-    --8<-- "docs/examples/traversal.py:note-model"
-    ```
+### Join type for traversed relations
 
-=== "Annotated"
-
-    ```python
-    --8<-- "docs/examples/traversal_annotated.py:note-model"
-    ```
-
-The practical consequence of INNER-everywhere: **traversing a relation narrows the result to rows where that relation exists**. A `Note` whose `account` FK is `NULL` simply does not appear in a query that filters through `note.account`:
+Every step is an inner join, whether or not the foreign key is nullable. A row whose relation is missing therefore drops out of a query that follows that relation:
 
 ```python
 --8<-- "docs/examples/traversal.py:inner-narrows"
 ```
 
-This is deliberate and stable. A hop's nullability never changes the join type, so making a foreign key nullable later never silently rewrites the meaning of an existing query, and an N-hop path is trivial to reason about — no hop poisons the ones after it. Keeping the relation-less rows is an explicit opt-in (`left_join`, below).
+Only Grace's two transactions come back. Office coffee is on Petty cash, which has no owner; it has no owner name to compare, so the join drops it. The join type never depends on nullability, so making a foreign key nullable later never changes what an existing query returns. To keep the rows without a relation, use [`left_join()`](#keeping-rows-that-have-no-relation).
 
-The narrowing is query-wide, not per-clause: the join is rendered once for the whole statement, so a traversal branch inside an `|` still narrows the entire result. `(note.account.ledger_id == 1) | (note.body == "orphan")` drops every relation-less note — the INNER `account` join removes it before the `OR` is ever evaluated, so the `body == "orphan"` branch can never rescue it. Reach for `left_join` when a traversal branch of an `|` must keep relation-less rows.
+The query sends this; on PostgreSQL only the placeholders differ:
 
-`count()` and the other terminals see exactly this narrowed set — a many-to-one join never multiplies root rows, so `.count()` equals the number of matching transactions, not the number of joined pairs:
+```sql
+-- traversal.py:inner-narrows (sqlite)
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+FROM "transaction"
+INNER JOIN "account" AS "j1_account" ON "transaction"."account_id" = "j1_account"."id"
+INNER JOIN "owner" AS "j2_owner" ON "j1_account"."owner_id" = "j2_owner"."id"
+WHERE "j2_owner"."name" <> ?;
+```
+
+The `INNER JOIN` on `owner` drops Office coffee: Petty cash has no `owner_id` to join on.
+
+The join applies to the whole query, not to one side of an `|`:
+
+```python
+--8<-- "docs/examples/traversal.py:inner-or"
+```
+
+Office coffee matches the second branch, but the join on `account.owner` has already dropped it.
+
+The query sends this; on PostgreSQL only the placeholders differ:
+
+```sql
+-- traversal.py:inner-or (sqlite)
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+FROM "transaction"
+INNER JOIN "account" AS "j1_account" ON "transaction"."account_id" = "j1_account"."id"
+INNER JOIN "owner" AS "j2_owner" ON "j1_account"."owner_id" = "j2_owner"."id"
+WHERE "j2_owner"."name" = ? OR "transaction"."memo" = ?;
+```
+
+The `OR` sits in the `WHERE`, after both joins.
+
+`count()` counts the same rows. Following a foreign key reaches one related row per row, so the join never multiplies results:
 
 ```python
 --8<-- "docs/examples/traversal.py:count"
 ```
 
+Ada's two accounts hold six transactions.
+
+`count()` sends this; on PostgreSQL only the placeholders differ:
+
+```sql
+-- traversal.py:count (sqlite)
+SELECT COUNT(*)
+FROM "transaction"
+INNER JOIN "account" AS "j1_account" ON "transaction"."account_id" = "j1_account"."id"
+INNER JOIN "owner" AS "j2_owner" ON "j1_account"."owner_id" = "j2_owner"."id"
+WHERE "j2_owner"."name" = ?;
+```
+
+`count()` counts over the same two joins.
+
 ### Ordering by a related column
 
-`order_by()` traverses the same way, to any depth, and shares its joins with `where()`:
+`order_by()` follows relations the same way:
 
 ```python
 --8<-- "docs/examples/traversal.py:order-by"
 ```
 
-Because the sort join is INNER too, ordering by a related column drops relation-less rows — the same narrowing as `where()`. (Use `left_join` to keep them; see below.)
+Accounts sort by label, descending: Travel, Savings, Petty cash, then Checking after the limit. The query sends this; on PostgreSQL only the placeholders differ:
 
-`after()` / `before()` take a decoded **tuple** of those order-key values — `include()` is not required to page. `position_of` on a model instance does require the relation populated.
+```sql
+-- traversal.py:order-by (sqlite)
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+FROM "transaction"
+INNER JOIN "account" AS "j1_account" ON "transaction"."account_id" = "j1_account"."id"
+WHERE TRUE
+ORDER BY "j1_account"."label" DESC NULLS LAST, "transaction"."id" ASC NULLS LAST
+LIMIT ?;
+```
+
+The sort reads the joined `label`, then `id` breaks ties. Sorting is an inner join too, so ordering by a column that some rows cannot reach drops those rows:
+
+```python
+--8<-- "docs/examples/traversal.py:order-by-narrows"
+```
+
+Eight of the nine transactions come back. The query sends this; on PostgreSQL only the placeholders differ:
+
+```sql
+-- traversal.py:order-by-narrows (sqlite)
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+FROM "transaction"
+INNER JOIN "account" AS "j1_account" ON "transaction"."account_id" = "j1_account"."id"
+INNER JOIN "owner" AS "j2_owner" ON "j1_account"."owner_id" = "j2_owner"."id"
+WHERE TRUE
+ORDER BY "j2_owner"."name" ASC NULLS LAST, "transaction"."id" ASC NULLS LAST;
+```
+
+Office coffee drops out at the `owner` join. `after()` and `before()` take a tuple of the related values, so you can page without loading the relation:
 
 ```python
 --8<-- "docs/examples/traversal.py:traversed-paging"
 ```
 
+The page starts after Office coffee, the last Petty cash row. `position_of()` and `after(row)` read the related value off the instance, so they need the relation [populated with `include()`](#populating-relations-with-include); a tuple does not.
+
+The query sends this; on PostgreSQL only the placeholders differ:
+
+```sql
+-- traversal.py:traversed-paging (sqlite)
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+FROM "transaction"
+INNER JOIN "account" AS "j1_account" ON "transaction"."account_id" = "j1_account"."id"
+WHERE "j1_account"."label" > ? OR "j1_account"."label" IS NULL OR ("j1_account"."label" = ? AND ("transaction"."id" > ? OR "transaction"."id" IS NULL))
+ORDER BY "j1_account"."label" ASC NULLS LAST, "transaction"."id" ASC NULLS LAST
+LIMIT ?;
+```
+
+The position compares the joined `label` and then `id`, as a position on the model's own columns would.
+
 ### One join per relation path
 
-The relation path is the join's identity. Reference the same path in two `where()` calls, in an `&`/`|` tree, or across `where()` and `order_by()`, and it renders as **one** join. Distinct paths — even to the same table — render as distinct joins. There is no alias to name and none to manage; the path does that job.
-
-That is what lets a traversal filter compose cleanly with plain root-column clauses — the motivating query pairs one `account` join with a root-column filter, ordering, and a limit, all in a single statement:
+The path decides the join. Use `transaction.account` in two `where()` calls, in both sides of an `|`, or in `where()` and `order_by()`, and the query still joins `account` once. You never name or manage an alias:
 
 ```python
 --8<-- "docs/examples/traversal.py:composed"
 ```
 
-### Comparing to a related instance
+The traversal filter, a plain column filter, an ordering and a limit run as one statement, and Ada's two largest debits come back.
 
-Every `ForeignKey` also exposes a shadow `{fk}_id` column, so you can filter by a related row's primary key directly — no join at all:
+The query sends this; on PostgreSQL only the placeholders differ:
 
-```python
-posts = await Post.where(lambda post: post.author_id == user.id).all()
+```sql
+-- traversal.py:composed (sqlite)
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+FROM "transaction"
+INNER JOIN "account" AS "j1_account" ON "transaction"."account_id" = "j1_account"."id"
+INNER JOIN "owner" AS "j2_owner" ON "j1_account"."owner_id" = "j2_owner"."id"
+WHERE "j2_owner"."name" = ? AND "transaction"."amount" < ?
+ORDER BY "transaction"."amount" ASC NULLS LAST
+LIMIT ?;
 ```
 
-Comparing the relation itself to a **persisted** instance is sugar for exactly that shadow-column check — still join-free:
+`account` and `owner` are joined once each; the plain filter and the ordering read `transaction` itself.
+
+### Comparing to a related instance
+
+Each foreign key adds a `<relation>_id` column, and filtering on it needs no join:
+
+```python
+--8<-- "docs/examples/traversal.py:shadow-column"
+```
+
+From checking is the one transaction whose `account_id` is Savings' `id`. Fetching Savings and the query send these statements; on PostgreSQL only the placeholders differ:
+
+```sql
+-- traversal.py:shadow-column (sqlite)
+SELECT "account"."id", "account"."label", "account"."owner_id"
+FROM "account"
+WHERE "account"."id" = ?
+LIMIT ?;
+
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+FROM "transaction"
+WHERE "transaction"."account_id" = ?;
+```
+
+The filter reads `account_id` on `transaction`, with no join. Comparing the relation to a saved instance means the same thing, with the same join-free query:
 
 ```python
 --8<-- "docs/examples/traversal.py:instance-eq"
 ```
 
-Deep instance equality compares the shadow column of the *last* hop under the prefix join: `transaction.account.owner == some_owner` filters `owner_id` on the joined `accounts` row.
+`transaction.account == savings` is `transaction.account_id == savings.id`; `!=` returns the other eight. The two queries send these statements; on PostgreSQL only the placeholders differ:
+
+```sql
+-- traversal.py:instance-eq (sqlite)
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+FROM "transaction"
+WHERE "transaction"."account_id" = ?;
+
+SELECT COUNT(*)
+FROM "transaction"
+WHERE "transaction"."account_id" <> ?;
+```
+
+Both compare `account_id`, the second with `<>`. At the end of a longer path, the comparison uses the last step's foreign key column:
 
 ```python
 --8<-- "docs/examples/traversal.py:deep-instance-eq"
 ```
 
-Comparing an **unpersisted** instance is a build-time error naming the model (`cannot compare relation 'account' to an unpersisted Account instance …`) — there is no primary key to match on yet.
+`transaction.account.owner == grace` joins `account` and compares its `owner_id`. Fetching Grace and the query send these statements; on PostgreSQL only the placeholders differ:
 
-### Testing for existence or absence
+```sql
+-- traversal.py:deep-instance-eq (sqlite)
+SELECT "owner"."email", "owner"."id", "owner"."name"
+FROM "owner"
+WHERE "owner"."id" = ?
+LIMIT ?;
 
-A bare `.join()` with no predicate is a meaningful **existence filter** on a nullable relation — it narrows to rows where the relation is present (the same INNER narrowing traversal gives you, expressed directly):
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+FROM "transaction"
+INNER JOIN "account" AS "j1_account" ON "transaction"."account_id" = "j1_account"."id"
+WHERE "j1_account"."owner_id" = ?;
+```
+
+The first statement fetched Grace; the query joins `account` and never `owner`. An instance that has not been saved has no primary key to compare, so Ferro refuses it when you build the query:
+
+```python
+--8<-- "docs/examples/traversal.py:unpersisted"
+```
+
+Save the account first, then compare.
+
+### Testing for a relation
+
+A bare `join()` with no condition keeps the rows whose relation exists:
 
 ```python
 --8<-- "docs/examples/traversal.py:existence"
 ```
 
-For the opposite question — "has *no* related row" — compare the relation to `None`. `relation == None` / `!= None` lower to `IS NULL` / `IS NOT NULL` on the shadow column, join-free, so "has no account" needs no `left_join`:
+Petty cash has no owner and is left out. The query sends this; on PostgreSQL only the placeholders differ:
+
+```sql
+-- traversal.py:existence (sqlite)
+SELECT "account"."id", "account"."label", "account"."owner_id"
+FROM "account"
+INNER JOIN "owner" AS "j1_owner" ON "account"."owner_id" = "j1_owner"."id"
+WHERE TRUE;
+```
+
+The bare `join()` is an `INNER JOIN` with nothing added to the `WHERE`. To ask the opposite, compare the relation to `None`: `== None` and `!= None` become `IS NULL` and `IS NOT NULL` on the foreign key column, with no join:
 
 ```python
 --8<-- "docs/examples/traversal.py:is-null"
 ```
 
-Both spellings here are the **forward** direction — the FK column lives on the queried table. Asking the same question in the *reverse* direction ("has at least one / no related child row") is an [existence test](#existence-tests-on-reverse-many-to-many-relations): `t.lines.exists()` / `~t.lines.exists()`.
+Both forms ask about a foreign key on the model you query. To ask whether a row has related rows on another table, such as "has at least one split line", use an [existence test](#existence-tests-on-reverse-many-to-many-relations).
+
+The two queries send these statements; on PostgreSQL only the placeholders differ:
+
+```sql
+-- traversal.py:is-null (sqlite)
+SELECT "account"."id", "account"."label", "account"."owner_id"
+FROM "account"
+WHERE "account"."owner_id" IS NULL;
+
+SELECT COUNT(*)
+FROM "account"
+WHERE "account"."owner_id" IS NOT NULL;
+```
+
+Neither statement joins `owner`.
 
 ### Keeping rows that have no relation
 
-When you want the relation-less rows *kept* rather than filtered out, opt into a `left_join`. It marks **every edge of its path** LEFT (the whole-path rule), so a left-marked two-hop path retains rows missing the relation at either hop:
+[`left_join()`][ferro.query.builder.Query.left_join] keeps the rows whose relation is missing. It makes every step of its path a left join, and a `where()` or `order_by()` on the same path uses it too:
 
 ```python
 --8<-- "docs/examples/traversal.py:left-join"
 ```
 
-A bare `left_join` on a path also traversed by `where()` lifts the shared edge to LEFT — an explicit LEFT always beats an implicit INNER on the same edge (declaring `join` **and** `left_join` on one edge is a build-time `ValueError`).
+All four accounts come back, Petty cash last because its owner name is `NULL`. Without `left_join()`, ordering by `account.owner.name` would drop it. Declaring `join()` and `left_join()` on the same path raises `ValueError`.
 
-!!! note "NULL ordering defaults to last unless you override it"
-    Relation-less rows under `left_join` land as `NULL` sort keys on a related column — omitted `nulls=` still means last. Pass `nulls="first"` to lead with `NULL`s, or `nulls="native"` for dialect-default placement — see [Ordering, Limit & Offset](#ordering-limit-offset).
+The query sends this; on PostgreSQL only the placeholders differ:
+
+```sql
+-- traversal.py:left-join (sqlite)
+SELECT "account"."id", "account"."label", "account"."owner_id"
+FROM "account"
+LEFT JOIN "owner" AS "j1_owner" ON "account"."owner_id" = "j1_owner"."id"
+WHERE TRUE
+ORDER BY "j1_owner"."name" ASC NULLS LAST, "account"."id" ASC NULLS LAST;
+```
+
+The `LEFT JOIN` keeps Petty cash with `NULL` in every `j1_owner` column, and `NULLS LAST` sorts it to the end.
 
 ### Two foreign keys to the same table
 
-Distinct relation paths are distinct joins even when they point at the same table, so two FKs to one model just work — no alias ceremony:
-
-=== "Assignment"
-
-    ```python
-    --8<-- "docs/examples/traversal.py:two-fk-model"
-    ```
-
-=== "Annotated"
-
-    ```python
-    --8<-- "docs/examples/traversal_annotated.py:two-fk-model"
-    ```
+Two foreign keys to one model are two paths, so they are two joins:
 
 ```python
 --8<-- "docs/examples/traversal.py:two-fk-query"
 ```
 
+`transfer.outflow` and `transfer.inflow` both point at `Transaction`, and each reaches its own account. The one transfer runs from transaction 4 on Checking to transaction 5 on Savings.
+
+The query sends this; on PostgreSQL only the placeholders differ:
+
+```sql
+-- traversal.py:two-fk-query (sqlite)
+SELECT "transfer"."id", "transfer"."inflow_id", "transfer"."outflow_id"
+FROM "transfer"
+INNER JOIN "transaction" AS "j1_outflow" ON "transfer"."outflow_id" = "j1_outflow"."id"
+INNER JOIN "account" AS "j2_account" ON "j1_outflow"."account_id" = "j2_account"."id"
+INNER JOIN "transaction" AS "j3_inflow" ON "transfer"."inflow_id" = "j3_inflow"."id"
+INNER JOIN "account" AS "j4_account" ON "j3_inflow"."account_id" = "j4_account"."id"
+WHERE "j2_account"."label" = ? AND "j4_account"."label" = ?;
+```
+
+Each path has its own aliases, `j1_outflow` and `j3_inflow`, each with its own join on `account`.
+
 ### Self-referential traversal
 
-A self-referencing FK traverses like any other — the join target is the same table, reached by a distinct path:
-
-=== "Assignment"
-
-    ```python
-    --8<-- "docs/examples/traversal.py:self-fk-model"
-    ```
-
-=== "Annotated"
-
-    ```python
-    --8<-- "docs/examples/traversal_annotated.py:self-fk-model"
-    ```
+A foreign key to the same model traverses like any other:
 
 ```python
 --8<-- "docs/examples/traversal.py:self-fk-query"
 ```
 
+Groceries and Dining have Food as their parent.
+
+The query sends this; on PostgreSQL only the placeholders differ:
+
+```sql
+-- traversal.py:self-fk-query (sqlite)
+SELECT "category"."id", "category"."name", "category"."parent_id"
+FROM "category"
+INNER JOIN "category" AS "j1_parent" ON "category"."parent_id" = "j1_parent"."id"
+WHERE "j1_parent"."name" = ?;
+```
+
+The `category` table joins itself under the alias `j1_parent`.
+
 ### Traversing from a many-to-many
 
-An association query (`post.tags`) composes with forward-FK traversal on the target model: the association join and the traversal join coexist in one statement.
-
-=== "Assignment"
-
-    ```python
-    --8<-- "docs/examples/traversal.py:m2m-model"
-    ```
-
-=== "Annotated"
-
-    ```python
-    --8<-- "docs/examples/traversal_annotated.py:m2m-model"
-    ```
+A many-to-many relation on an instance is a query, and its lambda can follow foreign keys on the other model:
 
 ```python
 --8<-- "docs/examples/traversal.py:m2m-query"
 ```
 
+Of the two reimbursable transactions, only Dinner in Lyon is in Dining.
+
+Fetching the tag and the query send these statements; on PostgreSQL only the placeholders differ:
+
+```sql
+-- traversal.py:m2m-query (sqlite)
+SELECT "tag"."id", "tag"."name"
+FROM "tag"
+WHERE "tag"."name" = ?
+LIMIT ?;
+
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+FROM "transaction"
+INNER JOIN "tag_transactions" ON "transaction"."id" = "tag_transactions"."transaction_id"
+INNER JOIN "category" AS "j1_category" ON "transaction"."category_id" = "j1_category"."id"
+WHERE "tag_transactions"."tag_id" = ? AND "j1_category"."name" = ?;
+```
+
+The many-to-many query joins the link table, `tag_transactions`, and `transaction.category` adds a join on `category`.
+
 ### Filtering reverse relations
 
-Reverse relations (`BackRef`) are chainable queries in their own right — filter, order, and slice them before executing, and their predicates can traverse too:
+A reverse relation on an instance (`account.transactions`) is a query too. Filter, order and count it before you await it:
 
 ```python
-published = await author.posts.where(lambda post: post.published == True).all()  # noqa: E712
-latest = await author.posts.order_by(lambda post: post.created_at, "desc").limit(5).all()
-n = await author.posts.count()
+--8<-- "docs/examples/traversal.py:reverse-filter"
 ```
 
-That is a query *from* an instance. To filter the **root query** on membership in a reverse relation — "authors who have at least one published post" — use an [existence test](#existence-tests-on-reverse-many-to-many-relations): `Author.where(lambda a: a.posts.exists(lambda post: post.published == True))`.
+Checking holds five transactions, and its two largest debits are Rent and To savings. That query starts from one account. To filter accounts by what their transactions hold, use an [existence test](#existence-tests-on-reverse-many-to-many-relations).
 
-### Results are plain root instances
+Fetching Checking and the two queries send these statements; on PostgreSQL only the placeholders differ:
 
-A traversed query is **shape-preserving**: filtering `Transaction` through `transaction.account.ledger_id` still returns `Transaction` instances, no matter how deep the predicate reaches. Traversal does *not* pre-load the related rows onto the results — `await transaction.account` still issues its own query, exactly as it does without any traversal. Attaching related data is a separate, explicit request: [`include()`](#populating-relations-with-include).
+```sql
+-- traversal.py:reverse-filter (sqlite)
+SELECT "account"."id", "account"."label", "account"."owner_id"
+FROM "account"
+WHERE "account"."id" = ?
+LIMIT ?;
 
-### `update()` and `delete()` cannot traverse
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+FROM "transaction"
+WHERE "transaction"."account_id" = ? AND "transaction"."amount" < ?
+ORDER BY "transaction"."amount" ASC NULLS LAST
+LIMIT ?;
 
-Portable SQL has no `UPDATE … JOIN` / `DELETE … JOIN`, so a traversed predicate on `update()`/`delete()` is rejected **before any SQL runs**:
-
-```text
->>> await Transaction.where(lambda transaction: transaction.account.label == "a1").delete()
-ValueError: delete() does not support relation traversal: portable SQL has no DELETE ... JOIN. Fetch primary keys via the joined query first, then delete by primary-key set. (A join-free relation filter like `t.account == instance` is allowed.)
+SELECT COUNT(*)
+FROM "transaction"
+WHERE "transaction"."account_id" = ?;
 ```
 
-Do the two-step: fetch the primary keys with the joined query, then mutate by that key set (a join-free `relation == instance` or `== None` filter *is* allowed on mutations):
+The reverse relation became a filter on `account_id`.
+
+### Result type of traversed queries
+
+A traversed query returns the model you queried: filtering `Transaction` through `transaction.account.owner` still returns `Transaction` instances, and it does not load the accounts. `await transaction.account` still runs its own query. To load related rows with the results, use [`include()`](#populating-relations-with-include).
+
+### Traversal in `update()` and `delete()`
+
+Portable SQL has no `UPDATE ... JOIN` or `DELETE ... JOIN`, so `update()` and `delete()` refuse a traversed predicate before any SQL runs:
+
+```python
+--8<-- "docs/examples/traversal.py:mutate-error"
+```
+
+The message names the fix. Fetch the primary keys through the join first, then update or delete by that key set:
 
 ```python
 --8<-- "docs/examples/traversal.py:mutate-limitation"
 ```
 
-### Guardrails
+Both Travel transactions are marked cleared. A join-free relation filter, such as `transaction.account == travel` or `transaction.category == None`, is allowed on `update()` and `delete()` as it is.
 
-- A predicate lambda that returns a **bare relation** (`lambda transaction: transaction.account`) is meaningless as a filter and raises `TypeError` pointing you at `== None`, `== an instance`, or a column comparison. The same bare relation in `order_by()` is likewise rejected.
-- Combining predicates with Python's `and`/`or`/`not` (instead of `&`/`|`/`~`) coerces a node to `bool` and raises `TypeError: QueryNode cannot be used in a boolean context; use & / | to combine predicates and ~ to negate them`. Always parenthesize and use the bitwise operators.
+The fetch and the update send these statements. PostgreSQL also casts the date parameter to `date`:
 
-See [Relationships](relationships.md) for the schema-declaration side of foreign keys and reverse relations.
+=== "SQLite"
 
-## Existence Tests on Reverse & Many-to-Many Relations
+    ```sql
+    -- traversal.py:mutate-limitation (sqlite)
+    SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+    FROM "transaction"
+    INNER JOIN "account" AS "j1_account" ON "transaction"."account_id" = "j1_account"."id"
+    WHERE "j1_account"."label" = ?;
 
-Traversal reaches *forward* along a foreign key. The reverse question — "which transactions have at least one split line?", "which transactions appear in any transfer?" — is a different shape: the related rows live on the **other** table, keyed back at you. In a predicate, a reverse (`BackRef`) or many-to-many relation supports exactly one verb for that question, the **existence test**:
+    UPDATE "transaction"
+    SET "cleared_on" = ?
+    WHERE "transaction"."id" IN (?, ?);
+    ```
+
+=== "PostgreSQL"
+
+    ```sql
+    -- traversal.py:mutate-limitation (postgres)
+    SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+    FROM "transaction"
+    INNER JOIN "account" AS "j1_account" ON "transaction"."account_id" = "j1_account"."id"
+    WHERE "j1_account"."label" = $1;
+
+    UPDATE "transaction"
+    SET "cleared_on" = CAST($1 AS date)
+    WHERE "transaction"."id" IN ($2, $3);
+    ```
+
+The join stays in the `SELECT`; the `UPDATE` filters on the fetched keys alone.
+
+### Unsupported predicate forms
+
+A lambda that returns a bare relation (`lambda transaction: transaction.account`) filters nothing, so it raises `TypeError` and names the forms that do: `== None`, `== instance` or a column comparison. Python's `and` and `or` raise `TypeError` too:
 
 ```python
-matches = await Transaction.where(lambda t: t.lines.exists()).all()
+--8<-- "docs/examples/traversal.py:guardrails"
 ```
 
-`.exists()` renders as a correlated `EXISTS` subquery — never a join — so the result stays **root-shaped**: each matching row comes back exactly once (a transaction with three lines is one result, no `DISTINCT` bookkeeping), rows are never multiplied, and the test composes with every other predicate, ordering, and paging. One verb covers every cardinality: a one-to-one `BackRef`, a to-many `BackRef`, and an M2M edge all spell the same, so a schema cardinality change never breaks a call site.
+Both refusals happen when you build the query. [Relationships](relationships.md) shows how to declare foreign keys and reverse relations. The [`Query` reference](../api/queries.md) lists `join()` and `left_join()` with their parameters.
 
-The examples below use this schema — a transfer links two transactions through unique FKs (one-to-one BackRefs), split lines hang off a transaction (to-many), and a category is referenced by both layers:
+## Existence tests on reverse & many-to-many relations
 
-=== "Assignment"
+A foreign key points from the row you query to one related row. A reverse relation (`BackRef`) or a many-to-many relation goes the other way, to any number of rows on another table. In a predicate, those relations answer one question, "is there at least one?", with `.exists()`:
 
-    ```python
-    --8<-- "docs/examples/existence_tests.py:schema"
-    ```
+```python
+--8<-- "docs/examples/existence_tests.py:first"
+```
 
-=== "Annotated"
+Weekly shop is the only transaction with split lines. `.exists()` becomes a correlated `EXISTS` subquery, not a join, so each matching row comes back once however many related rows it has. It works the same for a one-to-one reverse relation, a one-to-many one and a many-to-many one, so changing a relation's cardinality never breaks a query. These examples run inside the session from [the first block](#queries).
 
-    ```python
-    --8<-- "docs/examples/existence_tests_annotated.py:schema"
-    ```
+The query sends this; on PostgreSQL only the placeholders differ:
+
+```sql
+-- existence_tests.py:first (sqlite)
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+FROM "transaction"
+WHERE EXISTS(SELECT ? FROM "splitline" AS "x1_lines" WHERE "x1_lines"."transaction_id" = "transaction"."id");
+```
+
+The `EXISTS` subquery over `splitline` refers back to the outer `transaction` row. What it selects does not matter to `EXISTS`, so it selects a bound constant.
 
 ### Bare tests and negation
 
-A bare `.exists()` asks "is any related row there?". Negation is the uniform `~` — NOT EXISTS is not a separate spelling:
+A bare `.exists()` asks whether any related row is there, and `~` asks whether none is:
 
 ```python
 --8<-- "docs/examples/existence_tests.py:bare"
 ```
 
-The first query ships to the database as:
+`transfer_out` and `transfer_in` are the one-to-one reverse relations of `Transfer.outflow` and `Transfer.inflow`. The two halves of the transfer come back, and the other seven rows are in no transfer.
+
+The two queries send these statements; on PostgreSQL only the placeholders differ:
 
 ```sql
-SELECT ... FROM transaction t
-WHERE EXISTS (SELECT 1 FROM transfer WHERE transfer.outflow_transaction_id = t.id)
-   OR EXISTS (SELECT 1 FROM transfer WHERE transfer.inflow_transaction_id = t.id)
+-- existence_tests.py:bare (sqlite)
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+FROM "transaction"
+WHERE EXISTS(SELECT ? FROM "transfer" AS "x1_transfer_out" WHERE "x1_transfer_out"."outflow_id" = "transaction"."id") OR EXISTS(SELECT ? FROM "transfer" AS "x2_transfer_in" WHERE "x2_transfer_in"."inflow_id" = "transaction"."id");
+
+SELECT COUNT(*)
+FROM "transaction"
+WHERE (NOT EXISTS(SELECT ? FROM "transfer" AS "x1_transfer_out" WHERE "x1_transfer_out"."outflow_id" = "transaction"."id")) AND (NOT EXISTS(SELECT ? FROM "transfer" AS "x2_transfer_in" WHERE "x2_transfer_in"."inflow_id" = "transaction"."id"));
 ```
+
+`~` became `NOT EXISTS`, and each relation has its own subquery.
 
 ### Scoping with an inner predicate
 
-Pass a lambda to filter *which* related rows count. The inner lambda is a **full ferro predicate over the related model** — every operator, `&`/`|`/`~`, forward traversal, even nested existence tests — not a sub-language:
+Pass `.exists()` a lambda to choose which related rows count. The inner lambda is a full predicate over the related model, with every operator, `&`, `|`, `~`, traversal and further existence tests:
 
 ```python
 --8<-- "docs/examples/existence_tests.py:scoped"
 ```
 
-Rendered SQL — the root branch keeps line-less transactions, the `EXISTS` branch finds categories on any line:
+Market run has Groceries itself, and Weekly shop has it on a split line. The query sends this; on PostgreSQL only the placeholders differ:
 
 ```sql
-SELECT ... FROM transaction t
-WHERE t.category_id IN (...)
-   OR EXISTS (SELECT 1 FROM split_line l
-              WHERE l.txn_id = t.id AND l.category_id IN (...))
+-- existence_tests.py:scoped (sqlite)
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+FROM "transaction"
+WHERE "transaction"."category_id" = ? OR EXISTS(SELECT ? FROM "splitline" AS "x1_lines" WHERE "x1_lines"."transaction_id" = "transaction"."id" AND "x1_lines"."category_id" = ?);
 ```
 
-Because the result is root-shaped, keyset ordering and paging compose unchanged:
+The inner lambda's condition joined the subquery's `WHERE`. The result has one row per transaction, so ordering and paging work as on any query:
 
 ```python
 --8<-- "docs/examples/existence_tests.py:composes"
 ```
 
-### Grouping is explicit
+Weekly shop, at -95.00, is the larger of the two.
 
-With conditions on the *same* relation, there are two different questions: does **one** related row match all conditions, or does **some** related row match each? The lambda scope makes the choice visible — one test with a compound inner predicate, or two tests combined outside:
+The query sends this; on PostgreSQL only the placeholders differ:
+
+```sql
+-- existence_tests.py:composes (sqlite)
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+FROM "transaction"
+WHERE "transaction"."category_id" = ? OR EXISTS(SELECT ? FROM "splitline" AS "x1_lines" WHERE "x1_lines"."transaction_id" = "transaction"."id" AND "x1_lines"."category_id" = ?)
+ORDER BY "transaction"."amount" ASC NULLS LAST
+LIMIT ?;
+```
+
+`ORDER BY` and `LIMIT` apply to the outer query.
+
+### Grouping conditions
+
+Two conditions on the same relation can ask two different questions: is there one related row that matches both, or a row for each? Where you put the conditions decides which:
 
 ```python
 --8<-- "docs/examples/existence_tests.py:grouping"
 ```
 
-This is why reverse relations have an explicit combinator rather than implicit path traversal (`t.lines.category_id == x` raises): with implicit traversal, nothing on the page says which of those two questions `(t.lines.a == 1) & (t.lines.b == 2)` asks (ADR-0007).
+No single split line is both Dining and below -50, but Weekly shop has a Dining line and a different line below -50. Writing `transaction.lines.category_id` directly raises an error, because nothing on the page would say which of the two questions it asks.
+
+The two queries send these statements; on PostgreSQL only the placeholders differ:
+
+```sql
+-- existence_tests.py:grouping (sqlite)
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+FROM "transaction"
+WHERE EXISTS(SELECT ? FROM "splitline" AS "x1_lines" WHERE "x1_lines"."transaction_id" = "transaction"."id" AND ("x1_lines"."category_id" = ? AND "x1_lines"."amount" < ?));
+
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+FROM "transaction"
+WHERE EXISTS(SELECT ? FROM "splitline" AS "x1_lines" WHERE "x1_lines"."transaction_id" = "transaction"."id" AND "x1_lines"."category_id" = ?) AND EXISTS(SELECT ? FROM "splitline" AS "x2_lines" WHERE "x2_lines"."transaction_id" = "transaction"."id" AND "x2_lines"."amount" < ?);
+```
+
+One subquery holding both conditions asks for one line that matches both; two subqueries ask for a line for each.
 
 ### Traversal inside the test, and nesting
 
-Forward-FK traversal works inside the inner lambda — its joins render *inside* the `EXISTS` subquery with the same [INNER semantics](#every-traversed-hop-is-an-inner-join) as everywhere else — and existence tests nest to any depth:
+The inner lambda can follow foreign keys on the related model. Those joins run inside the `EXISTS` subquery, with the same [inner-join rule](#join-type-for-traversed-relations), so they filter the related rows and never the outer ones:
 
 ```python
 --8<-- "docs/examples/existence_tests.py:traversal-inside"
 ```
 
+Weekly shop's lines are in Groceries and Dining, both under Food. The query sends this; on PostgreSQL only the placeholders differ:
+
+```sql
+-- existence_tests.py:traversal-inside (sqlite)
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+FROM "transaction"
+WHERE EXISTS(SELECT ? FROM "splitline" AS "x1_lines" INNER JOIN "category" AS "x2_category" ON "x1_lines"."category_id" = "x2_category"."id" INNER JOIN "category" AS "x3_parent" ON "x2_category"."parent_id" = "x3_parent"."id" WHERE "x1_lines"."transaction_id" = "transaction"."id" AND "x3_parent"."name" = ?);
+```
+
+Both `category` joins sit inside the subquery. Existence tests nest to any depth:
+
+```python
+--8<-- "docs/examples/existence_tests.py:nested"
+```
+
+Only Ada has an account holding a split transaction.
+
+The query sends this; on PostgreSQL only the placeholders differ:
+
+```sql
+-- existence_tests.py:nested (sqlite)
+SELECT "owner"."email", "owner"."id", "owner"."name"
+FROM "owner"
+WHERE EXISTS(SELECT ? FROM "account" AS "x1_accounts" WHERE "x1_accounts"."owner_id" = "owner"."id" AND EXISTS(SELECT ? FROM "transaction" AS "x2_transactions" WHERE "x2_transactions"."account_id" = "x1_accounts"."id" AND EXISTS(SELECT ? FROM "splitline" AS "x3_lines" WHERE "x3_lines"."transaction_id" = "x2_transactions"."id")));
+```
+
+Each level is an `EXISTS` inside the one before, tied to its parent's row.
+
 ### Many-to-many
 
-An M2M relation spells identically, from either side — the test correlates through the association table and the inner lambda scopes over the target model:
-
-=== "Assignment"
-
-    ```python
-    --8<-- "docs/examples/existence_tests.py:m2m-schema"
-    ```
-
-=== "Annotated"
-
-    ```python
-    --8<-- "docs/examples/existence_tests_annotated.py:m2m-schema"
-    ```
+A many-to-many relation reads the same from either side. The test goes through the link table, and the inner lambda scopes over the other model:
 
 ```python
 --8<-- "docs/examples/existence_tests.py:m2m"
 ```
 
-### One verb, loud dead ends
+Rent carries `tax`, `reimbursable` is on the uncleared Lyon rows, and six transactions have no tag.
 
-Reverse relations are **tested, never traversed** (ADR-0007). Every other way of naming a reverse or M2M relation in a query fails at build time with the supported spelling in the message:
+The three queries send these statements; on PostgreSQL only the placeholders differ:
 
-- **Column access** (`t.lines.category_id`) raises `AttributeError` — scope the columns with the inner lambda instead: `t.lines.exists(lambda line: line.category_id == ...)`.
-- **Comparisons**, including the tempting `t.transfer_out != None`, raise `TypeError` — a reverse relation has no root-side column to be `NULL`; the spelling is `t.transfer_out.exists()` (and `~t.transfer_out.exists()` for absence).
-- **`in_()` with a query** (`t.id.in_(subquery)`) raises `TypeError` — the workloads an `IN (subquery)` serves are existence-test workloads, without hand-correlating on id columns.
-- **`join()` / `left_join()` on a reverse edge** raise `TypeError` — a join there would multiply root rows; membership is the existence test's job.
-- **The inner lambda sees only its own parameter.** Referencing the outer lambda's parameter (or comparing column-to-column) is a build-time error — cross-scope correlation is a tracked future capability ([#309](https://github.com/syn54x/ferro-orm/issues/309)), never a silent misrender.
+```sql
+-- existence_tests.py:m2m (sqlite)
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+FROM "transaction"
+WHERE EXISTS(SELECT ? FROM "tag_transactions" AS "x1_tags" INNER JOIN "tag" AS "x2_tags" ON "x1_tags"."tag_id" = "x2_tags"."id" WHERE "x1_tags"."transaction_id" = "transaction"."id" AND "x2_tags"."name" = ?);
 
-Existence tests answer **membership** only. *Populating* a reverse collection onto results (the data axis) is a separate future mechanism — see [Not Yet Supported](#not-yet-supported); until it lands, fetch collections through the relation itself (`await txn.lines.all()`).
+SELECT "tag"."id", "tag"."name"
+FROM "tag"
+WHERE EXISTS(SELECT ? FROM "tag_transactions" AS "x1_transactions" INNER JOIN "transaction" AS "x2_transactions" ON "x1_transactions"."transaction_id" = "x2_transactions"."id" WHERE "x1_transactions"."tag_id" = "tag"."id" AND "x2_transactions"."cleared_on" IS NULL);
 
-!!! note "Two `exists`, two levels"
-    `t.lines.exists(...)` inside a predicate is the existence *test* on a relation. `await query.exists()` is the query *terminal* asking whether the whole query matches any row. Same word, deliberately — both ask "is there at least one?" — at different levels.
+SELECT COUNT(*)
+FROM "transaction"
+WHERE NOT EXISTS(SELECT ? FROM "tag_transactions" AS "x1_tags" INNER JOIN "tag" AS "x2_tags" ON "x1_tags"."tag_id" = "x2_tags"."id" WHERE "x1_tags"."transaction_id" = "transaction"."id");
+```
 
-## Populating Relations with include()
+Each test reaches the other model through the link table, `tag_transactions`, from either side.
 
-Every relation access is a query. A list view that renders 100 transactions with their account labels awaits `transaction.account` 100 times — 101 statements for one screen. `include()` cures that N+1: ask the query to bring the related rows along, and each result's relation arrives **populated**:
+### Unsupported reverse-relation forms
+
+A reverse or many-to-many relation is tested, never traversed. Every other use in a query fails when you build it, and the message names the `.exists()` form to use:
+
+- Reading a column (`transaction.lines.category_id`) raises `AttributeError`. Put the condition in the inner lambda: `transaction.lines.exists(lambda split_line: split_line.category_id == ...)`.
+- Comparing the relation, including `transaction.transfer_out != None`, raises `TypeError`. The relation has no column on this table to be `NULL`; write `transaction.transfer_out.exists()`, or `~transaction.transfer_out.exists()` for none.
+- `in_()` with a query (`transaction.id.in_(query)`) raises `TypeError`. An existence test answers the same question without matching ids by hand.
+- `join()` and `left_join()` on a reverse relation raise `TypeError`, because the join would repeat each row once per related row.
+- The inner lambda sees only its own parameter. Referring to the outer lambda's parameter raises an error; see [Not yet supported](#not-yet-supported).
+
+```python
+--8<-- "docs/examples/existence_tests.py:dead-ends"
+```
+
+Each of the three refusals names the existence test to write instead.
+
+!!! note "Two meanings of `exists`"
+    `transaction.lines.exists(...)` inside a predicate tests a relation. `await query.exists()` is the terminal that asks whether the whole query matches any row. Both ask "is there at least one?", at different levels.
+
+The [`Query` reference](../api/queries.md) describes `.exists()` with its parameters.
+
+## Populating relations with `include()`
+
+Reading a relation runs a query. A list of 100 transactions that shows each account's label awaits `transaction.account` 100 times: 101 statements for one screen. [`include()`][ferro.query.builder.Query.include] asks the query to load the related rows in the same statement:
 
 ```python
 --8<-- "docs/examples/populated_relations.py:basic"
 ```
 
-One SQL statement. The query still returns the same `list[Transaction]` it always did — and `transaction.account` is now a plain attribute holding the complete `Account` instance, exactly as the field's annotation (`account: Account`) always claimed. No await, no query.
+It prints:
 
-The examples in this section use this schema (both foreign keys nullable, so you can see what happens when a relation is absent):
+<!-- prints: populated_relations.py:basic -->
+```text
+Weekly shop | Checking
+Office coffee | Petty cash
+Dinner in Lyon | Travel
+```
 
-=== "Assignment"
+The query still returns `list[Transaction]`, and `transaction.account` is now the `Account` instance itself, as the field's annotation (`account: Account`) says. Reading it needs no `await` and runs no query. These examples run inside the session from [the first block](#queries).
 
-    ```python
-    --8<-- "docs/examples/populated_relations.py:schema"
-    ```
+The query sends this; on PostgreSQL only the placeholders differ:
 
-=== "Annotated"
+```sql
+-- populated_relations.py:basic (sqlite)
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on", "j1_account"."id" AS "j1_account__id", "j1_account"."label" AS "j1_account__label", "j1_account"."owner_id" AS "j1_account__owner_id"
+FROM "transaction"
+LEFT JOIN "account" AS "j1_account" ON "transaction"."account_id" = "j1_account"."id"
+WHERE TRUE
+ORDER BY "transaction"."id" DESC NULLS LAST
+LIMIT ?;
+```
 
-    ```python
-    --8<-- "docs/examples/populated_relations_annotated.py:schema"
-    ```
+The account's columns come back in the same rows, through a `LEFT JOIN`, under `j1_account__` names.
 
 ### The population contract
 
-A relation is in exactly one of two states on any given instance:
+A relation on an instance is either populated or not:
 
-- **Populated** (the query included it): access is a **plain attribute** returning the complete related instance. A nullable FK with no target populates as `None` — truthful to the declared `Account | None`.
-- **Unpopulated** (everything else): access keeps today's **awaitable** contract, unchanged — a coroutine that runs its own query:
+- **Populated**, because a query included it: the attribute is the related instance. A nullable foreign key with no row populates as `None`.
+- **Not populated**: the attribute is awaitable and runs its own query:
 
 ```python
 --8<-- "docs/examples/populated_relations.py:awaitable"
 ```
 
-!!! warning "Awaiting a populated relation is a hard break"
-    `await transaction.account` on a *populated* instance raises `TypeError: 'Account' object can't be awaited` — the attribute is the instance itself, not a coroutine. Code that must handle both states cheaply can check `inspect.isawaitable(...)`, but the better pattern is to decide at the query: if you are going to read the relation, include it.
+`await transaction.account` fetched the Travel account with a second query.
 
-There is no separate "loaded" model type: `.all()` on an included query still returns `list[Transaction]`, and a populated instance is an ordinary instance of the target model. (Why no `Loaded[Transaction]`? See [Typed Query Predicates](../concepts/query-typing.md#included-queries).)
+The fetch and the await send these statements; on PostgreSQL only the placeholders differ:
 
-### Include never changes membership
+```sql
+-- populated_relations.py:awaitable (sqlite)
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+FROM "transaction"
+WHERE "transaction"."id" = ?
+LIMIT ?;
 
-Joins decide **membership**, projection decides **shape**, include decides **attached data** — three orthogonal axes. Adding `.include(...)` to any query returns exactly the rows that query returned without it:
+SELECT "account"."id", "account"."label", "account"."owner_id"
+FROM "account"
+WHERE "account"."id" = ?
+LIMIT ?;
+```
+
+The second statement is the one `await transaction.account` ran.
+
+!!! warning "Awaiting a populated relation raises"
+    On a populated instance, `await transaction.account` raises `TypeError: 'Account' object can't be awaited`, because the attribute is the instance, not a coroutine. Decide at the query: if you will read the relation, include it.
+
+There is no separate "loaded" model type: an included query returns `list[Transaction]`, and a populated relation is an ordinary instance. [Typed query predicates](../concepts/query-typing.md#included-queries) explains why.
+
+### Row membership under `include()`
+
+`include()` never changes which rows a query returns. A row whose relation is missing stays, with the relation populated as `None`:
 
 ```python
 --8<-- "docs/examples/populated_relations.py:membership"
 ```
 
-Under the hood, an edge only the include touches renders a LEFT join, and an edge any other clause references keeps that clause's join type. So a `where()` traversal on the same path keeps its INNER narrowing — include attaches data to the surviving rows, it never rewrites what a filter matches:
+All nine transactions come back, and Salary's `category` is `None`. The query sends this; on PostgreSQL only the placeholders differ:
+
+```sql
+-- populated_relations.py:membership (sqlite)
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on", "j1_category"."id" AS "j1_category__id", "j1_category"."name" AS "j1_category__name", "j1_category"."parent_id" AS "j1_category__parent_id"
+FROM "transaction"
+LEFT JOIN "category" AS "j1_category" ON "transaction"."category_id" = "j1_category"."id"
+WHERE TRUE;
+```
+
+A relation only `include()` uses becomes a `LEFT JOIN`, which keeps Salary. A relation a `where()` or `order_by()` also follows keeps that clause's inner join, so the filter still decides membership:
 
 ```python
 --8<-- "docs/examples/populated_relations.py:interplay"
 ```
 
-`count()` and `exists()` are likewise unaffected — they measure the same rows with or without the include:
+The `where()` keeps the two Travel rows, and `include()` attaches their account. The query sends this; on PostgreSQL only the placeholders differ:
+
+```sql
+-- populated_relations.py:interplay (sqlite)
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on", "j1_account"."id" AS "j1_account__id", "j1_account"."label" AS "j1_account__label", "j1_account"."owner_id" AS "j1_account__owner_id"
+FROM "transaction"
+INNER JOIN "account" AS "j1_account" ON "transaction"."account_id" = "j1_account"."id"
+WHERE "j1_account"."label" = ?;
+```
+
+The filter and the population share one `INNER JOIN`. `count()` and `exists()` measure the same rows with or without `include()`:
 
 ```python
 --8<-- "docs/examples/populated_relations.py:count"
 ```
 
-### Multi-hop paths populate every hop
+Both count the seven debits.
 
-`include(lambda t: t.account.owner)` populates the whole path — a populated graph is never missing its intermediate nodes. A `NULL` somewhere along the chain ends the chain as a populated `None`, with the root row retained:
+The two calls send the same statement; on PostgreSQL only the placeholders differ:
+
+```sql
+-- populated_relations.py:count (sqlite)
+SELECT COUNT(*)
+FROM "transaction"
+WHERE "transaction"."amount" < ?;
+
+SELECT COUNT(*)
+FROM "transaction"
+WHERE "transaction"."amount" < ?;
+```
+
+`include()` adds nothing to a count.
+
+### Multi-hop paths
+
+Including a path populates every step of it. A `NULL` along the way ends the chain with `None`, and the row stays:
 
 ```python
 --8<-- "docs/examples/populated_relations.py:multi-hop"
 ```
 
-Includes are cumulative, order-free, and idempotent: `.include(lambda t: t.account)` plus `.include(lambda t: t.account.owner)` — in either order — is the same query as `.include(lambda t: t.account.owner)` alone.
+Salary's account and its owner are both loaded. Office coffee's account is Petty cash, whose owner is `None`.
 
-### Populated instances are session instances
+The query sends this; on PostgreSQL only the placeholders differ:
 
-In a session, population runs through the identity map like every other fetch: same row, same object. A populated `Account` **is** the `Account` a direct fetch returns — deduped across result rows, and attached onto instances the session already holds:
+```sql
+-- populated_relations.py:multi-hop (sqlite)
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on", "j1_account"."id" AS "j1_account__id", "j1_account"."label" AS "j1_account__label", "j1_account"."owner_id" AS "j1_account__owner_id", "j2_owner"."email" AS "j2_owner__email", "j2_owner"."id" AS "j2_owner__id", "j2_owner"."name" AS "j2_owner__name"
+FROM "transaction"
+LEFT JOIN "account" AS "j1_account" ON "transaction"."account_id" = "j1_account"."id"
+LEFT JOIN "owner" AS "j2_owner" ON "j1_account"."owner_id" = "j2_owner"."id"
+WHERE TRUE
+ORDER BY "transaction"."id" ASC NULLS LAST;
+```
+
+Each step is one more `LEFT JOIN`, and each related row's columns come back under its alias.
+
+Includes add up, in any order, and repeating one changes nothing: `.include(lambda transaction: transaction.account)` followed by `.include(lambda transaction: transaction.account.owner)` is the same query as the second one alone.
+
+### Identity of populated instances
+
+In a session, each row is one object. A populated account is the same object a direct fetch of that account returns, shared by every row that points at it:
 
 ```python
 --8<-- "docs/examples/populated_relations.py:identity"
 ```
 
-Populations **accumulate** across a session's queries — an `account` include and a later `attachment` include both stick, so shared objects get richer, never forked:
+Both Travel transactions point at the `travel` object fetched first. Fetching Travel and the query send these statements; on PostgreSQL only the placeholders differ:
+
+```sql
+-- populated_relations.py:identity (sqlite)
+SELECT "account"."id", "account"."label", "account"."owner_id"
+FROM "account"
+WHERE "account"."id" = ?
+LIMIT ?;
+
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on", "j1_account"."id" AS "j1_account__id", "j1_account"."label" AS "j1_account__label", "j1_account"."owner_id" AS "j1_account__owner_id"
+FROM "transaction"
+LEFT JOIN "account" AS "j1_account" ON "transaction"."account_id" = "j1_account"."id"
+WHERE "transaction"."account_id" = ?;
+```
+
+The account's columns come back with each row, and the session hands back the object it already holds. Populations also accumulate on the objects a session holds: a later query's `include()` attaches to instances an earlier query returned:
 
 ```python
 --8<-- "docs/examples/populated_relations.py:accumulate"
 ```
 
-Outside a session there is no identity map, so an included query returns fresh instances per row — including a fresh related instance per row, with no query-local dedup. Sessionless Ferro keeps exactly one identity story: the session.
+`market_run` was fetched with nothing populated, and the two later queries populated its account and its category. Outside a session there is no identity map, so each row of an included query gets its own related instance. [Identity map](../concepts/identity-map.md) covers sessions and shared instances.
 
-### Refreshes drop populations that stopped being true
+The three queries send these statements; on PostgreSQL only the placeholders differ:
 
-Every fetch refreshes instances the session already holds. A refresh keeps each population **iff the row's foreign key still points at it**; if the FK changed (or went `NULL`) underneath you, the now-lying population is dropped and access reverts to the awaitable — a populated relation never points at the wrong row:
+```sql
+-- populated_relations.py:accumulate (sqlite)
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+FROM "transaction"
+WHERE "transaction"."id" = ?
+LIMIT ?;
+
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on", "j1_account"."id" AS "j1_account__id", "j1_account"."label" AS "j1_account__label", "j1_account"."owner_id" AS "j1_account__owner_id"
+FROM "transaction"
+LEFT JOIN "account" AS "j1_account" ON "transaction"."account_id" = "j1_account"."id"
+WHERE TRUE;
+
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on", "j1_category"."id" AS "j1_category__id", "j1_category"."name" AS "j1_category__name", "j1_category"."parent_id" AS "j1_category__parent_id"
+FROM "transaction"
+LEFT JOIN "category" AS "j1_category" ON "transaction"."category_id" = "j1_category"."id"
+WHERE TRUE;
+```
+
+Neither later query names `market_run`; the session matched its row by primary key.
+
+### Population after a refresh
+
+Every fetch refreshes the instances a session already holds. A refresh keeps a population only while the row's foreign key still points at it; if the foreign key changed, the population is dropped and the relation is awaitable again:
 
 ```python
 --8<-- "docs/examples/populated_relations.py:refresh-rule"
 ```
 
-### The loud limits
+After the row moved to Checking, `from_checking.account` no longer claims Savings; awaiting it fetches Checking.
 
-Misuse raises at build time, before any SQL:
+The four statements are the same on PostgreSQL, apart from the placeholders Ferro writes:
 
-- **Forward foreign keys only.** Including a `BackRef` or `ManyToMany` relation raises `TypeError`: reverse and M2M population will be a separate mechanism (a batched second query stitched onto the results), not `include()`. Until it lands, fetch collections through the relation itself (`await author.posts.all()`). *Filtering* on reverse membership is a different axis and already works — the [existence test](#existence-tests-on-reverse-many-to-many-relations).
-- **Lambda selectors only.** `include("account")` raises pointing at the lambda form — strings never traverse. Selecting a *column* (`include(lambda t: t.account.label)`) raises too: every populated hop is a complete row, so there is nothing to select per column.
-- **No include × projection.** A query carries exactly one materialization plan — populated instances or projected records, never both — and record results are flat, permanently. Either order raises `ValueError` pointing at [traversed projection](#reaching-across-a-relation), the record-shaped way across a relation.
-- **No mutations.** `update()`/`delete()` on an included query raise — a mutation returns no instances to populate.
+```sql
+-- populated_relations.py:refresh-rule (sqlite)
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on", "j1_account"."id" AS "j1_account__id", "j1_account"."label" AS "j1_account__label", "j1_account"."owner_id" AS "j1_account__owner_id"
+FROM "transaction"
+LEFT JOIN "account" AS "j1_account" ON "transaction"."account_id" = "j1_account"."id"
+WHERE "transaction"."id" = ?
+LIMIT ?;
+
+UPDATE "transaction"
+SET account_id = $1
+WHERE id = $2;
+
+SELECT "transaction"."account_id", "transaction"."amount", "transaction"."category_id", "transaction"."cleared_on", "transaction"."id", "transaction"."memo", "transaction"."posted_on"
+FROM "transaction"
+WHERE "transaction"."id" = ?
+LIMIT ?;
+
+SELECT "account"."id", "account"."label", "account"."owner_id"
+FROM "account"
+WHERE "account"."id" = ?
+LIMIT ?;
+```
+
+Ferro sends the raw `UPDATE` as written. The last `SELECT` is the await, fetching Checking.
+
+### Unsupported `include()` forms
+
+Ferro refuses these when you build the query, before any SQL:
+
+| Form | Error | Use instead |
+| :--- | :--- | :--- |
+| A `BackRef` or `ManyToMany` relation | `TypeError` | `await account.transactions.all()`; to filter on the relation, an [existence test](#existence-tests-on-reverse-many-to-many-relations) |
+| A string (`include("account")`) or a column (`include(lambda transaction: transaction.account.label)`) | `TypeError` | A lambda that names a relation; each populated step is a whole row |
+| `include()` with `select(...)`, in either order | `ValueError` | [A projection that reaches across the relation](#reaching-across-a-relation) |
+| `update()` or `delete()` on an included query | `ValueError` | The same query without `include()` |
 
 ```python
 --8<-- "docs/examples/populated_relations.py:limits"
 ```
 
-Include composes with the M2M association context (`post.tags.include(lambda tag: tag.created_by)` populates each tag's forward FK) and with everything else a query does: `where()` (traversal included), `order_by()`, `limit()`/`offset()`, `first()`, and query branching.
+Each refusal names the form to use. `include()` also works on a many-to-many query (`tag.transactions.include(lambda transaction: transaction.account)`), and with `where()`, `order_by()`, `limit()`, `offset()` and `first()`. The [`Query` reference](../api/queries.md#ferro.query.Query.include) lists its parameters.
 
-## Selecting a Column Subset
+## Selecting a column subset
 
-Every query so far loads complete rows into complete model instances. When a list view only reads two columns of a wide table, ask for less: pass `select()` a lambda naming the columns, and the query becomes a **projection**:
+A query loads whole rows into whole model instances. When a view only reads two columns of a wide table, pass [`select()`][ferro.query.builder.Query.select] a lambda naming the columns, and the query returns records with only those columns:
 
 ```python
 --8<-- "docs/examples/partial_selects.py:basic"
 ```
 
-The examples in this section use this schema:
+Each record has a `memo` and an `amount`, read as attributes like a model's. These examples run inside the session from [the first block](#queries).
 
-=== "Assignment"
+The query sends this; on PostgreSQL only the placeholders differ:
 
-    ```python
-    --8<-- "docs/examples/partial_selects.py:schema"
-    ```
+```sql
+-- partial_selects.py:basic (sqlite)
+SELECT "transaction"."memo" AS "memo", "transaction"."amount" AS "amount"
+FROM "transaction"
+WHERE TRUE
+ORDER BY "transaction"."id" ASC NULLS LAST
+LIMIT ?;
+```
 
-=== "Annotated"
+Only the two selected columns are in the `SELECT`, each named with `AS`.
 
-    ```python
-    --8<-- "docs/examples/partial_selects_annotated.py:schema"
-    ```
+### The `Row` result type
 
-### What you get back — and why it isn't a `Transaction`
-
-A projected query does **not** return `Transaction` instances. In Ferro, **a model instance always carries a complete row** — there is no such thing as a partial or deferred-field model instance, anywhere. If projection handed you a two-column `Transaction`, every `save()`, every refresh, and every helper that takes a model would have to wonder which query produced its argument, and touching an unselected field would blow up far from the query that caused it.
-
-So anything narrower than a full row comes back honestly typed as what it is: a **projected record** — a `Row`, delivered in the list-like `Rows` container:
+A selected query does not return `Transaction` instances. It returns [`Row`][ferro.query.Row] records in a [`Rows`][ferro.query.Rows] list:
 
 ```python
 --8<-- "docs/examples/partial_selects.py:not-a-model"
 ```
 
-A `Row` is read-only in the persistence sense: it has no `save()`, no refresh, and never enters the identity map — a record can never masquerade as a row in the database. It carries exactly the columns you selected, in selection order, decoded by the same machinery as full hydration — a projected `datetime`, `UUID`, enum, or `Decimal` column has the same Python type and value it would have on the model, on both backends. Under the hood the query declares this result shape explicitly (a *materialization plan* travels with the query), which is also why asking for less is never slower per row than asking for everything: records are built on the same zero-validation path as models.
+A `Row` holds the selected columns, in the order you selected them, with the same Python types the model would give them. It has no `save()`, is not refreshed, and never enters the identity map. A model instance always holds a whole row; [Typed query predicates](../concepts/query-typing.md#projected-queries) explains why a selected query returns records instead.
 
-Selecting a single column needs no tuple ceremony:
+One column needs no tuple:
 
 ```python
 --8<-- "docs/examples/partial_selects.py:single"
 ```
 
-### `Rows` is a list you can ship
+Each record holds only the `memo` of an uncleared transaction.
 
-`Rows` behaves like a list — index, slice, iterate, `len()` — and both `Rows` and `Row` are pydantic-shaped: `model_dump()` yields `list[dict]`, and `Rows[Row]` drops straight into a FastAPI `response_model`:
+The query sends this; on PostgreSQL only the placeholders differ:
+
+```sql
+-- partial_selects.py:single (sqlite)
+SELECT "transaction"."memo" AS "memo"
+FROM "transaction"
+WHERE "transaction"."cleared_on" IS NULL
+ORDER BY "transaction"."id" ASC NULLS LAST;
+```
+
+The statement selects `memo` alone.
+
+### The `Rows` container
+
+`Rows` behaves like a list: index it, slice it, iterate it and take its `len()`. `model_dump()` returns a list of dicts, and `Rows[Row]` works as a FastAPI `response_model`:
 
 ```python
 --8<-- "docs/examples/partial_selects.py:container"
 ```
 
+A slice of a `Rows` is a `Rows` too, with the two newest records.
+
+The query sends this; on PostgreSQL only the placeholders differ:
+
+```sql
+-- partial_selects.py:container (sqlite)
+SELECT "transaction"."id" AS "id", "transaction"."memo" AS "memo"
+FROM "transaction"
+WHERE TRUE
+ORDER BY "id" DESC NULLS LAST;
+```
+
+Indexing, slicing and `model_dump()` run in Python, over the records this one statement returned.
+
 ### Column-name strings
 
-Quick scripts can pass column names as strings — the same string contract as `order_by()`: root columns only (shadow `{fk}_id` columns included), validated at build time. The lambda form remains the documented style:
+`select()` also takes column names as strings, with the same rules as `order_by()`: columns on the queried model only, the `<relation>_id` columns included, checked when you build the query:
 
 ```python
 --8<-- "docs/examples/partial_selects.py:strings"
 ```
 
+The lambda form is the documented one because only a lambda can reach across a relation.
+
+The query sends this; on PostgreSQL only the placeholders differ:
+
+```sql
+-- partial_selects.py:strings (sqlite)
+SELECT "transaction"."id" AS "id", "transaction"."memo" AS "memo"
+FROM "transaction"
+WHERE TRUE
+ORDER BY "id" ASC NULLS LAST
+LIMIT ?;
+```
+
+Each string became a column of `transaction`, named after itself.
+
 ### Reaching across a relation
 
-A selected field may traverse a forward-FK relation, at any depth — the same attribute chaining as a `where()` predicate. Unaliased, a traversed field takes the **bare leaf column name**:
+A selected column can follow a foreign key, at any depth, as in a `where()` lambda. A column reached this way is named after its last step:
 
 ```python
 --8<-- "docs/examples/partial_selects.py:traversed"
 ```
 
-Strings never traverse (`select("account.label")` is rejected permanently) — traversed projection is lambda-only.
+`transaction.account.label` becomes the field `label`. Strings never follow relations: `select("account.label")` raises.
+
+The query sends this; on PostgreSQL only the placeholders differ:
+
+```sql
+-- partial_selects.py:traversed (sqlite)
+SELECT "transaction"."memo" AS "memo", "j1_account"."label" AS "label"
+FROM "transaction"
+INNER JOIN "account" AS "j1_account" ON "transaction"."account_id" = "j1_account"."id"
+WHERE TRUE
+ORDER BY "transaction"."id" ASC NULLS LAST
+LIMIT ?;
+```
+
+The traversal joins `account`, and `AS "label"` names the field after the last step.
 
 ### Naming output fields
 
-Return a **dict** from the selector and the keys name the record's fields — an *output alias*. Aliases name output fields only, never joins or tables, and the dict's insertion order is the record's field order:
+Return a dict from the lambda to name the record's fields. The keys name the fields, in their order:
 
 ```python
 --8<-- "docs/examples/partial_selects.py:aliases"
 ```
 
-The dict form is also how you resolve a name collision: `t.id` and `t.account.id` both want to be called `id`, so selecting them unaliased is a build-time error naming this fix:
+The record has the three names the dict gave it. The query sends this; on PostgreSQL only the placeholders differ:
+
+```sql
+-- partial_selects.py:aliases (sqlite)
+SELECT "transaction"."memo" AS "memo", "j1_account"."label" AS "account", "j2_owner"."email" AS "owner_email"
+FROM "transaction"
+INNER JOIN "account" AS "j1_account" ON "transaction"."account_id" = "j1_account"."id"
+INNER JOIN "owner" AS "j2_owner" ON "j1_account"."owner_id" = "j2_owner"."id"
+WHERE TRUE
+ORDER BY "transaction"."id" ASC NULLS LAST
+LIMIT ?;
+```
+
+Each dict key became an `AS` name. The dict form also settles a name clash: `transaction.id` and `transaction.account.id` would both be `id`, and selecting both without names raises `ValueError` that suggests the dict:
 
 ```python
 --8<-- "docs/examples/partial_selects.py:collision"
 ```
 
-### Traversal narrows; `left_join()` opts out
+The message names the dict form as the fix.
 
-Projection traversal is ordinary traversal (ADR-0006): it renders an INNER join per relation path — **shared** with any `where()`/`order_by()` traversal of the same path — so rows without the relation drop out. `left_join()` keeps them, and their traversed fields decode to `None`, *even when the source column is non-nullable* — a projected record describes the row you got, not the related model:
+### Traversal and `left_join()` in projections
+
+A selected column that follows a relation uses the same [inner join](#join-type-for-traversed-relations) as a `where()` on that path, and shares it. Rows without the relation drop out; `left_join()` keeps them, with `None` in the fields they cannot reach:
 
 ```python
 --8<-- "docs/examples/partial_selects.py:traversal-narrows"
 ```
 
-### Projections compose like any other query
+Office coffee drops out of the first query and comes back in the second with `owner_email` set to `None`. A field filled from a missing relation is `None` even when its column is not nullable: the record describes the row you got.
 
-`where()` (relation traversal included), `order_by()` (even by columns the projection does not select), `limit()`/`offset()`, `after()`/`before()`, and `first()` all work unchanged.
+The two queries send these statements; on PostgreSQL only the placeholders differ:
 
-On a plain projection, `count()` and `exists()` are unaffected: they measure the same matching rows a full query would. On an *aggregate* projection they raise with guidance instead (see [Aggregations & Grouped Queries](aggregations.md#the-loud-limits)).
+```sql
+-- partial_selects.py:traversal-narrows (sqlite)
+SELECT "transaction"."memo" AS "memo", "j2_owner"."email" AS "owner_email"
+FROM "transaction"
+INNER JOIN "account" AS "j1_account" ON "transaction"."account_id" = "j1_account"."id"
+INNER JOIN "owner" AS "j2_owner" ON "j1_account"."owner_id" = "j2_owner"."id"
+WHERE TRUE;
 
-`position_of` on a `Row` requires every order key in the projection. Otherwise pass a tuple.
+SELECT "transaction"."memo" AS "memo", "j2_owner"."email" AS "owner_email"
+FROM "transaction"
+LEFT JOIN "account" AS "j1_account" ON "transaction"."account_id" = "j1_account"."id"
+LEFT JOIN "owner" AS "j2_owner" ON "j1_account"."owner_id" = "j2_owner"."id"
+WHERE TRUE
+ORDER BY "transaction"."id" ASC NULLS LAST;
+```
+
+`left_join()` turned both joins into `LEFT JOIN`s.
+
+### Composing projections
+
+A selected query takes `where()` (traversal included), `order_by()` (even on a column you did not select), `limit()`, `offset()` and `first()`:
 
 ```python
 --8<-- "docs/examples/partial_selects.py:compose"
 ```
 
+The Travel rows come back ordered by `amount`, which is not in the records. The query sends this; on PostgreSQL only the placeholders differ:
+
+```sql
+-- partial_selects.py:compose (sqlite)
+SELECT "transaction"."id" AS "id", "transaction"."memo" AS "memo"
+FROM "transaction"
+INNER JOIN "account" AS "j1_account" ON "transaction"."account_id" = "j1_account"."id"
+WHERE "j1_account"."label" = ?
+ORDER BY "transaction"."amount" ASC NULLS LAST;
+```
+
+`ORDER BY` reads `transaction.amount`, a column the `SELECT` does not list. `after()` and `before()` page a selected query too. `after(row)` reads the order keys from the record, so every order key must be selected; otherwise pass a tuple:
+
 ```python
 --8<-- "docs/examples/partial_selects.py:projected-paging"
 ```
+
+The first page holds the five Checking rows, so the next starts at Petty cash. The two pages send these statements; on PostgreSQL only the placeholders differ:
+
+```sql
+-- partial_selects.py:projected-paging (sqlite)
+SELECT "j1_account"."label" AS "account", "transaction"."id" AS "id", "transaction"."memo" AS "memo"
+FROM "transaction"
+INNER JOIN "account" AS "j1_account" ON "transaction"."account_id" = "j1_account"."id"
+WHERE TRUE
+ORDER BY "j1_account"."label" ASC NULLS LAST, "id" ASC NULLS LAST
+LIMIT ?;
+
+SELECT "j1_account"."label" AS "account", "transaction"."id" AS "id", "transaction"."memo" AS "memo"
+FROM "transaction"
+INNER JOIN "account" AS "j1_account" ON "transaction"."account_id" = "j1_account"."id"
+WHERE "j1_account"."label" > ? OR "j1_account"."label" IS NULL OR ("j1_account"."label" = ? AND ("transaction"."id" > ? OR "transaction"."id" IS NULL))
+ORDER BY "j1_account"."label" ASC NULLS LAST, "id" ASC NULLS LAST
+LIMIT ?;
+```
+
+The second page's position compares the selected `account` and `id`. `count()` and `exists()` count the same rows as the query without `select()`:
 
 ```python
 --8<-- "docs/examples/partial_selects.py:count"
 ```
 
-### Build-time validation and the loud limits
+Both count the three uncleared transactions. The two calls send the same statement; on PostgreSQL only the placeholders differ:
 
-A misspelled column fails when you build the query, with a did-you-mean — exactly like `where()` and `order_by()`, and a traversed field validates every hop against that hop's model:
+```sql
+-- partial_selects.py:count (sqlite)
+SELECT COUNT(*)
+FROM "transaction"
+WHERE "transaction"."cleared_on" IS NULL;
 
-```text
->>> Transaction.select(lambda t: (t.id, t.amonut))
-AttributeError: Transaction has no queryable column 'amonut'. Did you mean 'amount'? Valid columns: account_id, amount, id, memo.
+SELECT COUNT(*)
+FROM "transaction"
+WHERE "transaction"."cleared_on" IS NULL;
 ```
 
-Misuse is loud, never silently ignored:
+A projection changes no count: both calls send `COUNT(*)` with the query's filter.
 
-- **No output-name collisions.** Two selected fields resolving to the same name raise `ValueError` naming the dict form (see above).
-- **One selector, one shape.** A dict nested in a tuple, a tuple (or dict) as a dict value, and non-string dict keys all raise `TypeError` — a projected record is flat.
-- **No mutations through a projection.** `update()` / `delete()` on a projected query raise `ValueError` at the call, before any SQL — a projection is a read shape, and silently ignoring it would make `select(...)` a no-op on mutations. Mutate through an unprojected query instead.
-- **No double `select()`.** Replacing a projection mid-chain would change the result type; name every field in one call, or start a new query from the model.
-- **No mixing forms.** Strings and a lambda in one `select()` call raise `TypeError`.
-- **No `include()` with a projection**, in either chain order: a query carries exactly one materialization plan, and record results are flat — permanently. Reach across the relation with traversed projection, or populate instances on an unprojected query.
+### Unsupported projection forms
 
-Static typing follows the same shape promise as predicates: `select(...)` flips the query's type so `.all()` checks as `Rows[Row]` and `.first()` as `Row | None` — passing a `Row` where a model instance is expected fails the type checker. See [Typed Query Predicates](../concepts/query-typing.md#projected-queries).
+A misspelled column fails when you build the query, as in `where()`; a column that follows a relation is checked at each step:
 
-Aggregation builds directly on this machinery — `select(lambda t: {"total": t.amount.sum()})` — and mixing aggregate and plain fields turns the projection into a **grouped query**. That is its own chapter: [Aggregations & Grouped Queries](aggregations.md).
+```python
+--8<-- "docs/examples/partial_selects.py:typo"
+```
 
-## Not Yet Supported
+The message lists the valid columns, as in `where()`. Ferro also refuses these, before any SQL:
 
-!!! note "On the roadmap"
-    The following query features are **not yet implemented** — see the [Roadmap](../roadmap.md):
+| Form | Error | Use instead |
+| :--- | :--- | :--- |
+| Two fields with the same name | `ValueError` | The dict form, to name them |
+| A dict inside a tuple, a tuple or dict as a dict value, or a key that is not a string | `TypeError` | One flat tuple or one flat dict |
+| `update()` or `delete()` on a selected query | `ValueError` | The same query without `select(...)` |
+| A second `select(...)` on a selected query | `ValueError` | One `select()` naming every field |
+| Strings and a lambda in one `select()` | `TypeError` | One form |
+| `include()` with `select(...)`, in either order | `ValueError` | A selected column that reaches across the relation |
 
-    - `having()` — post-aggregation filtering; `where()` rejects aggregate predicates pointing at it ([#291](https://github.com/syn54x/ferro-orm/issues/291))
-    - Reverse (`BackRef`) and many-to-many **population** — [`include()`](#populating-relations-with-include) covers forward FKs; collection population is a separate future mechanism. (*Filtering* on reverse/M2M membership is supported — that's the [existence test](#existence-tests-on-reverse-many-to-many-relations).)
-    - Cross-scope correlation inside an existence test — comparing an inner-lambda column to an outer column ([#309](https://github.com/syn54x/ferro-orm/issues/309)); rejected loudly at build time today
-    - Case-insensitive `ilike()`
+Your type checker sees the change too: after `select(...)`, `all()` is `Rows[Row]` and `first()` is `Row | None`, so passing a record where a `Transaction` is expected fails the check.
 
-## See Also
+Aggregates build on projection: `select(lambda transaction: {"total": transaction.amount.sum()})` sums a column, and mixing aggregates with plain columns groups the rows. [Aggregations & grouped queries](aggregations.md) covers them. The [`select()` reference](../api/queries.md#select-overloads) lists every selector form.
 
-- [Aggregations & Grouped Queries](aggregations.md) — `count`/`sum`/`avg`/`min`/`max` and derived grouping
-- [Mutations](mutations.md) — creating, updating, and deleting records
-- [Relationships](relationships.md) — forward and reverse relations
-- [Typed Query Predicates](../concepts/query-typing.md) — why three predicate styles exist
-- [Raw SQL](raw-sql.md) — the escape hatch for queries the ORM can't express
-- [Pagination](../howto/pagination.md) — efficient pagination patterns
+## Not yet supported
+
+These query features are not available yet; the [Roadmap](../roadmap.md) tracks them:
+
+- `having()`, to filter on an aggregate. `where()` refuses an aggregate and names `having()`.
+- Populating a reverse or many-to-many relation with its rows. `include()` covers foreign keys; until then, await the relation (`await account.transactions.all()`). Filtering on one is the [existence test](#existence-tests-on-reverse-many-to-many-relations).
+- Referring to the outer row inside an existence test's inner lambda, for example comparing a split line's amount to its transaction's amount. Ferro refuses it when you build the query.
+- Case-insensitive `ilike()`.
+
+## See also
+
+- [Query reference](../api/queries.md): `Query`, `ProjectedQuery`, `Row`, `Rows` and every method on this page
+- [Aggregations & grouped queries](aggregations.md): `count`, `sum`, `avg`, `min`, `max` and grouping
+- [Mutations](mutations.md): creating, updating and deleting rows
+- [Relationships](relationships.md): declaring foreign keys and reverse relations
+- [Typed query predicates](../concepts/query-typing.md): how lambda predicates are type-checked
+- [Raw SQL](raw-sql.md): for queries the query builder cannot express
+- [Pagination](../howto/pagination.md): offset and keyset paging in an API

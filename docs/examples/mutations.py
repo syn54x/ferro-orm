@@ -2,9 +2,12 @@
 
 import asyncio
 
+from ferro import ModelDoesNotExist, UniqueViolationError, connect, engines, now
+
+# --8<-- [start:models]
 from datetime import datetime
 
-from ferro import Field, Model, UniqueViolationError, connect, engines, now
+from ferro import Field, Model
 
 
 class Customer(Model):
@@ -16,135 +19,223 @@ class Customer(Model):
     updated_at: datetime | None = None
 
 
+# --8<-- [end:models]
+
+
+# --8<-- [start:conversation]
+class Conversation(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    turns: dict = Field(default_factory=dict)
+
+
+# --8<-- [end:conversation]
+
+
 async def main() -> None:
+    # --8<-- [start:session]
     await connect("sqlite::memory:", auto_migrate=True)
 
     async with engines.session():
-        # --8<-- [start:get-or-create]
-        customer, created = await Customer.get_or_create(
-            email="alice@example.com",
-            defaults={"name": "Alice"},
+        alice = await Customer.create(email="alice@example.com", name="Alice")
+        assert (alice.id, alice.plan) == (1, "free")
+        # --8<-- [end:session]
+
+        # --8<-- [start:create]
+        bob = await Customer.create(email="bob@example.com", name="Bob", plan="pro")
+
+        inserted = await Customer.bulk_create(
+            [
+                Customer(email="carol@example.com", name="Carol"),
+                Customer(email="dave@example.com", name="Dave", plan="pro"),
+            ]
         )
-        assert created is True
+        assert inserted == 2
+        assert await Customer.select().count() == 4
+        # --8<-- [end:create]
 
-        # Second call finds the existing row instead of inserting
-        same, created = await Customer.get_or_create(email="alice@example.com")
-        assert created is False and same.id == customer.id
-        # --8<-- [end:get-or-create]
+        # --8<-- [start:bulk-identity]
+        erin = Customer(email="erin@example.com", name="Erin")
+        await Customer.bulk_create([erin])
+        assert erin.id is None  # not written back
 
-        # --8<-- [start:update-or-create]
-        customer, created = await Customer.update_or_create(
-            email="alice@example.com",
-            defaults={"plan": "pro"},
-        )
-        assert created is False and customer.plan == "pro"
-        # --8<-- [end:update-or-create]
-
-        # --8<-- [start:refresh]
-        # Reload an instance from the database, discarding local state
-        await Customer.where(
-            lambda customer: customer.email == "alice@example.com"
-        ).update(name="Alice L.")
-        await customer.refresh()
-        assert customer.name == "Alice L."
-        # --8<-- [end:refresh]
+        erin = await Customer.where(
+            lambda customer: customer.email == "erin@example.com"
+        ).first()
+        assert erin.id == 5
+        # --8<-- [end:bulk-identity]
 
         # --8<-- [start:create-strict]
-        alice = await Customer.get(customer.id)
-
-        # create() never updates an existing row — a duplicate is an error
         try:
-            await Customer.create(id=alice.id, email="alice.2@example.com")
+            await Customer.create(email="alice@example.com", name="Alice again")
         except UniqueViolationError:
             ...  # the existing row is untouched
+        else:
+            raise AssertionError("expected UniqueViolationError")
+        assert (await Customer.get(alice.id)).name == "Alice"
         # --8<-- [end:create-strict]
 
         # --8<-- [start:save-insert-update]
-        bob = Customer(email="bob@example.com", name="Bob")
-        await bob.save()  # never persisted: INSERT (bob.id is now set)
+        frank = Customer(email="frank@example.com", name="Frank")
+        await frank.save()  # never persisted: INSERT
+        assert frank.id is not None  # the database assigned it
 
-        bob.plan = "pro"
-        await bob.save()  # persisted: UPDATE ... WHERE id = ?
+        frank.plan = "pro"
+        await frank.save()  # persisted: UPDATE by primary key
 
-        bobs = await Customer.where(lambda customer: customer.name == "Bob").count()
-        assert bobs == 1  # two saves, one row
+        franks = await Customer.where(lambda customer: customer.name == "Frank").count()
+        assert franks == 1  # two saves, one row
         # --8<-- [end:save-insert-update]
+
+        # --8<-- [start:save-missing]
+        await Customer.where(lambda customer: customer.id == frank.id).delete()
+        frank.name = "Franklin"
+        try:
+            await frank.save()
+        except ModelDoesNotExist:
+            ...  # the row is gone; save() does not insert it again
+        else:
+            raise AssertionError("expected ModelDoesNotExist")
+        # --8<-- [end:save-missing]
 
         # --8<-- [start:save-only]
         row = await Customer.get(bob.id)
-        row.name = "Bobby"
-        row.updated_at = datetime.now()
-        row.plan = "enterprise"  # omitted: left untouched in the database
+        row.name = "Robert"
+        row.updated_at = datetime(2026, 3, 1, 9, 30)
+        row.plan = "enterprise"  # not in only=, so not written
         await row.save(only={"name", "updated_at"})
-        # instance is not refreshed — omitted in-memory fields may diverge
-        assert row.plan == "enterprise"
+        assert row.plan == "enterprise"  # the instance keeps its change
+
+        await row.refresh()
+        assert (row.name, row.plan) == ("Robert", "pro")  # the row kept "pro"
         # --8<-- [end:save-only]
 
-        await row.refresh()
-        assert row.name == "Bobby"
-        assert row.plan == "pro"
-
         # --8<-- [start:save-exclude]
-        row.name = "Robert"
-        row.plan = "enterprise"  # excluded: left untouched in the database
+        row.name = "Bobby"
+        row.plan = "enterprise"  # excluded, so not written
         await row.save(exclude={"plan"})
+
+        await row.refresh()
+        assert (row.name, row.plan) == ("Bobby", "pro")
         # --8<-- [end:save-exclude]
 
-        await row.refresh()
-        assert row.name == "Robert"
-        assert row.plan == "pro"
+        # --8<-- [start:update-delete]
+        upgraded = await Customer.where(
+            lambda customer: customer.plan == "free"
+        ).update(plan="trial")
+        assert upgraded == 3  # Alice, Carol and Erin
 
-        # --8<-- [start:upsert]
-        # No row with this primary key: INSERT
-        carol = await Customer.upsert(id=100, email="carol@example.com", name="Carol")
-
-        # Same primary key again: UPDATE of the existing row
-        carol = await Customer.upsert(id=100, email="carol@example.com", plan="pro")
-        assert carol.plan == "pro"
-        assert await Customer.where(lambda customer: customer.id == 100).count() == 1
-
-        # The whole row is written: `name` was left unset above, so the stored
-        # "Carol" reverted to the field default — pass every field you care about.
-        stored = await Customer.get(100)
-        assert stored.name == ""
-        # --8<-- [end:upsert]
-
-        # --8<-- [start:handling-errors]
-        try:
-            await Customer.create(email="alice@example.com")  # email already taken
-        except UniqueViolationError as exc:
-            print(exc.sqlstate)  # "23505" (SQLSTATE) on Postgres, "2067" on SQLite
-            print(exc.constraint)  # violated constraint name (Postgres only)
-            print(exc.driver_message)  # original driver text, for logs
-        # --8<-- [end:handling-errors]
-
-        dora = await Customer.create(
-            email="dora@example.com"
-        )  # plan defaults to "free"
+        removed = await Customer.where(
+            lambda customer: customer.name == "Erin"
+        ).delete()
+        assert removed == 1
+        # --8<-- [end:update-delete]
 
         # --8<-- [start:recipe-update]
-        await Customer.where(lambda customer: customer.id == dora.id).update(
+        await Customer.where(lambda customer: customer.id == alice.id).update(
             lambda customer: {
                 "views": customer.views + 1,
                 "updated_at": now,
             }
         )
+
+        await alice.refresh()
+        assert alice.views == 1 and alice.updated_at is not None
         # --8<-- [end:recipe-update]
 
+        # .merge() exists on PostgreSQL only; the rendered statement says
+        # which database this session runs on.
+        on_postgres = (await Customer.select().count.sql()).dialect == "postgres"
+        if on_postgres:
+            # --8<-- [start:merge]
+            chat = await Conversation.create()
+            await Conversation.where(
+                lambda conversation: conversation.id == chat.id
+            ).update(
+                lambda conversation: {
+                    "turns": conversation.turns.merge({"r1": {"role": "user"}})
+                }
+            )
+
+            await chat.refresh()
+            assert chat.turns == {"r1": {"role": "user"}}
+            # --8<-- [end:merge]
+
         # --8<-- [start:mutation-guard]
-        free = Customer.where(lambda customer: customer.plan == "free")
+        trial = Customer.where(lambda customer: customer.plan == "trial")
         try:
-            await free.limit(10).delete()
-        except ValueError:
-            # Portable SQL has no DELETE ... LIMIT. Fetch primary keys first,
-            # then mutate by primary-key set:
-            doomed = await free.limit(10).all()
-            ids = [customer.id for customer in doomed]
-            removed = await Customer.where(
-                lambda customer: customer.id.in_(ids)
-            ).delete()
-            assert removed == 1
+            await trial.limit(1).delete()
+        except ValueError as error:
+            print(f"{type(error).__name__}: {error}")
+        else:
+            raise AssertionError("expected ValueError")
         # --8<-- [end:mutation-guard]
+
+        # --8<-- [start:mutation-by-key]
+        oldest = await trial.order_by(lambda customer: customer.id).limit(1).all()
+        ids = [customer.id for customer in oldest]
+        removed = await Customer.where(lambda customer: customer.id.in_(ids)).delete()
+        assert removed == 1  # Alice, the oldest trial customer
+        # --8<-- [end:mutation-by-key]
+
+        # --8<-- [start:delete-one]
+        carol = await Customer.where(
+            lambda customer: customer.email == "carol@example.com"
+        ).first()
+        await carol.delete()
+
+        assert await Customer.get_or_none(carol.id) is None
+        # --8<-- [end:delete-one]
+
+        # --8<-- [start:upsert]
+        grace = await Customer.upsert(id=100, email="grace@example.com", name="Grace")
+
+        grace = await Customer.upsert(id=100, email="grace@example.com", plan="pro")
+        assert grace.plan == "pro"
+        assert await Customer.where(lambda customer: customer.id == 100).count() == 1
+
+        stored = await Customer.get(100)
+        assert (stored.name, stored.plan) == ("", "pro")  # name reset to its default
+        # --8<-- [end:upsert]
+
+        # --8<-- [start:get-or-create]
+        heidi, created = await Customer.get_or_create(
+            email="heidi@example.com",
+            defaults={"name": "Heidi"},
+        )
+        assert created is True
+
+        same, created = await Customer.get_or_create(email="heidi@example.com")
+        assert created is False and same.id == heidi.id
+        # --8<-- [end:get-or-create]
+
+        # --8<-- [start:update-or-create]
+        heidi, created = await Customer.update_or_create(
+            email="heidi@example.com",
+            defaults={"plan": "pro"},
+        )
+        assert created is False and heidi.plan == "pro"
+        # --8<-- [end:update-or-create]
+
+        # --8<-- [start:refresh]
+        await Customer.where(lambda customer: customer.id == heidi.id).update(
+            name="Heidi L."
+        )
+        assert heidi.name == "Heidi"  # the instance has not seen the update
+
+        await heidi.refresh()
+        assert heidi.name == "Heidi L."
+        # --8<-- [end:refresh]
+
+        # --8<-- [start:handling-errors]
+        try:
+            await Customer.create(email="heidi@example.com")  # email already taken
+        except UniqueViolationError as error:
+            print(error.sqlstate)
+            print(error.constraint)
+            print(error.driver_message)
+        else:
+            raise AssertionError("expected UniqueViolationError")
+        # --8<-- [end:handling-errors]
 
     print("mutations example ran successfully")
 

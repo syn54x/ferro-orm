@@ -1,3 +1,7 @@
+---
+description: "Every key of ferro.toml or [tool.ferro], which tells Ferro's tooling where the models are and which dialects to target."
+---
+
 # Configuration
 
 A project commits one file that tells Ferro's tooling where its models are and which dialects its migrations target. `ferro migrate init` writes it; every `ferro migrate` verb, `ferro.migrations.*`, the Alembic bridge's `get_metadata()`, and `connect()` with an auto-migrate flag read it through one class, `ferro.FerroSettings`.
@@ -81,10 +85,11 @@ How long a DDL statement Ferro runs on Postgres, in a migration step or in an au
 
 ### `lock_timeout`
 
-How long a run waits for the run lock while another run holds it: `"500ms"`, `"30s"`, `"1m"`, a number of seconds, or `"0"` to wait without a limit. It is the default of `--lock-timeout` on `ferro migrate up`, `down`, `baseline` and `rerecord` (and of `lock_timeout=` on their Python calls); the flag wins. An auto-migrate pass (`connect(auto_migrate=…)`, `ferro.create_tables()`, `ferro.migrate()`) waits for it too, so a replica booting while another one's pass runs waits instead of failing:
+How long a run waits for the run lock while another run holds it: `"500ms"`, `"30s"`, `"1m"`, a number of seconds, or `"0"` to wait without a limit. It is the default of `--lock-timeout` on `ferro migrate up`, `down`, `baseline` and `rerecord` (and of `lock_timeout=` on their Python calls); the flag wins. An auto-migrate pass (`connect(auto_migrate=…)`, `ferro.create_tables()`, `ferro.migrate()`) waits for it too, so a replica booting while another one's pass runs waits instead of failing. Once the wait passes `lock_timeout` (here `"1s"`, on SQLite) it refuses:
 
+<!-- prints: auto_migrate_errors.py:lock-timeout -->
 ```text
-connect(auto_migrate=…) gave up waiting for the run lock on public: another ferro migration run or auto-migrate pass held it longer than lock_timeout (30s). Nothing was applied. Wait for that run to finish and try again, or raise lock_timeout; `ferro migrate status` shows a migration run while it holds the lock.
+connect(auto_migrate=…) gave up waiting for the run lock on main: another ferro migration run or auto-migrate pass held it longer than lock_timeout (1s). Nothing was applied. Wait for that run to finish and try again, or raise lock_timeout; `ferro migrate status` shows a migration run while it holds the lock.
 ```
 
 Unlike the flag, whose `0` refuses at once, the setting's `"0"` waits without a limit. As with `ddl_lock_timeout`, every configured database must set the same `lock_timeout` for an auto-migrate pass.
@@ -106,7 +111,7 @@ Unlike the flag, whose `0` refuses at once, the setting's `"0"` waits without a 
 
 The file found is used alone: nothing is layered on it, no environment variable overrides a key, and no `.env` file is read. These keys decide what a migration contains, so they come from the committed file only. No file is not an error for `FerroSettings()`: it returns an empty object listing the directories it searched, and refuses only when a database is asked for.
 
-```python
+```python {test=compile reason="needs a ferro.toml naming one database"}
 from ferro import FerroSettings
 
 settings = FerroSettings()

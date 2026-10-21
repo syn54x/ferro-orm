@@ -1,6 +1,6 @@
 # ruff: noqa: E402 - the models come first, as the docs page shows them
-"""Runnable companion for retiring a column, Annotated style
-(docs/pages/guide/schema/migrations.md).
+"""Runnable companion for retiring a column
+(docs/pages/guide/schema/renames-and-retirements.md).
 
 Release A declares ``bio`` required. Release B retires it: the migration only
 relaxes ``NOT NULL``, so A's code keeps writing ``bio`` while B's never names
@@ -8,16 +8,26 @@ it. Release C deletes the declaration, which drops the column. On SQLite.
 """
 
 # --8<-- [start:models]
+from enum import StrEnum
 from typing import Annotated
 
-from ferro import FerroField, Model
+from ferro import Field, Model
+
+
+class Status(StrEnum):
+    ACTIVE = "active"
+    PAUSED = "paused"
+    CANCELED = "canceled"
 
 
 class Author(Model):
-    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    id: Annotated[int | None, Field(primary_key=True)] = None
     name: str
-    # before: bio: Annotated[str, FerroField(index=True)]
-    bio: Annotated[str | None, FerroField(index=True, retired=True)] = None
+    email: Annotated[str, Field(unique=True)]
+    nickname: Annotated[str | None, Field(index=True)] = None
+    # before: bio: Annotated[str, Field(index=True)]
+    bio: Annotated[str | None, Field(index=True, retired=True)] = None
+    status: Status = Status.ACTIVE
 
 
 # --8<-- [end:models]
@@ -32,7 +42,10 @@ def main() -> None:
         app.models_before()
         app.ferro("migrate", "new", "create_author")
         app.ferro("migrate", "up")
-        app.sql("INSERT INTO author (name, bio) VALUES ('ada', 'pioneer')")
+        app.sql(
+            "INSERT INTO author (name, email, bio, status) VALUES"
+            " ('Ada Lovelace', 'ada@example.com', 'Analyst', 'active')"
+        )
 
         # Release B retires bio: one change, the relaxation.
         app.models_after()
@@ -44,8 +57,14 @@ def main() -> None:
         app.ferro("migrate", "up")
         assert "no drift" in app.ferro("migrate", "drift")
         # Release A's write (names bio) and B's (does not) both succeed.
-        app.sql("INSERT INTO author (name, bio) VALUES ('grace', 'admiral')")
-        app.sql("INSERT INTO author (name) VALUES ('linus')")
+        app.sql(
+            "INSERT INTO author (name, email, bio, status) VALUES"
+            " ('Grace Hopper', 'grace@example.com', 'Admiral', 'active')"
+        )
+        app.sql(
+            "INSERT INTO author (name, email, status) VALUES"
+            " ('Linus Torvalds', 'linus@example.com', 'active')"
+        )
 
         # Release C deletes the declaration: the destructive drop.
         (app.root / "blog" / "models.py").write_text(
@@ -64,9 +83,9 @@ def main() -> None:
         app.ferro("migrate", "up")
         assert "no drift" in app.ferro("migrate", "drift")
         assert app.sql("SELECT name FROM author ORDER BY id") == [
-            ("ada",),
-            ("grace",),
-            ("linus",),
+            ("Ada Lovelace",),
+            ("Grace Hopper",),
+            ("Linus Torvalds",),
         ]
 
 

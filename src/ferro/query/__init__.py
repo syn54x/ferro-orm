@@ -1,4 +1,8 @@
-"""Expose query-building primitives used by Ferro models"""
+"""Query builders, the pieces query lambdas build, and projected records.
+
+Start a query from a model with [`Model.where`][ferro.Model.where] or
+[`Model.select`][ferro.Model.select]; see [Queries](../guide/queries.md).
+"""
 
 from .builder import ProjectedQuery, Query, Relation
 from .nodes import (
@@ -12,7 +16,7 @@ from .nodes import (
     ValueExpr,
     now,
 )
-from .rendered import REDACTED, RenderedSql
+from .rendered import REDACTED, RenderedSql, Terminal
 from .rows import Row, Rows
 
 __all__ = [
@@ -27,6 +31,7 @@ __all__ = [
     "Relation",
     "RelationProxy",
     "RenderedSql",
+    "Terminal",
     "Row",
     "RowSelector",
     "Rows",

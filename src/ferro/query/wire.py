@@ -1,23 +1,20 @@
-"""The QueryIR payload: Ferro's single query wire contract (GLOSSARY.md).
+"""The query payload: the one form in which a built query reaches Ferro's core.
 
-Every query the ORM executes crosses the Python→Rust seam as one versioned
-JSON envelope. This module is the only place that wire shape exists on the
-Python side: :func:`compile_query` is the sole compiler from a built query to
-a :class:`QueryIrPayload`, and :func:`to_wire_json` the sole envelope
-serializer. The dataclasses mirror ``crates/ferro-schema-ir``'s serde structs
-one-for-one; golden vectors in ``tests/fixtures/ir_vectors/`` pin both sides
-to the same bytes (builder equality in ``tests/test_query_wire_vectors.py``,
-serde round-trips in the Rust crate's tests).
-
-Friend contract: :func:`compile_query` reads the query object's build state
-(``where_clause``, ``order_by_clause``, ``_limit``, ``_offset``, ``_after``,
-``_before``,
-``_joins``, ``_explicit_edges``, ``_includes``, ``_m2m_context``,
-``_projection``) directly — the builder and this module are one package, and
-the seam is ``compile_query``, not a snapshot type. The builder owns
-chainer-time validation and state; this module owns everything whose output
-is wire shape.
+Every query the ORM runs is sent as one versioned JSON document.
+[`compile_query`][ferro.query.wire.compile_query] turns a built query into a
+[`QueryIrPayload`][ferro.query.wire.QueryIrPayload], and
+[`to_wire_json`][ferro.query.wire.to_wire_json] serializes it.
 """
+
+# The dataclasses mirror the core's payload structs one for one; golden
+# vectors in tests/fixtures/ir_vectors/ pin both sides to the same bytes
+# (tests/test_query_wire_vectors.py here, serde round-trips in the crate).
+#
+# Friend contract: compile_query reads the query's build state (where_clause,
+# order_by_clause, _limit, _offset, _after, _before, _joins, _explicit_edges,
+# _includes, _m2m_context, _projection) directly. The builder owns chain-time
+# validation and state; this module owns everything whose output is wire
+# shape.
 
 from __future__ import annotations
 
@@ -51,9 +48,10 @@ from .nodes import (
 if TYPE_CHECKING:
     from .builder import Query
 
-# The verb a payload is compiled for. ``update`` and ``delete`` share the
-# mutate arm; they stay distinct values so guardrail errors name the caller.
+# ``update`` and ``delete`` share the mutate arm; they stay distinct values
+# so guardrail errors name the caller.
 QueryVerb = Literal["fetch", "count", "update", "delete"]
+"""What a payload is compiled for: fetching rows, counting, updating or deleting."""
 
 # Always 14 (#395 — unconditional bump). v14 adds an optional ``before``
 # position bound on fetch payloads. Python and Rust ship in one wheel, so a
@@ -77,33 +75,55 @@ _ABSENT = _AbsentType()
 
 
 def model_identity(model_cls: type) -> str:
-    """Qualified registry identity of a Ferro model class (FF-E)."""
+    """Return a model class's qualified name in the model registry.
+
+    Args:
+        model_cls: The model class.
+
+    Returns:
+        The name the registry and the core know the model by.
+    """
     return model_cls.__ferro_identity__  # ty: ignore[unresolved-attribute]
 
 
 def path_edges(path: tuple[str, ...]) -> list[tuple[str, ...]]:
-    """Every edge (prefix of length ≥ 1) of a relation ``path`` (#272)."""
+    """List every leading part of a relation path, shortest first.
+
+    Args:
+        path: Relation field names, such as `("author", "team")`.
+
+    Returns:
+        Each prefix of `path` of length one or more: `[("author",),
+            ("author", "team")]`.
+    """
     return [path[:i] for i in range(1, len(path) + 1)]
 
 
 @dataclass(frozen=True)
 class QueryJoinHop:
-    """One hop fact of a relation path — the shared shape of the ``joins``
-    section, ``instances`` plan paths, and aggregate ``expr`` traversals.
+    """One step of a relation path: the join from one table to the next.
 
-    ``target`` is the hop's model class — a compile-side fact riding the hop
-    (the hop-class map is collected from it), never serialized: the wire
-    carries ``to_table`` and Rust resolves registration facts from its own
-    registry.
+    The same shape describes the payload's joins, the paths an `include()`
+    fills in and the path of an aggregate's column.
     """
 
     relation: str
+    """The relation field the step follows."""
     from_column: str
+    """The column on the source side, the foreign key column."""
     to_table: str
+    """The table the step joins."""
     to_column: str
+    """The column on the joined table, its primary key."""
     target: type = field(compare=False, repr=False, kw_only=True)
+    """The joined model class; kept in Python and never sent."""
 
     def to_ir_dict(self) -> dict[str, str]:
+        """Convert the step to its payload form.
+
+        Returns:
+            The step as a dict, without `target`.
+        """
         return {
             "relation": self.relation,
             "from_column": self.from_column,
@@ -114,12 +134,19 @@ class QueryJoinHop:
 
 @dataclass(frozen=True)
 class QueryJoin:
-    """One ``joins`` entry: a full relation path and its resolved join type."""
+    """One join the query needs: a relation path and its join type."""
 
     join_type: str
+    """`"inner"` or `"left"`."""
     path: tuple[QueryJoinHop, ...]
+    """The steps from the queried table to the joined one."""
 
     def to_ir_dict(self) -> dict[str, Any]:
+        """Convert the join to its payload form.
+
+        Returns:
+            The join as a dict.
+        """
         return {
             "join_type": self.join_type,
             "path": [hop.to_ir_dict() for hop in self.path],
@@ -128,14 +155,23 @@ class QueryJoin:
 
 @dataclass(frozen=True)
 class OrderByEntry:
-    """One ``ORDER BY`` clause: column, direction, relation path, and nulls."""
+    """One sort key of a query, as `order_by()` records it."""
 
     column: str
+    """The sorted column."""
     direction: str
+    """`"asc"` or `"desc"`."""
     path: tuple[str, ...]
+    """The relation fields from the queried model to the column's model."""
     nulls: str = "last"
+    """Where `NULL` values sort: `"first"`, `"last"` or `"native"`."""
 
     def to_ir_dict(self) -> dict[str, Any]:
+        """Convert the sort key to its payload form.
+
+        Returns:
+            The sort key as a dict.
+        """
         return {
             "column": self.column,
             "direction": self.direction,
@@ -146,14 +182,23 @@ class OrderByEntry:
 
 @dataclass(frozen=True)
 class M2mContext:
-    """Many-to-many linkage context riding the payload's ``m2m`` section."""
+    """The join table details of a query over one instance's many-to-many relation."""
 
     join_table: str
+    """The join table."""
     source_col: str
+    """The join table column that points at the owning model."""
     target_col: str
+    """The join table column that points at the related model."""
     source_id: Any
+    """The owning instance's primary key."""
 
     def to_ir_dict(self) -> dict[str, Any]:
+        """Convert the details to their payload form.
+
+        Returns:
+            The details as a dict.
+        """
         return {
             "join_table": self.join_table,
             "source_col": self.source_col,
@@ -164,44 +209,71 @@ class M2mContext:
 
 @dataclass(frozen=True)
 class QueryValue:
-    """One typed literal value carried by a value-expression node."""
+    """A literal value and its kind, as the payload carries it."""
 
     kind: str
+    """The value's kind: `"null"`, `"bool"`, `"int"`, `"float"`, `"string"`, ..."""
     value: Any
+    """The value, in its JSON form."""
 
     def to_ir_dict(self) -> dict[str, Any]:
+        """Convert the value to its payload form.
+
+        Returns:
+            The value and its kind, as a dict.
+        """
         return {"kind": self.kind, "value": self.value}
 
 
 @dataclass(frozen=True)
 class LiteralValueExpr:
-    """A bound literal in the clause-agnostic SET value-expression family."""
+    """A literal new value in an update."""
 
     value: QueryValue
+    """The value."""
 
     def to_ir_dict(self) -> dict[str, Any]:
+        """Convert the expression to its payload form.
+
+        Returns:
+            The expression as a dict.
+        """
         return {"kind": "literal", "value": self.value.to_ir_dict()}
 
 
 @dataclass(frozen=True)
 class ColumnRefValueExpr:
-    """An unqualified root-column copy in the SET value-expression family."""
+    """A new value copied from another column of the same row."""
 
     column: str
+    """The column copied from."""
 
     def to_ir_dict(self) -> dict[str, Any]:
+        """Convert the expression to its payload form.
+
+        Returns:
+            The expression as a dict.
+        """
         return {"kind": "column", "column": self.column}
 
 
 @dataclass(frozen=True)
 class BinarySetExpr:
-    """A binary ``+`` / ``-`` SET value expression (#378)."""
+    """A new value computed with `+` or `-`."""
 
     op: Literal["add", "sub"]
+    """`"add"` or `"sub"`."""
     left: "SetValueExpr"
+    """The left operand."""
     right: "SetValueExpr"
+    """The right operand."""
 
     def to_ir_dict(self) -> dict[str, Any]:
+        """Convert the expression to its payload form.
+
+        Returns:
+            The expression as a dict.
+        """
         return {
             "kind": self.op,
             "left": self.left.to_ir_dict(),
@@ -211,20 +283,32 @@ class BinarySetExpr:
 
 @dataclass(frozen=True)
 class NowSetExpr:
-    """The database-clock SET value expression (#378)."""
+    """A new value read from the database's clock."""
 
     def to_ir_dict(self) -> dict[str, Any]:
+        """Convert the expression to its payload form.
+
+        Returns:
+            The expression as a dict.
+        """
         return {"kind": "now"}
 
 
 @dataclass(frozen=True)
 class MergeSetExpr:
-    """A Postgres-only shallow object-merge SET value expression (#379)."""
+    """A new value merging keys into a JSON object column (Postgres only)."""
 
     left: "SetValueExpr"
+    """The column merged into."""
     right: "SetValueExpr"
+    """The keys and values merged in."""
 
     def to_ir_dict(self) -> dict[str, Any]:
+        """Convert the expression to its payload form.
+
+        Returns:
+            The expression as a dict.
+        """
         return {
             "kind": "merge",
             "left": self.left.to_ir_dict(),
@@ -235,33 +319,47 @@ class MergeSetExpr:
 SetValueExpr = (
     LiteralValueExpr | ColumnRefValueExpr | BinarySetExpr | NowSetExpr | MergeSetExpr
 )
+"""Any new value an update can assign to a column."""
 
 
 @dataclass(frozen=True)
 class SetAssignment:
-    """One ordered root-column assignment in the canonical SET section."""
+    """One column an update assigns, and its new value."""
 
     column: str
+    """The assigned column."""
     value: SetValueExpr
+    """The new value."""
 
     def to_ir_dict(self) -> dict[str, Any]:
+        """Convert the assignment to its payload form.
+
+        Returns:
+            The assignment as a dict.
+        """
         return {"column": self.column, "value": self.value.to_ir_dict()}
 
 
 @dataclass(frozen=True)
 class RecordExpr:
-    """The expression source of an aggregate record field (v5, ADR-0009).
+    """The aggregate a projected field reads, such as `SUM(views)`.
 
-    Self-contained on the wire: ``fn`` travels as data (the closed aggregate
-    set) and ``path`` carries the source column's traversal as ordered hop
-    facts rather than keying into the ``joins`` section.
+    It carries its own relation path, apart from the query's joins.
     """
 
     fn: str
+    """The aggregate: `"count"`, `"sum"`, `"avg"`, `"min"` or `"max"`."""
     column: str
+    """The aggregated column."""
     path: tuple[QueryJoinHop, ...]
+    """The steps from the queried table to the column's table."""
 
     def to_ir_dict(self) -> dict[str, Any]:
+        """Convert the aggregate to its payload form.
+
+        Returns:
+            The aggregate as a dict.
+        """
         return {
             "fn": self.fn,
             "column": self.column,
@@ -271,21 +369,27 @@ class RecordExpr:
 
 @dataclass(frozen=True)
 class RecordField:
-    """One projected field of a ``record`` plan (ADR-0007/ADR-0009).
+    """One field of a projected record: its output name and what it reads.
 
-    ``name`` is declared separately from the source (output aliases are
-    free). A field reads from exactly one source: a ``column`` + relation
-    ``path``, or an aggregate ``expr`` whose traversal rides the expression —
-    never both, never neither (the Rust side enforces this at
-    deserialization).
+    A field reads either a column, through `path`, or an aggregate, through
+    `expr`; never both and never neither.
     """
 
     name: str
+    """The field's name on the record."""
     column: str | None
+    """The column read, or `None` for an aggregate."""
     path: tuple[str, ...]
+    """The relation fields from the queried model to the column's model."""
     expr: RecordExpr | None
+    """The aggregate read, or `None` for a column."""
 
     def to_ir_dict(self) -> dict[str, Any]:
+        """Convert the field to its payload form.
+
+        Returns:
+            The field as a dict, with `column` or `expr` as it reads.
+        """
         if self.expr is not None:
             return {
                 "name": self.name,
@@ -301,19 +405,30 @@ class RecordField:
 
 @dataclass(frozen=True)
 class RootInstances:
-    """Complete root-model instances — the default materialization plan."""
+    """Results as whole instances of the queried model, the default."""
 
     def to_ir_dict(self) -> dict[str, Any]:
+        """Convert the plan to its payload form.
+
+        Returns:
+            The plan as a dict.
+        """
         return {"kind": "root_instances"}
 
 
 @dataclass(frozen=True)
 class Record:
-    """Projected records: a typed column subset decoded into ``Row`` records."""
+    """Results as `Row` records holding the selected fields."""
 
     fields: tuple[RecordField, ...]
+    """The record's fields, in selection order."""
 
     def to_ir_dict(self) -> dict[str, Any]:
+        """Convert the plan to its payload form.
+
+        Returns:
+            The plan as a dict.
+        """
         return {
             "kind": "record",
             "fields": [field.to_ir_dict() for field in self.fields],
@@ -322,14 +437,21 @@ class Record:
 
 @dataclass(frozen=True)
 class Instances:
-    """Populated instance graphs (joined-row hydration, ADR-0008): one
-    ordered hop-fact list per include path, deliberately separate from the
-    ``joins`` section so include can never change membership or a shared
-    edge's join type."""
+    """Results as instances with the `include()` relations filled in.
+
+    The paths are kept apart from the query's joins, so an `include()` never
+    changes which rows come back or how a shared join is made.
+    """
 
     paths: tuple[tuple[QueryJoinHop, ...], ...]
+    """One path of steps per included relation."""
 
     def to_ir_dict(self) -> dict[str, Any]:
+        """Convert the plan to its payload form.
+
+        Returns:
+            The plan as a dict.
+        """
         return {
             "kind": "instances",
             "paths": [[hop.to_ir_dict() for hop in path] for path in self.paths],
@@ -337,32 +459,46 @@ class Instances:
 
 
 Materialization = RootInstances | Record | Instances
+"""What a query's results are built as: instances, records or filled-in instances."""
 
 
 @dataclass(frozen=True)
 class QueryIrPayload:
-    """The single typed wire artifact a query ships to the Rust runtime.
+    """Everything one query sends to Ferro's core, field for field.
 
-    Mirrors ``ferro_schema_ir::QueryIrPayload`` field-for-field. ``where``
-    holds :meth:`QueryNode.to_ir_dict` output — the node module owns the
-    predicate wire shape. ``limit``/``offset`` may be :data:`_ABSENT`
-    (mutating payloads omit the keys entirely). ``after`` / ``before`` are
-    omitted when unset (fetch, count, and mutating payloads alike).
+    An update or delete leaves out `limit` and `offset` entirely, and any
+    query leaves out `after` and `before` when they are not set.
     """
 
     model_name: str
+    """The queried model's registry name."""
     where: tuple[dict[str, Any], ...]
+    """The conditions, each in the dict form `QueryNode.to_ir_dict()` returns."""
     set: tuple[SetAssignment, ...]
+    """The columns an update assigns; empty for other queries."""
     order_by: tuple[OrderByEntry, ...]
+    """The sort keys."""
     limit: int | None | _AbsentType
+    """The row limit, `None`, or absent on an update or delete."""
     offset: int | None | _AbsentType
+    """The rows skipped, `None`, or absent on an update or delete."""
     after: tuple[QueryValue, ...] | None
+    """The position the results start after, one value per sort key."""
     before: tuple[QueryValue, ...] | None
+    """The position the results end before, one value per sort key."""
     m2m: M2mContext | None
+    """The join table details, on a query over a many-to-many relation."""
     joins: tuple[QueryJoin, ...]
+    """The joins the query needs."""
     materialization: Materialization
+    """What the results are built as."""
 
     def to_ir_dict(self) -> dict[str, Any]:
+        """Convert the payload to its dict form.
+
+        Returns:
+            The payload as plain dicts and lists, without the absent keys.
+        """
         payload: dict[str, Any] = {
             "model_name": self.model_name,
             "where": list(self.where),
@@ -406,16 +542,19 @@ def _target_pk_column(model_cls: type) -> str:
 def resolve_join_hops(
     model_cls: type, path: tuple[str, ...]
 ) -> tuple[QueryJoinHop, ...]:
-    """Resolve a relation path into ordered hop facts.
+    """Turn a relation path into the joins that follow it.
 
-    Each hop's ``relation``/``from_column``/``to_table``/``to_column`` is read
-    from the relation-spec chain starting at ``model_cls`` — ``from_column`` is
-    the shadow FK column on the source side, ``to_column`` the target's PK.
+    Args:
+        model_cls: The model the path starts from.
+        path: Relation field names, such as `("author",)`.
+
+    Returns:
+        One step per relation: from the foreign key column on one side to
+            the primary key of the next table.
 
     Raises:
-        ValueError: If a path element is not a declared relation of the current
-            model (should not happen — proxies validate at build time), or the
-            target has no single primary key (:func:`_target_pk_column`).
+        ValueError: A name in the path is not a relation of the model it is
+            read from, or a target model has no primary key.
     """
     hops: list[QueryJoinHop] = []
     current = model_cls
@@ -465,7 +604,7 @@ def _serialize_joins(query: "Query[Any]") -> tuple[QueryJoin, ...]:
     """Serialize the query's registered relation paths into ``joins`` entries.
 
     Emits one entry per registered full path, in insertion order, each
-    carrying its ordered hop facts (:func:`resolve_join_hops`). The Rust
+    carrying its ordered hop facts (`resolve_join_hops`). The Rust
     SELECT walkers assign deterministic ``j{i}_{relation}`` aliases and
     dedup shared prefixes at render time (#270).
 
@@ -913,30 +1052,22 @@ def _reject_mutation_misuse(query: "Query[Any]", operation: str) -> None:
 
 @dataclass(frozen=True)
 class CompiledQuery:
-    """One compiled artifact per query — GLOSSARY.md "Compiled query".
+    """A compiled query: its payload, the JSON sent and the related model classes.
 
-    ``wire_json`` and ``hop_classes`` are two views of the same compile:
-    the map is collected from the hop facts the payload itself carries, so
-    the wire and the classes the runtime hydrates through can never
-    disagree (the builder previously re-walked relation-spec chains to
-    assemble ``hop_classes`` beside the wire, agreeing by hand).
-
-    ``hop_classes`` is plan-scoped, mirroring the Rust ``needs_hop_classes``
-    guard exactly (a both-sides double-check, like #272 join edges): ``None``
-    unless the materialization plan decodes or hydrates through a hop model's
-    class — an ``instances`` plan (#286) or a ``record`` plan with traversed
-    plain fields (#293). When it is a map, it covers every hop the payload
-    carries, keyed by physical table (one model per table, enforced at
-    registration).
+    The JSON and the model classes both come from the one payload, so they
+    always agree.
     """
 
     payload: QueryIrPayload
-    """The compiled QueryIR payload."""
+    """The query's payload."""
     wire_json: str
-    """The payload serialized as the versioned wire envelope."""
+    """The payload serialized as the JSON document sent to the core."""
     hop_classes: dict[str, type] | None
-    """The hop model classes keyed by physical table, or `None` when the plan
-    decodes through no hop's class."""
+    """The related model class for each joined table, keyed by table name.
+
+    `None` unless the results are built through related models: with
+    `include()`, or a projection that reads a related model's column.
+    """
     secret_values: tuple[object, ...] = ()
     """What each `SecretStr` / `SecretBytes` literal the query compiled with
     hides, unwrapped, in the order the compile met them; empty when there is
@@ -1012,24 +1143,33 @@ def compile_query(
     assignments: Mapping[str, Any] | None = None,
     recipe: Mapping[str, Any] | None = None,
 ) -> CompiledQuery:
-    """Compile a built query into its wire artifact — the single choke point.
+    """Compile a built query into the payload for one operation.
 
-    What each verb carries is policy, stated here once:
+    Each operation carries a different part of the query:
 
-    - ``fetch`` carries everything: ordering, paging (``limit``/``offset``
-      keys, plus optional ``after`` / ``before`` bounds), m2m context, joins,
-      and the query's own materialization plan.
-    - ``count`` is unaffected by ordering, paging, and projection (PRD #277
-      verb table): it materializes a scalar, so ordering is dropped, paging
-      is ``null`` (``after`` / ``before`` omitted), and the plan is ``root_instances``
-      even on a projected query — joins and the m2m context still shape
-      membership.
-    - ``update``/``delete`` are single-table write shapes: guardrails reject
-      paging, traversal, and includes (:func:`_reject_mutation_misuse`), and
-      the payload omits the paging keys entirely.
+    - `"fetch"` carries everything: sort keys, paging, joins and how the
+      results are built.
+    - `"count"` ignores sort keys, paging and any projection, and keeps the
+      conditions and joins that decide which rows match.
+    - `"update"` and `"delete"` write one table: paging, relation paths and
+      `include()` are refused, and the payload leaves out the paging keys.
+
+    Args:
+        query: The built query.
+        verb: The operation: `"fetch"`, `"count"`, `"update"` or `"delete"`.
+        assignments: The literal column values of a keyword `update()`.
+            Defaults to `None`.
+        recipe: The column values an `update()` recipe returned. Defaults to
+            `None`.
+
+    Returns:
+        The payload, its JSON and the related model classes.
 
     Raises:
-        ValueError: From the mutate guardrails.
+        ValueError: An update or delete has paging, a relation path or an
+            `include()`, or a recipe value is not allowed.
+        TypeError: Both `assignments` and `recipe` are given, or a value
+            cannot be assigned.
     """
     identity = model_identity(query.model_cls)
     where = tuple(node.to_ir_dict() for node in query.where_clause)
@@ -1103,7 +1243,15 @@ def compile_query(
 
 
 def to_wire_json(payload: QueryIrPayload) -> str:
-    """Serialize a payload into the versioned IR envelope JSON string."""
+    """Serialize a payload as the versioned JSON document sent to the core.
+
+    Args:
+        payload: The payload to serialize.
+
+    Returns:
+        The JSON text, with the payload under `"payload"` beside its kind and
+            version.
+    """
     return json.dumps(
         {
             "ir_kind": "query",

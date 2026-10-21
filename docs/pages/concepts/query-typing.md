@@ -1,153 +1,152 @@
-# Typed Query Predicates
+---
+description: "How Ferro's lambda predicates are checked, by your type checker and when you build a query, and where checking stops."
+---
 
-`Model.where`, `Query.where`, and `Relation.where` accept a single predicate
-shape: a lambda that receives a `QueryProxy` and returns a `QueryNode`.
+# Typed query predicates
 
-```python
-rows = await User.where(lambda user: user.archived == False).all()
-rows = await User.where(
-    lambda user: (user.role == "admin") & (user.active == True)
+This page explains how Ferro's lambda predicates are checked: what your type checker sees, what Ferro checks when you build a query, and where checking stops.
+
+`Model.where()`, `Query.where()` and a relation's `where()` take one kind of argument, a lambda whose parameter stands for one row of the model:
+
+```python {test=run prelude=queries}
+uncleared_debits = await Transaction.where(
+    lambda transaction: (transaction.amount < 0)
+    & (transaction.cleared_on == None)
 ).all()
+assert {transaction.memo for transaction in uncleared_debits} == {
+    "Train to Lyon",
+    "Dinner in Lyon",
+    "Weekly shop",
+}
 ```
 
-## How It Works
+Each comparison in the lambda returns a condition, and `where()` turns the conditions into the query's `WHERE` clause. The examples on this page use the ledger from the [Queries guide](../guide/queries.md#the-ledger) and run inside a [session](../guide/connections.md#sessions).
 
-The lambda receives a fresh `QueryProxy` for the model being queried.
-Attribute access on the proxy is validated against the model's declared
-columns (plus shadow `{fk}_id` columns) and returns a `FieldProxy`, so
-`user.archived == False` builds a `QueryNode`. A misspelled column —
-`user.archievd` — raises `AttributeError` naming the closest valid match and
-listing every queryable column, at build time, before any query reaches the
-database.
+## Proxy validation
 
-Name the lambda parameter after the model in lowercase singular (`user` for
-`User`, `post` for `Post`) so predicates read like English. The full operator
-surface is available: `==`, `!=`, `<`, `<=`, `>`, `>=`, `.like()`, `.in_()`,
-`&`, `|`, `== None`, and shadow FK columns (`user.author_id`).
+The lambda never sees a `Transaction`. Ferro calls it with a [`QueryProxy`][ferro.query.QueryProxy] for the model, whose attributes are the model's columns, including the `<relation>_id` column each foreign key adds. Reading an attribute returns a `FieldProxy`, and comparing a `FieldProxy` returns a condition, a `QueryNode`.
 
-That gives you two concrete guarantees today:
+The proxy checks every name when the lambda runs, which is when you build the query. A misspelled column raises `AttributeError` with the closest match and the full list, before anything reaches the database:
 
-- **A valid predicate type-checks as `QueryNode`.** `lambda user: user.age >= 18` passes `ty check` / Pyright because `>=` on a `FieldProxy` is typed to return `QueryNode`, which is exactly what `where()` expects.
-- **A junk predicate fails the checker.** `lambda user: True` — a callable that doesn't return a `QueryNode` at all — is a type error, not a silent no-op query, because `where()`'s parameter type is `Predicate = Callable[[QueryProxy[TModel]], QueryNode]`.
-
-What isn't checked yet is the *right-hand side* of a comparison: the proxy attribute type is `FieldProxy[Any]`, so `user.age >= "eighteen"` type-checks even though it would fail at runtime. Closing that gap needs per-field static types on the proxy — TypeScript-style mapped types, proposed for Python in [PEP 827](https://peps.python.org/pep-0827/) ("Type Manipulation", draft status, targeting Python 3.16). When type checkers support it, `QueryProxy` attribute typing upgrades from `FieldProxy[Any]` to each field's real declared type — with zero runtime change — and `user.age >= "eighteen"` starts failing the checker too.
-
-`Relation.where` (used on `BackRef` collections) accepts the same shape:
-
-```python
-published = await author.posts.where(lambda post: post.published == True).all()
+```python {test=run prelude=queries}
+try:
+    Transaction.where(lambda transaction: transaction.cleard_on == None)
+except AttributeError as error:
+    assert "Did you mean 'cleared_on'?" in str(error)
+else:
+    raise AssertionError("a misspelled column must raise AttributeError")
 ```
 
-## Traversing Relations
+The query is never built, so no SQL runs.
 
-Reaching through a foreign key inside a predicate — `lambda transaction: transaction.account.ledger_id == 1` — type-checks as a predicate for the same reason a plain comparison does: attribute access on the proxy keeps returning a chainable proxy, and the terminal comparison returns `QueryNode`. The checker sees a valid `Predicate[Transaction]`; the [Queries guide](../guide/queries.md#querying-across-relationships) covers what the traversal *means* (one INNER join per relation path).
+## What the type checker sees
 
-The static gate checks the **shape** of the predicate, not the **names** in it:
+`where()` is typed to take a [`Predicate`][ferro.query.Predicate]: `Callable[[QueryProxy[TModel]], QueryNode]`. That gives two guarantees:
 
-- **A traversal that ends in a comparison type-checks.** `transaction.account.ledger_id == 1` is a `QueryNode`, so it satisfies `where()`.
-- **A bare relation as a predicate fails the checker.** `lambda transaction: transaction.account` returns a proxy, not a `QueryNode`, so it is a type error — the same failure mode as `lambda user: True`.
-- **Name typos are caught at build time, not by the checker.** A misspelled hop (`transaction.accont`, `account.emial`) is `FieldProxy[Any]` to the type checker, so it type-checks; at build time the proxy validates every hop against the real model and raises `AttributeError` with a did-you-mean naming that hop's model. The static gate guarantees shape; the runtime proxy guarantees names.
+- **A valid predicate type-checks.** `lambda transaction: transaction.amount < 0` passes `ty check` and Pyright, because `<` on a `FieldProxy` is typed to return `QueryNode`.
+- **A predicate that returns something else fails the checker.** `lambda transaction: True` returns a `bool`, not a `QueryNode`, so it is a type error rather than a query that matches every row.
 
-## Projected Queries
+A relation's `where()`, such as `account.transactions.where(...)`, takes the same `Predicate`:
 
-Partial selects extend the same shape-not-names promise through projection.
-`select(...)` with a selector flips the query's static type from
-`Query[Model]` to `ProjectedQuery[Model]`, so the terminals change shape:
-`.all()` checks as `Rows[Row]` and `.first()` as `Row | None` — never
-`list[Model]`:
-
-```python
-rows = await Transaction.select(lambda t: (t.id, t.amount)).all()  # Rows[Row]
-row = await Transaction.select(lambda t: t.amount).first()  # Row | None
-full = await Transaction.select().all()  # list[Transaction] — bare form unchanged
+```python {test=run prelude=queries}
+checking = await Account.get(1)
+uncleared = await checking.transactions.where(
+    lambda transaction: transaction.cleared_on == None
+).all()
+assert [transaction.memo for transaction in uncleared] == ["Weekly shop"]
 ```
 
-Every selector form keeps that shape: the tuple, the single field, traversal
-at any depth (`t.account.owner.email` chains as `FieldProxy[Any]`), and the
-dict form, whose values may also be **aggregate expressions**:
+Weekly shop is the one uncleared transaction on Checking.
 
-```python
-row = await Transaction.select(
-    lambda t: {"acct": t.account_id, "total": t.amount.sum()}
-).first()  # Row | None
+## Traversing relations
+
+A predicate that follows a foreign key, such as `transaction.account.owner.name == "Ada Lovelace"`, type-checks for the same reason: each attribute returns another proxy, and the final comparison returns `QueryNode`. The [Queries guide](../guide/queries.md#querying-across-relationships) covers what a traversal does to the query.
+
+The checker checks the shape of the predicate, and the proxy checks the names in it:
+
+- **A traversal that ends in a comparison type-checks**, because it returns a `QueryNode`.
+- **A bare relation fails the checker.** `lambda transaction: transaction.account` returns a proxy, not a `QueryNode`, the same failure as `lambda transaction: True`.
+- **A misspelled step type-checks, and fails when you build the query.** To the checker, `transaction.accont` is a `FieldProxy` like any other attribute; at build time the proxy checks each step against its own model and raises `AttributeError` naming that model.
+
+## Projected queries
+
+`select()` with a selector changes the query's type from `Query[Transaction]` to `ProjectedQuery[Transaction]`, so the terminals change type with it: `all()` checks as [`Rows[Row]`][ferro.query.Rows] and `first()` as [`Row`][ferro.query.Row]` | None`. A bare `select()` keeps `Query[Transaction]`:
+
+```python {test=run prelude=queries}
+from ferro import Row, Rows
+
+records = await Transaction.select(
+    lambda transaction: (transaction.id, transaction.amount)
+).all()  # Rows[Row]
+first = await Transaction.select(lambda transaction: transaction.memo).first()  # Row | None
+everything = await Transaction.select().all()  # list[Transaction]
+
+assert isinstance(records, Rows)
+assert isinstance(first, Row)
+assert isinstance(everything[0], Transaction)
 ```
 
-An aggregate expression types **opaquely**: `t.amount.sum()` is an
-`AggregateExpr` — deliberately not a value, not a `QueryNode`, not a column.
-That is what makes the misuse gates work: an aggregate compared inside
-`where()` raises at build time (post-aggregation filtering is `having()`),
-and an `AggregateExpr` is only ever valid as a dict-selector value or an
-`order_by()` lambda result.
+Each result has the type its annotation claims.
 
-The gate divides the work exactly like predicates do:
+A selected query returns records because a Ferro model instance always holds a whole row. If `select()` returned a `Transaction` with two of its seven columns loaded, every `save()`, every refresh and every function that takes a `Transaction` would have to know which query produced its argument, and reading an unloaded field would fail far from that query. A `Row` says what it is: the columns you asked for and nothing else. The query carries its result shape with it, and records are built on the same no-validation path as model instances, so selecting fewer columns is never slower per row than selecting all of them.
 
-- **Shape is checked statically.** Passing a `Row` where a model instance is
-  expected fails the checker (`list[Transaction] = await
-  Transaction.select(lambda t: (t.id,)).all()` is an `invalid-assignment`),
-  and mutating a projected query (`.update()` / `.delete()`) is a static
-  error at the call site as well as a build-time `ValueError`.
-- **Names are checked at build time.** A selected column is `FieldProxy[Any]`
-  to the checker; a misspelled column raises `AttributeError` with a
-  did-you-mean when the query is built, before any round-trip — the same
-  runtime validation as `where()` and `order_by()`.
+Every selector form keeps that type: a tuple, a single field, a traversal at any depth, and a dict, whose values may also be aggregates:
 
-The promise is **shape, not names**: the checker knows a projected query
-yields `Rows[Row]`, but not that this particular `Row` has a `.total` of type
-`int | None` — record fields type as `Any` on access. Inferring per-field
-record types from the selector (so `row.total` checks as what the aggregate
-contract says it is) is the record-field inference lane, tracked in
-[#290](https://github.com/syn54x/ferro-orm/issues/290) — another place
-typing can sharpen later with zero runtime change.
+```python {test=run prelude=queries}
+totals = await Transaction.select(
+    lambda transaction: {
+        "account_id": transaction.account_id,
+        "total": transaction.amount.sum(),
+    }
+).all()  # Rows[Row]
+assert len(totals) == 4
+```
 
-## Included Queries
+The four accounts each get one record with their total.
 
-`include()` deliberately does **not** flip the query's type the way `select()`
-does. An included query stays `Query[Model]`-shaped: `.all()` checks as
-`list[Transaction]`, `.first()` as `Transaction | None`, and populated access
-(`txns[0].account.label`) type-checks through the field's ordinary declared
-annotation. There is no `Loaded[Transaction]`.
+An aggregate such as `transaction.amount.sum()` is an [`AggregateExpr`][ferro.query.AggregateExpr]: not a value, not a `QueryNode` and not a column. That is what lets Ferro refuse its misuse: comparing an aggregate inside `where()` raises when you build the query, and an `AggregateExpr` is valid only as a dict value in a selector or as the result of an `order_by()` lambda.
 
-That is a decision, not a gap, for two reasons:
+The work divides as it does for predicates:
 
-- **A per-query "loaded" type is unsound under the identity map.** In a
-  session, the instance an included query returns is the *same object* a
-  plain query returns — populations attach to shared instances and accumulate
-  across queries. A static brand that says "this object's `account` is
-  populated" asserts something the runtime cannot pin to a type: the next
-  refresh may drop the population (see the
-  [refresh rule](../guide/queries.md#refreshes-drop-populations-that-stopped-being-true)),
-  and a plain query can hand you the already-populated object. The honest
-  static type of every instance is the model itself.
-- **The declared annotation already claims the instance.** The field says
-  `account: Account`; a distinct loaded type would need to *transform*
-  per-field types on the unloaded side instead (`account: Awaitable[Account]`
-  → `Account`), which requires TypeScript-style mapped types —
-  [PEP 827](https://peps.python.org/pep-0827/) (draft, targeting
-  Python 3.16). Population is what makes the declared annotation *true* at
-  runtime, exactly where the user opted in.
+- **The checker checks the shape.** Assigning a `Rows[Row]` to a variable typed `list[Transaction]` is an `invalid-assignment` error, and calling `update()` or `delete()` on a selected query is a type error at the call as well as a `ValueError` when it runs.
+- **The proxy checks the names.** A selected column is a `FieldProxy` to the checker; a misspelled one raises `AttributeError` when you build the query.
 
-When PEP 827 lands, typing can sharpen with zero runtime change — precisely
-because the runtime type stayed single. Meanwhile the statically catchable
-misuses do fail the gate: `include()` on a projected query is an error at the
-call site (the `self: Never` pin), and a string selector fails the callable
-parameter type.
+The checker knows a selected query returns `Rows[Row]`, but not which fields a given `Row` has: `row.total` types as `Any`. Typing each record's fields from its selector needs the type features described under [Where checking stops](#where-checking-stops).
 
-## What This Doesn't Change
+## Included queries
 
-- Your model annotations. `archived: bool = False` stays exactly as it is.
-- Pydantic schema generation, JSON schema output, or model validation.
-- The Rust FFI bridge architecture (predicates serialize through QueryIR envelopes).
+`include()` does not change the query's type. An included query is still a `Query[Transaction]`: `all()` checks as `list[Transaction]`, `first()` as `Transaction | None`, and a populated relation (`transactions[0].account.label`) type-checks through the field's own annotation. There is no `Loaded[Transaction]` type.
+
+`include()` keeps the model type for two reasons:
+
+- **A "loaded" type would be wrong under the identity map.** In a session, an included query returns the same objects a plain query returns: populations attach to shared instances and accumulate across queries. A type that says "this object's `account` is populated" claims something the next refresh may undo (see [Population after a refresh](../guide/queries.md#population-after-a-refresh)), and a plain query can hand you an object an earlier query populated. The one type that is always true of an instance is its model.
+- **The annotation already names the instance.** The field says `account: Account`. A separate loaded type would have to rewrite each field's type on the unloaded side (`account: Awaitable[Account]` to `Account`), which needs type features Python does not have yet; see [Where checking stops](#where-checking-stops). Populating a relation is what makes the declared annotation true, where you asked for it.
+
+The misuses a checker can catch do fail it: `include()` on a selected query is a type error at the call, and a string selector fails the lambda parameter type.
+
+## Where checking stops
+
+The checker does not check the right-hand side of a comparison. A proxy attribute is a `FieldProxy[Any]`, so `transaction.amount < "a lot"` type-checks and fails only when it runs. The same gap leaves record fields typed `Any` and rules out a "loaded" model type.
+
+Closing it needs per-field types on the proxy: TypeScript-style mapped types, which [PEP 827](https://peps.python.org/pep-0827/) ("Type Manipulation", a draft) proposes for Python. Once type checkers support them, `QueryProxy` attributes can carry each field's declared type, record fields can carry their selected types, and `transaction.amount < "a lot"` will fail the checker. None of that needs a change at runtime, because the runtime already has one type per result.
+
+## Unchanged behavior
+
+Lambda predicates change nothing outside the query:
+
+- Your model annotations stay as they are: `cleared_on: date | None = None` is still a plain Pydantic field.
+- Pydantic's schema generation, JSON schema output and validation are unchanged.
+- Predicates reach the Rust core through the same query envelopes as every other query.
 
 ## Reference
 
-- `ferro.query.QueryProxy` — validating attribute proxy passed to lambda predicates.
-- `ferro.query.Predicate` — `Callable[[QueryProxy[TModel]], QueryNode]`, the type of any lambda predicate.
-- `ferro.query.FieldProxy` — generic over the column's Python type (`FieldProxy[T]`); the mechanism a `QueryProxy` attribute access returns.
-- `ferro.query.RowSelector` — the type of a `select()` lambda selector: a callable returning one field, a tuple of fields, or a dict of output names to fields/aggregates.
-- `ferro.query.AggregateExpr` — the opaque type of `t.amount.sum()` and friends; valid only as a dict-selector value or an `order_by()` lambda result.
-- `ferro.query.Row` / `ferro.query.Rows` — projected records and their list-like container, the result shape of a projected query.
+- [`QueryProxy`][ferro.query.QueryProxy]: the object a predicate's parameter receives
+- [`Predicate`][ferro.query.Predicate]: the type of a lambda predicate
+- [`RowSelector`][ferro.query.RowSelector]: the type of a `select()` lambda
+- [`AggregateExpr`][ferro.query.AggregateExpr]: the type of `transaction.amount.sum()` and the other aggregates
+- [`Row`][ferro.query.Row] and [`Rows`][ferro.query.Rows]: the records a selected query returns
 
-## See Also
+## See also
 
-- [Queries Guide](../guide/queries.md)
-- [Type Safety](type-safety.md)
+- [Queries guide](../guide/queries.md)
+- [Type safety](type-safety.md)

@@ -1,33 +1,34 @@
 """Historical models: the classes a data step queries, built from snapshots.
 
-Migration ``0011_backfill_slugs`` adds ``slug`` to ``author`` and renames
-``name`` to ``full_name``. Its data step runs between the expand and the
-contract, when the live table holds both the old columns and the new ones,
-so its historical ``Author`` is the **union** of the parent's snapshot and
-the migration's own (ADR-0025)::
+Migration `0011_backfill_slugs` adds `slug` to `author` and renames `name`
+to `full_name`. Its data step runs between the expand and the contract, when
+the live table holds both the old columns and the new ones, so its
+historical `Author` is the union of the parent's snapshot and the
+migration's own:
 
-    parent  0010/ir.json   author: id, name, bio
-    own     0011/ir.json   author: id, full_name (renamed_from "name"), slug
-    union                  author: id, full_name, bio, slug (nullable)
+```text
+parent  0010/ir.json   author: id, name, bio
+own     0011/ir.json   author: id, full_name (renamed_from "name"), slug
+union                  author: id, full_name, bio, slug (nullable)
+```
 
 - a column only the migration's own snapshot has is nullable, whatever it
-  declares: the expand created it so and every row holds ``NULL`` until the
+  declares: the expand created it so and every row holds `NULL` until the
   backfill runs;
 - a live rename hint (the own snapshot names an old column the parent has,
   and the parent lacks the new name) is one column under its new name;
 - a same-named column whose storage differs between the two snapshots (its
-  type, ``db_type`` or enum type) is refused, naming both declarations: the
+  type, `db_type` or enum type) is refused, naming both declarations: the
   safe expand/contract shape never produces it. A column that only stops (or
-  starts) accepting ``NULL`` is not that: the union keeps it nullable, which
-  is what lets a backfill fill the ``NULL``s before the contract;
+  starts) accepting `NULL` is not that: the union keeps it nullable, which
+  is what lets a backfill fill the `NULL`s before the contract;
 - an enum's labels are the union of both snapshots' labels.
 
-Each table becomes a columns-only class built through ferro's own metaclass
-(no relations, methods or validators; a foreign key is its plain ``*_id``
-column), under the module identity ``ferro.migrations.historical.<rev>``,
-registered into a registry of its own (:meth:`ferro.registry.Registry.capture`)
-so today's registry never sees it. A many-to-many join table gets a class
-like any other table.
+Each table becomes a columns-only class built through Ferro's own metaclass
+(no relations, methods or validators; a foreign key is its plain `*_id`
+column), under the module identity `ferro.migrations.historical.<rev>`,
+registered into a registry of its own so today's registry never sees it. A
+many-to-many join table gets a class like any other table.
 """
 
 from __future__ import annotations
@@ -63,7 +64,7 @@ _ANNOTATIONS: dict[str, Any] = {
     "unknown": Any,
 }
 """Each SchemaIR ``logical_type`` and the annotation that compiles back to it
-(``ferro.columns._logical_type`` read in reverse). :func:`_check_compiled`
+(``ferro.columns._logical_type`` read in reverse). `_check_compiled`
 pins every class against its union, so a gap here fails loudly."""
 
 # The column facts that decide storage: a same-named column differing in one
@@ -86,12 +87,19 @@ class HistoricalModelError(MigrationRefused):
 def build(
     previous: dict[str, Any] | None, current: dict[str, Any], *, rev: str
 ) -> HistoricalModels:
-    """The historical models of migration ``rev``: the union of its parent's
-    snapshot ``previous`` (``None`` for the first migration) and its own
-    ``current`` (SchemaIR envelopes, as ``ir.json`` stores them).
+    """Build the historical models of a migration: the union of its parent's snapshot and its own.
+
+    Args:
+        previous: The parent's snapshot, as `ir.json` stores it; `None` for
+            the first migration.
+        current: The migration's own snapshot, as `ir.json` stores it.
+        rev: The migration, such as `0011_backfill_slugs`.
+
+    Returns:
+        The historical models, one class per table of the union.
 
     Raises:
-        HistoricalModelError: a same-named column is declared with different
+        HistoricalModelError: A same-named column is declared with different
             storage in the two snapshots (naming both).
     """
     tables = _union(_tables(previous), _tables(current), rev)
@@ -99,7 +107,15 @@ def build(
 
 
 def build_single(snapshot: dict[str, Any], rev: str) -> HistoricalModels:
-    """The historical models of one snapshot alone, as it declares them."""
+    """Build the historical models of one snapshot alone, as it declares them.
+
+    Args:
+        snapshot: The snapshot, as `ir.json` stores it.
+        rev: The migration the snapshot belongs to.
+
+    Returns:
+        The historical models, one class per table.
+    """
     return _models(_tables(snapshot), rev)
 
 
@@ -288,7 +304,7 @@ def _field(model: dict[str, Any], column: dict[str, Any]) -> tuple[Any, Any]:
 
 def _enum(column: dict[str, Any]) -> type[enum.Enum]:
     """The historical enum: every label either snapshot declares. A value
-    the live type holds beyond them fails hydration naming it (ADR-0035)."""
+    the live type holds beyond them fails hydration naming it."""
     type_name = column["enum_type_name"]
     values: Iterable[Any] = column["enum_values"]
     # Member names only label the values; a sunder-looking label gets a prefix.

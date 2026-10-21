@@ -1,211 +1,179 @@
-"""Runnable companion to the Existence Tests guide (docs/pages/guide/queries.md).
+"""Runnable companion to "Existence tests on reverse & many-to-many
+relations" in the Queries guide (docs/pages/guide/queries.md).
 
-Seeds the transfer/split-line domain the guide walks through (one-to-one and
-to-many BackRefs plus a category both layers point at) and a tagged-user M2M
-pair, then runs every existence test the guide shows and asserts the exact
-rows that come back.
+Runs every existence test the guide shows against the guide's ledger
+(declared in predicates.py, rows from _ledger_seed.py) and asserts the rows
+that come back.
 """
 
 import asyncio
-from typing import Annotated
 
-from ferro import (
-    BackRef,
-    Field,
-    ForeignKey,
-    ManyToMany,
-    Model,
-    Relation,
-    connect,
-    engines,
-)
+import predicates
+from _ledger_seed import seed
+from predicates import Account, Category, Owner, Tag, Transaction
 
-
-# --8<-- [start:schema]
-class Category(Model):
-    id: int | None = Field(default=None, primary_key=True)
-    name: str
-    transactions: Relation[list["Transaction"]] = BackRef()
-    lines: Relation[list["SplitLine"]] = BackRef()
-
-
-class Transaction(Model):
-    id: int | None = Field(default=None, primary_key=True)
-    amount: int
-    category: Annotated[
-        Category | None, ForeignKey(related_name="transactions", on_delete="SET NULL")
-    ] = None
-    # One-to-one BackRefs: a transfer references a transaction via a unique FK
-    transfer_out: "Transfer" = BackRef()
-    transfer_in: "Transfer" = BackRef()
-    # To-many BackRef: a split transaction carries its lines
-    lines: Relation[list["SplitLine"]] = BackRef()
-
-
-class Transfer(Model):
-    id: int | None = Field(default=None, primary_key=True)
-    outflow_transaction: Annotated[
-        Transaction | None, ForeignKey(related_name="transfer_out", unique=True)
-    ] = None
-    inflow_transaction: Annotated[
-        Transaction | None, ForeignKey(related_name="transfer_in", unique=True)
-    ] = None
-
-
-class SplitLine(Model):
-    id: int | None = Field(default=None, primary_key=True)
-    txn: Annotated[Transaction, ForeignKey(related_name="lines", on_delete="CASCADE")]
-    category: Annotated[
-        Category | None, ForeignKey(related_name="lines", on_delete="SET NULL")
-    ] = None
-    amount: int = 0
-
-
-# --8<-- [end:schema]
-
-
-# --8<-- [start:m2m-schema]
-class Tag(Model):
-    id: int | None = Field(default=None, primary_key=True)
-    name: str
-    users: Relation[list["User"]] = ManyToMany(related_name="tags")
-
-
-class User(Model):
-    id: int | None = Field(default=None, primary_key=True)
-    username: str
-    tags: Relation[list["Tag"]] = BackRef()
-
-
-# --8<-- [end:m2m-schema]
+from ferro import connect, engines
 
 
 async def main() -> None:
     await connect("sqlite::memory:", auto_migrate=True)
 
     async with engines.session():
-        outflow = await Transaction.create(amount=-100)
-        inflow = await Transaction.create(amount=100)
-        plain = await Transaction.create(amount=-20)
-        assert plain.amount == -20
-        await Transfer.create(outflow_transaction=outflow)
-        await Transfer.create(inflow_transaction=inflow)
+        await seed(vars(predicates))
+
+        # --8<-- [start:first]
+        split = await Transaction.where(
+            lambda transaction: transaction.lines.exists()
+        ).all()
+        assert [transaction.memo for transaction in split] == ["Weekly shop"]
+        # --8<-- [end:first]
 
         # --8<-- [start:bare]
-        # "Is this transaction part of any transfer?" — membership via either
-        # FK column, one EXISTS per side, each matching row exactly once.
-        in_transfer = await Transaction.where(
-            lambda t: t.transfer_out.exists() | t.transfer_in.exists()
+        in_a_transfer = await Transaction.where(
+            lambda transaction: (
+                transaction.transfer_out.exists() | transaction.transfer_in.exists()
+            )
         ).all()
+        assert {transaction.memo for transaction in in_a_transfer} == {
+            "To savings",
+            "From checking",
+        }
 
-        # The negated branch: ~ renders NOT EXISTS
-        not_in_transfer = await Transaction.where(
-            lambda t: ~t.transfer_out.exists() & ~t.transfer_in.exists()
-        ).all()
+        not_in_a_transfer = await Transaction.where(
+            lambda transaction: (
+                ~transaction.transfer_out.exists() & ~transaction.transfer_in.exists()
+            )
+        ).count()
+        assert not_in_a_transfer == 7
         # --8<-- [end:bare]
-        assert {t.amount for t in in_transfer} == {-100, 100}
-        assert {t.amount for t in not_in_transfer} == {-20}
 
-        groceries = await Category.create(name="Groceries")
-        split = await Transaction.create(amount=-70)  # category vacated while split
-        await SplitLine.create(txn=split, category=groceries, amount=-30)
-        await SplitLine.create(txn=split, category=groceries, amount=-40)
-        await Transaction.create(amount=-10, category=groceries)
-        ids = [groceries.id]
+        groceries = await Category.where(
+            lambda category: category.name == "Groceries"
+        ).first()
+        dining = await Category.where(
+            lambda category: category.name == "Dining"
+        ).first()
+        assert groceries is not None and dining is not None
 
         # --8<-- [start:scoped]
-        # The inner lambda is a full ferro predicate over the related model:
-        # "transactions carrying the category at the root OR on any line".
-        # A line-less transaction survives through the OR's root branch, and
-        # a transaction with several matching lines comes back exactly once.
-        matching = await Transaction.where(
-            lambda t: (
-                t.category_id.in_(ids)
-                | t.lines.exists(lambda line: line.category_id.in_(ids))
-            )
-        ).all()
-        # --8<-- [end:scoped]
-        assert {t.amount for t in matching} == {-70, -10}
-
-        # --8<-- [start:composes]
-        # Root-shaped results: existence tests compose with every other
-        # predicate, ordering, and paging — nothing about the query changes.
-        page = (
-            await Transaction.where(
-                lambda t: (
-                    t.category_id.in_(ids)
-                    | t.lines.exists(lambda line: line.category_id.in_(ids))
+        # Groceries on the transaction itself, or on any of its split lines.
+        grocery_spend = await Transaction.where(
+            lambda transaction: (
+                (transaction.category_id == groceries.id)
+                | transaction.lines.exists(
+                    lambda split_line: split_line.category_id == groceries.id
                 )
             )
-            .order_by("amount", "desc")
-            .limit(1)
-            .all()
-        )
-        # --8<-- [end:composes]
-        assert [t.amount for t in page] == [-10]
+        ).all()
+        assert {transaction.memo for transaction in grocery_spend} == {
+            "Market run",
+            "Weekly shop",
+        }
+        # --8<-- [end:scoped]
 
-        fuel_run = await Transaction.create(amount=-55)
-        await SplitLine.create(txn=fuel_run, category=groceries, amount=-55)
-        spread = await Transaction.create(amount=-60)
-        await SplitLine.create(txn=spread, category=groceries, amount=-5)
-        await SplitLine.create(txn=spread, amount=-55)
+        # --8<-- [start:composes]
+        largest_grocery_spend = (
+            await Transaction.where(
+                lambda transaction: (
+                    (transaction.category_id == groceries.id)
+                    | transaction.lines.exists(
+                        lambda split_line: split_line.category_id == groceries.id
+                    )
+                )
+            )
+            .order_by(lambda transaction: transaction.amount)
+            .first()
+        )
+        assert largest_grocery_spend is not None
+        assert largest_grocery_spend.memo == "Weekly shop"
+        # --8<-- [end:composes]
 
         # --8<-- [start:grouping]
-        # Grouping is YOUR choice, spelled explicitly — the two shapes below
-        # are different questions with different answers.
-
-        # One line matches BOTH conditions:
+        # One split line that is both Dining and below -50:
         one_line_both = await Transaction.where(
-            lambda t: t.lines.exists(
-                lambda line: line.category_id.in_(ids) & (line.amount <= -50)
+            lambda transaction: transaction.lines.exists(
+                lambda split_line: (
+                    (split_line.category_id == dining.id) & (split_line.amount < -50)
+                )
             )
         ).all()
+        assert one_line_both == []
 
-        # SOME line matches each condition (possibly different lines):
+        # A Dining line, and a line below -50 (here, two different lines):
         some_line_each = await Transaction.where(
-            lambda t: (
-                t.lines.exists(lambda line: line.category_id.in_(ids))
-                & t.lines.exists(lambda line: line.amount <= -50)
+            lambda transaction: (
+                transaction.lines.exists(
+                    lambda split_line: split_line.category_id == dining.id
+                )
+                & transaction.lines.exists(lambda split_line: split_line.amount < -50)
             )
         ).all()
+        assert [transaction.memo for transaction in some_line_each] == ["Weekly shop"]
         # --8<-- [end:grouping]
-        assert {t.amount for t in one_line_both} == {-55}
-        assert {t.amount for t in some_line_each} == {-55, -60}
 
         # --8<-- [start:traversal-inside]
-        # Forward traversal works inside the test (joins render INSIDE the
-        # EXISTS subquery, ADR-0006 semantics unchanged), and tests nest.
-        by_name = await Transaction.where(
-            lambda t: t.lines.exists(lambda line: line.category.name == "Groceries")
+        food_lines = await Transaction.where(
+            lambda transaction: transaction.lines.exists(
+                lambda split_line: split_line.category.parent.name == "Food"
+            )
         ).all()
-
-        active_categories = await Category.where(
-            lambda c: c.lines.exists(lambda line: line.txn.amount < -50)
-        ).all()
+        assert [transaction.memo for transaction in food_lines] == ["Weekly shop"]
         # --8<-- [end:traversal-inside]
-        assert {t.amount for t in by_name} == {-70, -55, -60}
-        assert {c.name for c in active_categories} == {"Groceries"}
 
-        admin = await Tag.create(name="admin")
-        beta = await Tag.create(name="beta")
-        alice = await User.create(username="alice")
-        bob = await User.create(username="bob")
-        await User.create(username="carol")
-        await admin.users.add(alice)
-        await beta.users.add(alice, bob)
+        # --8<-- [start:nested]
+        owners_with_split_spending = await Owner.where(
+            lambda owner: owner.accounts.exists(
+                lambda account: account.transactions.exists(
+                    lambda transaction: transaction.lines.exists()
+                )
+            )
+        ).all()
+        assert [owner.name for owner in owners_with_split_spending] == ["Ada Lovelace"]
+        # --8<-- [end:nested]
 
         # --8<-- [start:m2m]
-        # Many-to-many spells identically — the test correlates through the
-        # join table, and the inner lambda scopes over the target model.
-        admins = await User.where(
-            lambda u: u.tags.exists(lambda tag: tag.name == "admin")
+        taxed = await Transaction.where(
+            lambda transaction: transaction.tags.exists(lambda tag: tag.name == "tax")
         ).all()
-        tagged = await User.where(lambda u: u.tags.exists()).all()
-        untagged = await User.where(lambda u: ~u.tags.exists()).all()
+        assert [transaction.memo for transaction in taxed] == ["Rent"]
+
+        tags_on_uncleared = await Tag.where(
+            lambda tag: tag.transactions.exists(
+                lambda transaction: transaction.cleared_on == None
+            )
+        ).all()
+        assert [tag.name for tag in tags_on_uncleared] == ["reimbursable"]
+
+        untagged = await Transaction.where(
+            lambda transaction: ~transaction.tags.exists()
+        ).count()
+        assert untagged == 6
         # --8<-- [end:m2m]
-        assert {u.username for u in admins} == {"alice"}
-        assert {u.username for u in tagged} == {"alice", "bob"}
-        assert {u.username for u in untagged} == {"carol"}
+
+        # --8<-- [start:dead-ends]
+        try:
+            Transaction.where(
+                lambda transaction: transaction.lines.category_id == groceries.id
+            )
+        except AttributeError as error:
+            assert "lines.exists(" in str(error)
+        else:
+            raise AssertionError("column access on a reverse relation must raise")
+
+        try:
+            Transaction.where(lambda transaction: transaction.transfer_out != None)
+        except TypeError as error:
+            assert "transfer_out.exists()" in str(error)
+        else:
+            raise AssertionError("comparing a reverse relation must raise")
+
+        try:
+            Account.select().join(lambda account: account.transactions)
+        except TypeError as error:
+            assert "transactions.exists(" in str(error)
+        else:
+            raise AssertionError("joining a reverse relation must raise")
+        # --8<-- [end:dead-ends]
 
     print("existence_tests example ran successfully")
 

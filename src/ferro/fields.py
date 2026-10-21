@@ -1,4 +1,4 @@
-"""Expose Ferro's wrapped Field helper on top of Pydantic."""
+"""`Field`, `BackRef` and `ManyToMany`: Pydantic's `Field` with Ferro's database options."""
 
 from __future__ import annotations
 
@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from pydantic.fields import Deprecated, FieldInfo
 
 FERRO_FIELD_EXTRA_KEY = "ferro_field"
+"""The `json_schema_extra` key under which `Field` stores its database options."""
 _T = TypeVar("_T")
 
 
@@ -415,32 +416,57 @@ def Field(
     fail_fast: bool | None = _Unset,
     **extra: Unpack[_EmptyKwargs],
 ) -> Any:
-    """Build field metadata with Pydantic and Ferro options
+    """Declare a model field with Pydantic's options and Ferro's database options.
+
+    `Field` takes every argument of Pydantic's own `Field` and adds the
+    database options Ferro reads: primary key, uniqueness, indexes, column
+    type, relations and rename hints. Use it as the field's default, or
+    inside `Annotated[...]`. See
+    [Field options](../guide/models-and-fields.md#field-options) for each
+    database option at work.
 
     Args:
-        default: Default value used when the field is not set.
-        primary_key: Mark this column as the table primary key in Ferro.
-        autoincrement: Override automatic increment behavior for primary key columns.
-            When not provided, Ferro infers this for integer primary keys.
-        unique: Add a **single-column** uniqueness constraint for this column in Ferro.
-            Multi-column uniqueness is declared with ``__ferro_composite_uniques__`` on the model.
-        index: Request an index for this column in Ferro.
-        back_ref: Mark this field as a reverse relationship. This is the lower-level
-            equivalent of assigning ``BackRef()`` as the field default.
-        many_to_many: Mark this field as a many-to-many relationship.
-        related_name: Reverse relationship field name used by many-to-many relationships.
-        through: Optional join table name used by many-to-many relationships.
-        nullable: Alembic ``Column.nullable`` override for :func:`~ferro.migrations.get_metadata`.
-            ``\"infer\"`` (default) derives nullability from the field annotation.
-        renamed_from: The column's previous name. ``ferro migrate new`` renders
-            ``RENAME COLUMN`` (and renames every index and check named after the
-            column) while the previous migration still holds that name; after
-            that migration the hint is inert and may stay or be deleted.
-        retired: Retire the column (ADR-0053): the field leaves the model (no
-            attribute, no keyword, no statement the model issues names it) and
-            the column stays in the schema snapshot, nullable, until the
-            declaration is deleted in a later release. The annotation must
-            allow ``None``.
+        default: The value the field takes when it is not set.
+        primary_key: Make the column the table's primary key.
+        autoincrement: Whether the database generates the key. When not
+            given, an integer primary key auto-increments.
+        unique: Add a unique constraint on this column alone. For uniqueness
+            across several columns, declare `__ferro_composite_uniques__` on
+            the model (see
+            [Composite uniques](../guide/models-and-fields.md#composite-uniques)).
+        index: Add an index on the column.
+        back_ref: Mark the field as the reading side of a relation. Assigning
+            [`BackRef()`][ferro.BackRef] is the usual spelling.
+        many_to_many: Mark the field as a many-to-many relation.
+            [`ManyToMany(...)`][ferro.ManyToMany] is the usual spelling.
+        related_name: The name of the relation on the target model that reads
+            this one back.
+        through: The many-to-many join table's name. When not given, Ferro
+            derives one from the two models.
+        reverse_index: Add an index on the many-to-many join table's
+            `(target, source)` columns for queries from the other side. When
+            not given, the index is added.
+        nullable: `"infer"` (the default) makes the column nullable when the
+            annotation allows `None`; `True` or `False` forces `NULL` or
+            `NOT NULL` in every schema Ferro emits, whatever the annotation
+            says.
+        db_type: The column's SQL type, overriding the one Ferro derives from
+            the annotation: a [`DbTypeToken`][ferro.DbTypeToken] or a
+            [`varchar(N)`][ferro.varchar] name. When not given, the column
+            takes the derived type. A type the annotation cannot be stored
+            as is refused when the class is defined.
+        db_check: Add a `CHECK` constraint, named `ck_<table>_<column>`, that
+            limits the column to an enum's values. Needs `db_type`, since the
+            default native enum type already enforces them. Defaults to
+            `False`.
+        renamed_from: The column's previous name, so that `ferro migrate new`
+            renames the column, and every index and check named after it,
+            instead of dropping and adding it. See
+            [Rename hints](../guide/schema/renames-and-retirements.md#rename-hints).
+        retired: Take the column out of the model while it stays in the
+            schema, nullable, until a later release deletes the declaration.
+            The annotation must allow `None`. Defaults to `False`. See
+            [Retiring a column](../guide/schema/renames-and-retirements.md#retiring-a-column).
         default_factory: A callable to generate the default value. The callable can either take 0 arguments
             (in which case it is called as is) or a single argument containing the already validated data.
         alias: The name to use for the attribute when validating or serializing by alias.
@@ -470,7 +496,7 @@ def Field(
             (Only applies to dataclasses.)
         coerce_numbers_to_str: Whether to enable coercion of any `Number` type to `str` (not applicable in `strict` mode).
         strict: If `True`, strict validation is applied to the field.
-            See [Strict Mode](../concepts/strict_mode.md) for details.
+            See [Strict Mode](https://docs.pydantic.dev/latest/concepts/strict_mode/).
         gt: Greater than. If set, value must be greater than this. Only applicable to numbers.
         ge: Greater than or equal. If set, value must be greater than or equal to this. Only applicable to numbers.
         lt: Less than. If set, value must be less than this. Only applicable to numbers.
@@ -480,33 +506,53 @@ def Field(
         max_length: Maximum length for iterables.
         pattern: Pattern for strings (a regular expression).
         allow_inf_nan: Allow `inf`, `-inf`, `nan`. Only applicable to float and [`Decimal`][decimal.Decimal] numbers.
-        max_digits: Maximum number of allow digits for strings.
+        max_digits: Maximum number of allowed digits for strings.
         decimal_places: Maximum number of decimal places allowed for numbers.
         union_mode: The strategy to apply when validating a union. Can be `smart` (the default), or `left_to_right`.
-            See [Union Mode](../concepts/unions.md#union-modes) for details.
+            See [Union Mode](https://docs.pydantic.dev/latest/concepts/unions/#union-modes).
         fail_fast: If `True`, validation will stop on the first error. If `False`, all validation errors will be collected.
             This option can be applied only to iterable types (list, tuple, set, and frozenset).
-        extra: (Deprecated) Extra fields that will be included in the JSON schema.
-
-            !!! warning Deprecated
-                The `extra` kwargs is deprecated. Use `json_schema_extra` instead.
+        **extra: Deprecated: extra fields to include in the JSON schema. Use
+            `json_schema_extra` instead.
 
     Returns:
-        A new [`FieldInfo`][pydantic.fields.FieldInfo]. The return annotation is `Any` so `Field` can be used on
-            type-annotated fields without causing a type error.
+        A new [`FieldInfo`][pydantic.fields.FieldInfo]. The return annotation
+            is `Any` so that `Field` type-checks as any field's default.
 
     Raises:
-        TypeError: If Ferro kwargs are provided together with callable `json_schema_extra`.
+        TypeError: A database option is given together with a callable
+            `json_schema_extra`, or `nullable`, `renamed_from` or `retired`
+            has a value of the wrong type.
 
     Examples:
-        >>> from typing import Annotated
-        >>> from ferro import Field, Model
-        >>> class User(Model):
-        ...     id: int | None = Field(default=None, primary_key=True)
-        ...     username: str = Field(unique=True, min_length=3)
-        >>> class UserAnnotated(Model):
-        ...     id: Annotated[int | None, Field(default=None, primary_key=True)]
-        ...     username: Annotated[str, Field(unique=True, min_length=3)]
+        ```python {test=run prelude=reference}
+        from ferro import Field, Model, create_tables
+
+
+        class Reader(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            handle: str = Field(unique=True, min_length=3)
+            nickname: str | None = Field(default=None, index=True)
+
+
+        await create_tables()
+        reader = await Reader.create(handle="ada")
+        assert reader.id == 1
+        ```
+
+        The same model with the options inside `Annotated`:
+
+        ```python {test=run prelude=reference}
+        from typing import Annotated
+
+        from ferro import Field, Model
+
+
+        class Reader(Model):
+            id: Annotated[int | None, Field(primary_key=True)] = None
+            handle: Annotated[str, Field(unique=True, min_length=3)]
+            nickname: Annotated[str | None, Field(index=True)] = None
+        ```
     """
     ferro_kwargs: dict[str, Any] = {}
     if primary_key is not _Unset:
@@ -597,9 +643,20 @@ def Field(
 
 
 class BackRef:
-    """Declare a reverse relationship field.
+    """The reading side of a relation, assigned as the field's default.
 
-    ``BackRef()`` is a convenience wrapper around ``Field(back_ref=True)``.
+    `BackRef()` is `Field(back_ref=True)`. Pair it with the
+    [`ForeignKey`][ferro.ForeignKey] or [`ManyToMany`][ferro.ManyToMany]
+    whose `related_name` names this field; the field adds no column. It
+    takes the keyword arguments of [`Field`][ferro.Field] except
+    `reverse_index`, which belongs on the `ManyToMany` side.
+
+    Examples:
+        ```python {test=run prelude=reference}
+        ada = await Author.where(lambda author: author.name == "Ada Lovelace").first()
+        titles = [post.title for post in await ada.posts.all()]
+        assert titles == ["Notes on the Analytical Engine"]
+        ```
     """
 
     def __new__(cls, **kwargs: Any) -> Any:
@@ -625,15 +682,49 @@ def ManyToMany(
     reverse_index: bool = True,
     **kwargs: Any,
 ) -> Any:
-    """Declare a many-to-many relationship field.
+    """Declare a many-to-many relation, assigned as the field's default.
+
+    Ferro creates the join table. Annotate the field
+    `Relation[list[Target]]`, and give the target a
+    [`BackRef`][ferro.BackRef] named by `related_name`. See
+    [Many-to-many](../guide/relationships.md#many-to-many).
 
     Args:
-        related_name: Name for reverse access from the related model.
-        through: Optional explicit join table name. When omitted, Ferro
-            generates a join table name automatically.
-        reverse_index: When True (default), the synthesized join table gets
-            a non-unique composite index on ``(target_col, source_col)`` to
-            optimize back-ref queries. Set to False to opt out.
+        related_name: The name of the relation on the target model that reads
+            this one back.
+        through: The join table's name. Defaults to `None`, a name Ferro
+            derives from the two models.
+        reverse_index: Add an index on the join table's `(target, source)`
+            columns for queries from the other side. Defaults to `True`; turn
+            it off for a write-heavy join table.
+        **kwargs: Other keyword arguments of [`Field`][ferro.Field].
+
+    Returns:
+        The field's metadata, as [`Field`][ferro.Field] returns it.
+
+    Examples:
+        ```python {test=run prelude=reference}
+        from ferro import BackRef, Field, ManyToMany, Model, Relation, create_tables
+
+
+        class Tag(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            label: str
+            posts: Relation[list["Article"]] = BackRef()
+
+
+        class Article(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            title: str
+            tags: Relation[list[Tag]] = ManyToMany(related_name="posts")
+
+
+        await create_tables()
+        history = await Tag.create(label="history")
+        article = await Article.create(title="Babbage's engines")
+        await article.tags.add(history)
+        assert [tag.label for tag in await article.tags.all()] == ["history"]
+        ```
     """
 
     return Field(

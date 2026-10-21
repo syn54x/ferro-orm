@@ -1,51 +1,22 @@
-"""The migration test harness: a project's own tests prove its chain (ADR-0045).
+"""The migration test harness: a project's own tests prove its chain.
 
-Migration ``0012_add_slug`` adds ``author.slug`` and backfills it in a data
-step. The test seeds a row the way the table stood at ``0011``, applies
-exactly ``0012``, and reads the row back the way ``0012`` left it::
-
-    from ferro.migrations.testing import harness
-
-    async def test_slug_backfill(db_url, migrations_settings):
-        await ferro.connect(db_url)
-        h = harness(settings=migrations_settings, database="default")
-        await h.apply_through("0011")
-        async with h.models_at("0011") as models:
-            await models.Author(name="Ada").save()   # seed against the schema that existed
-        await h.apply("0012")                        # refused unless the database stands at 0011
-        async with h.models_at("0012") as models:
-            ada = await models.Author.where(lambda author: author.name == "Ada").first()
-            assert ada.slug == "ada"
-        await h.revert_to("0011")
-        await h.round_trip()
-
-and the test that every down reaches its parent is one line::
-
-    async def test_the_chain_round_trips(db_url):
-        await ferro.connect(db_url)
-        result = await harness().round_trip()
-        assert result.irreversible is None
-
-The harness carries what the application's own calls refuse (ADR-0040,
-ADR-0038): a target on the way up, a revert with no prompt, and the
-historical models outside a data step. It is one object per fixture,
-binding ``settings=``, ``database=`` and ``using=`` once (one
-:class:`~ferro.migrations.target.Target`, as every verb resolves) and
-keeping no other state: every call reads where the database stands from
-its tracking table. It never makes a database fresh and never skips a dialect (both are
-the project's fixture), and it has no ``reset()`` and no step-level target
-(``"0007:02"``): no snapshot describes the state between two steps.
+The harness carries what the application's own calls refuse: a target on
+the way up, a revert with no prompt, and the historical models outside a
+data step. It is one object per fixture, binding `settings=`, `database=`
+and `using=` once and keeping no other state: every call reads where the
+database stands from its tracking table. It never makes a database fresh
+and never skips a dialect (both are the project's fixture), and it has no
+`reset()` and no step-level target (`"0007:02"`): no snapshot describes the
+state between two steps.
 
 Nothing here decides how a migration runs. Every step runs through the
-runner (``up`` bounded by its ``through``, :func:`~ferro.migrations.runner.down`)
-under its run lock, every comparison is :func:`ferro.migrations.drift`, and
-every historical model is built by
-:func:`ferro.migrations.historical.build_single` and installed with
-:meth:`ferro.registry.Registry.swap`. A harness call that cannot do exactly
-what it was asked raises :class:`~ferro.migrations.errors.MigrationRefused`
-naming the migration the database stands at and the one asked for; the
-runner's own refusals surface unchanged. Only ``apply*``, ``revert*`` and
-``round_trip`` take the run lock or create the tracking tables.
+runner under its run lock, every comparison is `ferro.migrations.drift`,
+and every historical model is the one a data step would get. A harness call
+that cannot do exactly what it was asked raises `MigrationRefused` naming
+the migration the database stands at and the one asked for; the runner's
+own refusals surface unchanged. Only `apply*`, `revert*` and `round_trip`
+take the run lock or create the tracking tables. See
+[Testing migrations](../guide/schema/testing.md).
 """
 
 from __future__ import annotations
@@ -78,29 +49,37 @@ _MIGRATION = re.compile(r"(\d{4})(_\w+)?")
 
 @dataclass(frozen=True)
 class RoundTripResult:
-    """What :meth:`Harness.round_trip` walked.
+    """What [`Harness.round_trip`][ferro.migrations.testing.Harness.round_trip] walked.
 
-    A chain whose every down reaches its parent::
+    For a chain whose every down reaches its parent:
 
-        RoundTripResult(applied=["0001_create_author", "0002_add_slug"],
-                        reverted_to=None, irreversible=None)
+    ```python {test=compile reason="a value `round_trip` returns; `RoundTripResult` is not imported here"}
+    RoundTripResult(applied=["0001_create_author", "0002_add_slug"],
+                    reverted_to=None, irreversible=None)
+    ```
 
-    and one whose ``0002`` declares a step irreversible::
+    and for one whose `0002` declares a step irreversible:
 
-        RoundTripResult(applied=["0001_create_author", "0002_add_slug"],
-                        reverted_to="0002_add_slug",
-                        irreversible=("0002_add_slug", "01_schema", "the index is shared"))
+    ```python {test=compile reason="a value `round_trip` returns; `RoundTripResult` is not imported here"}
+    RoundTripResult(applied=["0001_create_author", "0002_add_slug"],
+                    reverted_to="0002_add_slug",
+                    irreversible=("0002_add_slug", "01_schema", "the index is shared"))
+    ```
     """
 
     applied: list[str] = field(default_factory=list)
-    """Every migration of the chain, in order (``NNNN_<name>``): each stood
-    applied with no drift on the way up, and again on the way back up."""
+    """Every migration of the chain, in order (`NNNN_<name>`).
+
+    Each stood applied with no drift on the way up, and again on the way
+    back up.
+    """
     reverted_to: str | None = None
-    """Where the downward walk stopped: the migration holding the
-    irreversible step, still applied. ``None`` when it reverted everything."""
+    """Where the downward walk stopped: the migration holding the irreversible step, still applied.
+
+    `None` when the walk reverted everything.
+    """
     irreversible: tuple[str, str, str] | None = None
-    """``(migration, step, reason)`` of the irreversible step that ended the
-    downward walk, or ``None``."""
+    """The `(migration, step, reason)` of the irreversible step that ended the downward walk, or `None`."""
 
 
 @dataclass(frozen=True)
@@ -119,8 +98,11 @@ class _Migration:
 
 
 class Harness:
-    """A migration chain driven by name, for a test. Build it with
-    :func:`harness`."""
+    """A migration chain driven by name, for a test.
+
+    Build it with [`harness`][ferro.migrations.testing.harness]. Each
+    method takes a migration as `"0007"` or `"0007_split_name"`.
+    """
 
     def __init__(self, target: Target) -> None:
         self._target = target
@@ -134,11 +116,20 @@ class Harness:
     # -- the verbs ----------------------------------------------------------------
 
     async def apply_through(self, migration: str) -> RunReport:
-        """Apply every pending migration up to and including ``migration``
-        (``"0007"`` or ``"0007_split_name"``), under the run lock.
+        """Apply every pending migration up to and including one, under the run lock.
 
-        A database already standing at ``migration`` is left alone (an empty
-        report). Refused naming both when the database stands past it.
+        A database already standing at `migration` is left alone.
+
+        Args:
+            migration: The last migration to apply, `"0007"` or
+                `"0007_split_name"`.
+
+        Returns:
+            The run's report; empty when nothing was pending.
+
+        Raises:
+            MigrationRefused: The database stands past `migration` (naming
+                both), or there is no such migration.
         """
         chain = self._chain()
         target = _find(chain, migration)
@@ -155,12 +146,22 @@ class Harness:
             return await self._up_through(name, chain, target)
 
     async def apply(self, migration: str) -> RunReport:
-        """Apply exactly ``migration``, under the run lock.
+        """Apply exactly one migration, under the run lock.
 
-        Refused, naming the migration the database stands at and the parent
-        it would have to stand at, unless it stands at that parent (for the
-        first migration: at nothing), so a test that seeded at ``0006``
-        knows only ``0007`` ran.
+        A test that seeded at `0006` and applies `0007` knows only `0007`
+        ran.
+
+        Args:
+            migration: The migration to apply, `"0007"` or
+                `"0007_split_name"`.
+
+        Returns:
+            The run's report.
+
+        Raises:
+            MigrationRefused: The database does not stand at the migration's
+                parent (for the first migration: at nothing); the message
+                names where it stands and where it would have to.
         """
         chain = self._chain()
         target = _find(chain, migration)
@@ -185,12 +186,21 @@ class Harness:
             return await self._up_through(name, chain, target)
 
     async def revert_to(self, migration: str) -> RunReport:
-        """Revert every migration above ``migration``, newest first, with no
-        prompt, leaving ``migration`` applied.
+        """Revert every migration above one, newest first, with no prompt, leaving it applied.
 
         The runner's rules hold: an irreversible step in the way refuses
-        before anything is reverted. Refused naming both when the database
-        stands below ``migration``.
+        before anything is reverted.
+
+        Args:
+            migration: The migration to leave applied, `"0007"` or
+                `"0007_split_name"`.
+
+        Returns:
+            The run's report.
+
+        Raises:
+            MigrationRefused: The database stands below `migration` (naming
+                both), or an irreversible step is in the way.
         """
         chain = self._chain()
         target = _find(chain, migration)
@@ -205,26 +215,46 @@ class Harness:
             return await self._down(name, target=chain[target].short)
 
     async def revert_all(self) -> RunReport:
-        """Revert every applied migration, newest first, with no prompt. On a
-        database with nothing applied it does nothing and creates nothing."""
+        """Revert every applied migration, newest first, with no prompt.
+
+        On a database with nothing applied it does nothing and creates
+        nothing.
+
+        Returns:
+            The run's report.
+
+        Raises:
+            MigrationRefused: An irreversible step is in the way; nothing was
+                reverted.
+        """
         async with self._target.open() as name:
             return await self._down(name, all=True)
 
     @asynccontextmanager
     async def models_at(self, migration: str) -> AsyncIterator[HistoricalModels]:
-        """The historical models of ``migration``'s snapshot alone, installed
-        for the block: the same ``models`` object a data step's context
-        carries, with every table as that one snapshot declares it (a column
-        a later migration adds is absent, not nullable)::
+        """Install the historical models of one migration's snapshot for the block.
 
+        They are the same `models` object a data step's context carries,
+        with every table as that one snapshot declares it (a column a later
+        migration adds is absent, not nullable). The block is a session on
+        the harness's connection, so the models need no `using=`. While it
+        is open today's classes are unreachable (`Author` raises naming
+        `models.Author`); they are restored on exit, error and cancellation.
+        Reads no database state.
+
+        Args:
+            migration: The migration whose snapshot to install, `"0007"` or
+                `"0007_split_name"`.
+
+        Yields:
+            The historical models.
+
+        Examples:
+            ```python {test=compile reason="needs a migrations project and a database"}
             async with h.models_at("0011") as models:
                 await models.Author(name="Ada").save()
                 links = await models.table("author_tags").all()
-
-        The block is a session on the harness's connection, so the models
-        need no ``using=``. While it is open today's classes are unreachable
-        (``Author`` raises naming ``models.Author``); they are restored on
-        exit, error and cancellation. Reads no database state.
+            ```
         """
         chain = self._chain()
         this = chain[_find(chain, migration)]
@@ -235,19 +265,31 @@ class Harness:
                     yield models
 
     async def round_trip(self) -> RoundTripResult:
-        """Apply every migration, revert every one, and apply them all again,
-        one migration per stop, raising :class:`MigrationRefused` with the
-        drift lines at the first stop where the database is not what that
-        migration's snapshot declares.
+        """Apply every migration, revert every one, and apply them all again, checking drift at each stop.
 
-        A step whose down is declared irreversible ends the downward walk at
-        its migration: the result reports it (``irreversible``,
-        ``reverted_to``) and the walk back up completes; it is not a failure.
+        The walk moves one migration per stop. A step whose down is declared
+        irreversible ends the downward walk at its migration: the result
+        reports it and the walk back up completes; it is not a failure.
+        With every migration reverted there is no snapshot to compare with,
+        so that one stop instead checks that none of the first migration's
+        tables remain.
 
-        With every migration reverted the database has no records, so
-        :func:`~ferro.migrations.drift` has no snapshot to compare with and
-        refuses; that one stop instead checks that none of the first
-        migration's tables remain (``author table is extra``).
+        Returns:
+            What the walk applied, where it stopped going down, and the
+                irreversible step that stopped it.
+
+        Raises:
+            MigrationRefused: At the first stop where the database is not
+                what that migration's snapshot declares, with the drift
+                lines.
+
+        Examples:
+            ```python {test=compile reason="needs a migrations project and a database"}
+            async def test_the_chain_round_trips(db_url):
+                await ferro.connect(db_url)
+                result = await harness().round_trip()
+                assert result.irreversible is None
+            ```
         """
         chain = self._chain()
         async with self._target.open() as name:
@@ -441,18 +483,46 @@ def harness(
     database: str | None = None,
     using: str | None = None,
 ) -> Harness:
-    """A :class:`Harness` over ``database`` (``None``: the one configured) of
-    ``settings`` (``None``: ``FerroSettings()``), working on the open
-    connection ``using`` (``None``: the default connection), which the test
-    connects and makes fresh itself::
+    """Return a [`Harness`][ferro.migrations.testing.Harness] over one configured database.
 
-        @pytest.fixture
-        async def h(db_url):
-            await ferro.connect(db_url)
-            return harness()
+    The test connects the database and makes it fresh itself.
+
+    Args:
+        settings: The project's configuration. Defaults to `FerroSettings()`.
+        database: The configured database. Defaults to the only one
+            configured.
+        using: The open connection to work on. Defaults to the default
+            connection.
+
+    Returns:
+        The harness.
 
     Raises:
-        MigrationRefused: no configuration is found, or ``database`` names
+        MigrationRefused: No configuration is found, or `database` names
             none of its databases.
+
+    Examples:
+        Migration `0012_add_slug` adds `author.slug` and backfills it in a
+        data step. The test seeds a row the way the table stood at `0011`,
+        applies exactly `0012`, and reads the row back the way `0012` left
+        it:
+
+        ```python {test=compile reason="needs a migrations project and a database"}
+        from ferro.migrations.testing import harness
+
+
+        async def test_slug_backfill(db_url, migrations_settings):
+            await ferro.connect(db_url)
+            h = harness(settings=migrations_settings, database="default")
+            await h.apply_through("0011")
+            async with h.models_at("0011") as models:
+                await models.Author(name="Ada").save()  # the schema as it stood
+            await h.apply("0012")  # refused unless the database stands at 0011
+            async with h.models_at("0012") as models:
+                ada = await models.Author.where(lambda author: author.name == "Ada").first()
+                assert ada.slug == "ada"
+            await h.revert_to("0011")
+            await h.round_trip()
+        ```
     """
     return Harness(Target.resolve(settings, database, using=using))

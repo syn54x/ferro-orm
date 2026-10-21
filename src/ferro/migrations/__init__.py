@@ -1,27 +1,26 @@
 """Ferro migrations: the in-process calls and the Alembic bridge.
 
-Each call here is the CLI verb's own function: ``up()`` is ``ferro migrate
-up``, ``status()`` is ``ferro migrate status``, ``check()`` is ``ferro
-migrate check``. Each takes ``settings=None, database=None`` (the project's
-configuration and which of its databases) and, when it works on a live
-database, ``using=`` (an open connection) or ``url=`` (a private one); the
-default connection otherwise (:class:`~ferro.migrations.target.Target`).
-``down`` and ``rerecord`` stay CLI verbs: they are operator decisions with
-prompts. A refusal is raised, never returned: an application that called
-``up()`` must not go on serving a database the run did not reach.
+Each call here is the CLI verb's own function: `up()` is `ferro migrate up`,
+`status()` is `ferro migrate status`, `check()` is `ferro migrate check`.
+Each takes `settings=None, database=None` (the project's configuration and
+which of its databases) and, when it works on a live database, `using=` (an
+open connection) or `url=` (a private one); the default connection
+otherwise. `down` and `rerecord` stay CLI verbs: they are operator
+decisions with prompts. A refusal is raised, never returned: an application
+that called `up()` must not go on serving a database the run did not reach.
 
-```python
+```python {test=compile reason="needs a project with a migrations directory"}
 await ferro.connect(url)
 await ferro.migrations.up()                # a desktop app with no deploy step
 await ferro.migrations.require_applied()   # a server that migrates in its deploy step
 ```
 
-A data step declares its shape with ``atomic`` / ``chunked`` (and its down
-with ``irreversible`` / ``nothing_to_reverse``), and marks what only a
-person can supply with ``todo("…")`` (ADR-0035).
+A data step declares its shape with `atomic` / `chunked` (and its down with
+`irreversible` / `nothing_to_reverse`), and marks what only a person can
+supply with `todo("…")`.
 
-``get_metadata``, ``ferro_options`` and ``render_item`` (the Alembic bridge) are loaded on
-first use, so the migration calls never import Alembic.
+`get_metadata`, `ferro_options` and `render_item` (the Alembic bridge) are
+loaded on first use, so the migration calls never import Alembic.
 """
 
 from __future__ import annotations
@@ -32,7 +31,7 @@ from ._baseline import BaselineReport, baseline, remove_baseline
 from ._drift import DriftReport, drift, render_op
 from .errors import DatabaseAheadError, MigrationRefused, PendingMigrationsError
 from .generate import check
-from .report import AlreadyTrackedError, AppliedAboveBaselineError
+from .report import AlreadyTrackedError, AppliedAboveBaselineError, RunRefused
 from .runner import require_applied, status, up
 from .steps import atomic, chunked, irreversible, nothing_to_reverse, todo
 
@@ -47,6 +46,7 @@ __all__ = [
     "DriftReport",
     "MigrationRefused",
     "PendingMigrationsError",
+    "RunRefused",
     "atomic",
     "baseline",
     "check",

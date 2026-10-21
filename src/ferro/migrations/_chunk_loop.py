@@ -1,6 +1,9 @@
-"""The chunk loop: a chunked data step run in batches that resumes (ADR-0024).
+"""The chunk loop: a chunked data step run in batches that resumes.
 
-```python
+The public declaration is [`chunked`][ferro.migrations.chunked]; this
+private module runs it.
+
+```python {test=compile reason="a data step file; the migration runner calls it"}
 @chunked(
     lambda models: models.Author.where(lambda author: author.slug == None)
     .order_by(lambda author: author.id),
@@ -13,36 +16,38 @@ async def up(ctx, batch):
 ```
 
 Over 2,500 authors the runner opens three transactions. Each reads the next
-1,000 rows after the cursor (keyset ``after()`` over the query's order
-keys), hands them to ``up(ctx, batch)``, and commits, in that same
-transaction, the step record's cursor and ``rows_done``::
+1,000 rows after the cursor (keyset `after()` over the query's order keys),
+hands them to `up(ctx, batch)`, and commits, in that same transaction, the
+step record's cursor and `rows_done`:
 
-    batch 1  rows 1-1000      resume_cursor {"keys": [1000], "order_by": ["author.id"], "rows_done": 1000}
-    batch 2  rows 1001-2000   resume_cursor {"keys": [2000], "order_by": ["author.id"], "rows_done": 2000}
-    batch 3  rows 2001-2500   the finished record, rows_done 2500
+```text
+batch 1  rows 1-1000      resume_cursor {"keys": [1000], "order_by": ["author.id"], "rows_done": 1000}
+batch 2  rows 1001-2000   resume_cursor {"keys": [2000], "order_by": ["author.id"], "rows_done": 2000}
+batch 3  rows 2001-2500   the finished record, rows_done 2500
+```
 
 A batch that fails rolls back alone: the batches before it stay committed
 with their cursor, and the next run starts after it, so no row is replayed.
-The last batch (fewer rows than ``batch_size``, possibly none) writes the
+The last batch (fewer rows than `batch_size`, possibly none) writes the
 finished record going up, or removes the record going down. A chunked down
-pages its own query the same way, marking the record ``reverting`` with its
-own cursor (``revert_cursor``) until that last batch (ADR-0033).
+pages its own query the same way, marking the record `reverting` with its
+own cursor (`revert_cursor`) until that last batch.
 
 A failed down is recorded only where the database moved (the tracking
 table says where it stands now). A down that rolled back completely (an
 atomic down, a transactional SQL down, a chunked down failing on its first
-batch) leaves the record unchanged: the step stays ``applied`` and the
-error is in the run's output. A down that left part of itself applied
-writes the error onto the record: a no-transaction SQL down, and a chunked
-down failing after a committed batch, which stays ``reverting`` at its
-cursor so ``up`` refuses until a ``down`` finishes it.
+batch) leaves the record unchanged: the step stays `applied` and the error
+is in the run's output. A down that left part of itself applied writes the
+error onto the record: a no-transaction SQL down, and a chunked down
+failing after a committed batch, which stays `reverting` at its cursor so
+`up` refuses until a `down` finishes it.
 
 The cursor is the last row's order-key tuple as JSON, each value in the form
-``canonicalize_wire_scalar`` gives a query literal (I-13), so ``after()``
-compares a resumed cursor exactly as ``save()`` wrote the row. It names the
-order keys it is a position in (``order_by``, :func:`order_keys`), so an
-edited step can be continued from it only while its query still pages over
-the same ones (``ferro migrate rerecord --continue``, ADR-0030).
+a query literal takes, so `after()` compares a resumed cursor exactly as
+`save()` wrote the row. It names the order keys it is a position in
+(`order_by`, from `order_keys`), so an edited step can be continued from it
+only while its query still pages over the same ones
+(`ferro migrate rerecord --continue`).
 """
 
 from __future__ import annotations
@@ -90,10 +95,10 @@ class ChunkOutcome:
 
 
 class BatchFailed(Exception):
-    """A batch raised and rolled back; everything before it stays committed.
+    """The error for a batch that raised and rolled back; everything before it stays committed.
 
-    Carries what the record holds now, so the runner can write the failure
-    beside the committed cursor without moving it.
+    It carries what the record holds now, so the runner can write the
+    failure beside the committed cursor without moving it.
     """
 
     def __init__(
@@ -107,15 +112,19 @@ class BatchFailed(Exception):
     ) -> None:
         super().__init__(str(error))
         self.error = error
+        """The error the batch raised."""
         self.cursor = cursor
-        """The last committed cursor (``None`` before any row)."""
+        """The last committed cursor (`None` before any row)."""
         self.rows_done = rows_done
+        """The rows the walk has committed, across every run of it."""
         self.batches = batches
         """The batches this run committed before the failing one."""
         self.committed = committed
-        """Whether the walk has committed anything on the record: going up
-        always (the started record); going down once the record is
-        ``reverting``, from this run or an earlier one."""
+        """Whether the walk has committed anything on the record.
+
+        Going up always (the started record); going down once the record is
+        `reverting`, from this run or an earlier one.
+        """
 
 
 # -- the cursor codec --------------------------------------------------------------
@@ -136,12 +145,23 @@ def _cursor_value(value: Any) -> Any:
 def encode_cursor(
     keys: Sequence[Any], rows_done: int, *, order_by: Sequence[str]
 ) -> str:
-    """The cursor JSON for the last row's order-key values ``keys`` under the
-    order keys ``order_by`` (:func:`order_keys`): ``{"keys": [...],
-    "order_by": ["author.id"], "rows_done": N}``, each value in its
-    query-literal form (``canonicalize_wire_scalar``, I-13). ``order_by``
-    is what ``ferro migrate rerecord --continue`` compares an edited step's
-    query against (ADR-0030)."""
+    """Encode a cursor as JSON: `{"keys": [...], "order_by": ["author.id"], "rows_done": N}`.
+
+    Each value is in its query-literal form. `order_by` is what
+    `ferro migrate rerecord --continue` compares an edited step's query
+    against.
+
+    Args:
+        keys: The last row's order-key values.
+        rows_done: The rows the walk has committed.
+        order_by: The order keys, as `order_keys` spells them.
+
+    Returns:
+        The cursor JSON.
+
+    Raises:
+        TypeError: An order-key value is bytes, which a cursor cannot hold.
+    """
     return json.dumps(
         {
             "keys": [_cursor_value(key) for key in keys],
@@ -154,10 +174,23 @@ def encode_cursor(
 def decode_cursor(
     text: str, types: Sequence[Any], order_by: Sequence[str] | None = None
 ) -> tuple[tuple[Any, ...], int]:
-    """The order-key values and ``rows_done`` of cursor JSON ``text``, each
-    value validated back to its order key's annotation in ``types``.
-    ``order_by`` (the query's :func:`order_keys`) must be the cursor's own
-    when the cursor records them."""
+    """Decode cursor JSON into its order-key values and `rows_done`.
+
+    Args:
+        text: The cursor JSON.
+        types: Each order key's annotation; every value is validated back
+            to its key's annotation.
+        order_by: The query's order keys, as `order_keys` spells them. When
+            given and the cursor records its own, they must match. Defaults
+            to no check.
+
+    Returns:
+        The order-key values and the rows the walk has committed.
+
+    Raises:
+        StepRefused: The query's order keys changed since the cursor was
+            committed.
+    """
     cursor = json.loads(text)
     keys = cursor["keys"]
     recorded = cursor.get("order_by")
@@ -181,11 +214,19 @@ def decode_cursor(
 
 
 def order_keys(query: Query[Any]) -> list[str]:
-    """The order keys a chunked query pages over, as a cursor records them:
-    ``<table>.<column>``, then `` desc`` for a descending key and
-    `` nulls first`` where nulls sort first (``["author.created_at desc",
-    "author.id"]``). Two queries with the same list page in the same order,
-    so a cursor committed under one is a position in the other."""
+    """Spell the order keys a chunked query pages over, as a cursor records them.
+
+    Each key is `<table>.<column>`, then ` desc` for a descending key and
+    ` nulls first` where nulls sort first (`["author.created_at desc",
+    "author.id"]`). Two queries with the same list page in the same order,
+    so a cursor committed under one is a position in the other.
+
+    Args:
+        query: The chunked query.
+
+    Returns:
+        The spelled order keys, in order.
+    """
     model = query.model_cls
     table = getattr(model, "__ferro_table__", None) or model.__name__.lower()
     spelled = []
@@ -216,30 +257,37 @@ async def run_chunked(
     direction: Literal["up", "down"],
     using: str | None = None,
 ) -> ChunkOutcome:
-    """Run ``declared`` (a ``@chunked`` step function) to its last batch.
+    """Run a `@chunked` step function to its last batch.
 
-    ``ctx_factory(tx)`` is the step's context on one batch's transaction;
-    ``step`` is the step's handle on the locked ``run``, which carries the
-    cursor an earlier attempt committed (``step.resume_cursor``: going up the
-    started record's, going down a reverting record's). Batches run on
-    connection ``using``. Each batch's record moves through the run's
-    transitions inside the batch's transaction, each verifying the run lock
-    first (ADR-0029 as amended): a lost lock commits nothing and propagates
-    untouched.
+    Each batch's record moves through the run's transitions inside the
+    batch's transaction, each verifying the run lock first: a lost lock
+    commits nothing and propagates untouched. Going up, a batch advances
+    `resume_cursor` and the last batch writes the finished record; going
+    down, a batch advances `revert_cursor` with the record marked
+    `reverting`, and the last batch removes the record. Each batch is
+    `transaction(immediate=True)`: on SQLite a `BEGIN IMMEDIATE` that holds
+    the write lock before the batch reads, so its read-then-write cannot
+    fail upgrading into `SQLITE_BUSY`; on Postgres a plain `BEGIN`.
 
-    Going up a batch advances ``resume_cursor`` (``run.advance``) and the
-    last batch writes the finished record (``run.finish``); going down a
-    batch advances ``revert_cursor`` with the record marked ``reverting``
-    (``run.advance_revert``), and the last batch removes the record
-    (``run.remove``). Each batch is ``transaction(immediate=True)``: on
-    SQLite a ``BEGIN IMMEDIATE`` that holds the write lock before the batch
-    reads, so its read-then-write cannot fail upgrading into
-    ``SQLITE_BUSY`` (ADR-0024); on Postgres a plain ``BEGIN``.
+    Args:
+        ctx_factory: Builds the step's context on one batch's transaction.
+        declared: The `@chunked` step function and its shape.
+        run: The locked database the run holds.
+        step: The step's handle on `run`, carrying the cursor an earlier
+            attempt committed (going up the started record's, going down a
+            reverting record's).
+        direction: `"up"` or `"down"`.
+        using: The connection the batches run on. Defaults to the default
+            connection.
+
+    Returns:
+        The rows the walk has committed and the batches this run committed.
 
     Raises:
-        BatchFailed: a batch raised; it rolled back, and what the record
+        TypeError: `declared` is not a `@chunked` step.
+        BatchFailed: A batch raised; it rolled back, and what the record
             holds is on the exception.
-        RunRefused: the run lock was lost; the batch rolled back.
+        RunRefused: The run lock was lost; the batch rolled back.
     """
     shape = declared.shape
     if not isinstance(shape, Chunked):

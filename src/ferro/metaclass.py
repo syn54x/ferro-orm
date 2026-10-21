@@ -1,3 +1,5 @@
+"""The metaclass that turns a model class declaration into a registered table."""
+
 import re
 from dataclasses import replace
 from functools import partial
@@ -144,20 +146,26 @@ def _written_retired_label(value: Any, labels: frozenset[str]) -> str | None:
 def refuse_retired_label(
     enum_cls: type[Enum], labels: frozenset[str], value: Any
 ) -> Any:
-    """Refuse ``value`` if it writes one of ``enum_cls``'s retired ``labels``.
+    """Refuse a value that would write one of an enum's retired labels.
 
-    The one retired-label refusal (ADR-0053), whichever path writes: the
-    field's ``AfterValidator`` raises it from inside Pydantic validation
-    (construction, and assignment under ``validate_assignment``), and
-    :func:`refuse_retired_label_write` carries it out of the paths that run
-    no validation. Every one surfaces as a ``ValidationError`` whose error
-    type is ``retired_enum_label``.
+    Every path that writes an enum column refuses a retired label the same
+    way: Pydantic validation calls this function, and
+    [`refuse_retired_label_write`][ferro.metaclass.refuse_retired_label_write]
+    calls it for the writes that skip validation. Each surfaces as a
+    `ValidationError` of type `retired_enum_label`. See
+    [Retiring an enum label](../guide/schema/renames-and-retirements.md#retiring-an-enum-label).
+
+    Args:
+        enum_cls: The column's enum class.
+        labels: The enum's retired labels.
+        value: The value being written: a member or a raw label.
 
     Returns:
-        ``value`` unchanged when it writes no retired label.
+        `value`, unchanged, when it writes no retired label.
 
     Raises:
-        PydanticCustomError: ``retired_enum_label``, naming the member.
+        PydanticCustomError: The value writes a retired label; the error
+            names the member.
     """
     label = _written_retired_label(value, labels)
     if label is None:
@@ -171,15 +179,20 @@ def refuse_retired_label(
 
 
 def refuse_retired_label_write(model_cls: type, column: str, value: Any) -> None:
-    """Refuse a write of a retired label to ``column`` that runs no validation.
+    """Refuse a retired enum label written without Pydantic validation.
 
-    Attribute assignment without ``validate_assignment`` and ``update()``
-    (keyword and recipe) set a column without Pydantic validating it, so
-    they ask here; the refusal is :func:`refuse_retired_label`'s, raised as
-    the ``ValidationError`` validation would have raised.
+    Assigning an attribute (without `validate_assignment`) and `update()`
+    write a column without validating it, so they check here and raise the
+    `ValidationError` that validation would have raised.
+
+    Args:
+        model_cls: The model class being written.
+        column: The column being written.
+        value: The value being written.
 
     Raises:
-        ValidationError: ``retired_enum_label`` at ``(column,)``.
+        ValidationError: The value writes a retired label of the column's
+            enum, with error type `retired_enum_label` at `(column,)`.
     """
     enum_cls = getattr(model_cls, "_enum_fields", {}).get(column)
     if enum_cls is None:
@@ -203,12 +216,11 @@ def _guarded_setattr(guarded: frozenset[str], inherited: Any):
 
 
 class ModelMetaclass(type(BaseModel)):
-    """
-    Metaclass for Ferro models that provisionally registers schema in Python caches.
+    """The metaclass of [`Model`][ferro.Model], which records each model's schema when the class is defined.
 
-    Class-body registration writes the Python registry, SchemaIR envelope cache,
-    and generation counter only. Rust registration is installed at the first
-    bulk sync (``connect``/``create_tables``/``migrate``) — ADR #242 / #246.
+    Defining a model class checks its declaration and records its table in
+    the model registry. The database learns about it on the next
+    `connect()`, `create_tables()` or `migrate()`.
     """
 
     def __new__(mcs, name, bases, namespace, **kwargs):
@@ -631,7 +643,7 @@ class ModelMetaclass(type(BaseModel)):
 
         The relation gets no descriptor and no shadow ``*_id`` field, so the
         model has neither attribute; its column is compiled from the
-        ``ForeignKey`` alone (:func:`ferro.columns.retired_column_specs`).
+        ``ForeignKey`` alone (`ferro.columns.retired_column_specs`).
         """
         if metadata.renamed_from is not None:
             raise _retired_and_renamed(model_name, field_name)

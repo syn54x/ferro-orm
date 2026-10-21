@@ -1,6 +1,6 @@
-"""What a data step is handed: :class:`StepContext` and :class:`HistoricalModels`.
+"""What a data step is handed: `StepContext` and `HistoricalModels`.
 
-```python
+```python {test=compile reason="a data step body; the migration runner calls it"}
 @atomic
 async def up(ctx):
     for author in await ctx.models.Author.where(lambda author: author.slug == None).all():
@@ -11,11 +11,11 @@ async def up(ctx):
     ctx.log.info("backfilled %d authors", ...)
 ```
 
-The context is closed (ADR-0035): the historical models, raw SQL on the
-step's own transaction, the target dialect and a logger. It has no
-``transaction()``, no database name, migration number or direction, and no
-path to the models in the codebase today. A nested ``ferro.transaction()``
-inside a step is a savepoint, as in application code.
+The context is closed: the historical models, raw SQL on the step's own
+transaction, the target dialect and a logger. It has no `transaction()`, no
+database name, migration number or direction, and no path to the models in
+the codebase today. A nested `ferro.transaction()` inside a step is a
+savepoint, as in application code.
 """
 
 from __future__ import annotations
@@ -34,10 +34,10 @@ __all__ = ["HistoricalModels", "StepContext"]
 class HistoricalModels:
     """The historical model of every table in a migration's snapshot union.
 
-    ``models.Author`` is a model by class name; ``models.table("author_tags")``
+    `models.Author` is a model by class name; `models.table("author_tags")`
     reaches any table by table name, a many-to-many join table included (it
     never had a class of its own). A name the union lacks raises and lists
-    what it holds. Built by :func:`ferro.migrations.historical.build`.
+    what it holds.
     """
 
     __slots__ = ("_by_name", "_by_table", "_registry_state", "_rev")
@@ -48,8 +48,13 @@ class HistoricalModels:
         classes: dict[str, type[Model]],
         registry_state: RegistrySnapshot,
     ) -> None:
-        """``classes`` maps each table name to its historical class;
-        ``registry_state`` is the registry those classes registered into."""
+        """Hold a migration's historical classes.
+
+        Args:
+            rev: The migration these models belong to.
+            classes: Each table name mapped to its historical class.
+            registry_state: The registry those classes registered into.
+        """
         self._rev = rev
         self._by_table = dict(sorted(classes.items()))
         self._by_name: dict[str, type[Model]] = {}
@@ -63,25 +68,43 @@ class HistoricalModels:
 
     @property
     def rev(self) -> str:
-        """The migration these models belong to (``0011_backfill_slugs``)."""
+        """The migration these models belong to (`0011_backfill_slugs`)."""
         return self._rev
 
     @property
     def registry_state(self) -> RegistrySnapshot:
-        """The registry holding exactly these classes (what
-        :meth:`ferro.registry.Registry.swap` installs)."""
+        """The registry holding exactly these classes, which a step run installs."""
         return self._registry_state
 
     def names(self) -> list[str]:
-        """The class names, sorted (a join table's class is named after it)."""
+        """List the class names, sorted (a join table's class is named after it).
+
+        Returns:
+            The class names.
+        """
         return sorted(self._by_name)
 
     def tables(self) -> list[str]:
-        """The table names, sorted."""
+        """List the table names, sorted.
+
+        Returns:
+            The table names.
+        """
         return list(self._by_table)
 
     def table(self, name: str) -> type[Model]:
-        """The historical model of table ``name``."""
+        """Return the historical model of a table, by table name.
+
+        Args:
+            name: The table name, such as `"author_tags"`.
+
+        Returns:
+            The table's historical model class.
+
+        Raises:
+            LookupError: The union has no such table; the message lists the
+                tables it holds.
+        """
         try:
             return self._by_table[name]
         except KeyError:
@@ -91,8 +114,14 @@ class HistoricalModels:
             ) from None
 
     def unreachable(self, cls: FerroModelClass) -> str:
-        """Why today's ``cls`` cannot be queried while these models are
-        installed, naming the historical model to use instead."""
+        """Explain why a model from today's codebase cannot be queried in a data step.
+
+        Args:
+            cls: The model class from the codebase today.
+
+        Returns:
+            The sentence naming the historical model to use instead.
+        """
         name = cls.__name__
         return (
             f"{name} is the model in the codebase today, which a data step cannot "
@@ -125,13 +154,11 @@ _AMBIGUOUS: Any = object()
 
 
 class StepContext:
-    """``ctx``: everything a data step can reach (ADR-0035).
+    """The `ctx` a data step receives: everything the step can reach.
 
-    ``models`` are the historical models; ``execute`` / ``fetch_all`` /
-    ``fetch_one`` are ferro's raw API on the step's own transaction (no
-    ``using``, ``session`` or ``autocommit``); ``dialect`` is the target
-    dialect (``"postgres"`` or ``"sqlite"``); ``log`` is a logger named for
-    the step.
+    `execute`, `fetch_all` and `fetch_one` are Ferro's
+    [raw SQL](../guide/raw-sql.md) calls on the step's own transaction,
+    without `using`, `session` or `autocommit`.
     """
 
     __slots__ = ("_dialect", "_log", "_historical", "_tx")
@@ -150,29 +177,54 @@ class StepContext:
 
     @property
     def models(self) -> HistoricalModels:
-        """The historical models: ``ctx.models.Author``, ``ctx.models.table(...)``."""
+        """The historical models: `ctx.models.Author`, `ctx.models.table(...)`."""
         return self._historical
 
     @property
     def dialect(self) -> str:
-        """The target dialect: ``"postgres"`` or ``"sqlite"``."""
+        """The target dialect: `"postgres"` or `"sqlite"`."""
         return self._dialect
 
     @property
     def log(self) -> logging.Logger:
-        """A logger named for the step (``ferro.migrations.0011.01_backfill_author``)."""
+        """A logger named for the step (`ferro.migrations.0011.01_backfill_author`)."""
         return self._log
 
     async def execute(self, sql: str, *args: Any) -> int:
-        """Run a raw statement on the step's transaction; rows affected."""
+        """Run a raw statement on the step's transaction.
+
+        Args:
+            sql: The statement.
+            *args: Values bound to the statement's placeholders, in order.
+
+        Returns:
+            The number of rows affected.
+        """
         return await self._tx.execute(sql, *args)
 
     async def fetch_all(self, sql: str, *args: Any) -> list[dict[str, Any]]:
-        """Run a raw query on the step's transaction; every row as a dict."""
+        """Run a raw query on the step's transaction and return every row.
+
+        Args:
+            sql: The query.
+            *args: Values bound to the query's placeholders, in order.
+
+        Returns:
+            Every row, as a dict keyed by column name.
+        """
         return await self._tx.fetch_all(sql, *args)
 
     async def fetch_one(self, sql: str, *args: Any) -> dict[str, Any] | None:
-        """Run a raw query on the step's transaction; the first row, or ``None``."""
+        """Run a raw query on the step's transaction and return its first row.
+
+        Args:
+            sql: The query.
+            *args: Values bound to the query's placeholders, in order.
+
+        Returns:
+            The first row as a dict keyed by column name, or `None` when there
+                is none.
+        """
         return await self._tx.fetch_one(sql, *args)
 
     def __repr__(self) -> str:

@@ -1,6 +1,6 @@
 """Project configuration: the one way every ferro tool reads a project's databases.
 
-A project commits one file that names its databases (ADR-0036, ADR-0039):
+A project commits one file that names its databases:
 
 ```toml
 # ferro.toml — or the same keys under [tool.ferro] in pyproject.toml
@@ -8,14 +8,14 @@ models   = ["myapp.models"]
 dialects = ["postgres", "sqlite"]
 ```
 
-```python
+```python {test=compile reason="needs a project with a ferro.toml and its database URL set"}
 from ferro import FerroSettings
 
 settings = FerroSettings()
 db = settings.database()           # implied: there is one
-db.directory                       # <config dir>/migrations
-db.url_for()                       # $DATABASE_URL, never the file
-db.import_models()                 # imports myapp.models, returns its models
+directory = db.directory           # <config dir>/migrations
+url = db.url_for()                 # $DATABASE_URL, never the file
+models = db.import_models()        # imports myapp.models, returns its models
 ```
 
 The rules, each enforced here with a refusal that names its fix:
@@ -79,13 +79,18 @@ from .exceptions import FerroError
 __all__ = ["DatabaseSettings", "FerroSettings", "SettingsError"]
 
 Dialect = Literal["postgres", "sqlite"]
+"""A dialect a database's migrations are rendered for."""
 
 FERRO_TOML = "ferro.toml"
+"""The name of the dedicated config file."""
 PYPROJECT_TOML = "pyproject.toml"
+"""The name of the project file whose `[tool.ferro]` table can hold the config."""
 CONFIG_ENV = "FERRO_CONFIG"
+"""The environment variable that names the config file to read."""
 DEFAULT_DATABASE = "default"
 """The name of the one database a config declares without a databases table."""
 DEFAULT_DIRECTORY = "migrations"
+"""The migrations directory of a database that sets no `directory`."""
 
 _DATABASE_KEYS = (
     "models",
@@ -124,8 +129,18 @@ class SettingsError(FerroError):
 
 
 def parse_ddl_lock_timeout(value: str) -> timedelta:
-    """Parse a ``ddl_lock_timeout`` duration (``"500ms"``, ``"5s"``, ``"1m"``),
-    or ``"0"``, which turns the timeout and its retries off (ADR-0044)."""
+    """Parse a `ddl_lock_timeout` value into a duration.
+
+    Args:
+        value: A positive duration written as `"500ms"`, `"5s"` or `"1m"`,
+            or `"0"`, which turns the timeout and its retries off.
+
+    Returns:
+        The duration; zero for `"0"`.
+
+    Raises:
+        ValueError: `value` is not one of those forms.
+    """
     if value == "0":
         return timedelta(0)
     match = _DURATION.match(value) if isinstance(value, str) else None
@@ -138,19 +153,26 @@ def parse_ddl_lock_timeout(value: str) -> timedelta:
 
 
 MAX_LOCK_TIMEOUT_S = 60.0 * 60 * 24 * 365
-"""The longest lock timeout accepted: one year, "until it is free" while
-staying well within the runtime's range. A configured ``lock_timeout = "0"``
-waits this long."""
+"""The longest lock timeout accepted, in seconds: one year.
+
+A configured `lock_timeout = "0"` waits this long, which stands for "until
+the lock is free" while staying within the runtime's range.
+"""
 
 
 def parse_lock_timeout(value: str | float) -> float:
-    """Seconds from ``"30s"``, ``"500ms"``, ``"1m"`` or a plain number of
-    seconds, as ``--lock-timeout`` takes them (``0`` tries the lock once,
-    :data:`MAX_LOCK_TIMEOUT_S` is the most).
+    """Parse a lock timeout as `--lock-timeout` takes it, into seconds.
+
+    Args:
+        value: `"30s"`, `"500ms"`, `"1m"`, or a number of seconds. `0` tries
+            the lock once.
+
+    Returns:
+        The timeout in seconds.
 
     Raises:
-        SettingsError: ``value`` is not a duration, is negative, or is longer
-            than :data:`MAX_LOCK_TIMEOUT_S`.
+        SettingsError: `value` is not a duration, is negative, or is longer
+            than one year.
     """
     if isinstance(value, int | float) and not isinstance(value, bool):
         seconds = float(value)
@@ -182,13 +204,20 @@ def parse_lock_timeout(value: str | float) -> float:
 
 
 def lock_timeout_setting_seconds(value: str) -> float:
-    """A configured ``lock_timeout`` in seconds: the forms ``--lock-timeout``
-    takes, except that ``"0"`` waits without a limit
-    (:data:`MAX_LOCK_TIMEOUT_S`): a setting that refused every contended
-    run would be no wait at all.
+    """Parse a configured `lock_timeout` into seconds.
+
+    It takes the forms `--lock-timeout` takes, except that `"0"` waits
+    without a limit: a setting that refused every contended run would be no
+    wait at all.
+
+    Args:
+        value: `"30s"`, `"500ms"`, `"1m"`, a number of seconds, or `"0"`.
+
+    Returns:
+        The timeout in seconds; one year for `"0"`.
 
     Raises:
-        ValueError: ``value`` is not one of those forms.
+        ValueError: `value` is not one of those forms.
     """
     try:
         seconds = parse_lock_timeout(value)
@@ -214,23 +243,32 @@ class _Project:
 
 
 class DatabaseSettings(BaseModel):
-    """One configured *database*: a named set of models with one migration lineage.
+    """One configured database: a named set of models with one line of migrations.
 
-    Built by :class:`FerroSettings` from ``[tool.ferro]`` (one database, named
-    ``"default"``) or ``[tool.ferro.databases.<name>]`` (several). Paths are
-    already resolved against the config file's directory.
+    [`FerroSettings`][ferro.FerroSettings] builds it from `[tool.ferro]` (one
+    database, named `"default"`) or from `[tool.ferro.databases.<name>]`
+    (several). Paths are already resolved against the config file's
+    directory. See [Keys](../reference/configuration.md#keys) for each key.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     name: str = Field(min_length=1)
+    """The database's name: `"default"` for a single database."""
     models: list[str] = Field(min_length=1)
+    """The dotted modules that define the database's models."""
     dialects: list[Dialect] = Field(min_length=1)
+    """The dialects its migrations are rendered for: `"postgres"`, `"sqlite"` or both."""
     url_env: str = Field(default="DATABASE_URL", min_length=1)
+    """The environment variable holding the database URL. Defaults to `"DATABASE_URL"`."""
     directory: Path
+    """The migrations directory, resolved against the config file's directory."""
     tracking_schema: str | None = Field(default=None, min_length=1)
+    """Postgres only: the schema of the tracking tables. Defaults to `None`, the current schema."""
     ddl_lock_timeout: str = "5s"
+    """How long a DDL statement on Postgres waits for its table lock. Defaults to `"5s"`."""
     lock_timeout: str = "30s"
+    """How long a run waits for the run lock. Defaults to `"30s"`; `"0"` waits without a limit."""
 
     _project: _Project | None = PrivateAttr(default=None)
 
@@ -258,34 +296,51 @@ class DatabaseSettings(BaseModel):
 
     @property
     def ddl_lock_timeout_seconds(self) -> float:
-        """``ddl_lock_timeout`` in seconds; ``0.0`` when it is off."""
+        """`ddl_lock_timeout` in seconds; `0.0` when it is off."""
         return parse_ddl_lock_timeout(self.ddl_lock_timeout).total_seconds()
 
     @property
     def lock_timeout_seconds(self) -> float:
-        """``lock_timeout`` in seconds: how long a run (``ferro migrate up``,
-        ``down``, ``baseline``, ``rerecord``) or an auto-migrate pass waits
-        for the run lock another one holds; ``"0"`` is
-        :data:`MAX_LOCK_TIMEOUT_S`, no limit."""
+        """`lock_timeout` in seconds; one year, no limit, for `"0"`.
+
+        It is how long a run (`ferro migrate up`, `down`, `baseline`,
+        `rerecord`) or an auto-migrate pass waits for the run lock another
+        one holds.
+        """
         return lock_timeout_setting_seconds(self.lock_timeout)
 
     def lock_wait(self, override: str | float | None = None) -> float:
-        """Seconds a run on this database waits for the run lock: ``override``
-        (``--lock-timeout``, or a call's ``lock_timeout=``) when given, else
-        the configured ``lock_timeout``.
+        """Return how many seconds a run on this database waits for the run lock.
+
+        Args:
+            override: `--lock-timeout`, or a call's `lock_timeout=`. Defaults
+                to `None`, the configured `lock_timeout`.
+
+        Returns:
+            The wait in seconds.
 
         Raises:
-            SettingsError: ``override`` is not a lock timeout.
+            SettingsError: `override` is not a lock timeout.
         """
         if override is None:
             return self.lock_timeout_seconds
         return parse_lock_timeout(override)
 
     def url_for(self, override: str | None = None) -> str:
-        """The database URL: ``override`` (``--url``), else ``$<url_env>``.
+        """Return the database URL: `override`, else the `url_env` variable.
 
-        The file never holds a URL; an unset or empty variable is refused by
-        name.
+        The config file never holds a URL.
+
+        Args:
+            override: A URL given on the command line (`--url`). Defaults to
+                `None`, which reads the variable `url_env` names.
+
+        Returns:
+            The URL.
+
+        Raises:
+            SettingsError: No `override` was given and the variable is unset
+                or empty.
         """
         if override:
             return override
@@ -298,20 +353,24 @@ class DatabaseSettings(BaseModel):
         return url
 
     def import_models(self) -> list[type]:
-        """Import this database's ``models`` modules and return its models.
+        """Import this database's `models` modules and return its models.
 
-        The config file's directory goes first on ``sys.path``, then each
-        ``python_path`` entry, and each module is imported as written. Those
-        ``sys.path`` entries stay for the rest of the process, since an
-        imported module may import its siblings later. The result is every
-        registered model this database claims, in registration order, after
-        checking that every registered model has a database and that none of
-        this database's models has a foreign key into another. A foreign key
-        naming its target by string is resolved against every configured
-        database's modules, importing them if needed.
+        The config file's directory goes first on `sys.path`, then each
+        `python_path` entry, and the entries stay for the rest of the
+        process, since an imported module may import its siblings later. A
+        foreign key naming its target by string is resolved against every
+        configured database's modules, importing them if needed.
 
-        An empty result is refused: no models is never read as "drop every
-        table" (ADR-0036).
+        Returns:
+            Every registered model this database claims, in registration
+                order.
+
+        Raises:
+            SettingsError: The modules registered no model (no models is
+                never read as "drop every table"), a registered model belongs
+                to no database, one of this database's models has a foreign
+                key into another database, or the settings were built by hand
+                rather than read from a config file.
         """
         project = self._require_project()
         _import_database_modules(project, self)
@@ -336,31 +395,53 @@ class DatabaseSettings(BaseModel):
 
 
 class FerroSettings(BaseSettings):
-    """A project's ferro configuration, read from its one config file.
+    """A project's Ferro configuration, read from its one config file.
 
-    ``FerroSettings()`` finds the file (see the module docstring for the
-    lookup); ``FerroSettings(config=path)`` names it. With no file found the
-    object is empty: ``databases == {}`` and ``searched`` lists every
-    directory examined.
+    `FerroSettings()` looks for the file in this order: the `FERRO_CONFIG`
+    environment variable, then the nearest directory, walking up from the
+    working directory, that holds a `ferro.toml` or a `pyproject.toml` with
+    a `[tool.ferro]` table. The file found is used alone: no environment
+    variable overrides a key. With no file found the object is empty
+    (`databases == {}`, and `searched` lists every directory examined); it
+    refuses only when a database is asked for. Each `FerroSettings()` reads
+    the file again. See [Configuration](../reference/configuration.md).
 
-    The lookup is ferro's; reading the file is pydantic-settings':
-    ``__init__`` hands the located path to ``settings_customise_sources``
-    through the init source, which then reads it with one
-    ``TomlConfigSettingsSource`` and nothing else. The validators below shape
-    the file's keys (one database or a ``databases`` table) into
-    ``databases`` and refuse what does not belong, naming where it goes.
+    Args:
+        config: The config file to read, skipping the lookup. Defaults to
+            `None`.
+
+    Raises:
+        SettingsError: The file is malformed or contradicts itself, a key is
+            unknown or misplaced, or one directory holds both a `ferro.toml`
+            and a `[tool.ferro]` table.
+
+    Examples:
+        ```python {test=run prelude=reference}
+        import tempfile
+        from pathlib import Path
+
+        from ferro import FerroSettings
+
+        config = Path(tempfile.mkdtemp()) / "ferro.toml"
+        config.write_text('models = ["blog.models"]\ndialects = ["postgres", "sqlite"]\n')
+        database = FerroSettings(config=config).database()
+        assert database.name == "default"
+        assert database.directory == config.resolve().parent / "migrations"
+        ```
     """
 
     model_config = SettingsConfigDict(extra="forbid", frozen=True, case_sensitive=True)
 
     config_path: Path | None = None
-    """The config file read, or ``None`` when none was found."""
+    """The config file read, or `None` when none was found."""
     config_table: tuple[str, ...] = ()
-    """Where the keys sit in it: ``("tool", "ferro")``, or ``()`` for the top level."""
+    """Where the keys sit in it: `("tool", "ferro")`, or `()` for the top level."""
     searched: list[Path] = Field(default_factory=list)
     """Every directory the walk-up examined without finding a config."""
     python_path: list[Path] = Field(default_factory=list)
+    """Directories put on `sys.path` before importing models, resolved against the config file."""
     databases: dict[str, DatabaseSettings] = Field(default_factory=dict)
+    """The configured databases, by name; empty when no file was found."""
 
     def __init__(self, config: Path | str | None = None) -> None:
         path, searched = _locate(config)
@@ -382,12 +463,27 @@ class FerroSettings(BaseSettings):
         dotenv_settings: PydanticBaseSettingsSource,
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
-        """The located config file, read by ``TomlConfigSettingsSource``.
+        """Read the located config file and nothing else.
 
-        ``init_settings`` carries only what ``__init__`` located (the path,
-        its table header, the directories searched). No environment
-        variable, ``.env`` file or secrets directory ever sets a field
-        (ADR-0036: these keys decide what a migration contains).
+        Pydantic-settings calls it while building the object. No environment
+        variable, `.env` file or secrets directory sets a field, since these
+        keys decide what a migration contains.
+
+        Args:
+            settings_cls: The settings class being built.
+            init_settings: What the constructor located: the path, its table
+                header and the directories searched.
+            env_settings: Unused: no environment variable sets a key.
+            dotenv_settings: Unused: no `.env` file is read.
+            file_secret_settings: Unused: no secrets directory is read.
+
+        Returns:
+            The constructor's source, and the config file's when one was
+                found.
+
+        Raises:
+            SettingsError: The file is not valid TOML, or a key the
+                constructor sets appears in it.
         """
         located = (
             init_settings.init_kwargs
@@ -472,7 +568,20 @@ class FerroSettings(BaseSettings):
         return self
 
     def database(self, name: str | None = None) -> DatabaseSettings:
-        """The database called ``name``; implied when exactly one is configured."""
+        """Return the database called `name`.
+
+        Args:
+            name: The database's name. Defaults to `None`, which is allowed
+                when exactly one database is configured.
+
+        Returns:
+            That database's settings.
+
+        Raises:
+            SettingsError: No config file was found, no database has that
+                name, or `name` is `None` and several databases are
+                configured.
+        """
         if not self.databases:
             raise SettingsError(self._no_config_message())
         if name is None:
@@ -492,11 +601,21 @@ class FerroSettings(BaseSettings):
             ) from None
 
     def database_for(self, model: type) -> DatabaseSettings:
-        """The database that owns ``model``, decided by its defining module.
+        """Return the database that owns `model`, decided by its defining module.
 
-        Refused when no database claims it, when several do (it then has no
-        single owner; ask for a database by name), or when one of its foreign
-        keys points at a model its database does not claim.
+        A model belongs to each database whose `models` list holds its
+        module or a parent of it.
+
+        Args:
+            model: A model class.
+
+        Returns:
+            The settings of the one database that claims the model.
+
+        Raises:
+            SettingsError: `model` is not a model class, no config file was
+                found, no database or several claim the model, or one of its
+                foreign keys points at a model its database does not claim.
         """
         if not isinstance(model, type) or not hasattr(model, "__ferro_identity__"):
             raise SettingsError(

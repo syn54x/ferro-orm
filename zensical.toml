@@ -12,88 +12,105 @@ watch = ["src", "docs/examples", "README.md", "CHANGELOG.md", "CONTRIBUTING.md"]
 extra_css = ["stylesheets/extra.css"]
 
 nav = [
-  { "Home" = "index.md" },
-  { "Why Ferro" = "why-ferro.md" },
-  { "Getting Started" = [
+  { "Get started" = [
+    { "Ferro ORM" = "index.md" },
+    { "Why Ferro" = "why-ferro.md" },
     { "Installation" = "getting-started/installation.md" },
-    { "Quickstart Tutorial" = "getting-started/quickstart.md" },
-    { "Next Steps" = "getting-started/next-steps.md" },
+    { "Quickstart" = "getting-started/quickstart.md" },
   ] },
   { "Guide" = [
-    { "Models & Fields" = "guide/models-and-fields.md" },
+    { "Models and fields" = "guide/models-and-fields.md" },
     { "Queries" = "guide/queries.md" },
-    { "Aggregations" = "guide/aggregations.md" },
+    { "Aggregations and grouped queries" = "guide/aggregations.md" },
     { "Mutations" = "guide/mutations.md" },
     { "Relationships" = "guide/relationships.md" },
     { "Transactions" = "guide/transactions.md" },
     { "Raw SQL" = "guide/raw-sql.md" },
-    { "Connections & Databases" = "guide/connections.md" },
-    { "Schema Management" = [
-      { "Overview" = "guide/schema/overview.md" },
+    { "Connections" = "guide/connections.md" },
+    { "Schema management" = [
+      { "Overview of schema management" = "guide/schema/overview.md" },
       { "Auto-migrate" = "guide/schema/auto-migrate.md" },
       { "Migrations" = "guide/schema/migrations.md" },
-      { "Data Steps and Backfills" = "guide/schema/data-steps.md" },
-      { "Deploying Migrations" = "guide/schema/deploying.md" },
-      { "Testing Migrations" = "guide/schema/testing.md" },
-      { "Alembic" = "guide/schema/alembic.md" },
+      { "Renaming and retiring columns and labels" = "guide/schema/renames-and-retirements.md" },
+      { "Data steps and backfills" = "guide/schema/data-steps.md" },
+      { "Squashing a feature branch's migrations" = "guide/schema/squash.md" },
+      { "Deploying migrations" = "guide/schema/deploying.md" },
+      { "Testing migrations" = "guide/schema/testing.md" },
+      { "Adopting migrations on an existing database" = "guide/schema/adopting-migrations.md" },
+      { "Alembic bridge" = "guide/schema/alembic.md" },
     ] },
-    { "Using with Postgres RLS" = "guide/row-level-security.md" },
   ] },
-  { "How-To" = [
-    { "Upgrade Guide" = "howto/upgrade-guide.md" },
-    { "Testing" = "howto/testing.md" },
-    { "Pagination" = "howto/pagination.md" },
-    { "Timestamps" = "howto/timestamps.md" },
-    { "Soft Deletes" = "howto/soft-deletes.md" },
-    { "Multiple Databases" = "howto/multiple-databases.md" },
-    { "Adopting Migrations on an Existing Database" = "howto/adopting-migrations.md" },
-    { "Migrating from SQLAlchemy" = "howto/migrate-from-sqlalchemy.md" },
+  { "How-to" = [
+    { "How to test a Ferro app with pytest" = "howto/testing.md" },
+    { "How to paginate query results" = "howto/pagination.md" },
+    { "How to record created and updated times" = "howto/timestamps.md" },
+    { "How to soft-delete rows" = "howto/soft-deletes.md" },
+    { "How to use several databases in one app" = "howto/multiple-databases.md" },
+    { "Scope rows by tenant with Postgres row-level security" = "guide/row-level-security.md" },
+    { "Migrate from SQLAlchemy" = "howto/migrate-from-sqlalchemy.md" },
   ] },
   { "Concepts" = [
     { "Architecture" = "concepts/architecture.md" },
-    { "Identity Map" = "concepts/identity-map.md" },
-    { "Type Safety" = "concepts/type-safety.md" },
-    { "Typed Query Predicates" = "concepts/query-typing.md" },
-    { "Database Backends" = "concepts/backends.md" },
+    { "Identity map" = "concepts/identity-map.md" },
+    { "Type safety" = "concepts/type-safety.md" },
+    { "Typed query predicates" = "concepts/query-typing.md" },
+    { "Database backends" = "concepts/backends.md" },
+    { "Row-level security and session settings" = "concepts/row-level-security.md" },
     { "Performance" = "concepts/performance.md" },
   ] },
   { "Reference" = [
+    { "Python API" = [
+      { "Model" = "api/model.md" },
+      { "Field, FerroField and DbType" = "api/fields.md" },
+      { "Query" = "api/queries.md" },
+      { "ForeignKey, BackRef, ManyToMany and Relation" = "api/relationships.md" },
+      { "transaction and Transaction" = "api/transactions.md" },
+      { "execute, fetch_all and fetch_one" = "api/raw-sql.md" },
+      { "connect, Session and the registry" = "api/connection.md" },
+      { "ferro.migrations" = "api/migrations.md" },
+    ] },
     { "CLI" = "reference/cli.md" },
     { "Configuration" = "reference/configuration.md" },
+    { "FerroError and its subclasses" = "api/exceptions.md" },
+    { "Migrations reference" = "reference/migrations.md" },
+    { "Row-level security" = "reference/row-level-security.md" },
   ] },
-  { "API Reference" = [
-    { "Model" = "api/model.md" },
-    { "Fields & Types" = "api/fields.md" },
-    { "Queries" = "api/queries.md" },
-    { "Relationships" = "api/relationships.md" },
-    { "Transactions" = "api/transactions.md" },
-    { "Raw SQL" = "api/raw-sql.md" },
-    { "Connection & Registry" = "api/connection.md" },
-    { "Migrations" = "api/migrations.md" },
-    { "Exceptions" = "api/exceptions.md" },
-  ] },
-  { "Community" = [
+  { "Project" = [
     { "FAQ" = "faq.md" },
     { "Roadmap" = "roadmap.md" },
-    { "Contributing" = "contributing.md" },
+    { "Upgrading between versions" = "upgrading.md" },
     { "Changelog" = "changelog.md" },
+    { "Contributing" = "contributing.md" },
   ] },
 ]
 
 [project.theme]
 features = [
-  "navigation.tabs",
-  "navigation.sections",
-  "navigation.expand",
-  "navigation.top",
-  "toc.follow",
-  "search.suggest",
-  "search.highlight",
-  "content.code.copy",
-  "content.code.annotate",
+  "content.action.copy",
   "content.action.edit",
   "content.action.view",
+  "content.code.annotate",
+  "content.code.copy",
+  "content.code.select",
+  "content.tabs.link",
+  "content.tooltips",
+  "navigation.expand",
+  "navigation.footer",
+  "navigation.instant",
+  "navigation.instant.progress",
+  "navigation.path",
+  "navigation.sections",
+  "navigation.tabs",
+  "navigation.top",
+  "navigation.tracking",
+  "search.highlight",
+  "toc.follow",
 ]
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme)"
+toggle.icon = "lucide/sun-moon"
+toggle.name = "Switch to light mode"
 
 [[project.theme.palette]]
 media = "(prefers-color-scheme: light)"
@@ -109,21 +126,151 @@ scheme = "slate"
 primary = "custom"
 accent = "amber"
 toggle.icon = "lucide/moon"
-toggle.name = "Switch to light mode"
+toggle.name = "Switch to system preference"
+
+[project.extra]
+status.new = "Recently added"
+status.deprecated = "Deprecated"
+
+[[project.extra.social]]
+icon = "fontawesome/brands/github"
+link = "https://github.com/syn54x/ferro-orm"
+name = "Ferro on GitHub"
+
+[[project.extra.social]]
+icon = "fontawesome/brands/python"
+link = "https://pypi.org/project/ferro-orm/"
+name = "Ferro on PyPI"
+
+[project.plugins.social]
+cards_layout_options.background_color = "#B7410E"
+
+[project.plugins.llmstxt]
+markdown_description = "Ferro is an async Python ORM: Pydantic models, a Rust core, SQLite and Postgres."
+full_output = "llms-full.txt"
+
+[project.plugins.llmstxt.sections]
+"Get started" = [
+  "index.md",
+  "why-ferro.md",
+  "getting-started/installation.md",
+  "getting-started/quickstart.md",
+]
+"Guide" = ["guide/*.md", "guide/schema/*.md"]
+"How-to" = ["howto/*.md"]
+"Concepts" = ["concepts/*.md"]
+"Reference" = ["reference/*.md", "api/*.md"]
+"Project" = ["faq.md", "roadmap.md", "upgrading.md", "changelog.md", "contributing.md"]
+
+# Moved pages. Each old URL, and each anchor it had, points at the section
+# that replaced it.
+[project.plugins.redirects.redirect_maps]
+"guide/migrations.md" = "guide/schema/overview.md"
+"guide/migrations.md#three-ways-to-manage-schema" = "guide/schema/overview.md#the-ladder"
+"guide/migrations.md#auto-migration" = "guide/schema/auto-migrate.md"
+"guide/migrations.md#creating-tables-with-auto_migratetrue" = "guide/schema/auto-migrate.md#creating-tables-with-auto_migratetrue"
+"guide/migrations.md#applying-column-changes-with-migrate_updates" = "guide/schema/auto-migrate.md#applying-column-changes-with-migrate_updates"
+"guide/migrations.md#evolving-enums-label-addition" = "guide/schema/auto-migrate.md#evolving-enums-label-addition"
+"guide/migrations.md#destructive-drops-with-migrate_destructive" = "guide/schema/auto-migrate.md#destructive-drops-with-migrate_destructive"
+"guide/migrations.md#on-demand-migrate" = "guide/schema/auto-migrate.md#on-demand-migrate"
+"guide/migrations.md#safety-guidance" = "guide/schema/auto-migrate.md#safety-guidance"
+"guide/migrations.md#alembic-for-production" = "guide/schema/alembic.md"
+"guide/migrations.md#install" = "guide/schema/alembic.md#install"
+"guide/migrations.md#initialize" = "guide/schema/alembic.md#initialize"
+"guide/migrations.md#configure-envpy" = "guide/schema/alembic.md#configure-envpy"
+"guide/migrations.md#autogenerate" = "guide/schema/alembic.md#one-decider"
+"guide/migrations.md#review-apply" = "guide/schema/alembic.md#one-decider"
+"guide/migrations.md#choosing-a-workflow" = "guide/schema/overview.md#choosing"
+"getting-started/next-steps.md" = "getting-started/quickstart.md#next-steps"
+"getting-started/next-steps.md#learn-by-use-case" = "getting-started/quickstart.md#next-steps"
+"getting-started/next-steps.md#building-an-api" = "getting-started/quickstart.md#next-steps"
+"getting-started/next-steps.md#data-processing" = "getting-started/quickstart.md#next-steps"
+"getting-started/next-steps.md#production-deployment" = "getting-started/quickstart.md#next-steps"
+"getting-started/next-steps.md#common-patterns" = "getting-started/quickstart.md#next-steps"
+"getting-started/next-steps.md#reference-material" = "getting-started/quickstart.md#next-steps"
+"getting-started/next-steps.md#get-help" = "getting-started/quickstart.md#next-steps"
+"howto/adopting-migrations.md" = "guide/schema/adopting-migrations.md"
+"howto/upgrade-guide.md" = "upgrading.md"
+# Sections renamed on pages the rewrite kept, linked from outside the docs.
+"guide/mutations.md#get-or-create" = "guide/mutations.md#get_or_create-and-update_or_create"
+"guide/transactions.md#nesting-behavior" = "guide/transactions.md#nested-transactions"
+"guide/connections.md#sessions-recommended" = "guide/connections.md#sessions"
+"faq.md#what-is-ferro" = "faq.md#what-ferro-is"
+"howto/testing.md#writing-your-first-test" = "howto/testing.md#a-first-test"
+"howto/upgrade-guide.md#save-no-longer-upserts" = "upgrading.md#save-and-upserts"
+# Sections the migrations guide split (#714) moved to other pages, or renamed.
+"guide/schema/migrations.md#renames" = "guide/schema/renames-and-retirements.md#rename-hints"
+"guide/schema/migrations.md#retiring-a-column" = "guide/schema/renames-and-retirements.md#retiring-a-column"
+"guide/schema/migrations.md#retiring-an-enum-label" = "guide/schema/renames-and-retirements.md#retiring-an-enum-label"
+"guide/schema/migrations.md#headers" = "reference/migrations.md#step-file-headers"
+"guide/schema/migrations.md#changes-existing-rows-need-a-value-for" = "guide/schema/migrations.md#backfills"
+"guide/schema/migrations.md#checking" = "guide/schema/migrations.md#check-status-and-drift"
+"guide/schema/migrations.md#going-back" = "guide/schema/migrations.md#reverting-with-down"
+"guide/schema/migrations.md#editing-a-migration" = "guide/schema/migrations.md#edited-migrations"
+"guide/schema/migrations.md#two-branches-one-number" = "guide/schema/migrations.md#duplicate-migration-numbers-and-replace"
+"guide/schema/migrations.md#squashing-an-epics-migrations" = "guide/schema/squash.md"
+"guide/schema/migrations.md#a-rename-inside-the-range" = "guide/schema/squash.md#renames-inside-the-range"
+"guide/schema/migrations.md#every-database-that-applied-the-originals-inherits-the-squash" = "guide/schema/squash.md#inheritance-on-databases-that-ran-the-originals"
+"guide/schema/migrations.md#a-squash-is-pre-release" = "guide/schema/squash.md#squash-timing"
+"guide/schema/migrations.md#squash-or---replace" = "guide/schema/squash.md#squash-vs-replace"
+# Sections of the old row-level security guide, split three ways (#715).
+"guide/row-level-security.md#the-pooler-constraint" = "concepts/row-level-security.md#the-pooler-constraint"
+"guide/row-level-security.md#deploy-ordering" = "guide/row-level-security.md#deploy-order"
+"guide/row-level-security.md#declaring-row-security" = "guide/row-level-security.md#the-tenant-policy"
+"guide/row-level-security.md#the-shorthand" = "reference/row-level-security.md#the-shorthand"
+"guide/row-level-security.md#multiple-policies-composing-permissive-and-restrictive" = "reference/row-level-security.md#composing-policies"
+"guide/row-level-security.md#the-raw-escape-hatch" = "reference/row-level-security.md#the-sql-form"
+"guide/row-level-security.md#session-settings" = "concepts/row-level-security.md#session-settings"
+"guide/row-level-security.md#opening-a-session-with-settings" = "guide/row-level-security.md#tenant-scoped-sessions"
+"guide/row-level-security.md#deferred-resolution-current_sessionset_config" = "guide/row-level-security.md#a-tenant-known-after-the-session-opens"
+"guide/row-level-security.md#nesting-and-inheritance" = "concepts/row-level-security.md#nested-sessions"
+"guide/row-level-security.md#scope-stability-mid-operation" = "concepts/row-level-security.md#visibility-of-a-new-value"
+"guide/row-level-security.md#the-nullif-contract" = "concepts/row-level-security.md#policy-expressions"
+"guide/row-level-security.md#bypassrls" = "concepts/row-level-security.md#force-and-bypassrls"
+"guide/row-level-security.md#the-json-claims-recipe" = "guide/row-level-security.md#json-claims"
+"guide/row-level-security.md#framework-integration" = "guide/row-level-security.md#web-framework-middleware"
+"guide/row-level-security.md#outside-the-request-context" = "guide/row-level-security.md#background-jobs"
+"guide/row-level-security.md#connection-delivery-mode" = "concepts/row-level-security.md#connection-delivery"
+"guide/row-level-security.md#raw-policies-and-drift" = "concepts/row-level-security.md#drift-and-ownership"
+"guide/row-level-security.md#migrations-and-alembic" = "guide/row-level-security.md#deploy-order"
 
 [project.plugins.mkdocstrings.handlers.python]
 paths = ["src"]
-inventories = ["https://docs.python.org/3/objects.inv"]
+inventories = [
+  "https://docs.python.org/3/objects.inv",
+  "https://docs.pydantic.dev/latest/objects.inv",
+]
 
 [project.plugins.mkdocstrings.handlers.python.options]
 docstring_style = "google"
-show_source = true
+docstring_options = { ignore_init_summary = true }
+merge_init_into_class = true
+show_source = false
 show_root_heading = true
 show_root_full_path = false
-show_category_heading = true
-show_if_no_docstring = true
+show_category_heading = false
+# A member with no docstring is not rendered; every public object has one.
+show_if_no_docstring = false
 members_order = "source"
+# Not "public": griffe counts every dunder as public, so "public" would render
+# __repr__, __post_init__ and the __ferro_*__ class attributes. A protocol a
+# reader uses (async with, len(), comparisons) belongs in the class docstring.
+# `model_config` is Pydantic's configuration, inherited with Pydantic's own
+# docstring; it is no part of a Ferro model's API.
+filters = ["!^_", "!^model_config$"]
+separate_signature = true
+show_signature_annotations = true
+signature_crossrefs = true
+show_symbol_type_heading = true
+show_symbol_type_toc = true
+scoped_crossrefs = true
+relative_crossrefs = true
+summary = true
+backlinks = "tree"
+extensions = ["griffe_inherited_docstrings"]
 
+# --- Python-Markdown core ---
+[project.markdown_extensions.abbr]
 [project.markdown_extensions.attr_list]
 [project.markdown_extensions.md_in_html]
 [project.markdown_extensions.admonition]
@@ -131,12 +278,22 @@ members_order = "source"
 
 [project.markdown_extensions.toc]
 permalink = true
+permalink_title = "Anchor link to this section"
 
+# --- pymdown-extensions ---
 [project.markdown_extensions.pymdownx.details]
 [project.markdown_extensions.pymdownx.inlinehilite]
 [project.markdown_extensions.pymdownx.keys]
 [project.markdown_extensions.pymdownx.mark]
 [project.markdown_extensions.pymdownx.smartsymbols]
+
+[project.markdown_extensions.pymdownx.magiclink]
+provider = "github"
+user = "syn54x"
+repo = "ferro-orm"
+repo_url_shorthand = true
+repo_url_shortener = true
+normalize_issue_symbols = true
 
 [project.markdown_extensions.pymdownx.superfences]
 custom_fences = [
@@ -146,6 +303,11 @@ custom_fences = [
 [project.markdown_extensions.pymdownx.snippets]
 base_path = ["."]
 check_paths = true
+# Example sections sit inside `async def main():`; strip that indentation so
+# an embedded block starts at column 0 and runs when pasted.
+dedent_subsections = true
+# The glossary lives outside docs_dir so it is not built as a page.
+auto_append = ["docs/includes/abbreviations.md"]
 
 [project.markdown_extensions.pymdownx.highlight]
 anchor_linenums = true
@@ -154,6 +316,8 @@ pygments_lang_class = true
 
 [project.markdown_extensions.pymdownx.tabbed]
 alternate_style = true
+combine_header_slug = true
+slugify = { object = "pymdownx.slugs.slugify", kwds = { case = "lower" } }
 
 [project.markdown_extensions.pymdownx.emoji]
 emoji_index = "zensical.extensions.emoji.twemoji"

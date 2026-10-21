@@ -1,259 +1,369 @@
-"""Runnable companion to the Queries guide (docs/pages/guide/queries.md)."""
+"""Runnable companion to the Queries guide (docs/pages/guide/queries.md).
+
+Declares the ledger every section of the guide queries, adds its rows
+(``_ledger_seed.py``), then runs the filtering, ordering, paging and terminal
+examples and asserts the rows that come back. The guide's other example
+scripts import these models from here.
+"""
 
 import asyncio
-from datetime import UTC, datetime
 
-# --8<-- [start:setup]
-from ferro import Field, Model, connect, engines
+# --8<-- [start:models]
+from datetime import date
+from decimal import Decimal
+from typing import Annotated
+
+from ferro import BackRef, Field, ForeignKey, ManyToMany, Model, Relation
 
 
-class User(Model):
+class Owner(Model):
     id: int | None = Field(default=None, primary_key=True)
     name: str
-    age: int
-    role: str = "member"
-    archived: bool = False
+    email: str = Field(unique=True)
+    accounts: Relation[list["Account"]] = BackRef()
 
 
-# --8<-- [end:setup]
-
-
-# --8<-- [start:nullable-model]
-class Invoice(Model):
+class Account(Model):
     id: int | None = Field(default=None, primary_key=True)
-    reference: str
-    amount: float | None = None  # None until the invoice is issued
+    label: str
+    owner: Annotated[Owner | None, ForeignKey(related_name="accounts")] = None
+    transactions: Relation[list["Transaction"]] = BackRef()
 
 
-# --8<-- [end:nullable-model]
-
-
-# --8<-- [start:card-model]
-class Card(Model):
+class Category(Model):
     id: int | None = Field(default=None, primary_key=True)
-    title: str
-    pinned_at: datetime | None = None
-    updated_at: datetime
+    name: str = Field(unique=True)
+    parent: Annotated[
+        "Category", ForeignKey(related_name="children", nullable=True)
+    ] = None
+    children: Relation[list["Category"]] = BackRef()
+    transactions: Relation[list["Transaction"]] = BackRef()
+    split_lines: Relation[list["SplitLine"]] = BackRef()
 
 
-# --8<-- [end:card-model]
+class Transaction(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    memo: str
+    amount: Decimal
+    posted_on: date
+    cleared_on: date | None = None
+    account: Annotated[Account, ForeignKey(related_name="transactions")]
+    category: Annotated[Category | None, ForeignKey(related_name="transactions")] = None
+    lines: Relation[list["SplitLine"]] = BackRef()
+    transfer_out: "Transfer" = BackRef()
+    transfer_in: "Transfer" = BackRef()
+    tags: Relation[list["Tag"]] = BackRef()
+
+
+class SplitLine(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    amount: Decimal
+    transaction: Annotated[Transaction, ForeignKey(related_name="lines")]
+    category: Annotated[Category, ForeignKey(related_name="split_lines")]
+
+
+class Transfer(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    outflow: Annotated[
+        Transaction, ForeignKey(related_name="transfer_out", unique=True)
+    ]
+    inflow: Annotated[Transaction, ForeignKey(related_name="transfer_in", unique=True)]
+
+
+class Tag(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    name: str = Field(unique=True)
+    transactions: Relation[list[Transaction]] = ManyToMany(related_name="tags")
+
+
+# --8<-- [end:models]
 
 
 async def main() -> None:
+    from _ledger_seed import seed
+
+    # --8<-- [start:first-query]
+    from ferro import connect, engines
+
     await connect("sqlite::memory:", auto_migrate=True)
-
     async with engines.session():
-        await User.bulk_create(
-            [
-                User(name="alice", age=34, role="admin"),
-                User(name="bob", age=19),
-                User(name="carol", age=42, archived=True),
-                User(name="dave", age=17),
-            ]
-        )
+        await seed(globals())  # adds the rows this page queries
 
-        # --8<-- [start:filtering]
-        adults = await User.where(lambda user: user.age >= 18).all()
-        # --8<-- [end:filtering]
-        assert len(adults) == 3
-
-        # --8<-- [start:lambda-style]
-        admins = await User.where(
-            lambda user: (user.role == "admin") & (user.archived == False)  # noqa: E712
-        ).all()
-        # --8<-- [end:lambda-style]
-        assert len(admins) == 1
-
-        # --8<-- [start:operators]
-        teens = await User.where(lambda user: (user.age >= 13) & (user.age <= 19)).all()
-        a_names = await User.where(lambda user: user.name.like("a%")).all()
-        staff = await User.where(
-            lambda user: user.role.in_(["admin", "moderator"])
-        ).all()
-        # --8<-- [end:operators]
-        assert len(teens) == 2
-        assert len(a_names) == 1
-        assert len(staff) == 1
-
-        # --8<-- [start:combining]
-        # & is AND, | is OR — parenthesize each side
-        flagged = await User.where(
-            lambda user: (user.age < 18) | (user.archived == True)  # noqa: E712
-        ).all()
-
-        # Chained .where() calls also AND together
-        young_members = (
-            await User.where(lambda user: user.role == "member")
-            .where(lambda user: user.age < 21)
+        large = (
+            await Transaction.where(lambda transaction: transaction.amount <= -100)
+            .order_by(lambda transaction: transaction.amount)
             .all()
         )
+        for transaction in large:
+            print(transaction.memo, transaction.amount)
+        # --8<-- [end:first-query]
+        assert [transaction.memo for transaction in large] == ["Rent", "To savings"]
+
+        # --8<-- [start:filtering]
+        uncleared = await Transaction.where(
+            lambda transaction: transaction.cleared_on == None
+        ).all()
+        assert {transaction.memo for transaction in uncleared} == {
+            "Train to Lyon",
+            "Dinner in Lyon",
+            "Weekly shop",
+        }
+        # --8<-- [end:filtering]
+
+        # --8<-- [start:typo]
+        try:
+            Transaction.where(lambda transaction: transaction.amout < 0)
+        except AttributeError as error:
+            assert str(error) == (
+                "Transaction has no queryable column 'amout'. Did you mean "
+                "'amount'? Valid columns: account_id, amount, category_id, "
+                "cleared_on, id, memo, posted_on. Valid relations: account, "
+                "category."
+            )
+        else:
+            raise AssertionError("a misspelled column must raise AttributeError")
+        # --8<-- [end:typo]
+
+        # --8<-- [start:operators]
+        coffee = await Transaction.where(
+            lambda transaction: transaction.memo.like("%coffee")
+        ).all()
+        assert {transaction.memo for transaction in coffee} == {"Office coffee"}
+
+        lyon = await Transaction.where(
+            lambda transaction: transaction.posted_on.in_(
+                [date(2026, 3, 9), date(2026, 3, 10)]
+            )
+        ).all()
+        assert {transaction.memo for transaction in lyon} == {
+            "Train to Lyon",
+            "Dinner in Lyon",
+        }
+        # --8<-- [end:operators]
+
+        # --8<-- [start:combining]
+        # & is AND, | is OR: parenthesize each side.
+        small_uncleared = await Transaction.where(
+            lambda transaction: (
+                (transaction.cleared_on == None) & (transaction.amount > -90)
+            )
+        ).all()
+        assert {transaction.memo for transaction in small_uncleared} == {
+            "Train to Lyon",
+            "Dinner in Lyon",
+        }
+
+        # Chained where() calls AND together.
+        march_debits = (
+            await Transaction.where(lambda transaction: transaction.amount < 0)
+            .where(lambda transaction: transaction.posted_on >= date(2026, 3, 10))
+            .all()
+        )
+        assert {transaction.memo for transaction in march_debits} == {
+            "Dinner in Lyon",
+            "Office coffee",
+            "Weekly shop",
+        }
         # --8<-- [end:combining]
-        assert len(flagged) == 2
-        assert len(young_members) == 2
 
         # --8<-- [start:negation]
-        # ~ negates ANY predicate: a comparison, .in_(), .like(), or a whole
-        # &/| group. There are no per-operator negative forms to memorize.
-        not_staff = await User.where(
-            lambda user: ~user.role.in_(["admin", "moderator"])
+        not_lyon = await Transaction.where(
+            lambda transaction: (
+                ~transaction.memo.like("%Lyon") & (transaction.amount < -50)
+            )
         ).all()
-        not_a_names = await User.where(lambda user: ~user.name.like("a%")).all()
-        active_adults = await User.where(
-            lambda user: ~((user.age < 18) | (user.archived == True))  # noqa: E712
-        ).all()
+        assert {transaction.memo for transaction in not_lyon} == {
+            "Rent",
+            "Market run",
+            "To savings",
+            "Weekly shop",
+        }
         # --8<-- [end:negation]
-        assert len(not_staff) == 3
-        assert len(not_a_names) == 3
-        assert len(active_adults) == 2
-
-        await Invoice.bulk_create(
-            [
-                Invoice(reference="inv-1", amount=250.0),
-                Invoice(reference="inv-2", amount=40.0),
-                Invoice(reference="inv-3", amount=None),
-            ]
-        )
 
         # --8<-- [start:three-valued]
-        big = await Invoice.where(lambda invoice: invoice.amount > 100).all()
-        not_big = await Invoice.where(lambda invoice: ~(invoice.amount > 100)).all()
-
-        # inv-3 (amount is NULL) appears in NEITHER list
-        assert {invoice.reference for invoice in big} == {"inv-1"}
-        assert {invoice.reference for invoice in not_big} == {"inv-2"}
-
-        # keeping the NULL rows is an explicit extra condition
-        not_big_or_unissued = await Invoice.where(
-            lambda invoice: ~(invoice.amount > 100) | (invoice.amount == None)  # noqa: E711
+        before_march_5 = await Transaction.where(
+            lambda transaction: transaction.cleared_on < date(2026, 3, 5)
         ).all()
-        assert {invoice.reference for invoice in not_big_or_unissued} == {
-            "inv-2",
-            "inv-3",
+        not_before_march_5 = await Transaction.where(
+            lambda transaction: ~(transaction.cleared_on < date(2026, 3, 5))
+        ).all()
+        assert {transaction.memo for transaction in before_march_5} == {
+            "Salary",
+            "Rent",
+        }
+        # The three uncleared rows are in neither list.
+        assert {transaction.memo for transaction in not_before_march_5} == {
+            "Market run",
+            "To savings",
+            "From checking",
+            "Office coffee",
         }
         # --8<-- [end:three-valued]
 
+        # --8<-- [start:keep-nulls]
+        not_before_or_uncleared = await Transaction.where(
+            lambda transaction: (
+                ~(transaction.cleared_on < date(2026, 3, 5))
+                | (transaction.cleared_on == None)
+            )
+        ).all()
+        assert len(not_before_or_uncleared) == 7
+        # --8<-- [end:keep-nulls]
+
+        # --8<-- [start:get]
+        from ferro import ModelDoesNotExist
+
+        rent = await Transaction.get(2)
+        assert rent.memo == "Rent"
+
+        try:
+            await Transaction.get(99)
+        except ModelDoesNotExist as error:
+            assert (error.model, error.pk) == (Transaction, 99)
+        else:
+            raise AssertionError("a missing row must raise ModelDoesNotExist")
+
+        assert await Transaction.get_or_none(99) is None
+        # --8<-- [end:get]
+
         # --8<-- [start:ordering-slicing]
-        oldest_first = await User.select().order_by(lambda user: user.age, "desc").all()
-        second_page = (
-            await User.select().order_by(lambda user: user.id).limit(2).offset(2).all()
+        largest_debits = (
+            await Transaction.select()
+            .order_by(lambda transaction: transaction.amount)
+            .limit(3)
+            .all()
         )
+        assert [transaction.memo for transaction in largest_debits] == [
+            "Rent",
+            "To savings",
+            "Weekly shop",
+        ]
+
+        next_three = (
+            await Transaction.select()
+            .order_by(lambda transaction: transaction.amount)
+            .limit(3)
+            .offset(3)
+            .all()
+        )
+        assert [transaction.memo for transaction in next_three] == [
+            "Market run",
+            "Train to Lyon",
+            "Dinner in Lyon",
+        ]
         # --8<-- [end:ordering-slicing]
-        assert oldest_first[0].name == "carol"
-        assert len(second_page) == 2
-
-        # --8<-- [start:after-paging]
-        page = (
-            await User.select()
-            .order_by(lambda user: user.age)
-            .order_by(lambda user: user.id)
-            .limit(2)
-            .all()
-        )
-        next_page = (
-            await User.select()
-            .order_by(lambda user: user.age)
-            .order_by(lambda user: user.id)
-            .after(page[-1])
-            .limit(2)
-            .all()
-        )
-        # --8<-- [end:after-paging]
-        assert [user.name for user in page] == ["dave", "bob"]
-        assert [user.name for user in next_page] == ["alice", "carol"]
-
-        # --8<-- [start:before-paging]
-        previous_page = (
-            await User.select()
-            .order_by(lambda user: user.age)
-            .order_by(lambda user: user.id)
-            .before(next_page[0])
-            .limit(2)
-            .all()
-        )
-        earlier = (
-            await User.select()
-            .order_by(lambda user: user.age)
-            .order_by(lambda user: user.id)
-            .before(next_page[0])
-            .all()
-        )
-        adjacent = (
-            await User.select()
-            .order_by(lambda user: user.age)
-            .order_by(lambda user: user.id)
-            .before(next_page[0])
-            .first()
-        )
-        # --8<-- [end:before-paging]
-        assert [user.name for user in previous_page] == ["dave", "bob"]
-        assert [user.name for user in earlier] == ["dave", "bob"]
-        assert adjacent is not None and adjacent.name == "bob"
-        assert earlier[0].name == "dave"
-        assert adjacent.name != earlier[0].name
-
-        t0 = datetime(2026, 1, 1, tzinfo=UTC)
-        t1 = datetime(2026, 2, 1, tzinfo=UTC)
-        t2 = datetime(2026, 3, 1, tzinfo=UTC)
-        await Card.bulk_create(
-            [
-                Card(title="unpinned-old", pinned_at=None, updated_at=t0),
-                Card(title="pinned-early", pinned_at=t0, updated_at=t0),
-                Card(title="unpinned-new", pinned_at=None, updated_at=t2),
-                Card(title="pinned-late", pinned_at=t1, updated_at=t1),
-            ]
-        )
 
         # --8<-- [start:nulls-ordering]
-        cards = (
-            await Card.select()
-            .order_by(lambda card: card.pinned_at, "desc", nulls="last")
-            .order_by(lambda card: card.updated_at, "desc")
-            .order_by(lambda card: card.id, "desc")
+        uncleared_first = (
+            await Transaction.select()
+            .order_by(lambda transaction: transaction.cleared_on, "desc", nulls="first")
+            .order_by(lambda transaction: transaction.id)
+            .limit(4)
             .all()
         )
-        # --8<-- [end:nulls-ordering]
-        assert [card.title for card in cards] == [
-            "pinned-late",
-            "pinned-early",
-            "unpinned-new",
-            "unpinned-old",
+        assert [transaction.memo for transaction in uncleared_first] == [
+            "Train to Lyon",
+            "Dinner in Lyon",
+            "Weekly shop",
+            "Office coffee",
         ]
+        # --8<-- [end:nulls-ordering]
+
+        # --8<-- [start:after-paging]
+        by_date = (
+            Transaction.select()
+            .order_by(lambda transaction: transaction.posted_on)
+            .order_by(lambda transaction: transaction.id)
+        )
+        first_page = await by_date.limit(3).all()
+        second_page = await by_date.after(first_page[-1]).limit(3).all()
+        assert [transaction.memo for transaction in first_page] == [
+            "Salary",
+            "Rent",
+            "Market run",
+        ]
+        assert [transaction.memo for transaction in second_page] == [
+            "To savings",
+            "From checking",
+            "Train to Lyon",
+        ]
+        # --8<-- [end:after-paging]
+
+        # --8<-- [start:position-of]
+        position = by_date.position_of(first_page[-1])
+        assert position == (date(2026, 3, 5), 3)
+
+        same_page = await by_date.after(position).limit(3).all()
+        assert same_page == second_page
+        # --8<-- [end:position-of]
+
+        # --8<-- [start:before-paging]
+        previous_page = await by_date.before(second_page[0]).limit(2).all()
+        assert [transaction.memo for transaction in previous_page] == [
+            "Rent",
+            "Market run",
+        ]
+
+        everything_earlier = await by_date.before(second_page[0]).all()
+        assert [transaction.memo for transaction in everything_earlier] == [
+            "Salary",
+            "Rent",
+            "Market run",
+        ]
+
+        previous_row = await by_date.before(second_page[0]).first()
+        assert previous_row is not None and previous_row.memo == "Market run"
+        # --8<-- [end:before-paging]
 
         # --8<-- [start:after-null-paging]
-        last_pinned = cards[1]
-        unpinned_page = (
-            await Card.select()
-            .order_by(lambda card: card.pinned_at, "desc")
-            .order_by(lambda card: card.updated_at, "desc")
-            .order_by(lambda card: card.id, "desc")
-            .after(last_pinned)
-            .all()
+        by_clearing = (
+            Transaction.select()
+            .order_by(lambda transaction: transaction.cleared_on, "desc")
+            .order_by(lambda transaction: transaction.id)
         )
-        remaining_unpinned = (
-            await Card.select()
-            .order_by(lambda card: card.pinned_at, "desc")
-            .order_by(lambda card: card.updated_at, "desc")
-            .order_by(lambda card: card.id, "desc")
-            .after((None, cards[2].updated_at, cards[2].id))
-            .all()
-        )
-        # --8<-- [end:after-null-paging]
-        assert [card.title for card in unpinned_page] == [
-            "unpinned-new",
-            "unpinned-old",
+        rest_of_uncleared = await by_clearing.after((None, 6)).all()
+        assert [transaction.memo for transaction in rest_of_uncleared] == [
+            "Dinner in Lyon",
+            "Weekly shop",
         ]
-        assert [card.title for card in remaining_unpinned] == ["unpinned-old"]
+        # --8<-- [end:after-null-paging]
 
         # --8<-- [start:terminals]
-        everyone = await User.all()
-        first_admin = await User.where(lambda user: user.role == "admin").first()
-        headcount = await User.select().count()
-        any_minors = await User.where(lambda user: user.age < 18).exists()
+        everything = await Transaction.all()
+        assert len(everything) == 9
+
+        newest = (
+            await Transaction.select()
+            .order_by(lambda transaction: transaction.posted_on, "desc")
+            .first()
+        )
+        assert newest is not None and newest.memo == "Weekly shop"
+
+        uncleared_count = await Transaction.where(
+            lambda transaction: transaction.cleared_on == None
+        ).count()
+        assert uncleared_count == 3
+
+        any_refunds = await Transaction.where(
+            lambda transaction: transaction.memo.like("Refund%")
+        ).exists()
+        assert any_refunds is False
         # --8<-- [end:terminals]
-        assert len(everyone) == 4
-        assert first_admin is not None
-        assert headcount == 4
-        assert any_minors
+
+        # --8<-- [start:immutability]
+        debits = Transaction.where(lambda transaction: transaction.amount < 0)
+
+        debit_count = await debits.count()
+        biggest = await debits.order_by(lambda transaction: transaction.amount).first()
+        uncleared_debits = await debits.where(
+            lambda transaction: transaction.cleared_on == None
+        ).count()
+
+        assert debit_count == 7
+        assert biggest is not None and biggest.memo == "Rent"
+        assert uncleared_debits == 3
+        assert await debits.count() == 7  # debits itself never changed
+        # --8<-- [end:immutability]
 
     print("predicates example ran successfully")
 

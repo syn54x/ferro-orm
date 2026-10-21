@@ -1,14 +1,23 @@
 """The Schema Management docs say what the code does (#539).
 
-Five promises the pages make, each checked against the implementation:
+The promises the pages make, each checked against the implementation:
 
 - every ``ferro migrate`` output a page quotes (a ```text block marked
   ``<!-- output: <id> -->``) is what the verb prints with no terminal, on a
   scratch SQLite project, once the parts that vary are normalised;
+- every step file a page quotes (a block headed ``-- NNNN_<name>/<file>``, or a
+  Python block headed ``# migrations/NNNN_<name>/<file>``) is, byte for byte,
+  what ``ferro migrate new`` writes from the page's example models;
+- every Alembic revision the bridge page quotes (``<!-- revision: <id> -->``)
+  is what ``alembic revision --autogenerate`` writes for that change;
 
 - the two declaration styles of every migrations example generate the same
   migration, byte for byte (the ``_annotated`` twin's ``migrations/`` equals
   the assignment twin's);
+- every example of the renames and retirements page starts from the one
+  running example the page declares;
+- the migrations reference lists every ``PassReport`` statement role and every
+  warning kind the core raises, in the core's order;
 - every refusal the CLI reference quotes is the text ``ferro`` prints, for
   the refusals that need no database;
 - the Migrations API page documents exactly ``ferro.migrations.__all__``, and
@@ -32,6 +41,7 @@ from types import ModuleType
 import pytest
 
 import ferro.migrations
+from tests._docs_harness import Fence, fenced_blocks, page_fences, run_python
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DOCS_PAGES = REPO_ROOT / "docs" / "pages"
@@ -62,16 +72,7 @@ def _files(root: Path) -> dict[str, bytes]:
 
 
 def _run_example(name: str, project: Path) -> None:
-    result = subprocess.run(
-        [sys.executable, str(DOCS_EXAMPLES / f"{name}.py"), str(project)],
-        capture_output=True,
-        text=True,
-        timeout=180,
-        cwd=REPO_ROOT,
-    )
-    assert result.returncode == 0, (
-        f"{name} failed\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-    )
+    run_python([str(DOCS_EXAMPLES / f"{name}.py"), str(project)])
 
 
 @pytest.mark.parametrize("name", MIGRATION_EXAMPLES)
@@ -85,6 +86,35 @@ def test_both_declaration_styles_generate_the_same_migrations(
     written = _files(assignment / "migrations")
     assert any(path.endswith("ir.json") for path in written), written
     assert _files(annotated / "migrations") == written
+
+
+RENAMES_PAGE_EXAMPLES = [
+    "migrations_rename",
+    "migrations_retire",
+    "migrations_retire_label",
+]
+"""The examples of the renames and retirements page, each one change to its running
+example, which ``migrations_rename``'s ``base`` region declares."""
+
+
+def _examples_project() -> ModuleType:
+    """``docs/examples/_migrations_project.py``, which reads an example's regions."""
+    sys.path.insert(0, str(DOCS_EXAMPLES))
+    try:
+        return importlib.import_module("_migrations_project")
+    finally:
+        sys.path.remove(str(DOCS_EXAMPLES))
+
+
+@pytest.mark.parametrize("style", ["", "_annotated"])
+@pytest.mark.parametrize("name", RENAMES_PAGE_EXAMPLES)
+def test_each_renames_page_example_starts_from_the_page_s_running_example(
+    name: str, style: str
+) -> None:
+    project = _examples_project()
+    change = project._region(DOCS_EXAMPLES / f"{name}{style}.py", "models")
+    base = project._region(DOCS_EXAMPLES / f"migrations_rename{style}.py", "base")
+    assert project._before(change) == base
 
 
 # -- the refusals the CLI reference quotes -------------------------------------------
@@ -197,17 +227,67 @@ REFUSALS = {
 }
 
 
+def _marked(kind: str, blocks: list[Fence] | None = None) -> dict[str, str]:
+    """Each ```text block marked ``<!-- <kind>: <id> -->``, by id.
+
+    ``blocks`` defaults to every block a docs page shows, so a marked block
+    on any page is compared: there is no page where the note goes unchecked.
+
+    Raises:
+        AssertionError: Two blocks carry one id.
+    """
+    found: dict[str, str] = {}
+    for fence in page_fences("text") if blocks is None else blocks:
+        if fence.note is None or fence.note[0] != kind:
+            continue
+        block_id = fence.note[1]
+        assert block_id not in found, (
+            f"{fence.where}: {kind} id {block_id!r} marks two blocks"
+        )
+        found[block_id] = fence.body
+    return found
+
+
+def _registry_gaps(
+    kind: str, registry: dict, blocks: list[Fence] | None = None
+) -> list[str]:
+    """What keeps the marked blocks and ``registry`` from naming the same ids."""
+    marked = _marked(kind, blocks)
+    return [
+        *(
+            f"<!-- {kind}: {block_id} --> has no entry in the registry"
+            for block_id in sorted(set(marked) - set(registry))
+        ),
+        *(
+            f"the registry's {block_id!r} marks no block"
+            for block_id in sorted(set(registry) - set(marked))
+        ),
+    ]
+
+
 def _quoted_refusals() -> dict[str, str]:
-    """Each ```text block the CLI reference marks ``<!-- refusal: <id> -->``."""
-    page = CLI_REFERENCE.read_text()
-    found = re.findall(
-        r"<!-- refusal: ([a-z-]+) -->\s*```text\n(.*?)```", page, flags=re.DOTALL
+    return _marked("refusal")
+
+
+def test_the_pages_quote_each_database_free_refusal() -> None:
+    assert _registry_gaps("refusal", REFUSALS) == []
+
+
+@pytest.mark.parametrize("kind", ["output", "refusal"])
+def test_a_marked_block_on_any_page_is_compared(kind: str) -> None:
+    """A typed block under ``output:`` or ``refusal:`` on a page outside the
+    migrations guides still has to name a registered scenario."""
+    page = DOCS_PAGES / "howto" / "testing.md"
+    fabricated = fenced_blocks(
+        page,
+        f"# Testing\n\n<!-- {kind}: made-up -->\n```text\nferro migrate: typed\n```\n",
+        "text",
     )
-    return {key: text for key, text in found}
-
-
-def test_the_cli_reference_quotes_each_database_free_refusal() -> None:
-    assert sorted(_quoted_refusals()) == sorted(REFUSALS)
+    registry = OUTPUTS if kind == "output" else REFUSALS
+    blocks = [*page_fences("text"), *fabricated]
+    assert _registry_gaps(kind, registry, blocks) == [
+        f"<!-- {kind}: made-up --> has no entry in the registry"
+    ]
 
 
 @pytest.mark.parametrize("refusal", sorted(REFUSALS))
@@ -234,10 +314,11 @@ def test_the_api_page_documents_every_public_name_of_ferro_migrations() -> None:
     targets = re.findall(
         r"^::: (ferro\.migrations\.[\w.]+)", API_PAGE.read_text(), re.M
     )
+    # Only `ferro.migrations.<name>`: the testing harness and the reports
+    # documented under their defining module (`ferro.migrations.runner.RunReport`)
+    # are not in `ferro.migrations.__all__`.
     documented = sorted(
-        target.rsplit(".", 1)[1]
-        for target in targets
-        if not target.startswith("ferro.migrations.testing.")
+        target.rsplit(".", 1)[1] for target in targets if target.count(".") == 2
     )
     assert documented == sorted(ferro.migrations.__all__)
 
@@ -302,6 +383,43 @@ def test_the_api_page_documents_the_test_harness() -> None:
         assert f"::: ferro.migrations.testing.{name}\n" in page, name
 
 
+# -- the PassReport the migrations reference describes ------------------------------
+
+MIGRATIONS_REFERENCE = DOCS_PAGES / "reference" / "migrations.md"
+REPORT_KINDS_SOURCE = REPO_ROOT / "crates" / "ferro-ddl-lowering" / "src" / "lib.rs"
+
+
+def _first_column(page: Path, header: str) -> list[str]:
+    """The backticked first cell of every row of the table whose header row
+    starts with ``header``."""
+    lines = page.read_text().splitlines()
+    start = next(number for number, line in enumerate(lines) if line.startswith(header))
+    cells = []
+    for line in lines[start + 2 :]:
+        if not line.startswith("|"):
+            break
+        cells.append(line.split("|")[1].strip().strip("`").strip('"'))
+    return cells
+
+
+def test_the_reference_lists_every_report_kind_the_core_raises() -> None:
+    source = REPORT_KINDS_SOURCE.read_text()
+    body = source[source.index("pub enum ReportKind {") :]
+    body = body[: body.index("\n}\n")]
+    kinds = re.findall(r"^    ([A-Z]\w+)\b", body, flags=re.MULTILINE)
+    assert kinds, "no ReportKind variant found"
+    assert _first_column(MIGRATIONS_REFERENCE, "| `kind` |") == kinds
+
+
+def test_the_reference_lists_every_executed_statement_role() -> None:
+    from typing import get_args
+
+    from ferro.pass_report import Role
+
+    roles = _first_column(MIGRATIONS_REFERENCE, "| `role` |")
+    assert roles == list(get_args(Role))
+
+
 # -- the doors' names ---------------------------------------------------------------
 
 
@@ -327,9 +445,11 @@ def test_no_page_names_a_door_the_old_way(phrase: str) -> None:
 OUTPUT_PAGES = [
     CLI_REFERENCE,
     DOCS_PAGES / "guide" / "schema" / "migrations.md",
+    DOCS_PAGES / "guide" / "schema" / "renames-and-retirements.md",
+    DOCS_PAGES / "guide" / "schema" / "squash.md",
     DOCS_PAGES / "guide" / "schema" / "data-steps.md",
     DOCS_PAGES / "guide" / "schema" / "deploying.md",
-    DOCS_PAGES / "howto" / "adopting-migrations.md",
+    DOCS_PAGES / "guide" / "schema" / "adopting-migrations.md",
 ]
 
 HEAD = "from ferro import Field, Model\n\n\n"
@@ -346,7 +466,6 @@ class Author(Model):
 AUTHOR_NICKNAME = (
     AUTHOR + "    nickname: str | None = Field(default=None, index=True)\n"
 )
-AUTHOR_HANDLE = AUTHOR + "    handle: str | None = Field(default=None, index=True)\n"
 
 NAMED_AUTHOR = (
     HEAD
@@ -359,15 +478,7 @@ class Author(Model):
 NAMED_AUTHOR_SLUG = NAMED_AUTHOR + "    slug: str\n"
 NAMED_AUTHOR_OPTIONAL_SLUG = NAMED_AUTHOR + "    slug: str | None = None\n"
 
-POST = (
-    HEAD
-    + """\
-class Post(Model):
-    id: int | None = Field(default=None, primary_key=True)
-    title: str | None = None
-"""
-)
-POST_TITLE_REQUIRED = POST.replace("title: str | None = None", "title: str")
+AUTHOR_NICKNAME_REQUIRED = AUTHOR + "    nickname: str = Field(index=True)\n"
 
 
 def _write_models(project: Path, source: str) -> None:
@@ -480,54 +591,81 @@ def _sql_step_added(project: Path) -> None:
     _run_ok(project, "migrate", "new", "seed", "--sql-step", "seed_admins")
 
 
+# The renames page: its running example, and nickname renamed with no hint.
+
+RENAMES_BASE = (
+    "from enum import StrEnum\n\n"
+    + HEAD
+    + """\
+class Status(StrEnum):
+    ACTIVE = "active"
+    PAUSED = "paused"
+    CANCELED = "canceled"
+
+
+class Author(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    name: str
+    email: str = Field(unique=True)
+    nickname: str | None = Field(default=None, index=True)
+    bio: str = Field(index=True)
+    status: Status = Status.ACTIVE
+"""
+)
+
+
 def _before_rename(project: Path) -> None:
     _configured(project)
-    _write_models(project, AUTHOR_NICKNAME)
+    _write_models(project, RENAMES_BASE)
     _run_ok(project, "migrate", "new", "create_author")
     _run_ok(project, "migrate", "up")
-    _write_models(project, AUTHOR_HANDLE)
+    _write_models(project, RENAMES_BASE.replace("nickname:", "handle:"))
 
 
 def _rebuild_blocked(project: Path) -> None:
-    _configured(project)
-    _write_models(project, POST)
-    _run_ok(project, "migrate", "new", "create_post")
-    _run_ok(project, "migrate", "up")
+    """The loop's database, with an index and a trigger ferro never declared, meets
+    a migration that makes ``nickname`` required: a SQLite rebuild."""
+    _loop_applied(project)
     _database(
         project,
-        "CREATE INDEX my_idx ON post(title);"
-        " CREATE TRIGGER t AFTER INSERT ON post BEGIN SELECT 1; END;",
+        "CREATE INDEX my_idx ON author(name);"
+        " CREATE TRIGGER t AFTER INSERT ON author BEGIN SELECT 1; END;",
     )
-    _write_models(project, POST_TITLE_REQUIRED)
+    _write_models(project, AUTHOR_NICKNAME_REQUIRED)
     _run_ok(
-        project, "migrate", "new", "post_title_required", "--no-backfill", "post.title"
+        project,
+        "migrate",
+        "new",
+        "nickname_required",
+        "--no-backfill",
+        "author.nickname",
     )
 
 
-# Two branches that both generated migration 0002.
+# Two branches that both generated migration 0002: a teammate's, the loop's
+# ``0002_author_nickname``, and yours, ``0002_author_bio``.
 
-AUTHOR_NICK = NAMED_AUTHOR + "    nick: str | None = None\n"
-AUTHOR_BIO = NAMED_AUTHOR + "    bio: str | None = None\n"
-AUTHOR_BIO_AND_NICK = AUTHOR_NICK + "    bio: str | None = None\n"
+AUTHOR_BIO = AUTHOR + "    bio: str | None = None\n"
+AUTHOR_NICKNAME_AND_BIO = AUTHOR_NICKNAME + "    bio: str | None = None\n"
 
 
 def _two_branches(project: Path, *, applied: bool) -> None:
     import shutil
 
     _configured(project)
-    _write_models(project, NAMED_AUTHOR)
+    _write_models(project, AUTHOR)
     _run_ok(project, "migrate", "new", "create_author")
     _run_ok(project, "migrate", "up")
-    _write_models(project, AUTHOR_NICK)
-    _run_ok(project, "migrate", "new", "add_y")
-    teammate = project / "migrations" / "0002_add_y"
+    _write_models(project, AUTHOR_NICKNAME)
+    _run_ok(project, "migrate", "new", "author_nickname")
+    teammate = project / "migrations" / "0002_author_nickname"
     shutil.move(teammate, project / "teammate")
     _write_models(project, AUTHOR_BIO)
-    _run_ok(project, "migrate", "new", "add_x", "--sql-step", "fix_rows")
+    _run_ok(project, "migrate", "new", "author_bio", "--sql-step", "fix_rows")
     if applied:
         _run_ok(project, "migrate", "up")
     shutil.move(project / "teammate", teammate)
-    _write_models(project, AUTHOR_BIO_AND_NICK)
+    _write_models(project, AUTHOR_NICKNAME_AND_BIO)
 
 
 def _two_branches_unapplied(project: Path) -> None:
@@ -536,10 +674,10 @@ def _two_branches_unapplied(project: Path) -> None:
 
 def _two_branches_replaced(project: Path) -> None:
     _two_branches(project, applied=True)
-    _run_ok(project, "migrate", "new", "add_x", "--replace", "0002_add_x")
+    _run_ok(project, "migrate", "new", "author_bio", "--replace", "0002_author_bio")
 
 
-# An epic's branch, one migration per task, squashed before it merges.
+# A feature branch, one migration per task, squashed before it merges.
 
 TEAM = (
     "\n\nclass Team(Model):\n"
@@ -550,27 +688,21 @@ TEAM_TMP_CODE = "    tmp_code: str | None = None\n"
 TEAM_SLUG = "    slug: str\n"
 
 
-def _teams_epic(project: Path) -> None:
-    """Main holds ``0001``..``0004``; the epic's tasks add ``0005_add_teams`` (with
-    a ``tmp_code`` column), ``0006_team_slug`` (a required slug and its written
-    backfill), ``0007_drop_tmp`` and ``0008_fix_rows`` (a hand-written SQL step).
-    The developer's database applied every one."""
+def _teams_branch(project: Path) -> None:
+    """Main holds ``0001_create_author``, the loop's ``Author``; the branch's tasks
+    add ``0002_add_teams`` (with a ``tmp_code`` column), ``0003_team_slug`` (a
+    required slug and its written backfill), ``0004_drop_tmp`` and
+    ``0005_fix_rows`` (a hand-written SQL step). The developer's database applied
+    every one."""
     _configured(project)
-    models = NAMED_AUTHOR
-    for name, column in (
-        ("create_author", ""),
-        ("author_email", "    email: str | None = None\n"),
-        ("author_bio", "    bio: str | None = None\n"),
-        ("author_nick", "    nick: str | None = None\n"),
-    ):
-        models += column
-        _write_models(project, models)
-        _run_ok(project, "migrate", "new", name)
+    models = AUTHOR_NICKNAME
+    _write_models(project, models)
+    _run_ok(project, "migrate", "new", "create_author")
     _write_models(project, models + TEAM + TEAM_TMP_CODE)
     _run_ok(project, "migrate", "new", "add_teams")
     _write_models(project, models + TEAM + TEAM_TMP_CODE + TEAM_SLUG)
     _run_ok(project, "migrate", "new", "team_slug")
-    backfill = project / "migrations" / "0006_team_slug" / "02_backfill_team.py"
+    backfill = project / "migrations" / "0003_team_slug" / "02_backfill_team.py"
     backfill.write_text(
         backfill.read_text().replace(
             'todo("the slug for an existing team")', "team.name.lower()"
@@ -579,7 +711,7 @@ def _teams_epic(project: Path) -> None:
     _write_models(project, models + TEAM + TEAM_SLUG)
     _run_ok(project, "migrate", "new", "drop_tmp")
     _run_ok(project, "migrate", "new", "fix_rows", "--sql-step", "fix_rows")
-    fix_rows = project / "migrations" / "0008_fix_rows"
+    fix_rows = project / "migrations" / "0005_fix_rows"
     (fix_rows / "01_fix_rows.up.sql").write_text("UPDATE team SET name = trim(name);\n")
     (fix_rows / "01_fix_rows.down.sql").write_text(
         "-- ferro: nothing-to-reverse the names stay trimmed\n"
@@ -587,26 +719,26 @@ def _teams_epic(project: Path) -> None:
     _run_ok(project, "migrate", "up")
 
 
-def _teams_epic_squashed(project: Path) -> None:
-    _teams_epic(project)
-    _run_ok(project, "migrate", "squash", "teams_epic", "--from", "0005")
+def _teams_branch_squashed(project: Path) -> None:
+    _teams_branch(project)
+    _run_ok(project, "migrate", "squash", "teams", "--from", "0002")
 
 
-def _teams_epic_dead_name(project: Path) -> None:
-    """``0006_team_slug``'s backfill, a chunked step, selects its rows by
+def _teams_branch_dead_name(project: Path) -> None:
+    """``0003_team_slug``'s backfill, a chunked step, selects its rows by
     ``tmp_code``, a column that exists only inside the range."""
-    _teams_epic(project)
-    backfill = project / "migrations" / "0006_team_slug" / "02_backfill_team.py"
+    _teams_branch(project)
+    backfill = project / "migrations" / "0003_team_slug" / "02_backfill_team.py"
     backfill.write_text(
         backfill.read_text().replace("team.slug == None", "team.tmp_code == None")
     )
 
 
-def _teams_epic_partly_applied(project: Path) -> None:
-    """A teammate's database: it applied ``0005``..``0007`` and not ``0008``."""
-    _teams_epic(project)
-    _run_ok(project, "migrate", "down", "--to", "0007", "--yes")
-    _run_ok(project, "migrate", "squash", "teams_epic", "--from", "0005")
+def _teams_branch_partly_applied(project: Path) -> None:
+    """A teammate's database: it applied ``0002``..``0004`` and not ``0005``."""
+    _teams_branch(project)
+    _run_ok(project, "migrate", "down", "--to", "0004", "--yes")
+    _run_ok(project, "migrate", "squash", "teams", "--from", "0002")
 
 
 # A required column, a backfill, and the rows the backfill is for.
@@ -663,6 +795,33 @@ def _slug_late_row_reverted(project: Path) -> None:
     step.write_text(NOT_APPLICABLE)
 
 
+# The Deploying guide's two-release chain, as docs/examples/migration_errors.py
+# builds it: 0002_author_slug_nullable (one expand step), then
+# 0003_author_slug_required (backfill, add-constraint, contract), so the page
+# names one migration per number.
+
+REQUIRED = "0003_author_slug_required"
+
+
+def _chain_written(project: Path) -> None:
+    _slug_edited(project)
+    _write_models(project, NAMED_AUTHOR_OPTIONAL_SLUG)
+    _run_ok(project, "migrate", "new", "author_slug_nullable")
+    _write_models(project, NAMED_AUTHOR_SLUG)
+    _run_ok(project, "migrate", "new", "author_slug_required")
+    backfill = project / "migrations" / REQUIRED / "01_backfill_author.py"
+    backfill.write_text(backfill.read_text().replace(TODO, WRITTEN))
+
+
+def _chain_late_row_failed(project: Path) -> None:
+    """A writer inserts a row without a slug after the backfill, so the
+    contract step fails."""
+    _chain_written(project)
+    step = project / "migrations" / REQUIRED / "02_add_constraint.up.sqlite.sql"
+    step.write_text(LATE_ROW)
+    assert _ferro(project, "migrate", "up", scratch=True).returncode == 1
+
+
 # A database built by auto-migrate, about to be baselined.
 
 
@@ -677,10 +836,11 @@ def _adopt_base(project: Path) -> None:
 
 
 def _adopt_initial(project: Path) -> None:
-    """Models described by ``0001_initial``; the database was built by the old door."""
+    """Models described by ``0001_create_author``; the database was built by the
+    old door."""
     _initialised(project)
-    _run_ok(project, "migrate", "new", "initial")
-    first = project / "migrations" / "0001_initial" / "01_schema.up.sqlite.sql"
+    _run_ok(project, "migrate", "new", "create_author")
+    first = project / "migrations" / "0001_create_author" / "01_schema.up.sqlite.sql"
     _database(project, first.read_text())
 
 
@@ -690,9 +850,22 @@ def _adopt_ahead(project: Path) -> None:
     _database(project, "ALTER TABLE author ADD COLUMN slug varchar")
 
 
-def _adopt_staged(project: Path) -> None:
+STAGING = ("--url", "sqlite:staging.db")
+"""A second database beside ``app.db``: the staging copy the adopting how-to
+baselines with ``--url "$STAGING_URL"``."""
+
+
+def _adopt_staging(project: Path) -> None:
+    """A staging copy restored from a dump taken at ``0001``."""
+    import shutil
+
     _adopt_base(project)
-    _run_ok(project, "migrate", "baseline", "0001")
+    shutil.copy(project / "app.db", project / "staging.db")
+
+
+def _adopt_staged(project: Path) -> None:
+    _adopt_staging(project)
+    _run_ok(project, "migrate", "baseline", "0001", *STAGING)
 
 
 def _adopt_baselined(project: Path) -> None:
@@ -762,7 +935,7 @@ def _ddl_lock_retry(project: Path) -> None:
     _run_ok(project, "migrate", "new", "create_author")
     _run_ok(project, "migrate", "up")
     _write_models(project, NAMED_AUTHOR_OPTIONAL_SLUG)
-    _run_ok(project, "migrate", "new", "author_slug")
+    _run_ok(project, "migrate", "new", "author_slug_nullable")
 
 
 @contextmanager
@@ -825,7 +998,7 @@ OUTPUTS = {
         ),
     ),
     "new-small": (_loop_edited, ("migrate", "new", "author_nickname")),
-    "squash": (_feature_branch, ("migrate", "squash", "epic", "--from", "0002")),
+    "squash": (_feature_branch, ("migrate", "squash", "teams", "--from", "0002")),
     "check-ok": (_loop_generated, ("migrate", "check")),
     "check-problem": (_loop_edited, ("migrate", "check")),
     "up": (_loop_generated, ("migrate", "up")),
@@ -841,7 +1014,6 @@ OUTPUTS = {
     "loop-check": (_loop_edited, ("migrate", "check")),
     "loop-new": (_loop_edited, ("migrate", "new", "author_nickname")),
     "loop-up": (_loop_generated, ("migrate", "up")),
-    "rename-hint": (_before_rename, ("migrate", "new", "rename_writer")),
     "sql-step": (
         _created_and_applied,
         ("migrate", "new", "seed", "--sql-step", "seed_admins"),
@@ -856,21 +1028,21 @@ OUTPUTS = {
     "duplicate-number": (_two_branches_unapplied, ("migrate", "check")),
     "replace": (
         _two_branches_unapplied,
-        ("migrate", "new", "add_x", "--replace", "0002_add_x"),
+        ("migrate", "new", "author_bio", "--replace", "0002_author_bio"),
     ),
     "replaced-up-refused": (_two_branches_replaced, ("migrate", "up")),
-    "squash-epic": (
-        _teams_epic,
-        ("migrate", "squash", "teams_epic", "--from", "0005"),
-    ),
-    "squash-dead-name": (
-        _teams_epic_dead_name,
-        ("migrate", "squash", "teams_epic", "--from", "0005"),
-    ),
-    "squash-status-inheritable": (_teams_epic_squashed, ("migrate", "status")),
-    "squash-up-inherits": (_teams_epic_squashed, ("migrate", "up")),
-    "squash-partial-witness": (_teams_epic_partly_applied, ("migrate", "up")),
     "rekey-refused": (_primary_key_change, ("migrate", "new", "rekey")),
+    # renames and retirements
+    "rename-hint": (_before_rename, ("migrate", "new", "rename_handle")),
+    # squashing
+    "squash-teams": (_teams_branch, ("migrate", "squash", "teams", "--from", "0002")),
+    "squash-dead-name": (
+        _teams_branch_dead_name,
+        ("migrate", "squash", "teams", "--from", "0002"),
+    ),
+    "squash-status-inheritable": (_teams_branch_squashed, ("migrate", "status")),
+    "squash-up-inherits": (_teams_branch_squashed, ("migrate", "up")),
+    "squash-partial-witness": (_teams_branch_partly_applied, ("migrate", "up")),
     # data steps
     "backfill-new": (_slug_edited, ("migrate", "new", "author_slug")),
     "backfill-unwritten": (_slug_unwritten, ("migrate", "up")),
@@ -884,19 +1056,19 @@ OUTPUTS = {
     # deploying
     "run-lock-wait": (_lock_wait, ("migrate", "up", "--lock-timeout", "1s")),
     "ddl-lock-retry": (_ddl_lock_retry, ("migrate", "up")),
-    "ci-check": (_slug_written, ("migrate", "check")),
-    "server-up": (_slug_written, ("migrate", "up")),
-    "status-steps": (_slug_late_row_failed, ("migrate", "status", "--steps")),
+    "ci-check": (_chain_written, ("migrate", "check")),
+    "server-up": (_chain_written, ("migrate", "up")),
+    "status-steps": (_chain_late_row_failed, ("migrate", "status", "--steps")),
     "edited-up": (_loop_edited_step, ("migrate", "up")),
     "edited-rerecord": (_loop_edited_step, ("migrate", "rerecord", "0001:01")),
     # adopting
-    "adopt-new-initial": (_initialised, ("migrate", "new", "initial")),
+    "adopt-new-initial": (_initialised, ("migrate", "new", "create_author")),
     "adopt-baseline": (_adopt_initial, ("migrate", "baseline")),
     "adopt-up-refused": (_adopt_base, ("migrate", "up")),
     "baseline-drift": (_adopt_ahead, ("migrate", "baseline", "0001")),
     "baseline-foreign-default": (_adopt_foreign_default, ("migrate", "baseline")),
-    "staging-baseline": (_adopt_base, ("migrate", "baseline", "0001")),
-    "staging-up": (_adopt_staged, ("migrate", "up")),
+    "staging-baseline": (_adopt_staging, ("migrate", "baseline", "0001", *STAGING)),
+    "staging-up": (_adopt_staged, ("migrate", "up", *STAGING)),
     "status-baselined": (_adopt_baselined, ("migrate", "status")),
     "baseline-remove": (_adopt_baselined, ("migrate", "baseline", "--remove")),
     "down-baselined-refused": (_adopt_baselined, ("migrate", "down", "--yes")),
@@ -907,34 +1079,22 @@ def _quoted_blocks(page: Path) -> list[tuple[str | None, str | None, str, str]]:
     """Every ```text block of ``page`` as (kind, id, first line, body), the kind and
     id from the ``<!-- output|refusal: <id> -->`` marker above it, if any."""
     blocks = []
-    pattern = re.compile(
-        r"^(?P<indent>[ \t]*)(?:<!-- (?P<kind>output|refusal): (?P<id>[a-z0-9-]+) -->\n"
-        r"(?P=indent))?```text\n(?P<body>.*?)^(?P=indent)```",
-        flags=re.DOTALL | re.MULTILINE,
-    )
-    for match in pattern.finditer(page.read_text()):
-        indent = match["indent"]
-        body = "".join(
-            line.removeprefix(indent)
-            for line in match["body"].splitlines(keepends=True)
-        )
-        blocks.append((match["kind"], match["id"], body.split("\n", 1)[0], body))
+    for fence in fenced_blocks(page, page.read_text(), "text"):
+        kind, block_id = fence.note or (None, None)
+        if kind not in ("output", "refusal"):
+            kind = block_id = None
+        blocks.append((kind, block_id, fence.body.split("\n", 1)[0], fence.body))
     return blocks
 
 
 def _quoted_outputs() -> dict[str, str]:
-    return {
-        block_id: body
-        for page in OUTPUT_PAGES
-        for kind, block_id, _first, body in _quoted_blocks(page)
-        if kind == "output"
-    }
+    return _marked("output")
 
 
 def _normalise(text: str) -> str:
     """The parts of ferro's output that differ from run to run, made equal."""
     text = re.sub(
-        r"sqlite:(?://)?\S*?app\.db(?:\?mode=rwc)?", "sqlite:///./app.db", text
+        r"sqlite:(?://)?\S*?(\w+)\.db(?:\?mode=rwc)?", r"sqlite:///./\1.db", text
     )
     text = re.sub(
         r"postgres(?:ql)?://[^:\s/]+:\*+@\S+",
@@ -948,14 +1108,7 @@ def _normalise(text: str) -> str:
 
 
 def test_every_output_block_has_a_registry_entry_and_the_reverse() -> None:
-    marked = [
-        block_id
-        for page in OUTPUT_PAGES
-        for kind, block_id, _first, _body in _quoted_blocks(page)
-        if kind == "output"
-    ]
-    assert len(marked) == len(set(marked)), "an output id marks two blocks"
-    assert sorted(marked) == sorted(OUTPUTS)
+    assert _registry_gaps("output", OUTPUTS) == []
 
 
 CLI_LINE = re.compile(
@@ -1018,3 +1171,336 @@ def test_a_quoted_output_is_what_ferro_prints_without_a_terminal(
 
     printed = _normalise(result.stdout + result.stderr)
     assert printed == _normalise(_quoted_outputs()[output])
+
+
+# -- the step files the guides quote --------------------------------------------------
+#
+# A fenced block whose first line is ``-- NNNN_<name>/<file>`` quotes a step file
+# ``ferro migrate new`` wrote; a block may quote several, each under its own
+# header line. A Python block whose first line is ``# migrations/NNNN_<name>/<file>``
+# quotes one generated data step. Each quoted file must be, byte for byte, what the
+# page's example (or a scenario of this module) writes when it runs: the step file is
+# regenerated from the models the page shows, never kept by hand.
+
+STEP_FILE_HEADER = re.compile(r"^-- (?P<migration>\d{4}_[a-z0-9_]+)/(?P<file>\S+)$")
+DATA_STEP_HEADER = re.compile(
+    r"^# migrations/(?P<migration>\d{4}_[a-z0-9_]+)/(?P<file>\S+\.py)$"
+)
+
+
+def _slug_guarded(project: Path) -> None:
+    _slug_edited(project)
+    _run_ok(project, "migrate", "new", "author_slug", "--no-backfill", "author.slug")
+
+
+ORDER = (
+    "from enum import StrEnum\n\n"
+    + HEAD
+    + """\
+class Status(StrEnum):
+    PAID = "paid"
+    CANCELED = "canceled"
+
+
+class Order(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    status: Status = Status.PAID
+"""
+)
+
+
+def _label_removed(project: Path) -> None:
+    """``Status`` loses ``canceled``, a label rows may still hold."""
+    _configured(project)
+    _write_models(project, ORDER)
+    _run_ok(project, "migrate", "new", "create_order")
+    _write_models(project, ORDER.replace('    CANCELED = "canceled"\n', ""))
+    _run_ok(project, "migrate", "new", "drop_canceled")
+
+
+INVOICE = """\
+import uuid
+from typing import ClassVar
+
+from ferro import Field, Model, RowPolicy, RowSecurity
+
+
+class Invoice(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    tenant_id: uuid.UUID
+    customer: str
+    total: int
+"""
+INVOICE_RLS = (
+    INVOICE
+    + """
+    __ferro_rls__: ClassVar = RowSecurity(
+        RowPolicy(column="tenant_id", setting="app.tenant_id")
+    )
+"""
+)
+
+
+def _invoice_rls(project: Path) -> None:
+    """The row-level security guide's ``Invoice``, which exists, gains its policy."""
+    _configured(project)
+    _write_models(project, INVOICE)
+    _run_ok(project, "migrate", "new", "create_invoice")
+    _write_models(project, INVOICE_RLS)
+    _run_ok(project, "migrate", "new", "invoice_rls")
+
+
+STEP_FILE_SOURCES: dict[tuple[str, ...], str | Callable[[Path], None]] = {
+    ("guide/schema/migrations.md", "0001_create_author"): "migrations_quickstart",
+    ("guide/schema/migrations.md", "0002_author_nickname"): "migrations_quickstart",
+    (
+        "guide/schema/renames-and-retirements.md",
+        "0002_rename_writer",
+    ): "migrations_rename",
+    (
+        "guide/schema/renames-and-retirements.md",
+        "0002_retire_bio",
+    ): "migrations_retire",
+    ("guide/schema/squash.md", "0002_teams"): "migrations_squash",
+    ("reference/migrations.md", "0002_author_nickname"): "migrations_quickstart",
+    ("guide/schema/data-steps.md", "0002_author_slug"): "migrations_backfill",
+    (
+        "guide/schema/data-steps.md",
+        "0002_author_slug",
+        "02_backfill_author.py",
+    ): _slug_unwritten,
+    (
+        "guide/schema/data-steps.md",
+        "0002_author_slug",
+        "02_guard_author.py",
+    ): _slug_guarded,
+    ("guide/schema/data-steps.md", "0002_drop_canceled"): _label_removed,
+    ("guide/row-level-security.md", "0002_invoice_rls"): _invoice_rls,
+    (
+        "guide/schema/migrations.md",
+        "0002_add_writer",
+        "03_backfill_writer.py",
+    ): None,
+}
+"""What writes the migration a page quotes: an example's name, or a scenario. Keyed by
+(page, migration), or by (page, migration, file) where one file of a migration comes
+from elsewhere (an unwritten backfill, a guard step in place of it). ``None`` marks a
+data step the page shows already written by hand, which nothing generates."""
+
+
+def _step_files_in(body: str) -> list[tuple[str, str, str]]:
+    """The step files one block quotes, as (migration, file, text): the text runs
+    from under its header line to the next header or the block's end, blank lines
+    around it dropped."""
+    first, _, rest = body.partition("\n")
+    data_step = DATA_STEP_HEADER.match(first)
+    if data_step:
+        return [(data_step["migration"], data_step["file"], rest)]
+    if not STEP_FILE_HEADER.match(first):
+        return []
+    quoted = []
+    header: re.Match[str] | None = None
+    rows: list[str] = []
+    for row in [*body.splitlines(), None]:
+        match = None if row is None else STEP_FILE_HEADER.match(row)
+        if row is not None and match is None:
+            rows.append(row)
+            continue
+        if header is not None:
+            text = "\n".join(rows).strip("\n") + "\n"
+            quoted.append((header["migration"], header["file"], text))
+        header, rows = match, []
+    return quoted
+
+
+def _quoted_step_files() -> list[tuple[str, int, str, str, str]]:
+    """Every step file a page quotes, as (page, block line, migration, file, text)."""
+    return [
+        (page.relative_to(DOCS_PAGES).as_posix(), line, migration, file, text)
+        for page in sorted(DOCS_PAGES.rglob("*.md"))
+        for line, body in (
+            (f.line, f.body) for f in fenced_blocks(page, page.read_text())
+        )
+        for migration, file, text in _step_files_in(body)
+    ]
+
+
+def _step_file_source(page: str, migration: str, file: str) -> tuple[str, ...] | None:
+    for key in ((page, migration, file), (page, migration)):
+        if key in STEP_FILE_SOURCES:
+            return key
+    return None
+
+
+def test_every_quoted_step_file_has_a_source_and_the_reverse() -> None:
+    used = {
+        _step_file_source(page, migration, file)
+        for page, _line, migration, file, _text in _quoted_step_files()
+    }
+    assert None not in used, "a quoted step file has no source in STEP_FILE_SOURCES"
+    assert used == set(STEP_FILE_SOURCES)
+
+
+@pytest.fixture(scope="module")
+def example_projects(tmp_path_factory: pytest.TempPathFactory):
+    """Run each example once, into a project it leaves behind."""
+    built: dict[str, Path] = {}
+
+    def make(name: str) -> Path:
+        if name not in built:
+            project = tmp_path_factory.mktemp(name) / "app"
+            _run_example(name, project)
+            built[name] = project
+        return built[name]
+
+    return make
+
+
+def _step_file_id(value: object) -> str:
+    """The page, block line, migration and file name a test is about; not the text."""
+    if isinstance(value, int):
+        return str(value)
+    return value if isinstance(value, str) and "\n" not in value else ""
+
+
+def _generated_step_files() -> list[tuple[str, int, str, str, str]]:
+    """The quoted step files to regenerate: every one but those written by hand
+    (one with no source stays, and fails naming itself)."""
+    generated = []
+    for page, line, migration, file, text in _quoted_step_files():
+        key = _step_file_source(page, migration, file)
+        if key is None or STEP_FILE_SOURCES[key] is not None:
+            generated.append((page, line, migration, file, text))
+    return generated
+
+
+@pytest.mark.parametrize(
+    ("page", "line", "migration", "file", "text"),
+    _generated_step_files(),
+    ids=_step_file_id,
+)
+def test_a_quoted_step_file_is_what_the_generator_writes(
+    page: str,
+    line: int,
+    migration: str,
+    file: str,
+    text: str,
+    example_projects,
+    scenarios,
+) -> None:
+    where = f"{page}:{line} quotes {migration}/{file}"
+    key = _step_file_source(page, migration, file)
+    assert key, f"{where}, a migration STEP_FILE_SOURCES names no source for"
+    source = STEP_FILE_SOURCES[key]
+    if isinstance(source, str):
+        project, name = example_projects(source), source
+    else:
+        project, name = scenarios(source), source.__name__
+    written = project / "migrations" / migration / file
+    assert written.is_file(), f"{where}, which {name} never writes"
+    assert text == written.read_text(), f"{where}, which {name} writes otherwise"
+
+
+# -- the Alembic revisions the bridge page quotes -----------------------------------
+#
+# A ```python block marked ``<!-- revision: <id> -->`` is the ``upgrade()`` and
+# ``downgrade()`` that ``alembic revision --autogenerate`` writes for a change, on a
+# SQLite database the before models built, without Alembic's ``# ###`` banner lines.
+
+ALEMBIC_PAGE = DOCS_PAGES / "guide" / "schema" / "alembic.md"
+
+REVISIONS = {
+    "nickname": (AUTHOR, AUTHOR_NICKNAME),
+    "drop-bio": (AUTHOR + "    bio: str | None = None\n", AUTHOR),
+}
+"""Each quoted revision's models: (before, after)."""
+
+AUTOGENERATE = """\
+import asyncio
+import sys
+
+import sqlalchemy as sa
+from alembic.autogenerate import produce_migrations, render_python_code
+from alembic.migration import MigrationContext
+
+import ferro
+import blog.models  # noqa: F401
+from ferro.migrations import ferro_options, get_metadata
+
+
+async def main(step):
+    if step == "create":
+        await ferro.connect("sqlite:app.db?mode=rwc", auto_migrate=True)
+        return
+    engine = sa.create_engine("sqlite:///app.db")
+    options = ferro_options()
+    with engine.connect() as connection:
+        context = MigrationContext.configure(
+            connection,
+            opts={"compare_type": True, "compare_server_default": True, **options},
+        )
+        script = produce_migrations(context, get_metadata())
+    engine.dispose()
+    for name, ops in (("upgrade", script.upgrade_ops), ("downgrade", script.downgrade_ops)):
+        print(f"def {name}() -> None:")
+        for line in render_python_code(ops, render_item=options["render_item"]).splitlines():
+            if line.strip() and not line.strip().startswith("# ###"):
+                print("    " + line.strip())
+        if name == "upgrade":
+            print("\\n")
+
+
+asyncio.run(main(sys.argv[1]))
+"""
+"""Builds the database from the before models (``create``), then, run again over
+the after models, prints the revision as the page quotes it."""
+
+
+def _quoted_revisions() -> dict[str, str]:
+    found = re.findall(
+        r"<!-- revision: ([a-z0-9-]+) -->\n```python[^\n]*\n(.*?)```",
+        ALEMBIC_PAGE.read_text(),
+        flags=re.DOTALL,
+    )
+    return dict(found)
+
+
+def test_every_quoted_revision_has_models_and_the_reverse() -> None:
+    assert sorted(_quoted_revisions()) == sorted(REVISIONS)
+
+
+@pytest.mark.parametrize("revision", sorted(REVISIONS))
+def test_a_quoted_revision_is_what_autogenerate_writes(
+    revision: str, tmp_path: Path
+) -> None:
+    pytest.importorskip("alembic", reason="the alembic extra is not installed")
+    before, after = REVISIONS[revision]
+    project = tmp_path / "app"
+    (project / "blog").mkdir(parents=True)
+    (project / "blog" / "__init__.py").write_text("")
+    (project / "autogenerate.py").write_text(AUTOGENERATE)
+    printed = ""
+    for models, step in ((before, "create"), (after, "render")):
+        _write_models(project, models)
+        result = run_python(
+            ["autogenerate.py", step],
+            timeout=120,
+            cwd=project,
+            env={"PYTHONPATH": str(project)},
+        )
+        printed = result.stdout
+
+    assert printed == _quoted_revisions().get(revision), (
+        f"guide/schema/alembic.md quotes revision {revision!r}; autogenerate writes:\n"
+        f"{printed}"
+    )
+
+
+def test_the_deploying_guide_names_one_migration_per_number() -> None:
+    """Every block and sentence of the Deploying guide follows one project, so
+    a number never names two migrations there."""
+    page = (DOCS_PAGES / "guide" / "schema" / "deploying.md").read_text()
+    names: dict[str, set[str]] = {}
+    for name in re.findall(r"\b(\d{4})_([a-z0-9_]+)", page):
+        names.setdefault(name[0], set()).add(name[1])
+    assert {number: sorted(n) for number, n in names.items() if len(n) > 1} == {}

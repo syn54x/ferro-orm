@@ -1,25 +1,23 @@
 """The database a migration verb works on, and the connection that reaches it.
 
-```python
+```python {test=compile reason="needs a project with a migrations directory"}
 await ferro.migrations.up()                          # the configured database, default connection
 await ferro.migrations.up(database="analytics", using="reporting")
 await ferro.migrations.up(url="postgres://…/app")    # a private connection, closed after
 ```
 
-Every verb (``up``, ``down``, ``status``, ``require_applied``, ``drift``,
-``baseline``, ``remove_baseline``, ``rerecord``, ``check``) takes the same
-``(settings=None, database=None, *, using=None, url=None)`` and hands them
-to :meth:`Target.resolve`, which decides three things once: the project's
-configuration (``settings=None`` is ``FerroSettings()``), which configured
-database (``database=None`` is the only one, or a refusal naming them all),
-and which connection (``using`` names an open one, ``url`` opens a private
-one, neither is the default connection; both is refused). The CLI calls the
-same verbs with ``url=``: the ``--url`` flag, else the database's
-``url_env``.
+Every verb (`up`, `down`, `status`, `require_applied`, `drift`, `baseline`,
+`remove_baseline`, `rerecord`, `check`) takes the same
+`(settings=None, database=None, *, using=None, url=None)` and hands them to
+`Target.resolve`, which decides three things once: the project's
+configuration (`settings=None` is `FerroSettings()`), which configured
+database (`database=None` is the only one, or a refusal naming them all),
+and which connection (`using` names an open one, `url` opens a private one,
+neither is the default connection; both is refused). The CLI calls the same
+verbs with `url=`: the `--url` flag, else the database's `url_env`.
 
 A configuration that names no single database, and a connection the verb
-cannot work on, are :class:`~ferro.migrations.errors.MigrationRefused`
-naming the fix, for every caller.
+cannot work on, are a `MigrationRefused` naming the fix, for every caller.
 """
 
 from __future__ import annotations
@@ -37,11 +35,18 @@ __all__ = ["Target", "connection_dialect"]
 
 
 def connection_dialect(name: str, database: DatabaseSettings) -> str:
-    """The dialect of open connection ``name``.
+    """Return the dialect of an open connection, checked against the database's dialects.
+
+    Args:
+        name: The open connection's name.
+        database: The configured database the connection must serve.
+
+    Returns:
+        `"postgres"` or `"sqlite"`.
 
     Raises:
-        SettingsError: ``name`` is not open, or ``database`` does not target
-            its dialect.
+        SettingsError: `name` is not open, or `database` does not target its
+            dialect.
     """
     dialect = _core.connection_backend(name)
     if dialect is None:
@@ -57,13 +62,17 @@ def connection_dialect(name: str, database: DatabaseSettings) -> str:
 
 @dataclass(frozen=True)
 class Target:
-    """The database a verb works on: its project's configuration, the
-    configured database, and the connection choice (``using``, ``url``, or
-    neither: the default connection). Build it with :meth:`resolve`; work on
-    it inside :meth:`open`."""
+    """The database a verb works on, and the connection that reaches it.
+
+    It holds the project's configuration, the configured database, and the
+    connection choice (`using`, `url`, or neither: the default connection).
+    Build it with `resolve`; work on it inside `open`.
+    """
 
     settings: FerroSettings
+    """The project's configuration."""
     database: DatabaseSettings
+    """The configured database the verb works on."""
     using: str | None = None
     """An open connection's name."""
     url: str | None = None
@@ -78,15 +87,26 @@ class Target:
         using: str | None = None,
         url: str | None = None,
     ) -> Target:
-        """The target ``settings`` (``None``: ``FerroSettings()``),
-        ``database`` (``None``: the only one configured) and ``using`` /
-        ``url`` name. Opens nothing.
+        """Decide the configuration, the database and the connection choice; open nothing.
+
+        Args:
+            settings: The project's configuration. Defaults to
+                `FerroSettings()`, read from the project's config file.
+            database: The configured database's name. Defaults to the only
+                one configured.
+            using: An open connection to work on.
+            url: A URL to open a private connection to, for the verb's
+                lifetime. With neither `using` nor `url`, the verb works on
+                the default connection.
+
+        Returns:
+            The target.
 
         Raises:
-            MigrationRefused: no configuration is found, several databases
-                are configured and ``database`` names none, ``database``
-                names one that is not configured, or both ``using`` and
-                ``url`` are given.
+            MigrationRefused: No configuration is found, several databases
+                are configured and `database` names none, `database` names
+                one that is not configured, or both `using` and `url` are
+                given.
         """
         try:
             settings = FerroSettings() if settings is None else settings
@@ -99,17 +119,20 @@ class Target:
 
     @asynccontextmanager
     async def open(self) -> AsyncIterator[str]:
-        """The name of the connection to work on, for the block: ``using``,
-        a private connection to ``url`` (closed when the block ends), or the
-        default connection. The connection is checked before the block runs:
-        it is open, and its dialect is one the database targets.
+        """Yield the name of the connection to work on, for the block.
 
-        Only reaching the connection is translated; whatever the block raises
-        reaches the caller unchanged.
+        The connection is `using`, a private connection to `url` (closed
+        when the block ends), or the default connection. It is checked
+        before the block runs: it is open, and its dialect is one the
+        database targets. Only reaching the connection is translated;
+        whatever the block raises reaches the caller unchanged.
+
+        Yields:
+            The connection's name.
 
         Raises:
-            MigrationRefused: there is no default connection, ``using`` names
-                a connection that is not open, or the connection's dialect is
+            MigrationRefused: There is no default connection, `using` names a
+                connection that is not open, or the connection's dialect is
                 not one the database targets.
         """
         if self.url is None:

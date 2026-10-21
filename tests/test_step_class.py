@@ -457,17 +457,25 @@ def test_generated_files_carry_no_class_header(project, pkg, db):
 DEPLOYING = Path(__file__).resolve().parents[1] / "docs/pages/guide/schema/deploying.md"
 
 
-def test_the_deploying_guide_quotes_the_refusal_expand_only_raises(project, pkg, db):
-    """The rolling-deploy recipe is ``"expand-only"``, and the refusal it
-    quotes is the text ferro raises (the guide's migration is ``0008``)."""
+def test_expand_only_refuses_a_contract_step_as_the_deploying_guide_shows(
+    project, pkg, db
+):
+    """The rolling-deploy recipe is ``"expand-only"``, and it refuses a
+    database ahead by a contract step, naming the step.
+
+    The refusal the guide quotes is regenerated from
+    ``docs/examples/migration_errors.py`` (``tests/test_docs_output.py``), so
+    the page half here checks only that the guide shows the recipe and that
+    its refusal is that regenerated block, never a typed copy.
+    """
     page = DEPLOYING.read_text()
     recipe = 'await ferro.migrations.require_applied(allow_ahead="expand-only")'
-    assert f"```python\n{recipe}\n```" in page
-    quoted = re.search(
-        r"```text\n(ferro\.migrations\.DatabaseAheadError: [^`]*?0008_drop_bio:01[^`]*)```",
+    assert re.search(rf"```python[^\n]*\n{re.escape(recipe)}\n```", page)
+    assert re.search(
+        r"<!-- prints: migration_errors\.py:ahead-by-contract -->\n```text\n"
+        r"DatabaseAheadError: ",
         page,
     )
-    assert quoted is not None
 
     configure(project, pkg, db.backend)
     write_models(project, pkg, BIO)
@@ -479,7 +487,4 @@ def test_the_deploying_guide_quotes_the_refusal_expand_only_raises(project, pkg,
     with pytest.raises(DatabaseAheadError) as raised:
         require_applied(db, allow_ahead="expand-only")
     assert raised.value.contract_steps == ["0002_drop_bio:01"]
-    raised_text = f"ferro.migrations.DatabaseAheadError: {raised.value}\n".replace(
-        "0002_drop_bio", "0008_drop_bio"
-    )
-    assert quoted.group(1) == raised_text
+    assert "starting with 0002_drop_bio:01 (contract" in str(raised.value)

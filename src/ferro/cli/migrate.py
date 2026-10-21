@@ -1,21 +1,23 @@
-"""``ferro migrate``: the sub-app every migration verb registers on.
+"""`ferro migrate`: the sub-app every migration verb registers on.
 
-This module defines ``init``. Later verbs register with ``@migrate.command``
-and take ``glob: Annotated[Global, Parameter(parse=False)]`` to receive the
-global options.
+Each verb registers with `@migrate.command` and takes
+`glob: Annotated[Global, Parameter(parse=False)]` to receive the global
+options.
 
-``init`` writes the project configuration :class:`~ferro.FerroSettings`
-reads (ADR-0036, ADR-0039)::
+`init` writes the project configuration that
+[`FerroSettings`][ferro.FerroSettings] reads:
 
-    $ ferro migrate init
-    Config file [pyproject.toml]:
-    Models module (dotted) [myapp.models]:
-    Target dialects [postgres]:
-    Another database (separate tables, own migration history)? [y/N]:
-    Wrote [tool.ferro] to pyproject.toml and created migrations/
+```text
+$ ferro migrate init
+Config file [pyproject.toml]:
+Models module (dotted) [myapp.models]:
+Target dialects [postgres]:
+Another database (separate tables, own migration history)? [y/N]:
+Wrote [tool.ferro] to pyproject.toml and created migrations/
+```
 
 Every prompt has a flag that answers it. The config is appended to an
-existing ``pyproject.toml`` as text, so the user's other tables are never
+existing `pyproject.toml` as text, so the user's other tables are never
 reformatted.
 """
 
@@ -48,6 +50,7 @@ if TYPE_CHECKING:
 __all__ = ["migrate"]
 
 migrate = App(
+    help_format="plaintext",
     name="migrate",
     help="Write, apply and check schema migrations.",
 )
@@ -62,8 +65,7 @@ Verbose = Annotated[
         negative="",
     ),
 ]
-"""``--verbose`` on ``new`` and ``check``, the verbs that print a change
-summary."""
+"""The `--verbose` flag of `new` and `check`, the verbs that print a change summary."""
 
 DIALECTS = ("postgres", "sqlite")
 _DATABASE_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -207,10 +209,10 @@ def new(
         str | None,
         Parameter(
             help=(
-                "Regenerate this migration (NNNN_<name>, or NNNN when one "
-                "migration carries the number) on top of the newest snapshot "
-                "below it, carrying its data steps and hand-written SQL steps "
-                "across: two branches that each generated the same number."
+                "When two branches generated the same number, regenerate this "
+                "migration (NNNN_<name>, or NNNN when one migration carries the "
+                "number) on top of the newest snapshot below it, carrying its "
+                "data steps and hand-written SQL steps across."
             )
         ),
     ] = None,
@@ -317,7 +319,7 @@ def squash(
 ) -> int:
     """Replace a range of migrations, from --from through the newest, with one.
 
-    Writes the migration `new` would have written across the range: planned
+    Writes the migration new would have written across the range: planned
     once from the snapshot below the range to the range's last snapshot (its
     renames composed), carrying every data step and hand-written SQL step of
     the range byte for byte, under the first migration's number. Deletes the
@@ -356,8 +358,7 @@ def check(
     verbose: Verbose = False,
     glob: Annotated[Global, Parameter(parse=False)],
 ) -> int:
-    """Check, offline, that every model change has a migration and the
-    migrations directory is intact.
+    """Check, offline, that every model change has a migration and the directory is intact.
 
     Exits 0 when it is, 3 naming each problem otherwise: an ungenerated
     model change, a broken snapshot chain, a duplicate or missing number, a

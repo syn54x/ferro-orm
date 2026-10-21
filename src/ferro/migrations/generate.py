@@ -1,22 +1,20 @@
-"""``ferro migrate new`` and ``ferro migrate check``: the offline half.
+"""`ferro migrate new` and `ferro migrate check`: the offline half.
 
-A developer declares a model and asks for a migration::
+A developer declares a model and asks for a migration:
 
-    class Author(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-        name: str
+```text
+$ ferro migrate new create_author
+migrations/0001_create_author/
+  01_schema.up.postgres.sql     CREATE TABLE "author" (...);
+  01_schema.down.postgres.sql   -- ferro: destructive / DROP TABLE "author";
+  ir.json
+```
 
-    $ ferro migrate new create_author
-    migrations/0001_create_author/
-      01_schema.up.postgres.sql     CREATE TABLE "author" (...);
-      01_schema.down.postgres.sql   -- ferro: destructive / DROP TABLE "author";
-      ir.json
-
-:func:`new` compiles the database's declared modelset, diffs it against the
-head migration's schema snapshot through the one planner (in the Rust core,
-which renders every statement), and writes the migration. It never opens a
-database (ADR-0023). :func:`check` asks the same question without writing:
-does every model change have a migration, and is the directory intact?
+`new` compiles the database's declared modelset, diffs it against the head
+migration's schema snapshot through the planner (which renders every
+statement), and writes the migration. It never opens a database. `check`
+asks the same question without writing: does every model change have a
+migration, and is the directory intact?
 """
 
 from __future__ import annotations
@@ -79,7 +77,7 @@ __all__ = [
 
 
 class MigrationsCheckError(MigrationRefused):
-    """Raised by :meth:`CheckReport.raise_for_problems`; carries the report."""
+    """The refusal `CheckReport.raise_for_problems()` raises; its `report` is the check's report."""
 
     def __init__(self, report: CheckReport) -> None:
         lines = "\n".join(f"  {p.kind}: {p.message}" for p in report.problems)
@@ -88,50 +86,71 @@ class MigrationsCheckError(MigrationRefused):
 
 @dataclass(frozen=True)
 class Problem:
-    """One thing :func:`check` found wrong."""
+    """One thing [`check`][ferro.migrations.check] found wrong."""
 
     kind: str
-    """A stable identifier: ``ungenerated``, ``broken_chain``,
-    ``duplicate_number``, ``missing_number``, ``missing_rendering``, ..."""
+    """A stable identifier, such as `ungenerated`, `broken_chain`, `duplicate_number` or `unwritten_step`."""
     message: str
     """What is wrong and how to fix it."""
     changes: tuple[Change, ...] = ()
-    """An ``ungenerated`` problem's change summary, as data: what the
-    migration ``ferro migrate new`` would write changes. Empty for every
-    other kind."""
+    """An `ungenerated` problem's change summary, as data; empty for every other kind.
+
+    It says what the migration `ferro migrate new` would write changes.
+    """
     headline: str | None = None
-    """An ``ungenerated`` problem's message without the summary and notes it
-    quotes (``the models changed since 0001_initial and no migration records
-    it; run ...``), as the core builds it: what a terminal prints above the
-    summary it lays out from :attr:`changes`. ``None`` for every other
-    problem."""
+    """An `ungenerated` problem's message without the summary and notes it quotes; `None` otherwise.
+
+    For example `the models changed since 0001_initial and no migration
+    records it; run ...`: what a terminal prints above the summary it lays
+    out from `changes`.
+    """
     notes: tuple[str, ...] = ()
-    """The notes an ``ungenerated`` problem's message quotes after its
-    summary, as ``new`` prints them. Empty for every other problem."""
+    """The notes an `ungenerated` problem's message quotes after its summary; empty otherwise."""
 
 
 @dataclass(frozen=True)
 class CheckReport:
-    """What :func:`check` found."""
+    """What [`check`][ferro.migrations.check] found: whether the migrations are complete, and each problem.
+
+    Examples:
+        ```python {test=compile reason="needs a migrations project"}
+        report = await ferro.migrations.check()
+        for problem in report.problems:
+            print(problem.kind, problem.message)
+        report.raise_for_problems()
+        ```
+    """
 
     ok: bool
+    """Whether `check` found no problem."""
     head: str | None = None
     """The newest migration's directory name, when there is one."""
     problems: list[Problem] = field(default_factory=list)
+    """Every problem found, in the order found."""
 
     def raise_for_problems(self) -> None:
-        """Raise :class:`MigrationsCheckError` carrying this report when it
-        has any problem; do nothing otherwise."""
+        """Raise when the report has any problem; do nothing otherwise.
+
+        Raises:
+            MigrationsCheckError: The report has a problem; the message
+                lists each, and its `report` is this report.
+        """
         if self.problems:
             raise MigrationsCheckError(self)
 
 
 def declared_modelset(database: DatabaseSettings) -> dict[str, Any]:
-    """The SchemaIR modelset envelope ``database`` declares.
+    """Compile the schema a configured database's models declare.
 
-    Imports the database's ``models`` modules and keeps, from the resolved
+    Imports the database's `models` modules and keeps, from the resolved
     registry modelset, the models this database claims and the join tables
     between them (a join table rides its models).
+
+    Args:
+        database: The configured database.
+
+    Returns:
+        The modelset, in the form a migration's `ir.json` stores.
     """
     from .. import ensure_resolved_modelset
     from ..registry import REGISTRY
@@ -168,35 +187,40 @@ def new(
     data_only: bool = False,
     no_backfill: Sequence[str] = (),
 ) -> Path | None:
-    """Write the migration that brings ``database``'s migrations up to its models.
+    """Write the migration that brings a database's migrations up to its models.
 
-    Returns the new migration's directory, or ``None`` when the models
-    change nothing that renders DDL (a Python default, a back-reference, a
-    method edit: ADR-0027) and no hand step (``sql_step``, ``data_step``)
-    was asked for; a migration of hand steps alone stores the declared
-    modelset as its snapshot. ``sql_step``
-    appends a hand-written portable step (``NN_<sql_step>.up.sql`` /
-    ``.down.sql``) holding ``-- write this step``. ``data_step`` (a model's
-    class name, ``Author``) adds a Python data step
-    ``NN_backfill_<model>.py`` whose ``up`` and ``down`` hold
-    ``todo("write this step")`` (or the project's ``_templates/data_step.py``),
-    after every generated step but the contract: a column or table the
-    migration drops is dropped by the contract, after the data step, which
-    can still read it (ADR-0025); with ``data_only`` the migration holds that
-    step alone, whatever the models changed, and a full copy of its parent's
-    snapshot. A change that
-    asks existing rows for values gets a generated backfill per model
-    (``NN_backfill_<model>.py``, ``todo`` where a value is missing);
-    ``no_backfill`` (``["author.slug"]``) replaces a model's backfill with a
-    generated guard step that fails the migration while any row still needs
-    a value. Rendering warnings (a
-    dialect that skips a declaration, such as row security on SQLite) are
-    issued as ``UserWarning``.
+    This is `ferro migrate new`. A change that asks existing rows for values
+    gets a generated backfill per model (`NN_backfill_<model>.py`, with
+    `todo` where a value is missing). A migration of hand steps alone stores
+    the declared modelset as its snapshot. Rendering warnings (a dialect
+    that skips a declaration, such as row security on SQLite) are issued as
+    `UserWarning`.
+
+    Args:
+        database: The configured database.
+        name: The migration's name: lowercase letters, digits and `_`.
+        sql_step: Also add a hand-written portable SQL step
+            `NN_<sql_step>.up.sql` / `.down.sql` holding `-- write this step`.
+        data_step: Also add a Python data step `NN_backfill_<model>.py` over
+            this model (its class name, `Author`), whose `up` and `down` hold
+            `todo("write this step")` (or the project's
+            `_templates/data_step.py`). It lands after every generated step
+            but the contract, so it can still read what the contract drops.
+        data_only: Write only the `data_step`: no DDL, and a full copy of the
+            parent's snapshot.
+        no_backfill: Columns (`"author.slug"`) whose generated backfill is
+            replaced by a guard step that fails the migration while any row
+            still needs a value.
+
+    Returns:
+        The new migration's directory, or `None` when the models change
+            nothing that renders DDL (a Python default, a back-reference, a
+            method edit) and no hand step was asked for.
 
     Raises:
-        MigrationsDirectoryError: the directory is malformed, a name is not
-            usable, or the models change something this generator does not
-            generate yet (``not generated yet: <op> on <table> (ticket #N)``).
+        MigrationsDirectoryError: The directory is malformed, a name is not
+            usable, or the models change something the generator does not
+            generate yet.
     """
     migration = prepare(
         database,
@@ -223,28 +247,37 @@ def replace(
     data_only: bool = False,
     no_backfill: Sequence[str] = (),
 ) -> Path:
-    """Regenerate the migration ``target`` names as ``name`` on top of the
-    newest schema snapshot below it (``ferro migrate new <name> --replace
-    <target>``), and return its directory.
+    """Regenerate a migration on top of the newest schema snapshot below it.
 
-    Two branches each generated ``0007``; after the rebase the directory
-    holds ``0007_add_x`` and ``0007_add_y``. ``replace(db, "add_x",
-    "0007_add_x")`` writes ``0008_add_x`` chained from ``0007_add_y``'s
-    snapshot and deletes ``0007_add_x``: a new snapshot, regenerated DDL
-    steps, and every data step and hand-written SQL step carried across by
-    name with its body intact, renumbered when the regenerated steps move
-    it. A carried step wins over a rescaffolded step of its name. The number
-    is kept when it is free. ``target`` is ``NNNN_<name>``, or ``NNNN`` when
-    one migration carries the number. The other options mean what they mean
-    to :func:`new`. It never opens a database (ADR-0023); a database that
-    applied the old files meets the replaced migration as a changed one.
+    This is `ferro migrate new <name> --replace <target>`. Two branches each
+    generated `0007`; after the rebase the directory holds `0007_add_x` and
+    `0007_add_y`. `replace(db, "add_x", "0007_add_x")` writes `0008_add_x`
+    chained from `0007_add_y`'s snapshot and deletes `0007_add_x`: a new
+    snapshot, regenerated DDL steps, and every data step and hand-written
+    SQL step carried across by name with its body intact, renumbered when
+    the regenerated steps move it. A carried step wins over a rescaffolded
+    step of its name. The number is kept when it is free. It never opens a
+    database; a database that applied the old files meets the replaced
+    migration as a changed one.
+
+    Args:
+        database: The configured database.
+        name: The regenerated migration's name.
+        target: The migration to regenerate, `NNNN_<name>`, or `NNNN` when
+            one migration carries the number.
+        sql_step: As for `new`.
+        data_step: As for `new`.
+        data_only: As for `new`.
+        no_backfill: As for `new`.
+
+    Returns:
+        The regenerated migration's directory.
 
     Raises:
-        MigrationsDirectoryError: the target is not in the directory, is a
-            number two migrations share, or a later migration chains from it
-            ("replace the later one first, or delete it"); the regeneration
-            is empty and carries nothing ("delete the directory"); or what
-            :func:`new` raises.
+        MigrationsDirectoryError: The target is not in the directory, is a
+            number two migrations share, or a later migration chains from it;
+            the regeneration is empty and carries nothing; or what `new`
+            raises.
     """
     migration = prepare(
         database,
@@ -272,29 +305,39 @@ def squash(
     data_only: bool = False,
     no_backfill: Sequence[str] = (),
 ) -> Path:
-    """Replace the range from the migration ``from_`` names through the head
-    with the one migration ``new`` would have written across it (``ferro
-    migrate squash <name> --from <from_>``, ADR-0056), and return its
-    directory.
+    """Replace a range of migrations, through the head, with the one migration `new` would have written.
 
-    A feature branch wrote ``0005_add_teams`` through ``0009_fix_rows``;
-    ``squash(db, "teams_epic", "0005")`` writes ``0005_teams_epic``, planned
-    once by the one planner from the snapshot below the range (none for a range
-    from ``0001``) to the range's composed target, with every data step and
-    hand-written SQL step of the range carried byte for byte in chain order,
-    and deletes the five. Its snapshot stores the composed target under the
-    parent's checksum, with the witness naming each replaced migration.
-    ``from_`` is ``NNNN_<name>``, or ``NNNN`` when one migration carries the
-    number. The other options mean what they mean to :func:`new`. It reads
+    This is `ferro migrate squash <name> --from <from_>`. A feature branch
+    wrote `0005_add_teams` through `0009_fix_rows`;
+    `squash(db, "teams_epic", "0005")` writes `0005_teams_epic`, planned
+    once from the snapshot below the range (none for a range from `0001`) to
+    the range's composed target, with every data step and hand-written SQL
+    step of the range carried byte for byte in chain order, and deletes the
+    five. Its snapshot stores the composed target under the parent's
+    checksum, with a witness naming each replaced migration. It reads
     snapshots and the directory only: the models are never imported, no
     database is opened.
 
+    Args:
+        database: The configured database.
+        name: The squashed migration's name.
+        from_: The first migration of the range, `NNNN_<name>`, or `NNNN`
+            when one migration carries the number.
+        sql_step: As for `new`.
+        data_step: As for `new`.
+        data_only: As for `new`, with a full copy of the snapshot below the
+            range.
+        no_backfill: As for `new`.
+
+    Returns:
+        The squashed migration's directory.
+
     Raises:
-        MigrationsDirectoryError: ``from_`` is not in the directory or is a
+        MigrationsDirectoryError: `from_` is not in the directory or is a
             number two migrations share; the range does not reach the head;
-            the range's rename hints do not compose; the squash renders nothing
-            and carries nothing ("delete the directories"); an aside of an
-            earlier squash or replace is present; or what :func:`new` raises.
+            the range's rename hints do not compose; the squash renders
+            nothing and carries nothing; an aside of an earlier squash or
+            replace is present; or what `new` raises.
     """
     migration = prepare(
         database,
@@ -313,23 +356,30 @@ def squash(
 
 
 def write(database: DatabaseSettings, migration: GeneratedMigration) -> Path:
-    """Write a migration :func:`prepare` returned into ``database``'s
-    directory (with its ``.gitattributes``); return the migration's directory.
+    """Write a prepared migration into a database's migrations directory.
 
-    A replacement (``migration.replaces``) sets the replaced migration's
-    directory aside under a hidden name naming both (``.0007_add_x.replaced``
-    in place, ``.0007_add_x.0008_add_x.replaced`` renumbered), writes the new
-    one, and deletes the aside; a write that raises puts it back. A run killed
-    in between leaves the aside, which every directory reader refuses by
-    name with its recovery (panel F6): rename it back while the replacement
-    is absent, delete it once the replacement is in place.
+    A replacement sets the replaced migration's directory aside under a
+    hidden name naming both (`.0007_add_x.replaced` in place,
+    `.0007_add_x.0008_add_x.replaced` renumbered), writes the new one, and
+    deletes the aside; a write that raises puts it back. A run killed in
+    between leaves the aside, which every directory reader refuses by name
+    with its recovery: rename it back while the replacement is absent,
+    delete it once the replacement is in place. A squash moves the range's
+    directories one by one into one aside named after both ends and the
+    replacement (`.0005_add_teams..0009_fix_rows.0005_teams_epic.squashed`)
+    and recovers the same way.
 
-    A squash moves the range's directories one by one into one aside named
-    after both ends and the replacement
-    (``.0005_add_teams..0009_fix_rows.0005_teams_epic.squashed``), writes the
-    new migration, and deletes the aside; a write that raises moves them
-    back. Every reader refuses a leftover aside the same way, naming any
-    original still outside it."""
+    Args:
+        database: The configured database.
+        migration: The migration `prepare` returned.
+
+    Returns:
+        The written migration's directory.
+
+    Raises:
+        MigrationsDirectoryError: An aside of another replace or squash is
+            present.
+    """
     directory = database.directory
     ensure_gitattributes(directory)
     if not migration.replaces:
@@ -359,7 +409,7 @@ def write(database: DatabaseSettings, migration: GeneratedMigration) -> Path:
 
 
 def _write_squash(directory: Path, migration: GeneratedMigration) -> Path:
-    """:func:`write` for a squash: the originals into one aside, one by one,
+    """`write` for a squash: the originals into one aside, one by one,
     the replacement written, the aside deleted; a raise moves them back."""
     first, last = migration.replaces[0], migration.replaces[-1]
     aside = directory / f".{first}..{last}.{migration.dir_name}.squashed"
@@ -396,11 +446,27 @@ def prepare(
     replace: str | None = None,
     squash_from: str | None = None,
 ) -> GeneratedMigration | None:
-    """The migration :func:`new` would write, without writing it; ``None``
-    for no schema change. Raises what :func:`new` raises. With ``replace``,
-    the migration :func:`replace` would write (never ``None``), raising what
-    it raises. With ``squash_from``, the migration :func:`squash` would write
-    (never ``None``), raising what it raises; the models are never read."""
+    """Build the migration `new`, `replace` or `squash` would write, without writing it.
+
+    Args:
+        database: The configured database.
+        name: The migration's name.
+        sql_step: As for `new`.
+        data_step: As for `new`.
+        data_only: As for `new`.
+        no_backfill: As for `new`.
+        replace: Build what `replace` would write for this target.
+        squash_from: Build what `squash` would write from this migration;
+            the models are never read.
+
+    Returns:
+        The migration, or `None` for no schema change (never `None` with
+            `replace` or `squash_from`).
+
+    Raises:
+        ValueError: Both `replace` and `squash_from` are given.
+        MigrationsDirectoryError: What `new`, `replace` or `squash` raises.
+    """
     if replace is not None and squash_from is not None:
         raise ValueError("name either replace or squash_from, not both")
     check_name(name, "migration name")
@@ -488,7 +554,7 @@ def _prepare_squash(
     from_: str,
     options: dict[str, Any],
 ) -> GeneratedMigration:
-    """:func:`prepare` for :func:`squash`: the range read, its snapshots
+    """`prepare` for `squash`: the range read, its snapshots
     composed into the target (``_core._compose_range``), the migration planned
     once from the parent snapshot to that target through the generator ``new``
     uses, carrying the range's data steps and hand-written SQL steps and
@@ -601,7 +667,7 @@ def _unneeded_scaffolds(
     dialects: list[str],
 ) -> dict[int, str]:
     """The carried data steps a squash drops, by their place in ``carry``,
-    each with the note that names it (ADR-0056, amended 2026-10-18).
+    each with the note that names it.
 
     A carried data step is dropped when it is still, byte for byte, the
     backfill the generator scaffolded for its original migration (that
@@ -690,12 +756,12 @@ def _with_dead_name_notes(
     names: list[str],
 ) -> GeneratedMigration:
     """``migration`` with a note for each dead name (a table, column, enum
-    label or constraint that existed only inside the range, ADR-0056) no carried
+    label or constraint that existed only inside the range) no carried
     data step's declaration touches, or the refusal of the first carried step
     whose declaration does.
 
     A squash cannot read what a step's body does, but it can read what the
-    step declares (ADR-0035): a chunked step's query, built over the
+    step declares: a chunked step's query, built over the
     historical models of the squashed migration widened by the dead names. The
     query's table, the columns its filter and order keys read and the enum
     labels its filter compares are names the step provably touches. A range
@@ -749,7 +815,7 @@ def _widened_models(
     names: list[str],
 ) -> HistoricalModels:
     """The squashed migration's historical models (the snapshot below the range
-    over the composed target, ADR-0025) plus every table and column any
+    over the composed target) plus every table and column any
     snapshot of the range held that the parent does not, so a declaration
     naming a dead name still builds and can be read.
 
@@ -921,8 +987,8 @@ def _refuse_data_only_over_ddl(
     name: str,
     options: dict[str, Any],
 ) -> None:
-    """Refuse ``squash --data-only`` over a range that renders DDL (panel F2
-    on #690): ``--data-only`` writes the snapshot below the range, while the
+    """Refuse ``squash --data-only`` over a range that renders DDL:
+    ``--data-only`` writes the snapshot below the range, while the
     witness lets every database that ran the originals inherit it, so they
     would stand on a snapshot that says the range's DDL never ran. A range that
     renders none (what it adds it drops again) loses nothing.
@@ -1140,7 +1206,7 @@ def _with_data_steps(
     template_dir: Path,
 ) -> GeneratedMigration:
     """``migration`` with each data step's file written from the step record
-    the generator produced (:func:`scaffold.render`), and each backfill that
+    the generator produced (`scaffold.render`), and each backfill that
     still needs writing named in a note after the generator's. The step's
     name and place are the generator's."""
     by_ordinal = {step["ordinal"]: step for step in generated["steps"]}
@@ -1191,18 +1257,31 @@ def _data_role(record: Mapping[str, Any]) -> str:
 async def check(
     settings: FerroSettings | None = None, database: str | None = None
 ) -> CheckReport:
-    """Check, offline, that every model change has a migration and the
-    directory is intact (``ferro migrate check``), reading files only: it
-    takes no connection.
+    """Check, offline, that every model change has a migration and the directory is intact.
 
-    Reports an ungenerated model change (naming the models), a broken
-    snapshot chain (naming both files), a duplicate or missing number, a
-    DDL step without the rendering a target dialect needs, and a data step
-    still holding ``todo(...)``. Raises nothing for a problem: call
-    :meth:`CheckReport.raise_for_problems` to fail on one.
+    This is `ferro migrate check`. It reads files only and takes no
+    connection. It reports an ungenerated model change (naming the models),
+    a broken snapshot chain (naming both files), a duplicate or missing
+    number, a DDL step without the rendering a target dialect needs, and a
+    data step still holding `todo(...)`. It raises nothing for a problem.
+
+    Args:
+        settings: The project's configuration. Defaults to `FerroSettings()`.
+        database: The configured database. Defaults to the only one
+            configured.
+
+    Returns:
+        The report; its `raise_for_problems()` raises on any problem.
 
     Raises:
-        MigrationRefused: the configuration names no single database.
+        MigrationRefused: The configuration names no single database.
+
+    Examples:
+        In CI, fail the build on an ungenerated change:
+
+        ```python {test=compile reason="needs a migrations project"}
+        (await ferro.migrations.check()).raise_for_problems()
+        ```
     """
     chosen = Target.resolve(settings, database).database
     declared = declared_modelset(chosen)

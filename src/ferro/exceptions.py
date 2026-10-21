@@ -3,45 +3,57 @@
 The tree is DBAPI-shaped so callers can catch database failures by type
 instead of string-matching driver messages:
 
-- :class:`FerroError` — root of everything Ferro raises for database work.
-    - :class:`InterfaceError` — the database interface was misused
-      (unknown connection name, protocol/configuration problems).
-    - :class:`OperationalError` — the database or its environment failed
+- `FerroError`: the root of everything Ferro raises for database work.
+    - `InterfaceError`: the database interface was misused (unknown
+      connection name, protocol or configuration problems).
+    - `OperationalError`: the database or its environment failed
       (connection refused, pool timeout, I/O or TLS errors).
-    - :class:`DataError` — a value could not be decoded or converted.
-    - :class:`IntegrityError` — a constraint rejected the statement.
-        - :class:`UniqueViolationError`
-        - :class:`ForeignKeyViolationError`
-        - :class:`NotNullViolationError`
-        - :class:`CheckViolationError`
-    - :class:`ModelDoesNotExist` — lookup by primary key found no row
-      (also a :class:`LookupError` for backwards compatibility).
+    - `DataError`: a value could not be decoded or converted.
+    - `IntegrityError`: a constraint rejected the statement.
+        - `UniqueViolationError`
+        - `ForeignKeyViolationError`
+        - `NotNullViolationError`
+        - `CheckViolationError`
+    - `ModelDoesNotExist`: no row matched the primary key (also a
+      `LookupError`).
 
-Exceptions raised from the Rust core preserve the original driver
-message and, where the backend provides them, the SQLSTATE code and the
-violated constraint name as structured attributes.
+Exceptions raised from the Rust core keep the driver's message and, where
+the backend reports them, the SQLSTATE code and the violated constraint's
+name as attributes.
 """
 
 from typing import Any
 
 
 class FerroError(Exception):
-    """Root of Ferro's database exception hierarchy.
+    """The root of every exception Ferro raises for database work.
 
-    Attributes:
-        driver_message: Original message from the database driver, when the
-            error originated in the database. ``None`` otherwise.
-        sqlstate: Backend error code as reported by the driver: the
-            five-character SQLSTATE (e.g. ``"23505"``) on Postgres, the
-            extended result code (e.g. ``"2067"``) on SQLite. ``None`` when
-            the driver reports none.
-        constraint: Name of the violated constraint when the backend reports
-            it (Postgres does; SQLite does not). ``None`` otherwise.
+    Catch it to handle any database failure, or a subclass to handle one
+    kind.
+
+    Examples:
+        ```python {test=run prelude=reference}
+        from ferro import UniqueViolationError
+
+        try:
+            await Author.create(name="Ada King", email="ada@example.com")
+        except UniqueViolationError as error:
+            assert error.sqlstate == "2067"
+        else:
+            raise AssertionError("expected UniqueViolationError")
+        ```
     """
 
     driver_message: str | None
+    """The database driver's own message, or `None` when the error did not come from the database."""
     sqlstate: str | None
+    """The backend's error code, or `None` when the driver reports none.
+
+    On Postgres it is the five-character SQLSTATE, such as `"23505"`; on
+    SQLite the extended result code, such as `"2067"`.
+    """
     constraint: str | None
+    """The violated constraint's name on Postgres, or `None` (SQLite does not report it)."""
 
     def __init__(
         self,
@@ -99,34 +111,52 @@ class IntegrityError(FerroError):
 
 
 class UniqueViolationError(IntegrityError):
-    """A UNIQUE or PRIMARY KEY constraint rejected the statement."""
+    """A `UNIQUE` or `PRIMARY KEY` constraint rejected the statement."""
 
 
 class ForeignKeyViolationError(IntegrityError):
-    """A FOREIGN KEY constraint rejected the statement.
+    """A `FOREIGN KEY` constraint rejected the statement.
 
-    Includes a parent delete blocked by ``ForeignKey(on_delete="RESTRICT")``.
-    PostgreSQL 18 reports SQLSTATE ``23001`` for that case; PostgreSQL 17
-    reports ``23503``. ``sqlstate`` is the raw driver code.
+    Includes a parent delete blocked by `ForeignKey(on_delete="RESTRICT")`.
+    PostgreSQL 18 reports SQLSTATE `23001` for that case; PostgreSQL 17
+    reports `23503`. `sqlstate` is the raw driver code.
     """
 
 
 class NotNullViolationError(IntegrityError):
-    """A NOT NULL constraint rejected the statement."""
+    """A `NOT NULL` constraint rejected the statement."""
 
 
 class CheckViolationError(IntegrityError):
-    """A CHECK constraint rejected the statement."""
+    """A `CHECK` constraint rejected the statement."""
 
 
 class ModelDoesNotExist(FerroError, LookupError):
-    """Raised when :meth:`~ferro.models.Model.get` finds no row for the primary
-    key, and when :meth:`~ferro.models.Model.save` on a persisted instance
-    matches no row (the row was deleted underneath, or the primary key was
-    mutated before saving)."""
+    """No row matched the primary key.
+
+    [`Model.get`][ferro.Model.get] raises it when no row has the key, and
+    [`save`][ferro.Model.save] on a saved instance raises it when its row is
+    gone (deleted, or its primary key changed before saving). It is also a
+    `LookupError`. Use [`get_or_none`][ferro.Model.get_or_none] to get `None`
+    instead.
+
+    Examples:
+        ```python {test=run prelude=reference}
+        from ferro import ModelDoesNotExist
+
+        try:
+            await Author.get(99)
+        except ModelDoesNotExist as error:
+            assert (error.model, error.pk) == (Author, 99)
+        else:
+            raise AssertionError("expected ModelDoesNotExist")
+        ```
+    """
 
     model: type
+    """The model class that was looked up."""
     pk: Any
+    """The primary key that matched no row."""
 
     def __init__(self, model_cls: type, pk: Any) -> None:
         self.model = model_cls

@@ -1,79 +1,91 @@
+---
+description: "How one model and one query travel through Ferro's Python layer, its Rust core and the database."
+---
+
 # Architecture
 
-Ferro is a Python ORM with a Rust core. You write Pydantic models and async Python; SQL generation, database I/O, and row hydration happen in compiled Rust.
+This page follows one model and one query through Ferro's layers: what runs in Python, what crosses into Rust, and when the database is involved.
 
-## Overview
+The running example is a `User` model:
 
-Ferro has two main pipelines: **schema compilation** (happens at import/class-creation) and **query execution** (happens per `await`). They share IR contracts but run at different times.
+=== "Assignment"
 
-### Schema path (compile-time)
+    ```python
+    --8<-- "docs/examples/concepts.py:models"
+    ```
 
-Runs when a `Model` subclass is defined. `ModelMetaclass` calls `build_model_schema()` once per model; that enriched schema fans out to SchemaIR compilation and Rust registry registration.
+=== "Annotated"
+
+    ```python
+    --8<-- "docs/examples/concepts_annotated.py:models"
+    ```
+
+With four users saved, this query reads the active ones, oldest first:
+
+```python
+--8<-- "docs/examples/concepts.py:query"
+```
+
+Edsger is inactive, so three users come back. Python built the query, Rust wrote the SQL, ran it and turned the rows into `User` instances, and the session decided which connection ran it. The rest of this page takes those steps one layer at a time.
+
+## Two pipelines
+
+Ferro does its work at two different times:
+
+- **When a model class is defined**, Ferro compiles its schema. This happens once, at import, and touches no database.
+- **When you await a query or a write**, Ferro runs it. This happens on every `await`, inside a session.
+
+### Schema path
+
+Defining `User` runs the model's metaclass, which compiles the class into a **SchemaIR** envelope: a versioned, JSON-shaped description of the table, its columns, keys, indexes and constraints. The envelope is kept in Python. When you call `connect()`, Ferro installs the whole set of model envelopes into the Rust engine in one step, and every consumer of the schema reads that one description:
 
 ```mermaid
 graph LR
-    subgraph python [Python]
-        Models[Pydantic Models]
+    subgraph python [Python, at class definition]
+        Models[Model classes]
         Metaclass[ModelMetaclass]
-        Builder[build_model_schema]
-        Compiler[SchemaIR Compiler]
-    end
-
-    subgraph artifacts [Artifacts]
-        SchemaIR[SchemaIR Envelope]
-        EnrichedJSON[Enriched Schema JSON]
+        SchemaIR[SchemaIR envelopes]
+        Models --> Metaclass --> SchemaIR
     end
 
     subgraph consumers [Consumers]
+        Registry[Rust model registry]
+        Planner[Schema planner]
         Alembic[Alembic get_metadata]
-        Registry[Rust Model Registry]
-        Migrate[Runtime DDL / ferro-migrate]
     end
 
-    Models --> Metaclass
-    Metaclass --> Builder
-    Builder --> EnrichedJSON
-    Builder --> Compiler
-    Compiler --> SchemaIR
+    SchemaIR -->|connect| Registry
+    SchemaIR -->|connect| Planner
     SchemaIR --> Alembic
-    EnrichedJSON --> Registry
-    EnrichedJSON --> Migrate
 ```
 
-> **Implementation status (2026-06-26):** only `SchemaIR --> Alembic` is a fully
-> realized SchemaIR consumer. The runtime DDL / `ferro-migrate` path currently
-> re-derives its own SchemaIR in Rust from the enriched JSON (it does not consume
-> the Python-compiled SchemaIR envelope), and the runtime CREATE emitter
-> (`src/schema.rs`) uses its own canonical type system rather than the shared
-> `ferro-ddl-lowering` crate. Collapsing these onto one SchemaIR producer and one
-> lowering library is tracked as **Phase 8.5** — see the
-> [IR-first lowering consolidation audit](https://github.com/syn54x/ferro-orm/blob/main/docs/solutions/architecture-patterns/ir-first-lowering-consolidation-audit.md).
+The registry gives the engine each column's type for binding values and hydrating rows. The planner compares the models with a database and writes the DDL; auto-migrate, `ferro migrate new` and the Alembic bridge all use it, which is covered in [Schema changes](#schema-changes) below.
 
-### Runtime path (per operation)
+### Runtime path
 
-Runs inside an active session when you await a terminal query method or execute a mutation. QueryIR crosses the FFI boundary; Rust owns SQL, I/O, and hydration.
+Awaiting a query runs it inside the active session. The query crosses into Rust as a **QueryIR** envelope, and Rust owns the SQL, the database I/O and the hydration of rows into instances:
 
 ```mermaid
 graph TB
     subgraph python [Python]
         direction TB
         Session[engines.session]
-        Builder[Query Builder]
+        Builder[Query builder]
         Session --> Builder
     end
 
-    Builder -->|await| QueryIR[QueryIR Envelope]
+    Builder -->|await| QueryIR[QueryIR envelope]
 
     QueryIR --> Planner
 
-    subgraph rust [Rust Engine]
+    subgraph rust [Rust engine]
         direction TB
-        Planner[Query Planner]
-        Codec[Codec Registry]
+        Planner[Query planner]
+        Codec[Codec registry]
         SeaQuery[Sea-Query]
         SQLx[SQLx]
-        Hydration[Hydration ABI]
-        IdentityMap[Session Identity Map]
+        Hydration[Hydration]
+        IdentityMap[Session identity map]
         Planner --> Codec --> SeaQuery --> SQLx
         Hydration --> IdentityMap
     end
@@ -84,133 +96,100 @@ graph TB
     Session -.->|scopes| IdentityMap
 ```
 
-In short:
+Each layer owns one part of the work:
 
-```text
-Python owns the model authoring surface.
-SchemaIR and QueryIR own the cross-language contracts.
-Rust owns execution, codecs, and hydration.
-Sea-Query owns SQL shape.
-SQLx owns typed database I/O.
-Sessions scope routing, transactions, and the identity map.
-The backend kind decides which database-specific path is legal.
-```
+| Layer | Owns |
+| :--- | :--- |
+| Python | Models, validation, building queries |
+| SchemaIR and QueryIR | The contracts that cross from Python to Rust |
+| Rust engine | Planning, value conversion, hydration |
+| Sea-Query | The shape of the SQL for each dialect |
+| SQLx | Connection pools and database I/O |
+| Sessions | Which connection runs the work, transactions, the identity map |
 
-## The Layers
+The backend decides which database-specific path is legal: a SQLite pool and a PostgreSQL pool are separate types, not one abstraction pretending to be both.
+
+## Layers
 
 ### Python
 
-Ferro models are real Pydantic V2 `BaseModel` subclasses. The Python layer owns:
+Ferro models are Pydantic v2 `BaseModel` subclasses, and the Python layer owns everything you write:
 
-- **Model definition.** Annotated fields become columns; Pydantic handles validation, defaults, serialization, and JSON schema generation.
-- **Metaclass registration.** `ModelMetaclass` inspects each model at class-creation time, builds an enriched JSON schema (primary keys, uniques, indexes, foreign keys, nullability, composite constraints), registers it with the Rust engine, and compiles a versioned **SchemaIR** artifact.
-- **Query building.** Chains like `User.where(lambda t: t.active).order_by(lambda t: t.age, "desc").limit(10)` are pure Python — each call returns a new, immutable `Query` that accumulates an in-memory query definition. Nothing touches the database until you await a terminal method (`.all()`, `.first()`, `.count()`, `.exists()`, `.update()`, `.delete()`). The lambda's parameter is a `QueryProxy` — a validating attribute proxy built fresh per predicate, not a class-level replacement of the model's fields — see [Typed Query Predicates](query-typing.md).
-- **Session routing.** ORM and raw operations run inside an active `engines.session()` context (or with an explicit `session=` handle). Sessions scope connection routing, transactions, and the identity map under concurrency.
+- **Model definition.** Annotated fields become columns; Pydantic handles validation, defaults, serialization and JSON schema generation. See [Type safety](type-safety.md).
+- **Schema compilation.** The metaclass reads each model at class definition (primary key, uniques, indexes, foreign keys, nullability, composite constraints) and compiles its SchemaIR envelope.
+- **Query building.** Each call in `User.where(...).order_by(...).limit(10)` returns a new, immutable query and touches no database. Nothing runs until you await a terminal method such as `.all()`, `.first()`, `.count()`, `.exists()`, `.update()` or `.delete()`. The lambda's parameter is a [`QueryProxy`][ferro.query.QueryProxy] that checks each attribute name as the lambda runs; [Typed query predicates](query-typing.md) explains it.
+- **Session routing.** ORM and raw SQL calls run inside an active `engines.session()` block, or take an explicit `session=` handle.
 
-### The Bridge
+### Bridge
 
-The FFI boundary is built on [PyO3](https://pyo3.rs) with `pyo3-async-runtimes` bridging Python's asyncio event loop to Rust's tokio runtime. Versioned IR envelopes cross the boundary:
+The boundary between Python and Rust is built on [PyO3](https://pyo3.rs), with `pyo3-async-runtimes` connecting Python's asyncio event loop to Rust's tokio runtime. Three things cross it:
 
-- **SchemaIR** (`ir_kind: "schema"`) — compiled at class-creation time from the enriched model schema. Cached in Python (`ferro.state`) and consumed by Alembic `get_metadata()` and parity tests. The Rust registry receives enriched JSON schema for runtime query/bind metadata, and the runtime migration planner currently re-derives its own SchemaIR in Rust from that JSON rather than consuming this envelope (consolidation tracked in [Phase 8.5](https://github.com/syn54x/ferro-orm/blob/main/docs/plans/2026-06-19-001-ir-first-roadmap.md)).
-- **QueryIR** (`ir_kind: "query"`) — emitted per operation from the query builder as `{ir_kind, ir_version, payload}`. Rust deserializes the envelope, plans SQL, and binds parameters through the shared codec registry.
-- **Rows** travel back as typed values that Rust hydrates into Python objects via the hydration ABI (direct `__dict__` population with required Pydantic slots initialized).
+- **SchemaIR** (`ir_kind: "schema"`): one envelope per model, compiled at class definition and installed into the engine by `connect()`. The Alembic bridge's `get_metadata()` reads the same envelopes.
+- **QueryIR** (`ir_kind: "query"`): one envelope per operation, `{ir_kind, ir_version, payload}`. Rust plans SQL from it and binds every value through the codec registry.
+- **Rows**, on the way back, which Rust hydrates into Python instances.
 
-The GIL is released while Rust waits on the database. An awaited Ferro query does not block other Python coroutines or threads.
+While Rust waits on the database, it holds no Python lock: the await runs on tokio, so other coroutines and threads keep running. [Async from end to end](#async-from-end-to-end) covers what that means for concurrent work.
 
-### The Rust Engine
+### Rust engine
 
-The engine owns everything between the IR envelope and the database:
+The engine owns everything between the QueryIR envelope and the database:
 
-- **Query planning** — QueryIR payloads lower to Sea-Query conditions with schema-aware bind typing.
-- **Codec registry** — unified bind/fetch lowering for inserts, updates, filters, M2M links, and hydration (typed NULLs, UUIDs, decimals, temporals).
-- **SQL generation** via [Sea-Query](https://github.com/SeaQL/sea-query), which lowers each operation through the dialect-specific builder (SQLite or PostgreSQL) with safely bound parameters.
-- **Connection pooling and execution** via [SQLx](https://github.com/launchbadge/sqlx) typed pools — a real SQLite pool or a real PostgreSQL pool, not a generic abstraction pretending to be both.
-- **Hydration ABI** — decoding database values into Python-compatible shapes and constructing instances without calling Pydantic `__init__`, while initializing `__pydantic_fields_set__`, `__pydantic_extra__`, and `__pydantic_private__`.
-- **Session-scoped identity map** — a per-session cache so one row maps to one Python instance within the active session. See [Identity Map](identity-map.md).
+- **Query planning.** The QueryIR payload becomes Sea-Query conditions, with each bound value typed from the model's schema.
+- **Codec registry.** One set of conversions for inserts, updates, filters, many-to-many links and hydration: typed `NULL`s, UUIDs, decimals, dates and times.
+- **SQL generation** through [Sea-Query](https://github.com/SeaQL/sea-query), with the SQLite or PostgreSQL builder and bound parameters. Values are bound, never interpolated into the SQL.
+- **Connection pooling and execution** through [SQLx](https://github.com/launchbadge/sqlx) typed pools.
+- **Hydration.** Rust decodes each row and fills the instance's fields directly, without calling the model's `__init__`, and sets the Pydantic attributes `__init__` would set (`__pydantic_fields_set__`, `__pydantic_extra__`, `__pydantic_private__`). A hydrated `User` behaves like one you constructed.
+- **Session identity map**, so one row is one Python instance within a session. See [Identity map](identity-map.md).
 
-## Life of a Query
+## Life of a query
+
+The query from the top of the page goes through these steps:
 
 ```mermaid
 sequenceDiagram
-    participant App as Your Code
+    participant App as Your code
     participant Session as engines.session
-    participant QB as Query Builder (Python)
-    participant Rust as Rust Engine
+    participant QB as Query builder (Python)
+    participant Rust as Rust engine
     participant DB as Database
 
-    App->>Session: async with engines.session("app")
-    App->>QB: User.where(lambda t: t.age > 18).all()
-    QB->>QB: Build QueryNode tree (no I/O)
-    QB->>Rust: await QueryIR envelope via FFI
-    Note over Rust: GIL released
-    Rust->>Rust: Plan query, codec bind, Sea-Query SQL
-    Rust->>DB: SELECT ... WHERE age > $1
+    App->>Session: async with engines.session()
+    App->>QB: User.where(lambda user: user.active == True)...all()
+    QB->>QB: Build the query tree (no I/O)
+    QB->>Rust: await the QueryIR envelope
+    Rust->>Rust: Plan, bind values, render SQL
+    Rust->>DB: SELECT ... WHERE ... ORDER BY ... LIMIT ...
     DB-->>Rust: Rows
-    Rust->>Rust: Hydrate via hydration ABI
-    Rust->>Rust: Reconcile with session identity map
-    Rust-->>QB: Python objects
-    QB-->>App: list[User] (validated Pydantic instances)
+    Rust->>Rust: Hydrate, reconcile with the identity map
+    Rust-->>QB: User instances
+    QB-->>App: list[User]
 ```
 
 Step by step:
 
-1. **Session** — `async with ferro.engines.session("app")` establishes ambient routing for ORM/raw operations (or pass `session=` explicitly).
-2. **Construction** — `User.where(lambda t: t.age > 18)` builds a `QueryNode` tree in Python. No database interaction.
-3. **Execution trigger** — awaiting `.all()` wraps the query in a **QueryIR envelope** and calls into Rust.
-4. **SQL generation** — the planner and codec registry lower the IR into dialect-correct, parameterized SQL. Values are bound, never interpolated.
-5. **Execution** — SQLx runs the statement on a pooled connection (or on the pinned connection if a [transaction](../guide/transactions.md) is active).
-6. **Hydration** — Rust decodes each row through the hydration ABI, consulting the session identity map so a primary key you've already loaded resolves to the existing object.
-7. **Return** — your code receives a plain `list[User]` of fully validated Pydantic instances.
+1. **Session.** `async with engines.session():` sets the connection that ORM and raw SQL calls inside it use. You can pass `session=` explicitly instead.
+2. **Construction.** `User.where(lambda user: user.active == True)` calls the lambda once with a proxy and builds a query tree in Python. No database is involved.
+3. **Execution.** Awaiting `.all()` wraps the query in a QueryIR envelope and calls into Rust.
+4. **SQL generation.** The planner and the codec registry turn the envelope into parameterized SQL for the connection's dialect.
+5. **Execution.** SQLx runs the statement on a pooled connection, or on the pinned connection of an open [transaction](../guide/transactions.md).
+6. **Hydration.** Rust decodes each row and checks the session's identity map, so a row you already hold comes back as the instance you hold.
+7. **Return.** Your code receives a `list[User]`.
 
-## Model Registration
+## Schema changes
 
-Defining a model is itself a registration step:
-
-=== "Assignment"
-
-    ```python
-    from ferro import Field, Model
-
-
-    class User(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        username: str = Field(unique=True)
-        email: str
-    ```
-
-=== "Annotated"
-
-    ```python
-    from typing import Annotated
-
-    from ferro import Field, Model
-
-
-    class User(Model):
-        id: Annotated[int | None, Field(default=None, primary_key=True)]
-        username: Annotated[str, Field(unique=True)]
-        email: str
-    ```
-
-At class-creation time the metaclass calls `build_model_schema()`, registers the enriched JSON with the Rust engine's model registry, and compiles **SchemaIR** artifacts (per-model and model-set fingerprints) from the same schema dict. Importing your models is therefore enough for Ferro to know your full schema — but it does **not** connect to a database.
-
-Schema DDL happens later, when you connect:
+Defining `User` compiles its schema, but connects to nothing. The schema reaches a database when you connect with auto-migrate:
 
 ```python
-from ferro import connect
-
-await connect("sqlite::memory:", auto_migrate=True)
+--8<-- "docs/examples/concepts.py:connect"
 ```
 
-- `auto_migrate=True` creates missing tables for every registered model.
-- `migrate_updates=True` (0.11.0) additionally adds missing columns to existing tables, and on PostgreSQL reconciles type drift, nullability drift, and foreign-key definition drift (`on_delete`, target) for ferro-owned constraints. Runtime updates are planned from **SchemaIR** diffing (`ferro-migrate`) and executed as backend-specific DDL.
-- `migrate_destructive=True` (0.11.0) additionally drops live columns no longer on the model (never whole tables).
+That call creates the `user` table, because no table of that name existed. `auto_migrate=True` creates missing tables and leaves existing ones alone; `migrate_updates=True` and `migrate_destructive=True` go further, and [Auto-migrate](../guide/schema/auto-migrate.md) lists what each one changes.
 
-Reviewed changes go through [migrations](../guide/schema/migrations.md): `ferro migrate new` diffs the models' SchemaIR against the previous migration's schema snapshot with the same planner and renders the same DDL per target dialect; the [Alembic bridge](../guide/schema/alembic.md) writes that planner's decisions as an Alembic revision. **SchemaIR** is the canonical contract for cross-emitter DDL parity — runtime CREATE, auto-migrate, and Alembic `get_metadata()` all derive from the Python-compiled SchemaIR modelset and shared `ferro-ddl-lowering` tokens. Parity is enforced structurally (`test_cross_emitter_parity.py`, `test_db_type_cross_emitter_parity.py`, `test_migrate_plan.py`). The enriched JSON schema in the Rust registry remains the runtime source for query bind typing and hydration metadata.
+Auto-migrate, [migrations](../guide/schema/migrations.md) (`ferro migrate new`) and the [Alembic bridge](../guide/schema/alembic.md) are three doors to the same planner. Each compares the models' SchemaIR with a database or a saved snapshot, and each renders the change through the same functions. Because they share one planner, they write the same statement for the same change, byte for byte, so switching from one to another never shows a phantom difference. [Schema management](../guide/schema/overview.md) compares the three.
 
-## Async Architecture
+## Async from end to end
 
-Ferro is async end to end. Python's `await` hands off to Rust's tokio runtime; there are no thread pools wrapping a synchronous driver, and no sync API with async bolted on.
+Ferro has no synchronous API and no thread pool wrapping a synchronous driver. Python's `await` hands off to Rust's tokio runtime, and SQLx talks to the database asynchronously:
 
 ```mermaid
 graph LR
@@ -218,26 +197,26 @@ graph LR
     B -->|SQLx async I/O| C[(Database)]
 ```
 
-Consequences:
+Three consequences follow:
 
-- Database I/O never holds the GIL, so other coroutines keep running while queries are in flight.
-- Concurrent queries from multiple tasks share the connection pool naturally when each task uses its own session (or explicit `session=` routing).
-- [Sessions](../guide/connections.md) and [transactions](../guide/transactions.md) pin enclosed work to a scoped connection and identity map via context variables.
+- Database I/O never holds Python's interpreter lock, so other coroutines keep running while queries are in flight.
+- Concurrent tasks share the connection pool when each task opens its own session, or routes with an explicit `session=`.
+- [Sessions](../guide/connections.md#sessions) and [transactions](../guide/transactions.md) pin the work inside them to a connection and an identity map through context variables.
 
 ## Trade-offs
 
-What this design costs:
+The design has costs:
 
-- **Compiled wheel dependency.** Ferro ships a compiled extension module. Prebuilt wheels cover common platforms; anything else means building from source with a Rust toolchain.
-- **Debugging crosses a language boundary.** A stack trace stops at the FFI. Ferro works to surface clear Python exceptions, but stepping a debugger *into* SQL generation or hydration is not possible the way it is with a pure-Python ORM.
+- **A compiled wheel.** Ferro ships a compiled extension module. Prebuilt wheels cover the common platforms; anywhere else, installing builds from source with a Rust toolchain.
+- **Debugging crosses a language boundary.** A Python traceback stops where the call enters Rust. Ferro raises Python exceptions with clear messages, but you cannot step a Python debugger into SQL generation or hydration.
 - **Limited runtime introspection.** You cannot monkeypatch the engine's internals or hook arbitrary points of the execution pipeline from Python.
-- **Young ecosystem.** Ferro is pre-1.0 with a small community, fewer integrations, and fewer Stack Overflow answers than SQLAlchemy or Django ORM.
+- **A young ecosystem.** Ferro is pre-1.0, with a small community, fewer integrations and fewer answered questions online than SQLAlchemy or the Django ORM.
 
-## See Also
+## See also
 
-- [Identity Map](identity-map.md) — session-scoped instance caching
-- [Query Typing](query-typing.md) — lambda predicates and the query DSL
-- [Type Safety](type-safety.md) — the Pydantic integration in depth
-- [Backends](backends.md) — SQLite and PostgreSQL specifics
-- [Performance](performance.md) — where the Rust core pays off
-- [Schema Management](../guide/schema/overview.md) — auto-migrate, migrations and the Alembic bridge
+- [Identity map](identity-map.md): one row, one instance, within a session
+- [Typed query predicates](query-typing.md): lambda predicates and how they are checked
+- [Type safety](type-safety.md): the Pydantic integration
+- [Database backends](backends.md): SQLite and PostgreSQL differences
+- [Performance](performance.md): where the Rust core helps
+- [Schema management](../guide/schema/overview.md): auto-migrate, migrations and the Alembic bridge

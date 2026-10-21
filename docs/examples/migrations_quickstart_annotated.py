@@ -1,6 +1,5 @@
 # ruff: noqa: E402 - the models come first, as the docs page shows them
-"""Runnable companion for the Migrations loop, Annotated style
-(docs/pages/guide/schema/migrations.md).
+"""Runnable companion for the Migrations loop (docs/pages/guide/schema/migrations.md).
 
 init, new, up; then a model edit, check, new, up, drift, down, on SQLite.
 """
@@ -8,14 +7,14 @@ init, new, up; then a model edit, check, new, up, drift, down, on SQLite.
 # --8<-- [start:models]
 from typing import Annotated
 
-from ferro import FerroField, Model
+from ferro import Field, Model
 
 
 class Author(Model):
-    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    id: Annotated[int | None, Field(primary_key=True)] = None
     name: str
-    email: Annotated[str, FerroField(unique=True)]
-    nickname: Annotated[str | None, FerroField(index=True)] = None  # new
+    email: Annotated[str, Field(unique=True)]
+    nickname: Annotated[str | None, Field(index=True)] = None  # new
 
 
 # --8<-- [end:models]
