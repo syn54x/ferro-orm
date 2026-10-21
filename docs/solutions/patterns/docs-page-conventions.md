@@ -90,9 +90,10 @@ To savings -500
 | Note | The block is | Checked by |
 | --- | --- | --- |
 | `<!-- prints: <example>.py:<snippet> -->` | What that snippet region prints | `tests/test_docs_output.py`, byte for byte |
+| `<!-- prints: <example>.py:<snippet> (postgres) -->` | What the region prints on PostgreSQL; the script runs as `<example>.py <database-url> <role>` | `tests/test_docs_output.py` under `postgres_only`, byte for byte |
 | `<!-- prints: above -->` | What the nearest Python fence above prints; that fence is marked `{test=run prelude=<name>}` | `tests/test_docs_output.py`, byte for byte |
 | `<!-- output: <id> -->`, `<!-- refusal: <id> -->` | What `ferro migrate` prints | `tests/test_docs_migrations.py` |
-| `<!-- shows: <what it is> -->` | Text no script prints: a shell session, a file tree, an agent prompt, or an error from a scenario no example runs | Nothing; the note says what it is |
+| `<!-- shows: <what it is> -->` | Text Ferro does not print: a sketch, a file tree, another tool's shell session, a prompt to paste | Nothing; the note says what it is |
 
 `tests/test_docs_output.py` refuses a ```text block with no note. To add one
 under an embedded example, put the `print` inside the snippet region (a
@@ -100,8 +101,15 @@ region that catches an error prints `f"{type(exc).__name__}: {exc}"`), write
 the note and an empty fence, and fill the fence from the failure message. A
 printed line belongs to the innermost line of the example inside a region on
 the call stack, so a helper defined outside the region can do the printing.
-Prefer `prints:` to `shows:`: an error a page quotes is better raised by an
-example region than typed.
+Every error, warning and message Ferro prints is a `prints:` block: write the
+scenario that raises it as an example region, however small (a model, a
+connect, a held lock, a migrations project from `_migrations_project.py`).
+`docs/examples/auto_migrate_errors.py` and `migration_errors.py` are the
+pattern; a region not shown on any page is fine, since the page shows the
+text. A `shows:` block that reads like Ferro's output (`ferro.`,
+`ferro auto-migrate:`, `SomethingError:`, `N validation error for`,
+`connect(`) fails the test. The one exception, in `VARIES`, is the statement
+log on the Connections guide, whose lines carry timings that change on every run.
 
 ### The session wrapper
 

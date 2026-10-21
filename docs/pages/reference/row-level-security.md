@@ -203,9 +203,9 @@ A session that only inherits settings from an outer Postgres session opens on SQ
 
 `connect(migrate_updates=True)` (or `migrate_destructive=True`) warns when the connecting role is neither a superuser nor `BYPASSRLS` and an existing table it migrates declares `RowSecurity(force=True)`:
 
-<!-- shows: the warning connect() gives for a forced table -->
+<!-- prints: row_level_security.py:forced_warning (postgres) -->
 ```text
-ferro auto-migrate: The connected role is neither a superuser nor BYPASSRLS, and this migration touches table(s) 'invoice' with FORCE ROW LEVEL SECURITY. Row policies apply to the migrating role too, so a backfill or data step can silently see and update zero rows. Migrate as a role with BYPASSRLS if this pass moves data.
+ferro auto-migrate: The connected role is neither a superuser nor BYPASSRLS, and this migration touches table(s) 'document', 'invoice' with FORCE ROW LEVEL SECURITY. Row policies apply to the migrating role too, so a backfill or data step can silently see and update zero rows. Migrate as a role with BYPASSRLS if this pass moves data.
 ```
 
 It does not check whether the table's live `FORCE` flag was already set. A table created by the same connect has no rows to miss, so `auto_migrate=True` and `create_tables()` never print it.

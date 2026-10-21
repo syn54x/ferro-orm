@@ -199,6 +199,14 @@ async def on_postgres(migrator_url: str, role: str) -> None:
         assert [document.title for document in documents] == ["Handbook", "Q3 plan"]
     # --8<-- [end:composed_query]
 
+    # --8<-- [start:forced_warning]
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        await connect(app_url, name="app_migrate", migrate_updates=True)
+    for warning in caught:
+        print(warning.message)
+    # --8<-- [end:forced_warning]
+
 
 async def on_sqlite() -> None:
     # --8<-- [start:sqlite]

@@ -75,6 +75,18 @@ def main() -> None:
         assert not (app.migrations / "0002_retire_paused").exists()
         app.ferro("migrate", "check")
 
+        # --8<-- [start:retired-write]
+        try:
+            Author(
+                name="Grace Hopper",
+                email="grace@example.com",
+                bio="Admiral",
+                status="paused",
+            )
+        except ValueError as error:
+            print(error)
+        # --8<-- [end:retired-write]
+
         subprocess.run(
             [sys.executable, "-c", PROBE], cwd=app.root, check=True, timeout=120
         )
