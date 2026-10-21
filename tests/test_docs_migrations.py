@@ -858,7 +858,7 @@ def _ddl_lock_retry(project: Path) -> None:
     _run_ok(project, "migrate", "new", "create_author")
     _run_ok(project, "migrate", "up")
     _write_models(project, NAMED_AUTHOR_OPTIONAL_SLUG)
-    _run_ok(project, "migrate", "new", "author_slug")
+    _run_ok(project, "migrate", "new", "author_slug_nullable")
 
 
 @contextmanager

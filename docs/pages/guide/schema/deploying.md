@@ -67,8 +67,8 @@ Behind its migrations, it raises `PendingMigrationsError`:
 
 <!-- prints: migration_errors.py:behind -->
 ```text
-ferro.migrations.PendingMigrationsError: ferro.migrations: this database is behind its migrations.
-  pending  0002_author_slug
+PendingMigrationsError: ferro.migrations: this database is behind its migrations.
+  pending  0002_author_slug_nullable
 Run `ferro migrate up` (or `await ferro.migrations.up()`) before serving.
 ```
 
@@ -121,14 +121,14 @@ In a rolling deploy, old code keeps running while the migration applies. A migra
 
 | Release | Model | Migration | Old code during the deploy |
 | :--- | :--- | :--- | :--- |
-| 1 | `slug: str \| None = None` | `0002_author_slug`: one schema step, `ADD COLUMN`, nullable | runs against a database one migration ahead of it |
+| 1 | `slug: str \| None = None` | `0002_author_slug_nullable`: one schema step, `ADD COLUMN`, nullable | runs against a database one migration ahead of it |
 | 2 | `slug: str` | `0003_author_slug_required`: backfill, add-constraint, contract | release 1 code already writes `slug` |
 
 Between the two, release 0 code meets a database that has applied a migration its checkout does not have. `require_applied()` and `up()` refuse that by default:
 
 <!-- prints: migration_errors.py:ahead -->
 ```text
-ferro.migrations.DatabaseAheadError: ferro migrate: this database has applied 0002_author_slug, which is not in migrations/.
+DatabaseAheadError: ferro migrate: this database has applied 0002_author_slug_nullable, which is not in migrations/.
 The directory is behind the database: check out the branch that holds it. Nothing was applied.
 Pass allow_ahead=True to run beside them (a rolling deploy).
 ```
@@ -139,17 +139,17 @@ So the old release starts with `allow_ahead="expand-only"`:
 await ferro.migrations.require_applied(allow_ahead="expand-only")
 ```
 
-It lets the database through when every step the old checkout lacks is an *expand* step: one the old release's writes keep succeeding beside. `0002_author_slug` adds a nullable column, so release 0 starts. A database ahead by a *contract* step is refused, naming the first one (`ferro migrate up --allow-ahead=expand-only` does the same):
+It lets the database through when every step the old checkout lacks is an *expand* step: one the old release's writes keep succeeding beside. `0002_author_slug_nullable` adds a nullable column, so release 0 starts. Release 2's deploy is different: `0003_author_slug_required` ends in a *contract* step, and a database ahead by one is refused, naming the first (`ferro migrate up --allow-ahead=expand-only` does the same):
 
 <!-- prints: migration_errors.py:ahead-by-contract -->
 ```text
-ferro.migrations.DatabaseAheadError: ferro migrate: this database has applied 0003_drop_bio, which is not in migrations/.
+DatabaseAheadError: ferro migrate: this database has applied 0003_author_slug_required, which is not in migrations/.
 The directory is behind the database: check out the branch that holds it.
-It is ahead by contract steps, starting with 0003_drop_bio:01 (contract: a write the previous release makes can fail beside it), so allow_ahead="expand-only" does not let it through. Nothing was applied.
+It is ahead by contract steps, starting with 0003_author_slug_required:03 (contract: a write the previous release makes can fail beside it), so allow_ahead="expand-only" does not let it through. Nothing was applied.
 Pass allow_ahead=True to run beside them (a rolling deploy).
 ```
 
-`.contract_steps` lists every such step (`["0003_drop_bio:01"]`). Each step's class is decided from what the step does: adding a nullable column is expand, dropping a column is contract. The [step classes](../../reference/migrations.md#step-classes) table lists the class of every kind of step.
+`.contract_steps` lists every such step (`["0003_author_slug_required:03"]`). Each step's class is decided from what the step does: adding a nullable column is expand, making it required is contract, since a write that leaves it empty then fails. Release 1 code writes `slug` on every save, so it can run beside the contract; a deployment that knows this starts it with `allow_ahead=True` (below). The [step classes](../../reference/migrations.md#step-classes) table lists the class of every kind of step.
 
 The class is about **writes**. `expand` means the previous release's writes keep succeeding beside the step, not that its reads only meet values it knows. Adding a label is `expand`, yet release 0 reading a row that holds the new label gets a value its enum does not have. So add a label in one release and write it in the next.
 
@@ -210,9 +210,9 @@ Two different waits apply:
     <!-- output: ddl-lock-retry -->
     ```text
     default · postgresql://app:***@localhost/app
-    0002_author_slug  01_schema  waiting for a lock on "author" (attempt 1 of 10, retry in 1s)
-    0002_author_slug  01_schema  waiting for a lock on "author" (attempt 2 of 10, retry in 2s)
-    0002_author_slug  01_schema  applied (2214 ms)
+    0002_author_slug_nullable  01_schema  waiting for a lock on "author" (attempt 1 of 10, retry in 1s)
+    0002_author_slug_nullable  01_schema  waiting for a lock on "author" (attempt 2 of 10, retry in 2s)
+    0002_author_slug_nullable  01_schema  applied (2214 ms)
     ```
 
     It does not apply to data steps.
