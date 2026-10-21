@@ -297,7 +297,7 @@ The fetch, the partial save and the refresh send these statements. PostgreSQL al
     LIMIT ?;
 
     UPDATE "customer"
-    SET "updated_at" = ?, "name" = ?
+    SET "name" = ?, "updated_at" = ?
     WHERE "id" = ?;
 
     SELECT "customer"."email", "customer"."id", "customer"."name", "customer"."plan", "customer"."updated_at", "customer"."views"
@@ -316,7 +316,7 @@ The fetch, the partial save and the refresh send these statements. PostgreSQL al
     LIMIT $2;
 
     UPDATE "customer"
-    SET "updated_at" = CAST($1 AS timestamptz), "name" = $2
+    SET "name" = $1, "updated_at" = CAST($2 AS timestamptz)
     WHERE "id" = $3;
 
     SELECT "customer"."email", "customer"."id", "customer"."name", "customer"."plan", "customer"."updated_at", "customer"."views"
@@ -325,7 +325,7 @@ The fetch, the partial save and the refresh send these statements. PostgreSQL al
     LIMIT $2;
     ```
 
-The `UPDATE` sets only `name` and `updated_at`. Ferro writes the columns of a partial save in no fixed order, so a log may show them the other way round.
+The `UPDATE` sets only `name` and `updated_at`.
 
 `save(exclude=...)` writes every column except the ones you name:
 
@@ -342,7 +342,7 @@ The save and the refresh send these statements. PostgreSQL also casts the `datet
     ```sql
     -- mutations.py:save-exclude (sqlite)
     UPDATE "customer"
-    SET "updated_at" = ?, "name" = ?, "views" = ?, "email" = ?
+    SET "email" = ?, "name" = ?, "views" = ?, "updated_at" = ?
     WHERE "id" = ?;
 
     SELECT "customer"."email", "customer"."id", "customer"."name", "customer"."plan", "customer"."updated_at", "customer"."views"
@@ -356,7 +356,7 @@ The save and the refresh send these statements. PostgreSQL also casts the `datet
     ```sql
     -- mutations.py:save-exclude (postgres)
     UPDATE "customer"
-    SET "updated_at" = CAST($1 AS timestamptz), "name" = $2, "views" = $3, "email" = $4
+    SET "email" = $1, "name" = $2, "views" = $3, "updated_at" = CAST($4 AS timestamptz)
     WHERE "id" = $5;
 
     SELECT "customer"."email", "customer"."id", "customer"."name", "customer"."plan", "customer"."updated_at", "customer"."views"

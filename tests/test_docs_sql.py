@@ -32,7 +32,6 @@ import asyncio
 import io
 import json
 import logging
-import os
 import re
 import subprocess
 import sys
@@ -416,12 +415,7 @@ def test_a_block_differing_on_postgres_only_in_placeholders_stands_for_both() ->
 
 
 def _capture(example: str, dialect: str, url: str | None) -> dict[str, list[str]]:
-    """What each snippet region of ``example`` sends on ``dialect``.
-
-    The example runs with ``PYTHONHASHSEED=0``: ``save(only=...)`` and
-    ``save(exclude=...)`` write their columns in the order of a Python set, so
-    the order of their ``SET`` list follows string hashing.
-    """
+    """What each snippet region of ``example`` sends on ``dialect``."""
     command = [sys.executable, "-m", "tests.test_docs_sql", example, dialect]
     if url is not None:
         command.append(url)
@@ -431,7 +425,6 @@ def _capture(example: str, dialect: str, url: str | None) -> dict[str, list[str]
         text=True,
         timeout=180,
         cwd=REPO_ROOT,
-        env={**os.environ, "PYTHONHASHSEED": "0"},
     )
     assert result.returncode == 0, (
         f"capturing {example} on {dialect} failed\n"
