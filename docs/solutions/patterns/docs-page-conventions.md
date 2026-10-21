@@ -197,8 +197,9 @@ recreated index). A data step the page shows written by hand is listed with
 ### Compile-only blocks say why
 
 An inline Python block that does not run under the harness says why in its
-fence: `{test=compile reason="needs a Postgres database"}`. Generated files
-and `env.py` excerpts are the usual cases; a block that can run, runs.
+fence: `{test=compile reason="needs Litestar, which the test groups do not install"}`.
+Generated files, `env.py` excerpts and model fragments whose imports are left
+out are the usual cases; a block that can run, runs.
 
 Every Python fence on a page, in Markdown a page pulls in with `--8<--`
 (`CONTRIBUTING.md`, `README.md` sections, `docs/includes`) and in a
@@ -208,11 +209,13 @@ docstring carries one of three markers; `tests/test_docs_examples.py` and
 | Marker | What the harness does |
 | --- | --- |
 | `{test=run prelude=<name>}` | Runs the block after `docs/examples/_preludes/<name>.py`. |
-| `{test=run prelude=<name> backend=postgres}` | Runs it on PostgreSQL under the `postgres_only` marker, every `connect()` in the prelude and the block pointed at the test database whatever URL it names; without Postgres the test is skipped and the block only compiles. |
+| `{test=run prelude=<name> backend=postgres}` | Runs it on PostgreSQL under the `postgres_only` marker, every `connect()` in the prelude and the block pointed at the test database whatever URL it names, keeping the PostgreSQL query options that URL carries (a `ferro_search_path` schema is created first); without Postgres the test is skipped and the block only compiles. A `<!-- prints: above -->` block under it is compared on PostgreSQL. |
 | `{test=compile reason="..."}` | Compiles the block; the reason says why it cannot run. |
 | `{test=pytest path="tests/<file>.py"}` | Writes the block at that path in a scratch project and runs pytest there (`tests/test_docs_testing_fixtures.py`, for the testing how-to). |
 
-A block that needs Postgres runs with `backend=postgres`; `test=compile` is for a block that cannot run anywhere the suite can (a web framework the test groups do not install, a generated file).
+A block that needs Postgres runs with `backend=postgres`; `test=compile` is for a block that cannot run anywhere the suite can (a web framework the test groups do not install, a generated file). An option the test server cannot honour (`sslmode=require` needs a TLS-enabled server) makes the block compile-only, saying so.
+
+The redirect (`point_connect_at`) and the snippet-region reader (`snippet_regions`) live in `tests/_docs_shared.py`, stdlib-only so the prelude runner and `docs/examples/_migrations_project.py` import them too; `tests/_docs_harness.py` re-exports both. Nothing else patches `ferro.connect` or parses `--8<-- [start:<name>]` markers.
 
 `lint=check` can be added to any of them. Any other setting is refused with
 the marker to write instead, so `{compile-only="..."}` or a bare

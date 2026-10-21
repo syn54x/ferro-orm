@@ -2,7 +2,7 @@
 
 A model says once who is allowed to see its rows:
 
-```python {test=compile reason="declares a model whose row security needs Postgres"}
+```python {test=compile reason="a model fragment; its imports are left out"}
 class Invoice(Model):
     id: int | None = Field(default=None, primary_key=True)
     tenant_id: UUID

@@ -32,7 +32,16 @@ import re
 import pytest
 
 from tests._docs_harness import Fence, fenced_blocks, page_fences
-from tests._docs_sql import PRINTS, Region, Run, captured, check_printed, page_name
+from tests._docs_sql import (
+    PRINTS,
+    Region,
+    Run,
+    printing_fence,
+    captured,
+    on_postgres,
+    check_printed,
+    page_name,
+)
 
 
 @pytest.mark.parametrize("block", page_fences("text"), ids=page_name)
@@ -40,15 +49,20 @@ def test_a_text_block_is_what_it_says_it_is(block: Fence) -> None:
     check_printed(block)
 
 
+def _on_postgres(block: Fence) -> bool:
+    """Whether a ``prints:`` block shows what something prints on PostgreSQL:
+    an example region marked ``(postgres)``, or a ``backend=postgres`` fence."""
+    if not block.note or block.note[0] != "prints":
+        return False
+    if block.note[1] == "above":
+        fence = printing_fence(block)
+        return fence is not None and on_postgres(fence)
+    marker = PRINTS.match(block.note[1])
+    return marker is not None and marker["dialect"] == "postgres"
+
+
 def _postgres_blocks() -> list[Fence]:
-    return [
-        block
-        for block in page_fences("text")
-        if block.note
-        and block.note[0] == "prints"
-        and (marker := PRINTS.match(block.note[1]))
-        and marker["dialect"] == "postgres"
-    ]
+    return [block for block in page_fences("text") if _on_postgres(block)]
 
 
 @pytest.mark.postgres_only
@@ -61,6 +75,7 @@ def test_a_postgres_text_block_is_what_its_example_prints_there(
         block,
         lambda example, dialect: captured(example, dialect, args=args),
         dialect="postgres",
+        database_url=db_url,
     )
 
 
@@ -194,3 +209,33 @@ def test_a_block_that_is_not_what_it_says_fails_naming_it(
     with pytest.raises(AssertionError) as raised:
         check_printed(_block(note, body), _fake)
     assert str(raised.value).startswith(message), str(raised.value)
+
+
+PG_FENCE = (
+    "```python {test=run prelude=reference backend=postgres}\n"
+    "from ferro import fetch_one\n\n"
+    'row = await fetch_one("SELECT version() AS v")\nprint(row["v"].split()[0])\n```'
+)
+
+
+def test_a_block_under_a_postgres_fence_is_compared_only_on_postgres(
+    tmp_path: Path,
+) -> None:
+    """On SQLite the fence above is only found and its marker checked; the
+    PostgreSQL job runs it and compares."""
+    block = _page_below(tmp_path, PG_FENCE, "anything\n")
+    check_printed(block)
+    assert printing_fence(block) is not None
+
+
+@pytest.mark.postgres_only
+@pytest.mark.parametrize("shown", ["PostgreSQL\n", "SQLite\n"], ids=["same", "edited"])
+def test_a_block_under_a_postgres_fence_holds_what_it_prints_there(
+    tmp_path: Path, db_url: str, shown: str
+) -> None:
+    block = _page_below(tmp_path, PG_FENCE, shown)
+    if shown == "PostgreSQL\n":
+        check_printed(block, dialect="postgres", database_url=db_url)
+        return
+    with pytest.raises(AssertionError, match="differs from what the fence at line 3"):
+        check_printed(block, dialect="postgres", database_url=db_url)

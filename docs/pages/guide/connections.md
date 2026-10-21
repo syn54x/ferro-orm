@@ -54,7 +54,7 @@ await connect("sqlite:app.db?mode=rwc")
 
 Pass a `postgresql://` URL; add `sslmode=require` to require TLS:
 
-```python {test=run prelude=connections backend=postgres}
+```python {test=compile reason="needs a TLS-enabled server"}
 from ferro import connect
 
 await connect("postgresql://user:password@localhost:5432/app?sslmode=require")

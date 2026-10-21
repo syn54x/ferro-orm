@@ -310,17 +310,23 @@ $$;
 
 Send the claims as one setting:
 
-```python {test=compile reason="needs a Postgres connection and the auth_uid() function above"}
+```python {test=run prelude=jwt_claims backend=postgres}
 import json
 
 claims = {"sub": "5f0c1a4e-2b7d-4c1e-9a3f-6d8e2b1c0a94", "role": "editor"}
 async with ferro.engines.session(
     "app", settings={"request.jwt.claims": json.dumps(claims)}
 ):
-    ...
+    row = await ferro.fetch_one("SELECT auth_uid() AS uid")
+print(row["uid"])
 ```
 
-Every query in that session can read the claims through `auth_uid()`.
+Every query in that session can read the claims through `auth_uid()`:
+
+<!-- prints: above -->
+```text
+5f0c1a4e-2b7d-4c1e-9a3f-6d8e2b1c0a94
+```
 
 Then call the function from a policy written in SQL, inside a scalar subquery:
 

@@ -34,6 +34,10 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+# The docs harness's region reader, so a region reads the same here as on a page.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from tests._docs_shared import snippet_regions  # noqa: E402
+
 __all__ = ["Project", "project"]
 
 FERRO_TOML = 'models = ["blog.models"]\ndialects = ["postgres", "sqlite"]\n'
@@ -42,10 +46,10 @@ _NEW = re.compile(r"#\s*new\b")
 
 
 def _region(script: Path, name: str = "models") -> str:
-    source = script.read_text()
-    opening, closing = f"# --8<-- [start:{name}]", f"# --8<-- [end:{name}]"
-    start = source.index(opening) + len(opening)
-    return source[start : source.index(closing)].strip("\n") + "\n"
+    regions = snippet_regions(script.read_text(), where=str(script))
+    if name not in regions:
+        raise ValueError(f"{script} has no snippet region {name!r}")
+    return regions[name].body.strip("\n") + "\n"
 
 
 def _before(region: str) -> str:

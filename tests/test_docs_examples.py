@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import pytest
@@ -15,6 +14,7 @@ from tests._docs_harness import (
     page_examples,
     run_fence,
     run_python,
+    snippet_regions,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -241,9 +241,6 @@ def test_compile_only_page_fence_states_its_reason() -> None:
 
 
 README = REPO_ROOT / "README.md"
-_MODELS_SECTION = re.compile(
-    r"# --8<-- \[start:models\]\n(.*?)# --8<-- \[end:models\]", flags=re.S
-)
 
 
 def _readme_quick_start() -> str:
@@ -262,7 +259,6 @@ def test_readme_quick_start_runs_and_prints_what_it_claims(tmp_path: Path) -> No
 
 def test_readme_model_is_the_home_page_example() -> None:
     """The README's model is the one the home page embeds in both tabs."""
-    [models] = _MODELS_SECTION.findall(
-        (DOCS_EXAMPLES / "readme_quickstart.py").read_text(encoding="utf-8")
-    )
+    script = DOCS_EXAMPLES / "readme_quickstart.py"
+    models = snippet_regions(script.read_text(encoding="utf-8"))["models"].body
     assert models.strip() in _readme_quick_start()

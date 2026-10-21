@@ -292,7 +292,7 @@ class Session:
             ValueError: `key` is not a dotted custom setting name.
 
         Examples:
-            ```python {test=compile reason="needs a Postgres database"}
+            ```python {test=run prelude=invoices backend=postgres}
             async with engines.session() as session:
                 tenant = await resolve_tenant(request)
                 await session.set_config("myapp.tenant_id", tenant)
@@ -419,7 +419,7 @@ class EngineManager:
 
             With settings, on Postgres:
 
-            ```python {test=compile reason="needs a Postgres database"}
+            ```python {test=run prelude=invoices backend=postgres}
             async with engines.session(settings={"myapp.tenant_id": "acme"}):
                 invoices = await Invoice.where(lambda invoice: invoice.total > 100).all()
             ```
