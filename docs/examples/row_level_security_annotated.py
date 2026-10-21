@@ -1,6 +1,19 @@
-"""Annotated-style companion to row_level_security.py (AGENTS.md I-7).
+"""Runnable companion for the row-level security pages.
 
-Runs the same way: no arguments for SQLite, or ``<postgres-url> <app-role>``.
+Embedded by docs/pages/guide/row-level-security.md,
+docs/pages/concepts/row-level-security.md and
+docs/pages/reference/row-level-security.md.
+
+Row-level security is a Postgres feature, so the pages' demo needs Postgres:
+
+    python docs/examples/row_level_security.py <postgres-url> <app-role>
+
+connects to ``<postgres-url>`` as the migrating role (a superuser, or a role
+with BYPASSRLS), creates the tables, creates ``<app-role>`` as the
+application's NOSUPERUSER login role, and checks what each session sees.
+``tests/test_docs_examples.py`` runs it that way when a Postgres server is
+configured. With no arguments it runs on SQLite, where Ferro creates the
+tables without their policies and warns.
 """
 
 import asyncio
@@ -223,7 +236,7 @@ async def main(argv: list[str]) -> None:
         await on_postgres(migrator_url, role)
     else:
         await on_sqlite()
-    print("row_level_security_annotated example ran successfully")
+    print("row_level_security example ran successfully")
 
 
 if __name__ == "__main__":

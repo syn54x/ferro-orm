@@ -1,10 +1,13 @@
-"""Annotated-style companion to readme_quickstart.py (AGENTS.md I-7)."""
+"""The README quick start (README.md), runnable.
+
+tests/test_docs_examples.py checks that the README's Python block is this
+file's code, marker comments aside, and runs it.
+"""
 
 import asyncio
-
-# --8<-- [start:models]
 from typing import Annotated
 
+# --8<-- [start:models]
 from ferro import Field, Model, connect, engines
 
 
@@ -26,7 +29,6 @@ async def main():
         await User.create(username="bob", is_active=False)
 
         active_users = await User.where(lambda user: user.is_active == True).all()
-        assert [user.username for user in active_users] == ["alice"]
         print(f"Found {len(active_users)} active users.")
         # --8<-- [end:query]
 

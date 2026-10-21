@@ -1,8 +1,4 @@
-"""Annotated-style companion to faq.py (AGENTS.md I-7).
-
-Same models as docs/examples/faq.py, with the field options inside
-``Annotated[...]`` and the defaults assigned.
-"""
+"""Runnable companion to the FAQ (docs/pages/faq.md): the Author and Post models."""
 
 import asyncio
 
@@ -49,7 +45,7 @@ async def main() -> None:
     # --8<-- [end:databases]
     assert (len(authors), len(analytics_authors)) == (1, 0)
 
-    print("faq annotated example ran successfully")
+    print("faq example ran successfully")
 
 
 if __name__ == "__main__":

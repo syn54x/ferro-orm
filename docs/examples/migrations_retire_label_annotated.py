@@ -1,5 +1,5 @@
 # ruff: noqa: E402 - the models come first, as the docs page shows them
-"""Runnable companion for retiring an enum label, Annotated style
+"""Runnable companion for retiring an enum label
 (docs/pages/guide/schema/renames-and-retirements.md).
 
 Release A writes ``paused``. Release B retires it: the member stays so rows

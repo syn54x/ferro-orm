@@ -1,4 +1,4 @@
-"""Annotated twin of from_sqlalchemy.py for the SQLAlchemy migration how-to (docs/pages/howto/migrate-from-sqlalchemy.md)."""
+"""Runnable companion to the SQLAlchemy migration how-to (docs/pages/howto/migrate-from-sqlalchemy.md)."""
 
 import asyncio
 

@@ -316,7 +316,13 @@ class Capture:
         """Record the registered models' SchemaIR, unless it is the last one."""
         from ferro.ir.compiler import compile_registry_schema_ir
 
-        schema = json.loads(json.dumps(compile_registry_schema_ir(), default=str))
+        try:
+            ir = compile_registry_schema_ir()
+        except TypeError as refused:
+            # A model the script declared and Ferro refused (two primary keys)
+            # stays registered; the refusal is the schema the script ends with.
+            ir = {"refused": str(refused)}
+        schema = json.loads(json.dumps(ir, default=str))
         if not self.schemas or self.schemas[-1] != schema:
             self.schemas.append(schema)
 

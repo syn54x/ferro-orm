@@ -1,6 +1,5 @@
 # ruff: noqa: E402, F811 - the models come first, and each of the page's files imports what it uses
-"""Runnable companion for testing migrations, Annotated style
-(docs/pages/guide/schema/testing.md).
+"""Runnable companion for testing migrations (docs/pages/guide/schema/testing.md).
 
 Generates two migrations (the second backfills a new required column), then
 runs the page's tests under pytest, in the project, the way a reader runs

@@ -1,13 +1,18 @@
 ---
-title: Docs page conventions (kind, running example, results, session, SQL, glossary, Annotated twins)
+title: Docs page conventions (kind, running example, results, printed output, session, SQL, glossary, Annotated twins)
 type: pattern
 tags: [docs, convention, zensical, pydantic]
 related_files:
   - AGENTS.md
   - docs/examples/
   - docs/includes/abbreviations.md
+  - tests/_docs_harness.py
+  - tests/_docs_sql.py
+  - tests/_docs_twins.py
   - tests/test_docs_examples.py
+  - tests/test_docs_output.py
   - tests/test_docs_sql.py
+  - tests/test_docs_twins.py
   - zensical.toml
 related_issues: [698, 700, 701, 703, 704, 725]
 related_prs: []
@@ -69,6 +74,35 @@ assert [user.name for user in adults] == ["Ada", "Grace"]
 # --8<-- [end:filtering]
 ```
 
+### Printed output is regenerated, never typed
+
+A ```text block shows what something printed, and says where that came from
+in an HTML comment on the line directly above it, at the fence's indentation:
+
+````markdown
+<!-- prints: predicates.py:first-query -->
+```text
+Rent -1450
+To savings -500
+```
+````
+
+| Note | The block is | Checked by |
+| --- | --- | --- |
+| `<!-- prints: <example>.py:<snippet> -->` | What that snippet region prints | `tests/test_docs_output.py`, byte for byte |
+| `<!-- prints: above -->` | What the nearest Python fence above prints; that fence is marked `{test=run prelude=<name>}` | `tests/test_docs_output.py`, byte for byte |
+| `<!-- output: <id> -->`, `<!-- refusal: <id> -->` | What `ferro migrate` prints | `tests/test_docs_migrations.py` |
+| `<!-- shows: <what it is> -->` | Text no script prints: a shell session, a file tree, an agent prompt, or an error from a scenario no example runs | Nothing; the note says what it is |
+
+`tests/test_docs_output.py` refuses a ```text block with no note. To add one
+under an embedded example, put the `print` inside the snippet region (a
+region that catches an error prints `f"{type(exc).__name__}: {exc}"`), write
+the note and an empty fence, and fill the fence from the failure message. A
+printed line belongs to the innermost line of the example inside a region on
+the call stack, so a helper defined outside the region can do the printing.
+Prefer `prints:` to `shows:`: an error a page quotes is better raised by an
+example region than typed.
+
 ### The session wrapper
 
 Every ORM call runs inside `async with engines.session():` and raises
@@ -107,7 +141,11 @@ that sends nothing but prints statements (a `create_tables()` report's
 
 `tests/test_docs_sql.py` regenerates every `sql` fence on the pages it lists
 (`PAGES`: Queries, Aggregations, Relationships, Mutations) and compares byte
-for byte, failing with the page, the line and the example. To add a block:
+for byte, failing with the page, the line and the example. The capture and
+the checks live in `tests/_docs_sql.py` (`captured(example, dialect, url)`,
+`check_block`, `check_printed`), which a new gate reuses; one run of an
+example records both the SQL and the printed output of every region. To add
+a block:
 
 1. Write the query in a snippet region of an example script; the region is
    what the block shows, so keep one example per region.
@@ -154,8 +192,10 @@ An inline Python block that does not run under the harness says why in its
 fence: `{test=compile reason="needs a Postgres database"}`. Generated files
 and `env.py` excerpts are the usual cases; a block that can run, runs.
 
-Every Python fence on a page carries one of three markers, and
-`tests/test_docs_examples.py` fails on a fence with none:
+Every Python fence on a page, in Markdown a page pulls in with `--8<--`
+(`CONTRIBUTING.md`, `README.md` sections, `docs/includes`) and in a
+docstring carries one of three markers; `tests/test_docs_examples.py` and
+`tests/test_docstring_examples.py` fail on a fence with none:
 
 | Marker | What the harness does |
 | --- | --- |
@@ -217,6 +257,30 @@ line. Use `Field`, the name the Assignment tab imports;
 `FerroField` stays out of twins. Forward foreign keys
 (`Annotated[Target, ForeignKey(...)]`) and `BackRef()` / `ManyToMany()`
 assignments have one form and appear the same in both tabs.
+
+A `default_factory` is a default too, and type checkers do not see it
+inside `Annotated` either (`ty` reports `missing-argument` for
+`id: Annotated[UUID, Field(primary_key=True, default_factory=uuid4)]`). It
+stays the assigned value, as a `Field` of its own; only the other options
+move:
+
+```python
+id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+```
+
+```python
+id: Annotated[uuid.UUID, Field(primary_key=True)] = Field(default_factory=uuid.uuid4)
+created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+```
+
+The twin is generated, never written by hand. `tests/_docs_twins.py`
+rewrites the Assignment script into the Annotated idiom and leaves every
+other line alone, so both tabs run the same data, queries and prints. After
+editing `<name>.py`, run `python -m tests._docs_twins docs/examples/<name>.py`
+to rewrite `<name>_annotated.py`. `tests/test_docs_twins.py` fails when a
+twin is not its script rewritten, or when the two declare a different schema
+or print different output.
 
 Link the tabs with the labels `Assignment` and `Annotated`, exactly; the
 `content.tabs.link` feature only syncs tabs whose labels match.

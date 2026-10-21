@@ -11,6 +11,8 @@ Assignment script into the one Annotated idiom of
   see it;
 - a ``default_factory`` stays an assigned ``Field(default_factory=...)``, for
   the same reason;
+- a comment quoting a declaration (``# before: bio: str = Field(index=True)``)
+  quotes it in the same idiom;
 - everything else in the script (data, queries, prints, asserts) is the same
   text, so both twins print the same thing.
 
@@ -21,8 +23,11 @@ Run ``python -m tests._docs_twins docs/examples/<name>.py`` to write
 from __future__ import annotations
 
 import ast
+import io
+import re
 import subprocess
 import sys
+import tokenize
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -96,64 +101,134 @@ def _declaration(source: str, node: ast.AnnAssign) -> str | None:
     return declaration
 
 
-def _with_annotated_import(source: str) -> str:
-    """``source`` importing ``Annotated`` from ``typing``, where ruff's import
-    order puts it."""
-    tree = ast.parse(source)
-    imports = [
-        node for node in tree.body if isinstance(node, ast.Import | ast.ImportFrom)
-    ]
-    for node in imports:
-        if isinstance(node, ast.ImportFrom) and node.module == "typing":
-            names = [alias.name for alias in node.names]
-            if "Annotated" in names:
-                return source
-            names.append("Annotated")
-            names.sort(
-                key=lambda name: (
-                    0
-                    if name.isupper() and len(name) > 1
-                    else 1
-                    if name[0].isupper()
-                    else 2,
-                    name,
-                )
-            )
-            lines = source.splitlines(keepends=True)
-            lines[node.lineno - 1 : node.end_lineno] = [
-                f"from typing import {', '.join(names)}\n"
-            ]
-            return "".join(lines)
-    stdlib = [
-        node
-        for node in imports
-        if (node.module if isinstance(node, ast.ImportFrom) else node.names[0].name)
-        and (
-            (node.module if isinstance(node, ast.ImportFrom) else node.names[0].name)
-            or ""
-        ).split(".")[0]
-        in sys.stdlib_module_names
-        and not (isinstance(node, ast.ImportFrom) and node.module == "__future__")
-    ]
-    lines = source.splitlines(keepends=True)
-    if stdlib:
-        after = [
-            node
-            for node in stdlib
-            if isinstance(node, ast.ImportFrom) and (node.module or "") > "typing"
-        ]
-        if after:
-            lines.insert(after[0].lineno - 1, "from typing import Annotated\n")
-        else:
-            lines.insert(stdlib[-1].end_lineno or 0, "from typing import Annotated\n")
-        return "".join(lines)
-    first = next(
-        node
-        for node in imports
-        if not (isinstance(node, ast.ImportFrom) and node.module == "__future__")
+def _module_name(node: ast.Import | ast.ImportFrom) -> str:
+    if isinstance(node, ast.ImportFrom):
+        return node.module or ""
+    return node.names[0].name
+
+
+def _sorted_names(names: list[str]) -> list[str]:
+    """``names`` in ruff's order: constants, then classes, then the rest."""
+    return sorted(
+        names,
+        key=lambda name: (
+            0 if name.isupper() and len(name) > 1 else 1 if name[0].isupper() else 2,
+            name,
+        ),
     )
-    lines.insert(first.lineno - 1, "from typing import Annotated\n\n")
+
+
+def _import_groups(tree: ast.Module) -> list[tuple[list[ast.stmt], int]]:
+    """Each run of top-level imports, with the line where the code it serves ends.
+
+    An example whose regions each stand alone imports again at the top of each
+    region, so each run serves the code up to the next run.
+    """
+    groups: list[list[ast.stmt]] = []
+    previous_was_import = False
+    for node in tree.body:
+        is_import = isinstance(node, ast.Import | ast.ImportFrom)
+        if is_import and not previous_was_import:
+            groups.append([])
+        if is_import:
+            groups[-1].append(node)
+        previous_was_import = is_import
+    ends = [group[0].lineno - 1 for group in groups[1:]] + [10**9]
+    return list(zip(groups, ends, strict=True))
+
+
+def _shared_comment(lines: list[str], group: list[ast.stmt]) -> str:
+    """The trailing comment every import of ``group`` carries (``# noqa: E402``
+    on imports placed after code), to carry onto the one added beside them."""
+    comments = {
+        lines[(node.end_lineno or node.lineno) - 1].partition("  #")[2].rstrip("\n")
+        for node in group
+    }
+    [comment] = comments if len(comments) == 1 else [""]
+    return f"  #{comment}" if comment else ""
+
+
+def _with_annotated_import(source: str) -> str:
+    """``source`` importing ``Annotated`` from ``typing`` in every run of imports
+    whose code uses it, where ruff's import order puts it."""
+    tree = ast.parse(source)
+    used = sorted(
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and node.id == "Annotated"
+    )
+    lines = source.splitlines(keepends=True)
+    edits: list[tuple[int, int, list[str]]] = []
+    for group, ends_at in _import_groups(tree):
+        starts_at = group[-1].end_lineno or group[-1].lineno
+        if not any(starts_at < line <= ends_at for line in used):
+            continue
+        typing = next(
+            (
+                node
+                for node in group
+                if isinstance(node, ast.ImportFrom) and node.module == "typing"
+            ),
+            None,
+        )
+        if typing is not None:
+            names = [alias.name for alias in typing.names]
+            if "Annotated" not in names:
+                names = _sorted_names([*names, "Annotated"])
+                edits.append(
+                    (
+                        typing.lineno - 1,
+                        typing.end_lineno or typing.lineno,
+                        [
+                            f"from typing import {', '.join(names)}"
+                            f"{_shared_comment(lines, group)}\n"
+                        ],
+                    )
+                )
+            continue
+        stdlib = [
+            node
+            for node in group
+            if _module_name(node).split(".")[0] in sys.stdlib_module_names
+            and _module_name(node) != "__future__"
+        ]
+        line = f"from typing import Annotated{_shared_comment(lines, group)}\n"
+        if stdlib:
+            after = [
+                node
+                for node in stdlib
+                if isinstance(node, ast.ImportFrom) and _module_name(node) > "typing"
+            ]
+            at = after[0].lineno - 1 if after else stdlib[-1].end_lineno or 0
+            edits.append((at, at, [line]))
+        else:
+            first = next(node for node in group if _module_name(node) != "__future__")
+            edits.append((first.lineno - 1, first.lineno - 1, [line, "\n"]))
+    for start, stop, text in sorted(edits, reverse=True):
+        lines[start:stop] = text
     return "".join(lines)
+
+
+_QUOTED = re.compile(r"^# (?P<lead>[a-z ]+: )(?P<code>\w+: .+)$")
+
+
+def _quoted_declaration(comment: str) -> str | None:
+    """A whole-line comment quoting a declaration (``# before: bio: str =
+    Field(index=True)``), with the declaration in the Annotated idiom, or
+    ``None`` when the comment quotes none."""
+    match = _QUOTED.match(comment)
+    if match is None:
+        return None
+    try:
+        [node] = ast.parse(match["code"]).body
+    except SyntaxError:
+        return None
+    if not isinstance(node, ast.AnnAssign) or node.value is None:
+        return None
+    declaration = _declaration(match["code"], node)
+    if declaration is None:
+        return None
+    return f"# {match['lead']}{declaration}"
 
 
 def _formatted(source: str) -> str:
@@ -186,6 +261,11 @@ def annotated_twin(source: str) -> str:
     """
     tree = ast.parse(source)
     lines = source.splitlines(keepends=True)
+    comments = {
+        token.start[0]: token
+        for token in tokenize.generate_tokens(io.StringIO(source).readline)
+        if token.type == tokenize.COMMENT
+    }
     rewrites: list[tuple[int, int, str]] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.AnnAssign) or node.value is None:
@@ -194,19 +274,21 @@ def annotated_twin(source: str) -> str:
         if declaration is None:
             continue
         end = node.end_lineno or node.lineno
-        span = "".join(lines[node.lineno - 1 : end])
+        inside = [line for line in range(node.lineno, end) if line in comments]
+        if inside:
+            raise ValueError(
+                f"line {inside[0]}: a comment inside a multi-line Field "
+                "declaration would be lost; move it above the field"
+            )
+        trailing = f"  {comments[end].string}" if end in comments else ""
         indent = lines[node.lineno - 1][: node.col_offset]
-        rest = span.replace(_segment(source, node), "", 1)
-        trailing = ""
-        if "#" in rest:
-            before, _, comment = rest.partition("#")
-            if end != node.lineno or before.strip():
-                raise ValueError(
-                    f"line {node.lineno}: a comment inside a multi-line Field "
-                    "declaration would be lost; move it above the field"
-                )
-            trailing = f"  #{comment.rstrip(chr(10))}"
         rewrites.append((node.lineno, end, f"{indent}{declaration}{trailing}\n"))
+    for line, token in comments.items():
+        quoted = _quoted_declaration(token.string)
+        if quoted is not None and not any(s <= line <= e for s, e, _ in rewrites):
+            start = token.start[1]
+            text = lines[line - 1]
+            rewrites.append((line, line, f"{text[:start]}{quoted}\n"))
     if not rewrites:
         return source
     for start, end, text in sorted(rewrites, reverse=True):

@@ -1,6 +1,5 @@
 # ruff: noqa: E402 - the models come first, as the docs page shows them
-"""Runnable companion for backfills and guards, Annotated style
-(docs/pages/guide/schema/data-steps.md).
+"""Runnable companion for backfills and guards (docs/pages/guide/schema/data-steps.md).
 
 A required column added to a table that has rows: the guard refuses, the
 backfill is written where it says todo(...), the late-row recovery is

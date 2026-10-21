@@ -83,9 +83,7 @@ def test_a_block_under_a_run_fence_holds_what_the_fence_prints(
     check_printed(_page_below(tmp_path, RUN_FENCE, "Ada Lovelace\n"))
     with pytest.raises(AssertionError) as raised:
         check_printed(_page_below(tmp_path, RUN_FENCE, "Grace Hopper\n"))
-    assert "the block differs from what the fence at line 3 prints" in str(
-        raised.value
-    )
+    assert "the block differs from what the fence at line 3 prints" in str(raised.value)
 
 
 def test_a_block_under_a_fence_that_does_not_run_is_refused(tmp_path: Path) -> None:

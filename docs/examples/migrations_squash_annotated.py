@@ -1,6 +1,5 @@
 # ruff: noqa: E402, F811 - the models come first, as the docs page shows them, once per task
-"""Runnable companion for squashing, Annotated style
-(docs/pages/guide/schema/squash.md).
+"""Runnable companion for squashing (docs/pages/guide/schema/squash.md).
 
 Two tasks on one branch: the first renames ``author.nickname`` to ``handle``
 with a rename hint, the second deletes the hint, now inert, and adds ``Team``.

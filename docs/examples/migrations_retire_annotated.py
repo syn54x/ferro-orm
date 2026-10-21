@@ -1,5 +1,5 @@
 # ruff: noqa: E402 - the models come first, as the docs page shows them
-"""Runnable companion for retiring a column, Annotated style
+"""Runnable companion for retiring a column
 (docs/pages/guide/schema/renames-and-retirements.md).
 
 Release A declares ``bio`` required. Release B retires it: the migration only
