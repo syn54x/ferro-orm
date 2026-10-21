@@ -15,8 +15,8 @@ many-to-many ``add()``) as the statement log records it. Schema statements
 (``migrate``), Postgres catalog probes (``catalog``), session settings and a
 ``transaction()`` block's own ``BEGIN`` / ``COMMIT`` are not shown.
 
-Each statement is laid out with one clause per line (``_layout``) and ends
-with ``;``. Joining a statement's lines with single spaces gives back the
+Each statement is laid out with one clause per line (``_layout``), ends
+with ``;`` and is set off from the next by a blank line. Joining a statement's lines with single spaces gives back the
 rendered SQL byte for byte, so the layout adds line breaks and nothing else.
 
 The test runs each named example once per dialect in a subprocess
@@ -140,8 +140,9 @@ def _unlaid(laid: str) -> str:
 
 
 def _statements(sqls: list[str]) -> str:
-    """The body a marked block holds for ``sqls``: each laid out, ending in ``;``."""
-    return "".join(f"{_layout(sql)};\n" for sql in sqls)
+    """The body a marked block holds for ``sqls``: each laid out and ending in
+    ``;``, with a blank line between two statements."""
+    return "\n".join(f"{_layout(sql)};\n" for sql in sqls)
 
 
 # -- the pages' blocks -----------------------------------------------------------
@@ -576,10 +577,10 @@ def _run_capture(example: str, dialect: str, url: str | None) -> dict[str, list[
         # Called first, so a terminal that refuses its query before returning
         # an awaitable raises here, where the example expects it.
         awaitable = call(self, *args, **kwargs)
-        if capture.depth:
-            return awaitable
 
         async def run() -> Any:
+            if capture.depth:  # a terminal another terminal runs: not rendered again
+                return await awaitable
             capture.depth += 1
             try:
                 try:

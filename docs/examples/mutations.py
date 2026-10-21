@@ -22,6 +22,15 @@ class Customer(Model):
 # --8<-- [end:models]
 
 
+# --8<-- [start:conversation]
+class Conversation(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    turns: dict = Field(default_factory=dict)
+
+
+# --8<-- [end:conversation]
+
+
 async def main() -> None:
     # --8<-- [start:session]
     await connect("sqlite::memory:", auto_migrate=True)
@@ -68,7 +77,7 @@ async def main() -> None:
         # --8<-- [start:save-insert-update]
         frank = Customer(email="frank@example.com", name="Frank")
         await frank.save()  # never persisted: INSERT
-        assert frank.id == 6
+        assert frank.id is not None  # the database assigned it
 
         frank.plan = "pro"
         await frank.save()  # persisted: UPDATE by primary key
@@ -132,6 +141,24 @@ async def main() -> None:
         await alice.refresh()
         assert alice.views == 1 and alice.updated_at is not None
         # --8<-- [end:recipe-update]
+
+        # .merge() exists on PostgreSQL only; the rendered statement says
+        # which database this session runs on.
+        on_postgres = (await Customer.select().count.sql()).dialect == "postgres"
+        if on_postgres:
+            # --8<-- [start:merge]
+            chat = await Conversation.create()
+            await Conversation.where(
+                lambda conversation: conversation.id == chat.id
+            ).update(
+                lambda conversation: {
+                    "turns": conversation.turns.merge({"r1": {"role": "user"}})
+                }
+            )
+
+            await chat.refresh()
+            assert chat.turns == {"r1": {"role": "user"}}
+            # --8<-- [end:merge]
 
         # --8<-- [start:mutation-guard]
         trial = Customer.where(lambda customer: customer.plan == "trial")

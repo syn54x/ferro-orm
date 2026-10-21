@@ -101,15 +101,12 @@ async def main() -> None:
             if statement.subject == "player":
                 print(statement.sql)
         # --8<-- [end:player-ddl]
-        assert table_ddl(report, "player") == [
-            'CREATE TABLE IF NOT EXISTS "player" ( "id" integer NOT NULL PRIMARY KEY '
-            'AUTOINCREMENT, "mentor_id" integer, "name" varchar NOT NULL, "team_id" '
-            'integer NOT NULL, CONSTRAINT "fk_player_mentor_id_player" FOREIGN KEY '
-            '("mentor_id") REFERENCES "player" ("id") ON DELETE SET NULL, CONSTRAINT '
-            '"fk_player_team_id_team" FOREIGN KEY ("team_id") REFERENCES "team" ("id") '
-            "ON DELETE CASCADE )",
-            'CREATE INDEX IF NOT EXISTS "idx_player_team_id" ON "player" ("team_id")',
-        ]
+        # The page shows these statements whole, on both databases
+        # (tests/test_docs_sql.py); here, the names each relation gives them.
+        player_ddl = "\n".join(table_ddl(report, "player"))
+        assert 'CONSTRAINT "fk_player_mentor_id_player"' in player_ddl
+        assert 'CONSTRAINT "fk_player_team_id_team"' in player_ddl
+        assert '"idx_player_team_id" ON "player" ("team_id")' in player_ddl
 
         # --8<-- [start:populated]
         players = (
@@ -134,14 +131,11 @@ async def main() -> None:
         assert profile.bio == "Plays in the front row"
         assert await corro.profile is None  # Corro has no profile
         # --8<-- [end:one-to-one]
-        assert table_ddl(report, "profile") == [
-            'CREATE TABLE IF NOT EXISTS "profile" ( "bio" varchar NOT NULL, "id" integer '
-            'NOT NULL PRIMARY KEY AUTOINCREMENT, "player_id" integer NOT NULL, '
-            'CONSTRAINT "fk_profile_player_id_player" FOREIGN KEY ("player_id") '
-            'REFERENCES "player" ("id") ON DELETE CASCADE )',
+        # unique=True gives the shadow column a unique index.
+        assert (
             'CREATE UNIQUE INDEX IF NOT EXISTS "uq_profile_player_id" ON "profile" '
-            '("player_id")',
-        ]
+            '("player_id")'
+        ) in table_ddl(report, "profile")
 
         # --8<-- [start:many-to-many]
         spring = await Tournament.create(name="Spring Open")
@@ -177,19 +171,10 @@ async def main() -> None:
             if statement.subject == "player_tournaments":
                 print(statement.sql)
         # --8<-- [end:join-table-ddl]
-        assert table_ddl(report, "player_tournaments") == [
-            'CREATE TABLE IF NOT EXISTS "player_tournaments" ( "player_id" integer NOT '
-            'NULL, "tournament_id" integer NOT NULL, CONSTRAINT '
-            '"fk_player_tournaments_player_id_player" FOREIGN KEY ("player_id") '
-            'REFERENCES "player" ("id") ON DELETE CASCADE, CONSTRAINT '
-            '"fk_player_tournaments_tournament_id_tournament" FOREIGN KEY '
-            '("tournament_id") REFERENCES "tournament" ("id") ON DELETE CASCADE )',
-            'CREATE INDEX IF NOT EXISTS "idx_player_tournaments_tournament_id_player_id" '
-            'ON "player_tournaments" ("tournament_id", "player_id")',
-            "CREATE UNIQUE INDEX IF NOT EXISTS "
-            '"uq_player_tournaments_player_id_tournament_id" ON "player_tournaments" '
-            '("player_id", "tournament_id")',
-        ]
+        link_ddl = "\n".join(table_ddl(report, "player_tournaments"))
+        assert 'CONSTRAINT "fk_player_tournaments_player_id_player"' in link_ddl
+        assert '"idx_player_tournaments_tournament_id_player_id"' in link_ddl
+        assert '"uq_player_tournaments_player_id_tournament_id"' in link_ddl
 
         # --8<-- [start:self-referential]
         crabby = await Player.create(name="Crabby", team=rustaceans, mentor=ferris)

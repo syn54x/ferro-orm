@@ -140,7 +140,8 @@ async def main() -> None:
         assert from_checking.account.label == "Savings"
 
         # Move the row to another account behind the ORM's back, then fetch it.
-        await execute('UPDATE "transaction" SET account_id = ? WHERE id = ?', 1, 5)
+        # ($1 and $2 are placeholders SQLite and PostgreSQL both accept.)
+        await execute('UPDATE "transaction" SET account_id = $1 WHERE id = $2', 1, 5)
         await Transaction.get(5)  # refreshes the instance in place
 
         pending = from_checking.account  # awaitable again
