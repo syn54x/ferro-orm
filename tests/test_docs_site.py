@@ -313,13 +313,23 @@ def test_docs_build_in_workflows_is_strict(workflow: str) -> None:
 
 def test_ci_docs_job_runs_every_docs_test_and_the_lint() -> None:
     jobs = yaml.safe_load((WORKFLOWS / "ci.yml").read_text(encoding="utf-8"))["jobs"]
+    """The job runs every module matching ``tests/test_doc*.py``, by glob, and
+    every test module that uses the docs harness is named to match it."""
     commands = "\n".join(step.get("run", "") for step in jobs["docs"]["steps"])
-    docs_tests = sorted(
-        path.relative_to(REPO_ROOT).as_posix()
-        for path in (REPO_ROOT / "tests").glob("test_doc*.py")
+    assert re.search(
+        r"pytest [^\n]*tests/test_doc\*\.py", commands.replace("\\\n", " ")
+    ), "the CI docs job must run pytest over tests/test_doc*.py"
+    helpers = ("tests._docs_harness", "tests._docs_sql", "tests._docs_twins")
+    misnamed = sorted(
+        path.name
+        for path in (REPO_ROOT / "tests").glob("test_*.py")
+        if not path.name.startswith("test_doc")
+        and any(helper in path.read_text(encoding="utf-8") for helper in helpers)
     )
-    missing = [test for test in docs_tests if test not in commands]
-    assert not missing, f"the CI docs job does not run: {missing}"
+    assert not misnamed, (
+        f"{misnamed} use the docs harness but the CI docs job's glob, "
+        "tests/test_doc*.py, does not reach them; rename them test_docs_*.py"
+    )
     assert "python -m tests._docs_checks docs/pages docs/examples src/ferro" in commands
 
 
