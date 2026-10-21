@@ -71,10 +71,12 @@ If you are moving from `0.12` or earlier straight past `0.14`, the deprecated AP
 
 ## Upgrading to 0.26
 
-`0.26` asks nothing of code that runs today. Two changes can show up in a type checker or an import:
+Four changes in `0.26` can reach code that runs today. Two show up in a type checker or an import, two in text you compare:
 
 - `Session.query` is now typed: it takes `type[M]` and returns `Query[M]`, so a type checker may flag a call that passes a class that is not a `Model`.
 - The undocumented module `ferro.migrations.chunked` is now the private `ferro.migrations._chunk_loop`. `from ferro.migrations import chunked` still imports the [`chunked`](api/migrations.md#ferro.migrations.chunked) decorator, unchanged.
+- The `RuntimeError` an operation raises with no database route ends differently. It said "Implicit default-connection routing was removed in v0.13 (deprecated since v0.12); see the sessions migration guide." and now says "Implicit default-connection routing was removed in v0.14 (deprecated since v0.12); see the upgrade guide." Code that matches the message on its old ending needs the new one; a match on its start, `No database route`, still holds.
+- Every write lists its columns in the model's field order: `save()` of a new or fetched record, `save(only=...)`, `save(exclude=...)`, `bulk_create()` and `update()`. Before, a `bytes` or secret column came last, a fetched record's `save()` followed the order its `SELECT` returned, and `save(only=...)` or `save(exclude=...)` could change order from one run to the next. The rows written are the same; the statement text is not, so a test or a log check that compares captured SQL (the [statement log](guide/connections.md#logging) or `.sql()`) needs its expected text updated.
 
 ## Upgrading to 0.25
 
