@@ -37,6 +37,50 @@ def test_docs_examples(example: CodeExample, eval_example: EvalExample) -> None:
     check_fence(example, eval_example=eval_example)
 
 
+def _on_postgres(examples: list[CodeExample]) -> list[CodeExample]:
+    return [
+        example
+        for example in examples
+        if fence_settings(example).get("backend") == "postgres"
+    ]
+
+
+@pytest.mark.postgres_only
+@pytest.mark.parametrize("example", _on_postgres(page_examples()), ids=str)
+def test_docs_examples_on_postgres(example: CodeExample, db_url: str) -> None:
+    """A page fence marked ``backend=postgres`` runs against PostgreSQL, every
+    ``connect()`` in it pointed at the test's database."""
+    check_fence(example, database_url=db_url)
+
+
+def test_a_postgres_fence_without_a_database_is_refused_by_run_fence() -> None:
+    example = _fence("python {test=run prelude=reference backend=postgres}")
+    with pytest.raises(ValueError, match="backend=postgres needs a database_url"):
+        run_fence(example)
+
+
+def test_backend_needs_test_run() -> None:
+    with pytest.raises(ValueError, match=r"backend=postgres needs test=run"):
+        fence_settings(_fence('python {test=compile reason="x" backend=postgres}'))
+
+
+def test_only_postgres_is_a_backend() -> None:
+    with pytest.raises(ValueError, match=r"backend=mysql is not backend=postgres"):
+        fence_settings(_fence("python {test=run prelude=reference backend=mysql}"))
+
+
+@pytest.mark.postgres_only
+def test_a_postgres_fence_runs_on_postgres(tmp_path: Path, db_url: str) -> None:
+    example = _page(
+        tmp_path,
+        "python {test=run prelude=reference backend=postgres}",
+        "from ferro import fetch_one\n"
+        'row = await fetch_one("SELECT version() AS v")\nprint(row["v"].split()[0])\n'
+        "print((await Author.get(1)).name)",
+    )
+    assert run_fence(example, database_url=db_url) == "PostgreSQL\nAda Lovelace\n"
+
+
 @pytest.mark.parametrize(
     "script",
     sorted(

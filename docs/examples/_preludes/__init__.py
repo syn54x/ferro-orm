@@ -11,7 +11,10 @@ Run a block by piping its source to this file:
     python docs/examples/_preludes/__init__.py <prelude> <path> <first line>
 
 ``path`` and ``first line`` are where the block's source sits, so a traceback
-points at the docs page or docstring, not at this runner.
+points at the docs page or docstring, not at this runner. With
+``FERRO_DOCS_DATABASE_URL`` set (a ``backend=postgres`` fence), every
+``connect()`` the prelude or the block makes goes to that database instead of
+the URL it names.
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ import ast
 import asyncio
 import importlib.util
 import inspect
+import os
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -80,8 +84,24 @@ async def run_block(prelude: str, source: str, path: str, first_line: int) -> No
             await result
 
 
+def point_connect_at(url: str) -> None:
+    """Send every ``ferro.connect`` call to ``url``, whatever URL it names."""
+    import ferro
+
+    connect = ferro.connect
+
+    async def connect_to(_url: str, *args: object, **kwargs: object) -> None:
+        await connect(url, *args, **kwargs)
+
+    ferro.connect = connect_to
+
+
 def main(argv: list[str]) -> None:
     prelude, path, first_line = argv
+    url = os.environ.get("FERRO_DOCS_DATABASE_URL")
+    if url:
+        # Before the prelude imports connect, so its name is this one too.
+        point_connect_at(url)
     asyncio.run(run_block(prelude, sys.stdin.read(), path, int(first_line)))
 
 

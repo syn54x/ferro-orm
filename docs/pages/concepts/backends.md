@@ -85,7 +85,7 @@ Because SQLite stores any value in any column, a SQLite column whose declared ty
 
 Add `ferro_search_path` to a PostgreSQL URL and every pooled connection runs `SET search_path` to that schema:
 
-```python {test=compile reason="needs a PostgreSQL server"}
+```python {test=run prelude=connections backend=postgres}
 from ferro import connect
 
 await connect(

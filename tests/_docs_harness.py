@@ -18,6 +18,11 @@ language:
   how-to hands readers; ``tests/test_docs_testing_fixtures.py`` writes it at
   that path in a scratch project and runs pytest there.
 
+``backend=postgres`` on a ``test=run`` fence runs it against PostgreSQL:
+every ``connect()`` the prelude or the block makes is pointed at the test
+database, whatever URL it names. Such a fence runs only under the
+``postgres_only`` marker, so a run without Postgres skips it, saying so.
+
 ``lint=check`` also lints the block. Every Python fence, on a docs page or in
 a docstring, carries a ``test`` mode (``fence_mode``). Any other setting, or a
 mode without its setting, is refused with the marker to write.
@@ -51,7 +56,9 @@ _SETTING = re.compile(r"""([A-Za-z_][\w-]*)=(?:"([^"]*)"|'([^']*)'|([^\s{}"']+))
 _TEST_MODES = ("run", "compile", "pytest")
 # The setting each test mode needs, and the only mode that takes it.
 _MODE_SETTING = {"run": "prelude", "compile": "reason", "pytest": "path"}
-_KNOWN_SETTINGS = frozenset({"test", "lint", *_MODE_SETTING.values()})
+_KNOWN_SETTINGS = frozenset({"test", "lint", "backend", *_MODE_SETTING.values()})
+_BACKENDS = ("postgres",)
+"""The databases a ``test=run`` fence can ask for besides SQLite."""
 _MODE_EXAMPLE = {
     "run": "prelude=<name>",
     "compile": 'reason="<why it cannot run>"',
@@ -341,6 +348,14 @@ def fence_settings(example: CodeExample) -> dict[str, str]:
             )
     if "lint" in settings and settings["lint"] != "check":
         raise ValueError(f"{example}: lint={settings['lint']} is not lint=check")
+    backend = settings.get("backend")
+    if backend is not None and backend not in _BACKENDS:
+        raise ValueError(f"{example}: backend={backend} is not backend=postgres")
+    if backend is not None and mode != "run":
+        raise ValueError(
+            f"{example}: backend={backend} needs test=run; mark the fence "
+            f"{{test=run prelude=<name> backend={backend}}}"
+        )
     return settings
 
 
@@ -367,19 +382,25 @@ _LINT_IGNORES = ["D", "T", "B", "C4", "E711", "E712", "E721"]
 
 
 def check_fence(
-    example: CodeExample, *, eval_example: EvalExample | None = None
+    example: CodeExample,
+    *,
+    eval_example: EvalExample | None = None,
+    database_url: str | None = None,
 ) -> str | None:
     """Hold one Python fence to its contract and return what it printed.
 
     The fence compiles (top-level ``await`` allowed), says how it is tested
     (``fence_mode``), is linted when marked ``lint=check``, and runs when
     marked ``test=run``. A ``test=pytest`` fence is run by the testing
-    how-to's own test.
+    how-to's own test. A ``backend=postgres`` fence runs only when given
+    ``database_url``.
 
     Args:
         example: The fence, from a docs page or a docstring.
         eval_example: pytest-examples' fixture, which lints a ``lint=check``
             fence. A fence marked ``lint=check`` without one is refused.
+        database_url: The PostgreSQL database a ``backend=postgres`` fence runs
+            against. Without it such a fence is only compiled and checked.
 
     Returns:
         What a ``test=run`` fence printed, or ``None`` for one that only
@@ -400,7 +421,11 @@ def check_fence(
             ruff_ignore=_LINT_IGNORES, line_length=100, target_version="py313"
         )
         eval_example.lint(example)
-    return run_fence(example) if mode == "run" else None
+    if mode != "run":
+        return None
+    if fence_settings(example).get("backend") == "postgres" and database_url is None:
+        return None
+    return run_fence(example, database_url=database_url)
 
 
 # -- docstrings -------------------------------------------------------------------
@@ -440,12 +465,21 @@ def docstring_examples(package: str, search_path: Path) -> list[CodeExample]:
     return sorted(examples, key=lambda example: (str(example.path), example.start_line))
 
 
-def run_fence(example: CodeExample) -> str:
+def run_fence(example: CodeExample, *, database_url: str | None = None) -> str:
     """Run a ``{test=run prelude=<name>}`` example and return what it printed.
 
     The example runs in a subprocess, so models and engines never leak
     between examples. A failure raises ``AssertionError`` carrying the
     traceback, whose frames name the example's own file and line.
+
+    Args:
+        example: The fence.
+        database_url: The PostgreSQL database a ``backend=postgres`` fence runs
+            against; every ``connect()`` in the run is pointed at it.
+
+    Raises:
+        ValueError: The fence is not marked ``test=run``, or is marked
+            ``backend=postgres`` and no ``database_url`` was given.
     """
     settings = fence_settings(example)
     if settings.get("test") != "run":
@@ -453,6 +487,14 @@ def run_fence(example: CodeExample) -> str:
             f"{example}: only a fence marked {{test=run prelude=<name>}} runs"
         )
     prelude = settings["prelude"]
+    env = None
+    if settings.get("backend") == "postgres":
+        if database_url is None:
+            raise ValueError(
+                f"{example}: backend=postgres needs a database_url; it runs "
+                "under the postgres_only marker"
+            )
+        env = {"FERRO_DOCS_DATABASE_URL": database_url}
     try:
         result = run_python(
             [
@@ -463,6 +505,7 @@ def run_fence(example: CodeExample) -> str:
             ],
             input=example.source,
             timeout=120,
+            env=env,
         )
     except AssertionError as failure:
         raise AssertionError(

@@ -144,7 +144,7 @@ On PostgreSQL, a `StrEnum` field creates a **native enum type**, and a type that
 
 Connect to the Postgres database with `migrate_updates=True`:
 
-```python {test=compile reason="label addition needs a Postgres database"}
+```python {test=run prelude=auto_migrate backend=postgres}
 await ferro.connect("postgresql://localhost/app", migrate_updates=True)
 ```
 

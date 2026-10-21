@@ -208,8 +208,11 @@ docstring carries one of three markers; `tests/test_docs_examples.py` and
 | Marker | What the harness does |
 | --- | --- |
 | `{test=run prelude=<name>}` | Runs the block after `docs/examples/_preludes/<name>.py`. |
+| `{test=run prelude=<name> backend=postgres}` | Runs it on PostgreSQL under the `postgres_only` marker, every `connect()` in the prelude and the block pointed at the test database whatever URL it names; without Postgres the test is skipped and the block only compiles. |
 | `{test=compile reason="..."}` | Compiles the block; the reason says why it cannot run. |
 | `{test=pytest path="tests/<file>.py"}` | Writes the block at that path in a scratch project and runs pytest there (`tests/test_docs_testing_fixtures.py`, for the testing how-to). |
+
+A block that needs Postgres runs with `backend=postgres`; `test=compile` is for a block that cannot run anywhere the suite can (a web framework the test groups do not install, a generated file).
 
 `lint=check` can be added to any of them. Any other setting is refused with
 the marker to write instead, so `{compile-only="..."}` or a bare

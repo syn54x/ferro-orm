@@ -54,7 +54,7 @@ await connect("sqlite:app.db?mode=rwc")
 
 Pass a `postgresql://` URL; add `sslmode=require` to require TLS:
 
-```python {test=compile reason="needs a PostgreSQL server"}
+```python {test=run prelude=connections backend=postgres}
 from ferro import connect
 
 await connect("postgresql://user:password@localhost:5432/app?sslmode=require")
@@ -203,7 +203,7 @@ The [`connect`](../api/connection.md#ferro.connect) reference lists every option
 
 Size a connection's pool with `PoolConfig`:
 
-```python {test=compile reason="needs a PostgreSQL server"}
+```python {test=run prelude=connections backend=postgres}
 from ferro import PoolConfig, connect
 
 await connect(
@@ -295,7 +295,7 @@ CREATE TABLE IF NOT EXISTS "post" ( "author_id" integer NOT NULL, "body" varchar
 
 Add the `ferro_search_path` parameter to a PostgreSQL URL to pin the connection to one schema:
 
-```python {test=compile reason="needs a PostgreSQL server"}
+```python {test=run prelude=connections backend=postgres}
 from ferro import connect
 
 await connect("postgresql://user:password@localhost:5432/app?ferro_search_path=tenant_a")
