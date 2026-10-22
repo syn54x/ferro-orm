@@ -1,6 +1,36 @@
 # CHANGELOG
 
 
+## v0.26.0 (2026-10-22)
+
+### Bug Fixes
+
+- SecretStr and SecretBytes fields store the real value and hydrate as secrets (#760)
+  ([#762](https://github.com/syn54x/ferro-orm/pull/762),
+  [`20ee954`](https://github.com/syn54x/ferro-orm/commit/20ee9548055b055afff56224d47771a81fe58b24))
+
+### Chores
+
+- **docs**: Rename CONTEXT.md to GLOSSARY.md, refresh agent docs, ADR-0057 for #700
+  ([#763](https://github.com/syn54x/ferro-orm/pull/763),
+  [`c0c4046`](https://github.com/syn54x/ferro-orm/commit/c0c404678787d1641cdc62b6a5363170c0213d51))
+
+- **docs**: Upgrade Zensical, mkdocstrings-python and pymdown-extensions
+  ([#699](https://github.com/syn54x/ferro-orm/pull/699),
+  [`2a45de9`](https://github.com/syn54x/ferro-orm/commit/2a45de9b3e545b57d9d78288dd8d5c93c3ab5109))
+
+### Documentation
+
+- Every page one kind, every block runs, the SQL beside every query (#698)
+  ([#777](https://github.com/syn54x/ferro-orm/pull/777),
+  [`23c6caf`](https://github.com/syn54x/ferro-orm/commit/23c6caf86e46bf40acd9dc2f5a5bb0a038126634))
+
+### Features
+
+- SQL inspection and logging (#700) ([#771](https://github.com/syn54x/ferro-orm/pull/771),
+  [`f3e46f8`](https://github.com/syn54x/ferro-orm/commit/f3e46f8c6cdadfc3e7a9d572bb7a498e043f9c07))
+
+
 ## v0.25.0 (2026-10-19)
 
 ### Features
