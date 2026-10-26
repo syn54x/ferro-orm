@@ -8,6 +8,7 @@ this module is the one place a record's message and attributes are built.
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from typing import Final
 
 LOGGER: Final = logging.getLogger("ferro.sql")
@@ -29,6 +30,25 @@ REDACTED: Final = _Redacted()
 """A secret parameter as a record shows it: its `repr` and `str` are `***`."""
 
 
+def masked_params(params: Iterable[object], mask: Iterable[bool]) -> tuple[object, ...]:
+    """Return `params` with each masked position replaced by [`REDACTED`][ferro._sql_log.REDACTED].
+
+    The one painter of a statement's parameters as the user sees them: a
+    `ferro.sql` record and a rendered statement both call it.
+
+    Args:
+        params: The bound values in placeholder order.
+        mask: `True` at each position whose value is a secret.
+
+    Returns:
+        The values, `REDACTED` where masked.
+    """
+    return tuple(
+        REDACTED if masked else value
+        for value, masked in zip(params, mask, strict=True)
+    )
+
+
 def emit(record: dict[str, object]) -> None:
     """Write one statement's record on `ferro.sql` at `DEBUG`.
 
@@ -45,11 +65,7 @@ def emit(record: dict[str, object]) -> None:
             `rows` (rows affected, or `None` for a fetch) and `error` (the
             database's error text, or `None`).
     """
-    mask = record["mask"]
-    params = tuple(
-        REDACTED if masked else value
-        for value, masked in zip(record["params"], mask, strict=True)  # type: ignore[call-overload]
-    )
+    params = masked_params(record["params"], record["mask"])  # type: ignore[arg-type]
     error = record["error"]
     message = f"{record['sql']} params={params!r} {record['duration_ms']:.1f}ms"
     if error is not None:

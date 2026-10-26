@@ -950,6 +950,29 @@ async def test_secret_values_are_collected_once_and_only_when_needed(
         assert emitted == []
 
 
+def test_a_deferred_secret_collector_reads_the_same_on_every_read(monkeypatch):
+    """The engine may read a write's collector once per statement it sends;
+    the values are collected once and every read sees them (#774 F13)."""
+    import ferro._bind_payload
+
+    collect = ferro._bind_payload.secret_values_in
+    collections = 0
+
+    def counting(values):
+        nonlocal collections
+        collections += 1
+        return collect(values)
+
+    monkeypatch.setattr(ferro._bind_payload, "secret_values_in", counting)
+    values = (value for value in (SecretStr("sk_live"), 1, [SecretBytes(b"k")]))
+    collector = ferro._bind_payload.deferred_secret_values(values)
+
+    assert collections == 0
+    assert tuple(collector) == ("sk_live", b"k")
+    assert tuple(collector) == ("sk_live", b"k")
+    assert collections == 1
+
+
 class _Discard(logging.Handler):
     """Handles every record and keeps none."""
 
