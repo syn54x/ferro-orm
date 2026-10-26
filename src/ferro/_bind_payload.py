@@ -69,20 +69,41 @@ def secret_values_in(values: Iterable[object]) -> tuple[object, ...]:
     return tuple(found)
 
 
-def deferred_secret_values(values: Iterable[object]) -> Iterator[object]:
-    """Yield the secret values in `values`, collected on first read.
+class DeferredSecretValues:
+    """The secret values among some bound values, collected on first read.
 
     A write or a raw statement hands this to the engine, which reads it only
     when the statement log is on: the engine's one read of the log's switch
-    decides whether anything is collected.
+    decides whether anything is collected. Every read after the first sees
+    the same tuple, so one collector can serve every statement an operation
+    sends.
+    """
+
+    __slots__ = ("_found", "_values")
+
+    def __init__(self, values: Iterable[object]) -> None:
+        self._values: Iterable[object] | None = values
+        self._found: tuple[object, ...] | None = None
+
+    def __iter__(self) -> Iterator[object]:
+        if self._found is None:
+            self._found = secret_values_in(self._values or ())
+            self._values = None
+        return iter(self._found)
+
+
+def deferred_secret_values(values: Iterable[object]) -> DeferredSecretValues:
+    """Return a collector of the secret values in `values`, read any number of times.
 
     Args:
-        values: The values about to be bound, read lazily.
+        values: The values about to be bound, read once, on the first
+            iteration of the collector.
 
-    Yields:
-        The unwrapped value of every secret in `values`, in order.
+    Returns:
+        The collector; iterating it yields the unwrapped value of every
+        secret in `values`, in order, the same on every read.
     """
-    yield from secret_values_in(values)
+    return DeferredSecretValues(values)
 
 
 def field_values(instances: Iterable[Any]) -> Iterator[object]:

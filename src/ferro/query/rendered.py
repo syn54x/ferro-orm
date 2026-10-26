@@ -25,7 +25,7 @@ from typing import (
     overload,
 )
 
-from .._sql_log import REDACTED
+from .._sql_log import REDACTED, masked_params
 
 if TYPE_CHECKING:
     from typing import Self
@@ -118,10 +118,7 @@ def send(
         raise _Rendered(
             RenderedSql(
                 sql=sql,
-                params=tuple(
-                    REDACTED if masked else value
-                    for value, masked in zip(params, mask, strict=True)
-                ),
+                params=masked_params(params, mask),
                 dialect=_DIALECTS[dialect],
             )
         )

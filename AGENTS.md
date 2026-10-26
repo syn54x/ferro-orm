@@ -302,6 +302,11 @@ anything in `BaseModel.__slots__` that `__init__` assigns (notably
 well. Leaving a slot unset raises `AttributeError` on access (unlike a normal
 instance attribute defaulting to `None`).
 
+The same holds for field values: a `SecretStr` / `SecretBytes` field hydrates
+as that type, never as the plain `str` / `bytes` the column stores. A
+hydrated instance that shows a secret's value where a constructed one shows
+`**********` is an I-2 miss (#760; review I-38 in #786).
+
 If you find yourself wanting to call `__init__` from Rust to "make this easier",
 stop and read `.cursorrules` §3.B and the design notes under
 `docs/solutions/patterns/`.
@@ -528,7 +533,7 @@ communicated, not what gets built.
 
 ---
 
-## I-13: Query and update literals match save() for datetime/date/time/UUID/Decimal
+## I-13: Query and update literals match save() for datetime/date/time/UUID/Decimal/secrets
 
 A developer pages a chat transcript with `after()` on a UTC datetime order
 key:
@@ -557,6 +562,13 @@ remains instance `model_dump` (field serializers stay on that door). A
 second datetime/UUID/Decimal cascade — including `datetime.isoformat()` or a
 “mirrors save_bind_payload” comment — is an I-13 violation. Enums on the
 query wire are out of scope for this invariant.
+
+A `SecretStr` / `SecretBytes` is unwrapped first, through `unwrap_secret`,
+on every door: `save()` binds the real value, a query or `update()` literal
+binds the same value, and the display mask `**********` never becomes a
+bind, a schema default or a hydrated value (#760; review I-38 in #786). A
+second unwrap, a JSON dump of a secret column or a `SecretBytes` column
+typed as text is an I-13 violation.
 
 Pinned by helper-vs-save unit equality for those five types and by a SQLite
 `save` then `after((original_python_datetime, pk))` paging test.
@@ -628,6 +640,61 @@ Rules:
 before/after pair. Page-level conventions (running examples, snippet
 markers, the session wrapper, the Annotated idiom for I-7 twins) are in
 `docs/solutions/patterns/docs-page-conventions.md`.
+
+---
+
+## I-15: Statement presentation is one module
+
+A developer turns the log on and saves a token:
+
+```python
+logging.getLogger("ferro.sql").setLevel(logging.DEBUG)
+
+await User(id=1, token=SecretStr("sk_live")).save()
+# ferro.sql DEBUG INSERT INTO "user" (...) VALUES ($1, $2) params=(1, ***) 0.4ms
+
+print(await User.where(lambda user: user.token == "sk_live").all.sql())
+# SELECT ... WHERE "user"."token" = $1    params=(***,)
+```
+
+Two doors, one statement, the same stars. A statement the user can see, a
+`ferro.sql` record or a terminal's `RenderedSql`, is built from one
+presentation: the `sql`, the `params` after one `masked_params` in
+`ferro._sql_log`, and the `dialect`. The engine decides which positions are
+secret, once, from the operation's secret-value set (ADR-0057); Python paints
+the stars once.
+
+The secret-value set a write or a raw statement hands the engine is one
+collector, `deferred_secret_values`, computed on its first read and the same
+on every read after it. The engine reads it only when the log is on, and may
+read it once per statement the operation sends; a single-shot iterable here
+leaves the second statement with an empty set and a secret in the log, with
+no error (#774 F13).
+
+A second `(params, mask)` to `REDACTED` zip, or a secret-value iterable a
+second statement can exhaust, is an I-15 violation. A new door (an instance
+`save().sql()`, a docs capture, a structured handler) calls `masked_params`
+and passes the collector. Review I-37 in #786.
+
+---
+
+## I-16: A write lists columns in model field declaration order
+
+```python
+await customer.save(only={"updated_at", "name"})
+# UPDATE "customer" SET "name" = ?, "updated_at" = ? WHERE "id" = ?
+```
+
+`only=` and `exclude=` are sets, and a fetched instance's `__dict__` follows
+the `SELECT`. Neither order reaches the statement: `save`, `bulk_create` and
+`save(only=)` / `save(exclude=)` emit their INSERT and SET columns in
+`model_fields` order, walked in `save_bind_payload`. A set is membership
+only.
+
+One call is one statement, in the log and in a docs `sql` block. A column
+order that changes between processes or with the row's fetch is an I-16
+violation, the mutation-side twin of the rendered-statement pin in I-1
+(#776; review I-39 in #786).
 
 ---
 
