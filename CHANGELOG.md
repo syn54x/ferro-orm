@@ -1,6 +1,15 @@
 # CHANGELOG
 
 
+## v0.26.1 (2026-10-26)
+
+### Bug Fixes
+
+- One painter for masked parameters and a re-readable secret collector (#787)
+  ([#788](https://github.com/syn54x/ferro-orm/pull/788),
+  [`9de78a8`](https://github.com/syn54x/ferro-orm/commit/9de78a8b04bd3c24abca0807047c9d2ef3514873))
+
+
 ## v0.26.0 (2026-10-22)
 
 ### Bug Fixes
