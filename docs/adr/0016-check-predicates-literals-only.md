@@ -1,5 +1,7 @@
 # Check predicates are root-column lambdas with inlined literals
 
+> **Amended by ADR-0059 (2026-10-28, grilling #789)**: a check compares value expressions, so `fn` functions from Ferro's closed function table are allowed, under value parity.
+
 A check predicate is the `where()` dialect restricted to this table: comparisons, `IS NULL`, AND/OR/NOT, `.in_()`, `.like()`, column-to-column. Values are literals (including enum members), inlined into the CHECK body — a CHECK cannot carry bind parameters. A closed-over variable or call fails at class definition. Forward-FK null tests accept both spellings — `t.outflow_transaction == None` (join-free shadow-FK leaf) and `t.outflow_transaction_id == None` — compiled at resolved registration so the shadow column exists. Traversal (`t.outflow_transaction.amount`), existence tests, and aggregates stay rejected; SQL functions wait for the predicate dialect to grow (ADR-0012).
 
 Decision by owner (2026-08-18), grilling #339.
