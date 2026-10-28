@@ -289,7 +289,7 @@ jobs:
 
       - name: Run backend matrix tests
         run: |
-          uv run pytest -n logical -m "backend_matrix or postgres_only" --db-backends=sqlite,postgres
+          uv run pytest -n logical --durations=0 -m "backend_matrix or postgres_only" --db-backends=sqlite,postgres
 
   check-conventional-commits:
     name: Check Conventional Commits
