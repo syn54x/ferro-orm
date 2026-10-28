@@ -250,7 +250,6 @@ jobs:
         ports:
           - 5432:5432
         options: >-
-          --tmpfs /var/lib/postgresql/data
           --health-cmd "pg_isready -U ferro -d ferro"
           --health-interval 10s
           --health-timeout 5s
@@ -290,7 +289,7 @@ jobs:
 
       - name: Run backend matrix tests
         run: |
-          uv run pytest -n logical --durations=0 -m "backend_matrix or postgres_only" --db-backends=postgres
+          uv run pytest -n logical -m "backend_matrix or postgres_only" --db-backends=postgres
 
   check-conventional-commits:
     name: Check Conventional Commits
