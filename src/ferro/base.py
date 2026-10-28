@@ -101,6 +101,35 @@ def _validate_retired(retired: bool, owner: str) -> bool:
     raise TypeError(f"{owner} retired must be True or False")
 
 
+class GeneratedExpression:
+    """The `generated=` lambda of a `Field`, carried in the field's metadata.
+
+    Pydantic serializes `json_schema_extra` into the model's JSON schema, and
+    a lambda has no JSON form, so the lambda rides the field's metadata
+    instead, where the metaclass reads it.
+    """
+
+    __slots__ = ("func",)
+
+    def __init__(self, func: Any) -> None:
+        self.func = func
+        """The lambda the database computes the column from."""
+
+    def __repr__(self) -> str:
+        return "GeneratedExpression(...)"
+
+
+def _validate_generated(generated: Any, owner: str) -> Any:
+    """Validate the ``generated`` option (ADR-0058): a lambda, or ``None``."""
+    if generated is None or callable(generated):
+        return generated
+    raise TypeError(
+        f"{owner} generated must be a lambda over the model's columns (e.g. "
+        "generated=lambda transaction: fn.sign(transaction.amount_minor)), not "
+        f"{type(generated).__name__}"
+    )
+
+
 class FerroField:
     """Database options for one model field, given inside `Annotated[...]`.
 
@@ -139,6 +168,7 @@ class FerroField:
         db_check: bool = False,
         renamed_from: str | None = None,
         retired: bool = False,
+        generated: Any = None,
     ):
         """Declare the database options for a field.
 
@@ -170,10 +200,14 @@ class FerroField:
                 declaration. The annotation must allow `None`. Defaults to
                 `False`. See
                 [Retiring a column](../guide/schema/renames-and-retirements.md#retiring-a-column).
+            generated: A lambda over the model's own columns from which the
+                database computes the column on every write. Defaults to
+                `None`, a plain column. Give the field a `None` default
+                beside it, as [`Field`][ferro.Field] does for you.
 
         Raises:
-            TypeError: `nullable`, `renamed_from` or `retired` has a value of
-                the wrong type.
+            TypeError: `nullable`, `renamed_from`, `retired` or `generated`
+                has a value of the wrong type.
         """
         self.primary_key = primary_key
         """Whether the column is the table's primary key."""
@@ -193,6 +227,8 @@ class FerroField:
         """The column's previous name, or `None`."""
         self.retired = _validate_retired(retired, "FerroField")
         """Whether the column is retired from the model."""
+        self.generated = _validate_generated(generated, "FerroField")
+        """The lambda the database computes the column from, or `None`."""
 
 
 class ForeignKey:

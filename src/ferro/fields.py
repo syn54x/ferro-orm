@@ -14,6 +14,8 @@ from .base import (
     FerroNullable,
     _validate_nullable_option,
     _validate_renamed_from,
+    GeneratedExpression,
+    _validate_generated,
     _validate_retired,
 )
 
@@ -48,6 +50,7 @@ def Field(
     db_check: bool = ...,
     renamed_from: str | None = ...,
     retired: bool = ...,
+    generated: Callable[[Any], Any] | None = ...,
     alias: str | None = ...,
     alias_priority: int | None = ...,
     validation_alias: str | AliasPath | AliasChoices | None = ...,
@@ -103,6 +106,7 @@ def Field(
     db_check: bool = ...,
     renamed_from: str | None = ...,
     retired: bool = ...,
+    generated: Callable[[Any], Any] | None = ...,
     alias: str | None = ...,
     alias_priority: int | None = ...,
     validation_alias: str | AliasPath | AliasChoices | None = ...,
@@ -158,6 +162,7 @@ def Field(
     db_check: bool = ...,
     renamed_from: str | None = ...,
     retired: bool = ...,
+    generated: Callable[[Any], Any] | None = ...,
     alias: str | None = ...,
     alias_priority: int | None = ...,
     validation_alias: str | AliasPath | AliasChoices | None = ...,
@@ -212,6 +217,7 @@ def Field(
     db_check: bool = ...,
     renamed_from: str | None = ...,
     retired: bool = ...,
+    generated: Callable[[Any], Any] | None = ...,
     default_factory: Callable[[], Any] | Callable[[dict[str, Any]], Any],
     alias: str | None = ...,
     alias_priority: int | None = ...,
@@ -267,6 +273,7 @@ def Field(
     db_check: bool = ...,
     renamed_from: str | None = ...,
     retired: bool = ...,
+    generated: Callable[[Any], Any] | None = ...,
     default_factory: Callable[[], _T] | Callable[[dict[str, Any]], _T],
     alias: str | None = ...,
     alias_priority: int | None = ...,
@@ -322,6 +329,7 @@ def Field(
     db_check: bool = ...,
     renamed_from: str | None = ...,
     retired: bool = ...,
+    generated: Callable[[Any], Any] | None = ...,
     alias: str | None = ...,
     alias_priority: int | None = ...,
     validation_alias: str | AliasPath | AliasChoices | None = ...,
@@ -377,6 +385,7 @@ def Field(
     db_check: bool | Any = _Unset,
     renamed_from: str | None | Any = _Unset,
     retired: bool | Any = _Unset,
+    generated: Callable[[Any], Any] | None | Any = _Unset,
     default_factory: Callable[[], Any]
     | Callable[[dict[str, Any]], Any]
     | None = _Unset,
@@ -467,6 +476,11 @@ def Field(
             schema, nullable, until a later release deletes the declaration.
             The annotation must allow `None`. Defaults to `False`. See
             [Retiring a column](../guide/schema/renames-and-retirements.md#retiring-a-column).
+        generated: A lambda over the model's own columns, its parameter named
+            after the model, from which the database computes the column on
+            every write: arithmetic and the functions in
+            [`ferro.fn`][ferro.fn]. The field defaults to `None` and holds the
+            database's value once saved. Defaults to `None`, a plain column.
         default_factory: A callable to generate the default value. The callable can either take 0 arguments
             (in which case it is called as is) or a single argument containing the already validated data.
         alias: The name to use for the attribute when validating or serializing by alias.
@@ -584,6 +598,14 @@ def Field(
         ferro_kwargs["renamed_from"] = _validate_renamed_from(renamed_from, "Field")
     if retired is not _Unset:
         ferro_kwargs["retired"] = _validate_retired(retired, "Field")
+    expression = None
+    if generated is not _Unset and generated is not None:
+        # The lambda has no JSON form, so it rides the field's metadata, never
+        # `json_schema_extra`, which Pydantic writes into the JSON schema.
+        expression = GeneratedExpression(_validate_generated(generated, "Field"))
+        # The database fills the value; the instance holds None until then.
+        if default is PydanticUndefined and default_factory is _Unset:
+            default = None
 
     schema_extra = json_schema_extra
     if ferro_kwargs:
@@ -601,7 +623,7 @@ def Field(
         merged_extra[FERRO_FIELD_EXTRA_KEY] = ferro_kwargs
         schema_extra = merged_extra
 
-    return PydanticField(
+    info = PydanticField(
         default=default,
         default_factory=default_factory,
         alias=alias,
@@ -640,6 +662,9 @@ def Field(
         fail_fast=fail_fast,
         **extra,
     )
+    if expression is not None:
+        info.metadata.append(expression)
+    return info
 
 
 class BackRef:

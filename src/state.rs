@@ -29,6 +29,9 @@ pub struct ModelMeta {
     /// The PK's `autoincrement` flag; `true` when there is no PK at all,
     /// matching the historical per-site default that `build_save_sql` receives.
     pub pk_autoincrement: bool,
+    /// The generated columns (ADR-0058), in IR column order: never written,
+    /// always read back with `RETURNING` after a save.
+    pub generated_cols: Vec<String>,
 }
 
 impl ModelMeta {
@@ -46,6 +49,11 @@ impl ModelMeta {
         ModelMeta {
             pk_col,
             pk_autoincrement,
+            generated_cols: columns
+                .iter()
+                .filter(|col| col.generated.is_some())
+                .map(|col| col.name.clone())
+                .collect(),
         }
     }
 }
@@ -1079,6 +1087,7 @@ mod install_registration_tests {
             enum_retired_labels: Default::default(),
             default_factory: None,
             retired: false,
+            generated: None,
         }
     }
 
@@ -1109,6 +1118,7 @@ mod install_registration_tests {
                     enum_retired_labels: Default::default(),
                     default_factory: None,
                     retired: false,
+                    generated: None,
                 },
             ],
             foreign_keys: vec![],
@@ -1128,6 +1138,7 @@ mod install_registration_tests {
         columns.push(SchemaColumn {
             name: "bio".to_string(),
             retired: true,
+            generated: None,
             ..columns[1].clone()
         });
         let registered =
@@ -1259,6 +1270,7 @@ mod model_meta_tests {
             enum_retired_labels: Default::default(),
             default_factory: None,
             retired: false,
+            generated: None,
         }]);
         assert_eq!(meta.pk_col, None);
         assert!(meta.pk_autoincrement);
@@ -1286,6 +1298,7 @@ mod model_meta_tests {
             enum_retired_labels: Default::default(),
             default_factory: None,
             retired: false,
+            generated: None,
         }]);
         assert_eq!(meta.pk_col.as_deref(), Some("id"));
         assert!(meta.pk_autoincrement);
@@ -1313,6 +1326,7 @@ mod model_meta_tests {
             enum_retired_labels: Default::default(),
             default_factory: None,
             retired: false,
+            generated: None,
         }]);
         assert_eq!(meta.pk_col.as_deref(), Some("id"));
         assert!(!meta.pk_autoincrement);
@@ -1341,6 +1355,7 @@ mod model_meta_tests {
                 enum_retired_labels: Default::default(),
                 default_factory: None,
                 retired: false,
+                generated: None,
             },
             SchemaColumn {
                 renamed_from: None,
@@ -1362,6 +1377,7 @@ mod model_meta_tests {
                 enum_retired_labels: Default::default(),
                 default_factory: None,
                 retired: false,
+                generated: None,
             },
         ]);
         assert_eq!(meta.pk_col.as_deref(), Some("b_id"));

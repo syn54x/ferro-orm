@@ -111,6 +111,7 @@ fn col(name: &str, db_type: &str, nullable: bool) -> SchemaColumn {
         enum_retired_labels: Default::default(),
         default_factory: None,
         retired: false,
+        generated: None,
     }
 }
 
@@ -171,6 +172,7 @@ fn ir_col(
         enum_retired_labels: Default::default(),
         default_factory: None,
         retired: false,
+        generated: None,
     }
 }
 
@@ -924,6 +926,63 @@ fn render_create_table_sqlite_fails_loudly_when_a_column_check_has_no_column() {
     }];
     let err = render_create_table(&model, Dialect::Sqlite).unwrap_err();
     assert!(err.message.contains("ck_account_role"), "{}", err.message);
+}
+
+#[test]
+fn render_create_table_writes_a_generated_column_stored_with_no_default() {
+    let direction = SchemaColumn {
+        default: Some(serde_json::Value::Null),
+        generated: Some(ferro_schema_ir::ValueExpr::Func {
+            name: "sign".to_string(),
+            args: vec![ferro_schema_ir::ValueExpr::Column {
+                name: "amount_minor".to_string(),
+            }],
+        }),
+        ..col("direction", "bigint", false)
+    };
+    let model = schema_model(
+        "transaction",
+        vec![
+            col("amount_minor", "bigint", false),
+            direction,
+            pk_col("id", "bigint"),
+        ],
+    );
+    for dialect in [Dialect::Sqlite, Dialect::Postgres] {
+        let sql = render_create_table(&model, dialect)
+            .expect("renders")
+            .create_sql;
+        let column = sql
+            .split(", ")
+            .find(|part| part.starts_with("\"direction\""))
+            .unwrap_or_else(|| panic!("{sql}"));
+        assert_eq!(
+            column.to_lowercase(),
+            "\"direction\" bigint not null generated always as (sign(\"amount_minor\")) stored",
+            "{dialect:?}: {sql}"
+        );
+        assert!(!sql.contains("DEFAULT"), "{sql}");
+    }
+}
+
+#[test]
+fn render_create_table_refuses_a_generated_column_calling_an_unknown_function() {
+    let model = schema_model(
+        "transaction",
+        vec![SchemaColumn {
+            generated: Some(ferro_schema_ir::ValueExpr::Func {
+                name: "nope".to_string(),
+                args: vec![],
+            }),
+            ..col("direction", "bigint", false)
+        }],
+    );
+    let err = render_create_table(&model, Dialect::Postgres).unwrap_err();
+    assert!(
+        err.message.contains("transaction.direction") && err.message.contains("'nope'"),
+        "{}",
+        err.message
+    );
 }
 
 #[test]
@@ -1733,6 +1792,7 @@ fn render_create_table_unknown_logical_type_errors() {
         enum_retired_labels: Default::default(),
         default_factory: None,
         retired: false,
+        generated: None,
     };
     let model = schema_model("widget", vec![col]);
     for dialect in [Dialect::Sqlite, Dialect::Postgres] {

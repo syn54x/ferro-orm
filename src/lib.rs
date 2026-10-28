@@ -206,6 +206,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(migrate::_declared_index, m)?)?;
     m.add_function(wrap_pyfunction!(live_ir::_live_schema_ir, m)?)?;
     migrations_ffi::register(m)?;
+    m.add_function(wrap_pyfunction!(naming_ffi::_value_function_table, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_ddl_single_index_name, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_ddl_single_unique_name, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_ddl_composite_index_name, m)?)?;

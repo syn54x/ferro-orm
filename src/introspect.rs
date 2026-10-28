@@ -25,7 +25,7 @@ fn serde_default_true() -> bool {
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct LiveColumn {
     pub name: String,
-    /// SQLite: the declared type from `PRAGMA table_info` (e.g. `varchar`,
+    /// SQLite: the declared type from `PRAGMA table_xinfo` (e.g. `varchar`,
     /// `uuid_text`, `datetime_text`). Postgres: `information_schema.data_type`
     /// (e.g. `character varying`, `timestamp with time zone`).
     #[serde(default)]
@@ -49,7 +49,7 @@ pub struct LiveColumn {
     pub enum_type_name: Option<String>,
     /// The column's server default as the catalog prints it: Postgres
     /// `information_schema.columns.column_default` (`''::character varying`,
-    /// `nextval('author_id_seq'::regclass)`), SQLite `PRAGMA table_info`'s
+    /// `nextval('author_id_seq'::regclass)`), SQLite `PRAGMA table_xinfo`'s
     /// `dflt_value` (`'free'`, `0`, `CURRENT_TIMESTAMP`). `None` for a column
     /// with no default. Whether ferro left it is the planner's decision
     /// (`ferro_migrate`'s foreign default, ADR-0027 as amended).
@@ -519,15 +519,20 @@ async fn postgres_table_foreign_keys(
         .collect())
 }
 
+/// The table's columns from `PRAGMA table_xinfo`, generated ones included:
+/// `hidden` is 0 for a plain column, 2 and 3 for a virtual and a stored
+/// generated one, and 1 for a virtual table's hidden column, which is not a
+/// column of the table.
 async fn sqlite_table_columns(engine: &EngineHandle, table: &str) -> PyResult<Vec<LiveColumn>> {
-    let sql = format!("PRAGMA table_info({})", quote_ident(table));
+    let sql = format!("PRAGMA table_xinfo({})", quote_ident(table));
     let rows = engine
         .fetch_all_sql_unprepared(&sql)
         .await
-        .map_err(|e| introspection_error("PRAGMA table_info", table, e))?;
+        .map_err(|e| introspection_error("PRAGMA table_xinfo", table, e))?;
 
     Ok(rows
         .iter()
+        .filter(|row| row_opt_i64(row, "hidden").unwrap_or(0) != 1)
         .filter_map(|row| {
             let name = row_string(row, "name")?;
             Some(LiveColumn {

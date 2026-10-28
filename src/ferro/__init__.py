@@ -23,6 +23,7 @@ from ._core import (
     connect as _core_connect,
 )
 from .base import DbType, DbTypeToken, FerroField, FerroNullable, ForeignKey, varchar
+from . import fn
 from .checks import Check
 from .exceptions import (
     CheckViolationError,
@@ -605,6 +606,7 @@ __all__ = [
     "varchar",
     "Field",
     "Check",
+    "fn",
     "RowSecurity",
     "RowPolicy",
     "ForeignKey",

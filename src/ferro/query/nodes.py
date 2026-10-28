@@ -616,6 +616,27 @@ class FieldProxy(Generic[TField]):
         """Subtract a numeric column from a value in an `update()` recipe."""
         return _binary_value("-", other, self)
 
+    def __mul__(self, other: Any) -> "BinaryValueExpr":
+        """Multiply a numeric column in a generated column's expression."""
+        return _binary_value("*", self, other)
+
+    def __rmul__(self, other: Any) -> "BinaryValueExpr":
+        """Multiply a value by a numeric column in a generated column's expression."""
+        return _binary_value("*", other, self)
+
+    def __truediv__(self, other: Any) -> "BinaryValueExpr":
+        """Divide a numeric column in a generated column's expression."""
+        return _binary_value("/", self, other)
+
+    def __rtruediv__(self, other: Any) -> "BinaryValueExpr":
+        """Divide a value by a numeric column in a generated column's expression."""
+        return _binary_value("/", other, self)
+
+    def __neg__(self) -> "NegateValueExpr":
+        """Negate a numeric column in a generated column's expression."""
+        _require_numeric_operand(self, "-")
+        return NegateValueExpr(self)
+
     def merge(self, patch: Any) -> "MergeValueExpr":
         """Merge keys into a JSON object column in an `update()` recipe (Postgres only).
 
@@ -765,7 +786,7 @@ def _numeric_operand_family(value: Any) -> str | None:
         if spec is None:
             return None
         return _aggregate_source_family(spec)
-    if isinstance(value, BinaryValueExpr):
+    if isinstance(value, (BinaryValueExpr, NegateValueExpr, FuncValueExpr)):
         return None
     if isinstance(value, NowExpr):
         return "datetime"
@@ -888,25 +909,50 @@ class ValueExpr:
         """Subtract the value from a number."""
         return _binary_value("-", other, self)
 
+    def __mul__(self, other: Any) -> "BinaryValueExpr":
+        """Multiply the value by a number."""
+        return _binary_value("*", self, other)
+
+    def __rmul__(self, other: Any) -> "BinaryValueExpr":
+        """Multiply a number by the value."""
+        return _binary_value("*", other, self)
+
+    def __truediv__(self, other: Any) -> "BinaryValueExpr":
+        """Divide the value by a number."""
+        return _binary_value("/", self, other)
+
+    def __rtruediv__(self, other: Any) -> "BinaryValueExpr":
+        """Divide a number by the value."""
+        return _binary_value("/", other, self)
+
+    def __neg__(self) -> "NegateValueExpr":
+        """Negate the value."""
+        _require_numeric_operand(self, "-")
+        return NegateValueExpr(self)
+
     def __repr__(self) -> str:
         """Show the expression, for debugging."""
         return "ValueExpr()"
 
 
 class BinaryValueExpr(ValueExpr):
-    """A sum or difference in an `update()` recipe, such as `post.views + 1`."""
+    """Arithmetic on a value, such as `post.views + 1`.
+
+    An `update()` recipe takes `+` and `-`; a generated column's expression
+    also takes `*` and `/`.
+    """
 
     def __init__(self, op: str, left: Any, right: Any) -> None:
-        """Build the expression; `+` and `-` on a column build these for you.
+        """Build the expression; arithmetic on a column builds these for you.
 
         Args:
-            op: `"+"` or `"-"`.
+            op: `"+"`, `"-"`, `"*"` or `"/"`.
             left: The left operand: a column, a number or another expression.
             right: The right operand: a column, a number or another
                 expression.
         """
         self.op = op
-        """`"+"` or `"-"`."""
+        """`"+"`, `"-"`, `"*"` or `"/"`."""
         self.left = left
         """The left operand."""
         self.right = right
@@ -914,6 +960,41 @@ class BinaryValueExpr(ValueExpr):
 
     def __repr__(self) -> str:
         return f"BinaryValueExpr({self.op!r}, {self.left!r}, {self.right!r})"
+
+
+class NegateValueExpr(ValueExpr):
+    """A negated value in a generated column's expression, such as `-line.price`."""
+
+    def __init__(self, operand: Any) -> None:
+        """Build the negation; unary `-` on a column builds these for you.
+
+        Args:
+            operand: The column or expression to negate.
+        """
+        self.operand = operand
+        """The column or expression negated."""
+
+    def __repr__(self) -> str:
+        return f"NegateValueExpr({self.operand!r})"
+
+
+class FuncValueExpr(ValueExpr):
+    """A call of a [`ferro.fn`][ferro.fn] function in a generated column's expression."""
+
+    def __init__(self, name: str, args: tuple[Any, ...]) -> None:
+        """Build the call; the functions in `ferro.fn` build these for you.
+
+        Args:
+            name: The function's name in `ferro.fn`.
+            args: The arguments: columns, numbers or other expressions.
+        """
+        self.name = name
+        """The function's name in `ferro.fn`."""
+        self.args = args
+        """The arguments, in order."""
+
+    def __repr__(self) -> str:
+        return f"FuncValueExpr({self.name!r}, {self.args!r})"
 
 
 class NowExpr(ValueExpr):

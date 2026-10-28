@@ -36,6 +36,7 @@ fn column(name: &str, db_type: &str, nullable: bool) -> SchemaColumn {
         default: None,
         default_factory: None,
         retired: false,
+        generated: None,
         format: None,
         enum_values: None,
         enum_type_name: None,

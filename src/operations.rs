@@ -1741,6 +1741,7 @@ impl<'a> Executor<'a> {
         }
     }
 
+    #[cfg(test)]
     async fn execute_result(
         &self,
         sql: &str,
@@ -2769,7 +2770,9 @@ pub fn fetch_one<'py>(
 /// target exists (an explicit PK value, or a non-autoincrement PK). An
 /// autoincrement PK left null is omitted from the column list either way.
 ///
-/// Returns `(sql, bind_values, needs_postgres_returning)`.
+/// Returns `(sql, bind_values, returning)`: `returning` names the columns the
+/// statement reads back, in order (the unset auto key, then every generated
+/// column), empty when it reads nothing back.
 #[allow(clippy::too_many_arguments)]
 fn build_save_sql(
     model: &crate::state::RegisteredModel,
@@ -2782,7 +2785,7 @@ fn build_save_sql(
     enum_udt: &HashMap<String, String>,
     uuid_columns: &HashSet<String>,
     ts_cast: &HashMap<String, String>,
-) -> PyResult<(String, sea_query::Values, bool)> {
+) -> PyResult<(String, sea_query::Values, Vec<String>)> {
     let mut columns = Vec::new();
     let mut values = Vec::new();
     let mut pk_provided = false;
@@ -2830,13 +2833,62 @@ fn build_save_sql(
             insert_stmt.on_conflict(on_conflict);
         }
     }
-    let needs_postgres_returning =
-        backend == Dialect::Postgres && pk_col.is_some() && pk_is_auto && !pk_provided;
-    let (mut sql, values) = sea_query_build_for_backend!(insert_stmt, backend);
-    if needs_postgres_returning && let Some(pk) = pk_col {
-        sql.push_str(&format!(" RETURNING \"{}\"", pk));
+    // What the database decides is read back, on both dialects: the auto key
+    // left unset, then every generated column (ADR-0058).
+    let mut returning: Vec<String> = Vec::new();
+    if let Some(pk) = pk_col
+        && pk_is_auto
+        && !pk_provided
+    {
+        returning.push(pk.to_string());
     }
-    Ok((sql, values, needs_postgres_returning))
+    returning.extend(model.meta.generated_cols.iter().cloned());
+    let (mut sql, values) = sea_query_build_for_backend!(insert_stmt, backend);
+    push_returning(&mut sql, &returning);
+    Ok((sql, values, returning))
+}
+
+/// Append ` RETURNING "a", "b"` for `columns`; nothing when there are none.
+fn push_returning(sql: &mut String, columns: &[String]) {
+    if columns.is_empty() {
+        return;
+    }
+    let quoted: Vec<String> = columns
+        .iter()
+        .map(|col| ferro_ddl_lowering::quote_ident(col))
+        .collect();
+    sql.push_str(" RETURNING ");
+    sql.push_str(&quoted.join(", "));
+}
+
+/// The columns a `RETURNING` clause read back, decoded through the model's
+/// codec plan as a fetch decodes them; a Python `dict` across FFI.
+#[derive(Default)]
+struct ReturnedRow(Vec<(String, crate::state::RustValue)>);
+
+impl<'py> pyo3::IntoPyObject<'py> for ReturnedRow {
+    type Target = pyo3::types::PyDict;
+    type Output = Bound<'py, pyo3::types::PyDict>;
+    type Error = PyErr;
+
+    fn into_pyobject(self, py: Python<'py>) -> PyResult<Self::Output> {
+        let dict = pyo3::types::PyDict::new(py);
+        for (column, value) in self.0 {
+            dict.set_item(column, value.into_py_any(py)?)?;
+        }
+        Ok(dict)
+    }
+}
+
+/// The first `RETURNING` row; empty when the statement returned no row.
+fn returned_fields(rows: Vec<EngineRow>, model: &crate::state::RegisteredModel) -> ReturnedRow {
+    ReturnedRow(
+        typed_rows_to_parsed_data(rows, model, None)
+            .into_iter()
+            .next()
+            .map(|(_, fields)| fields)
+            .unwrap_or_default(),
+    )
 }
 
 /// SQL plan for `update_record`: either a real UPDATE, or — for models whose
@@ -2918,7 +2970,9 @@ fn build_update_by_pk_sql(
         return Ok(UpdateByPkSql::ExistenceCheck(sql, values));
     }
     update_stmt.and_where(Expr::col(Alias::new(pk)).eq(pk_expr));
-    let (sql, values) = sea_query_build_for_backend!(update_stmt, backend);
+    let (mut sql, values) = sea_query_build_for_backend!(update_stmt, backend);
+    // Every generated column is read back: an input may have changed.
+    push_returning(&mut sql, &model.meta.generated_cols);
     Ok(UpdateByPkSql::Update(sql, values))
 }
 
@@ -2935,6 +2989,10 @@ fn build_update_by_pk_sql(
 ///         ``bytes``/``bytearray`` values are preserved verbatim; all other
 ///         values are routed through the schema-guided casting authority.
 ///     mode (str): `"insert"` or `"upsert"`.
+///
+/// Returns:
+///     dict: The columns the INSERT read back with `RETURNING` (the unset
+///     auto key and every generated column), `{}` when it read none back.
 ///
 /// # Errors
 /// Returns a `PyErr` if the engine is not initialized, the model is not
@@ -2986,7 +3044,7 @@ pub fn save_record<'py>(
                 uuid_columns,
                 ts_cast,
             } = &*catalog;
-            let (sql, bind_values, needs_postgres_returning) = build_save_sql(
+            let (sql, bind_values, returning) = build_save_sql(
                 &schema,
                 &table_name,
                 &bind_inputs,
@@ -3000,26 +3058,17 @@ pub fn save_record<'py>(
             )?;
 
             let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
-            if needs_postgres_returning {
-                let rows = exec
-                    .fetch_all(&sql, &engine_bind_values)
+            if returning.is_empty() {
+                exec.execute(&sql, &engine_bind_values)
                     .await
                     .map_err(|e| crate::errors::map_db_error("Save failed", e))?;
-                // FF-G G4a: return the RETURNING value as decoded. A
-                // non-positive id is a legitimate PK (sequence MINVALUE
-                // <= 0); only a missing row / non-integer PK maps to None.
-                let id = rows
-                    .first()
-                    .and_then(|row| row.values.first())
-                    .and_then(|(_, value)| value.as_i64());
-                Ok(id)
-            } else {
-                let exec_res = exec
-                    .execute_result(&sql, &engine_bind_values)
-                    .await
-                    .map_err(|e| crate::errors::map_db_error("Save failed", e))?;
-                Ok(exec_res.last_insert_id)
+                return Ok(ReturnedRow::default());
             }
+            let rows = exec
+                .fetch_all(&sql, &engine_bind_values)
+                .await
+                .map_err(|e| crate::errors::map_db_error("Save failed", e))?;
+            Ok(returned_fields(rows, &schema))
         }
         .await;
 
@@ -3036,10 +3085,12 @@ pub fn save_record<'py>(
 ///         including the primary key (used for the WHERE filter, never SET).
 ///
 /// Returns:
-///     int: Rows matched. 0 means no row with that primary key exists any
-///     more — the Python layer raises `ModelDoesNotExist`. For models whose
-///     only column is the primary key there is nothing to SET; an existence
-///     check runs instead so the 0-means-gone contract holds.
+///     tuple[int, dict]: Rows matched, and the generated columns the UPDATE
+///     read back with `RETURNING` (`{}` when the model has none). 0 means no
+///     row with that primary key exists any more — the Python layer raises
+///     `ModelDoesNotExist`. For models whose only column is the primary key
+///     there is nothing to SET; an existence check runs instead so the
+///     0-means-gone contract holds.
 ///
 /// # Errors
 /// `PyValueError` when the model has no primary key or the primary-key value
@@ -3102,6 +3153,17 @@ pub fn update_record<'py>(
             )?;
 
             match plan {
+                UpdateByPkSql::Update(sql, bind_values)
+                    if !schema.meta.generated_cols.is_empty() =>
+                {
+                    let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
+                    let rows = exec
+                        .fetch_all(&sql, &engine_bind_values)
+                        .await
+                        .map_err(|e| crate::errors::map_db_error("Update failed", e))?;
+                    let matched = rows.len() as u64;
+                    Ok((matched, returned_fields(rows, &schema)))
+                }
                 UpdateByPkSql::Update(sql, bind_values) => {
                     let rows_affected = execute_statement_with_optional_tx(
                         &engine,
@@ -3111,7 +3173,7 @@ pub fn update_record<'py>(
                     )
                     .await
                     .map_err(|e| crate::errors::map_db_error("Update failed", e))?;
-                    Ok(rows_affected)
+                    Ok((rows_affected, ReturnedRow::default()))
                 }
                 UpdateByPkSql::ExistenceCheck(sql, bind_values) => {
                     let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
@@ -3124,7 +3186,7 @@ pub fn update_record<'py>(
                         .and_then(|row| row.values.first())
                         .and_then(|(_, value)| value.as_i64())
                         .unwrap_or(0);
-                    Ok(count.max(0) as u64)
+                    Ok((count.max(0) as u64, ReturnedRow::default()))
                 }
             }
         }
@@ -8671,7 +8733,7 @@ mod save_mode_sql_tests {
         pk_is_auto: bool,
         mode: SaveMode,
         backend: Dialect,
-    ) -> (String, sea_query::Values, bool) {
+    ) -> (String, sea_query::Values, Vec<String>) {
         build_save_sql(
             &crate::state::RegisteredModel::new_for_test(widget_schema(), "widget".to_string()),
             "widget",
@@ -8775,37 +8837,107 @@ mod save_mode_sql_tests {
             !sql.contains("ON CONFLICT"),
             "unset auto PK has nothing to conflict on: {sql}"
         );
+        let (insert, returning) = sql.split_once(" RETURNING ").expect("reads the key back");
         assert!(
-            !sql.contains("\"id\""),
+            !insert.contains("\"id\""),
             "unset auto PK must be omitted from the column list: {sql}"
         );
+        assert_eq!(returning, "\"id\"");
     }
 
     #[test]
     fn insert_mode_preserves_postgres_returning_for_auto_pk() {
-        let (sql, _, needs_returning) = build_save(
-            &widget_inputs(serde_json::Value::Null, "a"),
-            true,
-            SaveMode::Insert,
-            Dialect::Postgres,
-        );
-        assert!(
-            needs_returning,
-            "auto PK left unset needs RETURNING on postgres"
-        );
-        assert!(sql.contains("RETURNING \"id\""), "sql: {sql}");
+        for backend in [Dialect::Postgres, Dialect::Sqlite] {
+            let (sql, _, returning) = build_save(
+                &widget_inputs(serde_json::Value::Null, "a"),
+                true,
+                SaveMode::Insert,
+                backend,
+            );
+            assert_eq!(returning, ["id"], "auto PK left unset reads back on {backend:?}");
+            assert!(sql.ends_with(" RETURNING \"id\""), "sql: {sql}");
 
-        let (sql, _, needs_returning) = build_save(
-            &widget_inputs(serde_json::Value::Null, "a"),
-            true,
-            SaveMode::Insert,
-            Dialect::Sqlite,
-        );
-        assert!(
-            !needs_returning,
-            "sqlite uses last_insert_id, not RETURNING"
-        );
-        assert!(!sql.contains("RETURNING"), "sql: {sql}");
+            let (sql, _, returning) = build_save(
+                &widget_inputs(serde_json::json!(4), "a"),
+                true,
+                SaveMode::Insert,
+                backend,
+            );
+            assert!(returning.is_empty(), "a given key reads nothing back");
+            assert!(!sql.contains("RETURNING"), "sql: {sql}");
+        }
+    }
+
+    fn ledger_schema() -> serde_json::Value {
+        serde_json::json!({
+            "properties": {
+                "id": {"type": "integer", "primary_key": true, "autoincrement": true},
+                "amount_minor": {"type": "integer"},
+                "direction": {
+                    "type": "integer",
+                    "generated": {
+                        "kind": "func",
+                        "name": "sign",
+                        "args": [{"kind": "column", "name": "amount_minor"}]
+                    }
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn a_generated_column_is_read_back_by_insert_and_update_on_both_dialects() {
+        let model =
+            crate::state::RegisteredModel::new_for_test(ledger_schema(), "ledger".to_string());
+        let inputs = vec![
+            ("id".to_string(), BindInput::Json(serde_json::Value::Null)),
+            (
+                "amount_minor".to_string(),
+                BindInput::Json(serde_json::json!(-5)),
+            ),
+        ];
+        for backend in [Dialect::Postgres, Dialect::Sqlite] {
+            let (sql, _, returning) = build_save_sql(
+                &model,
+                "ledger",
+                &inputs,
+                Some("id"),
+                true,
+                SaveMode::Insert,
+                backend,
+                &HashMap::new(),
+                &HashSet::new(),
+                &HashMap::new(),
+            )
+            .expect("insert");
+            assert_eq!(returning, ["id", "direction"]);
+            assert!(
+                sql.ends_with(" RETURNING \"id\", \"direction\""),
+                "sql: {sql}"
+            );
+
+            let update_inputs = vec![
+                ("id".to_string(), BindInput::Json(serde_json::json!(1))),
+                (
+                    "amount_minor".to_string(),
+                    BindInput::Json(serde_json::json!(7)),
+                ),
+            ];
+            let UpdateByPkSql::Update(sql, _) = build_update_by_pk_sql(
+                &model,
+                "ledger",
+                &update_inputs,
+                Some("id"),
+                backend,
+                &HashMap::new(),
+                &HashSet::new(),
+                &HashMap::new(),
+            )
+            .expect("update") else {
+                panic!("expected an UPDATE");
+            };
+            assert!(sql.ends_with(" RETURNING \"direction\""), "sql: {sql}");
+        }
     }
 
     #[test]

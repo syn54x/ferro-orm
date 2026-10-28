@@ -4,6 +4,12 @@
 //! `ferro-migrate` and (eventually) the runtime schema emitter.
 
 mod policy_expr;
+mod value_expr;
+
+pub use value_expr::{
+    VALUE_FUNCTIONS, ValueFunction, ValueSignature, ValueType, render_generated_clause,
+    render_value_expr, value_expr_columns, value_function,
+};
 
 use std::collections::BTreeMap;
 
@@ -5185,6 +5191,7 @@ mod tests {
             enum_retired_labels: Default::default(),
             default_factory: None,
             retired: false,
+            generated: None,
         }
     }
 
@@ -5215,6 +5222,7 @@ mod tests {
             enum_retired_labels: Default::default(),
             default_factory: None,
             retired: false,
+            generated: None,
         }
     }
 
@@ -5506,6 +5514,7 @@ mod tests {
             enum_retired_labels: Default::default(),
             default_factory: None,
             retired: false,
+            generated: None,
         };
         assert_eq!(
             logical_canonical_from_schema_column(&col, Dialect::Postgres),
@@ -5539,6 +5548,7 @@ mod tests {
             enum_retired_labels: Default::default(),
             default_factory: None,
             retired: false,
+            generated: None,
         };
         assert!(logical_canonical_from_schema_column(&col, Dialect::Postgres).is_err());
     }
