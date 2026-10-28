@@ -13,12 +13,14 @@ use crate::backend::EngineHandle;
 use crate::introspect::{
     LiveCheck, LiveColumn, LiveForeignKey, LiveIndex, live_enum_type_labels, live_table_checks,
     live_table_columns, live_table_foreign_keys, live_table_indexes, live_table_names,
-    live_table_row_security,
+    live_table_row_security, postgres_table_hidden_by_privilege, printed_pairs,
 };
 use ferro_ddl_lowering::{Dialect, LiveRowSecurity, information_schema_to_db_type_token};
 use ferro_migrate::plan::live_table_hints;
+use ferro_migrate::plan::renamed_value_expr;
 use ferro_migrate::{
-    Hint, HintError, LiveCheckFact, LiveFacts, LiveFkValidity, LiveIndexValidity, LiveTableFacts,
+    Hint, HintError, LiveCheckFact, LiveFacts, LiveFkValidity, LiveGeneratedFact,
+    LiveIndexValidity, LiveTableFacts, PrintedPair,
 };
 use ferro_schema_ir::{
     IrEnvelope, SchemaColumn, SchemaForeignKey, SchemaIndex, SchemaIrPayload, SchemaModel,
@@ -35,6 +37,9 @@ pub(crate) struct LiveTable {
     pub foreign_keys: Vec<LiveForeignKey>,
     pub checks: Vec<LiveCheck>,
     pub row_security: LiveRowSecurity,
+    /// Postgres: each generated column's printed pair, by column
+    /// ([`declared_pairs`]).
+    pub printed: BTreeMap<String, PrintedPair>,
 }
 
 /// Convert introspected tables (and the live enum types' labels) into the
@@ -198,7 +203,87 @@ fn table_facts(table: &LiveTable) -> LiveTableFacts {
             })
             .collect(),
         row_security: table.row_security.clone(),
+        generated: table
+            .columns
+            .iter()
+            .filter_map(|col| {
+                Some(LiveGeneratedFact {
+                    column: col.name.clone(),
+                    stored: col.generated_kind.as_deref()? == "stored",
+                    catalog: col.generation_expression.clone().unwrap_or_default(),
+                    printed: table.printed.get(&col.name).cloned(),
+                })
+            })
+            .collect(),
     }
+}
+
+/// The `(column, declared rendering, catalog reprint)` of every generated
+/// column of the live table `table` (its `columns`) that `declared` declares
+/// generated, for Postgres to print side by side (ADR-0060). The declared
+/// table and column are found by name or by their rename hint, and the
+/// expression is rendered under the live names, a rename of the same change
+/// reversed. A declared column or an input the live table lacks gets no
+/// pair: the plan adds or changes the column instead.
+fn declared_pairs(
+    declared: &IrEnvelope<SchemaIrPayload>,
+    table: &str,
+    columns: &[LiveColumn],
+) -> Vec<(String, String, String)> {
+    let Some(model) = [false, true].into_iter().find_map(|by_hint| {
+        declared.payload.models.iter().find(|model| {
+            if by_hint {
+                model.renamed_from.as_deref() == Some(table)
+            } else {
+                model.table_name == table
+            }
+        })
+    }) else {
+        return Vec::new();
+    };
+    let live = |name: &str| columns.iter().any(|col| col.name == name);
+    let live_name = |name: &str| -> Option<String> {
+        let col = model.columns.iter().find(|col| col.name == name)?;
+        [Some(&col.name), col.renamed_from.as_ref()]
+            .into_iter()
+            .flatten()
+            .find(|name| live(name))
+            .cloned()
+    };
+    let live_columns: Vec<SchemaColumn> = model
+        .columns
+        .iter()
+        .map(|col| SchemaColumn {
+            name: live_name(&col.name).unwrap_or_else(|| col.name.clone()),
+            ..col.clone()
+        })
+        .collect();
+    model
+        .columns
+        .iter()
+        .filter_map(|col| {
+            let expr = col.generated.as_ref()?;
+            let column = live_name(&col.name)?;
+            let catalog = columns
+                .iter()
+                .find(|live| live.name == column)?
+                .generation_expression
+                .clone()?;
+            let inputs_live = ferro_ddl_lowering::value_expr_columns(expr)
+                .iter()
+                .all(|input| live_name(input).is_some());
+            if !inputs_live {
+                return None;
+            }
+            let renamed = renamed_value_expr(expr, &|input| {
+                live_name(input).unwrap_or_else(|| input.to_string())
+            });
+            let rendered =
+                ferro_ddl_lowering::render_value_expr(&renamed, Dialect::Postgres, &live_columns)
+                    .ok()?;
+            Some((column, rendered, catalog))
+        })
+        .collect()
 }
 
 /// The live tables a read planned against `declared` covers: every declared
@@ -254,22 +339,51 @@ fn select_tables_to_read(
 }
 
 /// Read the live tables named in `tables` ([`tables_to_read`]) into the
-/// planner's input, plus every live enum type's labels on Postgres.
+/// planner's input, plus every live enum type's labels on Postgres, for a
+/// plan toward `declared`: on Postgres each generated column `declared`
+/// declares generated too carries its printed pair ([`printed_pairs`], one
+/// read-only `EXPLAIN` per table that has any, ADR-0060), so the planner
+/// compares strings and does no I/O.
 ///
 /// # Errors
-/// A `PyErr` when an introspection query fails.
+/// A `PyErr` when an introspection query fails; on Postgres,
+/// `OperationalError` naming the `GRANT SELECT` a table needs when the role
+/// cannot read it.
 pub async fn live_schema_ir(
     engine: &EngineHandle,
+    declared: &IrEnvelope<SchemaIrPayload>,
     tables: &[String],
 ) -> PyResult<(IrEnvelope<SchemaIrPayload>, LiveFacts)> {
+    let postgres = engine.backend() == Dialect::Postgres;
     let mut live = Vec::with_capacity(tables.len());
     for name in tables {
         // A table dropped since `tables_to_read` asked reads as absent, so
-        // the planner plans it as an add.
+        // the planner plans it as an add. One the role cannot see the
+        // columns of is refused, naming the GRANT.
         let Some(columns) = live_table_columns(engine, name).await? else {
+            if postgres && postgres_table_hidden_by_privilege(engine, name).await? {
+                printed_pairs(engine, name, &[]).await?;
+            }
             continue;
         };
+        let mut printed = BTreeMap::new();
+        if postgres {
+            let pairs = declared_pairs(declared, name, &columns);
+            if !pairs.is_empty() {
+                let asked: Vec<(String, String)> = pairs
+                    .iter()
+                    .map(|(_, rendered, catalog)| (rendered.clone(), catalog.clone()))
+                    .collect();
+                let answers = printed_pairs(engine, name, &asked).await?;
+                printed = pairs
+                    .into_iter()
+                    .map(|(column, ..)| column)
+                    .zip(answers)
+                    .collect();
+            }
+        }
         live.push(LiveTable {
+            printed,
             columns,
             indexes: live_table_indexes(engine, name).await?,
             foreign_keys: live_table_foreign_keys(engine, name).await?,
@@ -340,7 +454,7 @@ pub fn _live_schema_ir(
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let engine = crate::state::engine_for_connection(using)?;
         let tables = tables_to_read(&engine, &declared, &[], &extra).await?;
-        let (envelope, facts) = live_schema_ir(&engine, &tables).await?;
+        let (envelope, facts) = live_schema_ir(&engine, &declared, &tables).await?;
         let to_json = |value: serde_json::Result<String>| {
             value.map_err(|e| {
                 pyo3::exceptions::PyRuntimeError::new_err(format!(
@@ -371,6 +485,8 @@ mod tests {
             enum_type_name: None,
             column_default: None,
             owns_sequence: false,
+            generated_kind: None,
+            generation_expression: None,
         }
     }
 
@@ -403,6 +519,7 @@ mod tests {
                 validated: false,
                 column: Some("title".to_string()),
             }],
+            printed: BTreeMap::new(),
             row_security: LiveRowSecurity {
                 enabled: true,
                 forced: false,

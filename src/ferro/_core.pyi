@@ -614,7 +614,15 @@ async def _live_schema_ir(
 
     Returns ``(ir_json, facts_json)``: a ``schema`` IR envelope with one model
     per table read and the live facts the IR cannot carry — CHECK and policy
-    bodies as the catalog prints them, validity flags, enum labels.
+    bodies as the catalog prints them, validity flags, enum labels, and each
+    generated column (``generated``: its column, whether it is stored, the
+    catalog's expression and, on Postgres, the ``printed`` pair of the
+    declared rendering and the catalog's reprint as one read-only
+    ``EXPLAIN`` printed them, ADR-0060).
+
+    Raises ``ferro.exceptions.OperationalError`` (sqlstate ``42501``) naming
+    ``GRANT SELECT ON "<table>" TO <role>`` when the role cannot read a
+    Postgres table it compares.
     """
     ...
 
