@@ -100,7 +100,7 @@ def test_a_number_expression_on_an_int_field_names_both():
         class Line(Model):
             id: int | None = Field(default=None, primary_key=True)
             price: float
-            total: int = Field(generated=lambda line: line.price * 2)
+            total: int = Field(generated=lambda line: line.price + 1)
 
 
 def test_an_integer_expression_on_a_float_field_names_both():
@@ -140,6 +140,31 @@ def test_a_function_on_the_wrong_argument_type_lists_its_signatures():
             id: int | None = Field(default=None, primary_key=True)
             qty: int
             size: int = Field(generated=lambda line: fn.length(line.qty))
+
+
+def test_float_multiplication_and_division_are_refused_naming_integers():
+    with pytest.raises(TypeError, match=r"underflow.*minor units"):
+
+        class Line(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            price: float
+            doubled: float = Field(generated=lambda line: line.price * 2)
+
+    with pytest.raises(TypeError, match=r"underflow.*minor units"):
+
+        class Rate(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            qty: int
+            share: float = Field(generated=lambda rate: rate.qty / 2.5)
+
+
+def test_float_addition_and_negation_are_accepted():
+    class Line(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        price: float
+        shifted: float = Field(generated=lambda line: -line.price + 1.5)
+
+    assert Line.__ferro_generated__ == {"shifted": frozenset({"price"})}
 
 
 def test_decimal_arithmetic_is_refused_naming_floating_point():

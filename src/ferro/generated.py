@@ -178,6 +178,14 @@ def _arithmetic_type(
         shown = ", ".join(sorted(families))
         raise TypeError(f"{op!r} takes integers and floats, not {shown}")
     family = "integer" if families == {"integer"} else "number"
+    if family == "number" and op in ("*", "/"):
+        raise TypeError(
+            f"{op!r} over a float: Postgres raises when a float product or "
+            "quotient underflows to zero where SQLite stores 0.0, so the "
+            "databases would disagree; keep the arithmetic in integers (an "
+            "amount in minor units, such as amount_minor) or compute the "
+            "value in the application"
+        )
     return family, left[1] or right[1]
 
 

@@ -315,7 +315,7 @@ def _declare_arithmetic() -> type[Model]:
         a: int
         x: float
         whole: int = Field(generated=lambda sample: (sample.a - 1) * 3 / 2)
-        part: float = Field(generated=lambda sample: -sample.x / 4 + sample.a)
+        part: float = Field(generated=lambda sample: -sample.x + sample.a)
         day_class: int = Field(generated=lambda sample: fn.least(fn.abs(sample.a), 28))
 
     return Sample
@@ -340,7 +340,7 @@ async def test_arithmetic_truncates_and_rounds_alike(db_url: str, tmp_path):
     sqlite = await stored(f"sqlite:{tmp_path / 'arith.db'}?mode=rwc")
     postgres = await stored(db_url)
     # -21 / 2 truncates toward zero on both databases.
-    assert sqlite == postgres == [(-10, -6.025, 6), (45, 31.625, 28)]
+    assert sqlite == postgres == [(-10, -6.1, 6), (45, 33.5, 28)]
 
 
 def _sum_model(storage: str | None) -> type[Model]:
@@ -364,11 +364,11 @@ def _abs_model() -> type[Model]:
     return Ledger
 
 
-def _square_model() -> type[Model]:
+def _doubled_model() -> type[Model]:
     class Ledger(Model):
         id: int | None = Field(default=None, primary_key=True)
         a: float
-        total: float = Field(generated=lambda ledger: ledger.a * ledger.a)
+        total: float = Field(generated=lambda ledger: ledger.a + ledger.a)
 
     return Ledger
 
@@ -401,10 +401,10 @@ OVERFLOWS = {
         2**63 - 1,
     ),
     "float past the largest double": (
-        _square_model,
-        {"a": 1e200},
-        {"a": 1e154},
-        1e308,
+        _doubled_model,
+        {"a": 1e308},
+        {"a": 8e307},
+        1.6e308,
     ),
 }
 
