@@ -7,8 +7,8 @@ mod policy_expr;
 mod value_expr;
 
 pub use value_expr::{
-    VALUE_FUNCTIONS, ValueFunction, ValueSignature, ValueType, render_generated_clause,
-    render_value_expr, value_expr_columns, value_function,
+    NullRule, VALUE_FUNCTIONS, ValueFunction, ValueSignature, ValueType, render_generated_clause,
+    render_sqlite_integer_guard, render_value_expr, value_expr_columns, value_function,
 };
 
 use std::collections::BTreeMap;

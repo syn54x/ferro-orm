@@ -948,21 +948,63 @@ fn render_create_table_writes_a_generated_column_stored_with_no_default() {
             pk_col("id", "bigint"),
         ],
     );
-    for dialect in [Dialect::Sqlite, Dialect::Postgres] {
+    for (dialect, guard) in [
+        (
+            Dialect::Sqlite,
+            " check (typeof(\"direction\") in ('integer', 'null'))",
+        ),
+        (Dialect::Postgres, ""),
+    ] {
         let sql = render_create_table(&model, dialect)
             .expect("renders")
             .create_sql;
-        let column = sql
-            .split(", ")
-            .find(|part| part.starts_with("\"direction\""))
-            .unwrap_or_else(|| panic!("{sql}"));
-        assert_eq!(
-            column.to_lowercase(),
-            "\"direction\" bigint not null generated always as (sign(\"amount_minor\")) stored",
+        let expected = format!(
+            "\"direction\" bigint not null generated always as (sign(\"amount_minor\")) stored{guard}, "
+        );
+        assert!(
+            sql.to_lowercase().contains(&expected),
             "{dialect:?}: {sql}"
         );
         assert!(!sql.contains("DEFAULT"), "{sql}");
     }
+}
+
+#[test]
+fn render_create_table_guards_only_an_integer_generated_column_on_sqlite() {
+    let generated = |name: &str, db_type: &str, logical: &str| SchemaColumn {
+        logical_type: logical.to_string(),
+        generated: Some(ferro_schema_ir::ValueExpr::Column {
+            name: "amount".to_string(),
+        }),
+        ..col(name, db_type, true)
+    };
+    let model = schema_model(
+        "line",
+        vec![
+            pk_col("id", "bigint"),
+            col("amount", "int", false),
+            generated("copied", "int", "integer"),
+            generated("small", "smallint", "integer"),
+            generated("ratio", "double", "number"),
+            generated("flag", "boolean", "boolean"),
+        ],
+    );
+    let sqlite = render_create_table(&model, Dialect::Sqlite)
+        .expect("renders")
+        .create_sql;
+    for column in ["copied", "small"] {
+        assert!(
+            sqlite.contains(&ferro_ddl_lowering::render_sqlite_integer_guard(column)),
+            "{sqlite}"
+        );
+    }
+    for column in ["ratio", "flag", "amount"] {
+        assert!(!sqlite.contains(&format!("typeof(\"{column}\")")), "{sqlite}");
+    }
+    let postgres = render_create_table(&model, Dialect::Postgres)
+        .expect("renders")
+        .create_sql;
+    assert!(!postgres.contains("typeof"), "{postgres}");
 }
 
 #[test]
