@@ -4521,11 +4521,28 @@ pub fn update_filtered<'py>(
         let exec = Executor::new(scope.connection(), &engine);
 
         let outcome = async {
+            // With no `+` / `-` in the SET, only a generated expression
+            // computes, so an overflow is one of them; otherwise it may be
+            // the SET's own arithmetic, and the error names no column.
+            let generated = if plan.set_assignments.iter().any(|set| {
+                matches!(
+                    set.value,
+                    ferro_schema_ir::QueryValueExpr::Add { .. }
+                        | ferro_schema_ir::QueryValueExpr::Sub { .. }
+                )
+            }) {
+                Vec::new()
+            } else {
+                crate::state::registered_model(&name)?
+                    .meta
+                    .generated_cols
+                    .clone()
+            };
             let statement = build_update(&mut plan, &name, &engine, exec, backend).await?;
             let rows_affected = exec
                 .execute(&statement.sql, &statement.binds)
                 .await
-                .map_err(|e| crate::errors::map_db_error("Update failed", e))?;
+                .map_err(|e| crate::errors::map_write_error("Update failed", e, &generated))?;
 
             // After bulk update, we MUST clear the Identity Map for this model to avoid stale objects
             // Re-acquire the GIL before accessing identity map (async context has no GIL).

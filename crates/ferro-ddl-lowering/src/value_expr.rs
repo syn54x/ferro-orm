@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 use ferro_schema_ir::{ValueBinaryOp, ValueExpr};
 use serde::Serialize;
 
-use crate::{Dialect, quote_ident};
+use crate::{CanonicalType, Dialect, quote_ident};
 
 /// The value families a function admits and returns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -264,6 +264,39 @@ pub fn render_sqlite_integer_guard(column: &str) -> String {
     )
 }
 
+/// The SQLite column check a generated column of Postgres storage `storage`
+/// carries, or `None` for a type whose values cannot overflow.
+///
+/// Postgres raises when a computed value does not fit the column
+/// (`smallint out of range` at 2^15, `integer out of range` at 2^31, `bigint
+/// out of range` at 2^63, `value out of range: overflow` past the largest
+/// double). SQLite has 64-bit integers and stores an overflowing float as
+/// `inf`, so the check enforces Postgres's range and the same row fails on
+/// both. `NULL` passes, as it does for every check.
+pub fn render_sqlite_storage_guard(column: &str, storage: CanonicalType) -> Option<String> {
+    let quoted = quote_ident(column);
+    let integer_range = |low: i64, high: i64| {
+        format!(
+            "CHECK (typeof({quoted}) IN ('integer', 'null') AND {quoted} BETWEEN {low} AND {high})"
+        )
+    };
+    match storage {
+        CanonicalType::SmallInt => Some(integer_range(i16::MIN.into(), i16::MAX.into())),
+        CanonicalType::Integer => Some(integer_range(i32::MIN.into(), i32::MAX.into())),
+        CanonicalType::BigInt => Some(render_sqlite_integer_guard(column)),
+        CanonicalType::Double => Some(format!("CHECK (abs({quoted}) <= {max:e})", max = f64::MAX)),
+        _ => None,
+    }
+}
+
+/// The storage types [`render_sqlite_storage_guard`] guards.
+pub const GUARDED_STORAGE: [CanonicalType; 4] = [
+    CanonicalType::SmallInt,
+    CanonicalType::Integer,
+    CanonicalType::BigInt,
+    CanonicalType::Double,
+];
+
 /// Every column the expression reads.
 pub fn value_expr_columns(expr: &ValueExpr) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
@@ -498,6 +531,31 @@ mod tests {
         assert_eq!(
             render_sqlite_integer_guard("total"),
             "CHECK (typeof(\"total\") IN ('integer', 'null'))"
+        );
+    }
+
+    #[test]
+    fn the_sqlite_storage_guard_enforces_the_postgres_range() {
+        assert_eq!(
+            render_sqlite_storage_guard("n", CanonicalType::SmallInt).unwrap(),
+            "CHECK (typeof(\"n\") IN ('integer', 'null') AND \"n\" BETWEEN -32768 AND 32767)"
+        );
+        assert_eq!(
+            render_sqlite_storage_guard("n", CanonicalType::Integer).unwrap(),
+            "CHECK (typeof(\"n\") IN ('integer', 'null') AND \"n\" BETWEEN -2147483648 AND 2147483647)"
+        );
+        assert_eq!(
+            render_sqlite_storage_guard("n", CanonicalType::BigInt).unwrap(),
+            render_sqlite_integer_guard("n")
+        );
+        assert_eq!(
+            render_sqlite_storage_guard("x", CanonicalType::Double).unwrap(),
+            "CHECK (abs(\"x\") <= 1.7976931348623157e308)"
+        );
+        assert_eq!(render_sqlite_storage_guard("t", CanonicalType::Text), None);
+        assert_eq!(
+            render_sqlite_storage_guard("b", CanonicalType::Boolean),
+            None
         );
     }
 

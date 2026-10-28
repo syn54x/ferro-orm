@@ -2,14 +2,14 @@
 
 use crate::{Dialect, EmissionError, EmissionResult};
 use ferro_ddl_lowering::{
-    self, CanonicalType, CheckEmission, ConstraintMode, IndexMode, ResolvedStorage,
-    apply_canonical_type_for, canonical_from_schema_column, canonical_to_db_type_token,
-    db_check_constraint_name, fk_action_from_str, fk_action_sql, fk_name, literal_default_value,
-    pg_alter_type_target, quote_ident, refused_conversion_warning, refused_scalar_conversion,
-    render_db_check, render_generated_clause, render_json_backfill_default,
-    render_pg_enum_create_type, render_sqlite_add_column_references, render_sqlite_integer_guard,
-    render_table_check_body, resolve_column_storage, row_security_statements, single_index_name,
-    single_unique_index_name, sqlite_declared_type, sqlite_type_storage_drift,
+    self, CheckEmission, ConstraintMode, IndexMode, ResolvedStorage, apply_canonical_type_for,
+    canonical_from_schema_column, canonical_to_db_type_token, db_check_constraint_name,
+    fk_action_from_str, fk_action_sql, fk_name, literal_default_value, pg_alter_type_target,
+    quote_ident, refused_conversion_warning, refused_scalar_conversion, render_db_check,
+    render_generated_clause, render_json_backfill_default, render_pg_enum_create_type,
+    render_sqlite_add_column_references, render_sqlite_storage_guard, render_table_check_body,
+    resolve_column_storage, row_security_statements, single_index_name, single_unique_index_name,
+    sqlite_declared_type, sqlite_type_storage_drift,
 };
 use ferro_ddl_lowering::{InPlaceChange, Report, Subject, sqlite_in_place_report};
 use ferro_schema_ir::{SchemaColumn, SchemaModel};
@@ -256,18 +256,16 @@ pub fn render_create_table_as(
                     ),
                 }
             })?);
-            // SQLite stores an overflowing integer as a real; the guard makes
-            // it fail as Postgres does (value parity covers failures).
+            // SQLite has 64-bit integers and stores an overflowing float as
+            // inf; the guard enforces the range Postgres stores, so a value
+            // that fails there fails here (value parity covers failures).
             if dialect == Dialect::Sqlite
-                && col.logical_type != "boolean"
-                && matches!(
-                    storage,
-                    ResolvedStorage::Scalar(
-                        CanonicalType::Integer | CanonicalType::SmallInt | CanonicalType::BigInt
-                    )
-                )
+                && let ResolvedStorage::Scalar(pg_storage) =
+                    resolve_column_storage(col, Dialect::Postgres)
+                        .map_err(|message| EmissionError { message })?
+                && let Some(guard) = render_sqlite_storage_guard(&col.name, pg_storage)
             {
-                col_def.extra(render_sqlite_integer_guard(&col.name));
+                col_def.extra(guard);
             }
         }
         // A SQLite db_check rides its column's definition as a named column

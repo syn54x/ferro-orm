@@ -343,41 +343,124 @@ async def test_arithmetic_truncates_and_rounds_alike(db_url: str, tmp_path):
     assert sqlite == postgres == [(-10, -6.025, 6), (45, 31.625, 28)]
 
 
-def _declare_overflow() -> tuple[type[Model], type[Model]]:
+def _sum_model(storage: str | None) -> type[Model]:
+    options = {"db_type": storage} if storage else {}
+
+    class Ledger(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        a: int = Field(**options)
+        b: int = Field(**options)
+        total: int = Field(generated=lambda ledger: ledger.a + ledger.b, **options)
+
+    return Ledger
+
+
+def _abs_model() -> type[Model]:
     class Ledger(Model):
         id: int | None = Field(default=None, primary_key=True)
         a: int = Field(db_type="bigint")
-        b: int = Field(db_type="bigint")
-        total: int = Field(
-            generated=lambda ledger: ledger.a + ledger.b, db_type="bigint"
-        )
+        total: int = Field(generated=lambda ledger: fn.abs(ledger.a), db_type="bigint")
 
-    class Magnitude(Model):
+    return Ledger
+
+
+def _square_model() -> type[Model]:
+    class Ledger(Model):
         id: int | None = Field(default=None, primary_key=True)
-        a: int = Field(db_type="bigint")
-        size: int = Field(
-            generated=lambda magnitude: fn.abs(magnitude.a), db_type="bigint"
-        )
+        a: float
+        total: float = Field(generated=lambda ledger: ledger.a * ledger.a)
 
-    return Ledger, Magnitude
+    return Ledger
+
+
+#: (declare, the row that overflows, the largest row that fits, its value).
+OVERFLOWS = {
+    "int at 2**31": (
+        lambda: _sum_model(None),
+        {"a": 2**31 - 1, "b": 1},
+        {"a": 2**31 - 2, "b": 1},
+        2**31 - 1,
+    ),
+    "smallint at 2**15": (
+        lambda: _sum_model("smallint"),
+        {"a": 2**15 - 1, "b": 1},
+        {"a": -(2**15) + 1, "b": -1},
+        -(2**15),
+    ),
+    "bigint at 2**63": (
+        lambda: _sum_model("bigint"),
+        {"a": 2**63 - 1, "b": 1},
+        {"a": 2**62, "b": 2**62 - 1},
+        2**63 - 1,
+    ),
+    # The smallest bigint has no bigint absolute value.
+    "abs of the smallest bigint": (
+        _abs_model,
+        {"a": -(2**63)},
+        {"a": -(2**63) + 1},
+        2**63 - 1,
+    ),
+    "float past the largest double": (
+        _square_model,
+        {"a": 1e200},
+        {"a": 1e154},
+        1e308,
+    ),
+}
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("name", list(OVERFLOWS))
 async def test_an_overflowing_generated_value_raises_data_error_naming_it(
-    db_url: str, tmp_path
+    name: str, db_url: str, tmp_path
 ):
-    Ledger, Magnitude = _declare_overflow()
+    declare, overflowing, fitting, value = OVERFLOWS[name]
+    Ledger = declare()
     for url in (f"sqlite:{tmp_path / 'overflow.db'}?mode=rwc", db_url):
         await ferro.connect(url, auto_migrate=True)
         try:
             async with ferro.engines.session():
                 with pytest.raises(DataError, match=r'generated column "total"'):
-                    await Ledger(a=2**63 - 1, b=1).save()
-                # The smallest bigint has no bigint absolute value.
-                with pytest.raises(DataError, match=r'generated column "size"'):
-                    await Magnitude(a=-(2**63)).save()
-                fine = Ledger(a=2**62, b=2**62 - 1)
+                    await Ledger(**overflowing).save()
+                fine = Ledger(**fitting)
                 await fine.save()
-                assert fine.total == 2**63 - 1
+                assert fine.total == pytest.approx(value, rel=1e-12)
+        finally:
+            ferro.reset_engine()
+
+
+@pytest.mark.asyncio
+async def test_a_nullable_generated_integer_admits_null(db_url: str, tmp_path):
+    class Ledger(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        a: int | None = None
+        total: int | None = Field(generated=lambda ledger: ledger.a + 1)
+
+    for url in (f"sqlite:{tmp_path / 'null.db'}?mode=rwc", db_url):
+        await ferro.connect(url, auto_migrate=True)
+        try:
+            async with ferro.engines.session():
+                empty = Ledger()
+                await empty.save()
+                assert empty.total is None
+        finally:
+            ferro.reset_engine()
+
+
+@pytest.mark.asyncio
+async def test_a_query_update_that_overflows_names_the_generated_column(
+    db_url: str, tmp_path
+):
+    Ledger = _sum_model(None)
+    for url in (f"sqlite:{tmp_path / 'update.db'}?mode=rwc", db_url):
+        await ferro.connect(url, auto_migrate=True)
+        try:
+            async with ferro.engines.session():
+                await Ledger(a=1, b=1).save()
+                query = Ledger.where(lambda ledger: ledger.b == 1)
+                with pytest.raises(DataError, match=r'generated column "total"'):
+                    await query.update(a=2**31 - 1)
+                with pytest.raises(DataError, match=r'generated column "total"'):
+                    await query.update(lambda ledger: {"a": 2**31 - 1})
         finally:
             ferro.reset_engine()

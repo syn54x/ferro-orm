@@ -967,7 +967,7 @@ fn render_create_table_writes_a_generated_column_stored_with_no_default() {
 }
 
 #[test]
-fn render_create_table_guards_only_an_integer_generated_column_on_sqlite() {
+fn render_create_table_guards_a_numeric_generated_column_with_its_postgres_range_on_sqlite() {
     let generated = |name: &str, db_type: &str, logical: &str| SchemaColumn {
         logical_type: logical.to_string(),
         generated: Some(ferro_schema_ir::ValueExpr::Column {
@@ -989,13 +989,15 @@ fn render_create_table_guards_only_an_integer_generated_column_on_sqlite() {
     let sqlite = render_create_table(&model, Dialect::Sqlite)
         .expect("renders")
         .create_sql;
-    for column in ["copied", "small"] {
-        assert!(
-            sqlite.contains(&ferro_ddl_lowering::render_sqlite_integer_guard(column)),
-            "{sqlite}"
-        );
+    for (column, storage) in [
+        ("copied", ferro_ddl_lowering::CanonicalType::Integer),
+        ("small", ferro_ddl_lowering::CanonicalType::SmallInt),
+        ("ratio", ferro_ddl_lowering::CanonicalType::Double),
+    ] {
+        let guard = ferro_ddl_lowering::render_sqlite_storage_guard(column, storage).unwrap();
+        assert!(sqlite.contains(&guard), "{sqlite}");
     }
-    for column in ["ratio", "flag", "amount"] {
+    for column in ["flag", "amount"] {
         assert!(
             !sqlite.contains(&format!("typeof(\"{column}\")")),
             "{sqlite}"
