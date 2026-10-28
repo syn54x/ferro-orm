@@ -407,3 +407,34 @@ def test_the_json_schema_carries_no_lambda():
     Transaction = declare_transaction()
     schema = json.dumps(Transaction.model_json_schema())
     assert "direction" in schema
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.asyncio
+async def test_a_generated_column_over_the_auto_key_holds_its_value_after_insert(
+    db_url,
+):
+    class Order(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        label: str
+        ref: int = Field(generated=lambda order: order.id * 1000)
+
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        order = Order(label="first")
+        await order.save()
+        assert (order.id, order.ref) == (1, 1000)
+
+
+def test_ferro_field_takes_generated_in_annotated_style():
+    class Transaction(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        amount_minor: int
+        direction: Annotated[
+            int,
+            FerroField(generated=lambda transaction: fn.sign(transaction.amount_minor)),
+        ] = None  # type: ignore[assignment]
+
+    assert Transaction.__ferro_generated__ == {"direction": frozenset({"amount_minor"})}
+    assert _column("transaction", "direction")["generated"]["name"] == "sign"
+    assert Transaction(amount_minor=3).direction is None

@@ -542,9 +542,6 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         pk_val = None
         pk_field_name = self.__class__.__ferro_pk__
         new_id = returned.pop(pk_field_name, None) if pk_field_name else None
-        # The generated columns hold what the database computed; written
-        # straight to the instance, never marked as set by the caller.
-        self.__dict__.update(returned)
 
         if pk_field_name is not None:
             spec = self.__class__.__ferro_columns__[pk_field_name]
@@ -555,6 +552,11 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             ):
                 setattr(self, pk_field_name, new_id)
             pk_val = getattr(self, pk_field_name)
+        # The generated columns hold what the database computed, written
+        # straight to the instance and never marked as set by the caller. They
+        # go in after the key: assigning the key clears every generated column
+        # that reads it.
+        self.__dict__.update(returned)
 
         if pk_val is not None:
             register_instance(
