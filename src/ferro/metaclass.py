@@ -18,7 +18,7 @@ from typing import (
 from pydantic import AfterValidator, BaseModel, SecretBytes, SecretStr, ValidationError
 from pydantic import Field as PydanticField
 from pydantic.fields import FieldInfo
-from pydantic_core import PydanticCustomError
+from pydantic_core import PydanticCustomError, PydanticUndefined
 
 from ._annotation_utils import (
     _strip_optional_union as _annotation_utils_strip_optional_union,
@@ -292,6 +292,7 @@ class ModelMetaclass(type(BaseModel)):
         ferro_fields = mcs._parse_ferro_field_metadata(cls)
         cls.ferro_fields = ferro_fields
         mcs._validate_db_type_options(cls, ferro_fields)
+        mcs._validate_generated_options(cls, ferro_fields)
         mcs._retire_fields(cls, retired_relations)
         mcs._inject_relation_descriptors(cls, local_relations)
         mcs._generate_and_register_schema(cls, cls.__ferro_identity__)
@@ -931,6 +932,40 @@ class ModelMetaclass(type(BaseModel)):
                         f"closed-domain types (enum.Enum subclasses). "
                         f"Annotation {annotation!r} is not closed-domain."
                     )
+
+    @staticmethod
+    def _validate_generated_options(cls, ferro_fields: dict) -> None:
+        """Refuse `generated=` beside an option the database cannot honour.
+
+        A generated column's value comes only from its expression, so it has
+        no key, sequence, default or enum check of its own.
+        """
+        for field_name, metadata in ferro_fields.items():
+            if getattr(metadata, "generated", None) is None:
+                continue
+            field_info = cls.model_fields[field_name]
+            conflicts = [
+                option
+                for option, declared in (
+                    ("primary_key=True", metadata.primary_key),
+                    ("autoincrement=True", metadata.autoincrement),
+                    ("db_check=True", metadata.db_check),
+                    (
+                        "default=",
+                        field_info.default is not None
+                        and field_info.default is not PydanticUndefined
+                        or field_info.default_factory is not None,
+                    ),
+                )
+                if declared
+            ]
+            if conflicts:
+                raise TypeError(
+                    f"{cls.__name__}.{field_name} is a generated column, so it "
+                    f"cannot also take {conflicts[0]}: the database computes "
+                    f"its value from the expression; drop {conflicts[0]} or "
+                    "generated="
+                )
 
     @staticmethod
     def _inject_relation_descriptors(cls, local_relations: dict) -> None:

@@ -30,20 +30,144 @@ from typing import Any
 
 from .query.nodes import FuncValueExpr
 
-__all__ = ["sign"]
+__all__ = [
+    "abs",
+    "coalesce",
+    "day",
+    "greatest",
+    "least",
+    "length",
+    "month",
+    "sign",
+    "year",
+]
 
 
 def sign(value: Any) -> Any:
     """Return -1, 0 or 1 by the sign of a number.
 
     Args:
-        value: A numeric column or expression.
+        value: An integer, float or decimal column or expression.
 
     Returns:
-        The expression the database computes, which is `-1` for a negative
-            value, `0` for zero and `1` for a positive one.
+        The expression the database computes, of the argument's type: `-1`
+            for a negative value, `0` for zero and `1` for a positive one.
     """
     return FuncValueExpr("sign", (value,))
+
+
+def abs(value: Any) -> Any:  # noqa: A001 - the SQL function's name
+    """Return a number without its sign.
+
+    Args:
+        value: An integer, float or decimal column or expression.
+
+    Returns:
+        The expression the database computes, of the argument's type.
+    """
+    return FuncValueExpr("abs", (value,))
+
+
+def least(first: Any, second: Any, *more: Any) -> Any:
+    """Return the smallest of two or more numbers or dates.
+
+    Every argument must be non-nullable, since the two databases disagree on
+    a `NULL`; wrap a nullable column in [`coalesce`][ferro.fn.coalesce].
+    Text is not accepted: Postgres orders it by collation and SQLite byte by
+    byte.
+
+    Args:
+        first: An integer, float, decimal or date column or expression.
+        second: A value of the same type.
+        *more: More values of the same type.
+
+    Returns:
+        The expression the database computes, of the arguments' type.
+    """
+    return FuncValueExpr("least", (first, second, *more))
+
+
+def greatest(first: Any, second: Any, *more: Any) -> Any:
+    """Return the largest of two or more numbers or dates.
+
+    Every argument must be non-nullable, as for [`least`][ferro.fn.least].
+
+    Args:
+        first: An integer, float, decimal or date column or expression.
+        second: A value of the same type.
+        *more: More values of the same type.
+
+    Returns:
+        The expression the database computes, of the arguments' type.
+    """
+    return FuncValueExpr("greatest", (first, second, *more))
+
+
+def coalesce(first: Any, second: Any, *more: Any) -> Any:
+    """Return the first argument that is not `NULL`.
+
+    Args:
+        first: An integer, float, decimal, text, date or datetime column or
+            expression.
+        second: A value of the same type, such as a literal fallback.
+        *more: More values of the same type.
+
+    Returns:
+        The expression the database computes, of the arguments' type. It is
+            `NULL` only when every argument is.
+    """
+    return FuncValueExpr("coalesce", (first, second, *more))
+
+
+def length(value: Any) -> Any:
+    """Return the number of characters in a text.
+
+    Args:
+        value: A text column or expression.
+
+    Returns:
+        The expression the database computes, an integer.
+    """
+    return FuncValueExpr("length", (value,))
+
+
+def year(value: Any) -> Any:
+    """Return the year of a date.
+
+    Args:
+        value: A date column. A datetime is refused: its year depends on
+            the session's time zone.
+
+    Returns:
+        The expression the database computes, an integer.
+    """
+    return FuncValueExpr("year", (value,))
+
+
+def month(value: Any) -> Any:
+    """Return the month of a date, from 1 to 12.
+
+    Args:
+        value: A date column. A datetime is refused: its month depends on
+            the session's time zone.
+
+    Returns:
+        The expression the database computes, an integer.
+    """
+    return FuncValueExpr("month", (value,))
+
+
+def day(value: Any) -> Any:
+    """Return the day of the month of a date, from 1 to 31.
+
+    Args:
+        value: A date column. A datetime is refused: its day depends on the
+            session's time zone.
+
+    Returns:
+        The expression the database computes, an integer.
+    """
+    return FuncValueExpr("day", (value,))
 
 
 def __getattr__(name: str) -> Any:
