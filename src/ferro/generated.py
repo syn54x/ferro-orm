@@ -76,9 +76,7 @@ _WIDENS_TO = {"integer": frozenset({"number", "decimal"})}
 @functools.cache
 def _function_table() -> dict[str, dict[str, Any]]:
     """The value function table, read once from the Rust table over FFI."""
-    return {
-        entry["name"]: entry for entry in json.loads(_core._value_function_table())
-    }
+    return {entry["name"]: entry for entry in json.loads(_core._value_function_table())}
 
 
 def _column_family(spec: Any) -> str | None:

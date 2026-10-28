@@ -128,7 +128,9 @@ def test_least_on_text_is_refused_naming_collation():
             id: int | None = Field(default=None, primary_key=True)
             first: str
             last: str
-            earliest: str = Field(generated=lambda person: fn.least(person.first, person.last))
+            earliest: str = Field(
+                generated=lambda person: fn.least(person.first, person.last)
+            )
 
 
 def test_a_function_on_the_wrong_argument_type_lists_its_signatures():
@@ -244,7 +246,9 @@ def test_division_by_a_column_is_refused():
             amount_minor: int
             count: int
             average: int = Field(
-                generated=lambda transaction: transaction.amount_minor / transaction.count
+                generated=lambda transaction: (
+                    transaction.amount_minor / transaction.count
+                )
             )
 
 
@@ -254,7 +258,9 @@ def test_division_by_zero_is_refused():
         class Transaction(Model):
             id: int | None = Field(default=None, primary_key=True)
             amount_minor: int
-            broken: int = Field(generated=lambda transaction: transaction.amount_minor / 0)
+            broken: int = Field(
+                generated=lambda transaction: transaction.amount_minor / 0
+            )
 
 
 def test_division_by_a_literal_is_accepted():

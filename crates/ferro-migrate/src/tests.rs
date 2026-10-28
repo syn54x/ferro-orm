@@ -961,10 +961,7 @@ fn render_create_table_writes_a_generated_column_stored_with_no_default() {
         let expected = format!(
             "\"direction\" bigint not null generated always as (sign(\"amount_minor\")) stored{guard}, "
         );
-        assert!(
-            sql.to_lowercase().contains(&expected),
-            "{dialect:?}: {sql}"
-        );
+        assert!(sql.to_lowercase().contains(&expected), "{dialect:?}: {sql}");
         assert!(!sql.contains("DEFAULT"), "{sql}");
     }
 }
@@ -999,7 +996,10 @@ fn render_create_table_guards_only_an_integer_generated_column_on_sqlite() {
         );
     }
     for column in ["ratio", "flag", "amount"] {
-        assert!(!sqlite.contains(&format!("typeof(\"{column}\")")), "{sqlite}");
+        assert!(
+            !sqlite.contains(&format!("typeof(\"{column}\")")),
+            "{sqlite}"
+        );
     }
     let postgres = render_create_table(&model, Dialect::Postgres)
         .expect("renders")

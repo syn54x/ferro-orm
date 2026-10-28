@@ -86,9 +86,15 @@ const NUMERIC_UNARY: &[ValueSignature] = &[
 /// `least` and `greatest` take numbers and dates only: text compares by
 /// collation on Postgres and byte by byte on SQLite.
 const ORDERED_REPEATED: &[ValueSignature] = &[
-    repeated(&[ValueType::Integer, ValueType::Integer], ValueType::Integer),
+    repeated(
+        &[ValueType::Integer, ValueType::Integer],
+        ValueType::Integer,
+    ),
     repeated(&[ValueType::Number, ValueType::Number], ValueType::Number),
-    repeated(&[ValueType::Decimal, ValueType::Decimal], ValueType::Decimal),
+    repeated(
+        &[ValueType::Decimal, ValueType::Decimal],
+        ValueType::Decimal,
+    ),
     repeated(&[ValueType::Date, ValueType::Date], ValueType::Date),
 ];
 
@@ -123,12 +129,21 @@ pub const VALUE_FUNCTIONS: &[ValueFunction] = &[
     ValueFunction {
         name: "coalesce",
         signatures: &[
-            repeated(&[ValueType::Integer, ValueType::Integer], ValueType::Integer),
+            repeated(
+                &[ValueType::Integer, ValueType::Integer],
+                ValueType::Integer,
+            ),
             repeated(&[ValueType::Number, ValueType::Number], ValueType::Number),
-            repeated(&[ValueType::Decimal, ValueType::Decimal], ValueType::Decimal),
+            repeated(
+                &[ValueType::Decimal, ValueType::Decimal],
+                ValueType::Decimal,
+            ),
             repeated(&[ValueType::String, ValueType::String], ValueType::String),
             repeated(&[ValueType::Date, ValueType::Date], ValueType::Date),
-            repeated(&[ValueType::Datetime, ValueType::Datetime], ValueType::Datetime),
+            repeated(
+                &[ValueType::Datetime, ValueType::Datetime],
+                ValueType::Datetime,
+            ),
         ],
         nulls: NullRule::FirstNonNull,
     },
@@ -457,8 +472,7 @@ mod tests {
         assert_eq!(
             names,
             [
-                "sign", "abs", "least", "greatest", "coalesce", "length", "year", "month",
-                "day"
+                "sign", "abs", "least", "greatest", "coalesce", "length", "year", "month", "day"
             ]
         );
         let json = serde_json::to_value(VALUE_FUNCTIONS).unwrap();

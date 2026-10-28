@@ -42,6 +42,8 @@ pub(crate) fn exception_name_for_database(
         Some("23505") => "UniqueViolationError",
         Some("23502") => "NotNullViolationError",
         Some("23514") => "CheckViolationError",
+        // numeric_value_out_of_range: a value too large for its type.
+        Some("22003") => "DataError",
         _ => match kind {
             ErrorKind::UniqueViolation => "UniqueViolationError",
             ErrorKind::ForeignKeyViolation => "ForeignKeyViolationError",
@@ -106,6 +108,86 @@ fn build_exception(
 /// message, SQLSTATE code, and violated constraint name (when the backend
 /// reports them) are preserved as structured attributes on the exception.
 pub(crate) fn map_db_error(context: &str, err: sqlx::Error) -> PyErr {
+    map_write_error(context, err, &[])
+}
+
+/// The column SQLite's integer guard names in `message`, when the failure is
+/// that guard (`CHECK constraint failed: typeof("total") IN (...)`).
+pub(crate) fn integer_guard_column(message: &str) -> Option<String> {
+    let body = message.strip_prefix("CHECK constraint failed: ")?;
+    let (column, _) = unquote_ident(body.strip_prefix("typeof(")?)?;
+    (format!("CHECK ({body})") == ferro_ddl_lowering::render_sqlite_integer_guard(&column))
+        .then_some(column)
+}
+
+/// Whether a Postgres routine is integer arithmetic (`int8pl`, `int4mul`,
+/// `int8abs`, ...): the overflow then happened computing a value, not
+/// storing a bound one.
+fn is_integer_arithmetic_routine(routine: &str) -> bool {
+    let Some(rest) = routine.strip_prefix("int") else {
+        return false;
+    };
+    let ops = rest.trim_start_matches(['2', '4', '8']);
+    ops.len() < rest.len() && ["pl", "mi", "mul", "div", "um", "abs"].contains(&ops)
+}
+
+/// The generated columns an integer overflow belongs to, as a phrase.
+///
+/// SQLite's guard names its column. Elsewhere (Postgres's `22003` from
+/// integer arithmetic, SQLite's `integer overflow` from `abs`) the database
+/// names none, so the phrase names the `generated` columns of the statement's
+/// table: a save binds plain values, so only their expressions compute.
+pub(crate) fn generated_overflow_subject(
+    code: Option<&str>,
+    message: &str,
+    routine: Option<&str>,
+    generated: &[String],
+) -> Option<String> {
+    if let Some(column) = integer_guard_column(message) {
+        return Some(format!("the generated column {}", quoted(&column)));
+    }
+    let computed = message == "integer overflow"
+        || (code == Some("22003") && routine.is_some_and(is_integer_arithmetic_routine));
+    match generated {
+        _ if !computed => None,
+        [] => None,
+        [one] => Some(format!("the generated column {}", quoted(one))),
+        many => Some(format!(
+            "one of the generated columns {}",
+            many.iter()
+                .map(|c| quoted(c))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
+/// [`map_db_error`] for a write to a table whose generated columns are
+/// `generated`: an integer overflow computing one of them is a `DataError`
+/// naming it, on SQLite and Postgres alike (value parity covers failures).
+pub(crate) fn map_write_error(context: &str, err: sqlx::Error, generated: &[String]) -> PyErr {
+    if let sqlx::Error::Database(db) = &err {
+        let routine = db
+            .try_downcast_ref::<sqlx::postgres::PgDatabaseError>()
+            .and_then(|pg| pg.routine());
+        let code = db.code().map(|code| code.to_string());
+        if let Some(subject) =
+            generated_overflow_subject(code.as_deref(), db.message(), routine, generated)
+        {
+            let message = format!(
+                "{context}: {subject} is out of range for its integer type ({}); \
+                 the database computes it from the row, so write inputs whose \
+                 result fits the column's type",
+                db.message()
+            );
+            let driver_message = Some(db.message().to_string());
+            let constraint = db.constraint().map(|c| c.to_string());
+            return Python::attach(|py| {
+                build_exception(py, "DataError", &message, driver_message, code, constraint)
+                    .unwrap_or_else(|lookup_err| lookup_err)
+            });
+        }
+    }
     let name = exception_name_for(&err);
     let (driver_message, sqlstate, constraint) = match &err {
         sqlx::Error::Database(db) => (
@@ -1108,8 +1190,77 @@ mod counted_failure_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{exception_name_for, exception_name_for_database};
+    use super::{
+        exception_name_for, exception_name_for_database, generated_overflow_subject,
+        integer_guard_column,
+    };
     use sqlx::error::ErrorKind;
+
+    #[test]
+    fn numeric_value_out_of_range_22003_is_data_error() {
+        assert_eq!(
+            exception_name_for_database(ErrorKind::Other, Some("22003")),
+            "DataError"
+        );
+    }
+
+    #[test]
+    fn the_sqlite_integer_guard_failure_names_its_column() {
+        let message = format!(
+            "CHECK constraint failed: {}",
+            ferro_ddl_lowering::render_sqlite_integer_guard("to\"tal")
+                .strip_prefix("CHECK (")
+                .and_then(|rest| rest.strip_suffix(')'))
+                .unwrap()
+        );
+        assert_eq!(integer_guard_column(&message).as_deref(), Some("to\"tal"));
+        assert_eq!(
+            generated_overflow_subject(Some("275"), &message, None, &[]).as_deref(),
+            Some("the generated column \"to\"\"tal\"")
+        );
+        assert_eq!(
+            integer_guard_column("CHECK constraint failed: ck_t_x"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_postgres_arithmetic_overflow_names_the_generated_columns() {
+        let one = ["total".to_string()];
+        let subject = |routine, generated: &[String]| {
+            generated_overflow_subject(Some("22003"), "bigint out of range", routine, generated)
+        };
+        assert_eq!(
+            subject(Some("int8pl"), &one).as_deref(),
+            Some("the generated column \"total\"")
+        );
+        assert_eq!(
+            subject(Some("int4mul"), &one).as_deref(),
+            Some("the generated column \"total\"")
+        );
+        assert_eq!(
+            subject(Some("int8abs"), &one).as_deref(),
+            Some("the generated column \"total\"")
+        );
+        let two = ["a".to_string(), "b".to_string()];
+        assert_eq!(
+            subject(Some("int48um"), &two).as_deref(),
+            Some("one of the generated columns \"a\", \"b\"")
+        );
+        // Storing a bound value that does not fit is not a computed overflow.
+        assert_eq!(subject(Some("int84"), &one), None);
+        assert_eq!(subject(Some("interval_pl"), &one), None);
+        assert_eq!(subject(Some("int8pl"), &[]), None);
+    }
+
+    #[test]
+    fn a_sqlite_abs_overflow_names_the_generated_columns() {
+        let one = ["size".to_string()];
+        assert_eq!(
+            generated_overflow_subject(Some("1"), "integer overflow", None, &one).as_deref(),
+            Some("the generated column \"size\"")
+        );
+    }
 
     #[test]
     fn restrict_violation_23001_is_foreign_key() {

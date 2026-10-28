@@ -3059,15 +3059,17 @@ pub fn save_record<'py>(
 
             let engine_bind_values = engine_bind_values_from_sea(&bind_values.0);
             if returning.is_empty() {
-                exec.execute(&sql, &engine_bind_values)
-                    .await
-                    .map_err(|e| crate::errors::map_db_error("Save failed", e))?;
+                exec.execute(&sql, &engine_bind_values).await.map_err(|e| {
+                    crate::errors::map_write_error("Save failed", e, &schema.meta.generated_cols)
+                })?;
                 return Ok(ReturnedRow::default());
             }
             let rows = exec
                 .fetch_all(&sql, &engine_bind_values)
                 .await
-                .map_err(|e| crate::errors::map_db_error("Save failed", e))?;
+                .map_err(|e| {
+                    crate::errors::map_write_error("Save failed", e, &schema.meta.generated_cols)
+                })?;
             Ok(returned_fields(rows, &schema))
         }
         .await;
@@ -3160,7 +3162,13 @@ pub fn update_record<'py>(
                     let rows = exec
                         .fetch_all(&sql, &engine_bind_values)
                         .await
-                        .map_err(|e| crate::errors::map_db_error("Update failed", e))?;
+                        .map_err(|e| {
+                            crate::errors::map_write_error(
+                                "Update failed",
+                                e,
+                                &schema.meta.generated_cols,
+                            )
+                        })?;
                     let matched = rows.len() as u64;
                     Ok((matched, returned_fields(rows, &schema)))
                 }
