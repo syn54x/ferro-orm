@@ -6671,3 +6671,79 @@ fn a_sqlite_rebuild_copies_no_generated_column() {
          SELECT \"id\", \"amount_minor\" FROM \"transaction\""
     );
 }
+
+#[test]
+fn a_generated_column_reading_a_column_the_same_change_adds_needs_no_pair() {
+    // Live: `direction` = sign(amount_minor), no `fee_minor`. Declared:
+    // `direction` = sign(fee_minor), `fee_minor` added. The live read prints
+    // no pair (an input is not live), so none is demanded, and the plan adds
+    // the column, then changes the expression.
+    let mut facts = LiveFacts::default();
+    facts.tables.insert(
+        "transaction".to_string(),
+        live_direction(true, PG_REPRINT, None),
+    );
+    let live = Side::live(
+        envelope(vec![transaction_model("amount_minor", None)]),
+        facts,
+    )
+    .expect("live side");
+    let mut declared = transaction_model("amount_minor", Some(sign_of("fee_minor")));
+    declared.columns.push(col_with_flags(
+        "fee_minor",
+        "bigint",
+        true,
+        false,
+        false,
+        None,
+    ));
+    let declared = envelope(vec![declared]);
+    assert_eq!(
+        live.check_printed_pairs(&declared, Dialect::Postgres),
+        Ok(())
+    );
+    let plan = plan_from_ir(
+        &live,
+        &Side::declared(declared),
+        Dialect::Postgres,
+        updates_only(),
+    );
+    assert_eq!(
+        plan.op_list(),
+        vec![
+            MigrationOp::AddColumn {
+                table: "transaction".to_string(),
+                column: "fee_minor".to_string(),
+            },
+            alter_direction(),
+        ]
+    );
+}
+
+#[test]
+fn the_pair_rule_gives_a_pair_only_when_the_column_and_every_input_are_live() {
+    let mut model = transaction_model("amount_minor", Some(sign_of("amount_minor")));
+    model.columns[1].renamed_from = Some("amount".to_string());
+    let direction = model.columns[2].clone();
+    let live = |names: &'static [&'static str]| move |name: &str| names.contains(&name);
+    assert_eq!(
+        crate::plan::printed_pair_column(&model, &direction, &live(&["amount", "direction"])),
+        Some("direction".to_string()),
+        "an input live under its rename hint"
+    );
+    assert_eq!(
+        crate::plan::printed_pair_column(&model, &direction, &live(&["direction"])),
+        None,
+        "an input not live yet"
+    );
+    assert_eq!(
+        crate::plan::printed_pair_column(&model, &direction, &live(&["amount_minor"])),
+        None,
+        "the column not live yet"
+    );
+    assert_eq!(
+        crate::plan::printed_pair_column(&model, &model.columns[1], &live(&["amount_minor"])),
+        None,
+        "a plain column"
+    );
+}

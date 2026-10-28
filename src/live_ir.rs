@@ -17,7 +17,7 @@ use crate::introspect::{
 };
 use ferro_ddl_lowering::{Dialect, LiveRowSecurity, information_schema_to_db_type_token};
 use ferro_migrate::plan::live_table_hints;
-use ferro_migrate::plan::renamed_value_expr;
+use ferro_migrate::plan::{live_column_name, printed_pair_column, renamed_value_expr};
 use ferro_migrate::{
     Hint, HintError, LiveCheckFact, LiveFacts, LiveFkValidity, LiveGeneratedFact,
     LiveIndexValidity, LiveTableFacts, PrintedPair,
@@ -223,13 +223,17 @@ fn table_facts(table: &LiveTable) -> LiveTableFacts {
 /// generated, for Postgres to print side by side (ADR-0060). The declared
 /// table and column are found by name or by their rename hint, and the
 /// expression is rendered under the live names, a rename of the same change
-/// reversed. A declared column or an input the live table lacks gets no
-/// pair: the plan adds or changes the column instead.
+/// reversed. Which columns get a pair is [`printed_pair_column`]'s rule, the
+/// one the planner demands them by: a declared column or an input the live
+/// table lacks gets none, and the plan adds or changes the column instead.
+///
+/// # Errors
+/// A declared expression that does not render.
 fn declared_pairs(
     declared: &IrEnvelope<SchemaIrPayload>,
     table: &str,
     columns: &[LiveColumn],
-) -> Vec<(String, String, String)> {
+) -> PyResult<Vec<(String, String, String)>> {
     let Some(model) = [false, true].into_iter().find_map(|by_hint| {
         declared.payload.models.iter().find(|model| {
             if by_hint {
@@ -239,17 +243,10 @@ fn declared_pairs(
             }
         })
     }) else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     let live = |name: &str| columns.iter().any(|col| col.name == name);
-    let live_name = |name: &str| -> Option<String> {
-        let col = model.columns.iter().find(|col| col.name == name)?;
-        [Some(&col.name), col.renamed_from.as_ref()]
-            .into_iter()
-            .flatten()
-            .find(|name| live(name))
-            .cloned()
-    };
+    let live_name = |name: &str| live_column_name(model, name, &live);
     let live_columns: Vec<SchemaColumn> = model
         .columns
         .iter()
@@ -262,26 +259,30 @@ fn declared_pairs(
         .columns
         .iter()
         .filter_map(|col| {
-            let expr = col.generated.as_ref()?;
-            let column = live_name(&col.name)?;
+            let column = printed_pair_column(model, col, &live)?;
             let catalog = columns
                 .iter()
                 .find(|live| live.name == column)?
                 .generation_expression
                 .clone()?;
-            let inputs_live = ferro_ddl_lowering::value_expr_columns(expr)
-                .iter()
-                .all(|input| live_name(input).is_some());
-            if !inputs_live {
-                return None;
-            }
+            Some((col, column, catalog))
+        })
+        .map(|(col, column, catalog)| {
+            let expr = col.generated.as_ref().ok_or_else(|| {
+                pyo3::exceptions::PyRuntimeError::new_err("a printed pair needs an expression")
+            })?;
             let renamed = renamed_value_expr(expr, &|input| {
                 live_name(input).unwrap_or_else(|| input.to_string())
             });
             let rendered =
                 ferro_ddl_lowering::render_value_expr(&renamed, Dialect::Postgres, &live_columns)
-                    .ok()?;
-            Some((column, rendered, catalog))
+                    .map_err(|message| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "Cannot render generated column '{}.{}': {message}",
+                        model.table_name, col.name
+                    ))
+                })?;
+            Ok((column, rendered, catalog))
         })
         .collect()
 }
@@ -368,7 +369,7 @@ pub async fn live_schema_ir(
         };
         let mut printed = BTreeMap::new();
         if postgres {
-            let pairs = declared_pairs(declared, name, &columns);
+            let pairs = declared_pairs(declared, name, &columns)?;
             if !pairs.is_empty() {
                 let asked: Vec<(String, String)> = pairs
                     .iter()

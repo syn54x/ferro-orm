@@ -169,9 +169,10 @@ impl std::fmt::Display for PlanError {
             PlanError::MissingPrintedPair { table, column } => write!(
                 f,
                 "the live facts carry no printed pair for the generated column \
-                 '{table}.{column}': read the live database against the declaration it is \
-                 planned toward (`_live_schema_ir(using, declared_json)`), so Postgres prints \
-                 both expressions"
+                 '{table}.{column}': they were read against another declaration than the one \
+                 planned toward. Read them again with `_core._live_schema_ir(using, \
+                 declared_json)`, passing the same declared_json the plan is made toward, and \
+                 plan with the facts it returns unchanged"
             ),
         }
     }
@@ -3858,10 +3859,15 @@ impl Side {
         }
     }
 
-    /// Refuse a live side whose Postgres generated columns lack the printed
-    /// pair a comparison with `declared` needs (ADR-0060): every live stored
-    /// generated column whose declared column, by name or by its rename
-    /// hint, is generated too. A declared side, and SQLite, need none.
+    /// Refuse a live side whose Postgres generated columns lack a printed
+    /// pair the live read owed it (ADR-0060): every live stored generated
+    /// column that [`printed_pair_column`] gives a pair, the one rule the
+    /// live read prints them by. A column whose input is not live yet gets
+    /// none, and the plan adds or changes it instead. A declared side, and
+    /// SQLite, need none.
+    ///
+    /// The declared table is matched to its live table by name first, then
+    /// by its rename hint, as the live read matches them.
     ///
     /// # Errors
     /// [`PlanError::MissingPrintedPair`] naming the first such column.
@@ -3891,14 +3897,12 @@ impl Side {
                 .find(|live| &live.table_name == live_table)
                 .map(|live| live.columns.iter().map(|col| col.name.as_str()).collect())
                 .unwrap_or_default();
-            for col in model.columns.iter().filter(|col| col.generated.is_some()) {
-                let Some(live_name) = [Some(&col.name), col.renamed_from.as_ref()]
-                    .into_iter()
-                    .flatten()
-                    .find(|name| live_columns.contains(name.as_str()))
-                else {
+            let live = |name: &str| live_columns.contains(name);
+            for col in &model.columns {
+                let Some(live_name) = printed_pair_column(model, col, &live) else {
                     continue;
                 };
+                let live_name = &live_name;
                 let missing = facts.tables[live_table]
                     .generated
                     .iter()
@@ -3913,6 +3917,40 @@ impl Side {
         }
         Ok(())
     }
+}
+
+/// The live name of the declared column `name` of `model`: its own name
+/// when the live table holds it (`live`), else its rename hint's.
+pub fn live_column_name(
+    model: &SchemaModel,
+    name: &str,
+    live: &dyn Fn(&str) -> bool,
+) -> Option<String> {
+    let col = model.columns.iter().find(|col| col.name == name)?;
+    [Some(&col.name), col.renamed_from.as_ref()]
+        .into_iter()
+        .flatten()
+        .find(|name| live(name))
+        .cloned()
+}
+
+/// The live name of `col` when the live read prints its pair on Postgres
+/// (ADR-0060): `col` is generated, and it and every column its expression
+/// reads are live (`live`), by name or rename hint. The one rule the live
+/// read prints pairs by and [`Side::check_printed_pairs`] demands them by.
+/// A declared column or input absent live gets no pair: the plan adds the
+/// column, or changes its expression, instead.
+pub fn printed_pair_column(
+    model: &SchemaModel,
+    col: &ferro_schema_ir::SchemaColumn,
+    live: &dyn Fn(&str) -> bool,
+) -> Option<String> {
+    let expr = col.generated.as_ref()?;
+    let name = live_column_name(model, &col.name, live)?;
+    ferro_ddl_lowering::value_expr_columns(expr)
+        .iter()
+        .all(|input| live_column_name(model, input, live).is_some())
+        .then_some(name)
 }
 
 /// Whether `column`'s generation differs between `old_model` on `old` and

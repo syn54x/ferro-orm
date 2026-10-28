@@ -321,3 +321,63 @@ def test_drift_without_select_is_refused_naming_the_grant(
     with reader(db, pg_role, select_transaction=False) as url:
         with pytest.raises(MigrationRefused, match='GRANT SELECT ON "transaction"'):
             asyncio.run(ferro.migrations.drift(url=url))
+
+
+# -- an input added in the same change -----------------------------------------------
+
+FEE = """
+from ferro import Field, fn
+
+
+class Transaction(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    amount_minor: int
+    memo: str
+    fee_minor: int = 0
+    direction: int = Field(
+        generated=lambda transaction: fn.sign(transaction.fee_minor)
+    )
+"""
+
+
+def test_an_expression_over_a_column_the_same_change_adds_is_planned_not_refused(
+    project, pkg, db
+):
+    """``direction`` moves to ``sign(fee_minor)`` while ``fee_minor`` is
+    added: the live table has no ``fee_minor`` to print a pair under, so the
+    live read prints none and none is demanded. Drift reports the missing
+    column and the changed expression; on Postgres the pass adds the column,
+    sets the expression, and plans nothing on the next connect."""
+    import importlib
+
+    from ferro.ir import compile_registry_schema_ir
+    from ferro.migrations._drift import against
+
+    auto_migrated(project, pkg, db)
+    write_models(project, pkg, FEE)
+    importlib.import_module(f"{pkg}.models")
+
+    async def drift_lines() -> list[str]:
+        await ferro.connect(db.url, name="drift_fee")
+        try:
+            report = await against(
+                compile_registry_schema_ir(), migration="0002_fee", using="drift_fee"
+            )
+        finally:
+            ferro.reset_engine()
+        return report.lines
+
+    assert asyncio.run(drift_lines()) == [
+        "transaction.fee_minor column is missing",
+        LINE,
+    ]
+    if db.backend != "postgres":
+        return
+    statements = reconnect_statements(db)
+    assert statements[-1] == (
+        'ALTER TABLE "transaction" ALTER COLUMN "direction" '
+        'SET EXPRESSION AS (sign(CAST("fee_minor" AS bigint)))'
+    ), statements
+    assert any('ADD COLUMN "fee_minor"' in s for s in statements), statements
+    assert reconnect_statements(db) == []
+    assert asyncio.run(drift_lines()) == []
