@@ -951,7 +951,7 @@ fn render_create_table_writes_a_generated_column_stored_with_no_default() {
     for (dialect, guard) in [
         (
             Dialect::Sqlite,
-            " check (typeof(\"direction\") in ('integer', 'null'))",
+            " constraint \"_ferro_range_direction\" check (typeof(\"direction\") in ('integer', 'null'))",
         ),
         (Dialect::Postgres, ""),
     ] {
@@ -994,7 +994,17 @@ fn render_create_table_guards_a_numeric_generated_column_with_its_postgres_range
         ("small", ferro_ddl_lowering::CanonicalType::SmallInt),
         ("ratio", ferro_ddl_lowering::CanonicalType::Double),
     ] {
-        let guard = ferro_ddl_lowering::render_sqlite_storage_guard(column, storage).unwrap();
+        let expr = ferro_schema_ir::ValueExpr::Column {
+            name: "amount".to_string(),
+        };
+        let guard = ferro_ddl_lowering::render_sqlite_generated_guard(
+            column,
+            storage,
+            &expr,
+            &model.columns,
+        )
+        .unwrap()
+        .unwrap();
         assert!(sqlite.contains(&guard), "{sqlite}");
     }
     for column in ["flag", "amount"] {

@@ -111,23 +111,11 @@ pub(crate) fn map_db_error(context: &str, err: sqlx::Error) -> PyErr {
     map_write_error(context, err, None)
 }
 
-/// The column SQLite's range guard names in `message`, when the failure is
-/// that guard (`CHECK constraint failed: typeof("total") IN (...) ...`): the
-/// body is re-rendered for each guarded storage type and compared.
+/// The generated column SQLite's range guard names in `message`, when the
+/// failure is that guard (`CHECK constraint failed: _ferro_range_total`).
 pub(crate) fn storage_guard_column(message: &str) -> Option<String> {
-    let body = message.strip_prefix("CHECK constraint failed: ")?;
-    let operand = ["typeof(", "abs("]
-        .iter()
-        .find_map(|call| body.strip_prefix(call))?;
-    let (column, _) = unquote_ident(operand)?;
-    let check = format!("CHECK ({body})");
-    ferro_ddl_lowering::GUARDED_STORAGE
-        .iter()
-        .any(|storage| {
-            ferro_ddl_lowering::render_sqlite_storage_guard(&column, *storage).as_ref()
-                == Some(&check)
-        })
-        .then_some(column)
+    let constraint = message.strip_prefix("CHECK constraint failed: ")?;
+    ferro_ddl_lowering::sqlite_guard_column(constraint).map(str::to_string)
 }
 
 /// Whether a Postgres routine computes a value (`int8pl`, `int4mul`,
@@ -1243,27 +1231,6 @@ mod tests {
     };
     use sqlx::error::ErrorKind;
 
-    #[test]
-    fn every_sqlite_range_guard_failure_names_its_column() {
-        for storage in ferro_ddl_lowering::GUARDED_STORAGE {
-            let guard = ferro_ddl_lowering::render_sqlite_storage_guard("n", storage).unwrap();
-            let body = guard
-                .strip_prefix("CHECK (")
-                .and_then(|rest| rest.strip_suffix(')'))
-                .unwrap();
-            let message = format!("CHECK constraint failed: {body}");
-            assert_eq!(
-                storage_guard_column(&message).as_deref(),
-                Some("n"),
-                "{message}"
-            );
-        }
-        assert_eq!(
-            storage_guard_column("CHECK constraint failed: \"n\" > 0"),
-            None
-        );
-    }
-
     fn write<'a>(generated: &'a [String], computes: bool) -> GeneratedWrite<'a> {
         GeneratedWrite {
             table: "ledger",
@@ -1296,13 +1263,10 @@ mod tests {
     }
 
     #[test]
-    fn the_sqlite_integer_guard_failure_names_its_column() {
+    fn the_sqlite_guard_failure_names_its_column() {
         let message = format!(
             "CHECK constraint failed: {}",
-            ferro_ddl_lowering::render_sqlite_integer_guard("to\"tal")
-                .strip_prefix("CHECK (")
-                .and_then(|rest| rest.strip_suffix(')'))
-                .unwrap()
+            ferro_ddl_lowering::sqlite_guard_name("to\"tal")
         );
         assert_eq!(storage_guard_column(&message).as_deref(), Some("to\"tal"));
         assert_eq!(

@@ -7,7 +7,7 @@ use ferro_ddl_lowering::{
     fk_action_from_str, fk_action_sql, fk_name, literal_default_value, pg_alter_type_target,
     quote_ident, refused_conversion_warning, refused_scalar_conversion, render_db_check,
     render_generated_clause, render_json_backfill_default, render_pg_enum_create_type,
-    render_sqlite_add_column_references, render_sqlite_storage_guard, render_table_check_body,
+    render_sqlite_add_column_references, render_sqlite_generated_guard, render_table_check_body,
     resolve_column_storage, row_security_statements, single_index_name, single_unique_index_name,
     sqlite_declared_type, sqlite_type_storage_drift,
 };
@@ -265,7 +265,9 @@ pub fn render_create_table_as(
                 && let ResolvedStorage::Scalar(pg_storage) =
                     resolve_column_storage(col, Dialect::Postgres)
                         .map_err(|message| EmissionError { message })?
-                && let Some(guard) = render_sqlite_storage_guard(&col.name, pg_storage)
+                && let Some(guard) =
+                    render_sqlite_generated_guard(&col.name, pg_storage, expr, &model.columns)
+                        .map_err(|message| EmissionError { message })?
             {
                 col_def.extra(guard);
             }

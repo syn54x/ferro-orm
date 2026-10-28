@@ -373,8 +373,55 @@ def _doubled_model() -> type[Model]:
     return Ledger
 
 
+def _wrapped_step_model(body: str) -> type[Model]:
+    """A function over an arithmetic step that can overflow and come back."""
+    if body == "greatest":
+
+        class Ledger(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            x: float
+            total: float = Field(
+                generated=lambda ledger: fn.greatest(ledger.x + ledger.x, 0.0)
+            )
+
+        return Ledger
+    bodies = {
+        "least": lambda ledger: fn.least(ledger.a * ledger.b, 28),
+        "sign": lambda ledger: fn.sign(ledger.a * ledger.b),
+    }
+
+    class Ledger(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        a: int = Field(db_type="bigint")
+        b: int = Field(db_type="bigint")
+        total: int = Field(generated=bodies[body], db_type="bigint")
+
+    return Ledger
+
+
 #: (declare, the row that overflows, the largest row that fits, its value).
 OVERFLOWS = {
+    # Postgres raises at `a * b`; SQLite's `min(<real>, 28)` would be 28.
+    "fn.least(a * b, 28)": (
+        lambda: _wrapped_step_model("least"),
+        {"a": 2**62, "b": 4},
+        {"a": 2**61, "b": 3},
+        28,
+    ),
+    # SQLite's sign() of the overflowed real would be the integer 1.
+    "fn.sign(a * b)": (
+        lambda: _wrapped_step_model("sign"),
+        {"a": 2**62, "b": 4},
+        {"a": 2**61, "b": -3},
+        -1,
+    ),
+    # SQLite's max(inf, 0.0) is inf, and the step's own check fails it.
+    "fn.greatest(x + x, 0.0)": (
+        lambda: _wrapped_step_model("greatest"),
+        {"x": 1e308},
+        {"x": 8e307},
+        1.6e308,
+    ),
     "int at 2**31": (
         lambda: _sum_model(None),
         {"a": 2**31 - 1, "b": 1},

@@ -286,51 +286,134 @@ pub fn render_generated_clause(
     ))
 }
 
-/// The SQLite column check an integer generated column carries.
-///
-/// SQLite turns an overflowing integer result into a `real`, where Postgres
-/// raises `bigint out of range`. The check makes SQLite raise too, so the
-/// failure is the same on both (value parity covers failures). `NULL` passes,
-/// as it does for every check.
-pub fn render_sqlite_integer_guard(column: &str) -> String {
-    format!(
-        "CHECK (typeof({}) IN ('integer', 'null'))",
-        quote_ident(column)
-    )
+/// The prefix of the SQLite guard's constraint name; the column follows it.
+const SQLITE_GUARD_PREFIX: &str = "_ferro_range_";
+
+/// The name of the SQLite range guard on generated column `column`.
+pub fn sqlite_guard_name(column: &str) -> String {
+    format!("{SQLITE_GUARD_PREFIX}{column}")
 }
 
-/// The SQLite column check a generated column of Postgres storage `storage`
-/// carries, or `None` for a type whose values cannot overflow.
+/// The generated column a SQLite range guard named `constraint` belongs to.
+pub fn sqlite_guard_column(constraint: &str) -> Option<&str> {
+    constraint.strip_prefix(SQLITE_GUARD_PREFIX)
+}
+
+/// The SQLite range guard of a generated column: one named column check, or
+/// `None` when nothing in the expression can overflow.
 ///
-/// Postgres raises when a computed value does not fit the column
-/// (`smallint out of range` at 2^15, `integer out of range` at 2^31, `bigint
-/// out of range` at 2^63, `value out of range: overflow` past the largest
-/// double). SQLite has 64-bit integers and stores an overflowing float as
-/// `inf`, so the check enforces Postgres's range and the same row fails on
-/// both. `NULL` passes, as it does for every check.
-pub fn render_sqlite_storage_guard(column: &str, storage: CanonicalType) -> Option<String> {
+/// Postgres raises when a value does not fit: the column (`smallint out of
+/// range` at 2^15, `integer out of range` at 2^31) or any step of the
+/// computation (`bigint out of range` at 2^63, `value out of range:
+/// overflow` past the largest double). SQLite turns an integer overflow into
+/// a `real` and a float overflow into `inf`, and a later step can bring
+/// either back (`min(<real>, 28)` is `28`). So the check holds the column to
+/// its Postgres range and recomputes every arithmetic step under the column,
+/// each held to its own: an integer step must still be an integer, a float
+/// step finite. The same row then fails on both. `NULL` passes, as it does
+/// for every check.
+///
+/// `storage` is the column's Postgres storage type and `columns` the table's
+/// columns, from which each step's type is read.
+///
+/// # Errors
+/// As [`render_value_expr`].
+pub fn render_sqlite_generated_guard(
+    column: &str,
+    storage: CanonicalType,
+    expr: &ValueExpr,
+    columns: &[SchemaColumn],
+) -> Result<Option<String>, String> {
     let quoted = quote_ident(column);
-    let integer_range = |low: i64, high: i64| {
-        format!(
-            "CHECK (typeof({quoted}) IN ('integer', 'null') AND {quoted} BETWEEN {low} AND {high})"
-        )
-    };
+    let mut terms: Vec<String> = Vec::new();
     match storage {
-        CanonicalType::SmallInt => Some(integer_range(i16::MIN.into(), i16::MAX.into())),
-        CanonicalType::Integer => Some(integer_range(i32::MIN.into(), i32::MAX.into())),
-        CanonicalType::BigInt => Some(render_sqlite_integer_guard(column)),
-        CanonicalType::Double => Some(format!("CHECK (abs({quoted}) <= {max:e})", max = f64::MAX)),
-        _ => None,
+        CanonicalType::SmallInt => {
+            terms.push(integer_range(&quoted, i16::MIN.into(), i16::MAX.into()))
+        }
+        CanonicalType::Integer => {
+            terms.push(integer_range(&quoted, i32::MIN.into(), i32::MAX.into()))
+        }
+        CanonicalType::BigInt => terms.push(integer_term(&quoted)),
+        CanonicalType::Double => terms.push(finite_term(&quoted)),
+        _ => {}
+    }
+    let mut steps = Vec::new();
+    collect_steps(expr, true, &mut steps);
+    for step in steps {
+        let rendered = render_value_expr(step, Dialect::Sqlite, columns)?;
+        terms.push(if is_integer_valued(step, columns) {
+            integer_term(&rendered)
+        } else {
+            finite_term(&rendered)
+        });
+    }
+    Ok((!terms.is_empty()).then(|| {
+        format!(
+            "CONSTRAINT {} CHECK ({})",
+            quote_ident(&sqlite_guard_name(column)),
+            terms.join(" AND ")
+        )
+    }))
+}
+
+fn integer_term(sql: &str) -> String {
+    format!("typeof({sql}) IN ('integer', 'null')")
+}
+
+fn integer_range(sql: &str, low: i64, high: i64) -> String {
+    format!("{} AND {sql} BETWEEN {low} AND {high}", integer_term(sql))
+}
+
+fn finite_term(sql: &str) -> String {
+    format!("abs({sql}) <= {:e}", f64::MAX)
+}
+
+/// Every arithmetic step (`+ - * /`, unary `-`) under the root, in order; the
+/// root itself is the column, which the storage term holds.
+fn collect_steps<'a>(expr: &'a ValueExpr, root: bool, out: &mut Vec<&'a ValueExpr>) {
+    match expr {
+        ValueExpr::Column { .. } | ValueExpr::Literal { .. } => {}
+        ValueExpr::Binary { left, right, .. } => {
+            if !root {
+                out.push(expr);
+            }
+            collect_steps(left, false, out);
+            collect_steps(right, false, out);
+        }
+        ValueExpr::Negate { operand } => {
+            if !root {
+                out.push(expr);
+            }
+            collect_steps(operand, false, out);
+        }
+        ValueExpr::Func { args, .. } => args.iter().for_each(|arg| collect_steps(arg, false, out)),
     }
 }
 
-/// The storage types [`render_sqlite_storage_guard`] guards.
-pub const GUARDED_STORAGE: [CanonicalType; 4] = [
-    CanonicalType::SmallInt,
-    CanonicalType::Integer,
-    CanonicalType::BigInt,
-    CanonicalType::Double,
-];
+/// Whether a step computes an integer (its operands are all integers), as
+/// both databases type it; any float operand makes it a float.
+fn is_integer_valued(expr: &ValueExpr, columns: &[SchemaColumn]) -> bool {
+    match expr {
+        ValueExpr::Column { name } => columns.iter().any(|col| {
+            col.name == *name
+                && matches!(
+                    resolve_column_storage(col, Dialect::Postgres),
+                    Ok(ResolvedStorage::Scalar(
+                        CanonicalType::SmallInt | CanonicalType::Integer | CanonicalType::BigInt
+                    ))
+                )
+        }),
+        ValueExpr::Literal { token } => token.parse::<i64>().is_ok(),
+        ValueExpr::Binary { left, right, .. } => {
+            is_integer_valued(left, columns) && is_integer_valued(right, columns)
+        }
+        ValueExpr::Negate { operand } => is_integer_valued(operand, columns),
+        ValueExpr::Func { name, args } => match name.as_str() {
+            "length" | "year" | "month" | "day" => true,
+            _ => args.iter().all(|arg| is_integer_valued(arg, columns)),
+        },
+    }
+}
 
 /// Every column the expression reads.
 pub fn value_expr_columns(expr: &ValueExpr) -> BTreeSet<String> {
@@ -566,14 +649,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_sqlite_integer_guard_admits_integers_and_null() {
-        assert_eq!(
-            render_sqlite_integer_guard("total"),
-            "CHECK (typeof(\"total\") IN ('integer', 'null'))"
-        );
-    }
-
     fn schema_column(name: &str, logical: &str, db_type: Option<&str>) -> SchemaColumn {
         serde_json::from_value(serde_json::json!({
             "name": name,
@@ -617,73 +692,89 @@ mod tests {
         );
     }
 
-    /// Every storage type, so a new one must be placed in or out of the guard.
-    fn every_canonical_type() -> Vec<CanonicalType> {
-        use CanonicalType::*;
-        let all = vec![
-            Integer,
-            SmallInt,
-            BigInt,
-            Double,
-            Decimal,
-            Boolean,
-            Json,
-            Jsonb,
-            Text,
-            Varchar(None),
-            Char(1),
-            Uuid,
-            DateTime,
-            Timestamp,
-            TimestampTz,
-            Date,
-            Time,
-            Blob,
+    fn guard(column: &str, storage: CanonicalType, expr: &ValueExpr) -> Option<String> {
+        let columns = [
+            schema_column("a", "integer", None),
+            schema_column("b", "integer", Some("bigint")),
+            schema_column("x", "number", None),
         ];
-        for canonical in &all {
-            match canonical {
-                Integer | SmallInt | BigInt | Double | Decimal | Boolean | Json | Jsonb | Text
-                | Varchar(_) | Char(_) | Uuid | DateTime | Timestamp | TimestampTz | Date
-                | Time | Blob => {}
-            }
-        }
-        all
+        render_sqlite_generated_guard(column, storage, expr, &columns).unwrap()
+    }
+
+    fn binary(op: ValueBinaryOp, left: Box<ValueExpr>, right: Box<ValueExpr>) -> ValueExpr {
+        ValueExpr::Binary { op, left, right }
     }
 
     #[test]
-    fn guarded_storage_lists_exactly_the_types_the_guard_renders() {
-        for canonical in every_canonical_type() {
-            assert_eq!(
-                render_sqlite_storage_guard("c", canonical).is_some(),
-                GUARDED_STORAGE.contains(&canonical),
-                "{canonical:?}"
-            );
-        }
+    fn the_sqlite_guard_holds_the_column_to_its_postgres_range() {
+        let a = *column("a");
+        assert_eq!(
+            guard("n", CanonicalType::SmallInt, &a).unwrap(),
+            "CONSTRAINT \"_ferro_range_n\" CHECK (typeof(\"n\") IN ('integer', 'null') AND \"n\" BETWEEN -32768 AND 32767)"
+        );
+        assert_eq!(
+            guard("n", CanonicalType::Integer, &a).unwrap(),
+            "CONSTRAINT \"_ferro_range_n\" CHECK (typeof(\"n\") IN ('integer', 'null') AND \"n\" BETWEEN -2147483648 AND 2147483647)"
+        );
+        assert_eq!(
+            guard("n", CanonicalType::BigInt, &a).unwrap(),
+            "CONSTRAINT \"_ferro_range_n\" CHECK (typeof(\"n\") IN ('integer', 'null'))"
+        );
+        assert_eq!(
+            guard("x", CanonicalType::Double, &a).unwrap(),
+            "CONSTRAINT \"_ferro_range_x\" CHECK (abs(\"x\") <= 1.7976931348623157e308)"
+        );
+        assert_eq!(guard("t", CanonicalType::Text, &a), None);
+        assert_eq!(guard("f", CanonicalType::Boolean, &a), None);
     }
 
     #[test]
-    fn the_sqlite_storage_guard_enforces_the_postgres_range() {
+    fn the_sqlite_guard_recomputes_every_arithmetic_step_under_a_function() {
+        // least(a * b, 28): an integer step under the column.
+        let least = ValueExpr::Func {
+            name: "least".to_string(),
+            args: vec![
+                binary(ValueBinaryOp::Mul, column("a"), column("b")),
+                *literal("28"),
+            ],
+        };
         assert_eq!(
-            render_sqlite_storage_guard("n", CanonicalType::SmallInt).unwrap(),
-            "CHECK (typeof(\"n\") IN ('integer', 'null') AND \"n\" BETWEEN -32768 AND 32767)"
+            guard("n", CanonicalType::BigInt, &least).unwrap(),
+            "CONSTRAINT \"_ferro_range_n\" CHECK (typeof(\"n\") IN ('integer', 'null') AND typeof((\"a\" * \"b\")) IN ('integer', 'null'))"
+        );
+        // greatest(x + x, -x): float steps are held finite.
+        let greatest = ValueExpr::Func {
+            name: "greatest".to_string(),
+            args: vec![
+                binary(ValueBinaryOp::Add, column("x"), column("x")),
+                ValueExpr::Negate {
+                    operand: column("x"),
+                },
+            ],
+        };
+        assert_eq!(
+            guard("y", CanonicalType::Double, &greatest).unwrap(),
+            "CONSTRAINT \"_ferro_range_y\" CHECK (abs(\"y\") <= 1.7976931348623157e308 AND abs((\"x\" + \"x\")) <= 1.7976931348623157e308 AND abs((- \"x\")) <= 1.7976931348623157e308)"
+        );
+        // A nested step and the length function are integer steps; the root is the column.
+        let nested = binary(
+            ValueBinaryOp::Sub,
+            Box::new(binary(ValueBinaryOp::Add, column("a"), literal("1"))),
+            Box::new(call("length", &["s"])),
         );
         assert_eq!(
-            render_sqlite_storage_guard("n", CanonicalType::Integer).unwrap(),
-            "CHECK (typeof(\"n\") IN ('integer', 'null') AND \"n\" BETWEEN -2147483648 AND 2147483647)"
+            guard("n", CanonicalType::BigInt, &nested).unwrap(),
+            "CONSTRAINT \"_ferro_range_n\" CHECK (typeof(\"n\") IN ('integer', 'null') AND typeof((\"a\" + 1)) IN ('integer', 'null'))"
         );
+    }
+
+    #[test]
+    fn the_guard_name_carries_its_column_back() {
         assert_eq!(
-            render_sqlite_storage_guard("n", CanonicalType::BigInt).unwrap(),
-            render_sqlite_integer_guard("n")
+            sqlite_guard_column(&sqlite_guard_name("to\"tal")),
+            Some("to\"tal")
         );
-        assert_eq!(
-            render_sqlite_storage_guard("x", CanonicalType::Double).unwrap(),
-            "CHECK (abs(\"x\") <= 1.7976931348623157e308)"
-        );
-        assert_eq!(render_sqlite_storage_guard("t", CanonicalType::Text), None);
-        assert_eq!(
-            render_sqlite_storage_guard("b", CanonicalType::Boolean),
-            None
-        );
+        assert_eq!(sqlite_guard_column("ck_ledger_total"), None);
     }
 
     #[test]
