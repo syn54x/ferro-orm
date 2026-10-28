@@ -71,6 +71,37 @@ pub struct LiveCheckFact {
     pub column: Option<String>,
 }
 
+/// A Postgres rendering and the catalog's reprint of the same body, each as
+/// Postgres printed it back through one `EXPLAIN (VERBOSE, FORMAT JSON)`
+/// (ADR-0060): both passed through the same analysis, so equal strings are
+/// the same expression.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PrintedPair {
+    /// The declared rendering, as Postgres printed it.
+    pub declared: String,
+    /// The catalog's reprint, as Postgres printed it.
+    pub catalog: String,
+}
+
+/// One live generated column as the catalog reports it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LiveGeneratedFact {
+    /// The column.
+    pub column: String,
+    /// `STORED` (Postgres `attgenerated = 's'`, SQLite `hidden = 3`); a
+    /// `VIRTUAL` one is never the column ferro creates.
+    pub stored: bool,
+    /// Postgres: `pg_get_expr` of the expression. SQLite: the column
+    /// definition from its generated clause on, its range guard included,
+    /// as `sqlite_master` stores it.
+    pub catalog: String,
+    /// Postgres: the declared rendering and `catalog`, printed side by side,
+    /// when the live read had a declared generated column to compare it
+    /// with. `None` on SQLite.
+    #[serde(default)]
+    pub printed: Option<PrintedPair>,
+}
+
 /// Everything about one live table the planner reads that is not IR.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LiveTableFacts {
@@ -87,6 +118,9 @@ pub struct LiveTableFacts {
     /// the catalog prints them. The "off, no policies" state on SQLite.
     #[serde(default, serialize_with = "serialize_row_security")]
     pub row_security: LiveRowSecurity,
+    /// Every live generated column.
+    #[serde(default)]
+    pub generated: Vec<LiveGeneratedFact>,
 }
 
 /// The facts a live database holds beside its IR, keyed by table: every live
@@ -112,6 +146,15 @@ pub enum PlanError {
         /// The table.
         table: String,
     },
+    /// A Postgres live generated column the declared side also declares
+    /// generated carries no printed pair: the live read was not given that
+    /// declaration.
+    MissingPrintedPair {
+        /// The table.
+        table: String,
+        /// The column.
+        column: String,
+    },
 }
 
 impl std::fmt::Display for PlanError {
@@ -122,6 +165,14 @@ impl std::fmt::Display for PlanError {
                 "the live facts carry no entry for table '{table}', which the live schema \
                  holds: read the schema and its facts together, from one introspection \
                  (`_live_schema_ir`), or plan two declared snapshots without facts"
+            ),
+            PlanError::MissingPrintedPair { table, column } => write!(
+                f,
+                "the live facts carry no printed pair for the generated column \
+                 '{table}.{column}': they were read against another declaration than the one \
+                 planned toward. Read them again with `_core._live_schema_ir(using, \
+                 declared_json)`, passing the same declared_json the plan is made toward, and \
+                 plan with the facts it returns unchanged"
             ),
         }
     }
@@ -737,6 +788,7 @@ fn declared_table_facts(old_model: &SchemaModel) -> LiveTableFacts {
         foreign_keys: Vec::new(),
         indexes: Vec::new(),
         row_security: declared_row_security(old_model),
+        generated: Vec::new(),
     }
 }
 
@@ -1124,6 +1176,45 @@ fn renamed_facts(
                 check.definition = format!("CHECK ({now})");
             }
         }
+        for generated in &mut live.generated {
+            if let Some(new) = ops.iter().find_map(|op| match op {
+                MigrationOp::RenameColumn { table: t, old, new }
+                    if t == table && *old == generated.column =>
+                {
+                    Some(new.clone())
+                }
+                _ => None,
+            }) {
+                generated.column = new;
+            }
+            // SQLite rewrites a stored expression's column names on a rename,
+            // as Postgres does; only SQLite's catalog is compared as text.
+            if dialect != Dialect::Sqlite {
+                continue;
+            }
+            let (Some(model), Some(before)) = (declared, before.as_ref()) else {
+                continue;
+            };
+            let Some(i) = model
+                .columns
+                .iter()
+                .position(|col| col.name == generated.column)
+            else {
+                continue;
+            };
+            let text = |model: &SchemaModel, col| {
+                emit::generated_column_text(model, col, Dialect::Sqlite)
+                    .ok()
+                    .flatten()
+            };
+            if let (Some(was), Some(now)) = (
+                text(before, &before.columns[i]),
+                text(model, &model.columns[i]),
+            ) && fold_whitespace(&was) == fold_whitespace(&generated.catalog)
+            {
+                generated.catalog = now;
+            }
+        }
         for fk in &mut live.foreign_keys {
             fk.name = renamed_name(&fk.name);
         }
@@ -1319,6 +1410,7 @@ fn plan_existing_table(
         &mut ops,
         &mut column_drops,
     );
+    diff_generated(old, new, table, old_model, new_model, dialect, &mut ops);
     diff_model_indexes(table, old_model, new_model, options.destructive, &mut ops);
     // Invalid-index rebuilds (#515; ADR-0044) go where `AddIndex` goes: after
     // the column ops, ahead of the foreign-key ops. An invalid index is
@@ -2163,7 +2255,10 @@ fn demands_values(op: &MigrationOp, was: Option<&SchemaModel>, now: Option<&Sche
 fn fails_on_rows(op: &MigrationOp, now: Option<&SchemaModel>) -> RowRisk {
     let always = |yes: bool| if yes { RowRisk::Always } else { RowRisk::None };
     match op {
-        MigrationOp::AlterColumnType { .. } => RowRisk::Always,
+        // Both recompute every row, which can overflow.
+        MigrationOp::AlterColumnType { .. } | MigrationOp::AlterGeneratedExpression { .. } => {
+            RowRisk::Always
+        }
         MigrationOp::AlterColumnNullability { column, .. } => {
             always(find_column(now, column).is_some_and(|col| !col.nullable))
         }
@@ -2329,6 +2424,7 @@ fn execution(
 /// | drop a plain column | native |
 /// | drop a foreign-key column | rebuild |
 /// | change a column's type or nullability | rebuild |
+/// | change a generated column's expression | rebuild |
 /// | drop a foreign default | rebuild |
 /// | add, change or drop a check (but a dropped column's own) | rebuild |
 /// | add, retarget or drop a foreign key (on a kept column) | rebuild |
@@ -2387,6 +2483,7 @@ fn sqlite_rebuilds(
         MigrationOp::DropColumn { column, .. } => has_foreign_key(was, column),
         // SQLite has no `ALTER COLUMN … DROP DEFAULT`.
         MigrationOp::AlterColumnType { .. }
+        | MigrationOp::AlterGeneratedExpression { .. }
         | MigrationOp::AlterColumnNullability { .. }
         | MigrationOp::DropDefault { .. }
         | MigrationOp::ChangePrimaryKey { .. }
@@ -2592,6 +2689,7 @@ fn key(op: &MigrationOp) -> Option<Artifact> {
         MigrationOp::AddColumn { table, column }
         | MigrationOp::DropColumn { table, column }
         | MigrationOp::AlterColumnType { table, column }
+        | MigrationOp::AlterGeneratedExpression { table, column }
         | MigrationOp::AlterColumnNullability { table, column } => {
             Artifact::Column(t(table), column.clone())
         }
@@ -3294,6 +3392,9 @@ fn renamed_model(model: &SchemaModel, renames: &Renames<'_>) -> SchemaModel {
     let mut relabelled: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
     for column in &mut out.columns {
         column.name = col(&column.name);
+        if let Some(expr) = &mut column.generated {
+            *expr = renamed_value_expr(expr, &|c| col(c));
+        }
         let renamed = renames.enum_column(column);
         if !renamed.is_empty() {
             relabelled.insert(column.name.clone(), renamed);
@@ -3670,6 +3771,256 @@ fn diff_model_columns(
             ops.push(MigrationOp::AlterColumnNullability {
                 table: table.to_string(),
                 column: (*name).to_string(),
+            });
+        }
+    }
+}
+
+/// `expr` with every column reference renamed by `rename`.
+pub fn renamed_value_expr(
+    expr: &ferro_schema_ir::ValueExpr,
+    rename: &dyn Fn(&str) -> String,
+) -> ferro_schema_ir::ValueExpr {
+    use ferro_schema_ir::ValueExpr;
+    match expr {
+        ValueExpr::Column { name } => ValueExpr::Column { name: rename(name) },
+        ValueExpr::Literal { .. } => expr.clone(),
+        ValueExpr::Binary { op, left, right } => ValueExpr::Binary {
+            op: *op,
+            left: Box::new(renamed_value_expr(left, rename)),
+            right: Box::new(renamed_value_expr(right, rename)),
+        },
+        ValueExpr::Negate { operand } => ValueExpr::Negate {
+            operand: Box::new(renamed_value_expr(operand, rename)),
+        },
+        ValueExpr::Func { name, args } => ValueExpr::Func {
+            name: name.clone(),
+            args: args
+                .iter()
+                .map(|arg| renamed_value_expr(arg, rename))
+                .collect(),
+        },
+    }
+}
+
+/// `text` with every run of whitespace one space, trimmed: how SQLite's
+/// stored text of a generated column is compared with ferro's rendering.
+fn fold_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// How one side holds a column's generation.
+enum Generation {
+    /// Not generated.
+    Plain,
+    /// Declared generated, with its expression.
+    Declared(ferro_schema_ir::ValueExpr),
+    /// Generated on a live database, as the catalog reports it.
+    Live(LiveGeneratedFact),
+}
+
+impl Side {
+    /// How the side holds `column` of `model`'s generation: a declaration's
+    /// expression, or a live column's catalog fact.
+    fn generation(&self, model: &SchemaModel, column: &str) -> Generation {
+        match &self.0 {
+            SideKind::Declared(_) => model
+                .columns
+                .iter()
+                .find(|col| col.name == column)
+                .and_then(|col| col.generated.clone())
+                .map_or(Generation::Plain, Generation::Declared),
+            SideKind::Live { .. } => self
+                .table_facts(model)
+                .generated
+                .iter()
+                .find(|fact| fact.column == column)
+                .cloned()
+                .map_or(Generation::Plain, Generation::Live),
+        }
+    }
+
+    /// The expression `column` of `model` is generated by, as `SET
+    /// EXPRESSION` writes it on `dialect`: a declaration's rendering, or a
+    /// live column's catalog text, put back as the catalog printed it.
+    /// `None` for a plain column.
+    pub(crate) fn generated_body(
+        &self,
+        model: &SchemaModel,
+        column: &str,
+        dialect: Dialect,
+    ) -> Result<Option<String>, String> {
+        match self.generation(model, column) {
+            Generation::Plain => Ok(None),
+            Generation::Declared(expr) => {
+                ferro_ddl_lowering::render_value_expr(&expr, dialect, &model.columns).map(Some)
+            }
+            Generation::Live(fact) => Ok(Some(fact.catalog)),
+        }
+    }
+
+    /// Refuse a live side whose Postgres generated columns lack a printed
+    /// pair the live read owed it (ADR-0060): every live stored generated
+    /// column that [`printed_pair_column`] gives a pair, the one rule the
+    /// live read prints them by. A column whose input is not live yet gets
+    /// none, and the plan adds or changes it instead. A declared side, and
+    /// SQLite, need none.
+    ///
+    /// The declared table is matched to its live table by name first, then
+    /// by its rename hint, as the live read matches them.
+    ///
+    /// # Errors
+    /// [`PlanError::MissingPrintedPair`] naming the first such column.
+    pub fn check_printed_pairs(
+        &self,
+        declared: &IrEnvelope<SchemaIrPayload>,
+        dialect: Dialect,
+    ) -> Result<(), PlanError> {
+        let SideKind::Live { ir, facts } = &self.0 else {
+            return Ok(());
+        };
+        if dialect != Dialect::Postgres {
+            return Ok(());
+        }
+        for model in &declared.payload.models {
+            let live_table = [Some(&model.table_name), model.renamed_from.as_ref()]
+                .into_iter()
+                .flatten()
+                .find(|table| facts.tables.contains_key(*table));
+            let Some(live_table) = live_table else {
+                continue;
+            };
+            let live_columns: BTreeSet<&str> = ir
+                .payload
+                .models
+                .iter()
+                .find(|live| &live.table_name == live_table)
+                .map(|live| live.columns.iter().map(|col| col.name.as_str()).collect())
+                .unwrap_or_default();
+            let live = |name: &str| live_columns.contains(name);
+            for col in &model.columns {
+                let Some(live_name) = printed_pair_column(model, col, &live) else {
+                    continue;
+                };
+                let live_name = &live_name;
+                let missing = facts.tables[live_table]
+                    .generated
+                    .iter()
+                    .any(|fact| &fact.column == live_name && fact.stored && fact.printed.is_none());
+                if missing {
+                    return Err(PlanError::MissingPrintedPair {
+                        table: live_table.clone(),
+                        column: live_name.clone(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The live name of the declared column `name` of `model`: its own name
+/// when the live table holds it (`live`), else its rename hint's.
+pub fn live_column_name(
+    model: &SchemaModel,
+    name: &str,
+    live: &dyn Fn(&str) -> bool,
+) -> Option<String> {
+    let col = model.columns.iter().find(|col| col.name == name)?;
+    [Some(&col.name), col.renamed_from.as_ref()]
+        .into_iter()
+        .flatten()
+        .find(|name| live(name))
+        .cloned()
+}
+
+/// The live name of `col` when the live read prints its pair on Postgres
+/// (ADR-0060): `col` is generated, and it and every column its expression
+/// reads are live (`live`), by name or rename hint. The one rule the live
+/// read prints pairs by and [`Side::check_printed_pairs`] demands them by.
+/// A declared column or input absent live gets no pair: the plan adds the
+/// column, or changes its expression, instead.
+pub fn printed_pair_column(
+    model: &SchemaModel,
+    col: &ferro_schema_ir::SchemaColumn,
+    live: &dyn Fn(&str) -> bool,
+) -> Option<String> {
+    let expr = col.generated.as_ref()?;
+    let name = live_column_name(model, &col.name, live)?;
+    ferro_ddl_lowering::value_expr_columns(expr)
+        .iter()
+        .all(|input| live_column_name(model, input, live).is_some())
+        .then_some(name)
+}
+
+/// Whether `column`'s generation differs between `old_model` on `old` and
+/// `new_model` on `new` (ADR-0060). Two declarations compare their
+/// expressions. A live column compares with a declaration through what the
+/// live read gathered: on Postgres the printed pair (Postgres printed both
+/// expressions, so equal strings are one expression), on SQLite the stored
+/// text against ferro's rendering, guard included, whitespace folded. A live
+/// `VIRTUAL` column, or a plain column on one side and a generated one on
+/// the other, always differs.
+fn generation_differs(
+    old: &Side,
+    new: &Side,
+    old_model: &SchemaModel,
+    new_model: &SchemaModel,
+    column: &str,
+    dialect: Dialect,
+) -> bool {
+    let live_against = |fact: &LiveGeneratedFact, model: &SchemaModel| {
+        if !fact.stored {
+            return true;
+        }
+        match dialect {
+            Dialect::Postgres => fact
+                .printed
+                .as_ref()
+                .is_none_or(|pair| pair.declared != pair.catalog),
+            Dialect::Sqlite => model
+                .columns
+                .iter()
+                .find(|col| col.name == column)
+                .and_then(|col| emit::generated_column_text(model, col, dialect).ok())
+                .flatten()
+                .is_none_or(|text| fold_whitespace(&text) != fold_whitespace(&fact.catalog)),
+        }
+    };
+    match (
+        old.generation(old_model, column),
+        new.generation(new_model, column),
+    ) {
+        (Generation::Plain, Generation::Plain) => false,
+        (Generation::Declared(was), Generation::Declared(now)) => was != now,
+        (Generation::Live(fact), Generation::Declared(_)) => live_against(&fact, new_model),
+        (Generation::Declared(_), Generation::Live(fact)) => live_against(&fact, old_model),
+        (Generation::Live(was), Generation::Live(now)) => {
+            was.stored != now.stored
+                || fold_whitespace(&was.catalog) != fold_whitespace(&now.catalog)
+        }
+        _ => true,
+    }
+}
+
+/// A [`MigrationOp::AlterGeneratedExpression`] for every column both
+/// models hold whose generation differs ([`generation_differs`]).
+fn diff_generated(
+    old: &Side,
+    new: &Side,
+    table: &str,
+    old_model: &SchemaModel,
+    new_model: &SchemaModel,
+    dialect: Dialect,
+    ops: &mut Vec<MigrationOp>,
+) {
+    for col in &new_model.columns {
+        if old_model.columns.iter().any(|was| was.name == col.name)
+            && generation_differs(old, new, old_model, new_model, &col.name, dialect)
+        {
+            ops.push(MigrationOp::AlterGeneratedExpression {
+                table: table.to_string(),
+                column: col.name.clone(),
             });
         }
     }

@@ -3906,6 +3906,7 @@ fn a_text_comparison_check_as_postgres_prints_it_is_not_a_rebuild() {
                 foreign_keys: vec![],
                 indexes: vec![],
                 row_security: ferro_ddl_lowering::LiveRowSecurity::default(),
+                generated: vec![],
             },
         );
         facts
@@ -3983,6 +3984,7 @@ fn ledgerrow_with_leftovers() -> (IrEnvelope<SchemaIrPayload>, LiveFacts) {
                     live_policy("rls_ledgerrow_retired", CATALOG_LEDGER_EXPR),
                 ],
             },
+            generated: vec![],
         },
     );
     (envelope(vec![live_model]), facts)
@@ -6356,5 +6358,392 @@ fn a_table_and_its_serial_key_renamed_together_carry_the_sequence_in_order() {
             "ALTER TABLE \"writer\" RENAME COLUMN \"author_id\" TO \"id\"".to_string(),
             sequence("writer", "id"),
         ]
+    );
+}
+
+// -- generated expressions on a live database (ADR-0060) -----------------------------
+
+/// `sign(<input>)`, a generated column's body.
+fn sign_of(input: &str) -> ferro_schema_ir::ValueExpr {
+    ferro_schema_ir::ValueExpr::Func {
+        name: "sign".to_string(),
+        args: vec![ferro_schema_ir::ValueExpr::Column {
+            name: input.to_string(),
+        }],
+    }
+}
+
+/// `transaction` with `amount_minor` (named `input`) and `direction`,
+/// generated as `body` when it is `Some`.
+fn transaction_model(input: &str, body: Option<ferro_schema_ir::ValueExpr>) -> SchemaModel {
+    schema_model(
+        "transaction",
+        vec![
+            pk_col("id", "bigint"),
+            col(input, "bigint", false),
+            SchemaColumn {
+                generated: body,
+                ..col("direction", "bigint", false)
+            },
+        ],
+    )
+}
+
+/// The live `direction` column as the live read reports it.
+fn live_direction(stored: bool, catalog: &str, printed: Option<(&str, &str)>) -> LiveTableFacts {
+    LiveTableFacts {
+        generated: vec![LiveGeneratedFact {
+            column: "direction".to_string(),
+            stored,
+            catalog: catalog.to_string(),
+            printed: printed.map(|(declared, catalog)| PrintedPair {
+                declared: declared.to_string(),
+                catalog: catalog.to_string(),
+            }),
+        }],
+        ..LiveTableFacts::default()
+    }
+}
+
+fn plan_live_generated(
+    live: SchemaModel,
+    facts: LiveTableFacts,
+    declared: SchemaModel,
+    dialect: Dialect,
+) -> Plan {
+    let mut all = LiveFacts::default();
+    all.tables.insert(live.table_name.clone(), facts);
+    plan_from_ir(
+        &Side::live(envelope(vec![live]), all).expect("live side"),
+        &Side::declared(envelope(vec![declared])),
+        dialect,
+        updates_only(),
+    )
+}
+
+fn alter_direction() -> MigrationOp {
+    MigrationOp::AlterGeneratedExpression {
+        table: "transaction".to_string(),
+        column: "direction".to_string(),
+    }
+}
+
+const PG_REPRINT: &str = "sign((amount_minor)::double precision)";
+
+#[test]
+fn a_postgres_reprint_of_the_declared_expression_is_no_change() {
+    let plan = plan_live_generated(
+        transaction_model("amount_minor", None),
+        live_direction(true, PG_REPRINT, Some((PG_REPRINT, PG_REPRINT))),
+        transaction_model("amount_minor", Some(sign_of("amount_minor"))),
+        Dialect::Postgres,
+    );
+    assert_eq!(plan.op_list(), vec![]);
+}
+
+#[test]
+fn a_postgres_expression_edited_by_hand_is_set_back_in_place() {
+    let plan = plan_live_generated(
+        transaction_model("amount_minor", None),
+        live_direction(
+            true,
+            "abs(amount_minor)",
+            Some((PG_REPRINT, "abs(amount_minor)")),
+        ),
+        transaction_model("amount_minor", Some(sign_of("amount_minor"))),
+        Dialect::Postgres,
+    );
+    assert_eq!(plan.op_list(), vec![alter_direction()]);
+    let verdict = &plan.operations[0].verdict;
+    assert_eq!(verdict.execution, Execution::Native);
+    assert_eq!(verdict.fails_on_rows, RowRisk::Always);
+    assert!(!verdict.drops_data && !verdict.demands_values);
+    let rendered = plan.render().expect("renders");
+    assert_eq!(
+        rendered[0].statements,
+        vec![
+            "ALTER TABLE \"transaction\" ALTER COLUMN \"direction\" SET EXPRESSION AS \
+             (sign(\"amount_minor\"))"
+                .to_string()
+        ]
+    );
+}
+
+#[test]
+fn a_virtual_or_a_plain_live_column_is_not_the_declared_stored_one() {
+    let declared = || transaction_model("amount_minor", Some(sign_of("amount_minor")));
+    let virtual_live = plan_live_generated(
+        transaction_model("amount_minor", None),
+        live_direction(false, PG_REPRINT, Some((PG_REPRINT, PG_REPRINT))),
+        declared(),
+        Dialect::Postgres,
+    );
+    assert_eq!(virtual_live.op_list(), vec![alter_direction()]);
+    for dialect in [Dialect::Postgres, Dialect::Sqlite] {
+        let plain_live = plan_live_generated(
+            transaction_model("amount_minor", None),
+            LiveTableFacts::default(),
+            declared(),
+            dialect,
+        );
+        assert_eq!(plain_live.op_list(), vec![alter_direction()], "{dialect:?}");
+    }
+    // And a live generated column the model declares plain.
+    let plain_declared = plan_live_generated(
+        transaction_model("amount_minor", None),
+        live_direction(true, PG_REPRINT, None),
+        transaction_model("amount_minor", None),
+        Dialect::Postgres,
+    );
+    assert_eq!(plain_declared.op_list(), vec![alter_direction()]);
+    let rendered = plain_declared.render().expect("renders");
+    assert_eq!(
+        rendered[0].statements,
+        vec![ferro_ddl_lowering::render_drop_generated_expression(
+            "transaction",
+            "direction"
+        )]
+    );
+}
+
+/// What SQLite stores for `direction` as ferro created it: the clause and
+/// its range guard.
+fn sqlite_stored_direction() -> String {
+    let model = transaction_model("amount_minor", Some(sign_of("amount_minor")));
+    crate::emit::generated_column_text(&model, &model.columns[2], Dialect::Sqlite)
+        .expect("renders")
+        .expect("generated")
+}
+
+#[test]
+fn sqlite_compares_ferros_rendering_with_the_stored_text_whitespace_folded() {
+    let stored = sqlite_stored_direction();
+    assert!(stored.contains("_ferro_range_direction"), "{stored}");
+    let create = render_create_table(
+        &transaction_model("amount_minor", Some(sign_of("amount_minor"))),
+        Dialect::Sqlite,
+    )
+    .expect("renders")
+    .create_sql;
+    assert!(create.contains(&stored), "{create}");
+    let declared = || transaction_model("amount_minor", Some(sign_of("amount_minor")));
+    let refolded = stored.replace(' ', "  \n ");
+    let same = plan_live_generated(
+        transaction_model("amount_minor", None),
+        live_direction(true, &refolded, None),
+        declared(),
+        Dialect::Sqlite,
+    );
+    assert_eq!(same.op_list(), vec![]);
+
+    let edited = plan_live_generated(
+        transaction_model("amount_minor", None),
+        live_direction(true, &stored.replace("sign(", "abs("), None),
+        declared(),
+        Dialect::Sqlite,
+    );
+    assert_eq!(edited.op_list(), vec![alter_direction()]);
+    assert_eq!(edited.operations[0].verdict.execution, Execution::Rebuild);
+    let rendered = edited.render().expect("renders");
+    assert!(rendered[0].statements.is_empty());
+    assert!(
+        matches!(
+            rendered[0].reports[0].kind,
+            ferro_ddl_lowering::ReportKind::SqliteInPlace {
+                what: InPlaceChange::AlterGeneratedExpression
+            }
+        ),
+        "{:?}",
+        rendered[0].reports
+    );
+}
+
+#[test]
+fn a_renamed_input_column_is_the_rename_alone() {
+    let mut declared = transaction_model("amount_minor", Some(sign_of("amount_minor")));
+    declared.columns[1].renamed_from = Some("amount".to_string());
+    let stored = sqlite_stored_direction().replace("amount_minor", "amount");
+    let sqlite = plan_live_generated(
+        transaction_model("amount", None),
+        live_direction(true, &stored, None),
+        declared.clone(),
+        Dialect::Sqlite,
+    );
+    let rename = MigrationOp::RenameColumn {
+        table: "transaction".to_string(),
+        old: "amount".to_string(),
+        new: "amount_minor".to_string(),
+    };
+    assert_eq!(sqlite.op_list(), vec![rename.clone()]);
+    let reprint = "sign((amount)::double precision)";
+    let postgres = plan_live_generated(
+        transaction_model("amount", None),
+        live_direction(true, reprint, Some((reprint, reprint))),
+        declared,
+        Dialect::Postgres,
+    );
+    assert_eq!(postgres.op_list(), vec![rename]);
+}
+
+#[test]
+fn between_two_snapshots_a_changed_expression_is_altered_and_its_down_restores_it() {
+    let before = envelope(vec![transaction_model(
+        "amount_minor",
+        Some(sign_of("amount_minor")),
+    )]);
+    let abs = ferro_schema_ir::ValueExpr::Func {
+        name: "abs".to_string(),
+        args: vec![ferro_schema_ir::ValueExpr::Column {
+            name: "amount_minor".to_string(),
+        }],
+    };
+    let after = envelope(vec![transaction_model("amount_minor", Some(abs))]);
+    let up = plan_from_ir(
+        &Side::declared(before.clone()),
+        &Side::declared(after.clone()),
+        Dialect::Postgres,
+        destructive(),
+    );
+    assert_eq!(up.op_list(), vec![alter_direction()]);
+    let down = plan_down(
+        &up.op_list(),
+        &Side::declared(after),
+        &Side::declared(before.clone()),
+        Dialect::Postgres,
+    );
+    assert_eq!(down.op_list(), vec![alter_direction()]);
+    assert_eq!(
+        down.render().expect("renders")[0].statements,
+        vec![ferro_ddl_lowering::render_set_generated_expression(
+            "transaction",
+            "direction",
+            "sign(\"amount_minor\")"
+        )]
+    );
+    let same = plan_from_ir(
+        &Side::declared(before.clone()),
+        &Side::declared(before),
+        Dialect::Postgres,
+        destructive(),
+    );
+    assert_eq!(same.op_list(), vec![]);
+}
+
+#[test]
+fn a_postgres_live_generated_column_with_no_printed_pair_is_refused() {
+    let mut facts = LiveFacts::default();
+    facts.tables.insert(
+        "transaction".to_string(),
+        live_direction(true, PG_REPRINT, None),
+    );
+    let live = Side::live(
+        envelope(vec![transaction_model("amount_minor", None)]),
+        facts,
+    )
+    .expect("live side");
+    let declared = envelope(vec![transaction_model(
+        "amount_minor",
+        Some(sign_of("amount_minor")),
+    )]);
+    assert_eq!(
+        live.check_printed_pairs(&declared, Dialect::Postgres),
+        Err(PlanError::MissingPrintedPair {
+            table: "transaction".to_string(),
+            column: "direction".to_string(),
+        })
+    );
+    assert_eq!(live.check_printed_pairs(&declared, Dialect::Sqlite), Ok(()));
+}
+
+#[test]
+fn a_sqlite_rebuild_copies_no_generated_column() {
+    let before = transaction_model("amount_minor", None);
+    let after = transaction_model("amount_minor", Some(sign_of("amount_minor")));
+    let statements =
+        crate::generate::rebuild::render("transaction", &after, &before, &[]).expect("renders");
+    let insert = statements
+        .iter()
+        .find(|s| s.starts_with("INSERT INTO \"_ferro_new_transaction\""))
+        .expect("copy");
+    assert_eq!(
+        insert,
+        "INSERT INTO \"_ferro_new_transaction\" (\"id\", \"amount_minor\") \
+         SELECT \"id\", \"amount_minor\" FROM \"transaction\""
+    );
+}
+
+#[test]
+fn a_generated_column_reading_a_column_the_same_change_adds_needs_no_pair() {
+    // Live: `direction` = sign(amount_minor), no `fee_minor`. Declared:
+    // `direction` = sign(fee_minor), `fee_minor` added. The live read prints
+    // no pair (an input is not live), so none is demanded, and the plan adds
+    // the column, then changes the expression.
+    let mut facts = LiveFacts::default();
+    facts.tables.insert(
+        "transaction".to_string(),
+        live_direction(true, PG_REPRINT, None),
+    );
+    let live = Side::live(
+        envelope(vec![transaction_model("amount_minor", None)]),
+        facts,
+    )
+    .expect("live side");
+    let mut declared = transaction_model("amount_minor", Some(sign_of("fee_minor")));
+    declared.columns.push(col_with_flags(
+        "fee_minor",
+        "bigint",
+        true,
+        false,
+        false,
+        None,
+    ));
+    let declared = envelope(vec![declared]);
+    assert_eq!(
+        live.check_printed_pairs(&declared, Dialect::Postgres),
+        Ok(())
+    );
+    let plan = plan_from_ir(
+        &live,
+        &Side::declared(declared),
+        Dialect::Postgres,
+        updates_only(),
+    );
+    assert_eq!(
+        plan.op_list(),
+        vec![
+            MigrationOp::AddColumn {
+                table: "transaction".to_string(),
+                column: "fee_minor".to_string(),
+            },
+            alter_direction(),
+        ]
+    );
+}
+
+#[test]
+fn the_pair_rule_gives_a_pair_only_when_the_column_and_every_input_are_live() {
+    let mut model = transaction_model("amount_minor", Some(sign_of("amount_minor")));
+    model.columns[1].renamed_from = Some("amount".to_string());
+    let direction = model.columns[2].clone();
+    let live = |names: &'static [&'static str]| move |name: &str| names.contains(&name);
+    assert_eq!(
+        crate::plan::printed_pair_column(&model, &direction, &live(&["amount", "direction"])),
+        Some("direction".to_string()),
+        "an input live under its rename hint"
+    );
+    assert_eq!(
+        crate::plan::printed_pair_column(&model, &direction, &live(&["direction"])),
+        None,
+        "an input not live yet"
+    );
+    assert_eq!(
+        crate::plan::printed_pair_column(&model, &direction, &live(&["amount_minor"])),
+        None,
+        "the column not live yet"
+    );
+    assert_eq!(
+        crate::plan::printed_pair_column(&model, &model.columns[1], &live(&["amount_minor"])),
+        None,
+        "a plain column"
     );
 }

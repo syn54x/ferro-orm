@@ -13,14 +13,15 @@ use ferro_ddl_lowering::{
     fk_action_sql, is_pg_serial_column, primary_key_kept_warning, quote_ident,
     render_check_addition, render_check_drop, render_check_rebuild, render_check_restore,
     render_create_row_policy, render_disable_row_security, render_drop_constraint,
-    render_drop_index_sql, render_drop_row_policy, render_enable_row_security,
-    render_force_row_security, render_label_update, render_no_force_row_security,
-    render_pg_enum_add_value, render_pg_enum_create_type, render_pg_enum_drop_type,
-    render_pg_enum_rename_type, render_pg_enum_rename_value, render_pg_serial_sequence_rename,
-    render_rename_column, render_rename_constraint, render_rename_index, render_rename_policy,
-    render_rename_table, render_validate_constraint, resolve_column_storage, row_policy_clauses,
-    row_policy_rebuild_statements, row_security_statements, sqlite_drop_default_report,
-    sqlite_in_place_report,
+    render_drop_generated_expression, render_drop_index_sql, render_drop_row_policy,
+    render_enable_row_security, render_force_row_security, render_label_update,
+    render_no_force_row_security, render_pg_enum_add_value, render_pg_enum_create_type,
+    render_pg_enum_drop_type, render_pg_enum_rename_type, render_pg_enum_rename_value,
+    render_pg_serial_sequence_rename, render_rename_column, render_rename_constraint,
+    render_rename_index, render_rename_policy, render_rename_table,
+    render_set_generated_expression, render_validate_constraint, resolve_column_storage,
+    row_policy_clauses, row_policy_rebuild_statements, row_security_statements,
+    sqlite_drop_default_report, sqlite_in_place_report,
 };
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -397,6 +398,35 @@ pub(crate) fn render_from(
                 out.statements.extend(emission.statements);
                 out.reports.extend(emission.reports);
             }
+            // ADR-0060: Postgres changes the expression in place (`DROP
+            // EXPRESSION` when the target holds the column plain); SQLite
+            // only by a rebuild, which the pass never runs.
+            MigrationOp::AlterGeneratedExpression { table, column } => match dialect {
+                Dialect::Postgres => {
+                    let model = find_model(&new_models, table)?;
+                    let body =
+                        new_side
+                            .generated_body(model, column, dialect)
+                            .map_err(|message| EmissionError {
+                                message: format!(
+                                    "Cannot render generated column '{table}.{column}': {message}"
+                                ),
+                            })?;
+                    out.statements.push(match body {
+                        Some(body) => render_set_generated_expression(table, column, &body),
+                        None => render_drop_generated_expression(table, column),
+                    });
+                }
+                Dialect::Sqlite => out.reports.push(sqlite_in_place_report(
+                    InPlaceChange::AlterGeneratedExpression,
+                    Subject::column(table, column),
+                    format!(
+                        "Generated column '{table}.{column}' differs from the model, and \
+                         SQLite cannot change a generated column in place; `ferro migrate \
+                         new` changes it by rebuilding the table."
+                    ),
+                )),
+            },
             MigrationOp::AlterColumnNullability { table, column } => {
                 let old_col = find_column(find_model(&old_models, table)?, column)?;
                 let new_col = find_column(find_model(&new_models, table)?, column)?;

@@ -251,6 +251,8 @@ fn kind_class(op: &MigrationOp, target: &IrEnvelope<SchemaIrPayload>) -> StepCla
         // A type change, a removed label, a moved key: the previous
         // release's values may no longer fit.
         | MigrationOp::AlterColumnType { .. }
+        // A new expression replaces what every row holds in the column.
+        | MigrationOp::AlterGeneratedExpression { .. }
         | MigrationOp::RemoveEnumLabel { .. }
         | MigrationOp::ChangePrimaryKey { .. }
         // A constraint added or rebuilt refuses rows it did not refuse.

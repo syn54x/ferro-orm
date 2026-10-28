@@ -158,3 +158,56 @@ def test_sqlite_bookkeeping_tables_are_never_read(project, pkg, db):
     db.execute('INSERT INTO "tally" DEFAULT VALUES')
     assert "sqlite_sequence" in db.tables()
     assert asyncio.run(read()) == ["author"]
+
+
+GENERATED_LEDGER = """
+from ferro import Field, fn
+
+
+class Transaction(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    amount_minor: int
+    direction: int = Field(
+        generated=lambda transaction: fn.sign(transaction.amount_minor)
+    )
+"""
+
+
+def test_the_live_read_carries_each_generated_column_and_files_no_guard_as_a_check(
+    project, pkg, db
+):
+    """A generated column reads as a fact: stored, its catalog text and, on
+    Postgres, the declared rendering and the catalog's reprint as Postgres
+    printed them, equal. SQLite's ``_ferro_range_direction`` guard is part of
+    the column, never a check of the table."""
+    configure(project, pkg, db.backend)
+    write_models(project, pkg, GENERATED_LEDGER)
+    _, database = settings_and_database()
+    database.import_models()
+
+    async def read() -> dict:
+        await ferro.connect(db.url, auto_migrate=True)
+        try:
+            _, facts = await _core._live_schema_ir(
+                None, json.dumps(compile_registry_schema_ir())
+            )
+        finally:
+            ferro.reset_engine()
+        return json.loads(facts)["tables"]["transaction"]
+
+    facts = asyncio.run(read())
+    [generated] = facts["generated"]
+    assert (generated["column"], generated["stored"]) == ("direction", True)
+    if db.backend == "postgres":
+        assert generated["catalog"] == (
+            "sign(((amount_minor)::bigint)::double precision)"
+        )
+        printed = generated["printed"]
+        assert printed["declared"] == printed["catalog"] == generated["catalog"]
+    else:
+        assert generated["catalog"].startswith(
+            'GENERATED ALWAYS AS (sign("amount_minor")) STORED'
+        )
+        assert '"_ferro_range_direction"' in generated["catalog"]
+        assert generated["printed"] is None
+    assert [check["name"] for check in facts["checks"]] == []

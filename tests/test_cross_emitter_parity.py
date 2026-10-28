@@ -1696,13 +1696,67 @@ def column_defaults(db: Db) -> dict[tuple[str, str], str | None]:
     }
 
 
+def _sqlite_generated_text(create_sql: str, column: str) -> str | None:
+    """The definition of generated column ``column`` in a SQLite ``CREATE
+    TABLE`` from its ``GENERATED`` clause to the end of the column."""
+    quoted = f'"{column}"'
+    at = create_sql.find(quoted)
+    if at < 0:
+        return None
+    start = create_sql.upper().find("GENERATED", at)
+    if start < 0:
+        return None
+    depth, end = 0, len(create_sql)
+    for i in range(start, len(create_sql)):
+        ch = create_sql[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            if depth == 0:
+                end = i
+                break
+            depth -= 1
+        elif ch == "," and depth == 0:
+            end = i
+            break
+    return create_sql[start:end]
+
+
+def generation_expressions(db: Db) -> dict[tuple[str, str], str]:
+    """Every generated column's expression as the catalog holds it (Postgres
+    ``information_schema.columns.generation_expression``, SQLite the column's
+    clause in ``sqlite_master``), whitespace folded as drift folds it, keyed
+    ``(table, column)``, ferro's own ``_ferro_*`` tables left out."""
+    if db.backend == "sqlite":
+        rows = []
+        for table, create in db.rows(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'table' "
+            "AND name NOT LIKE 'sqlite%'"
+        ):
+            for row in db.rows(f'PRAGMA table_xinfo("{table}")'):
+                if row[6] in (2, 3):
+                    rows.append((table, row[1], _sqlite_generated_text(create, row[1])))
+    else:
+        rows = db.rows(
+            "SELECT table_name, column_name, generation_expression "
+            f"FROM information_schema.columns WHERE table_schema = '{db.schema}' "
+            "AND is_generated = 'ALWAYS'"
+        )
+    return {
+        (table, column): " ".join((expr or "").split())
+        for table, column, expr in rows
+        if not table.startswith("_ferro_")
+    }
+
+
 @pytest.mark.parametrize("case_id", CASE_IDS)
 def test_pin_e_a_migrated_database_is_the_auto_migrated_one(
     project, second_db, case_id, db_url, db_backend, postgres_base_url, db_schema_name
 ):
     """The chain ``0001`` → ``0002`` leaves no drift; a second database
     ``connect(auto_migrate=True)`` builds from the same models has the same
-    live schema, facts included; Alembic autogenerate writes nothing against
+    live schema, facts included, and the same expression on every generated
+    column (``generation_expressions``); Alembic autogenerate writes nothing against
     the auto-migrated one. Against the migrated one it refuses, by design:
     a database the tracking table marks is ``ferro migrate new``'s, and the
     bridge reads the very live schema just shown equal, so it has nothing
@@ -1717,6 +1771,11 @@ def test_pin_e_a_migrated_database_is_the_auto_migrated_one(
     auto_migrate(second)
 
     assert live_schema(db_url, after) == live_schema(second, after)
+    assert generation_expressions(
+        Db(db_url, db_backend, postgres_base_url, db_schema_name)
+    ) == generation_expressions(
+        Db(second, db_backend, postgres_base_url, second_schema)
+    )
     _empty_autogenerate(second, postgres_base_url, second_schema)
     with pytest.raises(RuntimeError, match="tracked by ferro migrations"):
         autogenerate(db_url, postgres_base_url, db_schema_name)
@@ -1859,7 +1918,8 @@ def test_pin_i_an_inherited_database_is_the_squashed_one(
     ``up`` against the squashed directory is the database that ran the
     squashed ``0001`` from empty: the same live schema and facts (columns,
     types, nullability, indexes, constraints, policies), the same server
-    default on every column (``column_defaults``), the same tracking table
+    default on every column (``column_defaults``) and generation expression
+    on every generated one (``generation_expressions``), the same tracking table
     bar origin and times, no drift on either, and ``down --all`` leaves both
     with no table of the models and no record."""
     expect_finding(request, case_id, db_backend, "i")
@@ -1885,6 +1945,7 @@ def test_pin_i_an_inherited_database_is_the_squashed_one(
 
     assert live_schema(db_url, after) == live_schema(second_url, after)
     assert column_defaults(inherited) == column_defaults(scratch)
+    assert generation_expressions(inherited) == generation_expressions(scratch)
     assert inherited.rows(_TRACKING) == scratch.rows(_TRACKING)
     assert inherited.rows(_TRACKING), "the squashed migration is recorded"
     for url in (db_url, second_url):

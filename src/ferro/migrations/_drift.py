@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from .. import _core
+from ..exceptions import OperationalError
 from . import runner
 from .errors import MigrationRefused
 from .report import RunRefused, StatusReport
@@ -189,6 +190,9 @@ _RENDERERS: dict[str, Callable[[dict[str, Any]], str]] = {
     "DropColumn": lambda op: f"{_column(op)} column is extra",
     "AlterColumnType": _type,
     "AlterColumnNullability": _nullability,
+    "AlterGeneratedExpression": lambda op: (
+        f"{_column(op)} generated expression differs"
+    ),
     "DropDefault": lambda op: (
         f"{_column(op)} has default {op['was']} in the database, none declared"
     ),
@@ -384,7 +388,9 @@ async def against(
         The drift report.
 
     Raises:
-        MigrationRefused: `using` is not an open connection.
+        MigrationRefused: `using` is not an open connection, or on Postgres
+            the role cannot read a table the snapshot holds (the message
+            names the `GRANT SELECT` it needs).
 
     Examples:
         ```python {test=compile reason="needs a migrations project and a database"}
@@ -397,7 +403,14 @@ async def against(
     # One core call reads the snapshot's live tables (and the old table of
     # each live rename hint, ADR-0032) by the pass's own rule (ADR-0047) and
     # plans them toward the snapshot, destructive changes on.
-    plan = await _core._plan_drift(using, json.dumps(snapshot))
+    try:
+        plan = await _core._plan_drift(using, json.dumps(snapshot))
+    except OperationalError as err:
+        # The role cannot read a table drift compares; the message names the
+        # GRANT.
+        if err.sqlstate == "42501":
+            raise MigrationRefused(str(err)) from None
+        raise
     operations = _describe(plan["operations"], plan["live"], snapshot, plan["dialect"])
     return DriftReport(
         against=migration,
