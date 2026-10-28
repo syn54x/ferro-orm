@@ -74,7 +74,7 @@ The three doors are [auto-migrate](../guide/schema/auto-migrate.md) (here its up
 
 ## Auto-migrate changes per backend
 
-What `connect(..., migrate_updates=True)` and `ferro.migrate()` do to an existing table, change by change. `migrate_destructive=True` adds the drops marked so.
+What `connect(..., migrate_updates=True)` and `ferro.migrate()` do to an existing table, change by change. `migrate_destructive=True` adds the drops marked so. The PostgreSQL column is PostgreSQL 17 or newer: `connect()` refuses an older server before any migration runs.
 
 | Change | SQLite | PostgreSQL |
 | :--- | :--- | :--- |

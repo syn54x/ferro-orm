@@ -168,6 +168,68 @@ fn accepted_dialect(connection_url: &str) -> PyResult<Dialect> {
     })
 }
 
+/// The oldest PostgreSQL Ferro connects to, as `server_version_num`.
+const POSTGRES_FLOOR_VERSION_NUM: u32 = 170000;
+
+/// A version `connect()` reads in place of the server's, set only by tests.
+static REPORTED_SERVER_VERSION: std::sync::RwLock<Option<u32>> = std::sync::RwLock::new(None);
+
+/// Report `version_num` as every Postgres server's `server_version_num` to
+/// each `connect()` in this process, in place of the value the server gives;
+/// `None` clears it. Test-only: it lets a test meet the version floor without an
+/// old server.
+///
+/// # Errors
+/// `RuntimeError` when the override's lock is poisoned.
+#[pyfunction]
+#[pyo3(name = "_report_server_version_for_test", signature = (version_num))]
+pub fn report_server_version_for_test(version_num: Option<u32>) -> PyResult<()> {
+    *REPORTED_SERVER_VERSION.write().map_err(|_| {
+        pyo3::exceptions::PyRuntimeError::new_err("Failed to lock the reported server version")
+    })? = version_num;
+    Ok(())
+}
+
+/// The `InterfaceError` text for a Postgres server below the floor, or `None`
+/// when `version_num` meets it. `shown_url` is the redacted URL.
+fn postgres_floor_refusal(version_num: u32, shown_url: &str) -> Option<String> {
+    if version_num >= POSTGRES_FLOOR_VERSION_NUM {
+        return None;
+    }
+    // Since PostgreSQL 10, server_version_num is major * 10000 + minor.
+    let shown_version = if version_num >= 100000 {
+        format!("{}.{}", version_num / 10000, version_num % 10000)
+    } else {
+        format!(
+            "{}.{}.{}",
+            version_num / 10000,
+            version_num / 100 % 100,
+            version_num % 100
+        )
+    };
+    let floor = POSTGRES_FLOOR_VERSION_NUM / 10000;
+    Some(format!(
+        "Ferro needs PostgreSQL {floor} or newer; {shown_url} runs PostgreSQL \
+         {shown_version} (server_version_num {version_num}). Upgrade the server \
+         to {floor} or later."
+    ))
+}
+
+/// Refuse `engine` when it reaches a Postgres server below the floor, reading
+/// the test override in place of the server's version when one is set.
+fn check_postgres_floor(engine: &EngineHandle, shown_url: &str) -> PyResult<()> {
+    let Some(server_version) = engine.server_version_num() else {
+        return Ok(());
+    };
+    let reported = *REPORTED_SERVER_VERSION.read().map_err(|_| {
+        pyo3::exceptions::PyRuntimeError::new_err("Failed to lock the reported server version")
+    })?;
+    match postgres_floor_refusal(reported.unwrap_or(server_version), shown_url) {
+        Some(message) => Err(crate::errors::interface_error(message)),
+        None => Ok(()),
+    }
+}
+
 /// `url` as Ferro shows it, its secrets masked by `***` (the userinfo
 /// password and every secret query value): what `ferro migrate` prints on
 /// its database line and `status --json` carries as `url`. A URL with no
@@ -348,6 +410,8 @@ pub fn connect(
         .map_err(|e| crate::errors::map_db_error(&failed_context, e))?
         .with_identity_map_enabled(identity_map)
         .with_shown_url(&url);
+        // Before auto-migrate and registration: a refused server is left untouched.
+        check_postgres_floor(&engine_handle, &redacted_url)?;
 
         let engine_handle = Arc::new(engine_handle);
 
@@ -561,8 +625,35 @@ pub fn set_default_connection(name: String) -> PyResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{connect_engine_handle, connection_failed_context, redact_connection_url};
+    use super::{
+        connect_engine_handle, connection_failed_context, postgres_floor_refusal,
+        redact_connection_url,
+    };
     use ferro_ddl_lowering::Dialect;
+
+    #[test]
+    fn postgres_floor_refuses_16_naming_both_versions() {
+        assert_eq!(
+            postgres_floor_refusal(160004, "postgresql://app:***@db/app").as_deref(),
+            Some(
+                "Ferro needs PostgreSQL 17 or newer; postgresql://app:***@db/app runs \
+                 PostgreSQL 16.4 (server_version_num 160004). Upgrade the server to 17 or later."
+            )
+        );
+    }
+
+    #[test]
+    fn postgres_floor_shows_a_pre_10_version_in_three_parts() {
+        let message = postgres_floor_refusal(90624, "postgresql://db/app").unwrap();
+        assert!(message.contains("runs PostgreSQL 9.6.24 (server_version_num 90624)"));
+    }
+
+    #[test]
+    fn postgres_floor_accepts_17_and_later() {
+        assert_eq!(postgres_floor_refusal(170000, "u"), None);
+        assert_eq!(postgres_floor_refusal(180001, "u"), None);
+        assert!(postgres_floor_refusal(169999, "u").is_some());
+    }
 
     #[test]
     fn redact_masks_a_password_containing_an_at_sign() {
