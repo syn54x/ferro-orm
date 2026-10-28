@@ -839,6 +839,36 @@ def _binary_value(op: str, left: Any, right: Any) -> "BinaryValueExpr":
     return BinaryValueExpr(op, left, right)
 
 
+def _holds_fn(value: Any) -> bool:
+    """Whether a value expression calls a `ferro.fn` function anywhere."""
+    if isinstance(value, FuncValueExpr):
+        return True
+    if isinstance(value, BinaryValueExpr):
+        return _holds_fn(value.left) or _holds_fn(value.right)
+    if isinstance(value, NegateValueExpr):
+        return _holds_fn(value.operand)
+    return False
+
+
+def reject_fn_in_query(value: Any, where: str) -> None:
+    """Refuse a `ferro.fn` call outside a generated column's expression.
+
+    Args:
+        value: The value a query, a comparison or an `update()` received.
+        where: What received it, named in the refusal.
+
+    Raises:
+        TypeError: `value` calls a `ferro.fn` function.
+    """
+    if _holds_fn(value):
+        raise TypeError(
+            f"ferro.fn cannot appear in {where}: its functions compute a "
+            "generated column's value. Declare the value as a generated column, "
+            "Field(generated=lambda ...), and query that column; a condition "
+            "on a model's rows is a Check in __ferro_checks__"
+        )
+
+
 class ValueExpr:
     """A new value computed in the database, for an `update()` recipe.
 
@@ -854,6 +884,7 @@ class ValueExpr:
     """
 
     def _reject_clause(self, clause: str) -> NoReturn:
+        reject_fn_in_query(self, f"{clause}()")
         raise TypeError(
             f"value expressions cannot appear in {clause}(); "
             "comparing a value expression to produce a predicate is #327; "
@@ -861,6 +892,7 @@ class ValueExpr:
         )
 
     def _reject_comparison(self, symbol: str) -> NoReturn:
+        reject_fn_in_query(self, f"a comparison ({symbol})")
         raise TypeError(
             f"comparing a value expression ({symbol}) is not a where() "
             "predicate (#327). Value expressions are SET sources "
@@ -887,6 +919,7 @@ class ValueExpr:
         self._reject_comparison(">=")
 
     def __bool__(self) -> NoReturn:
+        reject_fn_in_query(self, "a truth test")
         raise TypeError(
             "ValueExpr has no truth value; it is a SET source "
             '(update(lambda t: {"col": ...})), not a predicate. '

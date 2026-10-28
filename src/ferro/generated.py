@@ -11,12 +11,16 @@ from __future__ import annotations
 
 import dis
 import enum
+import functools
+import json
+import math
 import types
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
+from . import _core
 from . import fn as _fn
 from .checks import (
     _bound_default_values,
@@ -43,6 +47,203 @@ _DIALECT = (
     "a generated column's expression is built from the model's own columns, "
     "literals, + - * /, unary - and the functions in ferro.fn"
 )
+
+_NOT_A_CONDITION = (
+    "a generated column holds a value, not a condition; declare the condition "
+    "as a Check in __ferro_checks__ instead"
+)
+
+#: The value families a column can hold, by its logical type.
+_FAMILIES = frozenset(
+    {"integer", "number", "decimal", "string", "date", "datetime", "boolean"}
+)
+
+#: The Python annotation each family is declared with, for refusals.
+_ANNOTATIONS = {
+    "integer": "int",
+    "number": "float",
+    "decimal": "Decimal",
+    "string": "str",
+    "date": "date",
+    "datetime": "datetime",
+    "boolean": "bool",
+}
+
+#: An integer argument also fits a float or decimal parameter.
+_WIDENS_TO = {"integer": frozenset({"number", "decimal"})}
+
+
+@functools.cache
+def _function_table() -> dict[str, dict[str, Any]]:
+    """The value function table, read once from the Rust table over FFI."""
+    return {
+        entry["name"]: entry for entry in json.loads(_core._value_function_table())
+    }
+
+
+def _column_family(spec: Any) -> str | None:
+    """The value family a column holds, or `None` for one no expression yields."""
+    if spec.enum_class is not None or spec.enum_values is not None:
+        return None
+    return spec.logical_type if spec.logical_type in _FAMILIES else None
+
+
+def _literal_family(token: str) -> str:
+    """The family of a literal token as `_check_literal_token` renders it."""
+    if token in ("true", "false"):
+        return "boolean"
+    if token.startswith("'"):
+        return "string"
+    if token.lstrip("-").isdigit():
+        return "integer"
+    return "number"
+
+
+def _fits(argument: str, parameter: str) -> bool:
+    return argument == parameter or parameter in _WIDENS_TO.get(argument, ())
+
+
+def _signature_text(signature: Mapping[str, Any]) -> str:
+    args = ", ".join(signature["args"]) + (", ..." if signature["variadic"] else "")
+    return f"({args}) -> {signature['result']}"
+
+
+def _call_type(
+    name: str, args: list[tuple[str, bool]], columns: list[str | None]
+) -> tuple[str, bool]:
+    """The family and nullability of one `ferro.fn` call, or a refusal."""
+    function = _function_table()[name]
+    families = [family for family, _ in args]
+    for signature in function["signatures"]:
+        params = list(signature["args"])
+        if signature["variadic"]:
+            if len(families) < len(params):
+                continue
+            params += [params[-1]] * (len(families) - len(params))
+        elif len(families) != len(params):
+            continue
+        if all(_fits(family, param) for family, param in zip(families, params)):
+            break
+    else:
+        reason = ""
+        if "datetime" in families and any(
+            "date" in signature["args"] for signature in function["signatures"]
+        ):
+            reason = (
+                ": the part of a datetime depends on the session's time zone, "
+                "which Postgres refuses in a generated column; read a date "
+                "field instead"
+            )
+        elif "string" in families and name in ("least", "greatest"):
+            reason = (
+                ": text compares by collation on Postgres and byte by byte on "
+                "SQLite, so it is refused"
+            )
+        signatures = ", ".join(
+            _signature_text(signature) for signature in function["signatures"]
+        )
+        raise TypeError(
+            f"fn.{name} takes {signatures}, not ({', '.join(families)}){reason}"
+        )
+    nulls = function["nulls"]
+    if nulls == "refused":
+        nullable = [
+            column for (_, is_nullable), column in zip(args, columns) if is_nullable
+        ]
+        if nullable:
+            subject = (
+                f"the nullable column {nullable[0]!r}"
+                if nullable[0]
+                else "a nullable argument"
+            )
+            raise TypeError(
+                f"fn.{name} over {subject}: Postgres skips a NULL where SQLite "
+                "returns NULL; wrap it as fn.coalesce(<column>, <fallback>)"
+            )
+        return signature["result"], False
+    if nulls == "first_non_null":
+        return signature["result"], all(is_nullable for _, is_nullable in args)
+    return signature["result"], any(is_nullable for _, is_nullable in args)
+
+
+def _arithmetic_type(
+    op: str, left: tuple[str, bool], right: tuple[str, bool]
+) -> tuple[str, bool]:
+    families = {left[0], right[0]}
+    if "decimal" in families:
+        raise TypeError(
+            f"{op!r} over a decimal: SQLite computes decimal arithmetic in "
+            "floating point and Postgres exactly, so the stored values would "
+            "differ; store the amount in minor units as an int"
+        )
+    if not families <= {"integer", "number"}:
+        shown = ", ".join(sorted(families))
+        raise TypeError(f"{op!r} takes integers and floats, not {shown}")
+    family = "integer" if families == {"integer"} else "number"
+    return family, left[1] or right[1]
+
+
+def value_expr_type(
+    tree: Mapping[str, Any], columns: Mapping[str, Any]
+) -> tuple[str, bool]:
+    """Type a lowered value expression under value parity.
+
+    Args:
+        tree: The lowered expression, as `lower_value_expr` returns it.
+        columns: The compile's column specs, keyed by column name.
+
+    Returns:
+        The expression's value family (`"integer"`, `"number"`,
+            `"decimal"`, `"string"`, `"date"`, `"datetime"` or
+            `"boolean"`) and whether it can be `NULL`.
+
+    Raises:
+        TypeError: The expression could store a different value, or fail
+            differently, on SQLite and Postgres.
+    """
+    kind = tree["kind"]
+    if kind == "column":
+        spec = columns[tree["name"]]
+        if spec.retired:
+            raise TypeError(
+                f"reads the retired column {tree['name']!r}, which is leaving the "
+                "table; read a column the model still maps"
+            )
+        family = _column_family(spec)
+        if family is None:
+            raise TypeError(
+                f"reads {tree['name']!r}, a column no value expression can read; "
+                f"it takes {', '.join(_ANNOTATIONS.values())} columns"
+            )
+        return family, spec.nullable
+    if kind == "literal":
+        return _literal_family(tree["token"]), False
+    if kind == "negate":
+        family, nullable = value_expr_type(tree["operand"], columns)
+        if family not in ("integer", "number", "decimal"):
+            raise TypeError(f"unary - takes a number, not {family}")
+        return family, nullable
+    if kind == "binary":
+        op = {"add": "+", "sub": "-", "mul": "*", "div": "/"}[tree["op"]]
+        right = tree["right"]
+        if op == "/" and not (
+            right["kind"] == "literal"
+            and _literal_family(right["token"]) in ("integer", "number")
+            and float(right["token"]) != 0
+        ):
+            raise TypeError(
+                "divides by something other than a non-zero literal: Postgres "
+                "raises on division by zero where SQLite stores NULL; divide by "
+                "a non-zero literal such as / 100"
+            )
+        return _arithmetic_type(
+            op,
+            value_expr_type(tree["left"], columns),
+            value_expr_type(right, columns),
+        )
+    args = [value_expr_type(arg, columns) for arg in tree["args"]]
+    names = [arg["name"] if arg["kind"] == "column" else None for arg in tree["args"]]
+    return _call_type(tree["name"], args, names)
 
 
 @dataclass(frozen=True)
@@ -170,13 +371,17 @@ def lower_value_expr(value: Any, *, model_name: str, owner: str) -> dict[str, An
             ],
         }
     if isinstance(value, QueryNode):
+        raise TypeError(f"{where} is a comparison: {_NOT_A_CONDITION}")
+    if isinstance(value, float) and not math.isfinite(value):
         raise TypeError(
-            f"{where} is a comparison: {_DIALECT}, and a generated column holds "
-            "a value, not a condition"
+            f"{where} holds the float {value!r}, which neither database stores "
+            "in an expression; use a finite literal"
         )
-    if isinstance(value, Decimal) and value.is_finite():
-        # A numeric token, never the quoted text a check gives a non-number.
-        return {"kind": "literal", "token": str(value)}
+    if isinstance(value, Decimal):
+        raise TypeError(
+            f"{where} holds the Decimal {value!r}: a value expression takes int "
+            "and float literals; write the literal as one"
+        )
     if isinstance(value, (bool, int, float, str, enum.Enum)):
         return {"kind": "literal", "token": _check_literal_token(value)}
     raise TypeError(f"{where} holds {type(value).__name__} {value!r}: {_DIALECT}")
@@ -194,6 +399,36 @@ def _collect_inputs(expression: Mapping[str, Any], out: set[str]) -> None:
     elif kind == "func":
         for arg in expression["args"]:
             _collect_inputs(arg, out)
+
+
+def _refuse_unequal_family(
+    where: str,
+    expression: Mapping[str, Any],
+    columns: Mapping[str, Any],
+    field_name: str,
+) -> None:
+    """Refuse an expression whose value family is not its column's."""
+    try:
+        family, _ = value_expr_type(expression, columns)
+    except TypeError as exc:
+        raise TypeError(f"{where} {exc}") from exc
+    if family == "boolean":
+        raise TypeError(f"{where} is a boolean: {_NOT_A_CONDITION}")
+    spec = columns[field_name]
+    column_family = _column_family(spec)
+    if column_family is None:
+        annotation = getattr(spec.python_type, "__name__", spec.python_type)
+        raise TypeError(
+            f"{where} is declared {annotation}, which no value expression yields; "
+            f"a generated column is one of {', '.join(_ANNOTATIONS.values())}"
+        )
+    if family != column_family:
+        raise TypeError(
+            f"{where} computes {family} ({_ANNOTATIONS[family]}) but the field is "
+            f"{_ANNOTATIONS[column_family]}: SQLite and Postgres would store "
+            f"different values; annotate the field {_ANNOTATIONS[family]} or "
+            f"change the expression to yield {_ANNOTATIONS[column_family]}"
+        )
 
 
 def _declared_generated(model_cls: type[Any]) -> dict[str, Callable[..., Any]]:
@@ -222,8 +457,8 @@ def compile_generated_columns(
 
     Raises:
         TypeError: An expression outside the value expression dialect, an
-            unknown column, a closure, a generated primary key, or an
-            expression that reads itself or another generated column.
+            unknown column, a closure, an expression that reads itself or
+            another generated column, or one `value_expr_type` refuses.
     """
     declared = _declared_generated(model_cls)
     if not declared:
@@ -237,11 +472,6 @@ def compile_generated_columns(
     specs: dict[str, GeneratedColumnSpec] = {}
     for field_name, func in declared.items():
         where = f"{model_name}.{field_name}"
-        if model_cls.ferro_fields[field_name].primary_key:
-            raise TypeError(
-                f"{where}: a primary key cannot be generated; drop primary_key=True "
-                "or generated="
-            )
         if not isinstance(func, types.FunctionType):
             raise TypeError(
                 f"{where} generated must be a lambda over the model's columns, not "
@@ -262,6 +492,7 @@ def compile_generated_columns(
                 "generated column reads plain columns only; repeat that column's "
                 "expression instead"
             )
+        _refuse_unequal_family(where, expression, columns, field_name)
         specs[field_name] = GeneratedColumnSpec(
             expression=expression, inputs=frozenset(inputs)
         )

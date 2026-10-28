@@ -42,6 +42,7 @@ from .nodes import (
     _json_column_shape,
     _query_value_kind,
     now,
+    reject_fn_in_query,
     validate_query_column,
 )
 
@@ -692,6 +693,7 @@ _SET_BINARY_OPS: dict[str, Literal["add", "sub"]] = {"+": "add", "-": "sub"}
 
 def _reject_kwargs_value_expr(value: Any) -> None:
     """Kwargs stay literals-only; expressions belong on the recipe door."""
+    reject_fn_in_query(value, "update()")
     if isinstance(
         value,
         (FieldProxy, ValueExpr, RelationProxy, ReverseRelationProxy),
@@ -944,6 +946,7 @@ def _recipe_set(
         _reject_relation(model_cls, column, role="target")
         validate_query_column(model_cls, column)
         _refuse_generated_target(model_cls, column)
+        reject_fn_in_query(value, "an update() recipe")
         if isinstance(value, (RelationProxy, ReverseRelationProxy)):
             relation = (
                 value._path[-1] if isinstance(value, RelationProxy) else value._name

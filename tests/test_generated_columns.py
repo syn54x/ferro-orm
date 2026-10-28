@@ -122,7 +122,7 @@ def test_arithmetic_and_unary_minus_lower_to_binary_and_negate():
         price: int
         qty: int
         total: int = Field(generated=lambda line: -(line.price * line.qty) + 1)
-        half: float = Field(generated=lambda line: line.price / 2 - line.qty)
+        half: int = Field(generated=lambda line: line.price / 2 - line.qty)
 
     column = lambda name: {"kind": "column", "name": name}  # noqa: E731
     assert _column("line", "total")["generated"] == {
