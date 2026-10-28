@@ -60,7 +60,7 @@ jobs:
           uv run --no-sync --python 3.13 prek run --all-files
 
   docs:
-    name: Docs build and docs tests
+    name: Docs build
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -101,11 +101,6 @@ jobs:
         run: |
           uv run --no-sync python -m tests._docs_checks docs/pages docs/examples src/ferro
 
-      - name: Run the docs tests
-        # Every docs test module is named test_doc*.py, which
-        # tests/test_docs_site.py pins, so a new one runs here unlisted.
-        run: |
-          uv run --no-sync pytest --no-cov -p no:cacheprovider tests/test_doc*.py
 
   test-rust:
     name: Rust tests
@@ -183,7 +178,7 @@ jobs:
 
       - name: Run pytest
         run: |
-          uv run pytest -v --cov=src --cov-report=xml --cov-report=term
+          uv run pytest -n auto --cov=src --cov-report=xml --cov-report=term
 
   test-python-main:
     name: Python tests (main / ${{ matrix.python-version }})
@@ -230,7 +225,7 @@ jobs:
 
       - name: Run pytest
         run: |
-          uv run pytest -v --cov=src --cov-report=xml --cov-report=term
+          uv run pytest -n auto --cov=src --cov-report=xml --cov-report=term
 
       - name: Upload coverage to Codecov
         if: matrix.python-version == '3.13'
@@ -294,7 +289,7 @@ jobs:
 
       - name: Run backend matrix tests
         run: |
-          uv run pytest -v -m "backend_matrix or postgres_only" --db-backends=sqlite,postgres
+          uv run pytest -n auto -m "backend_matrix or postgres_only" --db-backends=sqlite,postgres
 
   check-conventional-commits:
     name: Check Conventional Commits
