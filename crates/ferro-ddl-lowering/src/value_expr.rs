@@ -70,7 +70,9 @@ pub const VALUE_FUNCTIONS: &[ValueFunction] = &[ValueFunction {
 
 /// The function table entry named `name`.
 pub fn value_function(name: &str) -> Option<&'static ValueFunction> {
-    VALUE_FUNCTIONS.iter().find(|function| function.name == name)
+    VALUE_FUNCTIONS
+        .iter()
+        .find(|function| function.name == name)
 }
 
 /// Render a value expression for `dialect`.

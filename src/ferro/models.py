@@ -353,8 +353,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         if generated and not generated.keys().isdisjoint(data):
             name = min(generated.keys() & data.keys())
             raise TypeError(
-                f"{generated_refusal(self.__class__, name)}; drop {name}= from the "
-                "call"
+                f"{generated_refusal(self.__class__, name)}; drop {name}= from the call"
             )
         # 1. Handle relationship inputs (e.g. Product(category=my_cat))
         relations = getattr(self.__class__, "ferro_relations", {})

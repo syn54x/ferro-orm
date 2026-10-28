@@ -8854,7 +8854,11 @@ mod save_mode_sql_tests {
                 SaveMode::Insert,
                 backend,
             );
-            assert_eq!(returning, ["id"], "auto PK left unset reads back on {backend:?}");
+            assert_eq!(
+                returning,
+                ["id"],
+                "auto PK left unset reads back on {backend:?}"
+            );
             assert!(sql.ends_with(" RETURNING \"id\""), "sql: {sql}");
 
             let (sql, _, returning) = build_save(

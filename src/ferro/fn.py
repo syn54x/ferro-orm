@@ -40,8 +40,8 @@ def sign(value: Any) -> Any:
         value: A numeric column or expression.
 
     Returns:
-        An expression the database computes: `-1` for a negative value, `0`
-        for zero and `1` for a positive one.
+        The expression the database computes, which is `-1` for a negative
+            value, `0` for zero and `1` for a positive one.
     """
     return FuncValueExpr("sign", (value,))
 
