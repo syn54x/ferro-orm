@@ -25,7 +25,7 @@ from ._annotation_utils import (
 )
 from ._annotation_utils import annotation_allows_none, is_closed_domain_annotation
 from ._shadow_fk_types import shadow_annotation_for_foreign_key
-from .base import FerroField, ForeignKey, ManyToManyRelation
+from .base import FerroField, ForeignKey, GeneratedExpression, ManyToManyRelation
 from .columns import build_column_specs, refuse_back_ref_over_retired_relation
 from .fields import FERRO_FIELD_EXTRA_KEY
 from .ir import compile_model_schema_ir
@@ -215,6 +215,38 @@ def _guarded_setattr(guarded: frozenset[str], inherited: Any):
     return __setattr__
 
 
+def generated_refusal(model_cls: type, name: str) -> str:
+    """The sentence a write to a generated column is refused with."""
+    inputs = ", ".join(sorted(model_cls.__ferro_generated__[name]))
+    return (
+        f"{model_cls.__name__}.{name} is a generated column: the database "
+        f"computes it from {inputs} on every write"
+    )
+
+
+def _generated_setattr(inherited: Any):
+    """Refuse assigning a generated field; clear it when an input is assigned.
+
+    The instance holds the value the database returned. Once a column the
+    expression reads changes, that value is stale, so the field reads `None`
+    until the next save reads it back (ADR-0058).
+    """
+
+    def __setattr__(self: BaseModel, name: str, value: Any) -> None:
+        generated = type(self).__ferro_generated__
+        if name in generated:
+            raise TypeError(
+                f"{generated_refusal(type(self), name)}; assign those columns "
+                "and save() instead"
+            )
+        inherited(self, name, value)
+        for field_name, inputs in generated.items():
+            if name in inputs:
+                self.__dict__[field_name] = None
+
+    return __setattr__
+
+
 class ModelMetaclass(type(BaseModel)):
     """The metaclass of [`Model`][ferro.Model], which records each model's schema when the class is defined.
 
@@ -269,6 +301,8 @@ class ModelMetaclass(type(BaseModel)):
         cls.__ferro_query_columns__ = frozenset(cls.__ferro_columns__)
         mcs._register_enum_fields(cls)
         mcs._register_hydration_converters(cls)
+        if cls.__ferro_generated__:
+            cls.__setattr__ = _generated_setattr(cls.__setattr__)
 
         return cls
 
@@ -762,6 +796,23 @@ class ModelMetaclass(type(BaseModel)):
                     }
                     if field_payload:
                         wrapped_metadata = FerroField(**field_payload)
+            generated = next(
+                (
+                    metadata.func
+                    for metadata in field_info.metadata
+                    if isinstance(metadata, GeneratedExpression)
+                ),
+                None,
+            )
+            if generated is not None:
+                if annotated_metadata:
+                    raise TypeError(
+                        f"Field '{f_name}' cannot declare Ferro field metadata twice "
+                        "(Annotated[..., FerroField(...)] + ferro.Field(generated=...)); "
+                        "pass generated= to the one FerroField."
+                    )
+                wrapped_metadata = wrapped_metadata or FerroField()
+                wrapped_metadata.generated = generated
 
             if annotated_metadata and wrapped_metadata:
                 raise TypeError(

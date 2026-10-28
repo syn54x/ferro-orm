@@ -12,11 +12,12 @@ from ferro import BackRef, Field, ManyToMany, Model, Relation, clear_registry
 VECTORS_DIR = Path(__file__).parent / "fixtures" / "ir_vectors"
 SUPPORTED_DOMAINS = {"schema", "query", "codec"}
 # `query` is on ir_version 14 (#395 — optional `before` position bound);
-# `codec` remains v1. `schema` is on v3 (a squash's witness, `replaces`,
-# ADR-0056; v2 added the rename hints, ADR-0032), and every shipped v1 and v2
-# schema vector keeps loading (ADR-0023).
-SUPPORTED_IR_VERSIONS = {"schema": {1, 2, 3}, "query": {14}, "codec": {1}}
-CURRENT_SCHEMA_IR_VERSION = 3
+# `codec` remains v1. `schema` is on v4 (a generated column's `generated`,
+# ADR-0058; v3 added a squash's witness, `replaces`, ADR-0056; v2 the rename
+# hints, ADR-0032), and every shipped v1 to v3 schema vector keeps loading
+# (ADR-0023).
+SUPPORTED_IR_VERSIONS = {"schema": {1, 2, 3, 4}, "query": {14}, "codec": {1}}
+CURRENT_SCHEMA_IR_VERSION = 4
 QUERY_OPERATORS = {"==", "!=", "<", "<=", ">", ">=", "IN", "LIKE", "AND", "OR"}
 MATERIALIZATION_KINDS = {"root_instances", "record", "instances"}
 AGGREGATE_FNS = {"count", "sum", "avg", "min", "max"}
@@ -497,7 +498,7 @@ def test_phase1_schema_compiler_matches_snapshot(clean_model_registry: None) -> 
     snapshot = _load_vector(VECTORS_DIR / "schema_phase1_fixture_models_v1.json")
 
     # Hint-free models compile to the shipped v1 payload byte for byte; schema
-    # v2 and v3 changed only the envelope's version (ADR-0023).
+    # v2 to v4 changed only the envelope's version for them (ADR-0023).
     assert compiled["ir_version"] == CURRENT_SCHEMA_IR_VERSION
     as_v1 = {**compiled, "ir_version": 1}
     assert as_v1 == snapshot["ir"]
@@ -520,8 +521,8 @@ def test_rename_hint_schema_compiler_matches_v2_vector(
     compiled = compile_registry_schema_ir()
     vector = _load_vector(VECTORS_DIR / "schema_rename_hints_v2.json")
 
-    # Schema v3 changed only the envelope's version for a modelset (its
-    # `replaces` is a squash's, never the compiler's).
+    # Schema v3 and v4 changed only the envelope's version for a modelset with
+    # no generated column (its `replaces` is a squash's, never the compiler's).
     assert compiled["ir_version"] == CURRENT_SCHEMA_IR_VERSION
     compiled = {**compiled, "ir_version": 2}
     assert compiled == vector["ir"]
@@ -573,6 +574,36 @@ def test_retired_column_schema_compiler_matches_v2_vector(
     assert [fk["name"] for fk in author["foreign_keys"]] == ["fk_author_team_id_team"]
     assert [i["name"] for i in author["indexes"]] == ["idx_author_bio"]
     assert [u["name"] for u in author["uniques"]] == ["uq_author_nickname"]
+
+
+def test_generated_column_schema_compiler_matches_v4_vector(
+    clean_model_registry: None,
+) -> None:
+    """The v4 vector pins a generated column's wire shape (ADR-0058): the
+    lowered value expression as ``generated`` on that column alone."""
+    from ferro.ir import compile_registry_schema_ir, schema_ir_fingerprint
+    from ferro.relations import resolve_relationships
+    from tests.test_generated_columns import declare_transaction
+
+    declare_transaction()
+    resolve_relationships()
+
+    compiled = compile_registry_schema_ir()
+    vector = _load_vector(VECTORS_DIR / "schema_generated_column_v4.json")
+
+    assert compiled["ir_version"] == CURRENT_SCHEMA_IR_VERSION == 4
+    assert compiled == vector["ir"]
+    assert schema_ir_fingerprint(compiled) == vector["fingerprint"]
+    (model,) = compiled["payload"]["models"]
+    assert {c["name"]: c.get("generated") for c in model["columns"]} == {
+        "amount_minor": None,
+        "direction": {
+            "kind": "func",
+            "name": "sign",
+            "args": [{"kind": "column", "name": "amount_minor"}],
+        },
+        "id": None,
+    }
 
 
 def test_phase1_schema_compiler_is_deterministic(clean_model_registry: None) -> None:

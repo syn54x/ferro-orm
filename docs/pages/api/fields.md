@@ -20,3 +20,5 @@ Fields are declared as type annotations on a [`Model`](model.md), with `Field(..
 ::: ferro.DbType
 
 ::: ferro.DbTypeToken
+
+::: ferro.fn

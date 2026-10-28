@@ -14,14 +14,15 @@ Every call runs inside a session. Connect, open one, and create a customer:
 
 `create()` returns the saved instance, with the primary key the database assigned and `plan` filled from its default. The blocks below run inside this session; see [Sessions](connections.md#sessions).
 
-Every example on this page is followed by the SQL it sends, captured from Ferro when the example runs. `create()` sends one `INSERT`. PostgreSQL also casts the `datetime` parameter to `timestamptz` and asks for the new `id` back with `RETURNING`:
+Every example on this page is followed by the SQL it sends, captured from Ferro when the example runs. `create()` sends one `INSERT`, which asks for the new `id` back with `RETURNING`. PostgreSQL also casts the `datetime` parameter to `timestamptz`:
 
 === "SQLite"
 
     ```sql
     -- mutations.py:session (sqlite)
     INSERT INTO "customer" ("email", "name", "plan", "views", "updated_at")
-    VALUES (?, ?, ?, ?, ?);
+    VALUES (?, ?, ?, ?, ?)
+    RETURNING "id";
     ```
 
 === "PostgreSQL"
@@ -32,8 +33,6 @@ Every example on this page is followed by the SQL it sends, captured from Ferro 
     VALUES ($1, $2, $3, $4, CAST($5 AS timestamptz))
     RETURNING "id";
     ```
-
-On SQLite the driver reports the new row's `id` without a `RETURNING` clause.
 
 The examples use one model, a customer with a unique email:
 
@@ -70,14 +69,15 @@ Ferro has four ways to write a row, and each does only what its name says:
 
 The table now holds four customers. Fields you leave out take their defaults, so Carol's `plan` is `"free"`.
 
-`create()`, `bulk_create()` and `count()` send these statements. PostgreSQL also casts the `datetime` parameter to `timestamptz`, and its single-row insert returns the new `id`:
+`create()`, `bulk_create()` and `count()` send these statements. The single-row insert asks for the new `id` with `RETURNING`, and PostgreSQL also casts the `datetime` parameter to `timestamptz`:
 
 === "SQLite"
 
     ```sql
     -- mutations.py:create (sqlite)
     INSERT INTO "customer" ("email", "name", "plan", "views", "updated_at")
-    VALUES (?, ?, ?, ?, ?);
+    VALUES (?, ?, ?, ?, ?)
+    RETURNING "id";
 
     INSERT INTO "customer" ("email", "name", "plan", "views", "updated_at")
     VALUES (?, ?, ?, ?, ?), (?, ?, ?, ?, ?);
@@ -156,14 +156,15 @@ The batch's `INSERT` returns no `id` on either database.
 
 Alice's row still holds the name `"Alice"`. Use [`upsert()`](#upsert) when you want insert-or-update instead.
 
-The refused insert and the lookup send these statements. PostgreSQL also casts the `datetime` parameter to `timestamptz` and adds `RETURNING "id"`:
+The refused insert and the lookup send these statements. Each `INSERT` asks for the new `id` with `RETURNING`, and PostgreSQL also casts the `datetime` parameter to `timestamptz`:
 
 === "SQLite"
 
     ```sql
     -- mutations.py:create-strict (sqlite)
     INSERT INTO "customer" ("email", "name", "plan", "views", "updated_at")
-    VALUES (?, ?, ?, ?, ?);
+    VALUES (?, ?, ?, ?, ?)
+    RETURNING "id";
 
     SELECT "customer"."email", "customer"."id", "customer"."name", "customer"."plan", "customer"."updated_at", "customer"."views"
     FROM "customer"
@@ -197,14 +198,15 @@ An instance is either **transient** (built with `Customer(...)` and never saved)
 
 The first `save()` inserted Frank and set his `id`; the second updated the same row, so there is still one Frank. A transient instance with a duplicate primary key or unique value raises `UniqueViolationError`, as `create()` does.
 
-The two saves and the count send these statements. PostgreSQL also casts the `datetime` parameter to `timestamptz` and returns the new `id`:
+The two saves and the count send these statements. The insert asks for the new `id` with `RETURNING`, and PostgreSQL also casts the `datetime` parameter to `timestamptz`:
 
 === "SQLite"
 
     ```sql
     -- mutations.py:save-insert-update (sqlite)
     INSERT INTO "customer" ("email", "name", "plan", "views", "updated_at")
-    VALUES (?, ?, ?, ?, ?);
+    VALUES (?, ?, ?, ?, ?)
+    RETURNING "id";
 
     UPDATE "customer"
     SET "email" = ?, "name" = ?, "plan" = ?, "views" = ?, "updated_at" = ?
@@ -610,7 +612,7 @@ The conflict target is the primary key only, so a conflict on another unique col
 
 The first call created Heidi; the second found the same row.
 
-The two calls send these statements. PostgreSQL also casts the `datetime` parameter to `timestamptz` and returns the new `id`:
+The two calls send these statements. The insert asks for the new `id` with `RETURNING`, and PostgreSQL also casts the `datetime` parameter to `timestamptz`:
 
 === "SQLite"
 
@@ -622,7 +624,8 @@ The two calls send these statements. PostgreSQL also casts the `datetime` parame
     LIMIT ?;
 
     INSERT INTO "customer" ("email", "name", "plan", "views", "updated_at")
-    VALUES (?, ?, ?, ?, ?);
+    VALUES (?, ?, ?, ?, ?)
+    RETURNING "id";
 
     SELECT "customer"."email", "customer"."id", "customer"."name", "customer"."plan", "customer"."updated_at", "customer"."views"
     FROM "customer"
@@ -739,14 +742,15 @@ UNIQUE constraint failed: customer.email
 
 `sqlstate` is the database's error code (`"23505"` on PostgreSQL, `"2067"` on SQLite), `constraint` names the violated constraint on PostgreSQL and is `None` on SQLite, and `driver_message` is the driver's own text, for logs. The [exceptions reference](../api/exceptions.md) lists the whole hierarchy.
 
-The refused statement is this `INSERT`. PostgreSQL also casts the `datetime` parameter to `timestamptz` and adds `RETURNING "id"`:
+The refused statement is this `INSERT`. It asks for the new `id` with `RETURNING`, and PostgreSQL also casts the `datetime` parameter to `timestamptz`:
 
 === "SQLite"
 
     ```sql
     -- mutations.py:handling-errors (sqlite)
     INSERT INTO "customer" ("email", "name", "plan", "views", "updated_at")
-    VALUES (?, ?, ?, ?, ?);
+    VALUES (?, ?, ?, ?, ?)
+    RETURNING "id";
     ```
 
 === "PostgreSQL"

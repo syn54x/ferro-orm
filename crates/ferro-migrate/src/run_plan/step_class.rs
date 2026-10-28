@@ -354,6 +354,7 @@ fn storage_facts(column: &ferro_schema_ir::SchemaColumn) -> ferro_schema_ir::Sch
         enum_values: None,
         enum_retired_labels: None,
         retired: false,
+        generated: None,
         default: None,
         default_factory: None,
         ..column.clone()
@@ -535,6 +536,7 @@ mod tests {
             enum_retired_labels: Default::default(),
             default_factory: None,
             retired: false,
+            generated: None,
         }
     }
 

@@ -685,6 +685,10 @@ def _materialization(query: "Query[Any]") -> Materialization:
 
 _RECIPE_FORM = 'update(lambda t: {"col": ...})'
 
+#: The arithmetic an `update()` recipe compiles; `*` and `/` are value
+#: expressions for generated columns only.
+_SET_BINARY_OPS: dict[str, Literal["add", "sub"]] = {"+": "add", "-": "sub"}
+
 
 def _reject_kwargs_value_expr(value: Any) -> None:
     """Kwargs stay literals-only; expressions belong on the recipe door."""
@@ -735,6 +739,7 @@ def _literal_set(
     compiled: list[SetAssignment] = []
     for column, value in (assignments or {}).items():
         validate_query_column(model_cls, column)
+        _refuse_generated_target(model_cls, column)
         _reject_kwargs_value_expr(value)
         compiled.append(_guarded_literal_assignment(model_cls, column, value))
     return tuple(compiled)
@@ -744,6 +749,17 @@ def _relation_names(model_cls: type) -> set[str]:
     relations = getattr(model_cls, "__ferro_relation_specs__", None) or {}
     reverse = getattr(model_cls, "__ferro_reverse_specs__", None) or {}
     return set(relations) | set(reverse)
+
+
+def _refuse_generated_target(model_cls: type, column: str) -> None:
+    """Refuse an `update()` that writes a generated column (ADR-0058)."""
+    inputs = getattr(model_cls, "__ferro_generated__", {}).get(column)
+    if inputs is not None:
+        raise TypeError(
+            f"update() cannot assign {model_cls.__name__}.{column}: it is a "
+            "generated column the database computes from "
+            f"{', '.join(sorted(inputs))}; assign those columns instead"
+        )
 
 
 def _reject_relation(model_cls: type, name: str, *, role: str) -> None:
@@ -837,8 +853,14 @@ def _compile_binary(
             f"cannot assign a numeric expression onto {model}.{target} "
             f"({target_family})"
         )
+    if value.op not in _SET_BINARY_OPS:
+        raise TypeError(
+            f"update() recipes compile + and -, not {value.op}: fetch the rows "
+            "and save() the value computed in Python, or declare a generated "
+            "column for a value the database derives"
+        )
     return BinarySetExpr(
-        op="add" if value.op == "+" else "sub",
+        op=_SET_BINARY_OPS[value.op],
         left=_compile_operand(model_cls, target, value.left),
         right=_compile_operand(model_cls, target, value.right),
     )
@@ -921,6 +943,7 @@ def _recipe_set(
             )
         _reject_relation(model_cls, column, role="target")
         validate_query_column(model_cls, column)
+        _refuse_generated_target(model_cls, column)
         if isinstance(value, (RelationProxy, ReverseRelationProxy)):
             relation = (
                 value._path[-1] if isinstance(value, RelationProxy) else value._name

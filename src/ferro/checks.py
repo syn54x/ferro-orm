@@ -184,6 +184,9 @@ class _CheckProxy(QueryProxy[Any]):
 
     __slots__ = ("_columns", "_relations", "_reverse_relations")
 
+    #: What the lambda is, as a refusal names it.
+    _subject = "check predicate"
+
     def __init__(
         self,
         model_cls: type,
@@ -213,7 +216,7 @@ class _CheckProxy(QueryProxy[Any]):
         close = difflib.get_close_matches(name, suggestions, n=1)
         hint = f" Did you mean {close[0]!r}?" if close else ""
         raise AttributeError(
-            f"check predicate references unknown column {name!r}.{hint} "
+            f"{self._subject} references unknown column {name!r}.{hint} "
             f"Valid columns: {', '.join(sorted(self._columns))}."
             + (
                 f" Valid relations: {', '.join(sorted(self._relations))}."

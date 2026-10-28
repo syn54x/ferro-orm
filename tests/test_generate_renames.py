@@ -564,7 +564,7 @@ def test_the_snapshot_records_every_hint(project, pkg):
     write_models(project, pkg, A5_AFTER)
     new("author_full_name")
     ir = snapshot(project, 2)
-    assert ir["ir_version"] == 3
+    assert ir["ir_version"] == 4
     (author,) = ir["payload"]["models"]
     assert {c["name"]: c.get("renamed_from") for c in author["columns"]} == {
         "full_name": "name",

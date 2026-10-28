@@ -27,17 +27,24 @@ Each vector is one JSON file with this envelope:
 Rules:
 
 - `domain` and `ir.ir_kind` must match.
-- `schema` vectors are on `ir_version` 1, 2 or 3. v2 (#528, ADR-0032) adds
+- `schema` vectors are on `ir_version` 1, 2, 3 or 4. v2 (#528, ADR-0032) adds
   the optional rename hints — `renamed_from` on a model, a column and a
   foreign key, each omitted when undeclared. v3 (#668, ADR-0056) adds the
   optional envelope key `replaces` beside `parent_checksum`, a squash's
   witness: one `{migration, snapshot_checksum, steps, replaces}` entry per
   replaced migration in chain order, nesting a replaced squash's own; it is
-  omitted when nothing is replaced, and v3 is what ferro writes.
+  omitted when nothing is replaced.
   `schema_squash_witness_v3` pins a witness that nests a squash, written as
-  `Snapshot::store` writes it. Every shipped v1 and v2 vector stays and keeps
-  loading through `Snapshot::load` (ADR-0023); a v1 or v2 envelope carrying
-  `replaces` is refused.
+  `Snapshot::store` writes it. v4 (#792, ADR-0058) adds the optional column
+  key `generated`, a generated column's value expression: a tagged tree of
+  `column {name}`, `literal {token}`, `binary {op, left, right}` (`op` one of
+  `add`, `sub`, `mul`, `div`), `negate {operand}` and `func {name, args}`,
+  omitted on every other column; v4 is what ferro writes.
+  `schema_generated_column_v4` pins it, compiled from
+  `tests.test_generated_columns.declare_transaction`. Every shipped v1 to v3
+  vector stays and keeps loading through `Snapshot::load` (ADR-0023); a v1 or
+  v2 envelope carrying `replaces` is refused, and so is a v1 to v3 envelope
+  whose column carries `generated`.
   `codec` vectors are on `ir_version` 1. `query`
   vectors are on `ir_version: 14` (#395 — optional `before` position bound on
   fetch payloads; omitted when unset; `after` from v13 still omitted when

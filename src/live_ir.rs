@@ -122,6 +122,7 @@ fn live_table_model(
             enum_retired_labels: Default::default(),
             default_factory: None,
             retired: false,
+            generated: None,
         })
         .collect();
     columns.sort_by(|a, b| a.name.cmp(&b.name));

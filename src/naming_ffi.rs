@@ -17,6 +17,18 @@ pub fn _tracking_table_names() -> (&'static str, &'static str) {
     (crate::run::TRACKING_TABLE, crate::run::FORMAT_TABLE)
 }
 
+/// The value function table as JSON: a list of `{name, signatures}`, each
+/// signature `{args, variadic, result}` over the value type tokens. `ferro.fn`
+/// is pinned to these names.
+///
+/// # Errors
+/// `PyRuntimeError` if the table does not serialize.
+#[pyfunction]
+pub fn _value_function_table() -> PyResult<String> {
+    serde_json::to_string(ferro_ddl_lowering::VALUE_FUNCTIONS)
+        .map_err(|err| pyo3::exceptions::PyRuntimeError::new_err(err.to_string()))
+}
+
 #[pyfunction]
 pub fn _ddl_single_index_name(table: String, column: String) -> String {
     ferro_ddl_lowering::single_index_name(&table, &column)

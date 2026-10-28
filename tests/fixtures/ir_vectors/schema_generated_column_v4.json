@@ -1,0 +1,76 @@
+{
+  "vector_name": "schema_generated_column_v4",
+  "domain": "schema",
+  "expect_valid": true,
+  "fingerprint": "fe28c3dceb0d18bfbeb4c7190881bf6d5be4ef5057aa9d26cc69fa593694f5eb",
+  "ir": {
+    "ir_kind": "schema",
+    "ir_version": 4,
+    "payload": {
+      "dialect_agnostic": true,
+      "models": [
+        {
+          "model_name": "tests.test_generated_columns.declare_transaction.<locals>.Transaction",
+          "table_name": "transaction",
+          "columns": [
+            {
+              "name": "amount_minor",
+              "logical_type": "integer",
+              "nullable": false,
+              "primary_key": false,
+              "autoincrement": false,
+              "unique": false,
+              "index": false,
+              "default": null,
+              "format": null
+            },
+            {
+              "name": "direction",
+              "logical_type": "integer",
+              "nullable": false,
+              "primary_key": false,
+              "autoincrement": false,
+              "unique": false,
+              "index": true,
+              "default": null,
+              "format": null,
+              "generated": {
+                "kind": "func",
+                "name": "sign",
+                "args": [
+                  {
+                    "kind": "column",
+                    "name": "amount_minor"
+                  }
+                ]
+              }
+            },
+            {
+              "name": "id",
+              "logical_type": "integer",
+              "nullable": false,
+              "primary_key": true,
+              "autoincrement": true,
+              "unique": false,
+              "index": false,
+              "default": null,
+              "format": null
+            }
+          ],
+          "foreign_keys": [],
+          "indexes": [
+            {
+              "name": "idx_transaction_direction",
+              "columns": [
+                "direction"
+              ],
+              "unique": false
+            }
+          ],
+          "uniques": [],
+          "checks": []
+        }
+      ]
+    }
+  }
+}
