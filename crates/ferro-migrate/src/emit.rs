@@ -247,30 +247,8 @@ pub fn render_create_table_as(
         }
         // A generated column's clause follows its type and nullability, and
         // the column never carries a DEFAULT (ADR-0058).
-        if let Some(expr) = &col.generated {
-            col_def.extra(
-                render_generated_clause(expr, dialect, &model.columns).map_err(|message| {
-                    EmissionError {
-                        message: format!(
-                            "Cannot render generated column '{}.{}': {message}",
-                            table_lower, col.name
-                        ),
-                    }
-                })?,
-            );
-            // SQLite has 64-bit integers and stores an overflowing float as
-            // inf; the guard enforces the range Postgres stores, so a value
-            // that fails there fails here (value parity covers failures).
-            if dialect == Dialect::Sqlite
-                && let ResolvedStorage::Scalar(pg_storage) =
-                    resolve_column_storage(col, Dialect::Postgres)
-                        .map_err(|message| EmissionError { message })?
-                && let Some(guard) =
-                    render_sqlite_generated_guard(&col.name, pg_storage, expr, &model.columns)
-                        .map_err(|message| EmissionError { message })?
-            {
-                col_def.extra(guard);
-            }
+        if let Some(text) = generated_column_text(model, col, dialect)? {
+            col_def.extra(text);
         }
         // A SQLite db_check rides its column's definition as a named column
         // constraint (#514); Postgres has no inline fragment.
@@ -308,6 +286,46 @@ pub fn render_create_table_as(
         post_create_sqls,
         reports,
     })
+}
+
+/// What a generated column's definition carries after its type and
+/// nullability, as `CREATE TABLE` writes it: the `GENERATED ALWAYS AS (…)
+/// STORED` clause and, on SQLite, its range guard. `None` for a plain
+/// column. The SQLite live read compares this text with what
+/// `sqlite_master` stores (ADR-0060).
+///
+/// # Errors
+/// The expression or the column's storage does not render.
+pub(crate) fn generated_column_text(
+    model: &SchemaModel,
+    col: &ferro_schema_ir::SchemaColumn,
+    dialect: Dialect,
+) -> Result<Option<String>, EmissionError> {
+    let Some(expr) = &col.generated else {
+        return Ok(None);
+    };
+    let mut text = render_generated_clause(expr, dialect, &model.columns).map_err(|message| {
+        EmissionError {
+            message: format!(
+                "Cannot render generated column '{}.{}': {message}",
+                model.table_name, col.name
+            ),
+        }
+    })?;
+    // SQLite has 64-bit integers and stores an overflowing float as inf; the
+    // guard enforces the range Postgres stores, so a value that fails there
+    // fails here (value parity covers failures).
+    if dialect == Dialect::Sqlite
+        && let ResolvedStorage::Scalar(pg_storage) = resolve_column_storage(col, Dialect::Postgres)
+            .map_err(|message| EmissionError { message })?
+        && let Some(guard) =
+            render_sqlite_generated_guard(&col.name, pg_storage, expr, &model.columns)
+                .map_err(|message| EmissionError { message })?
+    {
+        text.push(' ');
+        text.push_str(&guard);
+    }
+    Ok(Some(text))
 }
 
 /// `CREATE [UNIQUE] INDEX` for one index: the one renderer of every door's

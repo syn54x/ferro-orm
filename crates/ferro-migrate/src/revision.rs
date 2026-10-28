@@ -624,7 +624,10 @@ fn has_twin(
         | MigrationOp::RedefineIndex { .. }
         | MigrationOp::AddForeignKey { .. }
         | MigrationOp::DropForeignKey { .. } => true,
-        MigrationOp::AddEnumLabel { .. }
+        // Alembic has no op that changes a generated expression: the pass's
+        // statement, as written.
+        MigrationOp::AlterGeneratedExpression { .. }
+        | MigrationOp::AddEnumLabel { .. }
         | MigrationOp::CreateEnumType { .. }
         | MigrationOp::DropEnumType { .. }
         | MigrationOp::RenameEnumLabel { .. }
@@ -701,6 +704,7 @@ fn op_column(op: &MigrationOp) -> Option<&str> {
         MigrationOp::AddColumn { column, .. }
         | MigrationOp::DropColumn { column, .. }
         | MigrationOp::AlterColumnType { column, .. }
+        | MigrationOp::AlterGeneratedExpression { column, .. }
         | MigrationOp::AlterColumnNullability { column, .. }
         | MigrationOp::DropDefault { column, .. }
         | MigrationOp::AddForeignKey { column, .. }

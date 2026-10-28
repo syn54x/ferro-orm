@@ -1223,6 +1223,29 @@ pub fn render_rename_column(table: &str, old: &str, new: &str) -> String {
     )
 }
 
+/// `ALTER TABLE "t" ALTER COLUMN "c" SET EXPRESSION AS (<body>)`: a stored
+/// generated column's expression changed in place, every row recomputed.
+/// Postgres 17 and later; SQLite rebuilds the table instead. `body` is the
+/// rendered value expression ([`render_value_expr`]).
+pub fn render_set_generated_expression(table: &str, column: &str, body: &str) -> String {
+    format!(
+        "ALTER TABLE {} ALTER COLUMN {} SET EXPRESSION AS ({body})",
+        quote_ident(table),
+        quote_ident(column)
+    )
+}
+
+/// `ALTER TABLE "t" ALTER COLUMN "c" DROP EXPRESSION`: a generated column
+/// made plain, its stored values kept. Postgres only; SQLite rebuilds the
+/// table instead.
+pub fn render_drop_generated_expression(table: &str, column: &str) -> String {
+    format!(
+        "ALTER TABLE {} ALTER COLUMN {} DROP EXPRESSION",
+        quote_ident(table),
+        quote_ident(column)
+    )
+}
+
 /// `ALTER INDEX "old" RENAME TO "new"` — an `idx_` / `uq_` name a rename
 /// drags (ADR-0032). Postgres only: SQLite has no index rename, so it drops
 /// the index and creates it under the new name.
@@ -3943,6 +3966,10 @@ pub enum InPlaceChange {
     AlterColumnNullability,
     /// Drop a column's server default.
     DropDefault,
+    /// Change a generated column's expression.
+    AlterGeneratedExpression,
+    /// Turn a generated column into a plain one.
+    DropGeneratedExpression,
 }
 
 /// [`ReportKind::ForeignDefault`]: `table.column` has the server default
@@ -4310,6 +4337,23 @@ impl std::error::Error for HintError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_generated_expression_is_set_and_dropped_in_place_on_postgres() {
+        assert_eq!(
+            render_set_generated_expression(
+                "transaction",
+                "direction",
+                "sign(CAST(\"amount_minor\" AS bigint))"
+            ),
+            "ALTER TABLE \"transaction\" ALTER COLUMN \"direction\" SET EXPRESSION AS \
+             (sign(CAST(\"amount_minor\" AS bigint)))"
+        );
+        assert_eq!(
+            render_drop_generated_expression("transaction", "direction"),
+            "ALTER TABLE \"transaction\" ALTER COLUMN \"direction\" DROP EXPRESSION"
+        );
+    }
 
     #[test]
     fn db_type_tokens_match_canonical_vocabulary() {

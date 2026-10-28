@@ -351,6 +351,11 @@ pub fn render(
     let mut values = Vec::new();
     let mut guards = Vec::new();
     for col in &shape_after.columns {
+        // The new table computes a generated column itself, and refuses a
+        // value written to it.
+        if col.generated.is_some() {
+            continue;
+        }
         let cast = casts.iter().find(|(name, _)| name == &col.name);
         let old = shape_before.columns.iter().find(|old| old.name == col.name);
         let value = match (cast, old) {
@@ -580,6 +585,16 @@ mod tests {
             (drop("bio"), req_bio.clone(), plain.clone(), false),
             // C2, and the down of A1-with-FK.
             (drop("team_id"), opt_fk.clone(), plain.clone(), true),
+            // A generated column's expression: SQLite has no SET EXPRESSION.
+            (
+                MigrationOp::AlterGeneratedExpression {
+                    table: t(),
+                    column: "age".into(),
+                },
+                age_int.clone(),
+                age_int.clone(),
+                true,
+            ),
             // A6.
             (
                 MigrationOp::AlterColumnType {
@@ -773,7 +788,7 @@ mod tests {
             .iter()
             .map(|(op, ..)| super::super::op_kind(op))
             .collect();
-        assert_eq!(kinds.len(), 26, "{kinds:?}");
+        assert_eq!(kinds.len(), 27, "{kinds:?}");
         for (op, before, after, expected) in table {
             assert_eq!(
                 rebuilds(&op, &before, &after, Dialect::Sqlite),

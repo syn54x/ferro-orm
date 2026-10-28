@@ -44,8 +44,9 @@ pub use generate::{
 };
 pub use order::order_by_dependencies;
 pub use plan::{
-    Execution, Hint, HintError, LiveCheckFact, LiveFacts, LiveTableFacts, OpVerdict, PlanError,
-    PlannedOp, Refusal, Rider, RowRisk, Side, foreign_default, live_hints, plan_down, plan_from_ir,
+    Execution, Hint, HintError, LiveCheckFact, LiveFacts, LiveGeneratedFact, LiveTableFacts,
+    OpVerdict, PlanError, PlannedOp, PrintedPair, Refusal, Rider, RowRisk, Side, foreign_default,
+    live_hints, plan_down, plan_from_ir,
 };
 pub use render::{RenderedOp, validate_schema_ir};
 pub use revision::{
@@ -254,6 +255,19 @@ pub enum MigrationOp {
         /// Owning table.
         table: String,
         /// Column whose storage type drifted.
+        column: String,
+    },
+    /// A generated column's expression differs between the sides, or one side
+    /// holds it generated and the other does not (a live `VIRTUAL` column, or
+    /// a column Ferro did not create as generated, reads as different;
+    /// ADR-0060). `ALTER TABLE … ALTER COLUMN … SET EXPRESSION AS (…)` on
+    /// Postgres, every row recomputed (`DROP EXPRESSION` when the target
+    /// declares it plain); a table rebuild on SQLite. Its down restores the
+    /// previous side's expression.
+    AlterGeneratedExpression {
+        /// Owning table.
+        table: String,
+        /// The generated column.
         column: String,
     },
     /// `nullable` changed for a column that exists in both snapshots.
@@ -480,6 +494,7 @@ impl MigrationOp {
             | MigrationOp::AddColumn { table, .. }
             | MigrationOp::DropColumn { table, .. }
             | MigrationOp::AlterColumnType { table, .. }
+            | MigrationOp::AlterGeneratedExpression { table, .. }
             | MigrationOp::AlterColumnNullability { table, .. }
             | MigrationOp::DropDefault { table, .. }
             | MigrationOp::ChangePrimaryKey { table, .. }
