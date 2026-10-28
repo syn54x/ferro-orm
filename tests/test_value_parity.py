@@ -464,3 +464,94 @@ async def test_a_query_update_that_overflows_names_the_generated_column(
                     await query.update(lambda ledger: {"a": 2**31 - 1})
         finally:
             ferro.reset_engine()
+
+
+@pytest.mark.asyncio
+async def test_a_query_update_whose_set_computes_names_both_candidates(
+    db_url: str, tmp_path
+):
+    Ledger = _sum_model(None)
+    for url in (f"sqlite:{tmp_path / 'set.db'}?mode=rwc", db_url):
+        await ferro.connect(url, auto_migrate=True)
+        try:
+            async with ferro.engines.session():
+                await Ledger(a=1, b=2**31 - 2).save()
+                query = Ledger.where(lambda ledger: ledger.a == 1)
+                # SQLite's guard names the column; Postgres cannot tell the
+                # SET's own `+` from the generated sum, so it names both.
+                with pytest.raises(DataError, match=r'generated column "total"'):
+                    await query.update(lambda ledger: {"a": ledger.a + 1})
+        finally:
+            ferro.reset_engine()
+
+
+def _middle_step_model(body: str) -> type[Model]:
+    bodies = {
+        "a + b - c": lambda ledger: ledger.a + ledger.b - ledger.c,
+        "fn.abs(a) - 1": lambda ledger: fn.abs(ledger.a) - 1,
+        "a * b as bigint": lambda ledger: ledger.a * ledger.b,
+    }
+    options = {"db_type": "bigint"} if body == "a * b as bigint" else {}
+
+    class Ledger(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        a: int
+        b: int = 0
+        c: int = 0
+        total: int = Field(generated=bodies[body], **options)
+
+    return Ledger
+
+
+#: Expressions that leave the inputs' 4-byte range at a middle step: both
+#: databases compute them at 64 bits and store the same value.
+MIDDLE_STEPS = {
+    "a + b - c": ({"a": 2**31 - 1, "b": 1, "c": 1}, 2**31 - 1),
+    "fn.abs(a) - 1": ({"a": -(2**31)}, 2**31 - 1),
+    "a * b as bigint": ({"a": 2**31 - 1, "b": 2**31 - 1}, (2**31 - 1) ** 2),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", list(MIDDLE_STEPS))
+async def test_a_middle_step_past_the_inputs_range_stores_alike(
+    body: str, db_url: str, tmp_path
+):
+    Ledger = _middle_step_model(body)
+    row, value = MIDDLE_STEPS[body]
+    stored = []
+    for url in (f"sqlite:{tmp_path / 'middle.db'}?mode=rwc", db_url):
+        await ferro.connect(url, auto_migrate=True)
+        try:
+            async with ferro.engines.session():
+                saved = Ledger(**row)
+                await saved.save()
+                stored.append((await Ledger.get(saved.id)).total)
+        finally:
+            ferro.reset_engine()
+    assert stored == [value, value]
+
+
+@pytest.mark.asyncio
+async def test_a_narrower_generated_column_over_wider_inputs_names_it(
+    db_url: str, tmp_path
+):
+    class Ledger(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        a: int
+        b: int
+        total: int = Field(
+            generated=lambda ledger: ledger.a + ledger.b, db_type="smallint"
+        )
+
+    for url in (f"sqlite:{tmp_path / 'narrow.db'}?mode=rwc", db_url):
+        await ferro.connect(url, auto_migrate=True)
+        try:
+            async with ferro.engines.session():
+                with pytest.raises(DataError, match=r'generated column "total"'):
+                    await Ledger(a=2**15, b=0).save()
+                fine = Ledger(a=2**15, b=-1)
+                await fine.save()
+                assert fine.total == 2**15 - 1
+        finally:
+            ferro.reset_engine()

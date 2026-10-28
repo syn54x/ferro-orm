@@ -248,14 +248,16 @@ pub fn render_create_table_as(
         // A generated column's clause follows its type and nullability, and
         // the column never carries a DEFAULT (ADR-0058).
         if let Some(expr) = &col.generated {
-            col_def.extra(render_generated_clause(expr, dialect).map_err(|message| {
-                EmissionError {
-                    message: format!(
-                        "Cannot render generated column '{}.{}': {message}",
-                        table_lower, col.name
-                    ),
-                }
-            })?);
+            col_def.extra(
+                render_generated_clause(expr, dialect, &model.columns).map_err(|message| {
+                    EmissionError {
+                        message: format!(
+                            "Cannot render generated column '{}.{}': {message}",
+                            table_lower, col.name
+                        ),
+                    }
+                })?,
+            );
             // SQLite has 64-bit integers and stores an overflowing float as
             // inf; the guard enforces the range Postgres stores, so a value
             // that fails there fails here (value parity covers failures).

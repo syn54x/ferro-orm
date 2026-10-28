@@ -108,7 +108,7 @@ fn build_exception(
 /// message, SQLSTATE code, and violated constraint name (when the backend
 /// reports them) are preserved as structured attributes on the exception.
 pub(crate) fn map_db_error(context: &str, err: sqlx::Error) -> PyErr {
-    map_write_error(context, err, &[])
+    map_write_error(context, err, None)
 }
 
 /// The column SQLite's range guard names in `message`, when the failure is
@@ -144,53 +144,87 @@ fn is_arithmetic_routine(routine: &str) -> bool {
     ops.len() < rest.len() && ["pl", "mi", "mul", "div", "um", "abs"].contains(&ops)
 }
 
+/// The table a write goes to, for naming the generated column an overflow
+/// belongs to.
+pub(crate) struct GeneratedWrite<'a> {
+    /// The table written.
+    pub table: &'a str,
+    /// Its generated columns.
+    pub generated: &'a [String],
+    /// Whether the statement computes values of its own (a SET's `+` / `-`),
+    /// so an overflow may be its own and not a generated column's.
+    pub computes: bool,
+}
+
+/// Whether a Postgres routine stores a value in a narrower integer type
+/// (`int84`, `int82`, `int42`): the value may be a generated one or one the
+/// statement writes.
+fn is_narrowing_routine(routine: &str) -> bool {
+    matches!(routine, "int84" | "int82" | "int42")
+}
+
 /// The generated columns an overflow belongs to, as a phrase.
 ///
-/// SQLite's guard names its column. Elsewhere (Postgres's `22003` from
-/// arithmetic, SQLite's `integer overflow` from `abs`) the database
-/// names none, so the phrase names the `generated` columns of the statement's
-/// table: a save binds plain values, so only their expressions compute.
+/// SQLite's guard names its column. Elsewhere (Postgres's `22003`, SQLite's
+/// `integer overflow` from `abs`) the database names none, so the phrase
+/// names the table's generated columns. It names them alone when only they
+/// can compute (arithmetic, in a statement that computes nothing itself),
+/// and beside the values the statement writes when storing either could
+/// overflow (a narrowing cast, or a SET with its own arithmetic).
 pub(crate) fn generated_overflow_subject(
     code: Option<&str>,
     message: &str,
     routine: Option<&str>,
-    generated: &[String],
+    write: Option<&GeneratedWrite<'_>>,
 ) -> Option<String> {
     if let Some(column) = storage_guard_column(message) {
         return Some(format!("the generated column {}", quoted(&column)));
     }
+    let write = write.filter(|write| !write.generated.is_empty())?;
     let computed = message == "integer overflow"
         || (code == Some("22003") && routine.is_some_and(is_arithmetic_routine));
-    match generated {
-        _ if !computed => None,
-        [] => None,
-        [one] => Some(format!("the generated column {}", quoted(one))),
-        many => Some(format!(
+    let stored = code == Some("22003") && routine.is_some_and(is_narrowing_routine);
+    if !computed && !stored {
+        return None;
+    }
+    let columns = match write.generated {
+        [one] => format!("the generated column {}", quoted(one)),
+        many => format!(
             "one of the generated columns {}",
             many.iter()
                 .map(|c| quoted(c))
                 .collect::<Vec<_>>()
                 .join(", ")
-        )),
-    }
+        ),
+    };
+    let table = quoted(write.table);
+    Some(if computed && !write.computes {
+        format!("{columns} of {table}")
+    } else {
+        format!("a value written to {table} or {columns}")
+    })
 }
 
-/// [`map_db_error`] for a write to a table whose generated columns are
-/// `generated`: an overflow computing one of them is a `DataError`
-/// naming it, on SQLite and Postgres alike (value parity covers failures).
-pub(crate) fn map_write_error(context: &str, err: sqlx::Error, generated: &[String]) -> PyErr {
+/// [`map_db_error`] for a write to a table with generated columns: an
+/// overflow computing one of them is a `DataError` naming it, on SQLite and
+/// Postgres alike (value parity covers failures).
+pub(crate) fn map_write_error(
+    context: &str,
+    err: sqlx::Error,
+    write: Option<&GeneratedWrite<'_>>,
+) -> PyErr {
     if let sqlx::Error::Database(db) = &err {
         let routine = db
             .try_downcast_ref::<sqlx::postgres::PgDatabaseError>()
             .and_then(|pg| pg.routine());
         let code = db.code().map(|code| code.to_string());
         if let Some(subject) =
-            generated_overflow_subject(code.as_deref(), db.message(), routine, generated)
+            generated_overflow_subject(code.as_deref(), db.message(), routine, write)
         {
             let message = format!(
-                "{context}: {subject} is out of range for its type ({}); \
-                 the database computes it from the row, so write inputs whose \
-                 result fits the column's type",
+                "{context}: {subject} is out of range for its type ({}); the \
+                 database computes a generated column from the row, so write \
+                 inputs whose result fits the column's type",
                 db.message()
             );
             let driver_message = Some(db.message().to_string());
@@ -1204,8 +1238,8 @@ mod counted_failure_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        exception_name_for, exception_name_for_database, generated_overflow_subject,
-        storage_guard_column,
+        GeneratedWrite, exception_name_for, exception_name_for_database,
+        generated_overflow_subject, storage_guard_column,
     };
     use sqlx::error::ErrorKind;
 
@@ -1230,6 +1264,14 @@ mod tests {
         );
     }
 
+    fn write<'a>(generated: &'a [String], computes: bool) -> GeneratedWrite<'a> {
+        GeneratedWrite {
+            table: "ledger",
+            generated,
+            computes,
+        }
+    }
+
     #[test]
     fn a_postgres_float_overflow_names_the_generated_column() {
         let one = ["ratio".to_string()];
@@ -1238,10 +1280,10 @@ mod tests {
                 Some("22003"),
                 "value out of range: overflow",
                 Some("float_overflow_error"),
-                &one
+                Some(&write(&one, false)),
             )
             .as_deref(),
-            Some("the generated column \"ratio\"")
+            Some("the generated column \"ratio\" of \"ledger\"")
         );
     }
 
@@ -1264,7 +1306,7 @@ mod tests {
         );
         assert_eq!(storage_guard_column(&message).as_deref(), Some("to\"tal"));
         assert_eq!(
-            generated_overflow_subject(Some("275"), &message, None, &[]).as_deref(),
+            generated_overflow_subject(Some("275"), &message, None, None).as_deref(),
             Some("the generated column \"to\"\"tal\"")
         );
         assert_eq!(
@@ -1276,38 +1318,60 @@ mod tests {
     #[test]
     fn a_postgres_arithmetic_overflow_names_the_generated_columns() {
         let one = ["total".to_string()];
-        let subject = |routine, generated: &[String]| {
-            generated_overflow_subject(Some("22003"), "bigint out of range", routine, generated)
+        let subject = |routine, generated: &[String], computes| {
+            generated_overflow_subject(
+                Some("22003"),
+                "bigint out of range",
+                routine,
+                Some(&write(generated, computes)),
+            )
         };
-        assert_eq!(
-            subject(Some("int8pl"), &one).as_deref(),
-            Some("the generated column \"total\"")
-        );
-        assert_eq!(
-            subject(Some("int4mul"), &one).as_deref(),
-            Some("the generated column \"total\"")
-        );
-        assert_eq!(
-            subject(Some("int8abs"), &one).as_deref(),
-            Some("the generated column \"total\"")
-        );
+        for routine in ["int8pl", "int4mul", "int8abs", "int2mi"] {
+            assert_eq!(
+                subject(Some(routine), &one, false).as_deref(),
+                Some("the generated column \"total\" of \"ledger\""),
+                "{routine}"
+            );
+        }
         let two = ["a".to_string(), "b".to_string()];
         assert_eq!(
-            subject(Some("int48um"), &two).as_deref(),
-            Some("one of the generated columns \"a\", \"b\"")
+            subject(Some("int48um"), &two, false).as_deref(),
+            Some("one of the generated columns \"a\", \"b\" of \"ledger\"")
         );
-        // Storing a bound value that does not fit is not a computed overflow.
-        assert_eq!(subject(Some("int84"), &one), None);
-        assert_eq!(subject(Some("interval_pl"), &one), None);
-        assert_eq!(subject(Some("int8pl"), &[]), None);
+        assert_eq!(subject(Some("interval_pl"), &one, false), None);
+        assert_eq!(subject(Some("int8pl"), &[], false), None);
+    }
+
+    #[test]
+    fn a_narrowing_store_or_a_computing_set_names_both_candidates() {
+        let one = ["total".to_string()];
+        let subject = |routine, computes| {
+            generated_overflow_subject(
+                Some("22003"),
+                "integer out of range",
+                Some(routine),
+                Some(&write(&one, computes)),
+            )
+        };
+        let both = "a value written to \"ledger\" or the generated column \"total\"";
+        for routine in ["int84", "int82", "int42"] {
+            assert_eq!(subject(routine, false).as_deref(), Some(both), "{routine}");
+        }
+        assert_eq!(subject("int8pl", true).as_deref(), Some(both));
     }
 
     #[test]
     fn a_sqlite_abs_overflow_names_the_generated_columns() {
         let one = ["size".to_string()];
         assert_eq!(
-            generated_overflow_subject(Some("1"), "integer overflow", None, &one).as_deref(),
-            Some("the generated column \"size\"")
+            generated_overflow_subject(
+                Some("1"),
+                "integer overflow",
+                None,
+                Some(&write(&one, false))
+            )
+            .as_deref(),
+            Some("the generated column \"size\" of \"ledger\"")
         );
     }
 

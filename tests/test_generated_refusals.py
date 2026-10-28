@@ -354,6 +354,32 @@ def test_fn_in_where_is_refused_naming_generated_columns():
         Transaction.where(lambda transaction: fn.abs(transaction.amount_minor))
 
 
+def test_fn_on_the_right_of_a_comparison_is_refused_naming_generated_columns():
+    Transaction = _declare_transaction()
+    with pytest.raises(TypeError, match="generated column"):
+        Transaction.where(
+            lambda transaction: transaction.amount_minor > fn.abs(transaction.id)
+        )
+    with pytest.raises(TypeError, match="generated column"):
+        Transaction.where(
+            lambda transaction: transaction.amount_minor == fn.abs(transaction.id) + 1
+        )
+
+
+def test_fn_on_the_right_of_a_comparison_in_a_generated_body_points_at_check():
+    with pytest.raises(TypeError, match="Check"):
+
+        class Transaction(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            amount_minor: int
+            fee: int
+            large: bool = Field(
+                generated=lambda transaction: (
+                    transaction.amount_minor > fn.abs(transaction.fee)
+                )
+            )
+
+
 def test_fn_nested_in_arithmetic_in_a_query_is_refused():
     Transaction = _declare_transaction()
     with pytest.raises(TypeError, match="generated column"):

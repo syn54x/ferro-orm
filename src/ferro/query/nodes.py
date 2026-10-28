@@ -119,6 +119,7 @@ class QueryNode:
             owner: The model whose stand-in built the comparison, used to
                 refuse a condition that mixes two lambdas' parameters.
         """
+        reject_fn_in_query(value, f"a comparison ({operator})")
         self.column = column
         """The compared column, or `None` on a combination."""
         self.operator = operator

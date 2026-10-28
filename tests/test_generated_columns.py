@@ -49,7 +49,12 @@ from tests.test_migrate_up import (  # noqa: F401 - fixtures
 
 pytestmark = pytest.mark.usefixtures("clean_registry")
 
-GENERATED_SQL = 'GENERATED ALWAYS AS (sign("amount_minor")) STORED'
+def generated_sql(backend: str) -> str:
+    """The clause per dialect: Postgres computes an `integer` input at 64 bits."""
+    operand = (
+        'CAST("amount_minor" AS bigint)' if backend == "postgres" else '"amount_minor"'
+    )
+    return f"GENERATED ALWAYS AS (sign({operand})) STORED"
 
 
 def declare_transaction() -> type[Model]:
@@ -266,7 +271,8 @@ async def test_the_create_pass_writes_the_stored_clause_with_no_default(db_url):
     declare_transaction()
     report = await auto_migrate(db_url)
     create = next(s for s in schema_sql(report) if s.startswith("CREATE TABLE"))
-    assert '"direction" integer NOT NULL ' + GENERATED_SQL in create
+    backend = "postgres" if db_url.startswith("postgres") else "sqlite"
+    assert '"direction" integer NOT NULL ' + generated_sql(backend) in create
     assert "DEFAULT" not in create
     assert any("idx_transaction_direction" in s for s in schema_sql(report))
 
@@ -394,7 +400,7 @@ def test_drift_after_the_migrations_door_creates_the_table_is_empty(
     write_models(project, pkg, LEDGER)
     new("create_ledger")
     step = next(migrations(project).glob("0001_create_ledger/01_schema.up.*.sql"))
-    assert GENERATED_SQL in step.read_text()
+    assert generated_sql(db.backend) in step.read_text()
     assert run("migrate", "up", "--url", db.url) == 0
     capsys.readouterr()
 

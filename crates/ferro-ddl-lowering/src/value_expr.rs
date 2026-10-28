@@ -11,7 +11,9 @@ use std::collections::BTreeSet;
 use ferro_schema_ir::{ValueBinaryOp, ValueExpr};
 use serde::Serialize;
 
-use crate::{CanonicalType, Dialect, quote_ident};
+use ferro_schema_ir::SchemaColumn;
+
+use crate::{CanonicalType, Dialect, ResolvedStorage, quote_ident, resolve_column_storage};
 
 /// The value families a function admits and returns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -176,24 +178,50 @@ pub fn value_function(name: &str) -> Option<&'static ValueFunction> {
         .find(|function| function.name == name)
 }
 
-/// Render a value expression for `dialect`.
+/// Render a value expression for `dialect` over the table's `columns`.
 ///
 /// Every binary node is parenthesised and unary minus renders as `(- x)`, so
 /// the rendering never depends on operator precedence and never forms `--`.
 ///
+/// On Postgres every integer value narrower than `bigint` (a `smallint` or
+/// `integer` column, `length`, a date part) is cast to `bigint`. Postgres
+/// computes integer arithmetic at its operands' width and SQLite at 64 bits,
+/// so without the cast `a + b - c` over `integer` columns fails on Postgres
+/// at a middle step that SQLite computes fine. With it, both compute at 64
+/// bits and only the column's own range decides, as Postgres's assignment
+/// to the column and the SQLite storage guard enforce.
+///
 /// # Errors
 /// A message naming the function when a call names one the table lacks.
-pub fn render_value_expr(expr: &ValueExpr, dialect: Dialect) -> Result<String, String> {
+pub fn render_value_expr(
+    expr: &ValueExpr,
+    dialect: Dialect,
+    columns: &[SchemaColumn],
+) -> Result<String, String> {
+    let render = |expr: &ValueExpr| render_value_expr(expr, dialect, columns);
     Ok(match expr {
-        ValueExpr::Column { name } => quote_ident(name),
+        ValueExpr::Column { name } => {
+            let quoted = quote_ident(name);
+            let narrow = dialect == Dialect::Postgres
+                && columns.iter().any(|col| {
+                    col.name == *name
+                        && matches!(
+                            resolve_column_storage(col, Dialect::Postgres),
+                            Ok(ResolvedStorage::Scalar(
+                                CanonicalType::SmallInt | CanonicalType::Integer
+                            ))
+                        )
+                });
+            if narrow { widen(&quoted) } else { quoted }
+        }
         ValueExpr::Literal { token } => token.clone(),
         ValueExpr::Binary { op, left, right } => format!(
             "({} {} {})",
-            render_value_expr(left, dialect)?,
+            render(left)?,
             binary_op_sql(*op),
-            render_value_expr(right, dialect)?
+            render(right)?
         ),
-        ValueExpr::Negate { operand } => format!("(- {})", render_value_expr(operand, dialect)?),
+        ValueExpr::Negate { operand } => format!("(- {})", render(operand)?),
         ValueExpr::Func { name, args } => {
             let function = value_function(name).ok_or_else(|| {
                 let known: Vec<&str> = VALUE_FUNCTIONS.iter().map(|f| f.name).collect();
@@ -202,27 +230,30 @@ pub fn render_value_expr(expr: &ValueExpr, dialect: Dialect) -> Result<String, S
                     known.join(", ")
                 )
             })?;
-            let rendered = args
-                .iter()
-                .map(|arg| render_value_expr(arg, dialect))
-                .collect::<Result<Vec<_>, _>>()?;
+            let rendered = args.iter().map(render).collect::<Result<Vec<_>, _>>()?;
             render_call(function, &rendered, dialect)
         }
     })
+}
+
+/// A Postgres integer value at 64 bits.
+fn widen(sql: &str) -> String {
+    format!("CAST({sql} AS bigint)")
 }
 
 /// One function call's SQL per dialect.
 fn render_call(function: &ValueFunction, args: &[String], dialect: Dialect) -> String {
     let joined = args.join(", ");
     // Postgres's `extract` returns `numeric`; the cast keeps `fn.day(d) / 2`
-    // an integer division, as it is on SQLite.
+    // an integer division, as it is on SQLite, and at 64 bits.
     let date_part = |pg_field: &str, sqlite_format: &str| match dialect {
-        Dialect::Postgres => format!("CAST(extract({pg_field} from {joined}) AS integer)"),
+        Dialect::Postgres => widen(&format!("extract({pg_field} from {joined})")),
         Dialect::Sqlite => format!("CAST(strftime('{sqlite_format}', {joined}) AS integer)"),
     };
     match (function.name, dialect) {
         ("least", Dialect::Sqlite) => format!("min({joined})"),
         ("greatest", Dialect::Sqlite) => format!("max({joined})"),
+        ("length", Dialect::Postgres) => widen(&format!("length({joined})")),
         ("year", _) => date_part("year", "%Y"),
         ("month", _) => date_part("month", "%m"),
         ("day", _) => date_part("day", "%d"),
@@ -244,10 +275,14 @@ fn binary_op_sql(op: ValueBinaryOp) -> &'static str {
 ///
 /// # Errors
 /// As [`render_value_expr`].
-pub fn render_generated_clause(expr: &ValueExpr, dialect: Dialect) -> Result<String, String> {
+pub fn render_generated_clause(
+    expr: &ValueExpr,
+    dialect: Dialect,
+    columns: &[SchemaColumn],
+) -> Result<String, String> {
     Ok(format!(
         "GENERATED ALWAYS AS ({}) STORED",
-        render_value_expr(expr, dialect)?
+        render_value_expr(expr, dialect, columns)?
     ))
 }
 
@@ -352,7 +387,7 @@ mod tests {
             };
             for dialect in DIALECTS {
                 assert_eq!(
-                    render_value_expr(&expr, dialect).unwrap(),
+                    render_value_expr(&expr, dialect, &[]).unwrap(),
                     format!("(\"a\" {symbol} 2)")
                 );
             }
@@ -365,7 +400,7 @@ mod tests {
             operand: literal("-5"),
         };
         for dialect in DIALECTS {
-            assert_eq!(render_value_expr(&expr, dialect).unwrap(), "(- -5)");
+            assert_eq!(render_value_expr(&expr, dialect, &[]).unwrap(), "(- -5)");
         }
     }
 
@@ -377,7 +412,7 @@ mod tests {
         };
         for dialect in DIALECTS {
             assert_eq!(
-                render_generated_clause(&expr, dialect).unwrap(),
+                render_generated_clause(&expr, dialect, &[]).unwrap(),
                 "GENERATED ALWAYS AS (sign(\"amount_minor\")) STORED"
             );
         }
@@ -391,7 +426,7 @@ mod tests {
     }
 
     fn renders(name: &str, args: &[&str], dialect: Dialect) -> String {
-        render_value_expr(&call(name, args), dialect).unwrap()
+        render_value_expr(&call(name, args), dialect, &[]).unwrap()
     }
 
     #[test]
@@ -442,9 +477,14 @@ mod tests {
 
     #[test]
     fn length_renders_length_on_sqlite_and_postgres() {
-        for dialect in DIALECTS {
-            assert_eq!(renders("length", &["name"], dialect), "length(\"name\")");
-        }
+        assert_eq!(
+            renders("length", &["name"], Dialect::Sqlite),
+            "length(\"name\")"
+        );
+        assert_eq!(
+            renders("length", &["name"], Dialect::Postgres),
+            "CAST(length(\"name\") AS bigint)"
+        );
     }
 
     #[test]
@@ -455,7 +495,7 @@ mod tests {
         );
         assert_eq!(
             renders("year", &["d"], Dialect::Postgres),
-            "CAST(extract(year from \"d\") AS integer)"
+            "CAST(extract(year from \"d\") AS bigint)"
         );
     }
 
@@ -467,7 +507,7 @@ mod tests {
         );
         assert_eq!(
             renders("month", &["d"], Dialect::Postgres),
-            "CAST(extract(month from \"d\") AS integer)"
+            "CAST(extract(month from \"d\") AS bigint)"
         );
     }
 
@@ -479,7 +519,7 @@ mod tests {
         );
         assert_eq!(
             renders("day", &["d"], Dialect::Postgres),
-            "CAST(extract(day from \"d\") AS integer)"
+            "CAST(extract(day from \"d\") AS bigint)"
         );
     }
 
@@ -490,12 +530,12 @@ mod tests {
             args: vec![call("day", &["date"]), *literal("28")],
         };
         assert_eq!(
-            render_value_expr(&expr, Dialect::Sqlite).unwrap(),
+            render_value_expr(&expr, Dialect::Sqlite, &[]).unwrap(),
             "min(CAST(strftime('%d', \"date\") AS integer), 28)"
         );
         assert_eq!(
-            render_value_expr(&expr, Dialect::Postgres).unwrap(),
-            "least(CAST(extract(day from \"date\") AS integer), 28)"
+            render_value_expr(&expr, Dialect::Postgres, &[]).unwrap(),
+            "least(CAST(extract(day from \"date\") AS bigint), 28)"
         );
     }
 
@@ -534,6 +574,93 @@ mod tests {
         );
     }
 
+    fn schema_column(name: &str, logical: &str, db_type: Option<&str>) -> SchemaColumn {
+        serde_json::from_value(serde_json::json!({
+            "name": name,
+            "logical_type": logical,
+            "db_type": db_type,
+            "db_type_explicit": db_type.is_some(),
+            "nullable": false, "primary_key": false, "autoincrement": false,
+            "unique": false, "index": false, "default": null, "format": null,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn postgres_widens_narrow_integer_columns_to_bigint_and_sqlite_does_not() {
+        let columns = [
+            schema_column("a", "integer", None),
+            schema_column("s", "integer", Some("smallint")),
+            schema_column("big", "integer", Some("bigint")),
+            schema_column("x", "number", None),
+        ];
+        let expr = ValueExpr::Binary {
+            op: ValueBinaryOp::Add,
+            left: Box::new(ValueExpr::Binary {
+                op: ValueBinaryOp::Sub,
+                left: column("a"),
+                right: column("s"),
+            }),
+            right: Box::new(ValueExpr::Binary {
+                op: ValueBinaryOp::Add,
+                left: column("big"),
+                right: column("x"),
+            }),
+        };
+        assert_eq!(
+            render_value_expr(&expr, Dialect::Postgres, &columns).unwrap(),
+            "((CAST(\"a\" AS bigint) - CAST(\"s\" AS bigint)) + (\"big\" + \"x\"))"
+        );
+        assert_eq!(
+            render_value_expr(&expr, Dialect::Sqlite, &columns).unwrap(),
+            "((\"a\" - \"s\") + (\"big\" + \"x\"))"
+        );
+    }
+
+    /// Every storage type, so a new one must be placed in or out of the guard.
+    fn every_canonical_type() -> Vec<CanonicalType> {
+        use CanonicalType::*;
+        let all = vec![
+            Integer,
+            SmallInt,
+            BigInt,
+            Double,
+            Decimal,
+            Boolean,
+            Json,
+            Jsonb,
+            Text,
+            Varchar(None),
+            Char(1),
+            Uuid,
+            DateTime,
+            Timestamp,
+            TimestampTz,
+            Date,
+            Time,
+            Blob,
+        ];
+        for canonical in &all {
+            match canonical {
+                Integer | SmallInt | BigInt | Double | Decimal | Boolean | Json | Jsonb | Text
+                | Varchar(_) | Char(_) | Uuid | DateTime | Timestamp | TimestampTz | Date
+                | Time | Blob => {}
+            }
+        }
+        all
+    }
+
+    #[test]
+    fn guarded_storage_lists_exactly_the_types_the_guard_renders() {
+        for canonical in every_canonical_type() {
+            assert_eq!(
+                render_sqlite_storage_guard("c", canonical).is_some(),
+                GUARDED_STORAGE.contains(&canonical),
+                "{canonical:?}"
+            );
+        }
+    }
+
     #[test]
     fn the_sqlite_storage_guard_enforces_the_postgres_range() {
         assert_eq!(
@@ -565,7 +692,7 @@ mod tests {
             name: "nope".to_string(),
             args: vec![],
         };
-        let err = render_value_expr(&expr, Dialect::Postgres).unwrap_err();
+        let err = render_value_expr(&expr, Dialect::Postgres, &[]).unwrap_err();
         assert!(err.contains("'nope'") && err.contains("sign"), "{err}");
     }
 
