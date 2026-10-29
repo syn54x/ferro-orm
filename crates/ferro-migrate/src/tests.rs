@@ -7835,8 +7835,9 @@ fn a_policy_over_a_re_added_generated_column_is_dropped_before_and_added_after()
     let up = plan_declared(&before, &after, Dialect::Postgres, updates_only());
     assert_eq!(up.op_list(), expected);
     // The policy ops carry it unchanged: no door reports them as a difference.
-    let carried: Vec<bool> = up.operations.iter().map(|p| p.verdict.carried).collect();
-    assert_eq!(carried, vec![true, false, false, false, true]);
+    let carried: Vec<Option<Carry>> = up.operations.iter().map(|p| p.verdict.carried).collect();
+    let unchanged = Some(Carry::Unchanged);
+    assert_eq!(carried, vec![unchanged, None, None, None, unchanged]);
     for planned in &up.operations {
         assert_eq!(planned.verdict.execution, Execution::Native, "{planned:?}");
     }
@@ -7993,8 +7994,8 @@ fn a_check_over_a_live_column_whose_type_changes_is_carried_around_the_alter() {
     // The live read prints no pair (the column's type differs), so the body
     // cannot be compared this round, and Postgres would refuse the alter
     // under an old body that no longer type-checks. The plan takes the check
-    // down before the alter and puts the declared one back after: carried,
-    // never a body difference.
+    // down before the alter and puts the declared one back after, saying the
+    // two bodies were not compared.
     let live_model = payment_with_large_check("1000");
     let mut declared = payment_with_large_check("1000");
     declared.columns[1].db_type = Some("bigint".to_string());
@@ -8037,17 +8038,18 @@ fn a_check_over_a_live_column_whose_type_changes_is_carried_around_the_alter() {
             check(true),
         ]
     );
-    let carried: Vec<bool> = plan
+    let carried: Vec<Option<Carry>> = plan
         .operations
         .iter()
         .map(|planned| planned.verdict.carried)
         .collect();
-    assert_eq!(carried, vec![true, false, true]);
+    let not_compared = Some(Carry::NotCompared);
+    assert_eq!(carried, vec![not_compared, None, not_compared]);
     plan.render().expect("renders");
 }
 
 #[test]
-fn a_check_over_a_retyped_column_between_two_declarations_is_carried_only_when_it_changes() {
+fn a_check_over_a_retyped_column_between_two_declarations_is_taken_down_only_when_it_changes() {
     // `amount >= 0` renders alike whatever `amount`'s type: unchanged,
     // Postgres revalidates it on the alter, which runs alone.
     let mut before = payment_with_large_check("1000");
@@ -8086,7 +8088,166 @@ fn a_check_over_a_retyped_column_between_two_declarations_is_carried_only_when_i
         "{:?}",
         plan.op_list()
     );
-    assert!(plan.operations.iter().all(|planned| {
-        planned.verdict.carried != matches!(planned.op, MigrationOp::AlterColumnType { .. })
-    }));
+    // The body put back is not the one taken down: a difference.
+    let carried: Vec<Option<Carry>> = plan
+        .operations
+        .iter()
+        .map(|planned| planned.verdict.carried)
+        .collect();
+    let changed = Some(Carry::Changed);
+    assert_eq!(carried, vec![changed, None, changed]);
+}
+
+#[test]
+fn a_policy_carried_around_a_replace_whose_command_changes_is_marked_changed() {
+    let before = policed_direction("integer", direction_setting());
+    let mut after = policed_direction("bigint", direction_setting());
+    if let Some(security) = after.row_security.as_mut() {
+        security.policies[0].command = ferro_schema_ir::RowPolicyCommand::Select;
+    }
+    let up = plan_declared(&before, &after, Dialect::Postgres, updates_only());
+    let carried: Vec<(MigrationOp, Option<Carry>)> = up
+        .operations
+        .iter()
+        .map(|planned| (planned.op.clone(), planned.verdict.carried))
+        .collect();
+    let policy = |op: &MigrationOp| {
+        matches!(
+            op,
+            MigrationOp::DropRowPolicy { .. } | MigrationOp::AddRowPolicy { .. }
+        )
+    };
+    assert_eq!(
+        carried
+            .iter()
+            .filter(|(op, _)| policy(op))
+            .map(|(_, carry)| *carry)
+            .collect::<Vec<_>>(),
+        vec![Some(Carry::Changed), Some(Carry::Changed)],
+        "{carried:?}"
+    );
+    // The carried pair stands for the change: no rebuild beside it.
+    assert!(
+        !up.op_list()
+            .iter()
+            .any(|op| matches!(op, MigrationOp::RebuildRowPolicy { .. })),
+        "{:?}",
+        up.op_list()
+    );
+}
+
+#[test]
+fn a_check_over_a_replaced_generated_column_put_back_unchanged_is_marked_unchanged() {
+    let checked = |input_type: &str, token: &str| SchemaModel {
+        table_checks: vec![SchemaTableCheck {
+            name: "ck_transaction_signed".to_string(),
+            predicate: abs_amount_over("direction", token),
+        }],
+        ..indexed_direction(input_type)
+    };
+    let add_back = |plan: &Plan| {
+        plan.operations
+            .iter()
+            .find(|planned| matches!(planned.op, MigrationOp::AddCheck { .. }))
+            .map(|planned| planned.verdict.carried)
+    };
+    let same = plan_declared(
+        &checked("integer", "1"),
+        &checked("bigint", "1"),
+        Dialect::Postgres,
+        updates_only(),
+    );
+    assert_eq!(
+        add_back(&same),
+        Some(Some(Carry::Unchanged)),
+        "{:?}",
+        same.op_list()
+    );
+    let edited = plan_declared(
+        &checked("integer", "1"),
+        &checked("bigint", "2"),
+        Dialect::Postgres,
+        updates_only(),
+    );
+    assert_eq!(
+        add_back(&edited),
+        Some(Some(Carry::Changed)),
+        "{:?}",
+        edited.op_list()
+    );
+}
+
+#[test]
+fn a_check_over_a_column_whose_type_change_is_refused_is_left_standing() {
+    // Live `at` timestamp under `ck_event_after_start`; declared `at` a
+    // datetime (timestamptz), a conversion the pass refuses with a warning
+    // and no ALTER. The check is read against the live table, which it will
+    // keep: printed alike, so nothing is dropped and added back, on this
+    // pass or the next.
+    let event = |at_type: &str| SchemaModel {
+        table_checks: vec![SchemaTableCheck {
+            name: "ck_event_after_start".to_string(),
+            predicate: ferro_schema_ir::CheckExpr::Compare {
+                left: ferro_schema_ir::ValueExpr::Column {
+                    name: "at".to_string(),
+                },
+                op: ferro_schema_ir::CheckCmpOp::Ge,
+                right: ferro_schema_ir::ValueExpr::Column {
+                    name: "starts".to_string(),
+                },
+            },
+        }],
+        ..schema_model(
+            "event",
+            vec![
+                pk_col("id", "bigint"),
+                col("at", at_type, false),
+                col("starts", at_type, false),
+            ],
+        )
+    };
+    let live_model = event("timestamp");
+    let declared_model = event("timestamptz");
+    // The live read asks Postgres to print the pair: the columns keep their
+    // live type.
+    let live_columns = live_model.columns.clone();
+    let live_column = |name: &str| live_columns.iter().find(|col| col.name == name);
+    let asked: Vec<String> =
+        crate::plan::printed_pair_checks(&declared_model, "event", &live_column, &|_| true)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+    assert_eq!(asked, vec!["ck_event_after_start".to_string()]);
+    let check = live_check("ck_event_after_start", "CHECK ((at >= starts))");
+    let check = if asked.contains(&check.name) {
+        printed_alike(&check.name, &check.definition, "(event.at >= event.starts)")
+    } else {
+        check
+    };
+    let declared = envelope(vec![declared_model]);
+    let mut facts = LiveFacts::default();
+    facts
+        .tables
+        .insert("event".to_string(), live_checks(vec![check]));
+    let live = Side::live(envelope(vec![live_model]), facts).expect("live side");
+    let plan = plan_from_ir(
+        &live,
+        &Side::declared(declared),
+        Dialect::Postgres,
+        destructive(),
+    );
+    assert_eq!(
+        plan.op_list(),
+        ["at", "starts"]
+            .map(|column| MigrationOp::AlterColumnType {
+                table: "event".to_string(),
+                column: column.to_string(),
+            })
+            .to_vec()
+    );
+    let rendered = plan.render().expect("renders");
+    assert!(
+        rendered.iter().all(|op| op.statements.is_empty()),
+        "{rendered:?}"
+    );
 }

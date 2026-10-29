@@ -789,6 +789,27 @@ pub(crate) fn find_foreign_key<'a>(
         })
 }
 
+/// The conversion Postgres's in-place type change from `old_col` to
+/// `new_col` would make that every door refuses (a warning, never an
+/// `ALTER`), with the live storage it starts from: the one decision the
+/// renderer warns by and the planner leaves the column's checks and
+/// generated columns standing by. A live type ferro cannot read is no
+/// conversion it knows to refuse.
+pub(crate) fn refused_alter(
+    old_col: &SchemaColumn,
+    new_col: &SchemaColumn,
+) -> Option<(
+    ferro_ddl_lowering::RefusedConversion,
+    ferro_ddl_lowering::CanonicalType,
+)> {
+    let Ok(ResolvedStorage::Scalar(new)) = resolve_column_storage(new_col, Dialect::Postgres)
+    else {
+        return None;
+    };
+    let old = canonical_from_schema_column(old_col, Dialect::Postgres).ok()?;
+    refused_scalar_conversion(old, new).map(|kind| (kind, old))
+}
+
 pub(crate) fn emit_alter_column_type(
     table: &str,
     column: &str,
@@ -836,11 +857,8 @@ pub(crate) fn emit_alter_column_type(
             };
             // Refusal rails (#154 generalized): a conversion that could
             // reinterpret or destroy stored values warns and skips — never a
-            // silent ALTER (FF-B B1/B2). A live type ferro cannot read is no
-            // conversion it knows to refuse.
-            if let Ok(old_canonical) = canonical_from_schema_column(old_col, ld)
-                && let Some(kind) = refused_scalar_conversion(old_canonical, new_canonical)
-            {
+            // silent ALTER (FF-B B1/B2).
+            if let Some((kind, old_canonical)) = refused_alter(old_col, new_col) {
                 result.reports.push(refused_conversion_warning(
                     kind,
                     table,

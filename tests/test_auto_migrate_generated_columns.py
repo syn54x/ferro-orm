@@ -445,3 +445,43 @@ def test_a_check_changed_with_the_type_of_the_column_it_reads_is_carried(
     with pytest.raises(Exception, match="(?i)check"):
         db.execute('INSERT INTO "ticket" ("code") VALUES (\'\')')
     assert schema_sql(reconnect(db)) == []
+
+
+EVENT = """
+from datetime import datetime
+
+from ferro import Check
+
+
+class Event(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    starts: Annotated[datetime, FerroField(db_type="timestamp")]
+    ends: Annotated[datetime, FerroField(db_type="timestamp")]
+    __ferro_checks__ = (Check("ordered", lambda event: event.ends >= event.starts),)
+"""
+EVENT_TZ = EVENT.replace(
+    'Annotated[datetime, FerroField(db_type="timestamp")]', "datetime"
+)
+"""``EVENT`` with its columns plain ``datetime`` (``timestamptz``), a
+conversion the pass refuses: it warns and alters nothing."""
+
+
+def test_a_check_over_a_column_whose_type_change_is_refused_stays_standing(
+    project, pkg, db
+):
+    """The check is never dropped and added back around an alter that never
+    runs, on this pass or the next."""
+    postgres_only(db)
+    declare(project, pkg, EVENT)
+    asyncio.run(ferro.connect(db.url, auto_migrate=True))
+    ferro.reset_engine()
+    declare(project, pkg, EVENT_TZ)
+
+    for _ in range(2):
+        report = reconnect(db)
+
+        assert schema_sql(report) == []
+        assert [warning.kind for warning in report.warnings] == [
+            "RefusedConversion",
+            "RefusedConversion",
+        ], report.warnings
