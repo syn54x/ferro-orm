@@ -1,0 +1,1 @@
+verified: cargo test (ddl-lowering 193, migrate 552, schema-ir 51, introspect 19) + Verify pytest line with test_connect_guard.py: PG18 1340 passed / PG17 1339 passed, 0 failed
