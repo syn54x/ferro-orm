@@ -7,11 +7,14 @@ use crate::session_settings::SettingsDelivery;
 use ferro_ddl_lowering::Dialect;
 use sqlx::ColumnIndex;
 use sqlx::pool::PoolConnection;
-use sqlx::postgres::PgPoolOptions;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::sqlite::SqlitePoolOptions;
-use sqlx::{Column, Connection, PgPool, Postgres, Row, Sqlite, SqlitePool, ValueRef};
+use sqlx::{
+    Column, ConnectOptions, Connection, PgPool, Postgres, Row, Sqlite, SqlitePool, ValueRef,
+};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
@@ -87,6 +90,14 @@ impl PoolSpec {
                 if self.settings_delivery == SettingsDelivery::Connection {
                     pool_options = pool_options.after_release(release_guard(self.pins.clone()));
                 }
+                // The pool retries a refused connection for its whole acquire
+                // timeout (30 s) and then reports a pool timeout; one direct
+                // connection fails at once with the refusal itself.
+                PgConnectOptions::from_str(&self.url)?
+                    .connect()
+                    .await?
+                    .close()
+                    .await?;
                 let pool = pool_options.connect(&self.url).await?;
                 Ok(BackendPool::Postgres(Arc::new(pool)))
             }
@@ -1308,7 +1319,7 @@ mod tests {
     use super::dialect_from_url;
     use crate::session_settings::SettingsDelivery;
     use ferro_ddl_lowering::Dialect;
-    use sqlx::postgres::PgPoolOptions;
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
     use sqlx::sqlite::SqlitePoolOptions;
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;

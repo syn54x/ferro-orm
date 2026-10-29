@@ -589,3 +589,14 @@ async def test_reset_engine_then_unnamed_connect_succeeds(db_url):
 async def test_named_connect_after_default_still_works(db_url):
     await ferro.connect(db_url)
     await ferro.connect(db_url, name="analytics")  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_a_refused_postgres_port_fails_at_once_with_the_refusal():
+    """Nothing listens on port 1. The error is the refusal itself, not a pool
+    timeout after 30 s of retrying."""
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    with pytest.raises(ferro.FerroError, match="(?i)refused"):
+        await ferro.connect("postgresql://u:p@127.0.0.1:1/db")
+    assert loop.time() - started < 5
