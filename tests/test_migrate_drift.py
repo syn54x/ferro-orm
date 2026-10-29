@@ -365,7 +365,11 @@ def test_a_changed_type_and_nullability_name_both_sides(project, pkg, db, capsys
     db.execute('ALTER TABLE "team" ALTER COLUMN "size" TYPE bigint')
     db.execute('ALTER TABLE "team" ALTER COLUMN "name" DROP NOT NULL')
 
+    # A check over a column whose type changes cannot be compared with its
+    # declaration (Postgres may not type-check the declared body against the
+    # live column), so the plan rebuilds it after the type change.
     assert sorted(drift_api(db).lines) == [
+        "ck_team_size_ok check body differs",
         "team.name is nullable, snapshot says NOT NULL",
         "team.size has type bigint, snapshot says int",
     ]

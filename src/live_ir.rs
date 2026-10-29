@@ -92,45 +92,7 @@ fn live_table_model(
     let mut columns: Vec<SchemaColumn> = table
         .columns
         .iter()
-        .map(|col| SchemaColumn {
-            renamed_from: None,
-            name: col.name.clone(),
-            logical_type: "unknown".to_string(),
-            db_type: Some(information_schema_to_db_type_token(
-                &col.declared_type,
-                col.char_max_len,
-                dialect,
-            )),
-            db_type_explicit: None,
-            nullable: col.is_nullable,
-            primary_key: col.is_primary_key,
-            // A column that owns a sequence (Postgres `serial`) reads as
-            // autoincrement: its `nextval` default is ferro's own.
-            autoincrement: col.owns_sequence,
-            unique: false,
-            index: false,
-            // The catalog's text, never a value: the planner's live side
-            // answers whether ferro left it (a foreign default, ADR-0027 as
-            // amended) and keeps it out of every backfill.
-            default: col.column_default.clone().map(serde_json::Value::String),
-            format: None,
-            enum_values: native_enum_type(col)
-                .and_then(|name| enum_labels.get(name))
-                .map(|labels| {
-                    labels
-                        .iter()
-                        .cloned()
-                        .map(serde_json::Value::String)
-                        .collect()
-                }),
-            enum_type_name: native_enum_type(col).map(str::to_string),
-            postgres_native_enum: col.is_enum_udt,
-            enum_renamed_labels: Default::default(),
-            enum_retired_labels: Default::default(),
-            default_factory: None,
-            retired: false,
-            generated: None,
-        })
+        .map(|col| live_column(col, enum_labels, dialect))
         .collect();
     columns.sort_by(|a, b| a.name.cmp(&b.name));
     let mut foreign_keys: Vec<SchemaForeignKey> = table
@@ -165,6 +127,53 @@ fn live_table_model(
         checks: Vec::new(),
         table_checks: Vec::new(),
         row_security: None,
+    }
+}
+
+/// The IR one live column reads as (see [`live_table_model`]).
+fn live_column(
+    col: &LiveColumn,
+    enum_labels: &BTreeMap<String, Vec<String>>,
+    dialect: Dialect,
+) -> SchemaColumn {
+    SchemaColumn {
+        renamed_from: None,
+        name: col.name.clone(),
+        logical_type: "unknown".to_string(),
+        db_type: Some(information_schema_to_db_type_token(
+            &col.declared_type,
+            col.char_max_len,
+            dialect,
+        )),
+        db_type_explicit: None,
+        nullable: col.is_nullable,
+        primary_key: col.is_primary_key,
+        // A column that owns a sequence (Postgres `serial`) reads as
+        // autoincrement: its `nextval` default is ferro's own.
+        autoincrement: col.owns_sequence,
+        unique: false,
+        index: false,
+        // The catalog's text, never a value: the planner's live side
+        // answers whether ferro left it (a foreign default, ADR-0027 as
+        // amended) and keeps it out of every backfill.
+        default: col.column_default.clone().map(serde_json::Value::String),
+        format: None,
+        enum_values: native_enum_type(col)
+            .and_then(|name| enum_labels.get(name))
+            .map(|labels| {
+                labels
+                    .iter()
+                    .cloned()
+                    .map(serde_json::Value::String)
+                    .collect()
+            }),
+        enum_type_name: native_enum_type(col).map(str::to_string),
+        postgres_native_enum: col.is_enum_udt,
+        enum_renamed_labels: Default::default(),
+        enum_retired_labels: Default::default(),
+        default_factory: None,
+        retired: false,
+        generated: None,
     }
 }
 
@@ -236,12 +245,14 @@ fn declared_pairs(
     declared: &IrEnvelope<SchemaIrPayload>,
     table: &str,
     columns: &[LiveColumn],
+    typed: &[SchemaColumn],
 ) -> PyResult<Vec<(String, String, String)>> {
     let Some(model) = declared_model(declared, table) else {
         return Ok(Vec::new());
     };
-    let live = |name: &str| columns.iter().any(|col| col.name == name);
-    let live_name = |name: &str| live_column_name(model, name, &live);
+    let live = |name: &str| typed.iter().find(|col| col.name == name);
+    let present = |name: &str| live(name).is_some();
+    let live_name = |name: &str| live_column_name(model, name, &present);
     let live_columns: Vec<SchemaColumn> = model
         .columns
         .iter()
@@ -310,13 +321,13 @@ fn declared_model<'a>(
 fn declared_check_pairs(
     declared: &IrEnvelope<SchemaIrPayload>,
     table: &str,
-    columns: &[LiveColumn],
+    typed: &[SchemaColumn],
     checks: &[LiveCheck],
 ) -> PyResult<Vec<(String, String, String)>> {
     let Some(model) = declared_model(declared, table) else {
         return Ok(Vec::new());
     };
-    let live = |name: &str| columns.iter().any(|col| col.name == name);
+    let live = |name: &str| typed.iter().find(|col| col.name == name);
     let live_check = |name: &str| {
         checks
             .iter()
@@ -410,6 +421,14 @@ pub async fn live_schema_ir(
     tables: &[String],
 ) -> PyResult<(IrEnvelope<SchemaIrPayload>, LiveFacts)> {
     let postgres = engine.backend() == Dialect::Postgres;
+    let dialect = engine.backend();
+    // Read first: a pair is asked only for columns stored as declared, which
+    // a live native-enum column answers with its type's labels.
+    let enum_labels = if postgres {
+        live_enum_type_labels(engine).await?
+    } else {
+        BTreeMap::new()
+    };
     let mut live = Vec::with_capacity(tables.len());
     for name in tables {
         // A table dropped since `tables_to_read` asked reads as absent, so
@@ -426,8 +445,12 @@ pub async fn live_schema_ir(
         if postgres {
             // The generated columns' pairs and the checks' share the table's
             // one EXPLAIN.
-            let generated = declared_pairs(declared, name, &columns)?;
-            let checked = declared_check_pairs(declared, name, &columns, &checks)?;
+            let typed: Vec<SchemaColumn> = columns
+                .iter()
+                .map(|col| live_column(col, &enum_labels, dialect))
+                .collect();
+            let generated = declared_pairs(declared, name, &columns, &typed)?;
+            let checked = declared_check_pairs(declared, name, &typed, &checks)?;
             if !generated.is_empty() || !checked.is_empty() {
                 let asked: Vec<(String, String)> = generated
                     .iter()
@@ -457,12 +480,6 @@ pub async fn live_schema_ir(
             name: name.clone(),
         });
     }
-    let dialect = engine.backend();
-    let enum_labels = if dialect == Dialect::Postgres {
-        live_enum_type_labels(engine).await?
-    } else {
-        BTreeMap::new()
-    };
     Ok(live_tables_to_schema_ir(live, enum_labels, dialect))
 }
 

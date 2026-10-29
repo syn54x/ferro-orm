@@ -707,9 +707,12 @@ async fn tracking_named_tables(engine: &EngineHandle) -> PyResult<HashSet<(Strin
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (?, ?)",
             None,
         ),
+        // `pg_class`, not `information_schema.tables`, which hides a table the
+        // role holds no privilege on: such a tracking table still governs.
         Dialect::Postgres => (
-            "SELECT table_name::text, table_schema::text FROM information_schema.tables \
-             WHERE table_name IN ($1, $2)",
+            "SELECT c.relname::text, n.nspname::text FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE c.relkind IN ('r', 'p') AND c.relname IN ($1, $2)",
             Some(1),
         ),
     };
@@ -1396,8 +1399,10 @@ pub fn _plan_revision(
 /// Resolves to a dict: `{"dialect": "postgres" | "sqlite", "live": <the live
 /// schema IR envelope>, "operations": [{"kind": …, <op fields>}],
 /// "reports": [report…]}`. Drift reports what would change, never how it
-/// runs, so the ops carry no verdict; reports are in `_plan_from_ir`'s
-/// shape.
+/// runs, so the ops carry no verdict but its `replaces` (why a generated
+/// column is dropped and added back, `made_generated`, `input_type` or
+/// `own_type`), on the two ops of such a pair only; reports are in
+/// `_plan_from_ir`'s shape.
 ///
 /// # Errors
 /// `ValueError` when `declared_json` is not a schema IR envelope or a side
@@ -1426,8 +1431,17 @@ pub fn _plan_drift(
             PlanOptions { destructive: true },
         );
         let operations = plan
-            .ops()
-            .map(serde_json::to_value)
+            .operations
+            .iter()
+            .map(|planned| {
+                let mut op = serde_json::to_value(&planned.op)?;
+                if let (Some(fields), Some(replace)) =
+                    (op.as_object_mut(), planned.verdict.replaces)
+                {
+                    fields.insert("replaces".into(), serde_json::to_value(replace)?);
+                }
+                Ok(op)
+            })
             .collect::<serde_json::Result<Vec<_>>>()
             .map_err(serialize_error)?;
         let wire = serde_json::json!({

@@ -294,6 +294,26 @@ CASES: tuple[Case, ...] = (
         check_functions.HEAD,
         check_functions.LEDGER,
     ),
+    Case(
+        "G6-add-a-generated-column-with-its-input",
+        generated.HEAD,
+        generated.FEE,
+    ),
+    Case(
+        "G6b-drop-a-generated-column-with-its-input",
+        generated.INDEXED,
+        generated.NO_AMOUNT,
+    ),
+    Case(
+        "G7-change-a-generated-columns-own-type",
+        generated.INDEXED,
+        generated.OWN_WIDE,
+    ),
+    Case(
+        "G8-replace-a-generated-column-a-row-policy-reads",
+        generated.POLICED,
+        generated.POLICED_WIDE,
+    ),
     # -- F: several changes at once -----------------------------------------------
     Case(
         "F1-several-models-at-once",

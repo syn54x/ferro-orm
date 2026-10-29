@@ -33,9 +33,15 @@ from tests.test_generate_generated_columns import (
     ABS,
     CHECKED,
     CHECKED_WIDE,
+    FEE,
     HEAD,
     INDEXED,
+    OWN_WIDE,
     PLAIN,
+    POLICED,
+    POLICED_WIDE,
+    RAW_POLICED,
+    RAW_POLICED_WIDE,
     WIDE,
 )
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
@@ -246,3 +252,126 @@ def test_every_generated_column_statement_is_in_the_statement_log(
     logged = [record.sql for record in caplog.records if record.name == "ferro.sql"]
     for statement in schema_sql(report):
         assert statement in logged
+
+
+def postgres_only(db) -> None:
+    if db.backend == "sqlite":
+        pytest.skip("the SQLite pass runs no DDL for a generated column")
+
+
+def positions(statements: list[str], *needles: str) -> list[int]:
+    return [
+        next(i for i, statement in enumerate(statements) if needle in statement)
+        for needle in needles
+    ]
+
+
+CODE_INT = """
+from ferro import Field, fn
+
+
+class Ticket(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    code: int
+    n: int = Field(generated=lambda ticket: ticket.code + 1)
+"""
+
+CODE_STR = """
+from ferro import Field, fn
+
+
+class Ticket(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    code: str
+    n: int = Field(generated=lambda ticket: fn.length(ticket.code))
+"""
+"""``CODE_INT`` with the input's type and the expression changed together:
+the new expression does not type-check against the live table."""
+
+
+def test_an_input_type_and_expression_changed_together_are_replaced(project, pkg, db):
+    postgres_only(db)
+    declare(project, pkg, CODE_INT)
+    asyncio.run(ferro.connect(db.url, auto_migrate=True))
+    ferro.reset_engine()
+    db.execute('INSERT INTO "ticket" ("code") VALUES (1234)')
+    declare(project, pkg, CODE_STR)
+
+    # The live read asks Postgres to print no expression it cannot type-check.
+    statements = schema_sql(reconnect(db, destructive=True))
+
+    drop, alter, add = positions(
+        statements,
+        'DROP COLUMN "n"',
+        'ALTER COLUMN "code" TYPE',
+        'ADD COLUMN "n"',
+    )
+    assert drop < alter < add, statements
+    assert db.rows('SELECT "code", "n" FROM "ticket"') == [("1234", 4)]
+    assert schema_sql(reconnect(db, destructive=True)) == []
+
+
+def test_a_generated_column_added_with_its_input_runs_after_it(project, pkg, db):
+    postgres_only(db)
+    built(project, pkg, db, HEAD)
+    declare(project, pkg, FEE)
+
+    statements = schema_sql(reconnect(db))
+
+    fee, direction = positions(
+        statements, 'ADD COLUMN "fee_minor"', 'ADD COLUMN "direction"'
+    )
+    assert fee < direction, statements
+    assert schema_sql(reconnect(db)) == []
+
+
+def test_a_generated_columns_own_type_change_drops_and_adds_it_back(project, pkg, db):
+    postgres_only(db)
+    built(project, pkg, db, INDEXED)
+    declare(project, pkg, OWN_WIDE)
+
+    statements = schema_sql(reconnect(db))
+
+    assert not any("USING" in statement for statement in statements), statements
+    drop, add = positions(
+        statements, 'DROP COLUMN "direction"', 'ADD COLUMN "direction"'
+    )
+    assert drop < add and '"direction" bigint' in statements[add], statements
+    assert directions(db) == [(-5, -1)]
+    assert schema_sql(reconnect(db)) == []
+
+
+def test_a_policy_over_a_replaced_generated_column_is_carried_around_it(
+    project, pkg, db
+):
+    postgres_only(db)
+    built(project, pkg, db, POLICED)
+    declare(project, pkg, POLICED_WIDE)
+
+    statements = schema_sql(reconnect(db))
+
+    at = positions(
+        statements,
+        'DROP POLICY "rls_transaction_direction"',
+        'DROP COLUMN "direction"',
+        'ADD COLUMN "direction"',
+        'CREATE POLICY "rls_transaction_direction"',
+    )
+    assert at == sorted(at), statements
+    assert directions(db) == [(-5, -1)]
+    assert schema_sql(reconnect(db)) == []
+
+
+def test_a_raw_policy_over_a_replaced_generated_column_refuses_naming_the_fix(
+    project, pkg, db
+):
+    postgres_only(db)
+    built(project, pkg, db, RAW_POLICED)
+    declare(project, pkg, RAW_POLICED_WIDE)
+
+    with pytest.raises(Exception) as refused:
+        reconnect(db)
+
+    assert 'DROP POLICY "rls_transaction_signed" ON "transaction"' in str(refused.value)
+    # Nothing ran: the column and its input stand as they were.
+    assert directions(db) == [(-5, -1)]

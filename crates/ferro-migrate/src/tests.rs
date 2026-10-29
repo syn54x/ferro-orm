@@ -6772,7 +6772,23 @@ fn the_pair_rule_gives_a_pair_only_when_the_column_and_every_input_are_live() {
     let mut model = transaction_model("amount_minor", Some(sign_of("amount_minor")));
     model.columns[1].renamed_from = Some("amount".to_string());
     let direction = model.columns[2].clone();
-    let live = |names: &'static [&'static str]| move |name: &str| names.contains(&name);
+    // The live columns of those names, typed as declared.
+    let columns: Vec<SchemaColumn> = [("amount", 1), ("amount_minor", 1), ("direction", 2)]
+        .into_iter()
+        .map(|(name, at)| SchemaColumn {
+            name: name.to_string(),
+            renamed_from: None,
+            ..model.columns[at].clone()
+        })
+        .collect();
+    let live = |names: &'static [&'static str]| {
+        let columns = &columns;
+        move |name: &str| {
+            columns
+                .iter()
+                .find(|col| col.name == name && names.contains(&name))
+        }
+    };
     assert_eq!(
         crate::plan::printed_pair_column(&model, &direction, &live(&["amount", "direction"])),
         Some("direction".to_string()),
@@ -6855,7 +6871,8 @@ fn adding_a_generated_column_is_native_on_postgres_and_a_rebuild_on_sqlite() {
     assert_eq!(verdict.execution, Execution::Native);
     // A required generated column asks the rows already there for nothing.
     assert!(!verdict.demands_values && !verdict.drops_data && !verdict.recreates);
-    assert_eq!(verdict.fails_on_rows, RowRisk::None);
+    // It computes every row, which can overflow.
+    assert_eq!(verdict.fails_on_rows, RowRisk::Always);
     assert_eq!(
         statements_of(&postgres),
         vec![
@@ -7471,24 +7488,47 @@ fn a_postgres_live_check_with_no_printed_pair_is_refused() {
 fn a_check_gets_a_pair_only_when_every_column_it_reads_is_live() {
     let model = payment_with_large_check("1000");
     let held = |name: &str| name == "ck_payment_large";
-    let without_amount =
-        crate::plan::printed_pair_checks(&model, "payment", &|name| name != "amount", &held);
+    let every = |name: &str| model.columns.iter().find(|col| col.name == name);
+    let without_amount = crate::plan::printed_pair_checks(
+        &model,
+        "payment",
+        &|name| every(name).filter(|_| name != "amount"),
+        &held,
+    );
     assert_eq!(
         without_amount,
         vec![],
         "a check over a column not live yet has none"
     );
     assert_eq!(
-        crate::plan::printed_pair_checks(&model, "payment", &|_| true, &|_| false),
+        crate::plan::printed_pair_checks(&model, "payment", &every, &|_| false),
         vec![],
         "a check no live check holds has none: it is an add"
     );
     assert_eq!(
-        crate::plan::printed_pair_checks(&model, "payment", &|_| true, &held),
+        crate::plan::printed_pair_checks(&model, "payment", &every, &held),
         vec![(
             "ck_payment_large".to_string(),
             Ok("(abs(CAST(\"amount\" AS bigint)) > 1000)".to_string())
         )]
+    );
+    // A column whose live type is not the declared one: the check may not
+    // type-check against the live table, so it gets none and is rebuilt.
+    let mut retyped = model.columns[1].clone();
+    retyped.db_type = Some("text".to_string());
+    assert_eq!(
+        crate::plan::printed_pair_checks(
+            &model,
+            "payment",
+            &|name| if name == "amount" {
+                Some(&retyped)
+            } else {
+                every(name)
+            },
+            &held
+        ),
+        vec![],
+        "a check over a column changing type has none"
     );
 }
 
@@ -7506,7 +7546,17 @@ fn a_check_is_paired_under_the_names_its_live_table_holds() {
         name: "ck_invoice_large".to_string(),
         predicate: abs_amount_over("total", "1000"),
     };
-    let live = |name: &str| ["id", "amount"].contains(&name);
+    // The live table's columns: the declared ones under their live names.
+    let live_columns: Vec<SchemaColumn> = model
+        .columns
+        .iter()
+        .map(|col| SchemaColumn {
+            name: col.renamed_from.clone().unwrap_or_else(|| col.name.clone()),
+            renamed_from: None,
+            ..col.clone()
+        })
+        .collect();
+    let live = |name: &str| live_columns.iter().find(|col| col.name == name);
     let pairs = |held: &str| {
         crate::plan::printed_pair_checks(&model, "payment", &live, &|name| name == held)
     };
@@ -7560,5 +7610,382 @@ fn a_table_check_calling_fn_over_a_re_added_generated_column_is_added_back_after
             |s| s.contains("\"ck_transaction_large\"") && s.contains("abs(\"direction\")")
         ),
         "{statements:?}"
+    );
+}
+
+// -- a generated column's order, own type, policies and replace reason ----------------
+
+/// `transaction` with `fee_minor` and `direction` generated as
+/// `sign(fee_minor)`: an input that sorts after the column reading it.
+fn fee_direction() -> SchemaModel {
+    let mut model = transaction_model("amount_minor", Some(sign_of("fee_minor")));
+    model.columns.push(col("fee_minor", "bigint", true));
+    model
+}
+
+fn column_op(kind: &str, column: &str) -> MigrationOp {
+    let (table, column) = ("transaction".to_string(), column.to_string());
+    match kind {
+        "add" => MigrationOp::AddColumn { table, column },
+        "drop" => MigrationOp::DropColumn { table, column },
+        _ => unreachable!("{kind}"),
+    }
+}
+
+#[test]
+fn a_generated_column_added_with_its_input_is_added_after_it_and_dropped_before_it() {
+    let before = transaction_without_direction("amount_minor");
+    let after = fee_direction();
+    for dialect in [Dialect::Postgres, Dialect::Sqlite] {
+        let up = plan_declared(&before, &after, dialect, updates_only());
+        assert_eq!(
+            up.op_list(),
+            vec![column_op("add", "fee_minor"), direction_op("add")],
+            "{dialect:?}"
+        );
+        let down = plan_down(
+            &up.op_list(),
+            &Side::declared(envelope(vec![after.clone()])),
+            &Side::declared(envelope(vec![before.clone()])),
+            dialect,
+        );
+        assert_eq!(
+            down.op_list(),
+            vec![direction_op("drop"), column_op("drop", "fee_minor")],
+            "{dialect:?}"
+        );
+    }
+}
+
+#[test]
+fn a_generated_column_dropped_with_its_input_is_dropped_before_it_and_added_after_it() {
+    // `amount_minor` sorts before `direction`, which reads it.
+    let before = transaction_model("amount_minor", Some(sign_of("amount_minor")));
+    let after = schema_model("transaction", vec![pk_col("id", "bigint")]);
+    for dialect in [Dialect::Postgres, Dialect::Sqlite] {
+        let up = plan_declared(&before, &after, dialect, destructive());
+        assert_eq!(
+            up.op_list(),
+            vec![direction_op("drop"), column_op("drop", "amount_minor")],
+            "{dialect:?}"
+        );
+        let down = plan_down(
+            &up.op_list(),
+            &Side::declared(envelope(vec![after.clone()])),
+            &Side::declared(envelope(vec![before.clone()])),
+            dialect,
+        );
+        assert_eq!(
+            down.op_list(),
+            vec![column_op("add", "amount_minor"), direction_op("add")],
+            "{dialect:?}"
+        );
+    }
+}
+
+#[test]
+fn adding_a_generated_column_can_fail_on_the_rows_it_computes() {
+    let plan = plan_declared(
+        &transaction_without_direction("amount_minor"),
+        &indexed_direction("bigint"),
+        Dialect::Postgres,
+        updates_only(),
+    );
+    let verdict = &plan.operations[0].verdict;
+    assert_eq!(verdict.fails_on_rows, RowRisk::Always);
+    assert!(!verdict.demands_values);
+}
+
+#[test]
+fn a_generated_columns_own_type_change_drops_and_adds_it_back() {
+    let before = indexed_direction("bigint");
+    let mut after = indexed_direction("bigint");
+    after.columns[2].db_type = Some("int".to_string());
+    for dialect in [Dialect::Postgres, Dialect::Sqlite] {
+        let up = plan_declared(&before, &after, dialect, updates_only());
+        assert_eq!(
+            up.op_list(),
+            vec![direction_op("drop"), direction_op("add")],
+            "{dialect:?}"
+        );
+        for planned in &up.operations {
+            assert_eq!(
+                planned.verdict.replaces,
+                Some(Replace::OwnType),
+                "{dialect:?}"
+            );
+        }
+        assert!(!up.operations[0].verdict.drops_data);
+        let down = plan_down(
+            &up.op_list(),
+            &Side::declared(envelope(vec![after.clone()])),
+            &Side::declared(envelope(vec![before.clone()])),
+            dialect,
+        );
+        assert_eq!(
+            down.op_list(),
+            vec![direction_op("drop"), direction_op("add")]
+        );
+    }
+    let statements = statements_of(&plan_declared(
+        &before,
+        &after,
+        Dialect::Postgres,
+        updates_only(),
+    ));
+    assert!(
+        statements.iter().all(|s| !s.contains("USING")),
+        "{statements:?}"
+    );
+    assert!(
+        statements[1].starts_with("ALTER TABLE \"transaction\" ADD COLUMN \"direction\" integer"),
+        "{statements:?}"
+    );
+}
+
+#[test]
+fn the_verdict_says_why_a_generated_column_is_dropped_and_added_back() {
+    let retyped = plan_declared(
+        &indexed_direction("integer"),
+        &indexed_direction("bigint"),
+        Dialect::Postgres,
+        updates_only(),
+    );
+    let reasons: Vec<Option<Replace>> = retyped
+        .operations
+        .iter()
+        .map(|planned| planned.verdict.replaces)
+        .collect();
+    assert_eq!(
+        reasons,
+        vec![Some(Replace::InputType), None, Some(Replace::InputType)]
+    );
+    let made = plan_declared(
+        &transaction_model("amount_minor", None),
+        &transaction_model("amount_minor", Some(sign_of("amount_minor"))),
+        Dialect::Postgres,
+        destructive(),
+    );
+    assert!(
+        made.operations
+            .iter()
+            .all(|planned| planned.verdict.replaces == Some(Replace::MadeGenerated)),
+        "{:?}",
+        made.operations
+    );
+    // A column dropped for good is no replace.
+    let dropped = plan_declared(
+        &transaction_model("amount_minor", Some(sign_of("amount_minor"))),
+        &transaction_without_direction("amount_minor"),
+        Dialect::Postgres,
+        destructive(),
+    );
+    assert_eq!(dropped.operations[0].verdict.replaces, None);
+}
+
+/// [`indexed_direction`] under row security, with `policy` the one policy.
+fn policed_direction(input_type: &str, policy: ferro_schema_ir::RowPolicyExpr) -> SchemaModel {
+    let mut model = indexed_direction(input_type);
+    model.row_security = Some(ferro_schema_ir::SchemaRowSecurity {
+        force: false,
+        policies: vec![ferro_schema_ir::SchemaRowPolicy {
+            name: "rls_transaction_direction".to_string(),
+            command: ferro_schema_ir::RowPolicyCommand::All,
+            restrictive: false,
+            expr: policy,
+        }],
+    });
+    model
+}
+
+fn direction_setting() -> ferro_schema_ir::RowPolicyExpr {
+    ferro_schema_ir::RowPolicyExpr::Setting {
+        column: "direction".to_string(),
+        setting: "app.direction".to_string(),
+    }
+}
+
+fn raw_using(using: &str) -> ferro_schema_ir::RowPolicyExpr {
+    ferro_schema_ir::RowPolicyExpr::Raw {
+        using: Some(using.to_string()),
+        with_check: None,
+    }
+}
+
+#[test]
+fn a_policy_over_a_re_added_generated_column_is_dropped_before_and_added_after() {
+    let before = policed_direction("integer", direction_setting());
+    let after = policed_direction("bigint", direction_setting());
+    let policy = |add: bool| {
+        let (table, name) = (
+            "transaction".to_string(),
+            "rls_transaction_direction".to_string(),
+        );
+        if add {
+            MigrationOp::AddRowPolicy { table, name }
+        } else {
+            MigrationOp::DropRowPolicy { table, name }
+        }
+    };
+    let alter = MigrationOp::AlterColumnType {
+        table: "transaction".to_string(),
+        column: "amount_minor".to_string(),
+    };
+    let expected = vec![
+        policy(false),
+        direction_op("drop"),
+        alter,
+        direction_op("add"),
+        policy(true),
+    ];
+    let up = plan_declared(&before, &after, Dialect::Postgres, updates_only());
+    assert_eq!(up.op_list(), expected);
+    for planned in &up.operations {
+        assert_eq!(planned.verdict.execution, Execution::Native, "{planned:?}");
+    }
+    // The drop of a policy still declared renders: the same ops add it back.
+    let statements = statements_of(&up);
+    assert!(
+        statements[0].starts_with("DROP POLICY \"rls_transaction_direction\""),
+        "{statements:?}"
+    );
+    assert!(
+        statements
+            .last()
+            .is_some_and(|s| s.starts_with("CREATE POLICY \"rls_transaction_direction\"")),
+        "{statements:?}"
+    );
+    let down = plan_down(
+        &up.op_list(),
+        &Side::declared(envelope(vec![after.clone()])),
+        &Side::declared(envelope(vec![before.clone()])),
+        Dialect::Postgres,
+    );
+    assert_eq!(down.op_list(), expected);
+}
+
+#[test]
+fn a_raw_policy_naming_a_re_added_generated_column_is_carried_between_two_declarations() {
+    // Both bodies are ferro's own copies of the declaration: the plan drops
+    // the policy first and adds it back last, as for a shorthand one.
+    let raw = raw_using("\"direction\" >= 0");
+    let up = plan_declared(
+        &policed_direction("integer", raw.clone()),
+        &policed_direction("bigint", raw),
+        Dialect::Postgres,
+        updates_only(),
+    );
+    let ops = up.op_list();
+    assert!(
+        matches!(&ops[0], MigrationOp::DropRowPolicy { name, .. } if name == "rls_transaction_direction"),
+        "{ops:?}"
+    );
+    assert!(
+        matches!(ops.last(), Some(MigrationOp::AddRowPolicy { name, .. }) if name == "rls_transaction_direction"),
+        "{ops:?}"
+    );
+    up.render().expect("renders");
+}
+
+#[test]
+fn a_raw_policy_naming_a_re_added_generated_column_on_a_live_table_refuses_naming_the_fix() {
+    // A live raw body is never rewritten from a declaration (ADR-0019), and
+    // Postgres refuses to drop the column under it.
+    let raw = raw_using("\"direction\" >= 0");
+    let mut live_model = policed_direction("integer", raw.clone());
+    live_model.columns[2].generated = None;
+    live_model.row_security = None;
+    let mut facts = LiveFacts::default();
+    let mut table = live_direction(true, PG_REPRINT, None);
+    table.row_security = ferro_ddl_lowering::LiveRowSecurity {
+        enabled: true,
+        forced: false,
+        policies: vec![live_policy("rls_transaction_direction", "(direction >= 0)")],
+    };
+    facts.tables.insert("transaction".to_string(), table);
+    let up = plan_from_ir(
+        &Side::live(envelope(vec![live_model]), facts).expect("live side"),
+        &Side::declared(envelope(vec![policed_direction("bigint", raw)])),
+        Dialect::Postgres,
+        updates_only(),
+    );
+    assert_eq!(up.op_list()[0], direction_op("drop"));
+    let Execution::Refused(refusal) = &up.operations[0].verdict.execution else {
+        panic!("{:?}", up.operations[0].verdict);
+    };
+    let text = refusal.to_string();
+    assert!(
+        text.contains("DROP POLICY \"rls_transaction_direction\" ON \"transaction\""),
+        "{text}"
+    );
+    // The renderer, which the pass and the bridge run, fails in the same words.
+    let failed = up.render().expect_err("refused");
+    assert_eq!(failed.message, text);
+}
+
+#[test]
+fn a_raw_policy_naming_only_other_columns_leaves_the_replace_native() {
+    let raw = raw_using("directions > 0 AND x_direction > 0");
+    let up = plan_declared(
+        &policed_direction("integer", raw.clone()),
+        &policed_direction("bigint", raw),
+        Dialect::Postgres,
+        updates_only(),
+    );
+    assert_eq!(up.op_list()[0], direction_op("drop"));
+    assert_eq!(up.operations[0].verdict.execution, Execution::Native);
+}
+
+#[test]
+fn an_input_whose_live_type_changes_gets_no_printed_pair_and_is_not_refused() {
+    // Live: `amount_minor` integer, `direction` = sign(amount_minor).
+    // Declared: `amount_minor` text, `direction` = length(amount_minor). The
+    // new expression does not type-check against the live table, so the
+    // live read asks for no pair, none is demanded, and the plan replaces.
+    let mut live_model = transaction_model("amount_minor", None);
+    live_model.columns[1].db_type = Some("integer".to_string());
+    let mut declared = transaction_model(
+        "amount_minor",
+        Some(ferro_schema_ir::ValueExpr::Func {
+            name: "length".to_string(),
+            args: vec![ferro_schema_ir::ValueExpr::Column {
+                name: "amount_minor".to_string(),
+            }],
+        }),
+    );
+    declared.columns[1].db_type = Some("text".to_string());
+    let live_columns = live_model.columns.clone();
+    let live = |name: &str| live_columns.iter().find(|col| col.name == name);
+    assert_eq!(
+        crate::plan::printed_pair_column(&declared, &declared.columns[2], &live),
+        None
+    );
+    let mut facts = LiveFacts::default();
+    facts.tables.insert(
+        "transaction".to_string(),
+        live_direction(true, PG_REPRINT, None),
+    );
+    let live_side = Side::live(envelope(vec![live_model]), facts).expect("live side");
+    let declared = envelope(vec![declared]);
+    assert_eq!(
+        live_side.check_printed_pairs(&declared, Dialect::Postgres),
+        Ok(())
+    );
+    let plan = plan_from_ir(
+        &live_side,
+        &Side::declared(declared),
+        Dialect::Postgres,
+        updates_only(),
+    );
+    assert_eq!(
+        plan.op_list(),
+        vec![
+            direction_op("drop"),
+            MigrationOp::AlterColumnType {
+                table: "transaction".to_string(),
+                column: "amount_minor".to_string(),
+            },
+            direction_op("add"),
+        ]
     );
 }

@@ -45,8 +45,8 @@ pub use generate::{
 pub use order::order_by_dependencies;
 pub use plan::{
     Execution, Hint, HintError, LiveCheckFact, LiveFacts, LiveGeneratedFact, LiveTableFacts,
-    OpVerdict, PlanError, PlannedOp, PrintedPair, Refusal, Rider, RowRisk, Side, foreign_default,
-    live_hints, plan_down, plan_from_ir,
+    OpVerdict, PlanError, PlannedOp, PrintedPair, Refusal, Replace, Rider, RowRisk, Side,
+    foreign_default, live_hints, plan_down, plan_from_ir,
 };
 pub use render::{RenderedOp, validate_schema_ir};
 pub use revision::{

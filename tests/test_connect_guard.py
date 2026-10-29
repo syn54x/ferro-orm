@@ -20,6 +20,7 @@ import warnings
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Annotated
+from urllib.parse import urlparse
 
 import pytest
 
@@ -388,3 +389,29 @@ async def test_the_pass_waits_for_the_run_lock_up_to_lock_timeout(
     assert len([w for w in caught if "is waiting" in str(w.message)]) == 1
     assert [w.kind for w in raised.value.report.warnings] == ["RunLockWait"]
     assert "guardfresh" not in db.tables()
+
+
+async def test_a_tracking_table_the_role_cannot_read_still_refuses(
+    project, pkg, db, pg_role
+):
+    """``information_schema`` hides a table the role holds no privilege on;
+    the guard reads ``pg_class``, so the tracking table still refuses."""
+    if db.backend != "postgres":
+        pytest.skip("roles are Postgres's")
+    await track(project, pkg, db)
+    role = pg_role("guard")
+    db.execute(f"CREATE ROLE \"{role}\" LOGIN NOSUPERUSER PASSWORD 'guard-pw'")
+    db.execute(f'GRANT USAGE ON SCHEMA "{db.schema}" TO "{role}"')
+    parsed = urlparse(db.url)
+    url = parsed._replace(
+        netloc=f"{role}:guard-pw@{parsed.hostname}:{parsed.port}"
+    ).geturl()
+    declare_fresh_model()
+
+    try:
+        with pytest.raises(MigrationRefused) as raised:
+            await ferro.connect(url, auto_migrate=True)
+    finally:
+        ferro.reset_engine()
+
+    assert str(raised.value) == guard_text(governed(db), governed(db))

@@ -19,8 +19,9 @@ class Transaction(Model):
 | change an input's type | drop the column, `ALTER … TYPE`, add it back | rebuild |
 | rename an input | the `RENAME COLUMN` alone | the rename alone |
 
-A required generated column asks the rows already there for nothing: no
-backfill step and no ``-- ferro: data-dependent``. Every case builds a
+A required generated column asks the rows already there for nothing (no
+backfill step), but computing it can fail on any of them (an overflow), so
+its step is ``-- ferro: data-dependent``. Every case builds a
 project, applies ``0001`` with a row in it, generates the change, applies it
 and checks the stored values and that drift is clean, then takes it down and
 checks drift against ``0001``. The casebook (``tests/_casebook.py``) builds
@@ -122,6 +123,41 @@ def checked(head: str) -> str:
 CHECKED = checked(HEAD)
 CHECKED_WIDE = checked(WIDE_HEAD)
 
+FEE = HEAD + (
+    "    fee_minor: int | None = None\n"
+    "    direction: int | None = Field(\n"
+    "        generated=lambda transaction: transaction.fee_minor + 1,\n"
+    "    )\n"
+)
+"""A generated column added with the input it reads, which sorts after it:
+the input's add goes first, and the down drops the column first."""
+
+NO_AMOUNT = HEAD.replace("    amount_minor: int\n", "")
+"""``INDEXED`` with ``direction`` and its input ``amount_minor`` dropped:
+the input sorts first, and the column goes first."""
+
+OWN_WIDE = HEAD + direction().replace(
+    "        index=True,\n", '        index=True,\n        db_type="bigint",\n'
+)
+"""``INDEXED`` with ``direction``'s own type widened, which Postgres refuses
+to alter on a generated column: it is dropped and added back."""
+
+
+def policed(head: str, policy: str) -> str:
+    """``head`` and ``direction`` under the one row policy ``policy``."""
+    return "from ferro import RowPolicy, RowSecurity\n" + (head + direction()).replace(
+        "class Transaction(Model):\n",
+        f"class Transaction(Model):\n    __ferro_rls__ = RowSecurity({policy})\n",
+    )
+
+
+DIRECTION_POLICY = 'RowPolicy(column="direction", setting="app.direction")'
+RAW_POLICY = 'RowPolicy(name="signed", using=\'"direction" >= -1\')'
+POLICED = policed(HEAD, DIRECTION_POLICY)
+POLICED_WIDE = policed(WIDE_HEAD, DIRECTION_POLICY)
+RAW_POLICED = policed(HEAD, RAW_POLICY)
+RAW_POLICED_WIDE = policed(WIDE_HEAD, RAW_POLICY)
+
 
 # -- helpers --------------------------------------------------------------------------
 
@@ -186,7 +222,8 @@ def test_adding_an_indexed_generated_column_to_a_table_with_rows(project, pkg, d
     files = up_files(migration, db.backend)
     # A required generated column asks the row already there for nothing.
     assert not any("backfill" in step for step in files), files
-    assert all("-- ferro: data-dependent" not in text for text in files.values())
+    # Computing it for every row can fail on one (an overflow).
+    assert "-- ferro: data-dependent\n" in files["01_schema"], files
     if db.backend == "postgres":
         assert up_statements(migration, "postgres") == [
             'ALTER TABLE "transaction" ADD COLUMN "direction" integer NOT NULL '
@@ -357,3 +394,123 @@ def test_dropping_a_generated_column_is_destructive(project, pkg, db):
     assert any("-- ferro: destructive\n" in text for text in files.values()), files
     applied_and_reverted(db)
     assert directions(db) == [(-5, -1)]
+
+
+def positions(statements: list[str], *needles: str) -> list[int]:
+    """The index of the first statement holding each of ``needles``."""
+    return [
+        next(i for i, statement in enumerate(statements) if needle in statement)
+        for needle in needles
+    ]
+
+
+def test_a_generated_column_added_with_its_input_is_added_after_it(project, pkg, db):
+    start(project, pkg, db, HEAD)
+    migration = generate(project, pkg, FEE, "fee")
+
+    if db.backend == "postgres":
+        added = up_statements(migration, "postgres")
+        fee, direction = positions(
+            added, 'ADD COLUMN "fee_minor"', 'ADD COLUMN "direction"'
+        )
+        assert fee < direction, added
+    assert run("migrate", "up", "--url", db.url) == 0
+    db.execute('UPDATE "transaction" SET "fee_minor" = 4')
+    assert db.rows('SELECT "fee_minor", "direction" FROM "transaction"') == [(4, 5)]
+    assert drift_api(db).lines == []
+    # The down drops the column before the input it reads.
+    assert run("migrate", "down", "--yes", "--url", db.url) == 0
+    assert drift_api(db).lines == []
+
+
+def test_a_generated_column_dropped_with_its_input_is_dropped_before_it(
+    project, pkg, db
+):
+    start(project, pkg, db, INDEXED)
+    migration = generate(project, pkg, NO_AMOUNT, "no_amount")
+
+    if db.backend == "postgres":
+        dropped = up_statements(migration, "postgres")
+        direction, amount = positions(
+            dropped, 'DROP COLUMN "direction"', 'DROP COLUMN "amount_minor"'
+        )
+        assert direction < amount, dropped
+    assert run("migrate", "up", "--url", db.url) == 0
+    assert drift_api(db).lines == []
+    # The down adds back a required input no row has a value for: empty the
+    # table, and it adds the input before the column reading it.
+    db.execute('DELETE FROM "transaction"')
+    assert run("migrate", "down", "--yes", "--url", db.url) == 0
+    assert drift_api(db).lines == []
+
+
+def test_a_generated_columns_own_type_change_drops_and_adds_it_back(project, pkg, db):
+    start(project, pkg, db, INDEXED)
+    migration = generate(project, pkg, OWN_WIDE, "wide_direction")
+
+    files = up_files(migration, db.backend)
+    assert all("-- ferro: destructive" not in text for text in files.values())
+    if db.backend == "postgres":
+        changed = up_statements(migration, "postgres")
+        assert not any("USING" in statement for statement in changed), changed
+        drop, add = positions(
+            changed, 'DROP COLUMN "direction"', 'ADD COLUMN "direction"'
+        )
+        assert drop < add and '"direction" bigint' in changed[add], changed
+
+    assert run("migrate", "up", "--url", db.url) == 0
+    assert directions(db) == [(-5, -1)]
+    assert drift_api(db).lines == []
+    assert run("migrate", "down", "--yes", "--url", db.url) == 0
+    assert directions(db) == [(-5, -1)]
+    assert drift_api(db).lines == []
+
+
+def test_a_policy_over_a_re_added_generated_column_is_dropped_and_added_back(
+    project, pkg, db
+):
+    start(project, pkg, db, POLICED)
+    migration = generate(project, pkg, POLICED_WIDE, "wide_policed")
+
+    if db.backend == "postgres":
+        changed = up_statements(migration, "postgres")
+        at = positions(
+            changed,
+            'DROP POLICY "rls_transaction_direction"',
+            'DROP COLUMN "direction"',
+            'ADD COLUMN "direction"',
+            'CREATE POLICY "rls_transaction_direction"',
+        )
+        assert at == sorted(at), changed
+
+    assert run("migrate", "up", "--url", db.url) == 0
+    assert directions(db) == [(-5, -1)]
+    assert drift_api(db).lines == []
+    assert run("migrate", "down", "--yes", "--url", db.url) == 0
+    assert drift_api(db).lines == []
+
+
+def test_a_raw_policy_over_a_re_added_generated_column_is_dropped_and_added_back(
+    project, pkg, db
+):
+    # Both of its bodies are the declaration's, so a migration carries it
+    # (the reconciliation pass refuses: a live raw body is never rewritten).
+    start(project, pkg, db, RAW_POLICED)
+    migration = generate(project, pkg, RAW_POLICED_WIDE, "wide_raw")
+
+    if db.backend == "postgres":
+        changed = up_statements(migration, "postgres")
+        at = positions(
+            changed,
+            'DROP POLICY "rls_transaction_signed"',
+            'DROP COLUMN "direction"',
+            'ADD COLUMN "direction"',
+            'CREATE POLICY "rls_transaction_signed"',
+        )
+        assert at == sorted(at), changed
+
+    assert run("migrate", "up", "--url", db.url) == 0
+    assert directions(db) == [(-5, -1)]
+    assert drift_api(db).lines == []
+    assert run("migrate", "down", "--yes", "--url", db.url) == 0
+    assert drift_api(db).lines == []
