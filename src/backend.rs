@@ -1319,7 +1319,7 @@ mod tests {
     use super::dialect_from_url;
     use crate::session_settings::SettingsDelivery;
     use ferro_ddl_lowering::Dialect;
-    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+    use sqlx::postgres::PgPoolOptions;
     use sqlx::sqlite::SqlitePoolOptions;
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
