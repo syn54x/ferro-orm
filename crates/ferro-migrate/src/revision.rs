@@ -611,8 +611,20 @@ fn has_twin(
                 && model.is_some_and(|model| inline_constraint(model, column));
             !(has_default || inline)
         }
-        MigrationOp::AddTable { .. }
-        | MigrationOp::DropTable { .. }
+        // SQLite stores a generated column's text as written, its range
+        // guard included, which `sa.Computed` cannot write: the pass's
+        // `CREATE TABLE`, as written.
+        MigrationOp::AddTable { table } => {
+            dialect != Dialect::Sqlite
+                || !target
+                    .payload
+                    .models
+                    .iter()
+                    .filter(|model| &model.table_name == table)
+                    .flat_map(|model| &model.columns)
+                    .any(|col| col.generated.is_some())
+        }
+        MigrationOp::DropTable { .. }
         | MigrationOp::RenameTable { .. }
         | MigrationOp::RenameColumn { .. }
         | MigrationOp::DropColumn { .. }

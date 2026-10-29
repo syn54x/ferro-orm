@@ -6937,7 +6937,7 @@ fn a_live_plain_or_virtual_column_where_the_model_declares_a_stored_one_is_dropp
 }
 
 #[test]
-fn an_input_type_change_drops_the_generated_column_alters_and_adds_it_back_on_postgres() {
+fn an_input_type_change_drops_the_generated_column_alters_and_adds_it_back() {
     let before = indexed_direction("integer");
     let after = indexed_direction("bigint");
     let alter = MigrationOp::AlterColumnType {
@@ -6984,9 +6984,15 @@ fn an_input_type_change_drops_the_generated_column_alters_and_adds_it_back_on_po
         vec![direction_op("drop"), alter.clone(), direction_op("add")]
     );
 
-    // SQLite rebuilds the table, which computes the column anew.
+    // SQLite folds the three into the one rebuild the type change needs.
     let sqlite = plan_declared(&before, &after, Dialect::Sqlite, updates_only());
-    assert_eq!(sqlite.op_list(), vec![alter]);
+    assert_eq!(
+        sqlite.op_list(),
+        vec![direction_op("drop"), alter, direction_op("add")]
+    );
+    for planned in &sqlite.operations {
+        assert_eq!(planned.verdict.execution, Execution::Rebuild);
+    }
 }
 
 #[test]

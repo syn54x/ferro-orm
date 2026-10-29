@@ -232,7 +232,7 @@ class _Target:
         self.models: dict[str, dict[str, Any]] = {}
         for model in envelope["payload"]["models"]:
             self.models[model["table_name"]] = model
-            _build_sa_table_from_ir(self.metadata, model)
+            _build_sa_table_from_ir(self.metadata, model, dialect)
 
     def table(self, name: str) -> sa.Table:
         return self.metadata.tables[name]

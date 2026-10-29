@@ -639,6 +639,23 @@ def _split_rebuilds(statements: list[str]) -> tuple[list[str], list[Rebuild]]:
     return natives, rebuilds
 
 
+def _rides_a_declined_column(statement: str, ops: list[dict]) -> bool:
+    """Whether ``statement`` builds an index over a column the pass declines
+    to add: an ``AddColumn`` it renders no statement for, only a warning (a
+    generated column SQLite adds only by a rebuild). The pass, which never
+    adds the column, builds nothing over it."""
+    return any(
+        op["kind"] == "AddColumn"
+        and not op["statements"]
+        and re.match(
+            rf'^CREATE (UNIQUE )?INDEX IF NOT EXISTS "[^"]+" '
+            rf'ON "{re.escape(op["table"])}" \("{re.escape(op["column"])}"\)$',
+            statement,
+        )
+        for op in ops
+    )
+
+
 def _op_subjects(op: dict) -> set[str]:
     """The tables (and ``type:<type>``) a planner op touches."""
     subjects = {op["table"]} if op.get("table") else set()
@@ -815,16 +832,27 @@ def door_statements(door: Door, dialect: str) -> list[str]:
     stands for what it carries: the pass's statements for the ops on its
     table (or type) that no native statement of the migration runs — on
     SQLite mostly none, since the pass only warns there; pin (b) compares the
-    rebuild itself. Data steps hold no DDL."""
+    rebuild itself. A column the pass declines that way (a generated column
+    SQLite adds only by a rebuild) takes the index build riding it along:
+    the pass, which never adds the column, builds no index over it. A
+    parent's index over a column the plan drops goes with the column, so a
+    build under its name is a plain build. Data steps hold no DDL."""
     steps = [s for s in door.stems if not door.is_data(s)]
     split = {s: _split_rebuilds(door.statements(s, "up", dialect)) for s in steps}
+    ops = [op for plan in door.pass_plans(dialect) for op in plan]
+    dropped = {
+        (op["table"], op["column"]) for op in ops if op["kind"] == "DropColumn"
+    }
     parent_indexes = frozenset(
         index["name"]
         for model in door.parent["payload"]["models"]
         for index in [*(model.get("indexes") or []), *(model.get("uniques") or [])]
+        if not any(
+            (model["table_name"], column) in dropped
+            for column in index.get("columns") or []
+        )
     )
     natives = [t for s in steps for t in _plain_twins(split[s][0], parent_indexes)]
-    ops = [op for plan in door.pass_plans(dialect) for op in plan]
     remaining = Counter(natives)
     out = list(natives)
     carried: set[int] = set()
@@ -834,6 +862,7 @@ def door_statements(door: Door, dialect: str) -> list[str]:
             if at in carried or not _op_subjects(op) & rebuilt:
                 continue
             carried.add(at)
+            out = [s for s in out if not _rides_a_declined_column(s, [op])]
             for statement in op["statements"]:
                 if remaining[statement]:
                     remaining[statement] -= 1
@@ -1065,6 +1094,9 @@ REBUILD_CASES = (
     "C3-retarget-a-foreign-key",
     "C4-drop-a-foreign-key-keep-its-column",
     "D3-rename-a-label",
+    "G1-add-an-indexed-generated-column",
+    "G2-change-a-generated-expression",
+    "G3-change-an-input-column-type",
     "F2-a-rename-and-a-type-change",
     "F3-a-type-change-and-a-new-index",
 )
@@ -1075,6 +1107,8 @@ INDEX_STEP_CASES = (
     "A9-drop-a-unique",
     "A11-redefine-an-index-under-a-cut-name",
     "A11-redefine-an-index-under-a-joined-name",
+    "G1-add-an-indexed-generated-column",
+    "G3-change-an-input-column-type",
     "F3-a-type-change-and-a-new-index",
 )
 """Postgres index steps (``CONCURRENTLY``, no transaction)."""
@@ -1173,8 +1207,10 @@ def test_pin_b_a_rebuild_creates_the_shape_its_step_leaves_as_the_create_pass(
     """The rebuild's ``CREATE TABLE "_ferro_new_<t>"`` is byte for byte the
     create pass's ``CREATE TABLE "<t>"`` for the shape the step leaves (the
     relaxed shape for an expand, the target for a contract, the parent going
-    down), and the indexes it re-creates are the create pass's (ADR-0046) but
-    the ones a later index step of the migration builds.
+    down), and the indexes it re-creates are the create pass's (ADR-0046) but,
+    going up, the ones a later index step of the migration builds. Going
+    down, a later index step's down has run first, and the rebuild puts back
+    every index of the shape it leaves.
     Postgres alters every one of these in place: it writes no rebuild."""
     door = doors(case_id)
     if dialect == "postgres":
@@ -1189,7 +1225,11 @@ def test_pin_b_a_rebuild_creates_the_shape_its_step_leaves_as_the_create_pass(
             door.shape_left(stem, direction), "sqlite", table
         )
         # An index a later index step builds is that step's (ADR-0044).
-        later = {f'"{s.split("_", 1)[1]}"' for s in _index_steps(door) if s > stem}
+        later = {
+            f'"{s.split("_", 1)[1]}"'
+            for s in _index_steps(door)
+            if s > stem and direction == "up"
+        }
         indexes = [i for i in indexes if i.split(" ON ")[0].split()[-1] not in later]
         where = f"{case_id} {stem}.{direction}"
         assert (
@@ -1220,13 +1260,16 @@ def test_pin_c_a_concurrent_index_statement_is_the_pass_but_for_one_token(
     the pass's ``CREATE [UNIQUE] INDEX IF NOT EXISTS`` with that one token
     swapped, and its ``DROP INDEX CONCURRENTLY IF EXISTS`` the pass's ``DROP
     INDEX IF EXISTS`` plus it. SQLite's index step is the pass's statement
-    itself."""
+    itself, but for one over a column the pass declines to add, which the
+    pass's warning covers."""
     door = doors(case_id)
     planned = pass_statements(door, dialect)
     if dialect == "sqlite":
+        ops = [op for plan in door.pass_plans("sqlite") for op in plan]
         for stem in _index_steps(door):
             for sql in door.statements(stem, "up", "sqlite"):
-                assert sql in planned, (case_id, sql)
+                if not _rides_a_declined_column(sql, ops):
+                    assert sql in planned, (case_id, sql)
         return
     online = [
         sql

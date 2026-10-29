@@ -175,13 +175,17 @@ def test_a_plain_column_becomes_generated_only_under_migrate_destructive(
 def test_migrate_updates_drops_and_adds_back_around_an_input_type_change(
     project, pkg, db
 ):
-    if db.backend == "sqlite":
-        pytest.skip("SQLite stores every integer width alike: no type change")
     built(project, pkg, db, INDEXED)
     declare(project, pkg, WIDE)
 
     report = reconnect(db)
 
+    if db.backend == "sqlite":
+        assert schema_sql(report) == []
+        assert {warning.kind for warning in report.warnings} == {"SqliteInPlace"}
+        assert all("ferro migrate new" in str(w) for w in report.warnings)
+        assert directions(db) == [(-5, -1)]
+        return
     assert schema_sql(report) == [
         'ALTER TABLE "transaction" DROP COLUMN "direction"',
         'ALTER TABLE "transaction" ALTER COLUMN "amount_minor" TYPE bigint '

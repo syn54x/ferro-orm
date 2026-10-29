@@ -3786,10 +3786,11 @@ fn type_changes(
 ///
 /// - one `old` holds plain or `VIRTUAL`: the add replaces the values the
 ///   rows hold, so only a `destructive` plan does it;
-/// - on Postgres, one an input of which changes type, which Postgres
-///   refuses to alter while an expression reads it. The add computes every
-///   row again, so nothing is lost. SQLite's rebuild of the type change
-///   computes the column anew by itself.
+/// - one an input of which changes type, which Postgres refuses to alter
+///   while an expression reads it. The add computes every row again, so
+///   nothing is lost. On SQLite the three ops fold into the one rebuild the
+///   type change needs, so both dialects plan the same ops (and the same
+///   index steps).
 fn replaced_generated_columns(
     old: &Side,
     old_model: &SchemaModel,
@@ -3812,8 +3813,7 @@ fn replaced_generated_columns(
             if !old.generation(old_model, &col.name).is_stored() {
                 return destructive;
             }
-            dialect == Dialect::Postgres
-                && ferro_ddl_lowering::value_expr_columns(expr)
+            ferro_ddl_lowering::value_expr_columns(expr)
                     .iter()
                     .any(|input| match (old_column(input), new_column(input)) {
                         (Some(was), Some(now)) => type_changes(was, now, dialect),
