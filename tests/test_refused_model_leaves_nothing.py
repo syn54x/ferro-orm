@@ -45,7 +45,7 @@ def define_ledger() -> type[Model]:
 def refused_by_value_parity() -> None:
     class Rate(Model):
         id: int | None = Field(default=None, primary_key=True)
-        ledger: Annotated["Ledger", ForeignKey(related_name="rates")]
+        ledger: Annotated["Ledger", ForeignKey(related_name="rates")]  # noqa: F821
         price: float
         doubled: float = Field(generated=lambda rate: rate.price * 2)
 
@@ -53,7 +53,7 @@ def refused_by_value_parity() -> None:
 def refused_by_db_type() -> None:
     class Rate(Model):
         id: int | None = Field(default=None, primary_key=True)
-        ledger: Annotated["Ledger", ForeignKey(related_name="rates")]
+        ledger: Annotated["Ledger", ForeignKey(related_name="rates")]  # noqa: F821
         name: str = Field(db_type="bigint")
 
 
@@ -64,7 +64,7 @@ def refused_by_check() -> None:
         )
 
         id: int | None = Field(default=None, primary_key=True)
-        ledger: Annotated["Ledger", ForeignKey(related_name="rates")]
+        ledger: Annotated["Ledger", ForeignKey(related_name="rates")]  # noqa: F821
         left: str | None = None
 
 
