@@ -450,6 +450,20 @@ def test_a_bounded_string_generated_column_is_refused_naming_text(db_type):
             )
 
 
+def test_a_fixed_width_string_generated_column_is_refused():
+    # Postgres pads a shorter value with spaces where SQLite stores it as
+    # computed; db_type= has no char(N) token, so the model never declares one.
+    with pytest.raises(TypeError, match=r"db_type='char\(5\)' is not in the canonical"):
+
+        class Contact(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            name: str
+            label: str = Field(
+                generated=lambda contact: fn.coalesce(contact.name, "anon"),
+                db_type="char(5)",
+            )
+
+
 @pytest.mark.parametrize("db_type", [None, "text"])
 def test_an_unbounded_string_generated_column_is_accepted(db_type):
     # No db_type stores a str as an unbounded varchar on Postgres.
