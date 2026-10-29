@@ -476,9 +476,17 @@ Each one has a [reference entry](../api/fields.md#ferro.fn). A name that is not 
 
 Ferro admits an expression only when SQLite and PostgreSQL store the same value for it on every row, and it checks that when the class is defined. A float product is one they disagree on:
 
-```python
---8<-- "docs/examples/generated_columns.py:parity"
-```
+=== "Assignment"
+
+    ```python
+    --8<-- "docs/examples/generated_columns.py:parity"
+    ```
+
+=== "Annotated"
+
+    ```python
+    --8<-- "docs/examples/generated_columns_annotated.py:parity"
+    ```
 
 It prints:
 
