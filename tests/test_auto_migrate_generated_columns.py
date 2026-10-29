@@ -589,4 +589,4 @@ def test_a_check_over_a_key_column_whose_type_changes_stays_standing(project, pk
         report = reconnect(db)
 
         assert schema_sql(report) == []
-        assert report.warnings == [], report.warnings
+        assert list(report.warnings) == [], report.warnings
