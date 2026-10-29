@@ -280,10 +280,16 @@ pub fn render_generated_clause(
     dialect: Dialect,
     columns: &[SchemaColumn],
 ) -> Result<String, String> {
-    Ok(format!(
-        "GENERATED ALWAYS AS ({}) STORED",
-        render_value_expr(expr, dialect, columns)?
-    ))
+    Ok(render_stored_generated_clause(&render_value_expr(
+        expr, dialect, columns,
+    )?))
+}
+
+/// `GENERATED ALWAYS AS (<body>) STORED` for an expression already
+/// rendered: a declaration's, or the text a live catalog printed for a
+/// column put back as it was.
+pub fn render_stored_generated_clause(body: &str) -> String {
+    format!("GENERATED ALWAYS AS ({body}) STORED")
 }
 
 /// The prefix of the SQLite guard's constraint name; the column follows it.

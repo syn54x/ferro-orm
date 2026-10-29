@@ -7025,3 +7025,36 @@ fn dropping_a_generated_column_is_a_destructive_column_drop() {
         vec![]
     );
 }
+
+#[test]
+fn a_down_toward_a_live_generated_column_adds_it_back_with_the_catalogs_expression() {
+    // The bridge's downgrade of a column made plain: from the models back to
+    // the live database, whose generation is a catalog fact only.
+    let mut facts = LiveFacts::default();
+    facts.tables.insert(
+        "transaction".to_string(),
+        live_direction(true, PG_REPRINT, Some((PG_REPRINT, PG_REPRINT))),
+    );
+    let live = Side::live(
+        envelope(vec![transaction_model("amount_minor", None)]),
+        facts,
+    )
+    .expect("live side");
+    let models = Side::declared(envelope(vec![transaction_model("amount_minor", None)]));
+    let down = plan_down(&[direction_op("plain")], &models, &live, Dialect::Postgres);
+    assert_eq!(down.op_list(), vec![direction_op("drop"), direction_op("add")]);
+    let add = &down.operations[1].verdict;
+    assert!(!add.demands_values && !add.recreates, "{add:?}");
+    // The plain values the column held are replaced.
+    assert!(down.operations[0].verdict.drops_data);
+    assert_eq!(
+        statements_of(&down),
+        vec![
+            "ALTER TABLE \"transaction\" DROP COLUMN \"direction\"".to_string(),
+            format!(
+                "ALTER TABLE \"transaction\" ADD COLUMN \"direction\" bigint NOT NULL \
+                 GENERATED ALWAYS AS ({PG_REPRINT}) STORED"
+            ),
+        ]
+    );
+}

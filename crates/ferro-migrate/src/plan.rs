@@ -1389,6 +1389,7 @@ fn plan_existing_table(
     // it after the drop: absent, so the add brings it back with what rides it.
     let replaced = replaced_generated_columns(
         old,
+        new,
         old_view.as_ref(),
         new_model,
         dialect,
@@ -2239,9 +2240,18 @@ fn verdict(op: &MigrationOp, before: &Side, target: &Side, dialect: Dialect) -> 
         (before.plans_label_removals() && rides_removed_label(op, was, now))
             .then_some(Rider::RemovedLabel)
     });
+    // A column the target holds generated (a live one by its catalog
+    // facts) is computed for every row: its add asks the rows for nothing
+    // and brings their values back with it.
+    let generated_add = match op {
+        MigrationOp::AddColumn { table, column } => target
+            .model(table)
+            .is_some_and(|model| target.generation(model, column).is_stored()),
+        _ => false,
+    };
     OpVerdict {
         execution: execution(op, was, now, goes_with, target, dialect),
-        demands_values: demands_values(op, was, now),
+        demands_values: !generated_add && demands_values(op, was, now),
         drops_data: match op {
             MigrationOp::DropTable { .. } | MigrationOp::DropEnumType { .. } => true,
             // A generated column dropped to be added back around an input's
@@ -2255,12 +2265,16 @@ fn verdict(op: &MigrationOp, before: &Side, target: &Side, dialect: Dialect) -> 
             }
             _ => false,
         },
-        fails_on_rows: fails_on_rows(op, now),
+        fails_on_rows: if generated_add {
+            RowRisk::None
+        } else {
+            fails_on_rows(op, now)
+        },
         recreates: match op {
             MigrationOp::AddTable { .. } => true,
-            // A generated column's values come back with it.
-            MigrationOp::AddColumn { column, .. } => find_column(now, column)
-                .is_some_and(|col| !col.nullable && col.generated.is_none()),
+            MigrationOp::AddColumn { column, .. } => {
+                !generated_add && find_column(now, column).is_some_and(|col| !col.nullable)
+            }
             _ => false,
         },
         goes_with,
@@ -2626,6 +2640,46 @@ pub fn plan_down(up: &[MigrationOp], after: &Side, before: &Side, dialect: Diale
                 Artifact::ForeignKey(table.clone(), column)
             }));
         }
+    }
+    // A column in scope that the down drops and adds back (made generated
+    // again) takes every index, check and foreign key over it with the
+    // drop: the down puts them back too, as `before` holds them.
+    let added_back: Vec<(String, String)> = plan
+        .ops()
+        .filter_map(|op| match op {
+            MigrationOp::DropColumn { table, column }
+                if scope.contains(&Artifact::Column(table.clone(), column.clone()))
+                    && plan.ops().any(|other| {
+                        matches!(other, MigrationOp::AddColumn { table: t, column: c }
+                            if t == table && c == column)
+                    }) =>
+            {
+                Some((table.clone(), column.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    for (table, column) in added_back {
+        let Some(model) = before.model(&table) else {
+            continue;
+        };
+        scope.extend(
+            emit::standalone_indexes(model)
+                .into_iter()
+                .filter(|(_, columns, _)| columns.contains(&column))
+                .map(|(name, ..)| Artifact::Index(table.clone(), name)),
+        );
+        let riders = emit::column_riders(model, &column);
+        scope.extend(
+            riders
+                .check
+                .map(|check| Artifact::Constraint(table.clone(), check.name.clone())),
+        );
+        scope.extend(
+            riders
+                .foreign_key
+                .map(|_| Artifact::ForeignKey(table.clone(), column.clone())),
+        );
     }
     plan.operations.retain(|planned| {
         is_rename(&planned.op)
@@ -3781,8 +3835,10 @@ fn type_changes(
     moved_enum || schema_columns_storage_drift(old_col, new_col, dialect)
 }
 
-/// The generated columns of `new_model` that `old_model` (on `old`) holds
-/// too and the plan drops and adds back, in `new_model`'s order:
+/// The stored generated columns of `new_model` (on `new`) that
+/// `old_model` (on `old`) holds too and the plan drops and adds back, in
+/// `new_model`'s order. Each side answers for its own generation (a live
+/// one from its catalog facts):
 ///
 /// - one `old` holds plain or `VIRTUAL`: the add replaces the values the
 ///   rows hold, so only a `destructive` plan does it;
@@ -3793,6 +3849,7 @@ fn type_changes(
 ///   index steps).
 fn replaced_generated_columns(
     old: &Side,
+    new: &Side,
     old_model: &SchemaModel,
     new_model: &SchemaModel,
     dialect: Dialect,
@@ -3804,16 +3861,20 @@ fn replaced_generated_columns(
         .columns
         .iter()
         .filter(|col| {
-            let Some(expr) = &col.generated else {
-                return false;
-            };
-            if old_column(&col.name).is_none() {
+            let now = new.generation(new_model, &col.name);
+            if !now.is_stored() || old_column(&col.name).is_none() {
                 return false;
             }
-            if !old.generation(old_model, &col.name).is_stored() {
+            let was = old.generation(old_model, &col.name);
+            if !was.is_stored() {
                 return destructive;
             }
-            ferro_ddl_lowering::value_expr_columns(expr)
+            // The columns it reads, from the side that declares it.
+            let ((Generation::Declared(expr), _) | (_, Generation::Declared(expr))) = (now, was)
+            else {
+                return false;
+            };
+            ferro_ddl_lowering::value_expr_columns(&expr)
                     .iter()
                     .any(|input| match (old_column(input), new_column(input)) {
                         (Some(was), Some(now)) => type_changes(was, now, dialect),
@@ -3961,6 +4022,12 @@ impl Side {
                 .cloned()
                 .map_or(Generation::Plain, Generation::Live),
         }
+    }
+
+    /// Whether the side holds `column` of `model` as a stored generated
+    /// column: declared generated, or so in a live catalog.
+    pub(crate) fn holds_generated(&self, model: &SchemaModel, column: &str) -> bool {
+        self.generation(model, column).is_stored()
     }
 
     /// The expression `column` of `model` is generated by, as `SET

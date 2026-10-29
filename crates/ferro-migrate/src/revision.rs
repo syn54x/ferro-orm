@@ -540,7 +540,22 @@ fn written(
             .map(RevisionForeignKey::from),
         _ => None,
     };
-    let twin = has_twin(&planned.op, &statements, target, plan.dialect());
+    // A column the target holds generated only as a live catalog fact (a
+    // downgrade toward the database) is not in the IR Alembic's twin is
+    // built from: the pass's statement, as written.
+    let live_generated = match &planned.op {
+        MigrationOp::AddColumn { table, column } => {
+            plan.target.model(table).is_some_and(|model| {
+                plan.target.holds_generated(model, column)
+                    && model
+                        .columns
+                        .iter()
+                        .any(|col| &col.name == column && col.generated.is_none())
+            })
+        }
+        _ => false,
+    };
+    let twin = !live_generated && has_twin(&planned.op, &statements, target, plan.dialect());
     let index = match &planned.op {
         MigrationOp::RedefineIndex { table, name } => {
             Some(crate::declared_index(target, table, name).ok_or_else(|| {
