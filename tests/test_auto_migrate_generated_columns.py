@@ -52,7 +52,7 @@ pytestmark = [
 
 ADD_DIRECTION = (
     'ALTER TABLE "transaction" ADD COLUMN "direction" integer NOT NULL '
-    'GENERATED ALWAYS AS (sign(CAST("amount_minor" AS bigint))) STORED'
+    'GENERATED ALWAYS AS (CAST(sign(CAST("amount_minor" AS bigint)) AS bigint)) STORED'
 )
 INDEX_DIRECTION = (
     'CREATE INDEX IF NOT EXISTS "idx_transaction_direction" '
@@ -205,7 +205,7 @@ def test_migrate_updates_drops_and_adds_back_around_an_input_type_change(
         'ALTER TABLE "transaction" ALTER COLUMN "amount_minor" TYPE bigint '
         'USING "amount_minor"::bigint',
         'ALTER TABLE "transaction" ADD COLUMN "direction" integer NOT NULL '
-        'GENERATED ALWAYS AS (sign("amount_minor")) STORED',
+        'GENERATED ALWAYS AS (CAST(sign("amount_minor") AS bigint)) STORED',
         INDEX_DIRECTION,
     ]
     assert directions(db) == [(-5, -1)]

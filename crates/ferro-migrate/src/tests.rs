@@ -943,24 +943,31 @@ fn render_create_table_writes_a_generated_column_stored_with_no_default() {
     let model = schema_model(
         "transaction",
         vec![
-            col("amount_minor", "bigint", false),
+            SchemaColumn {
+                logical_type: "integer".to_string(),
+                ..col("amount_minor", "bigint", false)
+            },
             direction,
             pk_col("id", "bigint"),
         ],
     );
-    for (dialect, guard) in [
+    for (dialect, body, guard) in [
         (
             Dialect::Sqlite,
+            "sign(\"amount_minor\")",
             " constraint \"_ferro_range_direction\" check (typeof(\"direction\") in ('integer', 'null'))",
         ),
-        (Dialect::Postgres, ""),
+        (
+            Dialect::Postgres,
+            "cast(sign(\"amount_minor\") as bigint)",
+            "",
+        ),
     ] {
         let sql = render_create_table(&model, dialect)
             .expect("renders")
             .create_sql;
-        let expected = format!(
-            "\"direction\" bigint not null generated always as (sign(\"amount_minor\")) stored{guard}, "
-        );
+        let expected =
+            format!("\"direction\" bigint not null generated always as ({body}) stored{guard}, ");
         assert!(sql.to_lowercase().contains(&expected), "{dialect:?}: {sql}");
         assert!(!sql.contains("DEFAULT"), "{sql}");
     }
@@ -6454,7 +6461,10 @@ fn transaction_model(input: &str, body: Option<ferro_schema_ir::ValueExpr>) -> S
         "transaction",
         vec![
             pk_col("id", "bigint"),
-            col(input, "bigint", false),
+            SchemaColumn {
+                logical_type: "integer".to_string(),
+                ..col(input, "bigint", false)
+            },
             SchemaColumn {
                 generated: body,
                 ..col("direction", "bigint", false)
@@ -6537,7 +6547,7 @@ fn a_postgres_expression_edited_by_hand_is_set_back_in_place() {
         rendered[0].statements,
         vec![
             "ALTER TABLE \"transaction\" ALTER COLUMN \"direction\" SET EXPRESSION AS \
-             (sign(\"amount_minor\"))"
+             (CAST(sign(\"amount_minor\") AS bigint))"
                 .to_string()
         ]
     );
@@ -6654,7 +6664,7 @@ fn between_two_snapshots_a_changed_expression_is_altered_and_its_down_restores_i
         vec![ferro_ddl_lowering::render_set_generated_expression(
             "transaction",
             "direction",
-            "sign(\"amount_minor\")"
+            "CAST(sign(\"amount_minor\") AS bigint)"
         )]
     );
     let same = plan_from_ir(
@@ -6850,7 +6860,7 @@ fn adding_a_generated_column_is_native_on_postgres_and_a_rebuild_on_sqlite() {
         statements_of(&postgres),
         vec![
             "ALTER TABLE \"transaction\" ADD COLUMN \"direction\" bigint NOT NULL \
-             GENERATED ALWAYS AS (sign(\"amount_minor\")) STORED"
+             GENERATED ALWAYS AS (CAST(sign(\"amount_minor\") AS bigint)) STORED"
                 .to_string(),
             "CREATE INDEX IF NOT EXISTS \"idx_transaction_direction\" ON \"transaction\" \
              (\"direction\")"
@@ -6957,7 +6967,7 @@ fn a_plain_column_made_generated_is_a_destructive_drop_and_add() {
         vec![
             "ALTER TABLE \"transaction\" DROP COLUMN \"direction\"".to_string(),
             "ALTER TABLE \"transaction\" ADD COLUMN \"direction\" bigint NOT NULL \
-             GENERATED ALWAYS AS (sign(\"amount_minor\")) STORED"
+             GENERATED ALWAYS AS (CAST(sign(\"amount_minor\") AS bigint)) STORED"
                 .to_string(),
         ]
     );

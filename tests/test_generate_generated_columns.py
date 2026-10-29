@@ -190,7 +190,7 @@ def test_adding_an_indexed_generated_column_to_a_table_with_rows(project, pkg, d
     if db.backend == "postgres":
         assert up_statements(migration, "postgres") == [
             'ALTER TABLE "transaction" ADD COLUMN "direction" integer NOT NULL '
-            'GENERATED ALWAYS AS (sign(CAST("amount_minor" AS bigint))) STORED',
+            'GENERATED ALWAYS AS (CAST(sign(CAST("amount_minor" AS bigint)) AS bigint)) STORED',
             # The index step drops what a failed build left, then builds.
             'DROP INDEX CONCURRENTLY IF EXISTS "idx_transaction_direction"',
             'CREATE INDEX CONCURRENTLY "idx_transaction_direction" '
@@ -260,7 +260,7 @@ def test_making_a_plain_column_generated_is_destructive(project, pkg, db):
         assert up_statements(migration, "postgres") == [
             'ALTER TABLE "transaction" DROP COLUMN "direction"',
             'ALTER TABLE "transaction" ADD COLUMN "direction" integer NOT NULL '
-            'GENERATED ALWAYS AS (sign(CAST("amount_minor" AS bigint))) STORED',
+            'GENERATED ALWAYS AS (CAST(sign(CAST("amount_minor" AS bigint)) AS bigint)) STORED',
             # The index step drops what a failed build left, then builds.
             'DROP INDEX CONCURRENTLY IF EXISTS "idx_transaction_direction"',
             'CREATE INDEX CONCURRENTLY "idx_transaction_direction" '
@@ -286,7 +286,7 @@ def test_an_input_type_change_drops_alters_and_adds_back(project, pkg, db):
             'ALTER TABLE "transaction" ALTER COLUMN "amount_minor" TYPE bigint '
             'USING "amount_minor"::bigint',
             'ALTER TABLE "transaction" ADD COLUMN "direction" integer NOT NULL '
-            'GENERATED ALWAYS AS (sign("amount_minor")) STORED',
+            'GENERATED ALWAYS AS (CAST(sign("amount_minor") AS bigint)) STORED',
             # The index step drops what a failed build left, then builds.
             'DROP INDEX CONCURRENTLY IF EXISTS "idx_transaction_direction"',
             'CREATE INDEX CONCURRENTLY "idx_transaction_direction" '

@@ -602,3 +602,92 @@ async def test_a_narrower_generated_column_over_wider_inputs_names_it(
                 assert fine.total == 2**15 - 1
         finally:
             ferro.reset_engine()
+
+
+# -- literals and function results compute at the type SQLite computes them at ------
+
+
+async def _stored_values(url: str, model: type[Model], rows) -> list[Any]:
+    await ferro.connect(url, auto_migrate=True)
+    try:
+        async with ferro.engines.session():
+            values = []
+            for row in rows:
+                saved = model(**row)
+                await saved.save()
+                values.append((await model.get(saved.id)).value)
+            return values
+    finally:
+        ferro.reset_engine()
+
+
+@pytest.mark.asyncio
+async def test_a_decimal_literal_computes_in_double_on_both_databases(
+    db_url: str, tmp_path
+):
+    # Postgres types a bare 0.1 as numeric, which would store exactly 0.3.
+    class Sample(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        a: int
+        value: float = Field(generated=lambda sample: sample.a + 0.1 + 0.2)
+
+    rows = [{"a": 0}, {"a": 2}]
+    sqlite = await _stored_values(
+        f"sqlite:{tmp_path / 'literal.db'}?mode=rwc", Sample, rows
+    )
+    postgres = await _stored_values(db_url, Sample, rows)
+    assert sqlite == postgres == [0 + 0.1 + 0.2, 2 + 0.1 + 0.2]
+
+
+@pytest.mark.asyncio
+async def test_a_cast_float_literal_is_no_drift_on_a_reconnect(db_url: str, tmp_path):
+    # Postgres prints the CAST back its own way; the pass must still plan nothing.
+    class Sample(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        a: int
+        value: float = Field(generated=lambda sample: sample.a + 0.1)
+
+    for url in (f"sqlite:{tmp_path / 'reconnect.db'}?mode=rwc", db_url):
+        await ferro.connect(url, auto_migrate=True)
+        try:
+            report = await ferro.migrate(destructive=True)
+            assert report.statements == ()
+            assert report.warnings == ()
+        finally:
+            ferro.reset_engine()
+
+
+@pytest.mark.asyncio
+async def test_the_sign_of_an_integer_divides_as_an_integer_on_both_databases(
+    db_url: str, tmp_path
+):
+    # Postgres's sign(bigint) is a double: 3 / 2 would be 1.5, stored as 2.
+    class Sample(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        a: int
+        value: int = Field(generated=lambda sample: fn.sign(sample.a) * 3 / 2)
+
+    rows = [{"a": 7}, {"a": -7}, {"a": 0}]
+    sqlite = await _stored_values(
+        f"sqlite:{tmp_path / 'sign.db'}?mode=rwc", Sample, rows
+    )
+    postgres = await _stored_values(db_url, Sample, rows)
+    assert sqlite == postgres == [1, -1, 0]
+
+
+@pytest.mark.asyncio
+async def test_a_plain_column_overflow_stays_an_operational_error(db_url: str):
+    # Only a generated column's overflow is re-classed as DataError.
+    class Counter(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        hits: int = Field(db_type="smallint")
+
+    await ferro.connect(db_url, auto_migrate=True)
+    try:
+        async with ferro.engines.session():
+            with pytest.raises(ferro.OperationalError) as raised:
+                await Counter(hits=2**15).save()
+            assert not isinstance(raised.value, DataError)
+            assert raised.value.sqlstate == "22003"
+    finally:
+        ferro.reset_engine()

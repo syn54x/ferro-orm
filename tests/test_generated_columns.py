@@ -57,7 +57,11 @@ def generated_sql(backend: str) -> str:
     operand = (
         'CAST("amount_minor" AS bigint)' if backend == "postgres" else '"amount_minor"'
     )
-    return f"GENERATED ALWAYS AS (sign({operand})) STORED"
+    call = f"sign({operand})"
+    if backend == "postgres":
+        # Postgres's sign(bigint) is a double; the cast keeps it an integer.
+        call = f"CAST({call} AS bigint)"
+    return f"GENERATED ALWAYS AS ({call}) STORED"
 
 
 def declare_transaction() -> type[Model]:

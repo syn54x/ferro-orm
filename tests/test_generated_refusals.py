@@ -418,3 +418,63 @@ async def test_fn_in_an_update_recipe_is_refused_naming_generated_columns():
         )
     with pytest.raises(TypeError, match="generated column"):
         await query.update(amount_minor=fn.abs(5))
+
+
+# -- literals and storage the two databases hold differently ------------------------
+
+
+def test_an_integer_literal_past_64_bits_is_refused_naming_a_float_literal():
+    # SQLite reads 10**19 as a float and Postgres as numeric: (x + 10**19) - 10**19
+    # would store 0 on SQLite and x on Postgres.
+    with pytest.raises(TypeError, match=r"10000000000000000000.*64-bit.*float literal"):
+
+        class Ledger(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            x: int
+            y: int = Field(generated=lambda ledger: (ledger.x + 10**19) - 10**19)
+
+
+@pytest.mark.parametrize("db_type", ["varchar(5)"])
+def test_a_bounded_string_generated_column_is_refused_naming_text(db_type):
+    # Postgres raises on a ten-character value (and trims trailing spaces to
+    # fit), where SQLite stores all ten.
+    with pytest.raises(TypeError, match=r"Contact\.label .*\(5\).*drop db_type="):
+
+        class Contact(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            nickname: str | None = None
+            name: str
+            label: str | None = Field(
+                generated=lambda contact: fn.coalesce(contact.nickname, contact.name),
+                db_type=db_type,
+            )
+
+
+@pytest.mark.parametrize("db_type", [None, "text"])
+def test_an_unbounded_string_generated_column_is_accepted(db_type):
+    # No db_type stores a str as an unbounded varchar on Postgres.
+    options = {"db_type": db_type} if db_type else {}
+
+    class Contact(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        nickname: str | None = None
+        name: str
+        label: str | None = Field(
+            generated=lambda contact: fn.coalesce(contact.nickname, contact.name),
+            **options,
+        )
+
+    assert Contact.__ferro_generated__ == {"label": frozenset({"nickname", "name"})}
+
+
+def test_a_call_over_literals_only_is_refused_naming_a_literal():
+    # A constant reads no column, and on Postgres its integer literals would
+    # compute at 32 bits.
+    with pytest.raises(
+        TypeError, match=r"literals only.*write the result as a literal"
+    ):
+
+        class Ledger(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            x: int
+            y: int = Field(generated=lambda ledger: ledger.x + fn.abs(-2147483648))

@@ -29,6 +29,107 @@ pub fn _value_function_table() -> PyResult<String> {
         .map_err(|err| pyo3::exceptions::PyRuntimeError::new_err(err.to_string()))
 }
 
+fn value_expr_from_json(tree_json: &str) -> PyResult<ferro_schema_ir::ValueExpr> {
+    serde_json::from_str(tree_json).map_err(|err| {
+        pyo3::exceptions::PyValueError::new_err(format!("Invalid value expression: {err}"))
+    })
+}
+
+fn schema_columns_from_json(columns_json: &str) -> PyResult<Vec<ferro_schema_ir::SchemaColumn>> {
+    serde_json::from_str(columns_json).map_err(|err| {
+        pyo3::exceptions::PyValueError::new_err(format!("Invalid SchemaIR columns: {err}"))
+    })
+}
+
+fn value_type_from_token(token: &str) -> PyResult<ferro_ddl_lowering::ValueType> {
+    ferro_ddl_lowering::ValueType::from_token(token).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!("Unknown value family {token:?}"))
+    })
+}
+
+/// The family token and nullability of a lowered value expression, typed by
+/// `ferro_ddl_lowering::type_value_expr` over the table's columns
+/// (`columns_json`, a list of SchemaIR columns).
+///
+/// # Errors
+/// `TypeError` with the typing's refusal; `ValueError` on malformed JSON.
+#[pyfunction]
+pub fn _value_expr_type(tree_json: String, columns_json: String) -> PyResult<(String, bool)> {
+    let expr = value_expr_from_json(&tree_json)?;
+    let columns = schema_columns_from_json(&columns_json)?;
+    let typed = ferro_ddl_lowering::type_value_expr(&expr, &|name| {
+        ferro_ddl_lowering::schema_value_column(&columns, name)
+    })
+    .map_err(pyo3::exceptions::PyTypeError::new_err)?;
+    Ok((typed.family.token().to_string(), typed.nullable))
+}
+
+/// The value family one SchemaIR column holds, or `None` for a column no
+/// value expression reads.
+///
+/// # Errors
+/// `ValueError` on a malformed column.
+#[pyfunction]
+pub fn _value_column_family(column_ir_json: String) -> PyResult<Option<String>> {
+    let col: ferro_schema_ir::SchemaColumn =
+        serde_json::from_str(&column_ir_json).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Invalid SchemaIR column: {e}"))
+        })?;
+    Ok(ferro_ddl_lowering::value_column(&col)
+        .family
+        .map(|family| family.token().to_string()))
+}
+
+/// Every value family with its Python annotation, in table order.
+#[pyfunction]
+pub fn _value_family_annotations() -> Vec<(&'static str, &'static str)> {
+    ferro_ddl_lowering::value_family_annotations()
+}
+
+/// Whether a value of family `argument` fits a parameter of `parameter`.
+///
+/// # Errors
+/// `ValueError` on an unknown family token.
+#[pyfunction]
+pub fn _value_family_fits(argument: String, parameter: String) -> PyResult<bool> {
+    Ok(value_type_from_token(&argument)?.fits(value_type_from_token(&parameter)?))
+}
+
+/// Every column a lowered value expression reads, sorted.
+///
+/// # Errors
+/// `ValueError` on malformed JSON.
+#[pyfunction]
+pub fn _value_expr_columns(tree_json: String) -> PyResult<Vec<String>> {
+    let expr = value_expr_from_json(&tree_json)?;
+    Ok(ferro_ddl_lowering::value_expr_columns(&expr)
+        .into_iter()
+        .collect())
+}
+
+/// The refusal of a generated column's Postgres storage, or `None`.
+///
+/// # Errors
+/// `ValueError` on a malformed column; `RuntimeError` when its storage does
+/// not resolve.
+#[pyfunction]
+pub fn _generated_storage_refusal(column_ir_json: String) -> PyResult<Option<String>> {
+    let col: ferro_schema_ir::SchemaColumn =
+        serde_json::from_str(&column_ir_json).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Invalid SchemaIR column: {e}"))
+        })?;
+    Ok(
+        match ferro_ddl_lowering::resolve_column_storage(&col, Dialect::Postgres)
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?
+        {
+            ResolvedStorage::Scalar(storage) => {
+                ferro_ddl_lowering::generated_storage_refusal(storage)
+            }
+            ResolvedStorage::PgEnum { .. } => None,
+        },
+    )
+}
+
 #[pyfunction]
 pub fn _ddl_single_index_name(table: String, column: String) -> String {
     ferro_ddl_lowering::single_index_name(&table, &column)
