@@ -594,8 +594,11 @@ def test_a_check_over_a_key_column_whose_type_changes_stays_standing(project, pk
 
 def keyed_ticket(code: str, body: str) -> str:
     """``Ticket`` keyed by ``code`` (annotated ``code``), with ``body`` after it."""
+    # The two sides differ in length too: a rewrite within the same second
+    # to a same-sized file would otherwise import the stale bytecode.
     return (
-        "from ferro import Check, Field, RowPolicy, RowSecurity, fn\n\n\n"
+        "from ferro import Check, Field, RowPolicy, RowSecurity, fn\n\n"
+        f"# code is {'an integer' if code == 'int' else 'text'}\n\n"
         "class Ticket(Model):\n"
         f"    code: Annotated[{code}, FerroField(primary_key=True)]\n" + body
     )
