@@ -1,0 +1,1 @@
+verified 2026-10-29 653b779 (on dde5a86): maturin develop; cargo test 201/542/51 ok; root lib tests 397 ok; pytest Verify line + test_value_parity.py 1569 passed 13 skipped 1 xfailed on PG18:5432 and PG17:5434; docs_checks exit 0; ruff clean
