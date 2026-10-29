@@ -171,12 +171,8 @@ def _build_sa_table_from_ir(
         # No unique=/index= column flags: single-column uniques and indexes are
         # explicit named artifacts below (the IR `uniques[]`/`indexes[]` carry
         # the shared `uq_`/`idx_` names), matching the Rust emitter's shapes.
-        kwargs = {
-            "primary_key": bool(col.get("primary_key", False)),
-            "nullable": bool(col.get("nullable", True))
-            if not bool(col.get("primary_key", False))
-            else False,
-        }
+        primary_key = bool(col.get("primary_key", False))
+        nullable = bool(col.get("nullable", True)) if not primary_key else False
         # A generated column's expression is the core's one rendering, the
         # text every door's GENERATED ALWAYS AS (…) STORED writes.
         computed = (
@@ -191,7 +187,15 @@ def _build_sa_table_from_ir(
             if col.get("generated")
             else []
         )
-        columns.append(sa.Column(col_name, sa_type, *computed, **kwargs))
+        columns.append(
+            sa.Column(
+                col_name,
+                sa_type,
+                *computed,
+                primary_key=primary_key,
+                nullable=nullable,
+            )
+        )
         columns_by_name[col_name] = columns[-1]
 
     table_args: list[Any] = list(columns)

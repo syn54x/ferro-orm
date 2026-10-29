@@ -6839,7 +6839,10 @@ fn a_generated_column_made_plain_drops_its_expression_and_keeps_the_values() {
         &Side::declared(envelope(vec![generated])),
         Dialect::Postgres,
     );
-    assert_eq!(down.op_list(), vec![direction_op("drop"), direction_op("add")]);
+    assert_eq!(
+        down.op_list(),
+        vec![direction_op("drop"), direction_op("add")]
+    );
 }
 
 #[test]
@@ -7042,7 +7045,10 @@ fn a_down_toward_a_live_generated_column_adds_it_back_with_the_catalogs_expressi
     .expect("live side");
     let models = Side::declared(envelope(vec![transaction_model("amount_minor", None)]));
     let down = plan_down(&[direction_op("plain")], &models, &live, Dialect::Postgres);
-    assert_eq!(down.op_list(), vec![direction_op("drop"), direction_op("add")]);
+    assert_eq!(
+        down.op_list(),
+        vec![direction_op("drop"), direction_op("add")]
+    );
     let add = &down.operations[1].verdict;
     assert!(!add.demands_values && !add.recreates, "{add:?}");
     // The plain values the column held are replaced.

@@ -840,9 +840,7 @@ def door_statements(door: Door, dialect: str) -> list[str]:
     steps = [s for s in door.stems if not door.is_data(s)]
     split = {s: _split_rebuilds(door.statements(s, "up", dialect)) for s in steps}
     ops = [op for plan in door.pass_plans(dialect) for op in plan]
-    dropped = {
-        (op["table"], op["column"]) for op in ops if op["kind"] == "DropColumn"
-    }
+    dropped = {(op["table"], op["column"]) for op in ops if op["kind"] == "DropColumn"}
     parent_indexes = frozenset(
         index["name"]
         for model in door.parent["payload"]["models"]

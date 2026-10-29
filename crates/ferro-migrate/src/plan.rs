@@ -2240,15 +2240,9 @@ fn verdict(op: &MigrationOp, before: &Side, target: &Side, dialect: Dialect) -> 
         (before.plans_label_removals() && rides_removed_label(op, was, now))
             .then_some(Rider::RemovedLabel)
     });
-    // A column the target holds generated (a live one by its catalog
-    // facts) is computed for every row: its add asks the rows for nothing
-    // and brings their values back with it.
-    let generated_add = match op {
-        MigrationOp::AddColumn { table, column } => target
-            .model(table)
-            .is_some_and(|model| target.generation(model, column).is_stored()),
-        _ => false,
-    };
+    // A generated column is computed for every row: its add asks the rows
+    // for nothing and brings their values back with it.
+    let generated_add = adds_generated(op, target);
     OpVerdict {
         execution: execution(op, was, now, goes_with, target, dialect),
         demands_values: !generated_add && demands_values(op, was, now),
@@ -2278,6 +2272,17 @@ fn verdict(op: &MigrationOp, before: &Side, target: &Side, dialect: Dialect) -> 
             _ => false,
         },
         goes_with,
+    }
+}
+
+/// Whether `op` adds a column `target` holds as a stored generated one (a
+/// live target by its catalog facts, which its IR does not carry).
+fn adds_generated(op: &MigrationOp, target: &Side) -> bool {
+    match op {
+        MigrationOp::AddColumn { table, column } => target
+            .model(table)
+            .is_some_and(|model| target.holds_generated(model, column)),
+        _ => false,
     }
 }
 
@@ -2448,7 +2453,10 @@ fn execution(
     if primary_key {
         return Execution::Refused(Refusal::PrimaryKeyChange { table: table() });
     }
-    if dialect == Dialect::Sqlite && sqlite_rebuilds(op, was, now, goes_with) {
+    // SQLite's `ADD COLUMN` takes no stored generated column.
+    if dialect == Dialect::Sqlite
+        && (sqlite_rebuilds(op, was, now, goes_with) || adds_generated(op, target))
+    {
         return Execution::Rebuild;
     }
     if let MigrationOp::AlterColumnType { column, .. } = op
@@ -2475,7 +2483,7 @@ fn execution(
 /// | drop a plain column | native |
 /// | drop a foreign-key column | rebuild |
 /// | change a column's type or nullability | rebuild |
-/// | add a generated column, or make one plain, or change its expression | rebuild |
+/// | add a generated column (decided by the caller, from the target's side), make one plain, or change its expression | rebuild |
 /// | drop a column to add it back generated | rebuild |
 /// | drop a foreign default | rebuild |
 /// | add, change or drop a check (but a dropped column's own) | rebuild |
@@ -2529,9 +2537,8 @@ fn sqlite_rebuilds(
         // again: only a rebuild adds a column `NOT NULL` and default-free.
         // The pass, which never rebuilds, adds one with a literal default as
         // `NOT NULL DEFAULT <literal>` (ADR-0034, the SQLite exception).
-        // SQLite's `ADD COLUMN` takes no stored generated column.
         MigrationOp::AddColumn { column, .. } => {
-            find_column(now, column).is_some_and(|col| !col.nullable || col.generated.is_some())
+            find_column(now, column).is_some_and(|col| !col.nullable)
         }
         // A column the target still holds is dropped to be added back
         // generated, which only the rebuild does.
@@ -3875,11 +3882,11 @@ fn replaced_generated_columns(
                 return false;
             };
             ferro_ddl_lowering::value_expr_columns(&expr)
-                    .iter()
-                    .any(|input| match (old_column(input), new_column(input)) {
-                        (Some(was), Some(now)) => type_changes(was, now, dialect),
-                        _ => false,
-                    })
+                .iter()
+                .any(|input| match (old_column(input), new_column(input)) {
+                    (Some(was), Some(now)) => type_changes(was, now, dialect),
+                    _ => false,
+                })
         })
         .map(|col| col.name.clone())
         .collect()
@@ -3892,7 +3899,8 @@ fn without_columns(model: &SchemaModel, columns: &[String]) -> SchemaModel {
     let mut out = model.clone();
     out.columns.retain(|col| !gone(&col.name));
     out.indexes.retain(|index| !index.columns.iter().any(gone));
-    out.uniques.retain(|unique| !unique.columns.iter().any(gone));
+    out.uniques
+        .retain(|unique| !unique.columns.iter().any(gone));
     out.checks.retain(|check| !gone(&check.column));
     out.foreign_keys.retain(|fk| !gone(&fk.column));
     out

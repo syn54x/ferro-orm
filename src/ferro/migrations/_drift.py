@@ -449,16 +449,18 @@ def _lines(operations: list[dict[str, Any]], snapshot: dict[str, Any]) -> list[s
     }
     lines = []
     for op in operations:
-        key = (op.get("table"), op.get("column"))
-        added_back = op["kind"] == "AddColumn" and key in dropped
-        if op["kind"] == "DropColumn" and key in columns:
-            continue
-        if added_back:
-            generated = columns[key].get("generated")
-            if generated and any((key[0], c) in retyped for c in _inputs(generated)):
+        if op["kind"] in ("DropColumn", "AddColumn"):
+            table, column = op["table"], op["column"]
+            if op["kind"] == "DropColumn" and (table, column) in columns:
                 continue
-            lines.append(f"{_column(op)} generated expression differs")
-            continue
+            if op["kind"] == "AddColumn" and (table, column) in dropped:
+                generated = columns[(table, column)].get("generated")
+                if generated and any(
+                    (table, read) in retyped for read in _inputs(generated)
+                ):
+                    continue
+                lines.append(f"{_column(op)} generated expression differs")
+                continue
         lines.append(render_op(op))
     return lines
 
