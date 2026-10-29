@@ -14,6 +14,15 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # Every job compiles Ferro's own crates from scratch (rust-cache keeps only
+  # dependencies): 2.5 to 4 minutes a job. sccache keys each rustc call by its
+  # inputs and stores the object in the Actions cache, so an unchanged crate is
+  # a download. Incremental compilation is off because sccache cannot cache it.
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: sccache
+  CARGO_INCREMENTAL: "0"
+
 jobs:
   lint-and-format:
     name: Lint & Format (Pre-commit / Prek)
@@ -37,10 +46,14 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Cache compiled Rust crates
+        uses: mozilla-actions/sccache-action@v0.0.11
+
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v1
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
 
       - name: Cache pre-commit hook environments
@@ -60,7 +73,7 @@ jobs:
           uv run --no-sync --python 3.13 prek run --all-files
 
   docs:
-    name: Docs build and docs tests
+    name: Docs build
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -79,10 +92,16 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache compiled Rust crates
+        uses: mozilla-actions/sccache-action@v0.0.11
+
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v1
+          shared-key: maturin-develop
+          key: py3.13
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
 
       - name: Install documentation and test dependencies
@@ -101,11 +120,6 @@ jobs:
         run: |
           uv run --no-sync python -m tests._docs_checks docs/pages docs/examples src/ferro
 
-      - name: Run the docs tests
-        # Every docs test module is named test_doc*.py, which
-        # tests/test_docs_site.py pins, so a new one runs here unlisted.
-        run: |
-          uv run --no-sync pytest --no-cov -p no:cacheprovider tests/test_doc*.py
 
   test-rust:
     name: Rust tests
@@ -122,10 +136,14 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Cache compiled Rust crates
+        uses: mozilla-actions/sccache-action@v0.0.11
+
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
 
       - name: Run Rust tests
@@ -159,10 +177,16 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache compiled Rust crates
+        uses: mozilla-actions/sccache-action@v0.0.11
+
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v1
+          shared-key: maturin-develop
+          key: py3.13
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
 
       - name: Install dependencies
@@ -183,7 +207,7 @@ jobs:
 
       - name: Run pytest
         run: |
-          uv run pytest -v --cov=src --cov-report=xml --cov-report=term
+          uv run pytest -n logical --cov=src --cov-report=xml --cov-report=term
 
   test-python-main:
     name: Python tests (main / ${{ matrix.python-version }})
@@ -210,10 +234,16 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache compiled Rust crates
+        uses: mozilla-actions/sccache-action@v0.0.11
+
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v1
+          shared-key: maturin-develop
+          key: py${{ matrix.python-version }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
 
       - name: Install dependencies
@@ -230,24 +260,29 @@ jobs:
 
       - name: Run pytest
         run: |
-          uv run pytest -v --cov=src --cov-report=xml --cov-report=term
+          uv run pytest -n logical --cov=src --cov-report=xml --cov-report=term
 
       - name: Upload coverage to Codecov
         if: matrix.python-version == '3.13'
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v5
         with:
-          file: ./coverage.xml
+          token: ${{ secrets.CODECOV_TOKEN }}
+          fail_ci_if_error: true
+          files: ./coverage.xml
           flags: python-${{ matrix.python-version }}
           name: python-${{ matrix.python-version }}
-        continue-on-error: true
 
   test-python-backend-matrix:
-    name: Python backend matrix (SQLite + Postgres ${{ matrix.postgres }})
+    name: Python backend matrix (Postgres ${{ matrix.postgres }}, shard ${{ matrix.shard }}/2)
+    # A slice PR into an integration branch skips the matrix; the open PR
+    # from that branch to main runs it on every merge into the branch.
+    if: github.event_name != 'pull_request' || github.base_ref == 'main'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         postgres: ['17', '18']
+        shard: [1, 2]
     services:
       postgres:
         image: postgres:${{ matrix.postgres }}
@@ -281,10 +316,16 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache compiled Rust crates
+        uses: mozilla-actions/sccache-action@v0.0.11
+
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v1
+          shared-key: maturin-develop
+          key: py3.13
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
 
       - name: Install dependencies
@@ -297,7 +338,7 @@ jobs:
 
       - name: Run backend matrix tests
         run: |
-          uv run pytest -v -m "backend_matrix or postgres_only" --db-backends=sqlite,postgres
+          uv run pytest -n logical -m "backend_matrix or postgres_only" --db-backends=postgres --shard ${{ matrix.shard }}/2
 
   check-conventional-commits:
     name: Check Conventional Commits
