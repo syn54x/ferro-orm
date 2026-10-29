@@ -37,6 +37,7 @@ import ferro
 from ferro import Check, CheckViolationError, Field, Model, fn
 from ferro._core import _render_create_table_sql_for_test
 from ferro.base import FerroField
+from ferro.exceptions import DataError
 from ferro.ir import compile_registry_schema_ir
 from tests._pass_harness import auto_migrate, schema_sql
 from tests.test_migrate_drift import drift_api
@@ -235,6 +236,114 @@ def test_float_multiplication_in_a_check_is_refused():
             )
             id: int | None = Field(default=None, primary_key=True)
             rate: float
+
+
+BIG = Annotated[int, FerroField(db_type="bigint")]
+
+
+def test_an_overflowing_bigint_product_in_a_check_is_refused():
+    """`a * b` over bigint columns raises `bigint out of range` on Postgres
+    at a = b = 2**40, where SQLite turns the product into a real and accepts
+    the row; the check is refused before either database sees it."""
+    with pytest.raises(TypeError) as caught:
+
+        class Box(Model):
+            __ferro_checks__ = (Check("c", lambda box: box.a * box.b > 0),)
+            id: int | None = Field(default=None, primary_key=True)
+            a: BIG
+            b: BIG
+
+    message = str(caught.value)
+    assert "Box.__ferro_checks__ check 'c'" in message
+    assert "64 bits" in message
+    assert "generated column" in message
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        lambda box: box.big + 1 > 0,
+        lambda box: box.big - 1 > 0,
+        lambda box: -box.big > 0,
+        lambda box: box.big / -1 > 0,
+        lambda box: box.n * box.n * box.n > 0,
+        lambda box: fn.abs(box.n * box.n) * 4 > 0,
+        lambda box: fn.coalesce(box.maybe, box.big) + 1 > 0,
+    ],
+    ids=[
+        "bigint +",
+        "bigint -",
+        "bigint negated",
+        "bigint / -1",
+        "int cubed",
+        "through a call",
+        "through coalesce",
+    ],
+)
+def test_every_integer_step_that_can_overflow_is_refused(body):
+    with pytest.raises(TypeError, match="64 bits"):
+
+        class Box(Model):
+            __ferro_checks__ = (Check("c", body),)
+            id: int | None = Field(default=None, primary_key=True)
+            n: int
+            big: BIG
+            maybe: Annotated[int | None, FerroField(db_type="bigint")] = None
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        lambda box: box.n * box.n > 0,
+        lambda box: box.n + box.n - box.n > 0,
+        lambda box: box.big / 2 > 0,
+        lambda box: fn.abs(box.big) > 0,
+        lambda box: fn.length(box.memo) * 1000 > 0,
+        lambda box: box.rate + 1.5 > 0,
+    ],
+    ids=[
+        "int product",
+        "int sum",
+        "bigint halved",
+        "bigint abs",
+        "length scaled",
+        "float sum",
+    ],
+)
+def test_integer_steps_that_fit_64_bits_are_accepted(body):
+    class Box(Model):
+        __ferro_checks__ = (Check("c", body),)
+        id: int | None = Field(default=None, primary_key=True)
+        n: int
+        big: BIG
+        memo: str
+        rate: float
+
+    assert predicate("box", "c")["kind"] == "compare"
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.asyncio
+async def test_the_named_fix_fails_the_overflowing_row_on_both_databases(db_url):
+    """The refusal's recipe: compute the product as a generated column and
+    check that column. Its range guard fails the row on SQLite where
+    Postgres raises, so both reject `a = b = 2**40`."""
+
+    class Box(Model):
+        __ferro_checks__ = (Check("c", lambda box: box.product > 0),)
+        id: int | None = Field(default=None, primary_key=True)
+        a: BIG
+        b: BIG
+        product: Annotated[
+            int | None,
+            FerroField(db_type="bigint", generated=lambda box: box.a * box.b),
+        ] = None
+
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        assert (await Box.create(a=3, b=4)).product == 12
+        with pytest.raises(DataError, match='generated column "product"'):
+            await Box.create(a=2**40, b=2**40)
 
 
 def test_a_date_part_of_a_datetime_is_refused():
