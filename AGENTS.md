@@ -118,10 +118,14 @@ For a single model, every emitter must agree on:
       `render_check_addition`), rebuilds (`drifted_check_names` /
       `render_check_rebuild`) and leftovers (`extra_check_names` /
       `extra_check_names_warning` / `render_check_drop`) (ADR-0013..0015).
-      One normalizer, `normalize_check_definition`, compares the canonical
-      rendering with the catalog's; it folds only the casts Postgres adds for
-      display (any cast on a literal, and a text-family cast on a column or
-      `ARRAY[…]`), and every other cast is drift (#563).
+      On Postgres a body is compared as a **printed pair** (ADR-0060): the
+      declared rendering and the catalog's reprint pass through one
+      read-only `EXPLAIN (VERBOSE, FORMAT JSON)` per compared table
+      (`printed_pair_checks`, `PrintedPair`), and equal prints are no
+      drift. On SQLite, which stores the body as written, the normalizer
+      `normalize_check_definition` compares the canonical rendering with
+      the stored text. Row-policy drift keeps its own normalizer
+      (`normalize_row_policy_expr`).
     - **Row security** — the policy name, shorthand cast, rendered
       expression and `ENABLE` / `FORCE` / `CREATE POLICY` statements
       (`row_policy_name`, `is_ferro_row_policy_name`,
@@ -147,6 +151,26 @@ For a single model, every emitter must agree on:
       (`ferro.migrations.render_item`). This supersedes in part the
       inline-vs-statement provenance of ADR-0020..0022 (ADR-0041).
       Postgres-only (SQLite enums store as text).
+    - **Generated expressions** — a generated column's body is a value
+      expression lowered once (`render_value_expr` over the closed function
+      table `value_function`, which `_core._value_function_table` hands
+      `ferro.fn`) and written as `GENERATED ALWAYS AS (…) STORED`
+      (`render_generated_clause`), never with a `DEFAULT`. Its ops and
+      their verdicts: added with the column (`AddColumn`, native on Postgres,
+      a rebuild on SQLite, no backfill), a changed expression
+      (`AlterGeneratedExpression`, `render_set_generated_expression`, can
+      fail on rows), generated to plain (`DropGeneratedExpression`,
+      `render_drop_generated_expression`, values kept, `migrate_updates`),
+      plain to generated (`DropColumn` + `AddColumn`, destructive; without
+      `migrate_destructive` the pass reports `PlainColumnKept`), an input's
+      type change (drop the expression, alter, re-add, any table check
+      reading the input re-added after it) and an input rename (the rename
+      alone). Drift is a printed pair on Postgres (`printed_pair_column`; a
+      live `VIRTUAL` column or a plain one where the model declares
+      generated differs) and Ferro's rendering against the stored text,
+      whitespace folded, on SQLite. The bridge writes an added column as
+      `sa.Computed(<expr>, persisted=True)` and the other two ops as
+      `op.execute` of the pass's statement.
 
     Every artifact above reaches every door through the one planner,
     `ferro_migrate::plan_from_ir` (`_core._plan_from_ir` over FFI): its
@@ -154,12 +178,34 @@ For a single model, every emitter must agree on:
     second entry point; `_core._plan_enum_type_provenance` remains as a
     pass-side parity pin. The item is carried by pins **(e)** and **(f)**
     below.
+12. **Generated column guard names** — on SQLite an integer- or
+    float-family generated column carries `_ferro_range_<col>`
+    (`render_sqlite_generated_guard`), a check holding the value to the
+    Postgres storage range and re-checking every arithmetic step, so an
+    overflow raises on both databases. It is Ferro's own guard, written
+    inside the column definition and compared with it: never a `ck_*`
+    check and never in `__ferro_checks__`. Postgres needs none:
+    its integer arithmetic runs at 64 bits (narrower operands are cast to
+    `bigint`) and its column type holds the range.
+13. **Value parity** — a value expression (a generated column's body, or
+    either side of a check's comparison that calls `fn`) is admitted only
+    when SQLite and Postgres store the same value for it on every row,
+    decided once when the model is defined (ADR-0059; `src/ferro/generated.py`
+    over the function table). The expression's type family matches the
+    column's; `least` / `greatest` take numbers or dates and no nullable
+    operand; `year` / `month` / `day` take a `date`; `/` only by a non-zero
+    literal; no float `*` or `/` and no Decimal arithmetic; no other
+    generated column, retired column, relation or closed-over variable.
+    Failures match too: the SQLite guard of item 12 makes an overflow raise
+    where Postgres raises. A function joins `fn` only with its rendering per
+    dialect and a row in `tests/test_value_parity.py`, which runs it on both
+    dialects; a divergence is refused, never documented.
 
 ### The nine pins
 
 `tests/test_cross_emitter_parity.py` pins the migrations door, the bridge and
 the pass itself against the one planner over every casebook change
-(`tests/_casebook.py`, cases A–F, built from the generator tests' own models)
+(`tests/_casebook.py`, cases A–G, built from the generator tests' own models)
 on both dialects:
 
 - **(a)** the statements of the generated DDL steps, headers stripped and the
@@ -177,9 +223,10 @@ on both dialects:
   pass's, through the one renderer;
 - **(e)** a database taken through the migration chain shows no drift, has
   the same live schema (facts included) as one `connect(auto_migrate=True)`
-  built from the same models, and the same server default on every column
+  built from the same models, the same server default on every column
   (no backfill `DEFAULT` left behind, and a renamed table's serial sequence
-  under the name a fresh table gives it), and Alembic autogenerate against
+  under the name a fresh table gives it) and the same expression on every
+  generated column (`generation_expressions`), and Alembic autogenerate against
   the auto-migrated one is empty (against the migrated one it refuses: a
   tracked database is `ferro migrate new`'s);
 - **(f)** the bridge's revision runs the pass's DDL for every planner op:
@@ -200,8 +247,9 @@ on both dialects:
   `0001` and `0002` and then inherited by `ferro migrate up` against the squashed
   directory (it runs no statement) has the same live schema as one that ran
   the squashed `0001` from empty, reading every fact pin (e) reads (columns,
-  types, nullability, indexes, constraints, policies, and the server default
-  of every column, `column_defaults`), the same `_ferro_migrations` rows bar
+  types, nullability, indexes, constraints, policies, the server default
+  of every column, `column_defaults`, and the expression of every generated
+  column, `generation_expressions`), the same `_ferro_migrations` rows bar
   origin, `ferro_version` and times, no drift on either, and
   `ferro migrate down --all` leaves both with no table of the models and no
   record.

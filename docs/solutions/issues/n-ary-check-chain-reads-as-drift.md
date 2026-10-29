@@ -12,6 +12,13 @@ captured: 2026-09-28
 
 # A three-or-more-term OR/AND table check reads as drifted forever
 
+**Superseded on Postgres.** Postgres check drift no longer goes through the
+normalizer: Postgres prints both the declared body and the catalog's, and the
+two prints are compared (ADR-0060, [printed pairs](../patterns/printed-pairs-drift.md)),
+so the flattening rule below is no longer maintained there. The normalizer
+still decides SQLite check drift, where the body is stored as written and
+this flattening never happens.
+
 **Problem.** A table check built from three or more `|` (or `&`) terms was rebuilt on
 every `connect(migrate_updates=True)` and showed up as a DROP + ADD in every
 `alembic revision --autogenerate`, against a database ferro had built a second earlier.
