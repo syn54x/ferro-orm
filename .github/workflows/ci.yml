@@ -239,6 +239,9 @@ jobs:
 
   test-python-backend-matrix:
     name: Python backend matrix (Postgres, shard ${{ matrix.shard }}/2)
+    # A slice PR into an integration branch skips the matrix; the open PR
+    # from that branch to main runs it on every merge into the branch.
+    if: github.event_name != 'pull_request' || github.base_ref == 'main'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
