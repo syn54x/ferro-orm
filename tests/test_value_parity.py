@@ -770,10 +770,12 @@ async def test_an_integer_beside_a_float_compares_as_a_double_on_both_databases(
             ferro.reset_engine()
 
 
-# A check comparing a bigint with a float decides alike on both databases.
-# Postgres compares a bigint with a float column or a value expression's
-# float at double, so 2**53 + 1 is 2**53 there; a plain comparison's bare
-# float literal is an exact numeric on Postgres, so it compares exactly.
+# A check comparing a bigint with a float through a value expression
+# decides alike on both databases: Postgres compares a value expression's
+# float at double, so 2**53 + 1 is 2**53 there, and SQLite casts the integer
+# to match. A plain comparison is outside value parity and renders as it
+# always has; its bare float literal is an exact numeric on Postgres and
+# SQLite compares it exactly too, so those cases agree anyway.
 TWO_53 = 9007199254740992.0
 
 
@@ -784,7 +786,6 @@ TWO_53 = 9007199254740992.0
         (lambda box: box.a != 9007199254740992.0, True),
         (lambda box: box.a == 9007199254740992.0, False),
         (lambda box: box.a > 0.5, True),
-        (lambda box: box.a != box.x, False),
         (lambda box: box.a + 0 != 9007199254740992.0, False),
         (lambda box: 9007199254740992.0 != box.a + 0, False),
         (lambda box: box.a + 0 != box.x, False),
@@ -793,7 +794,6 @@ TWO_53 = 9007199254740992.0
         "a != 2**53.0",
         "a == 2**53.0",
         "a > 0.5",
-        "a != x",
         "a + 0 != 2**53.0",
         "2**53.0 != a + 0",
         "a + 0 != x",
@@ -856,3 +856,21 @@ def test_an_integer_comparison_renders_as_before(dialect: str):
         json.dumps(predicate), dialect, json.dumps([_int_column("price")])
     )
     assert rendered == '"price" > 0'
+
+
+@pytest.mark.parametrize("dialect", ["sqlite", "postgres"])
+def test_a_plain_integer_float_column_comparison_renders_as_before(dialect: str):
+    # `qty < price`, an `int` and a `float` column: a plain comparison, outside
+    # value parity, renders as it did before value expressions, with no
+    # `CAST(... AS real)`, so a database a released Ferro wrote reads clean.
+    predicate = {
+        "kind": "cmp",
+        "column": "qty",
+        "op": "lt",
+        "other": {"kind": "column", "name": "price"},
+    }
+    price = {**_int_column("price"), "logical_type": "number"}
+    rendered = _core._render_table_check_body(
+        json.dumps(predicate), dialect, json.dumps([_int_column("qty"), price])
+    )
+    assert rendered == '"qty" < "price"'

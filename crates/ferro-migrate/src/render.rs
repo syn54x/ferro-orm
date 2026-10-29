@@ -397,6 +397,12 @@ pub(crate) fn render_from(
                     && find_model(&new_models, table)
                         .is_ok_and(|model| find_column(model, column).is_ok()) => {}
             MigrationOp::AddColumn { table, column } => {
+                // A change in the way of what a withheld type change holds.
+                if let Some(refusal) = crate::plan::held_refusal(op, old_side, new_side, dialect) {
+                    return Err(EmissionError {
+                        message: refusal.to_string(),
+                    });
+                }
                 let model = find_model(&new_models, table)?;
                 // A column a live target holds generated is put back with
                 // the expression its catalog printed.
@@ -431,6 +437,7 @@ pub(crate) fn render_from(
                 }
                 // A policy reads the generated column it drops to add back.
                 if let Some(refusal) = crate::plan::replace_refusal(op, old_side, new_side, dialect)
+                    .or_else(|| crate::plan::held_refusal(op, old_side, new_side, dialect))
                 {
                     return Err(EmissionError {
                         message: refusal.to_string(),
@@ -443,6 +450,12 @@ pub(crate) fn render_from(
                 ));
             }
             MigrationOp::AlterColumnType { table, column } => {
+                // A change in the way of what a withheld type change holds.
+                if let Some(refusal) = crate::plan::held_refusal(op, old_side, new_side, dialect) {
+                    return Err(EmissionError {
+                        message: refusal.to_string(),
+                    });
+                }
                 let old_col = find_column(find_model(&old_models, table)?, column)?;
                 let new_col = find_column(find_model(&new_models, table)?, column)?;
                 let emission = emit_alter_column_type(table, column, old_col, new_col, dialect)?;

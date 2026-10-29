@@ -91,9 +91,12 @@ For a single model, every emitter must agree on:
     runs it natively, rebuilds the table, refuses it (naming the fix) or
     cannot reverse it, and whether it demands values from existing rows,
     drops data or can fail on them, whether it is the drop or add of a
-    generated column the plan replaces (`replaces`) and whether it carries
-    an unchanged policy or check around another change (`carried`). Every door reads that one verdict and
-    re-decides none of it. The reconciliation pass runs them directly; the
+    generated column the plan replaces (`replaces`), whether it carries a
+    policy or check around another change and puts it back as it was
+    (`carried`: `unchanged`, `changed` or `not_compared`; only `unchanged`
+    is no difference, on every door), and, on a type change no door runs,
+    what it leaves standing uncompared (`held`). Every door reads that one
+    verdict and re-decides none of it. The reconciliation pass runs them directly; the
     migrations door writes them into step files; the bridge's one comparator
     (`dispatch_for("schema")` in `src/ferro/migrations/alembic.py`) reads the
     live database through `_core._live_schema_ir` and asks the core for the
@@ -183,10 +186,30 @@ For a single model, every emitter must agree on:
       (`Replace::InputType`) and its own type change (`Replace::OwnType`),
       both of which Postgres refuses to alter under an expression. A row
       policy or table check that reads the column is carried around the
-      pair. A carried artifact is one taken down and put back unchanged
-      around another change, its ops marked `OpVerdict.carried`, which no
-      door reports as a difference; a changed or uncomparable artifact is
-      a difference drift reports. A row policy the plan
+      pair. A carried artifact is one taken down and put back around
+      another change, its ops marked `OpVerdict.carried` with whether it
+      comes back as it was: `unchanged` is no difference on any door, while
+      `changed` (`ck_transaction_nonzero check body differs`) and
+      `not_compared` (a live check over a column whose type changes, which
+      Postgres cannot print against the old type) are differences drift
+      reports. A type change no door runs (`emit::withheld_alter`: a
+      primary-key column, an enum type move, a refused scalar conversion)
+      carries nothing and replaces nothing. The column keeps its live type,
+      so every check, generated column and policy that reads it is held:
+      one set per table (`ferro_migrate::held_of`), read by every path. A
+      held artifact gets no printed pair and is never taken down, put
+      back, added, rebuilt or set, even when it also reads a column whose
+      change does run. A change that would take one down (a replaced
+      generated column it reads, or an alter Postgres refuses under its
+      expression or policy) is refused with
+      `Refusal::HeldByWithheldAlter`, naming the withheld change's fix.
+      The alter's verdict lists the set in `OpVerdict.held` with that fix:
+      `code: int` keyed under `code > 0`, redeclared `code: str` under
+      `fn.length(code) > 0`, runs no DDL and reports the primary-key
+      recipe, and drift prints `ticket.code has type int, snapshot says
+      varchar` then `ck_ticket_coded check not compared while its column's
+      type change is withheld; resolve the type change of "code" first:
+      …`. A row policy the plan
       cannot carry (a raw body it may not rewrite, ADR-0019) refuses the
       drop with `Refusal::PolicyReadsReplacedColumn`, naming the
       `DROP POLICY` recipe. Drift is a printed pair on Postgres
@@ -207,7 +230,18 @@ For a single model, every emitter must agree on:
       the column that can fail on a value is checked on SQLite the way
       Postgres evaluates it (a `coalesce` fallback only when the earlier
       arguments are null): an integer result must still be an integer, a
-      float one finite unless an operand already was infinite. A
+      float one finite unless an operand already was infinite. Where an
+      integer meets a float in a call with a float signature
+      (`fn.greatest(a, 0.5)`) or in a check comparison with a value
+      expression on either side (`a + 0 != x`), Postgres computes at
+      `double precision`, so SQLite renders the integer
+      `CAST(<operand> AS real)` (`sqlite_computes_as_double`; an integer
+      literal within ±2**53 stays bare). A plain comparison
+      (`qty < price`) is outside value parity and renders as it always
+      has. Each `ValueFunction` carries the two facts the guard reads,
+      `overflows_on_integer` (`abs`) and `skips_after_non_null`
+      (`coalesce`), so a function added to the table joins with its
+      renderings, both facts and a case in `tests/test_value_parity.py`. A
       `double precision` column gets no storage term, since
       Postgres stores the `inf` an input carried. `total: int = a + b`
       carries only the storage term; Postgres needs no guard, since it

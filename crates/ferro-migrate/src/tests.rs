@@ -8181,9 +8181,9 @@ fn a_check_over_a_replaced_generated_column_put_back_unchanged_is_marked_unchang
 fn a_check_over_a_column_whose_type_change_is_refused_is_left_standing() {
     // Live `at` timestamp under `ck_event_after_start`; declared `at` a
     // datetime (timestamptz), a conversion the pass refuses with a warning
-    // and no ALTER. The check is read against the live table, which it will
-    // keep: printed alike, so nothing is dropped and added back, on this
-    // pass or the next.
+    // and no ALTER. The check keeps its live table, which a declared body
+    // may not type-check against: no pair, nothing dropped, added back or
+    // rebuilt, and each alter lists it as held, not compared.
     let event = |at_type: &str| SchemaModel {
         table_checks: vec![SchemaTableCheck {
             name: "ck_event_after_start".to_string(),
@@ -8208,8 +8208,7 @@ fn a_check_over_a_column_whose_type_change_is_refused_is_left_standing() {
     };
     let live_model = event("timestamp");
     let declared_model = event("timestamptz");
-    // The live read asks Postgres to print the pair: the columns keep their
-    // live type.
+    // The live read asks Postgres to print no pair.
     let live_columns = live_model.columns.clone();
     let live_column = |name: &str| live_columns.iter().find(|col| col.name == name);
     let asked: Vec<String> =
@@ -8217,7 +8216,7 @@ fn a_check_over_a_column_whose_type_change_is_refused_is_left_standing() {
             .into_iter()
             .map(|(name, _)| name)
             .collect();
-    assert_eq!(asked, vec!["ck_event_after_start".to_string()]);
+    assert_eq!(asked, Vec::<String>::new());
     let check = live_check("ck_event_after_start", "CHECK ((at >= starts))");
     let check = if asked.contains(&check.name) {
         printed_alike(&check.name, &check.definition, "(event.at >= event.starts)")
@@ -8245,11 +8244,349 @@ fn a_check_over_a_column_whose_type_change_is_refused_is_left_standing() {
             })
             .to_vec()
     );
+    let held: Vec<Vec<crate::HeldArtifact>> = plan
+        .operations
+        .iter()
+        .map(|planned| {
+            planned
+                .verdict
+                .held
+                .clone()
+                .map(|held| held.artifacts)
+                .unwrap_or_default()
+        })
+        .collect();
+    let check = crate::HeldArtifact {
+        kind: crate::HeldKind::Check,
+        name: "ck_event_after_start".to_string(),
+    };
+    assert_eq!(held, vec![vec![check.clone()], vec![check]]);
     let rendered = plan.render().expect("renders");
     assert!(
         rendered.iter().all(|op| op.statements.is_empty()),
         "{rendered:?}"
     );
+}
+
+/// `ticket` keyed by `code` of `key_type`, with `extra` columns after it.
+fn keyed_ticket(key_type: &str, extra: Vec<SchemaColumn>) -> SchemaModel {
+    let mut code = pk_col("code", key_type);
+    code.autoincrement = false;
+    code.logical_type = if key_type == "text" {
+        "string"
+    } else {
+        "integer"
+    }
+    .to_string();
+    schema_model("ticket", std::iter::once(code).chain(extra).collect())
+}
+
+fn length_of(column: &str) -> ferro_schema_ir::ValueExpr {
+    ferro_schema_ir::ValueExpr::Func {
+        name: "length".to_string(),
+        args: vec![ferro_schema_ir::ValueExpr::Column {
+            name: column.to_string(),
+        }],
+    }
+}
+
+#[test]
+fn a_check_that_types_only_under_a_key_columns_withheld_type_is_held_not_read() {
+    // `code` an integer key under `code > 0`, declared a text key under
+    // `length(code) > 0`: the primary-key recipe's change. The live read
+    // would ask Postgres to print `length(code)` against an integer and fail;
+    // it asks no pair, the plan rebuilds nothing, and the refused alter
+    // lists the check as held.
+    let check = |predicate| SchemaTableCheck {
+        name: "ck_ticket_coded".to_string(),
+        predicate,
+    };
+    let live_model = SchemaModel {
+        table_checks: vec![check(ferro_schema_ir::CheckExpr::Cmp {
+            column: "code".to_string(),
+            op: ferro_schema_ir::CheckCmpOp::Gt,
+            other: ferro_schema_ir::CheckOperand::Literal {
+                token: "0".to_string(),
+            },
+        })],
+        ..keyed_ticket("integer", Vec::new())
+    };
+    let declared_model = SchemaModel {
+        table_checks: vec![check(ferro_schema_ir::CheckExpr::Compare {
+            left: length_of("code"),
+            op: ferro_schema_ir::CheckCmpOp::Gt,
+            right: ferro_schema_ir::ValueExpr::Literal {
+                token: "0".to_string(),
+            },
+        })],
+        ..keyed_ticket("text", Vec::new())
+    };
+    let live_columns = live_model.columns.clone();
+    let live_column = |name: &str| live_columns.iter().find(|col| col.name == name);
+    assert!(
+        crate::plan::printed_pair_checks(&declared_model, "ticket", &live_column, &|_| true)
+            .is_empty()
+    );
+    let mut facts = LiveFacts::default();
+    facts.tables.insert(
+        "ticket".to_string(),
+        live_checks(vec![live_check("ck_ticket_coded", "CHECK ((code > 0))")]),
+    );
+    let plan = plan_from_ir(
+        &Side::live(envelope(vec![live_model]), facts).expect("live side"),
+        &Side::declared(envelope(vec![declared_model])),
+        Dialect::Postgres,
+        destructive(),
+    );
+    let [planned] = plan.operations.as_slice() else {
+        panic!("{:?}", plan.op_list());
+    };
+    assert_eq!(
+        planned.op,
+        MigrationOp::AlterColumnType {
+            table: "ticket".to_string(),
+            column: "code".to_string(),
+        }
+    );
+    assert!(matches!(
+        planned.verdict.execution,
+        Execution::Refused(crate::Refusal::PrimaryKeyChange { .. })
+    ));
+    let held = planned.verdict.held.clone().expect("held");
+    assert_eq!(
+        held.artifacts,
+        vec![crate::HeldArtifact {
+            kind: crate::HeldKind::Check,
+            name: "ck_ticket_coded".to_string(),
+        }]
+    );
+    assert!(
+        held.fix.contains("ferro migrate new --data-step"),
+        "{}",
+        held.fix
+    );
+    let rendered = plan.render().expect("renders");
+    assert!(
+        rendered.iter().all(|op| op.statements.is_empty()),
+        "{rendered:?}"
+    );
+}
+
+#[test]
+fn a_generated_column_over_a_key_columns_withheld_type_change_is_held_unchanged() {
+    // `n = code + 1` over an integer key, declared `n = length(code)` over a
+    // text key: no expression change and no replace around an alter that
+    // never runs; the alter lists `n` as held.
+    let n = |expr| SchemaColumn {
+        logical_type: "integer".to_string(),
+        generated: Some(expr),
+        ..col("n", "bigint", false)
+    };
+    let before = keyed_ticket(
+        "integer",
+        vec![n(ferro_schema_ir::ValueExpr::Binary {
+            op: ferro_schema_ir::ValueBinaryOp::Add,
+            left: Box::new(ferro_schema_ir::ValueExpr::Column {
+                name: "code".to_string(),
+            }),
+            right: Box::new(ferro_schema_ir::ValueExpr::Literal {
+                token: "1".to_string(),
+            }),
+        })],
+    );
+    let after = keyed_ticket("text", vec![n(length_of("code"))]);
+    let plan = plan_declared(&before, &after, Dialect::Postgres, destructive());
+    let [planned] = plan.operations.as_slice() else {
+        panic!("{:?}", plan.op_list());
+    };
+    assert_eq!(
+        planned.op,
+        MigrationOp::AlterColumnType {
+            table: "ticket".to_string(),
+            column: "code".to_string(),
+        }
+    );
+    assert_eq!(
+        planned.verdict.held.clone().map(|held| held.artifacts),
+        Some(vec![crate::HeldArtifact {
+            kind: crate::HeldKind::GeneratedColumn,
+            name: "n".to_string(),
+        }])
+    );
+}
+
+/// `ticket` keyed by `code` (`integer` live, `text` declared), with a `qty`
+/// that widens from `integer` to `bigint`, a change that runs, and `extra`.
+fn keyed_ticket_with_qty(key_type: &str, qty_type: &str, extra: Vec<SchemaColumn>) -> SchemaModel {
+    let qty = SchemaColumn {
+        logical_type: "integer".to_string(),
+        ..col("qty", qty_type, false)
+    };
+    keyed_ticket(key_type, std::iter::once(qty).chain(extra).collect())
+}
+
+fn sum_of(columns: &[&str]) -> ferro_schema_ir::ValueExpr {
+    columns
+        .iter()
+        .map(|name| ferro_schema_ir::ValueExpr::Column {
+            name: (*name).to_string(),
+        })
+        .reduce(|left, right| ferro_schema_ir::ValueExpr::Binary {
+            op: ferro_schema_ir::ValueBinaryOp::Add,
+            left: Box::new(left),
+            right: Box::new(right),
+        })
+        .expect("a column")
+}
+
+#[test]
+fn a_check_over_a_running_and_a_withheld_column_is_held_not_carried() {
+    // `qty` widens (runs) and `code` is a key whose type change is withheld;
+    // `ck_ticket_both` reads both. It is held: not dropped and added back
+    // around `qty`'s change, so its declared body never meets the old `code`.
+    let both = |left| SchemaTableCheck {
+        name: "ck_ticket_both".to_string(),
+        predicate: ferro_schema_ir::CheckExpr::Compare {
+            left,
+            op: ferro_schema_ir::CheckCmpOp::Gt,
+            right: ferro_schema_ir::ValueExpr::Literal {
+                token: "0".to_string(),
+            },
+        },
+    };
+    let before = SchemaModel {
+        table_checks: vec![both(sum_of(&["qty", "code"]))],
+        ..keyed_ticket_with_qty("integer", "integer", Vec::new())
+    };
+    let after = SchemaModel {
+        table_checks: vec![both(ferro_schema_ir::ValueExpr::Binary {
+            op: ferro_schema_ir::ValueBinaryOp::Add,
+            left: Box::new(sum_of(&["qty"])),
+            right: Box::new(length_of("code")),
+        })],
+        ..keyed_ticket_with_qty("text", "bigint", Vec::new())
+    };
+    let plan = plan_declared(&before, &after, Dialect::Postgres, destructive());
+    assert!(!carries_a_check(&plan), "{:?}", plan.op_list());
+    assert!(
+        !plan
+            .op_list()
+            .iter()
+            .any(|op| matches!(op, MigrationOp::RebuildCheck { .. })),
+        "{:?}",
+        plan.op_list()
+    );
+    let rendered = plan.render().expect("renders");
+    let statements: Vec<&String> = rendered.iter().flat_map(|op| &op.statements).collect();
+    assert_eq!(
+        statements,
+        vec!["ALTER TABLE \"ticket\" ALTER COLUMN \"qty\" TYPE bigint USING \"qty\"::bigint"],
+        "{statements:?}"
+    );
+}
+
+#[test]
+fn a_running_change_under_a_held_generated_column_is_refused_naming_the_withheld_one() {
+    // `n` reads `qty` (widening, runs) and `code` (a key, withheld). Postgres
+    // refuses to alter `qty` under `n`'s expression, and `n` cannot be
+    // dropped and added back against the old `code`: `qty`'s change is
+    // refused, naming `code`'s fix.
+    let n = |expr| SchemaColumn {
+        logical_type: "integer".to_string(),
+        generated: Some(expr),
+        ..col("n", "bigint", false)
+    };
+    let before = keyed_ticket_with_qty("integer", "integer", vec![n(sum_of(&["qty", "code"]))]);
+    let after = keyed_ticket_with_qty(
+        "text",
+        "bigint",
+        vec![n(ferro_schema_ir::ValueExpr::Binary {
+            op: ferro_schema_ir::ValueBinaryOp::Add,
+            left: Box::new(sum_of(&["qty"])),
+            right: Box::new(length_of("code")),
+        })],
+    );
+    let plan = plan_declared(&before, &after, Dialect::Postgres, destructive());
+    assert!(
+        !plan.op_list().iter().any(|op| matches!(
+            op,
+            MigrationOp::DropColumn { .. }
+                | MigrationOp::AddColumn { .. }
+                | MigrationOp::AlterGeneratedExpression { .. }
+        )),
+        "{:?}",
+        plan.op_list()
+    );
+    let qty = plan
+        .operations
+        .iter()
+        .find(|planned| {
+            matches!(&planned.op, MigrationOp::AlterColumnType { column, .. } if column == "qty")
+        })
+        .expect("qty's alter");
+    let Execution::Refused(refusal) = &qty.verdict.execution else {
+        panic!("{:?}", qty.verdict);
+    };
+    let text = refusal.to_string();
+    assert!(
+        text.contains("generated column \"n\"")
+            && text.contains("resolve the type change of \"code\" first")
+            && text.contains("ferro migrate new --data-step"),
+        "{text}"
+    );
+    let error = plan.render().expect_err("refused");
+    assert_eq!(error.message, text);
+}
+
+#[test]
+fn a_replace_under_a_held_check_is_refused_naming_the_withheld_one() {
+    // `total = qty` is dropped and added back around `qty`'s widening; the
+    // check reads `total` and the withheld key `code`. The drop would take
+    // the held check with it: refused, naming `code`'s fix.
+    let total = SchemaColumn {
+        logical_type: "integer".to_string(),
+        generated: Some(sum_of(&["qty"])),
+        ..col("total", "bigint", false)
+    };
+    let both = |left| SchemaTableCheck {
+        name: "ck_ticket_both".to_string(),
+        predicate: ferro_schema_ir::CheckExpr::Compare {
+            left,
+            op: ferro_schema_ir::CheckCmpOp::Gt,
+            right: ferro_schema_ir::ValueExpr::Literal {
+                token: "0".to_string(),
+            },
+        },
+    };
+    let before = SchemaModel {
+        table_checks: vec![both(sum_of(&["total", "code"]))],
+        ..keyed_ticket_with_qty("integer", "integer", vec![total.clone()])
+    };
+    let after = SchemaModel {
+        table_checks: vec![both(ferro_schema_ir::ValueExpr::Binary {
+            op: ferro_schema_ir::ValueBinaryOp::Add,
+            left: Box::new(sum_of(&["total"])),
+            right: Box::new(length_of("code")),
+        })],
+        ..keyed_ticket_with_qty("text", "bigint", vec![total])
+    };
+    let plan = plan_declared(&before, &after, Dialect::Postgres, destructive());
+    assert!(!carries_a_check(&plan), "{:?}", plan.op_list());
+    let drop = plan
+        .operations
+        .iter()
+        .find(|planned| matches!(&planned.op, MigrationOp::DropColumn { column, .. } if column == "total"))
+        .expect("total's drop");
+    let Execution::Refused(refusal) = &drop.verdict.execution else {
+        panic!("{:?}", drop.verdict);
+    };
+    let text = refusal.to_string();
+    assert!(
+        text.contains("check \"ck_ticket_both\"")
+            && text.contains("resolve the type change of \"code\" first"),
+        "{text}"
+    );
+    assert_eq!(plan.render().expect_err("refused").message, text);
 }
 
 /// `payment` live as `live`, planned toward `declared`, its one check

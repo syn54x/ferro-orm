@@ -590,3 +590,198 @@ def test_a_check_over_a_key_column_whose_type_changes_stays_standing(project, pk
 
         assert schema_sql(report) == []
         assert list(report.warnings) == [], report.warnings
+
+
+def keyed_ticket(code: str, body: str) -> str:
+    """``Ticket`` keyed by ``code`` (annotated ``code``), with ``body`` after it."""
+    # The two sides differ in length too: a rewrite within the same second
+    # to a same-sized file would otherwise import the stale bytecode.
+    return (
+        "from ferro import Check, Field, RowPolicy, RowSecurity, fn\n\n"
+        f"# code is {'an integer' if code == 'int' else 'text'}\n\n"
+        "class Ticket(Model):\n"
+        f"    code: Annotated[{code}, FerroField(primary_key=True)]\n" + body
+    )
+
+
+KEYED_TWINS = {
+    "check": (
+        keyed_ticket(
+            "int",
+            '    __ferro_checks__ = (Check("coded", lambda ticket: ticket.code > 0),)\n',
+        ),
+        keyed_ticket(
+            "str",
+            "    __ferro_checks__ = (\n"
+            '        Check("coded", lambda ticket: fn.length(ticket.code) > 0),\n'
+            "    )\n",
+        ),
+    ),
+    "generated_column": (
+        keyed_ticket(
+            "int", "    n: int = Field(generated=lambda ticket: ticket.code + 1)\n"
+        ),
+        keyed_ticket(
+            "str",
+            "    n: int = Field(generated=lambda ticket: fn.length(ticket.code))\n",
+        ),
+    ),
+    "policy": tuple(
+        keyed_ticket(
+            code,
+            '    __ferro_rls__ = RowSecurity(RowPolicy(column="code", setting="app.code"))\n',
+        )
+        for code in ("int", "str")
+    ),
+}
+"""A primary-key ``code`` moved from ``int`` to ``str``, the primary-key
+recipe's change no door runs in place, with each kind of artifact over it
+declared in a body that types only under its own side's ``code``."""
+
+
+@pytest.mark.parametrize("kind", list(KEYED_TWINS))
+def test_what_reads_a_key_column_whose_type_change_is_withheld_runs_nothing(
+    project, pkg, db, kind
+):
+    """The live read cannot print ``length(code)`` against the live integer
+    ``code`` (``function length(integer) does not exist``), so it asks no
+    pair for it, and the pass makes no body decision for it: no DDL and no
+    error, on every pass."""
+    postgres_only(db)
+    before, after = KEYED_TWINS[kind]
+    declare(project, pkg, before)
+    asyncio.run(ferro.connect(db.url, auto_migrate=True))
+    ferro.reset_engine()
+    declare(project, pkg, after)
+
+    for _ in range(2):
+        report = reconnect(db, destructive=True)
+
+        assert schema_sql(report) == []
+        assert_key_refusal_reported(report)
+
+
+def assert_key_refusal_reported(report: PassReport) -> None:
+    """The pass names the primary-key recipe for ``code``'s withheld change."""
+    [kept] = [w for w in report.warnings if w.kind == "PrimaryKeyKept"]
+    assert '"ticket"."code"' in kept.text, kept.text
+    assert "ferro migrate new --data-step" in kept.text, kept.text
+
+
+QTY_INT = "    qty: int\n"
+QTY_BIGINT = '    qty: Annotated[int, FerroField(db_type="bigint")]\n'
+
+MIXED_TWINS = {
+    "running_check": (
+        keyed_ticket(
+            "int",
+            QTY_INT
+            + "    __ferro_checks__ = (\n"
+            + '        Check("both", lambda ticket: ticket.qty + ticket.code > 0),\n'
+            + "    )\n",
+        ),
+        keyed_ticket(
+            "str",
+            QTY_BIGINT
+            + "    __ferro_checks__ = (\n"
+            + '        Check("both", lambda ticket: ticket.qty + fn.length(ticket.code) > 0),\n'
+            + "    )\n",
+        ),
+    ),
+    "running_generated": (
+        keyed_ticket(
+            "int",
+            QTY_INT
+            + "    n: int = Field(generated=lambda ticket: ticket.qty + ticket.code)\n",
+        ),
+        keyed_ticket(
+            "str",
+            QTY_BIGINT
+            + "    n: int = Field(\n"
+            + "        generated=lambda ticket: ticket.qty + fn.length(ticket.code)\n"
+            + "    )\n",
+        ),
+    ),
+    "replaced_check": (
+        keyed_ticket(
+            "int",
+            QTY_INT
+            + "    total: int = Field(generated=lambda ticket: ticket.qty + 1)\n"
+            + "    __ferro_checks__ = (\n"
+            + '        Check("both", lambda ticket: ticket.total + ticket.code > 0),\n'
+            + "    )\n",
+        ),
+        keyed_ticket(
+            "str",
+            QTY_BIGINT
+            + "    total: int = Field(generated=lambda ticket: ticket.qty + 1)\n"
+            + "    __ferro_checks__ = (\n"
+            + '        Check("both", lambda ticket: ticket.total + fn.length(ticket.code) > 0),\n'
+            + "    )\n",
+        ),
+    ),
+}
+"""A withheld key change of ``code`` beside ``qty``'s widening, which runs,
+with an artifact over both: a check over ``qty`` (carried around a running
+change), a generated column over ``qty`` (which Postgres refuses to alter
+under), and a check over a generated column replaced around ``qty``'s
+change (its drop takes the check)."""
+
+
+def test_a_check_over_a_running_and_a_withheld_column_stays_and_the_rest_runs(
+    project, pkg, db
+):
+    """``qty`` widens; ``ck_ticket_both`` reads it and the withheld key
+    ``code``. The check is held, never dropped and added back with a body
+    Postgres cannot type against the integer ``code``: only ``qty``'s alter
+    runs, and the key's refusal is reported."""
+    postgres_only(db)
+    before, after = MIXED_TWINS["running_check"]
+    declare(project, pkg, before)
+    asyncio.run(ferro.connect(db.url, auto_migrate=True))
+    ferro.reset_engine()
+    declare(project, pkg, after)
+
+    report = reconnect(db, destructive=True)
+    assert schema_sql(report) == [
+        'ALTER TABLE "ticket" ALTER COLUMN "qty" TYPE bigint USING "qty"::bigint'
+    ]
+    assert_key_refusal_reported(report)
+    report = reconnect(db, destructive=True)
+    assert schema_sql(report) == []
+    assert_key_refusal_reported(report)
+
+
+@pytest.mark.parametrize(
+    ("kind", "artifact"),
+    [
+        ("running_generated", 'generated column "n"'),
+        ("replaced_check", 'check "ck_ticket_both"'),
+    ],
+)
+def test_a_change_that_would_take_down_a_held_artifact_is_refused_naming_the_key(
+    project, pkg, db, kind, artifact
+):
+    """``qty``'s widening would alter it under ``n`` (or drop ``total``, and
+    ``ck_ticket_both`` with it), and the artifact cannot come back against
+    the integer ``code``: the pass refuses, naming the key's recipe, and runs
+    nothing."""
+    postgres_only(db)
+    before, after = MIXED_TWINS[kind]
+    declare(project, pkg, before)
+    asyncio.run(ferro.connect(db.url, auto_migrate=True))
+    ferro.reset_engine()
+    declare(project, pkg, after)
+
+    with pytest.raises(Exception) as refused:
+        reconnect(db, destructive=True)
+
+    message = str(refused.value)
+    assert artifact in message, message
+    assert 'resolve the type change of "code" first' in message, message
+    assert "ferro migrate new --data-step" in message, message
+    assert db.rows(
+        "SELECT data_type FROM information_schema.columns "
+        "WHERE table_name = 'ticket' AND column_name = 'qty' "
+        f"AND table_schema = '{db.schema}'"
+    ) == [("integer",)]
