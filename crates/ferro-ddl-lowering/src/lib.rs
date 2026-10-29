@@ -962,11 +962,14 @@ pub fn table_check_constraint_name(table_lower: &str, suffix: &str) -> String {
 /// parenthesised, so a check calling a value function reads as a generated
 /// column's expression does.
 ///
-/// On SQLite a body with arithmetic is `(<body>) AND <step terms>`: one
-/// [`sqlite_step_terms`] term per step of every comparison, at the top
+/// On SQLite a body with arithmetic is
+/// `CASE WHEN NOT (<step terms>) THEN abs(-9223372036854775807 - 1) ELSE (<body>) END`:
+/// one [`sqlite_step_terms`] term per step of every comparison, at the top
 /// level where no `NOT` or `OR` can invert it. Postgres raises on a step
-/// that overflows; the terms make SQLite fail the same row instead of
-/// judging a real or `inf`. The Postgres body carries no terms.
+/// that overflows; a failed term makes SQLite raise too (`integer
+/// overflow`) instead of judging a real or `inf`, so both report a
+/// `DataError`. A `NULL` step passes, and a false body stays the check's own
+/// violation. The Postgres body carries no terms.
 ///
 /// # Errors
 /// As [`render_value_expr`]: a call of a function the table lacks.
@@ -979,6 +982,33 @@ pub fn render_check_expr(
     if dialect != Dialect::Sqlite {
         return Ok(body);
     }
+    let terms = check_step_terms(expr, columns)?;
+    Ok(if terms.is_empty() {
+        body
+    } else {
+        // abs() of the smallest 64-bit integer is SQLite's own runtime
+        // `integer overflow` error: the CHECK raises it where Postgres raises.
+        format!(
+            "CASE WHEN NOT ({}) THEN abs(-9223372036854775807 - 1) ELSE ({body}) END",
+            terms.join(" AND ")
+        )
+    })
+}
+
+/// Whether a table check computes arithmetic that can overflow: a write to
+/// its table can then fail computing the check, on either database.
+pub fn table_check_computes(
+    check: &ferro_schema_ir::SchemaTableCheck,
+    columns: &[ferro_schema_ir::SchemaColumn],
+) -> bool {
+    check_step_terms(&check.predicate, columns).is_ok_and(|terms| !terms.is_empty())
+}
+
+/// The [`sqlite_step_terms`] of every comparison in a check, in order.
+fn check_step_terms(
+    expr: &ferro_schema_ir::CheckExpr,
+    columns: &[ferro_schema_ir::SchemaColumn],
+) -> Result<Vec<String>, String> {
     let mut terms = Vec::new();
     let mut stack = vec![expr];
     while let Some(expr) = stack.pop() {
@@ -996,11 +1026,7 @@ pub fn render_check_expr(
             _ => {}
         }
     }
-    Ok(if terms.is_empty() {
-        body
-    } else {
-        format!("({body}) AND {}", terms.join(" AND "))
-    })
+    Ok(terms)
 }
 
 /// The check body without SQLite's step terms.
@@ -5381,8 +5407,9 @@ mod tests {
         assert_eq!(
             super::render_check_expr(&expr, Dialect::Sqlite, &columns),
             Ok(format!(
-                "({body}) AND abs((\"x\" + \"y\")) <= 1.7976931348623157e308 \
-                 AND typeof((\"m\" + \"n\")) IN ('integer', 'null')"
+                "CASE WHEN NOT (abs((\"x\" + \"y\")) <= 1.7976931348623157e308 \
+                 AND typeof((\"m\" + \"n\")) IN ('integer', 'null')) \
+                 THEN abs(-9223372036854775807 - 1) ELSE ({body}) END"
             ))
         );
         // A comparison without arithmetic carries no terms.

@@ -37,7 +37,7 @@ import ferro
 from ferro import Check, CheckViolationError, Field, Model, fn
 from ferro._core import _render_create_table_sql_for_test
 from ferro.base import FerroField
-from ferro.exceptions import OperationalError
+from ferro.exceptions import DataError
 from ferro.ir import compile_registry_schema_ir
 from tests._pass_harness import auto_migrate, schema_sql
 from tests.test_migrate_drift import drift_api
@@ -253,12 +253,11 @@ def declare_box(body) -> type[Model]:
     return Box
 
 
-def overflow_error(db_url: str) -> Any:
-    """Postgres raises computing the step, an overflow no generated column
-    owns; SQLite fails the check's step term."""
-    if db_url.startswith("sqlite"):
-        return pytest.raises(CheckViolationError, match="ck_box_c")
-    return pytest.raises(OperationalError, match="out of range")
+def overflow_error() -> Any:
+    """An overflow computing the check: Postgres raises it, and SQLite's
+    step guard raises `integer overflow`; both are a `DataError` naming the
+    check."""
+    return pytest.raises(DataError, match='the check "ck_box_c" of "box"')
 
 
 @pytest.mark.backend_matrix
@@ -294,12 +293,12 @@ async def test_a_check_step_that_overflows_fails_the_row_on_both_databases(
     db_url, body, fits, overflows
 ):
     """Postgres raises where a step overflows; SQLite would judge a real or
-    `inf`, so its check ANDs a term per step and fails the same row."""
+    `inf`, so its check guards every step and raises on the same row."""
     Box = declare_box(body)
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
         await Box.create(**fits)
-        with overflow_error(db_url):
+        with overflow_error():
             await Box.create(**overflows)
         assert len(await Box.all()) == 1
 
@@ -313,8 +312,20 @@ async def test_a_step_under_not_still_fails_the_row(db_url):
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
         await Box.create(x=1.0, y=2.0)
-        with overflow_error(db_url):
+        with overflow_error():
             await Box.create(x=1.7e308, y=1.7e308)
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.asyncio
+async def test_a_false_body_stays_a_check_violation(db_url):
+    """The step guard only raises on an overflow; a row the body rejects is
+    the check's own violation on both databases."""
+    Box = declare_box(lambda box: box.a * box.b > 0)
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        with pytest.raises(CheckViolationError, match="ck_box_c"):
+            await Box.create(a=-3, b=4)
 
 
 def test_a_date_part_of_a_datetime_is_refused():

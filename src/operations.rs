@@ -3048,6 +3048,7 @@ pub fn save_record<'py>(
             let write = crate::errors::GeneratedWrite {
                 table: &table_name,
                 generated: &schema.meta.generated_cols,
+                checks: &schema.meta.computing_checks,
                 computes: false,
             };
             let (sql, bind_values, returning) = build_save_sql(
@@ -3173,6 +3174,7 @@ pub fn update_record<'py>(
                                 Some(&crate::errors::GeneratedWrite {
                                     table: &schema.table_name,
                                     generated: &schema.meta.generated_cols,
+                                    checks: &schema.meta.computing_checks,
                                     computes: false,
                                 }),
                             )
@@ -3369,6 +3371,7 @@ pub fn save_bulk_records<'py>(
                             Some(&crate::errors::GeneratedWrite {
                                 table: &table_name,
                                 generated: &schema.meta.generated_cols,
+                                checks: &schema.meta.computing_checks,
                                 computes: false,
                             }),
                         ));
@@ -4549,6 +4552,7 @@ pub fn update_filtered<'py>(
             let write = crate::errors::GeneratedWrite {
                 table: &model.table_name,
                 generated: &model.meta.generated_cols,
+                checks: &model.meta.computing_checks,
                 computes,
             };
             let statement = build_update(&mut plan, &name, &engine, exec, backend).await?;
