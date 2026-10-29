@@ -29,7 +29,6 @@ import difflib
 import dis
 import enum
 import inspect
-import json
 import re
 import textwrap
 import types
@@ -37,7 +36,6 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from . import _core
 from . import fn as _fn
 from .base import ForeignKey
 from .query.nodes import (
@@ -608,130 +606,7 @@ def _lower_compare(
             "compare values of different types differently; compare values of "
             "one type"
         )
-    for tree in trees:
-        _integer_range(tree, where, columns)
     return {"kind": "compare", "left": trees[0], "op": cmp_op, "right": trees[1]}
-
-
-#: The range of the 64-bit integers both databases compute integer steps at.
-_INT64 = (-(2**63), 2**63 - 1)
-
-#: The range of a Postgres integer column narrower than `bigint`, by storage.
-_NARROW_INTEGER_RANGES = {
-    "smallint": (-(2**15), 2**15 - 1),
-    "int": (-(2**31), 2**31 - 1),
-}
-
-#: The range of an integer-valued call whatever its arguments: Postgres's
-#: `length` is an `integer`, and a date part is bounded by its calendar.
-_CALL_RANGES = {
-    "length": (0, 2**31 - 1),
-    "year": (-4713, 5874897),
-    "month": (1, 12),
-    "day": (1, 31),
-}
-
-_SYMBOLS = {"add": "+", "sub": "-", "mul": "*", "div": "/"}
-
-
-def _value_text(tree: Mapping[str, Any]) -> str:
-    """A lowered value expression written out, for a refusal."""
-    kind = tree["kind"]
-    if kind == "column":
-        return tree["name"]
-    if kind == "literal":
-        return tree["token"]
-    if kind == "negate":
-        return f"-{_value_text(tree['operand'])}"
-    if kind == "binary":
-        left, right = _value_text(tree["left"]), _value_text(tree["right"])
-        return f"({left} {_SYMBOLS[tree['op']]} {right})"
-    return f"fn.{tree['name']}({', '.join(_value_text(arg) for arg in tree['args'])})"
-
-
-def _column_range(spec: Any) -> tuple[int, int]:
-    """The values an integer column holds, from its Postgres storage."""
-    from .ir.compiler import _column_ir_from_spec
-
-    resolved = json.loads(
-        _core._resolve_storage_type(json.dumps(_column_ir_from_spec(spec)), "postgres")
-    )
-    return _NARROW_INTEGER_RANGES.get(resolved.get("token"), _INT64)
-
-
-def _truncated_quotient(numerator: int, divisor: int) -> int:
-    """Integer division rounding toward zero, as both databases divide."""
-    quotient = abs(numerator) // abs(divisor)
-    return quotient if (numerator < 0) == (divisor < 0) else -quotient
-
-
-def _integer_range(
-    tree: Mapping[str, Any], where: str, columns: Mapping[str, Any]
-) -> tuple[int, int] | None:
-    """The range an integer-valued check operand can take, or `None` for one
-    that is not an integer.
-
-    Every step is visited, a float step's integer operands included, and one
-    that can pass 64 bits is refused: Postgres raises there and SQLite turns
-    the value into a real, so the same row would pass one database and fail
-    the other. A step inside 64 bits computes the same on both.
-
-    Raises:
-        TypeError: A step can pass 64 bits.
-    """
-    from .generated import _column_family
-
-    kind = tree["kind"]
-    if kind == "column":
-        spec = columns[tree["name"]]
-        return _column_range(spec) if _column_family(spec) == "integer" else None
-    if kind == "literal":
-        token = tree["token"]
-        return (int(token), int(token)) if token.lstrip("-").isdigit() else None
-    if kind == "func":
-        ranges = [_integer_range(arg, where, columns) for arg in tree["args"]]
-        name = tree["name"]
-        if name in _CALL_RANGES:
-            return _CALL_RANGES[name]
-        if any(bounds is None for bounds in ranges):
-            return None
-        if name == "sign":
-            return (-1, 1)
-        if name == "abs":
-            [(low, high)] = ranges
-            # abs of the 64-bit minimum fails on both databases, so it is capped.
-            top = min(max(-low, high), _INT64[1])
-            return (0 if low <= 0 <= high else min(abs(low), abs(high)), top)
-        return (min(low for low, _ in ranges), max(high for _, high in ranges))
-    if kind == "negate":
-        operand = _integer_range(tree["operand"], where, columns)
-        bounds = None if operand is None else (-operand[1], -operand[0])
-    else:
-        left = _integer_range(tree["left"], where, columns)
-        right = _integer_range(tree["right"], where, columns)
-        if left is None or right is None:
-            return None
-        op = tree["op"]
-        if op == "add":
-            bounds = (left[0] + right[0], left[1] + right[1])
-        elif op == "sub":
-            bounds = (left[0] - right[1], left[1] - right[0])
-        elif op == "mul":
-            products = [a * b for a in left for b in right]
-            bounds = (min(products), max(products))
-        else:  # value parity admits only a non-zero literal divisor
-            quotients = [_truncated_quotient(a, right[0]) for a in left]
-            bounds = (min(quotients), max(quotients))
-    if bounds is not None and (bounds[0] < _INT64[0] or bounds[1] > _INT64[1]):
-        raise TypeError(
-            f"{where} computes {_value_text(tree)}, which can pass the 64 bits "
-            "both databases compute integers at: Postgres raises 'bigint out of "
-            "range' where SQLite turns the value into a real and accepts the "
-            "row; compute the value as a generated column "
-            "(Field(generated=...)), which both databases hold to its range, "
-            "and check that column"
-        )
-    return bounds
 
 
 def _lower_node(

@@ -241,109 +241,77 @@ def test_float_multiplication_in_a_check_is_refused():
 BIG = Annotated[int, FerroField(db_type="bigint")]
 
 
-def test_an_overflowing_bigint_product_in_a_check_is_refused():
-    """`a * b` over bigint columns raises `bigint out of range` on Postgres
-    at a = b = 2**40, where SQLite turns the product into a real and accepts
-    the row; the check is refused before either database sees it."""
-    with pytest.raises(TypeError) as caught:
-
-        class Box(Model):
-            __ferro_checks__ = (Check("c", lambda box: box.a * box.b > 0),)
-            id: int | None = Field(default=None, primary_key=True)
-            a: BIG
-            b: BIG
-
-    message = str(caught.value)
-    assert "Box.__ferro_checks__ check 'c'" in message
-    assert "64 bits" in message
-    assert "generated column" in message
-
-
-@pytest.mark.parametrize(
-    "body",
-    [
-        lambda box: box.big + 1 > 0,
-        lambda box: box.big - 1 > 0,
-        lambda box: -box.big > 0,
-        lambda box: box.big / -1 > 0,
-        lambda box: box.n * box.n * box.n > 0,
-        lambda box: fn.abs(box.n * box.n) * 4 > 0,
-        lambda box: fn.coalesce(box.maybe, box.big) + 1 > 0,
-    ],
-    ids=[
-        "bigint +",
-        "bigint -",
-        "bigint negated",
-        "bigint / -1",
-        "int cubed",
-        "through a call",
-        "through coalesce",
-    ],
-)
-def test_every_integer_step_that_can_overflow_is_refused(body):
-    with pytest.raises(TypeError, match="64 bits"):
-
-        class Box(Model):
-            __ferro_checks__ = (Check("c", body),)
-            id: int | None = Field(default=None, primary_key=True)
-            n: int
-            big: BIG
-            maybe: Annotated[int | None, FerroField(db_type="bigint")] = None
-
-
-@pytest.mark.parametrize(
-    "body",
-    [
-        lambda box: box.n * box.n > 0,
-        lambda box: box.n + box.n - box.n > 0,
-        lambda box: box.big / 2 > 0,
-        lambda box: fn.abs(box.big) > 0,
-        lambda box: fn.length(box.memo) * 1000 > 0,
-        lambda box: box.rate + 1.5 > 0,
-    ],
-    ids=[
-        "int product",
-        "int sum",
-        "bigint halved",
-        "bigint abs",
-        "length scaled",
-        "float sum",
-    ],
-)
-def test_integer_steps_that_fit_64_bits_are_accepted(body):
+def declare_box(body) -> type[Model]:
     class Box(Model):
         __ferro_checks__ = (Check("c", body),)
         id: int | None = Field(default=None, primary_key=True)
-        n: int
-        big: BIG
-        memo: str
-        rate: float
+        a: BIG = 0
+        b: BIG = 0
+        x: float = 0.0
+        y: float = 0.0
 
-    assert predicate("box", "c")["kind"] == "compare"
+    return Box
+
+
+def overflow_error(db_url: str) -> type[Exception]:
+    """Postgres raises computing the step; SQLite fails the check's step term."""
+    return CheckViolationError if db_url.startswith("sqlite") else DataError
 
 
 @pytest.mark.backend_matrix
 @pytest.mark.asyncio
-async def test_the_named_fix_fails_the_overflowing_row_on_both_databases(db_url):
-    """The refusal's recipe: compute the product as a generated column and
-    check that column. Its range guard fails the row on SQLite where
-    Postgres raises, so both reject `a = b = 2**40`."""
-
-    class Box(Model):
-        __ferro_checks__ = (Check("c", lambda box: box.product > 0),)
-        id: int | None = Field(default=None, primary_key=True)
-        a: BIG
-        b: BIG
-        product: Annotated[
-            int | None,
-            FerroField(db_type="bigint", generated=lambda box: box.a * box.b),
-        ] = None
-
+@pytest.mark.parametrize(
+    ("body", "fits", "overflows"),
+    [
+        (lambda box: box.a * box.b > 0, {"a": 3, "b": 4}, {"a": 2**40, "b": 2**40}),
+        (lambda box: box.a + box.b > 0, {"a": 1, "b": 2}, {"a": 2**62, "b": 2**62}),
+        (lambda box: -box.a > 0, {"a": -5}, {"a": -(2**63)}),
+        (lambda box: box.a / -1 > 0, {"a": -5}, {"a": -(2**63)}),
+        (
+            lambda box: box.x + box.y > 0,
+            {"x": 1.5, "y": 2.5},
+            {"x": 1.7e308, "y": 1.7e308},
+        ),
+        (
+            lambda box: box.x - box.y < 0,
+            {"x": 1.5, "y": 2.5},
+            {"x": -1.7e308, "y": 1.7e308},
+        ),
+    ],
+    ids=[
+        "bigint *",
+        "bigint +",
+        "bigint negated",
+        "bigint over -1",
+        "float +",
+        "float -",
+    ],
+)
+async def test_a_check_step_that_overflows_fails_the_row_on_both_databases(
+    db_url, body, fits, overflows
+):
+    """Postgres raises where a step overflows; SQLite would judge a real or
+    `inf`, so its check ANDs a term per step and fails the same row."""
+    Box = declare_box(body)
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-        assert (await Box.create(a=3, b=4)).product == 12
-        with pytest.raises(DataError, match='generated column "product"'):
-            await Box.create(a=2**40, b=2**40)
+        await Box.create(**fits)
+        with pytest.raises(overflow_error(db_url)):
+            await Box.create(**overflows)
+        assert len(await Box.all()) == 1
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.asyncio
+async def test_a_step_under_not_still_fails_the_row(db_url):
+    """The terms sit outside the body, so `NOT` cannot turn an overflow into
+    a pass."""
+    Box = declare_box(lambda box: ~(box.x + box.y < 0))
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        await Box.create(x=1.0, y=2.0)
+        with pytest.raises(overflow_error(db_url)):
+            await Box.create(x=1.7e308, y=1.7e308)
 
 
 def test_a_date_part_of_a_datetime_is_refused():
@@ -478,18 +446,18 @@ LEDGER = HEAD + SIGNED_CHECK
 LINE = "ck_payment_signed check body differs"
 
 
-def migrated(project, pkg, db, capsys) -> None:
+def migrated(project, pkg, db, capsys, models: str = "") -> None:
     """``0001_create_ledger`` applied."""
     configure(project, pkg, db.backend)
-    write_models(project, pkg, LEDGER)
+    write_models(project, pkg, models or LEDGER)
     new("create_ledger")
     assert run("migrate", "up", "--url", db.url) == 0
     capsys.readouterr()
 
 
-def auto_migrated(project, pkg, db) -> None:
+def auto_migrated(project, pkg, db, models: str = "") -> None:
     """The ledger built by ``connect(auto_migrate=True)``."""
-    write_models(project, pkg, LEDGER)
+    write_models(project, pkg, models or LEDGER)
     sys.path.insert(0, str(project))
     importlib.import_module(f"{pkg}.models")
     asyncio.run(ferro.connect(db.url, auto_migrate=True))
@@ -544,6 +512,38 @@ def test_a_ferro_created_check_calling_fn_is_not_drift(project, pkg, db, capsys)
 def test_a_reconnect_runs_nothing_for_a_check_calling_fn(project, pkg, db):
     auto_migrated(project, pkg, db)
     assert reconnect_statements(db) == []
+    assert reconnect_statements(db) == []
+
+
+SUMMED = (
+    HEAD
+    + """
+    __ferro_checks__ = (
+        Check("summed", lambda payment: payment.amount_minor + 1 > 0),
+    )
+"""
+)
+"""`HEAD` with a check over arithmetic: on SQLite its body carries a step
+term, which drift and a reconnect must render the same way."""
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.usefixtures("isolated_imports")
+def test_a_check_with_step_terms_is_not_drift(project, pkg, db, capsys):
+    migrated(project, pkg, db, capsys, SUMMED)
+    report = drift_api(db)
+    assert report.lines == [] and report.clean, report.lines
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.usefixtures("isolated_imports")
+def test_a_reconnect_runs_nothing_for_a_check_with_step_terms(project, pkg, db):
+    auto_migrated(project, pkg, db, SUMMED)
+    if db.backend == "sqlite":
+        [(create,)] = db.rows(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'payment'"
+        )
+        assert "typeof" in create, "the pin is only meaningful with a step term"
     assert reconnect_statements(db) == []
 
 

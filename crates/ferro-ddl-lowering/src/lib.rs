@@ -10,8 +10,8 @@ pub use value_expr::{
     NullRule, VALUE_FUNCTIONS, ValueColumn, ValueFunction, ValueSignature, ValueType, ValueTyping,
     check_expr_columns, generated_storage_refusal, literal_type, render_generated_clause,
     render_sqlite_generated_guard, render_stored_generated_clause, render_value_expr,
-    schema_value_column, sqlite_guard_column, sqlite_guard_name, type_value_expr, value_column,
-    value_expr_columns, value_family_annotations, value_function,
+    schema_value_column, sqlite_guard_column, sqlite_guard_name, sqlite_step_terms,
+    type_value_expr, value_column, value_expr_columns, value_family_annotations, value_function,
 };
 
 use std::collections::BTreeMap;
@@ -962,6 +962,12 @@ pub fn table_check_constraint_name(table_lower: &str, suffix: &str) -> String {
 /// parenthesised, so a check calling a value function reads as a generated
 /// column's expression does.
 ///
+/// On SQLite a body with arithmetic is `(<body>) AND <step terms>`: one
+/// [`sqlite_step_terms`] term per step of every comparison, at the top
+/// level where no `NOT` or `OR` can invert it. Postgres raises on a step
+/// that overflows; the terms make SQLite fail the same row instead of
+/// judging a real or `inf`. The Postgres body carries no terms.
+///
 /// # Errors
 /// As [`render_value_expr`]: a call of a function the table lacks.
 pub fn render_check_expr(
@@ -969,7 +975,41 @@ pub fn render_check_expr(
     dialect: Dialect,
     columns: &[ferro_schema_ir::SchemaColumn],
 ) -> Result<String, String> {
-    let render = |expr: &ferro_schema_ir::CheckExpr| render_check_expr(expr, dialect, columns);
+    let body = render_check_predicate(expr, dialect, columns)?;
+    if dialect != Dialect::Sqlite {
+        return Ok(body);
+    }
+    let mut terms = Vec::new();
+    let mut stack = vec![expr];
+    while let Some(expr) = stack.pop() {
+        match expr {
+            ferro_schema_ir::CheckExpr::And { left, right }
+            | ferro_schema_ir::CheckExpr::Or { left, right } => {
+                stack.push(right);
+                stack.push(left);
+            }
+            ferro_schema_ir::CheckExpr::Not { child } => stack.push(child),
+            ferro_schema_ir::CheckExpr::Compare { left, right, .. } => {
+                terms.extend(sqlite_step_terms(left, columns)?);
+                terms.extend(sqlite_step_terms(right, columns)?);
+            }
+            _ => {}
+        }
+    }
+    Ok(if terms.is_empty() {
+        body
+    } else {
+        format!("({body}) AND {}", terms.join(" AND "))
+    })
+}
+
+/// The check body without SQLite's step terms.
+fn render_check_predicate(
+    expr: &ferro_schema_ir::CheckExpr,
+    dialect: Dialect,
+    columns: &[ferro_schema_ir::SchemaColumn],
+) -> Result<String, String> {
+    let render = |expr: &ferro_schema_ir::CheckExpr| render_check_predicate(expr, dialect, columns);
     Ok(match expr {
         ferro_schema_ir::CheckExpr::And { left, right } => {
             format!("({}) AND ({})", render(left)?, render(right)?)
@@ -5298,6 +5338,56 @@ mod tests {
         );
         assert_eq!(
             super::render_check_expr(&abs_amount_over_1000(), Dialect::Sqlite, &int),
+            Ok("(abs(\"amount\") > 1000)".to_string())
+        );
+    }
+
+    #[test]
+    fn a_sqlite_check_ands_every_step_term_at_the_top_level() {
+        use ferro_schema_ir::{CheckCmpOp, CheckExpr, ValueBinaryOp, ValueExpr};
+        let column = |name: &str| {
+            Box::new(ValueExpr::Column {
+                name: name.to_string(),
+            })
+        };
+        let sum_over_zero = |left: &str, right: &str| CheckExpr::Compare {
+            left: ValueExpr::Binary {
+                op: ValueBinaryOp::Add,
+                left: column(left),
+                right: column(right),
+            },
+            op: CheckCmpOp::Gt,
+            right: ValueExpr::Literal {
+                token: "0".to_string(),
+            },
+        };
+        let expr = CheckExpr::Not {
+            child: Box::new(CheckExpr::Or {
+                left: Box::new(sum_over_zero("x", "y")),
+                right: Box::new(sum_over_zero("m", "n")),
+            }),
+        };
+        let columns = [
+            col_with_db_type("x", "number", None, None),
+            col_with_db_type("y", "number", None, None),
+            col_with_db_type("m", "integer", None, Some("bigint")),
+            col_with_db_type("n", "integer", None, Some("bigint")),
+        ];
+        let body = "NOT ((((\"x\" + \"y\") > 0)) OR (((\"m\" + \"n\") > 0)))";
+        assert_eq!(
+            super::render_check_expr(&expr, Dialect::Postgres, &columns),
+            Ok(body.to_string())
+        );
+        assert_eq!(
+            super::render_check_expr(&expr, Dialect::Sqlite, &columns),
+            Ok(format!(
+                "({body}) AND abs((\"x\" + \"y\")) <= 1.7976931348623157e308 \
+                 AND typeof((\"m\" + \"n\")) IN ('integer', 'null')"
+            ))
+        );
+        // A comparison without arithmetic carries no terms.
+        assert_eq!(
+            super::render_check_expr(&abs_amount_over_1000(), Dialect::Sqlite, &columns),
             Ok("(abs(\"amount\") > 1000)".to_string())
         );
     }

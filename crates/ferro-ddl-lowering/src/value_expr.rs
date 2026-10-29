@@ -788,19 +788,7 @@ pub fn render_sqlite_generated_guard(
         CanonicalType::Double => terms.push(finite_term(&quoted)),
         _ => {}
     }
-    let mut steps = Vec::new();
-    collect_steps(expr, true, &mut steps);
-    let lookup = |name: &str| schema_value_column(columns, name);
-    for step in steps {
-        let rendered = render_value_expr(step, Dialect::Sqlite, columns)?;
-        terms.push(
-            if type_value_expr(step, &lookup)?.family == ValueType::Integer {
-                integer_term(&rendered)
-            } else {
-                finite_term(&rendered)
-            },
-        );
-    }
+    terms.extend(step_terms(expr, true, columns)?);
     Ok((!terms.is_empty()).then(|| {
         format!(
             "CONSTRAINT {} CHECK ({})",
@@ -808,6 +796,46 @@ pub fn render_sqlite_generated_guard(
             terms.join(" AND ")
         )
     }))
+}
+
+/// One SQLite term per arithmetic step of `expr`, the root included: an
+/// integer step must still be an integer, a float step finite. Each is
+/// false on a row where Postgres raises computing that step, so a check
+/// ANDing them fails the row SQLite would otherwise judge on a real or
+/// `inf`.
+///
+/// # Errors
+/// As [`render_value_expr`].
+pub fn sqlite_step_terms(
+    expr: &ValueExpr,
+    columns: &[SchemaColumn],
+) -> Result<Vec<String>, String> {
+    step_terms(expr, false, columns)
+}
+
+/// The step terms under `expr`; `root` leaves out the root itself, which a
+/// generated column's storage term holds.
+fn step_terms(
+    expr: &ValueExpr,
+    root: bool,
+    columns: &[SchemaColumn],
+) -> Result<Vec<String>, String> {
+    let mut steps = Vec::new();
+    collect_steps(expr, root, &mut steps);
+    let lookup = |name: &str| schema_value_column(columns, name);
+    steps
+        .into_iter()
+        .map(|step| {
+            let rendered = render_value_expr(step, Dialect::Sqlite, columns)?;
+            Ok(
+                if type_value_expr(step, &lookup)?.family == ValueType::Integer {
+                    integer_term(&rendered)
+                } else {
+                    finite_term(&rendered)
+                },
+            )
+        })
+        .collect()
 }
 
 fn integer_term(sql: &str) -> String {
