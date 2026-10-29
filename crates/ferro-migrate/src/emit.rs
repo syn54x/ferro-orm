@@ -831,6 +831,55 @@ pub(crate) fn withheld_alter(
     refused_scalar_conversion(old, new).map(|kind| WithheldAlter::Conversion(kind, old))
 }
 
+/// What every door reports of a withheld type change ([`withheld_alter`]),
+/// naming its fix: the primary-key recipe, the enum type move's recipe, or
+/// the refused conversion's warning (#154 generalized: a conversion that
+/// could reinterpret or destroy stored values warns and skips, never a
+/// silent ALTER).
+pub(crate) fn withheld_alter_report(
+    table: &str,
+    column: &str,
+    old_col: &SchemaColumn,
+    new_col: &SchemaColumn,
+    withheld: &WithheldAlter,
+) -> Option<Report> {
+    match withheld {
+        WithheldAlter::PrimaryKey => Some(ferro_ddl_lowering::primary_key_type_kept_warning(
+            table,
+            column,
+            &crate::Refusal::PrimaryKeyChange {
+                table: table.to_string(),
+            }
+            .to_string(),
+        )),
+        WithheldAlter::EnumTypeMove(crate::Refusal::EnumTypeMove {
+            table,
+            column,
+            keep,
+        }) => Some(ferro_ddl_lowering::enum_type_move_report(
+            table,
+            column,
+            keep.as_deref(),
+        )),
+        WithheldAlter::EnumTypeMove(_) => None,
+        WithheldAlter::Conversion(kind, old_canonical) => {
+            let Ok(ResolvedStorage::Scalar(new_canonical)) =
+                resolve_column_storage(new_col, Dialect::Postgres)
+            else {
+                return None;
+            };
+            Some(refused_conversion_warning(
+                *kind,
+                table,
+                column,
+                &old_col.db_type.clone().unwrap_or_default(),
+                &pg_alter_type_target(new_canonical),
+                &canonical_to_db_type_token(*old_canonical, Dialect::Postgres),
+            ))
+        }
+    }
+}
+
 pub(crate) fn emit_alter_column_type(
     table: &str,
     column: &str,
@@ -843,32 +892,13 @@ pub(crate) fn emit_alter_column_type(
 
     match dialect {
         Dialect::Postgres => {
-            let withheld = withheld_alter(table, column, old_col, new_col);
-            match &withheld {
-                // The primary-key recipe's change, refused by the verdict.
-                Some(WithheldAlter::PrimaryKey) => return Ok(result),
-                // To, from or between native enum types no statement converts
-                // the column in place: no door does, and every door says so in
-                // the generator's words, the recipe a migration follows
-                // instead.
-                Some(WithheldAlter::EnumTypeMove(refusal)) => {
-                    if let crate::Refusal::EnumTypeMove {
-                        table,
-                        column,
-                        keep,
-                    } = refusal
-                    {
-                        result
-                            .reports
-                            .push(ferro_ddl_lowering::enum_type_move_report(
-                                table,
-                                column,
-                                keep.as_deref(),
-                            ));
-                    }
-                    return Ok(result);
-                }
-                _ => {}
+            // A withheld change runs nowhere, and every door says why in
+            // the words that name its fix.
+            if let Some(withheld) = withheld_alter(table, column, old_col, new_col) {
+                result.reports.extend(withheld_alter_report(
+                    table, column, old_col, new_col, &withheld,
+                ));
+                return Ok(result);
             }
             let cannot = |message: String| EmissionError {
                 message: format!("Cannot alter type for '{}.{}': {}", table, column, message),
@@ -882,20 +912,6 @@ pub(crate) fn emit_alter_column_type(
                         .to_string(),
                 ));
             };
-            // Refusal rails (#154 generalized): a conversion that could
-            // reinterpret or destroy stored values warns and skips — never a
-            // silent ALTER (FF-B B1/B2).
-            if let Some(WithheldAlter::Conversion(kind, old_canonical)) = withheld {
-                result.reports.push(refused_conversion_warning(
-                    kind,
-                    table,
-                    column,
-                    &old_col.db_type.clone().unwrap_or_default(),
-                    &pg_alter_type_target(new_canonical),
-                    &canonical_to_db_type_token(old_canonical, ld),
-                ));
-                return Ok(result);
-            }
             let target = pg_alter_type_target(new_canonical);
             result.statements.push(format!(
                 "ALTER TABLE {table} ALTER COLUMN {col} TYPE {target} USING {col}::{target}",

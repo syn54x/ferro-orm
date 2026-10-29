@@ -44,7 +44,7 @@ pub use generate::{
 };
 pub use order::order_by_dependencies;
 pub use plan::{
-    Carry, Execution, HeldArtifact, HeldKind, Hint, HintError, LiveCheckFact, LiveFacts,
+    Carry, Execution, Held, HeldArtifact, HeldKind, Hint, HintError, LiveCheckFact, LiveFacts,
     LiveGeneratedFact, LiveTableFacts, OpVerdict, PlanError, PlannedOp, PrintedPair, Refusal,
     Replace, Rider, RowRisk, Side, foreign_default, live_hints, plan_down, plan_from_ir,
 };
@@ -727,7 +727,7 @@ impl Plan {
                 let mut planned = PlannedOp::of(op, &before, &target, dialect);
                 planned.verdict.carried = carry;
                 if let Some((_, artifacts)) = held.iter().find(|(held, _)| *held == planned.op) {
-                    planned.verdict.held = artifacts.clone();
+                    planned.verdict.held = Some(artifacts.clone());
                 }
                 planned
             })

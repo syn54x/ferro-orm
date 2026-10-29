@@ -195,13 +195,21 @@ For a single model, every emitter must agree on:
       reports. A type change no door runs (`emit::withheld_alter`: a
       primary-key column, an enum type move, a refused scalar conversion)
       carries nothing and replaces nothing. The column keeps its live type,
-      so the checks, generated columns and policies that read it stay
-      standing, with no printed pair and no body decision, and the alter's
-      verdict lists each in `OpVerdict.held`: `code: int` keyed under
-      `code > 0`, redeclared `code: str` under `fn.length(code) > 0`, runs
-      no DDL, and drift prints `ticket.code has type int, snapshot says
+      so every check, generated column and policy that reads it is held:
+      one set per table (`ferro_migrate::held_of`), read by every path. A
+      held artifact gets no printed pair and is never taken down, put
+      back, added, rebuilt or set, even when it also reads a column whose
+      change does run. A change that would take one down (a replaced
+      generated column it reads, or an alter Postgres refuses under its
+      expression or policy) is refused with
+      `Refusal::HeldByWithheldAlter`, naming the withheld change's fix.
+      The alter's verdict lists the set in `OpVerdict.held` with that fix:
+      `code: int` keyed under `code > 0`, redeclared `code: str` under
+      `fn.length(code) > 0`, runs no DDL and reports the primary-key
+      recipe, and drift prints `ticket.code has type int, snapshot says
       varchar` then `ck_ticket_coded check not compared while its column's
-      type change is withheld`. A row policy the plan
+      type change is withheld; resolve the type change of "code" first:
+      …`. A row policy the plan
       cannot carry (a raw body it may not rewrite, ADR-0019) refuses the
       drop with `Refusal::PolicyReadsReplacedColumn`, naming the
       `DROP POLICY` recipe. Drift is a printed pair on Postgres

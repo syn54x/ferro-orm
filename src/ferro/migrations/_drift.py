@@ -262,7 +262,17 @@ _HELD: dict[str, Callable[[dict[str, Any], str], str]] = {
     ),
 }
 """What a type change no door runs holds (``held``), each left standing and
-not compared until the change runs: one line each, after the type line."""
+not compared until the change runs: one line each, after the type line,
+ending with the fix that makes the change run."""
+
+
+def _held_lines(op: dict[str, Any]) -> list[str]:
+    held = op["held"]
+    fix = f'resolve the type change of "{op["column"]}" first: {held["fix"]}'
+    return [
+        f"{_HELD[artifact['kind']](op, artifact['name'])}; {fix}"
+        for artifact in held["artifacts"]
+    ]
 
 
 def render_op(op: dict[str, Any]) -> str:
@@ -474,7 +484,7 @@ def _lines(operations: list[dict[str, Any]]) -> list[str]:
     for op in operations:
         if op.get("held"):
             lines.append(render_op(op))
-            lines.extend(_HELD[held["kind"]](op, held["name"]) for held in op["held"])
+            lines.extend(_held_lines(op))
             continue
         replaces = op.get("replaces")
         carried = op.get("carried")

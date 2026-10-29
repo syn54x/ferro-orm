@@ -4337,6 +4337,20 @@ pub fn primary_key_kept_warning(table: &str, declared: &[String], live: &[String
     )
 }
 
+/// [`ReportKind::PrimaryKeyKept`]: the primary-key column `table.column`
+/// changes type, which no door runs in place, so it keeps its type; `recipe`
+/// is the primary-key recipe that makes the change.
+pub fn primary_key_type_kept_warning(table: &str, column: &str, recipe: &str) -> Report {
+    Report::new(
+        ReportKind::PrimaryKeyKept,
+        Subject::column(table, column),
+        format!(
+            "column \"{table}\".\"{column}\" is in the primary key and changes type, which \
+             no door runs in place, so it keeps its type; {recipe}"
+        ),
+    )
+}
+
 /// The pass's warning for a live table hint on a pass that does not
 /// reconcile (`connect(auto_migrate=True)`, `create_tables()`): table `new` is
 /// neither renamed nor created beside its old self, nor is any new table in

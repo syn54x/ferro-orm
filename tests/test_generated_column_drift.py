@@ -30,7 +30,7 @@ import pytest
 import ferro
 from ferro.migrations import MigrationRefused, baseline
 from tests._pass_harness import auto_migrate, schema_sql
-from tests.test_auto_migrate_generated_columns import KEYED_TWINS
+from tests.test_auto_migrate_generated_columns import KEYED_TWINS, MIXED_TWINS
 from tests.test_migrate_drift import drift_api
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     pkg,
@@ -490,14 +490,88 @@ def test_what_reads_a_key_column_whose_type_change_is_withheld_is_not_compared(
 
     [held] = [op for op in report.operations if op.get("held")]
     assert (held["kind"], held["column"]) == ("AlterColumnType", "code")
-    assert [artifact["kind"] for artifact in held["held"]] == [kind]
-    [artifact] = held["held"]
+    assert [artifact["kind"] for artifact in held["held"]["artifacts"]] == [kind]
+    [artifact] = held["held"]["artifacts"]
     subject = {
         "check": "ck_ticket_coded check",
         "generated_column": "ticket.n generated expression",
     }.get(kind, f"{artifact['name']} policy")
     noun = "input's" if kind == "generated_column" else "column's"
-    assert report.lines == [
-        "ticket.code has type int, snapshot says varchar",
-        f"{subject} not compared while its {noun} type change is withheld",
+    type_line, held_line = report.lines
+    assert type_line == "ticket.code has type int, snapshot says varchar"
+    assert held_line.startswith(
+        f"{subject} not compared while its {noun} type change is withheld; "
+        'resolve the type change of "code" first: '
+    ), held_line
+    assert "ferro migrate new --data-step" in held_line, held_line
+
+
+def mixed_retyped_by_hand(db, kind: str) -> None:
+    """``qty`` back to ``integer`` and ``code`` to an integer key by hand,
+    with the artifact over both written for them."""
+    retype = (
+        'ALTER TABLE "ticket" ALTER COLUMN "qty" TYPE integer',
+        RETYPE_KEY,
+    )
+    if kind == "running_check":
+        db.execute('ALTER TABLE "ticket" DROP CONSTRAINT "ck_ticket_both"')
+        for statement in retype:
+            db.execute(statement)
+        db.execute(
+            'ALTER TABLE "ticket" ADD CONSTRAINT "ck_ticket_both" '
+            'CHECK ("qty" + "code" > 0)'
+        )
+    elif kind == "running_generated":
+        db.execute('ALTER TABLE "ticket" DROP COLUMN "n"')
+        for statement in retype:
+            db.execute(statement)
+        db.execute(
+            'ALTER TABLE "ticket" ADD COLUMN "n" integer NOT NULL '
+            'GENERATED ALWAYS AS ("qty" + "code") STORED'
+        )
+    else:
+        db.execute('ALTER TABLE "ticket" DROP CONSTRAINT "ck_ticket_both"')
+        db.execute('ALTER TABLE "ticket" DROP COLUMN "total"')
+        for statement in retype:
+            db.execute(statement)
+        db.execute(
+            'ALTER TABLE "ticket" ADD COLUMN "total" integer NOT NULL '
+            'GENERATED ALWAYS AS ("qty" + 1) STORED'
+        )
+        db.execute(
+            'ALTER TABLE "ticket" ADD CONSTRAINT "ck_ticket_both" '
+            'CHECK ("total" + "code" > 0)'
+        )
+
+
+@pytest.mark.parametrize("kind", list(MIXED_TWINS))
+def test_an_artifact_over_a_running_and_a_withheld_column_is_held_on_the_drift_line(
+    project, pkg, db, capsys, kind
+):
+    """``qty`` and the key ``code`` both differ from the snapshot; the check
+    or generated column reads both. Drift reads without asking a pair for it
+    and names it held, with the key's fix, after the type lines."""
+    if db.backend != "postgres":
+        pytest.skip("the hand edit is Postgres's")
+    configure(project, pkg, db.backend)
+    write_models(project, pkg, MIXED_TWINS[kind][1])
+    new("create_ticket")
+    assert run("migrate", "up", "--url", db.url) == 0
+    capsys.readouterr()
+    mixed_retyped_by_hand(db, kind)
+
+    report = drift_api(db)
+
+    subject = (
+        "ticket.n generated expression not compared while its input's"
+        if kind == "running_generated"
+        else "ck_ticket_both check not compared while its column's"
+    )
+    held = [line for line in report.lines if "withheld" in line]
+    assert held == [
+        f"{subject} type change is withheld; "
+        'resolve the type change of "code" first: '
+        + held[0].split('resolve the type change of "code" first: ', 1)[1]
     ], report.lines
+    assert "ferro migrate new --data-step" in held[0], held
+    assert "ticket.code has type int, snapshot says varchar" in report.lines
