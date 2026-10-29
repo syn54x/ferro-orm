@@ -286,10 +286,10 @@ class ModelMetaclass(type(BaseModel)):
         )
         cls.__ferro_renamed_from__ = mcs._resolve_renamed_from(name, namespace)
 
-        # The schema compile needs the class registered (it resolves the
-        # model's own relations through the registry), and it is where most
-        # declaration refusals raise; so a refused class is rolled back out of
-        # every store, leaving the registry as it was before the class body.
+        # Refusals raise from the schema compile, which itself writes the
+        # registry (the envelope, join tables), so no order puts every refusal
+        # before every write: a refused class is rolled back out of every
+        # store instead, leaving the registry as it was before the class body.
         before = REGISTRY.snapshot()
         try:
             for field_name, metadata in pending_relations:
