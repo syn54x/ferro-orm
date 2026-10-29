@@ -3361,9 +3361,16 @@ pub fn save_bulk_records<'py>(
                     // a chunk that fails takes every earlier chunk with it.
                     Ok(n) => rows_affected += n,
                     Err(e) => {
-                        return Err(crate::errors::map_db_error(
+                        // A bulk insert binds plain values, so only its
+                        // generated columns compute.
+                        return Err(crate::errors::map_write_error(
                             &format!("Bulk save failed for '{}'", name),
                             e,
+                            Some(&crate::errors::GeneratedWrite {
+                                table: &table_name,
+                                generated: &schema.meta.generated_cols,
+                                computes: false,
+                            }),
                         ));
                     }
                 }
