@@ -243,6 +243,7 @@ pub(crate) fn render_from(
                                 dialect,
                                 ConstraintMode::Plain,
                             )
+                            .map_err(|message| EmissionError { message })?
                             .ok_or_else(|| EmissionError {
                                 message: format!(
                                     "Label rename on '{table}.{column}' has no CHECK '{}' in \
@@ -684,9 +685,10 @@ pub(crate) fn render_from(
                     ),
                 };
                 match new_side.check_body(table, name).ok_or_else(missing)? {
-                    Body::Canonical(_) => {
+                    Body::Canonical => {
                         let emission =
                             render_check_addition(table, model, name, dialect, constraints)
+                                .map_err(|message| EmissionError { message })?
                                 .ok_or_else(missing)?;
                         out.statements.extend(emission.statement);
                         out.reports.extend(emission.warning);
@@ -710,9 +712,10 @@ pub(crate) fn render_from(
                     ),
                 };
                 match new_side.check_body(table, name).ok_or_else(missing)? {
-                    Body::Canonical(_) => {
+                    Body::Canonical => {
                         let emission =
                             render_check_rebuild(table, model, name, dialect, constraints)
+                                .map_err(|message| EmissionError { message })?
                                 .ok_or_else(missing)?;
                         out.statements.extend(emission.statements);
                         out.reports.extend(emission.warning);

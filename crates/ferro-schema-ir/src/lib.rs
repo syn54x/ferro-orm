@@ -353,6 +353,15 @@ pub enum CheckExpr {
         op: CheckCmpOp,
         other: CheckOperand,
     },
+    /// A comparison of two value expressions (ADR-0059), emitted only when
+    /// an operand is not a plain column or literal: a plain comparison stays
+    /// [`CheckExpr::Cmp`], so its IR bytes never change.
+    #[serde(rename = "compare")]
+    Compare {
+        left: ValueExpr,
+        op: CheckCmpOp,
+        right: ValueExpr,
+    },
     /// Column membership in a pre-rendered literal list.
     #[serde(rename = "in")]
     In { column: String, values: Vec<String> },
@@ -1028,6 +1037,33 @@ mod tests {
             serde_json::from_value(ir.clone()).expect("schema IR must deserialize");
         let encoded = serde_json::to_value(&envelope).expect("schema IR must serialize");
         assert_eq!(encoded, ir, "schema round-trip must not drift");
+    }
+
+    #[test]
+    fn a_check_comparing_value_expressions_is_the_compare_kind() {
+        let wire = serde_json::json!({
+            "kind": "compare",
+            "left": {"kind": "func", "name": "abs", "args": [{"kind": "column", "name": "amount"}]},
+            "op": "gt",
+            "right": {"kind": "literal", "token": "1000"}
+        });
+        let expr: CheckExpr = serde_json::from_value(wire.clone()).expect("compare deserializes");
+        assert_eq!(
+            expr,
+            CheckExpr::Compare {
+                left: ValueExpr::Func {
+                    name: "abs".to_string(),
+                    args: vec![ValueExpr::Column {
+                        name: "amount".to_string()
+                    }],
+                },
+                op: CheckCmpOp::Gt,
+                right: ValueExpr::Literal {
+                    token: "1000".to_string()
+                },
+            }
+        );
+        assert_eq!(serde_json::to_value(&expr).expect("serializes"), wire);
     }
 
     #[test]

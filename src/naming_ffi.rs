@@ -201,15 +201,26 @@ pub fn _render_check_body(column: String, values: Vec<String>) -> String {
 }
 
 /// Render a table-check CHECK body from a structured predicate JSON object
-/// (the `predicate` field of `SchemaTableCheck`). Byte-identical to the Rust
+/// (the `predicate` field of `SchemaTableCheck`) for `dialect`, over the
+/// table's columns `columns_json` (its `SchemaColumn`s; a check calling a
+/// value function widens by their types). Byte-identical to the Rust
 /// emitters (I-1).
 #[pyfunction]
-pub fn _render_table_check_body(predicate_json: String) -> PyResult<String> {
+#[pyo3(signature = (predicate_json, dialect="postgres".to_string(), columns_json="[]".to_string()))]
+pub fn _render_table_check_body(
+    predicate_json: String,
+    dialect: String,
+    columns_json: String,
+) -> PyResult<String> {
     let predicate: ferro_schema_ir::CheckExpr =
         serde_json::from_str(&predicate_json).map_err(|e| {
             pyo3::exceptions::PyValueError::new_err(format!("Invalid check predicate: {e}"))
         })?;
-    Ok(ferro_ddl_lowering::render_check_expr(&predicate))
+    let columns: Vec<ferro_schema_ir::SchemaColumn> = serde_json::from_str(&columns_json)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid columns: {e}")))?;
+    let dialect = crate::migrate::parse_dialect(&dialect)?;
+    ferro_ddl_lowering::render_check_expr(&predicate, dialect, &columns)
+        .map_err(pyo3::exceptions::PyValueError::new_err)
 }
 
 /// Canonical row-policy name (`rls_<table>_<name>`) — the shared builder the

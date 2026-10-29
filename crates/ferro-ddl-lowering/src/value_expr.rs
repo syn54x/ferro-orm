@@ -429,7 +429,8 @@ pub fn value_expr_columns(expr: &ValueExpr) -> BTreeSet<String> {
 }
 
 /// Every column a table check's body reads: the column each leaf names,
-/// and a comparison's other column.
+/// a comparison's other column, and every column either operand of a
+/// value-expression comparison reads.
 pub fn check_expr_columns(expr: &ferro_schema_ir::CheckExpr) -> BTreeSet<String> {
     use ferro_schema_ir::{CheckExpr, CheckOperand};
     let mut out = BTreeSet::new();
@@ -446,6 +447,10 @@ pub fn check_expr_columns(expr: &ferro_schema_ir::CheckExpr) -> BTreeSet<String>
                 if let CheckOperand::Column { name } = other {
                     out.insert(name.clone());
                 }
+            }
+            CheckExpr::Compare { left, right, .. } => {
+                collect_columns(left, &mut out);
+                collect_columns(right, &mut out);
             }
             CheckExpr::IsNull { column }
             | CheckExpr::IsNotNull { column }

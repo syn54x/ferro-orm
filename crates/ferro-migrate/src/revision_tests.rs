@@ -134,6 +134,7 @@ fn flavor_check_fact() -> LiveTableFacts {
             ferro_owned: true,
             validated: true,
             column: None,
+            printed: None,
         }],
         ..LiveTableFacts::default()
     }
@@ -590,6 +591,7 @@ fn a_dropped_table_goes_before_its_type_and_comes_back_after_it() {
             ferro_owned: true,
             validated: true,
             column: None,
+            printed: None,
         }],
         row_security: LiveRowSecurity {
             enabled: true,

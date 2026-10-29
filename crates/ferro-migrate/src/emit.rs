@@ -103,6 +103,7 @@ fn name_sqlite_inline_fks(create_sql: String, model: &SchemaModel) -> String {
 fn append_named_table_checks(
     create_sql: String,
     model: &SchemaModel,
+    dialect: Dialect,
 ) -> Result<String, EmissionError> {
     if model.table_checks.is_empty() {
         return Ok(create_sql);
@@ -111,13 +112,18 @@ fn append_named_table_checks(
         .table_checks
         .iter()
         .map(|check| {
-            format!(
-                "CONSTRAINT {} CHECK ({})",
-                quote_ident(&check.name),
-                render_table_check_body(check)
-            )
+            let body =
+                render_table_check_body(check, dialect, &model.columns).map_err(|message| {
+                    EmissionError {
+                        message: format!("{message} on table '{}'", model.table_name),
+                    }
+                })?;
+            Ok(format!(
+                "CONSTRAINT {} CHECK ({body})",
+                quote_ident(&check.name)
+            ))
         })
-        .collect::<Vec<_>>()
+        .collect::<Result<Vec<_>, EmissionError>>()?
         .join(", ");
     // Both builders close the column/constraint list with a literal " )" and
     // emit nothing after it for the table options ferro sets. A sea-query
@@ -277,7 +283,7 @@ pub fn render_create_table_as(
         Dialect::Sqlite => name_sqlite_inline_fks(table_stmt.build(SqliteQueryBuilder), model),
         Dialect::Postgres => table_stmt.build(PostgresQueryBuilder),
     };
-    let create_sql = append_named_table_checks(create_sql, model)?;
+    let create_sql = append_named_table_checks(create_sql, model, dialect)?;
 
     let (post_create_sqls, reports) = post_create_artifacts(model, &check_emissions, dialect)?;
     Ok(CreateTableEmission {

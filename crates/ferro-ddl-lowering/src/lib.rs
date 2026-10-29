@@ -952,20 +952,30 @@ pub fn table_check_constraint_name(table_lower: &str, suffix: &str) -> String {
     raw
 }
 
-/// Render a structured check predicate to its CHECK body SQL fragment.
-pub fn render_check_expr(expr: &ferro_schema_ir::CheckExpr) -> String {
-    match expr {
-        ferro_schema_ir::CheckExpr::And { left, right } => format!(
-            "({}) AND ({})",
-            render_check_expr(left),
-            render_check_expr(right)
-        ),
-        ferro_schema_ir::CheckExpr::Or { left, right } => format!(
-            "({}) OR ({})",
-            render_check_expr(left),
-            render_check_expr(right)
-        ),
-        ferro_schema_ir::CheckExpr::Not { child } => format!("NOT ({})", render_check_expr(child)),
+/// Render a structured check predicate to its CHECK body SQL fragment, for
+/// `dialect` over the table's `columns`.
+///
+/// Every kind but `compare` renders the same on both dialects. A `compare`
+/// renders each operand through [`render_value_expr`], the whole comparison
+/// parenthesised, so a check calling a value function reads as a generated
+/// column's expression does.
+///
+/// # Errors
+/// As [`render_value_expr`]: a call of a function the table lacks.
+pub fn render_check_expr(
+    expr: &ferro_schema_ir::CheckExpr,
+    dialect: Dialect,
+    columns: &[ferro_schema_ir::SchemaColumn],
+) -> Result<String, String> {
+    let render = |expr: &ferro_schema_ir::CheckExpr| render_check_expr(expr, dialect, columns);
+    Ok(match expr {
+        ferro_schema_ir::CheckExpr::And { left, right } => {
+            format!("({}) AND ({})", render(left)?, render(right)?)
+        }
+        ferro_schema_ir::CheckExpr::Or { left, right } => {
+            format!("({}) OR ({})", render(left)?, render(right)?)
+        }
+        ferro_schema_ir::CheckExpr::Not { child } => format!("NOT ({})", render(child)?),
         ferro_schema_ir::CheckExpr::IsNull { column } => {
             format!("{} IS NULL", quote_ident(column))
         }
@@ -979,13 +989,19 @@ pub fn render_check_expr(expr: &ferro_schema_ir::CheckExpr) -> String {
             };
             format!("{} {} {}", quote_ident(column), check_cmp_op_sql(*op), rhs)
         }
+        ferro_schema_ir::CheckExpr::Compare { left, op, right } => format!(
+            "({} {} {})",
+            render_value_expr(left, dialect, columns)?,
+            check_cmp_op_sql(*op),
+            render_value_expr(right, dialect, columns)?
+        ),
         ferro_schema_ir::CheckExpr::In { column, values } => {
             format!("{} IN ({})", quote_ident(column), values.join(", "))
         }
         ferro_schema_ir::CheckExpr::Like { column, pattern } => {
             format!("{} LIKE {}", quote_ident(column), pattern)
         }
-    }
+    })
 }
 
 fn check_cmp_op_sql(op: ferro_schema_ir::CheckCmpOp) -> &'static str {
@@ -999,9 +1015,18 @@ fn check_cmp_op_sql(op: ferro_schema_ir::CheckCmpOp) -> &'static str {
     }
 }
 
-/// The CHECK body for a table check — byte-identical across emitters (I-1).
-pub fn render_table_check_body(check: &ferro_schema_ir::SchemaTableCheck) -> String {
-    render_check_expr(&check.predicate)
+/// The CHECK body for a table check on `dialect`, over its table's
+/// `columns` — byte-identical across emitters (I-1).
+///
+/// # Errors
+/// As [`render_check_expr`], naming the check.
+pub fn render_table_check_body(
+    check: &ferro_schema_ir::SchemaTableCheck,
+    dialect: Dialect,
+    columns: &[ferro_schema_ir::SchemaColumn],
+) -> Result<String, String> {
+    render_check_expr(&check.predicate, dialect, columns)
+        .map_err(|message| format!("Cannot render CHECK constraint '{}': {message}", check.name))
 }
 
 /// The CHECK body for a `db_check` enum constraint — byte-identical across the
@@ -1403,18 +1428,23 @@ pub fn declared_check_names(model: &ferro_schema_ir::SchemaModel) -> Vec<String>
 ///
 /// `mode` appends ` NOT VALID` to the Postgres ADD ([`ConstraintMode`]); every
 /// door but the generator's staged constraint passes `Plain`.
+///
+/// # Errors
+/// A table check whose body does not render ([`render_table_check_body`]).
 pub fn render_check_addition(
     table: &str,
     model: &ferro_schema_ir::SchemaModel,
     name: &str,
     dialect: Dialect,
     mode: ConstraintMode,
-) -> Option<CheckEmission> {
+) -> Result<Option<CheckEmission>, String> {
     if let Some(check) = model.table_checks.iter().find(|check| check.name == name) {
-        return Some(render_add_table_check(table, check, dialect, mode));
+        return render_add_table_check(table, model, check, dialect, mode).map(Some);
     }
-    let check = model.checks.iter().find(|check| check.name == name)?;
-    Some(match dialect {
+    let Some(check) = model.checks.iter().find(|check| check.name == name) else {
+        return Ok(None);
+    };
+    Ok(Some(match dialect {
         Dialect::Postgres => render_db_check(table, check, dialect, mode),
         Dialect::Sqlite => CheckEmission {
             statement: None,
@@ -1431,7 +1461,7 @@ pub fn render_check_addition(
                 ),
             )),
         },
-    })
+    }))
 }
 
 /// `ALTER TABLE … ADD CONSTRAINT <name> <definition>` for a CHECK put back
@@ -1451,17 +1481,18 @@ pub fn render_check_restore(table: &str, name: &str, definition: &str) -> String
 /// The table-check half of [`render_check_addition`].
 fn render_add_table_check(
     table: &str,
+    model: &ferro_schema_ir::SchemaModel,
     check: &ferro_schema_ir::SchemaTableCheck,
     dialect: Dialect,
     mode: ConstraintMode,
-) -> CheckEmission {
-    match dialect {
+) -> Result<CheckEmission, String> {
+    Ok(match dialect {
         Dialect::Postgres => CheckEmission {
             statement: Some(format!(
                 "ALTER TABLE {} ADD CONSTRAINT {} CHECK ({}){}",
                 quote_ident(table),
                 quote_ident(&check.name),
-                render_table_check_body(check),
+                render_table_check_body(check, dialect, &model.columns)?,
                 mode.suffix(),
             )),
             inline: None,
@@ -1482,7 +1513,7 @@ fn render_add_table_check(
                 ),
             )),
         },
-    }
+    })
 }
 
 /// Outcome of rendering a CHECK constraint rebuild (ADR-0015).
@@ -1554,7 +1585,9 @@ pub fn render_validate_constraint(table: &str, name: &str) -> String {
 /// `target` is `(name, body)` pairs: a declaration's canonical renderings
 /// ([`declared_check_bodies`]), or a live database's catalog text when the
 /// plan leads to one. One normalizer compares them
-/// ([`normalize_check_definition`], ADR-0015).
+/// ([`normalize_check_definition`], ADR-0015). This decides check drift on
+/// SQLite, which stores the body as written; on Postgres the planner
+/// compares the bodies as Postgres printed them (ADR-0060).
 ///
 /// Absent-live names are an add (`missing_check_names`, #343), not a rebuild.
 /// Live names the target does not hold are leftover handling (#345).
@@ -1572,18 +1605,27 @@ pub fn drifted_check_names(target: &[(String, String)], live: &[(String, String)
         .collect()
 }
 
-/// Every CHECK the model declares as `(name, canonical body)`, table checks
-/// first: the bodies [`render_check_addition`] writes.
-pub fn declared_check_bodies(model: &ferro_schema_ir::SchemaModel) -> Vec<(String, String)> {
+/// Every CHECK the model declares as `(name, canonical body)` on `dialect`,
+/// table checks first: the bodies [`render_check_addition`] writes.
+///
+/// # Errors
+/// The first table check whose body does not render.
+pub fn declared_check_bodies(
+    model: &ferro_schema_ir::SchemaModel,
+    dialect: Dialect,
+) -> Result<Vec<(String, String)>, String> {
     model
         .table_checks
         .iter()
-        .map(|check| (check.name.clone(), render_table_check_body(check)))
+        .map(|check| {
+            render_table_check_body(check, dialect, &model.columns)
+                .map(|body| (check.name.clone(), body))
+        })
         .chain(
             model
                 .checks
                 .iter()
-                .map(|check| (check.name.clone(), render_check_body(check))),
+                .map(|check| Ok((check.name.clone(), render_check_body(check)))),
         )
         .collect()
 }
@@ -1593,15 +1635,20 @@ pub fn declared_check_bodies(model: &ferro_schema_ir::SchemaModel) -> Vec<(Strin
 ///
 /// `mode` stages the ADD half ([`ConstraintMode`]; ADR-0043 stages the `ADD`
 /// half of a rebuild on an existing Postgres table like any other add).
+///
+/// # Errors
+/// A table check whose body does not render ([`render_table_check_body`]).
 pub fn render_check_rebuild(
     table: &str,
     model: &ferro_schema_ir::SchemaModel,
     name: &str,
     dialect: Dialect,
     mode: ConstraintMode,
-) -> Option<CheckRebuildEmission> {
-    let body = declared_check_body(model, name)?;
-    Some(match dialect {
+) -> Result<Option<CheckRebuildEmission>, String> {
+    let Some(body) = declared_check_body(model, name, dialect)? else {
+        return Ok(None);
+    };
+    Ok(Some(match dialect {
         Dialect::Postgres => CheckRebuildEmission {
             statements: vec![
                 render_drop_constraint(table, name),
@@ -1629,18 +1676,28 @@ pub fn render_check_rebuild(
                 ),
             )),
         },
-    })
+    }))
 }
 
-fn declared_check_body(model: &ferro_schema_ir::SchemaModel, name: &str) -> Option<String> {
+/// The canonical body on `dialect` of the check `name` that `model`
+/// declares, a table check or a column check; `None` when it declares none
+/// of that name.
+///
+/// # Errors
+/// A table check whose body does not render ([`render_table_check_body`]).
+pub fn declared_check_body(
+    model: &ferro_schema_ir::SchemaModel,
+    name: &str,
+    dialect: Dialect,
+) -> Result<Option<String>, String> {
     if let Some(check) = model.table_checks.iter().find(|check| check.name == name) {
-        return Some(render_table_check_body(check));
+        return render_table_check_body(check, dialect, &model.columns).map(Some);
     }
-    model
+    Ok(model
         .checks
         .iter()
         .find(|check| check.name == name)
-        .map(render_check_body)
+        .map(render_check_body))
 }
 
 /// Live ferro-owned CHECK names the model no longer declares, in live order
@@ -4369,6 +4426,44 @@ impl std::error::Error for HintError {}
 mod tests {
     use super::*;
 
+    // A plain check (no `compare`) renders the same on both dialects and
+    // over any columns, so the plain-check tests below call these shims; the
+    // `compare` tests call the renderers through `super::`.
+    fn render_check_expr(expr: &ferro_schema_ir::CheckExpr) -> String {
+        super::render_check_expr(expr, Dialect::Postgres, &[]).expect("a plain check renders")
+    }
+
+    fn render_table_check_body(check: &ferro_schema_ir::SchemaTableCheck) -> String {
+        super::render_table_check_body(check, Dialect::Postgres, &[])
+            .expect("a plain check renders")
+    }
+
+    fn declared_check_bodies(model: &ferro_schema_ir::SchemaModel) -> Vec<(String, String)> {
+        super::declared_check_bodies(model, Dialect::Postgres).expect("plain checks render")
+    }
+
+    fn render_check_addition(
+        table: &str,
+        model: &ferro_schema_ir::SchemaModel,
+        name: &str,
+        dialect: Dialect,
+        mode: ConstraintMode,
+    ) -> Option<CheckEmission> {
+        super::render_check_addition(table, model, name, dialect, mode)
+            .expect("a plain check renders")
+    }
+
+    fn render_check_rebuild(
+        table: &str,
+        model: &ferro_schema_ir::SchemaModel,
+        name: &str,
+        dialect: Dialect,
+        mode: ConstraintMode,
+    ) -> Option<CheckRebuildEmission> {
+        super::render_check_rebuild(table, model, name, dialect, mode)
+            .expect("a plain check renders")
+    }
+
     #[test]
     fn a_generated_expression_is_set_and_dropped_in_place_on_postgres() {
         assert_eq!(
@@ -5164,6 +5259,68 @@ mod tests {
                 }),
             }),
             "NOT (\"deleted_at\" IS NOT NULL)"
+        );
+    }
+
+    fn abs_amount_over_1000() -> ferro_schema_ir::CheckExpr {
+        use ferro_schema_ir::{CheckCmpOp, CheckExpr, ValueExpr};
+        CheckExpr::Compare {
+            left: ValueExpr::Func {
+                name: "abs".to_string(),
+                args: vec![ValueExpr::Column {
+                    name: "amount".to_string(),
+                }],
+            },
+            op: CheckCmpOp::Gt,
+            right: ValueExpr::Literal {
+                token: "1000".to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn a_check_comparing_value_expressions_renders_them_per_dialect() {
+        let bigint = [col_with_db_type("amount", "integer", None, Some("bigint"))];
+        for dialect in [Dialect::Postgres, Dialect::Sqlite] {
+            assert_eq!(
+                super::render_check_expr(&abs_amount_over_1000(), dialect, &bigint),
+                Ok("(abs(\"amount\") > 1000)".to_string())
+            );
+        }
+        // An `int` field is `integer` on Postgres, widened to 64 bits as a
+        // generated column's expression is; SQLite computes at 64 bits.
+        let int = [col_with_db_type("amount", "integer", None, None)];
+        assert_eq!(
+            super::render_check_expr(&abs_amount_over_1000(), Dialect::Postgres, &int),
+            Ok("(abs(CAST(\"amount\" AS bigint)) > 1000)".to_string())
+        );
+        assert_eq!(
+            super::render_check_expr(&abs_amount_over_1000(), Dialect::Sqlite, &int),
+            Ok("(abs(\"amount\") > 1000)".to_string())
+        );
+    }
+
+    #[test]
+    fn a_compare_calling_an_unknown_function_does_not_render() {
+        let mut expr = abs_amount_over_1000();
+        if let ferro_schema_ir::CheckExpr::Compare { left, .. } = &mut expr {
+            *left = ferro_schema_ir::ValueExpr::Func {
+                name: "random".to_string(),
+                args: Vec::new(),
+            };
+        }
+        let rendered = super::render_check_expr(
+            &ferro_schema_ir::CheckExpr::Not {
+                child: Box::new(expr),
+            },
+            Dialect::Postgres,
+            &[],
+        );
+        assert!(
+            rendered
+                .as_ref()
+                .is_err_and(|e| e.contains("unknown value function 'random'")),
+            "{rendered:?}"
         );
     }
 
