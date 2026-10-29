@@ -41,6 +41,7 @@ from .._core import (
     _ddl_fk_name,
     _render_check_body,
     _render_generated_expression,
+    _render_sqlite_generated_guard,
     _render_table_check_body,
     _resolve_storage_type,
 )
@@ -120,8 +121,10 @@ def get_metadata(database: "str | None" = None) -> "sa.MetaData":
     A generated column's expression and a table check's body are written
     for the engine the metadata compiles against: `least(...)` on Postgres
     and `min(...)` on SQLite, so `metadata.create_all(engine)` builds a
-    table either database runs. Compiling them for any other database
-    raises `sqlalchemy.exc.CompileError`.
+    table either database runs. On SQLite a generated column also gets the
+    range check Ferro writes there, so a value too large for the Postgres
+    column fails on both. Compiling them for any other database raises
+    `sqlalchemy.exc.CompileError`.
 
     A column's `nullable` follows the `nullable` of its
     [`FerroField`][ferro.FerroField] or [`ForeignKey`][ferro.ForeignKey]
@@ -184,6 +187,30 @@ if sa is not None:
             )
         return text
 
+    class _SqliteGuard(sa.CheckConstraint):
+        """A generated column's SQLite range guard, written after the
+        column's ``STORED`` on SQLite and nowhere else: Postgres raises on
+        the overflow itself."""
+
+        inherit_cache = True
+
+    @compiles(_SqliteGuard)
+    def _compile_sqlite_guard(element: Any, compiler: Any, **kw: Any) -> str:
+        if compiler.dialect.name != "sqlite":
+            return ""
+        return compiler.visit_column_check_constraint(element, **kw)
+
+
+def _sqlite_guard(model_ir: Dict[str, Any], column: str) -> list[Any]:
+    """The SQLite range guard of generated column ``column``, as the
+    column constraint every Ferro door writes; none when nothing in the
+    expression can overflow."""
+    guard = _render_sqlite_generated_guard(json.dumps(model_ir), column)
+    if guard is None:
+        return []
+    name, body = guard
+    return [_SqliteGuard(body, name=sa.sql.quoted_name(name, quote=True))]
+
 
 def _ddl_text(render: Callable[[str], str], dialect: "str | None") -> Any:
     """``render``'s text for ``dialect``, or for whichever of Postgres and
@@ -236,6 +263,10 @@ def _build_sa_table_from_ir(
             if col.get("generated")
             else []
         )
+        # SQLite's range guard (`CONSTRAINT "_ferro_range_<col>" CHECK
+        # (…)`), so a value Postgres refuses fails there too.
+        if col.get("generated") and dialect != "postgres":
+            computed.extend(_sqlite_guard(model_ir, col_name))
         columns.append(
             sa.Column(
                 col_name,
