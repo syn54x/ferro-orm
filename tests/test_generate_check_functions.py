@@ -349,6 +349,8 @@ def test_a_step_that_can_overflow_under_an_or_is_refused(body, step):
     message = str(caught.value)
     assert "Box.__ferro_checks__ check 'c'" in message
     assert f"computes {step} under an OR" in message
+    assert "a row where that operation overflows" in message
+    assert "step" not in message
     assert "generated column" in message
 
 
