@@ -14,6 +14,15 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # Every job compiles Ferro's own crates from scratch (rust-cache keeps only
+  # dependencies): 2.5 to 4 minutes a job. sccache keys each rustc call by its
+  # inputs and stores the object in the Actions cache, so an unchanged crate is
+  # a download. Incremental compilation is off because sccache cannot cache it.
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: sccache
+  CARGO_INCREMENTAL: "0"
+
 jobs:
   lint-and-format:
     name: Lint & Format (Pre-commit / Prek)
@@ -37,10 +46,14 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      - name: Cache compiled Rust crates
+        uses: mozilla-actions/sccache-action@v0.0.11
+
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v1
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
 
       - name: Cache pre-commit hook environments
@@ -79,10 +92,16 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache compiled Rust crates
+        uses: mozilla-actions/sccache-action@v0.0.11
+
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v1
+          shared-key: maturin-develop
+          key: py3.13
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
 
       - name: Install documentation and test dependencies
@@ -117,10 +136,14 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Cache compiled Rust crates
+        uses: mozilla-actions/sccache-action@v0.0.11
+
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
 
       - name: Run Rust tests
@@ -154,10 +177,16 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache compiled Rust crates
+        uses: mozilla-actions/sccache-action@v0.0.11
+
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v1
+          shared-key: maturin-develop
+          key: py3.13
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
 
       - name: Install dependencies
@@ -205,10 +234,16 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache compiled Rust crates
+        uses: mozilla-actions/sccache-action@v0.0.11
+
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v1
+          shared-key: maturin-develop
+          key: py${{ matrix.python-version }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
 
       - name: Install dependencies
@@ -280,10 +315,16 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache compiled Rust crates
+        uses: mozilla-actions/sccache-action@v0.0.11
+
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v1
+          shared-key: maturin-develop
+          key: py3.13
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
 
       - name: Install dependencies
