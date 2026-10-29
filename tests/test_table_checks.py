@@ -407,9 +407,11 @@ def test_alembic_metadata_matches_the_runtime_check_names_and_bodies():
         "Transfer", json.dumps(payload), "postgres"
     )
 
+    from sqlalchemy.dialects import postgresql
+
     table = get_metadata().tables["transfer"]
     constraints = {
-        c.name: str(c.sqltext)
+        c.name: str(c.sqltext.compile(dialect=postgresql.dialect()))
         for c in table.constraints
         if isinstance(c, sa.CheckConstraint)
     }

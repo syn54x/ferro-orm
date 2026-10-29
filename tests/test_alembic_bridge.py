@@ -282,3 +282,76 @@ async def test_explicit_foreign_key_shadow_id_auto_migrate_roundtrip(db_url):
             lambda s: s.job_role_id == role.id
         ).first()
         assert by_shadow_id is not None and by_shadow_id.id == card.id
+
+
+PRICED = """
+from ferro import Check, Field, Model, fn
+
+
+class Priced(Model):
+    __ferro_checks__ = (
+        Check("capped", lambda priced: fn.least(priced.qty, 10) > 0),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    qty: int
+    capped_qty: int | None = Field(
+        default=None, generated=lambda priced: fn.least(priced.qty, 10)
+    )
+"""
+
+
+def _priced_project(tmp_path, monkeypatch, dialects: str) -> None:
+    """A configured project with one model whose generated column and check
+    both call `fn.least`, which SQLite spells `min`."""
+    import sys
+
+    monkeypatch.delenv("FERRO_CONFIG", raising=False)
+    package = f"ferro_gm_{tmp_path.name.replace('-', '_').lower()}"
+    (tmp_path / package).mkdir()
+    (tmp_path / package / "__init__.py").write_text("")
+    (tmp_path / package / "models.py").write_text(PRICED)
+    (tmp_path / "ferro.toml").write_text(
+        f'models = ["{package}.models"]\ndialects = {dialects}\n'
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setattr(sys, "modules", dict(sys.modules))
+
+
+@pytest.mark.usefixtures("isolated_imports")
+def test_get_metadata_on_a_sqlite_project_creates_the_sqlite_table(
+    tmp_path, monkeypatch
+):
+    """A SQLite project's metadata compiles the generated expression and
+    the check body SQLite runs, so `create_all` builds a working table."""
+    _priced_project(tmp_path, monkeypatch, '["sqlite"]')
+    metadata = get_metadata()
+    engine = sa.create_engine(f"sqlite:///{tmp_path / 'priced.db'}")
+    metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.execute(sa.text('INSERT INTO "priced" ("qty") VALUES (25)'))
+        assert (
+            connection.execute(
+                sa.text('SELECT "capped_qty" FROM "priced"')
+            ).scalar_one()
+            == 10
+        )
+
+
+@pytest.mark.usefixtures("isolated_imports")
+def test_get_metadata_compiles_each_dialects_own_spelling(tmp_path, monkeypatch):
+    """One metadata, compiled per engine: `min` on SQLite, `least` on
+    Postgres, and a refusal naming both on any other database."""
+    from sqlalchemy.dialects import mysql, postgresql, sqlite
+    from sqlalchemy.schema import CreateTable
+
+    _priced_project(tmp_path, monkeypatch, '["postgres", "sqlite"]')
+    table = get_metadata().tables["priced"]
+
+    sqlite_ddl = str(CreateTable(table).compile(dialect=sqlite.dialect()))
+    assert 'min("qty", 10)' in sqlite_ddl and "least" not in sqlite_ddl
+    postgres_ddl = str(CreateTable(table).compile(dialect=postgresql.dialect()))
+    assert 'least(CAST("qty" AS bigint), 10)' in postgres_ddl
+    assert "min(" not in postgres_ddl
+    with pytest.raises(sa.exc.CompileError, match="Postgres and SQLite"):
+        CreateTable(table).compile(dialect=mysql.dialect())

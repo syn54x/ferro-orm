@@ -117,6 +117,12 @@ def get_metadata(database: "str | None" = None) -> "sa.MetaData":
     class in lowercase (or after the column when the annotation is not an
     `enum.Enum`), so Postgres autogenerate and DDL compilation succeed.
 
+    A generated column's expression and a table check's body are written
+    for the engine the metadata compiles against: `least(...)` on Postgres
+    and `min(...)` on SQLite, so `metadata.create_all(engine)` builds a
+    table either database runs. Compiling them for any other database
+    raises `sqlalchemy.exc.CompileError`.
+
     A column's `nullable` follows the `nullable` of its
     [`FerroField`][ferro.FerroField] or [`ForeignKey`][ferro.ForeignKey]
     when that is a boolean. The default, `nullable="infer"`, uses whether
@@ -150,11 +156,51 @@ def get_metadata(database: "str | None" = None) -> "sa.MetaData":
     return metadata
 
 
+#: The SQLAlchemy dialect name of each dialect the core renders for.
+_SA_DIALECT_NAMES = {"postgres": "postgresql", "sqlite": "sqlite"}
+
+
+if sa is not None:
+    from sqlalchemy.ext.compiler import compiles
+
+    class _PerDialectSql(sa.sql.expression.ColumnElement):
+        """DDL text the core rendered for each dialect, picked when
+        SQLAlchemy compiles it for an engine, so one metadata creates the
+        table either database runs."""
+
+        inherit_cache = False
+
+        def __init__(self, texts: Dict[str, str]) -> None:
+            self.texts = texts
+
+    @compiles(_PerDialectSql)
+    def _compile_per_dialect_sql(element: Any, compiler: Any, **_kw: Any) -> str:
+        text = element.texts.get(compiler.dialect.name)
+        if text is None:
+            raise sa.exc.CompileError(
+                "Ferro renders generated columns and checks for Postgres and "
+                f"SQLite, not {compiler.dialect.name}; compile the metadata "
+                "with a Postgres or SQLite engine"
+            )
+        return text
+
+
+def _ddl_text(render: Callable[[str], str], dialect: "str | None") -> Any:
+    """``render``'s text for ``dialect``, or for whichever of Postgres and
+    SQLite compiles it when ``dialect`` is ``None``."""
+    if dialect is not None:
+        return render(dialect)
+    return _PerDialectSql(
+        {name: render(ours) for ours, name in _SA_DIALECT_NAMES.items()}
+    )
+
+
 def _build_sa_table_from_ir(
-    metadata: "sa.MetaData", model_ir: Dict[str, Any], dialect: str = "postgres"
+    metadata: "sa.MetaData", model_ir: Dict[str, Any], dialect: "str | None" = None
 ) -> None:
     """Add ``model_ir``'s table to ``metadata``, a generated column's
-    ``sa.Computed`` rendered for ``dialect`` by the core."""
+    ``sa.Computed`` and a table check's body rendered by the core for
+    ``dialect``, or for the engine that compiles them when it is ``None``."""
     table_name = model_ir.get("table_name")
     if not isinstance(table_name, str) or not table_name:
         return
@@ -178,8 +224,11 @@ def _build_sa_table_from_ir(
         computed = (
             [
                 sa.Computed(
-                    _render_generated_expression(
-                        json.dumps(model_ir), col_name, dialect
+                    _ddl_text(
+                        lambda ours, col_name=col_name: _render_generated_expression(
+                            json.dumps(model_ir), col_name, ours
+                        ),
+                        dialect,
                     ),
                     persisted=True,
                 )
@@ -227,10 +276,11 @@ def _build_sa_table_from_ir(
             continue
         if not isinstance(predicate, dict) or not predicate:
             continue
-        sqltext = _render_table_check_body(
-            json.dumps(predicate),
+        sqltext = _ddl_text(
+            lambda ours, predicate=predicate: _render_table_check_body(
+                json.dumps(predicate), ours, json.dumps(model_ir.get("columns") or [])
+            ),
             dialect,
-            json.dumps(model_ir.get("columns") or []),
         )
         table_args.append(sa.CheckConstraint(sqltext, name=name))
 
