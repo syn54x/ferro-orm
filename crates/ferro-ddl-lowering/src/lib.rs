@@ -10,14 +10,14 @@ pub use value_expr::{
     NullRule, VALUE_FUNCTIONS, ValueColumn, ValueFunction, ValueSignature, ValueType, ValueTyping,
     check_expr_columns, first_failing_step, generated_storage_refusal, literal_type,
     render_generated_clause, render_sqlite_generated_guard, render_stored_generated_clause,
-    render_value_expr, schema_value_column, sqlite_guard_column, sqlite_guard_name,
-    sqlite_step_terms, type_value_expr, value_column, value_expr_columns, value_family_annotations,
-    value_function, value_step_can_fail,
+    render_value_expr, schema_value_column, sqlite_computes_as_double, sqlite_double,
+    sqlite_guard_column, sqlite_guard_name, sqlite_step_terms, type_value_expr, value_column,
+    value_expr_columns, value_family_annotations, value_function, value_step_can_fail,
 };
 
 use std::collections::BTreeMap;
 
-use ferro_schema_ir::SchemaColumn;
+use ferro_schema_ir::{SchemaColumn, ValueExpr};
 use sea_query::{ColumnDef, ForeignKeyAction};
 
 /// The one SQL dialect / database backend Ferro targets. Selects both the
@@ -1042,19 +1042,56 @@ fn render_check_predicate(
             format!("{} IS NOT NULL", quote_ident(column))
         }
         ferro_schema_ir::CheckExpr::Cmp { column, op, other } => {
-            let rhs = match other {
-                ferro_schema_ir::CheckOperand::Column { name } => quote_ident(name),
-                ferro_schema_ir::CheckOperand::Literal { token } => token.clone(),
+            let left = ValueExpr::Column {
+                name: column.clone(),
             };
-            format!("{} {} {}", quote_ident(column), check_cmp_op_sql(*op), rhs)
+            let (right, rhs) = match other {
+                ferro_schema_ir::CheckOperand::Column { name } => {
+                    (ValueExpr::Column { name: name.clone() }, quote_ident(name))
+                }
+                ferro_schema_ir::CheckOperand::Literal { token } => (
+                    ValueExpr::Literal {
+                        token: token.clone(),
+                    },
+                    token.clone(),
+                ),
+            };
+            // A column no value expression reads (an enum) has no family, and
+            // so never meets a float. A bare float literal here is an exact
+            // `numeric` on Postgres, which compares a bigint with it exactly,
+            // as SQLite does; only a float column makes Postgres use doubles.
+            let family = |operand: &ValueExpr| match operand {
+                ValueExpr::Literal { token } => match literal_type(token) {
+                    Ok(ValueType::Number) => Some(ValueType::Decimal),
+                    typed => typed.ok(),
+                },
+                _ => type_value_expr(operand, &|name| schema_value_column(columns, name))
+                    .ok()
+                    .map(|typed| typed.family),
+            };
+            let (lhs, rhs) = sqlite_double_operands(
+                dialect,
+                (&left, family(&left), quote_ident(column)),
+                (&right, family(&right), rhs),
+            );
+            format!("{lhs} {} {rhs}", check_cmp_op_sql(*op))
         }
         ferro_schema_ir::CheckExpr::Compare { left, op, right } => {
-            let comparison = format!(
-                "({} {} {})",
-                render_value_expr(left, dialect, columns)?,
-                check_cmp_op_sql(*op),
-                render_value_expr(right, dialect, columns)?
+            let lookup = |name: &str| schema_value_column(columns, name);
+            let (lhs, rhs) = sqlite_double_operands(
+                dialect,
+                (
+                    left,
+                    Some(type_value_expr(left, &lookup)?.family),
+                    render_value_expr(left, dialect, columns)?,
+                ),
+                (
+                    right,
+                    Some(type_value_expr(right, &lookup)?.family),
+                    render_value_expr(right, dialect, columns)?,
+                ),
             );
+            let comparison = format!("({lhs} {} {rhs})", check_cmp_op_sql(*op));
             let terms = if dialect == Dialect::Sqlite {
                 check_step_terms(expr, columns)?
             } else {
@@ -1078,6 +1115,29 @@ fn render_check_predicate(
             format!("{} LIKE {}", quote_ident(column), pattern)
         }
     })
+}
+
+/// The two operands of a check comparison as rendered, an integer beside
+/// a float cast to `real` on SQLite ([`sqlite_computes_as_double`]), so
+/// both databases compare it as a double. Postgres already does.
+fn sqlite_double_operands(
+    dialect: Dialect,
+    left: (&ValueExpr, Option<ValueType>, String),
+    right: (&ValueExpr, Option<ValueType>, String),
+) -> (String, String) {
+    let side = |(operand, family, sql): &(&ValueExpr, Option<ValueType>, String),
+                other: Option<ValueType>| {
+        match (family, other) {
+            (Some(family), Some(other))
+                if dialect == Dialect::Sqlite
+                    && sqlite_computes_as_double(operand, *family, other) =>
+            {
+                sqlite_double(sql)
+            }
+            _ => sql.clone(),
+        }
+    };
+    (side(&left, right.1), side(&right, left.1))
 }
 
 fn check_cmp_op_sql(op: ferro_schema_ir::CheckCmpOp) -> &'static str {
@@ -5335,6 +5395,66 @@ mod tests {
                 }),
             }),
             "NOT (\"deleted_at\" IS NOT NULL)"
+        );
+    }
+
+    #[test]
+    fn a_check_compares_a_bigint_beside_a_float_as_postgres_does() {
+        use ferro_schema_ir::{CheckCmpOp, CheckExpr, CheckOperand, ValueBinaryOp, ValueExpr};
+        let columns = [
+            col_with_db_type("a", "integer", None, Some("bigint")),
+            col_with_db_type("x", "number", None, None),
+        ];
+        let render =
+            |expr: &CheckExpr, dialect| super::render_check_expr(expr, dialect, &columns).unwrap();
+        let cmp = |other| CheckExpr::Cmp {
+            column: "a".to_string(),
+            op: CheckCmpOp::Ne,
+            other,
+        };
+        // A float column: Postgres compares at double, so SQLite casts.
+        let float_column = cmp(CheckOperand::Column {
+            name: "x".to_string(),
+        });
+        assert_eq!(
+            render(&float_column, Dialect::Sqlite),
+            "CAST(\"a\" AS real) <> \"x\""
+        );
+        assert_eq!(render(&float_column, Dialect::Postgres), "\"a\" <> \"x\"");
+        // A bare float literal is an exact numeric on Postgres: no cast.
+        for literal in ["9007199254740992.0", "0"] {
+            let plain = cmp(CheckOperand::Literal {
+                token: literal.to_string(),
+            });
+            for dialect in [Dialect::Sqlite, Dialect::Postgres] {
+                assert_eq!(render(&plain, dialect), format!("\"a\" <> {literal}"));
+            }
+        }
+        // A value expression's float literal is a double on Postgres.
+        let compare = CheckExpr::Compare {
+            left: ValueExpr::Binary {
+                op: ValueBinaryOp::Add,
+                left: Box::new(ValueExpr::Column {
+                    name: "a".to_string(),
+                }),
+                right: Box::new(ValueExpr::Literal {
+                    token: "0".to_string(),
+                }),
+            },
+            op: CheckCmpOp::Ne,
+            right: ValueExpr::Literal {
+                token: "9007199254740992.0".to_string(),
+            },
+        };
+        assert!(
+            render(&compare, Dialect::Sqlite)
+                .ends_with("ELSE (CAST((\"a\" + 0) AS real) <> 9007199254740992.0) END"),
+            "{}",
+            render(&compare, Dialect::Sqlite)
+        );
+        assert_eq!(
+            render(&compare, Dialect::Postgres),
+            "((\"a\" + 0) <> CAST(9007199254740992.0 AS double precision))"
         );
     }
 

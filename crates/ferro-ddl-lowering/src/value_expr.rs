@@ -355,7 +355,7 @@ pub fn render_value_expr(
             let mut rendered = args.iter().map(render).collect::<Result<Vec<_>, _>>()?;
             if !postgres {
                 for i in float_params_over_integers(function, args, columns)? {
-                    rendered[i] = format!("CAST({} AS real)", rendered[i]);
+                    rendered[i] = sqlite_double(&rendered[i]);
                 }
             }
             let template = if postgres {
@@ -401,10 +401,29 @@ fn call_result(
     Ok(type_value_expr(call, &|name| schema_value_column(columns, name))?.family)
 }
 
-/// The arguments of a call that are integers where its signature takes a
-/// float. Postgres converts each to a double (`greatest(bigint, double
-/// precision)`); SQLite's `max()` would compare the integer exactly, so on
-/// SQLite each is cast to `real`, and both compare `2**53 + 1` as `2**53`.
+/// Whether SQLite computes `operand`, of family `family`, as a double
+/// where it meets a value of family `other`: an integer beside a float.
+/// Postgres converts the integer to a double (`greatest(bigint, double
+/// precision)`, `bigint <> double precision`); SQLite's `max()` and its
+/// comparisons keep the integer exact, so on SQLite it is cast to `real`
+/// ([`sqlite_double`]) and both see `2**53 + 1` as `2**53`. An integer
+/// literal within `±2**53` is a double exactly, so it stays bare.
+pub fn sqlite_computes_as_double(operand: &ValueExpr, family: ValueType, other: ValueType) -> bool {
+    const EXACT: u64 = 1 << 53;
+    family == ValueType::Integer
+        && other == ValueType::Number
+        && !matches!(operand, ValueExpr::Literal { token }
+            if token.parse::<i64>().is_ok_and(|n| n.unsigned_abs() <= EXACT))
+}
+
+/// A SQLite value computed as a double.
+pub fn sqlite_double(sql: &str) -> String {
+    format!("CAST({sql} AS real)")
+}
+
+/// The arguments of a call that SQLite computes as a double
+/// ([`sqlite_computes_as_double`]): integers where its signature takes a
+/// float.
 fn float_params_over_integers(
     function: &ValueFunction,
     args: &[ValueExpr],
@@ -422,7 +441,7 @@ fn float_params_over_integers(
         .iter()
         .enumerate()
         .filter(|(i, family)| {
-            **family == ValueType::Integer && signature_param(signature, *i) == ValueType::Number
+            sqlite_computes_as_double(&args[*i], **family, signature_param(signature, *i))
         })
         .map(|(i, _)| i)
         .collect())

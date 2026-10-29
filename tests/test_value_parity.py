@@ -768,3 +768,91 @@ async def test_an_integer_beside_a_float_compares_as_a_double_on_both_databases(
                     await Box.create(a=2**53 + 1)
         finally:
             ferro.reset_engine()
+
+
+# A check comparing a bigint with a float decides alike on both databases.
+# Postgres compares a bigint with a float column or a value expression's
+# float at double, so 2**53 + 1 is 2**53 there; a plain comparison's bare
+# float literal is an exact numeric on Postgres, so it compares exactly.
+TWO_53 = 9007199254740992.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("body", "accepted"),
+    [
+        (lambda box: box.a != 9007199254740992.0, True),
+        (lambda box: box.a == 9007199254740992.0, False),
+        (lambda box: box.a > 0.5, True),
+        (lambda box: box.a != box.x, False),
+        (lambda box: box.a + 0 != 9007199254740992.0, False),
+        (lambda box: 9007199254740992.0 != box.a + 0, False),
+        (lambda box: box.a + 0 != box.x, False),
+    ],
+    ids=[
+        "a != 2**53.0",
+        "a == 2**53.0",
+        "a > 0.5",
+        "a != x",
+        "a + 0 != 2**53.0",
+        "2**53.0 != a + 0",
+        "a + 0 != x",
+    ],
+)
+async def test_an_integer_compared_with_a_float_decides_alike_on_both(
+    body, accepted: bool, db_url: str, tmp_path
+):
+    class Box(Model):
+        __ferro_checks__: ClassVar[tuple[Check, ...]] = (Check("c", body),)
+        id: int | None = Field(default=None, primary_key=True)
+        a: int = Field(db_type="bigint")
+        x: float = TWO_53
+
+    outcomes = []
+    for url in (f"sqlite:{tmp_path / 'compare.db'}?mode=rwc", db_url):
+        await ferro.connect(url, auto_migrate=True)
+        try:
+            async with ferro.engines.session():
+                try:
+                    await Box.create(a=2**53 + 1)
+                    outcomes.append(True)
+                except CheckViolationError:
+                    outcomes.append(False)
+            # The cast reads back as declared: a reconnect plans nothing.
+            report = await ferro.migrate(destructive=True)
+            assert report.statements == ()
+            assert report.warnings == ()
+        finally:
+            ferro.reset_engine()
+    assert outcomes == [accepted, accepted]
+
+
+def _int_column(name: str) -> dict[str, Any]:
+    return {
+        "name": name,
+        "logical_type": "integer",
+        "db_type": None,
+        "db_type_explicit": False,
+        "nullable": False,
+        "primary_key": False,
+        "autoincrement": False,
+        "unique": False,
+        "index": False,
+        "default": None,
+        "format": None,
+    }
+
+
+@pytest.mark.parametrize("dialect", ["sqlite", "postgres"])
+def test_an_integer_comparison_renders_as_before(dialect: str):
+    # `price > 0` is integers on both sides, so it carries no cast.
+    predicate = {
+        "kind": "cmp",
+        "column": "price",
+        "op": "gt",
+        "other": {"kind": "literal", "token": "0"},
+    }
+    rendered = _core._render_table_check_body(
+        json.dumps(predicate), dialect, json.dumps([_int_column("price")])
+    )
+    assert rendered == '"price" > 0'
