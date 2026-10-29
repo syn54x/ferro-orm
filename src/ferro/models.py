@@ -258,6 +258,29 @@ async def transaction(
         _CURRENT_TRANSACTION_CONNECTION.reset(connection_token)
 
 
+def _hydrated_returning(cls: type["Model"], returned: dict[str, Any]) -> dict[str, Any]:
+    """The values a write read back, converted as a fetch converts them.
+
+    A fetch writes each column straight into the instance and wraps a
+    non-null value through the class's hydration converter (a secret field
+    in its `SecretStr` / `SecretBytes`); the values `RETURNING` reads back
+    take the same converters, so a saved instance reads as a fetched one.
+    """
+    converted = dict(returned)
+    for name, value in returned.items():
+        entry = cls._hydration_converters.get(name)
+        if entry is None or value is None:
+            continue
+        kind, convert = entry
+        try:
+            converted[name] = convert(value)
+        except Exception as err:
+            raise ValueError(
+                f"Failed to hydrate {kind} field {cls.__name__}.{name}: {err}"
+            ) from err
+    return converted
+
+
 class Model(BaseModel, metaclass=ModelMetaclass):
     """The base class of every Ferro model: a Pydantic model backed by a table.
 
@@ -539,6 +562,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                 secret_values=secrets,
             )
 
+        returned = _hydrated_returning(self.__class__, returned)
         pk_val = None
         pk_field_name = self.__class__.__ferro_pk__
         new_id = returned.pop(pk_field_name, None) if pk_field_name else None

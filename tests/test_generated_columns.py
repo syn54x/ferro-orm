@@ -26,11 +26,13 @@ import asyncio
 import json
 from typing import Annotated
 
+from pydantic import SecretStr
 import pytest
 
 import ferro
 from ferro import Check, Field, Model, _core, fn
 from ferro.base import FerroField
+from ferro.exceptions import DataError
 from ferro.ir import compile_registry_schema_ir
 import ferro.migrations
 from tests._pass_harness import auto_migrate, schema_sql
@@ -445,3 +447,58 @@ def test_ferro_field_takes_generated_in_annotated_style():
     assert Transaction.__ferro_generated__ == {"direction": frozenset({"amount_minor"})}
     assert _column("transaction", "direction")["generated"]["name"] == "sign"
     assert Transaction(amount_minor=3).direction is None
+
+
+def _observed(instance: Model) -> tuple[str, dict, list]:
+    """What a reader sees of an instance: its repr, its dump and each value."""
+    return (
+        repr(instance),
+        instance.model_dump(),
+        [(name, repr(getattr(instance, name))) for name in type(instance).model_fields],
+    )
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.asyncio
+async def test_a_saved_secret_generated_column_reads_as_the_fetched_one(db_url):
+    class Vault(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        name: str | None = None
+        token: SecretStr = Field(
+            generated=lambda vault: fn.coalesce(vault.name, "fallback")
+        )
+
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        vault = Vault(name="hunter2")
+        await vault.save()
+        assert vault.token.get_secret_value() == "hunter2"
+        saved = _observed(vault)
+    async with ferro.engines.session():
+        fetched = await Vault.get(1)
+        assert _observed(fetched) == saved
+        assert "token=SecretStr('**********')" in saved[0]
+
+        fetched.name = "swordfish"
+        await fetched.save()
+        assert fetched.token.get_secret_value() == "swordfish"
+        updated = _observed(fetched)
+    async with ferro.engines.session():
+        assert _observed(await Vault.get(1)) == updated
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.asyncio
+async def test_bulk_create_of_an_overflowing_generated_value_names_it(db_url):
+    class Ledger(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        a: int
+        b: int
+        total: int = Field(generated=lambda ledger: ledger.a + ledger.b)
+
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        rows = [Ledger(a=1, b=1), Ledger(a=2**31 - 1, b=1)]
+        with pytest.raises(DataError, match=r'generated column "total"'):
+            await Ledger.bulk_create(rows)
+        assert await Ledger.where(lambda ledger: ledger.a == 1).count() == 0
