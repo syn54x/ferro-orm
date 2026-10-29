@@ -1,0 +1,1 @@
+verified 8b5c273: maturin develop; cargo test --workspace --no-default-features --features testing (all ok); pytest Verify line (test_bulk_create.py absent, dropped) PG18 :5432 1110 passed 12 skipped 1 xfailed; PG17 :5434 1110 passed 12 skipped 1 xfailed
