@@ -286,6 +286,27 @@ def test_fn_inside_in_is_refused():
             amount: int
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        lambda payment: fn.length(payment.memo) > b"x",
+        lambda payment: fn.abs(payment.amount > 1) > 0,
+    ],
+    ids=["a bytes literal", "a comparison as an argument"],
+)
+def test_a_refused_operand_names_the_check_not_a_generated_column(body):
+    with pytest.raises(TypeError) as caught:
+
+        class Payment(Model):
+            __ferro_checks__ = (Check("odd", body),)
+            id: int | None = Field(default=None, primary_key=True)
+            amount: int
+            memo: str
+
+    assert "Payment.__ferro_checks__ check 'odd'" in str(caught.value)
+    assert "generated column" not in str(caught.value)
+
+
 def test_fn_in_a_query_stays_refused():
     Payment = declare_payment()
     with pytest.raises(TypeError, match=r"ferro\.fn cannot appear"):

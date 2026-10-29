@@ -44,7 +44,7 @@ _BINARY_OPS = {"+": "add", "-": "sub", "*": "mul", "/": "div"}
 _GLOBAL_LOAD_OPS = frozenset({"LOAD_GLOBAL", "LOAD_NAME"})
 
 _DIALECT = (
-    "a generated column's expression is built from the model's own columns, "
+    "a value expression is built from the model's own columns, "
     "literals, + - * /, unary - and the functions in ferro.fn"
 )
 
@@ -377,7 +377,11 @@ def lower_value_expr(value: Any, *, model_name: str, owner: str) -> dict[str, An
             ],
         }
     if isinstance(value, QueryNode):
-        raise TypeError(f"{where} is a comparison: {_NOT_A_CONDITION}")
+        raise TypeError(
+            f"{where} is a comparison where a value belongs: a value expression "
+            "holds a value, not a condition; declare a condition as a Check in "
+            "__ferro_checks__"
+        )
     if isinstance(value, float) and not math.isfinite(value):
         raise TypeError(
             f"{where} holds the float {value!r}, which neither database stores "
