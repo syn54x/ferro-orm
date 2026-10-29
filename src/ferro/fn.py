@@ -2,7 +2,12 @@
 
 Each function here is one the database evaluates, with the same result on
 SQLite and Postgres. Call it on a column inside a `Field(generated=...)`
-lambda; it builds an expression the database computes, never a Python value.
+lambda, or on either side of a [`Check`][ferro.Check] comparison; it builds
+an expression the database computes, never a Python value. An expression
+combines these functions with columns, literals, `+ - * /` and unary `-`.
+[Generated columns](../guide/models-and-fields.md#generated-columns) lists
+the rules an expression must follow to store the same value on both
+databases.
 
 Examples:
     ```python {test=run prelude=reference}

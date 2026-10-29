@@ -148,8 +148,12 @@ that sends nothing but prints statements (a `create_tables()` report's
 `statement.sql`) shows what it prints.
 
 `tests/test_docs_sql.py` regenerates every `sql` fence on the pages it lists
-(`PAGES`: Queries, Aggregations, Relationships, Mutations) and compares byte
-for byte, failing with the page, the line and the example. The capture and
+(`PAGES`: Queries, Aggregations, Relationships, Mutations, Models and fields)
+and compares byte for byte, failing with the page, the line and the example.
+A fence whose whole body embeds one example snippet
+(`--8<-- "docs/examples/<example>.py:<region>"`) is skipped: it is a schema
+the example itself asserts equals what `create_tables()` ran, as
+`table_checks.py` and `generated_columns.py` do. The capture and
 the checks live in `tests/_docs_sql.py` (`captured(example, dialect, url)`,
 `check_block`, `check_printed`), which a new gate reuses; one run of an
 example records both the SQL and the printed output of every region. To add

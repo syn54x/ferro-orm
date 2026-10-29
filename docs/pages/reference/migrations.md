@@ -71,6 +71,10 @@ The three doors are [auto-migrate](../guide/schema/auto-migrate.md) (here its up
 | Remove an enum label rows may hold | warns, no DDL | ✅ [backfill and contract](../guide/schema/data-steps.md#removing-an-enum-label) generated | ❌ not written; [migrations](../guide/schema/data-steps.md#removing-an-enum-label) generate it |
 | Python data steps over the models as they were | ❌ | ✅ [data steps](../guide/schema/data-steps.md) | hand-written `op.execute(...)` |
 | Change a primary key | ❌ | refused, with [the recipe](../guide/schema/migrations.md#changing-a-primary-key) | ❌ refused, with the same recipe |
+| Add a [generated column](../guide/models-and-fields.md#generated-columns) or change its expression, on Postgres | ✅ | ✅ an expression change marked `-- ferro: data-dependent` | ✅ `sa.Computed(..., persisted=True)` for an added column; an expression change is `op.execute` of the pass's statement |
+| The same on SQLite (needs a table rebuild) | ⚠️ warns, no DDL | ✅ generated [table rebuild](../guide/schema/migrations.md#sqlite-table-rebuilds) | ❌ refused at autogenerate |
+| Make a generated column plain, keeping its values | Postgres: ✅ `DROP EXPRESSION`; SQLite: ⚠️ warns, no DDL | ✅ (a table rebuild on SQLite) | Postgres: ✅ `op.execute` of the pass's statement; SQLite: ❌ refused at autogenerate |
+| Make a plain column generated (drops its values) | with `migrate_destructive` on Postgres; otherwise a `PlainColumnKept` warning. SQLite: ⚠️ warns, no DDL | ✅ marked `-- ferro: destructive` | ✅ marked `# ferro: destructive` |
 
 ## Auto-migrate changes per backend
 
@@ -105,6 +109,10 @@ What `connect(..., migrate_updates=True)` and `ferro.migrate()` do to an existin
 | Rename a table | ✅ `ALTER TABLE … RENAME TO` under `migrate_updates` when the database holds the old name from `__ferro_renamed_from__` and not the new one; derived index and check names follow. Without `migrate_updates` a `UserWarning` names the table, the hint and both doors, and nothing is created. [Migrations](../guide/schema/renames-and-retirements.md#rename-hints) are the reviewed path | ✅ same |
 | Drop a column | ✅ with `migrate_destructive=True` | ✅ with `migrate_destructive=True` |
 | Drop a table | ❌ never here; [migrations](../guide/schema/migrations.md#reading-a-migration) generate it, marked destructive | ❌ same |
+| Add a [generated column](../guide/models-and-fields.md#generated-columns) | ⚠️ `UserWarning`, no DDL; migrations generate the table rebuild | ✅ `ADD COLUMN … GENERATED ALWAYS AS (…) STORED`; no backfill, the database computes every row |
+| Change a generated column's expression | ⚠️ `UserWarning`, no DDL; migrations generate the table rebuild | ✅ `ALTER COLUMN … SET EXPRESSION AS (…)`, which recomputes every row |
+| Make a generated column plain (the model drops `generated=`) | ⚠️ `UserWarning`, no DDL; migrations generate the table rebuild | ✅ `ALTER COLUMN … DROP EXPRESSION`; the stored values stay |
+| Make a plain column generated | ⚠️ `UserWarning` (`PlainColumnKept`, or with `migrate_destructive=True` the rebuild warning), no DDL; migrations generate the table rebuild | ✅ with `migrate_destructive=True`: `DROP COLUMN` + `ADD COLUMN … GENERATED`; without it a `PlainColumnKept` warning and the column stays |
 | Change a primary key | ❌ never; no door generates it. Migrations refuse it with [the recipe](../guide/schema/migrations.md#changing-a-primary-key) | ❌ same |
 
 ## `PassReport` contents

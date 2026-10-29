@@ -301,6 +301,208 @@ On PostgreSQL the error also sets `exc.constraint` to `ck_payment_at_most_one_me
 
 For a closed set of values in a single column, use `Field(db_check=True)` instead; see [Enums](#enums).
 
+#### Functions in a check
+
+Either side of a comparison can call a function from [`ferro.fn`](../api/fields.md#ferro.fn), the same functions a [generated column](#generated-columns) uses. A refund is held to 500.00 in either direction, with its amount in cents:
+
+=== "Assignment"
+
+    ```python
+    --8<-- "docs/examples/generated_columns.py:check-model"
+    ```
+
+=== "Annotated"
+
+    ```python
+    --8<-- "docs/examples/generated_columns_annotated.py:check-model"
+    ```
+
+`fn.abs` becomes the database's `abs()`. On PostgreSQL the column is cast to `bigint` first, as integer arithmetic in a [generated column](#generated-columns) is:
+
+=== "SQLite"
+
+    ```sql
+    -- generated_columns.py:check-ddl (sqlite)
+    CREATE TABLE IF NOT EXISTS "refund" (
+      "amount_minor" integer NOT NULL,
+      "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT,
+      CONSTRAINT "ck_refund_within_limit" CHECK ((abs("amount_minor") <= 50000))
+    );
+    ```
+
+=== "PostgreSQL"
+
+    ```sql
+    -- generated_columns.py:check-ddl (postgres)
+    CREATE TABLE IF NOT EXISTS "refund" (
+      "amount_minor" integer NOT NULL,
+      "id" serial PRIMARY KEY NOT NULL,
+      CONSTRAINT "ck_refund_within_limit" CHECK ((abs(CAST("amount_minor" AS bigint)) <= 50000))
+    );
+    ```
+
+Python's own `abs()` inside a predicate raises when the class is defined; write `fn.abs`. A function call in a check follows the [value parity](#value-parity) rules of a generated column.
+
+## Generated columns
+
+A generated column is one the database computes from other columns of the same row, on every write. Whether you want one, or Pydantic's [`computed_field`](https://docs.pydantic.dev/latest/concepts/fields/#the-computed_field-decorator), depends on who needs the value:
+
+- **Only your Python code reads it**, say a label you print: use `computed_field`. It is a property, computed on each access, and it never reaches the table.
+- **The database needs it too**, to filter on, to index, or for a report or another service that reads the table: use a generated column. The value is stored in the row, so SQL sees it like any other column.
+
+A bank transaction stores its amount in minor units (cents), negative for money out. Its direction, `-1` or `1`, is the sign of that amount, and the database works it out:
+
+=== "Assignment"
+
+    ```python
+    --8<-- "docs/examples/generated_columns.py:models"
+    ```
+
+=== "Annotated"
+
+    ```python
+    --8<-- "docs/examples/generated_columns_annotated.py:models"
+    ```
+
+`generated=` takes a lambda written like a [`where()`](queries.md) filter, with its parameter named after the model, that returns a value instead of a condition. `fn.sign` is one of the database functions in `ferro.fn`. Ferro writes the expression into `CREATE TABLE`:
+
+=== "SQLite"
+
+    ```sql
+    --8<-- "docs/examples/generated_columns.py:ddl-sqlite"
+    ```
+
+=== "PostgreSQL"
+
+    ```sql
+    --8<-- "docs/examples/generated_columns.py:ddl-postgres"
+    ```
+
+The column is always `STORED`: the database computes it when the row is written, not when it is read, so it can carry an index (`index=True` and `unique=True` work as on any column). The annotation decides nullability, as for every field: `int` is `NOT NULL`, `int | None` allows `NULL`. A generated column has no `DEFAULT`, and it cannot also take `primary_key=`, `autoincrement=`, `default=` or `db_check=`.
+
+The two dialects differ in how they keep an overflow from storing different values. PostgreSQL computes integer arithmetic at 64 bits, so a column narrower than `bigint` is cast up first. SQLite carries Ferro's own guard, `_ferro_range_direction`, which holds the value to PostgreSQL's `integer` range. A value that does not fit raises `DataError` naming the column, on both databases.
+
+### Reading the value
+
+The database is the only place the value is computed, so an instance holds what the database last stored, or `None` while that is unknown:
+
+```python
+--8<-- "docs/examples/generated_columns.py:lifecycle"
+```
+
+It prints:
+
+<!-- prints: generated_columns.py:lifecycle -->
+```text
+None
+-1
+None
+1
+```
+
+Before the first `save()` there is no row, so `direction` is `None`. `save()` asks for the value back with `RETURNING` and fills it in. Assigning `amount_minor` sets `direction` back to `None`, because the stored `-1` no longer matches the row about to be written; the next `save()` reads the new value. The two saves send these statements; on PostgreSQL only the placeholders differ:
+
+```sql
+-- generated_columns.py:lifecycle (sqlite)
+INSERT INTO "transaction" ("amount_minor")
+VALUES (?)
+RETURNING "id", "direction";
+
+UPDATE "transaction"
+SET "amount_minor" = ?
+WHERE "id" = ?
+RETURNING "direction";
+```
+
+Neither statement lists `direction` among the columns it writes. A fetched instance carries the stored value, and `model_dump()` includes it. [`bulk_create()`](mutations.md) reads nothing back, so its instances keep `None`, as they keep `None` for an auto-assigned `id`.
+
+A generated column filters, orders and projects like any other column. The money that went out:
+
+```python
+--8<-- "docs/examples/generated_columns.py:filter"
+```
+
+It prints:
+
+<!-- prints: generated_columns.py:filter -->
+```text
+[-1200]
+```
+
+The query compares the stored column, which `index=True` covers; on PostgreSQL only the placeholder differs:
+
+```sql
+-- generated_columns.py:filter (sqlite)
+SELECT "transaction"."amount_minor", "transaction"."direction", "transaction"."id"
+FROM "transaction"
+WHERE "transaction"."direction" = ?;
+```
+
+### Writing to a generated column
+
+Ferro refuses any write to the column, naming what to do instead:
+
+```python
+--8<-- "docs/examples/generated_columns.py:refusals"
+```
+
+It prints:
+
+<!-- prints: generated_columns.py:refusals -->
+```text
+TypeError: Transaction.direction is a generated column: the database computes it from amount_minor on every write; drop direction= from the call
+TypeError: Transaction.direction is a generated column: the database computes it from amount_minor on every write; assign those columns and save() instead
+```
+
+An [`update()`](mutations.md) that sets `direction` and a `save(only={"direction"})` are refused too, when the call is built. Change `amount_minor` and the database follows.
+
+### The functions in `fn`
+
+An expression is built from the model's own columns, literals, `+`, `-`, `*`, `/`, unary `-` and these functions:
+
+| Function | Takes | Returns |
+| --- | --- | --- |
+| `fn.sign(x)` | an integer, float or decimal | `-1`, `0` or `1` |
+| `fn.abs(x)` | an integer, float or decimal | the number without its sign |
+| `fn.least(a, b, ...)` | non-nullable numbers or dates | the smallest |
+| `fn.greatest(a, b, ...)` | non-nullable numbers or dates | the largest |
+| `fn.coalesce(a, b, ...)` | values of one type | the first that is not `NULL` |
+| `fn.length(s)` | text | its number of characters |
+| `fn.year(d)`, `fn.month(d)`, `fn.day(d)` | a `date` | that part, as an integer |
+
+Each one has a [reference entry](../api/fields.md#ferro.fn). A name that is not in the table, such as `fn.round`, raises listing the ones that are.
+
+### Value parity
+
+Ferro admits an expression only when SQLite and PostgreSQL store the same value for it on every row, and it checks that when the class is defined. A float product is one they disagree on:
+
+```python
+--8<-- "docs/examples/generated_columns.py:parity"
+```
+
+It prints:
+
+<!-- prints: generated_columns.py:parity -->
+```text
+TypeError: __main__.main.<locals>.Rate.doubled '*' over a float: Postgres raises when a float product or quotient underflows to zero where SQLite stores 0.0, so the databases would disagree; keep the arithmetic in integers (an amount in minor units, such as amount_minor) or compute the value in the application
+```
+
+Each refusal names the fix. The rules, each from a case where the two databases would store different values:
+
+- **The result type matches the field's.** `fn.sign` over an `int` fills an `int` field; it cannot fill a `str`. `db_type=` within the same family (`bigint` for an `int`) is fine.
+- **`fn.least` and `fn.greatest` take numbers or dates, never `NULL`.** PostgreSQL skips a `NULL` argument where SQLite returns `NULL`, so a nullable column goes inside `fn.coalesce(column, fallback)`. Text is refused too, because the two order it differently.
+- **`fn.year`, `fn.month` and `fn.day` take a `date`.** The day of a `datetime` depends on the session's time zone, which PostgreSQL refuses in a generated column.
+- **`/` divides by a non-zero literal only**, such as `/ 100`. PostgreSQL raises on division by zero where SQLite stores `NULL`.
+- **No `*` or `/` over a float, and no arithmetic over a `Decimal`.** PostgreSQL raises when a float product underflows where SQLite stores `0.0`, and SQLite computes decimals in floating point. Keep amounts in integer minor units, or compute the value in your application.
+- **Only the model's own stored columns.** An expression cannot read another generated column, a relation, or a variable from the enclosing scope; inline a constant as a literal. A misspelled column raises with the closest name.
+- **A value, not a condition.** A comparison or `&` / `|` body raises; a condition belongs in a [table check](#table-checks).
+
+[ADR 0059](https://github.com/syn54x/ferro-orm/blob/main/docs/adr/0059-value-expressions-are-lambdas-over-a-closed-function-table-under-value-parity.md) records why the function table is closed, and [ADR 0058](https://github.com/syn54x/ferro-orm/blob/main/docs/adr/0058-a-generated-columns-value-comes-only-from-the-database.md) why the value is never computed in Python.
+
+### Changing a generated column
+
+Adding a generated column, changing its expression, or turning it into a plain column are schema changes like any other. [Auto-migrate](schema/auto-migrate.md) and [migrations](schema/migrations.md) say which ones each database runs in place and which rebuild the table on SQLite. A generated column needs no backfill: the database computes it for every existing row. `ferro migrate drift` reports an expression edited by hand as `transaction.direction generated expression differs`.
+
 ## Custom table names
 
 A model's table is its class name in lowercase: `class Product` is `product`. Set `__ferro_table__` in the class body to choose the name yourself, as [`Category`](#natural-keys) does:
