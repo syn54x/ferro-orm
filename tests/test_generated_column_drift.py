@@ -30,6 +30,7 @@ import pytest
 import ferro
 from ferro.migrations import MigrationRefused, baseline
 from tests._pass_harness import auto_migrate, schema_sql
+from tests.test_auto_migrate_generated_columns import KEYED_TWINS
 from tests.test_migrate_drift import drift_api
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     pkg,
@@ -431,3 +432,72 @@ def test_a_generated_column_retyped_by_hand_is_one_type_line(project, pkg, db, c
         "DropColumn": "own_type",
         "AddColumn": "own_type",
     }
+
+
+RETYPE_KEY = (
+    'ALTER TABLE "ticket" ALTER COLUMN "code" TYPE integer USING length("code")'
+)
+
+
+def key_retyped_by_hand(db, kind: str) -> None:
+    """``code`` put back to ``integer`` by hand, with the artifact over it in
+    the body that types under an integer ``code``."""
+    if kind == "check":
+        db.execute('ALTER TABLE "ticket" DROP CONSTRAINT "ck_ticket_coded"')
+        db.execute(RETYPE_KEY)
+        db.execute(
+            'ALTER TABLE "ticket" ADD CONSTRAINT "ck_ticket_coded" CHECK ("code" > 0)'
+        )
+    elif kind == "generated_column":
+        db.execute('ALTER TABLE "ticket" DROP COLUMN "n"')
+        db.execute(RETYPE_KEY)
+        db.execute(
+            'ALTER TABLE "ticket" ADD COLUMN "n" integer NOT NULL '
+            'GENERATED ALWAYS AS ("code" + 1) STORED'
+        )
+    else:
+        [(name,)] = db.rows(
+            "SELECT policyname FROM pg_policies WHERE tablename = 'ticket'"
+        )
+        db.execute(f'DROP POLICY "{name}" ON "ticket"')
+        db.execute(RETYPE_KEY)
+        db.execute(
+            f'CREATE POLICY "{name}" ON "ticket" USING '
+            "(\"code\" = current_setting('app.code')::integer)"
+        )
+
+
+@pytest.mark.parametrize("kind", list(KEYED_TWINS))
+def test_what_reads_a_key_column_whose_type_change_is_withheld_is_not_compared(
+    project, pkg, db, capsys, kind
+):
+    """The snapshot keys ``ticket`` by a text ``code``; the database by hand
+    holds an integer one, with the check, generated column or policy over it
+    written for an integer. The type change is the primary-key recipe's, so
+    no door runs it, and the artifact cannot be compared before it does:
+    drift names it after the type line, and the read prints no pair for it
+    (no ``function length(integer) does not exist``)."""
+    if db.backend != "postgres":
+        pytest.skip("the hand edit is Postgres's")
+    configure(project, pkg, db.backend)
+    write_models(project, pkg, KEYED_TWINS[kind][1])
+    new("create_ticket")
+    assert run("migrate", "up", "--url", db.url) == 0
+    capsys.readouterr()
+    key_retyped_by_hand(db, kind)
+
+    report = drift_api(db)
+
+    [held] = [op for op in report.operations if op.get("held")]
+    assert (held["kind"], held["column"]) == ("AlterColumnType", "code")
+    assert [artifact["kind"] for artifact in held["held"]] == [kind]
+    [artifact] = held["held"]
+    subject = {
+        "check": "ck_ticket_coded check",
+        "generated_column": "ticket.n generated expression",
+    }.get(kind, f"{artifact['name']} policy")
+    noun = "input's" if kind == "generated_column" else "column's"
+    assert report.lines == [
+        "ticket.code has type int, snapshot says varchar",
+        f"{subject} not compared while its {noun} type change is withheld",
+    ], report.lines

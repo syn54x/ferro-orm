@@ -1404,7 +1404,10 @@ pub fn _plan_revision(
 /// `own_type`), on the two ops of such a pair only, and `carried` on an op
 /// that takes down or puts back what the plan carries around another change
 /// (`unchanged`, `changed` or `not_compared`: whether it is put back as it
-/// was); reports are in `_plan_from_ir`'s shape.
+/// was), and `held` on a type change no door runs: the checks, generated
+/// columns and policies over the column, each `{"kind": "check" |
+/// "generated_column" | "policy", "name": …}`, left standing and not
+/// compared; reports are in `_plan_from_ir`'s shape.
 ///
 /// # Errors
 /// `ValueError` when `declared_json` is not a schema IR envelope or a side
@@ -1443,6 +1446,9 @@ pub fn _plan_drift(
                     }
                     if let Some(carry) = planned.verdict.carried {
                         fields.insert("carried".into(), serde_json::to_value(carry)?);
+                    }
+                    if !planned.verdict.held.is_empty() {
+                        fields.insert("held".into(), serde_json::to_value(&planned.verdict.held)?);
                     }
                 }
                 Ok(op)

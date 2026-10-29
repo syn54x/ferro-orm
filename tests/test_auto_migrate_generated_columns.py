@@ -590,3 +590,68 @@ def test_a_check_over_a_key_column_whose_type_changes_stays_standing(project, pk
 
         assert schema_sql(report) == []
         assert list(report.warnings) == [], report.warnings
+
+
+def keyed_ticket(code: str, body: str) -> str:
+    """``Ticket`` keyed by ``code`` (annotated ``code``), with ``body`` after it."""
+    return (
+        "from ferro import Check, Field, RowPolicy, RowSecurity, fn\n\n\n"
+        "class Ticket(Model):\n"
+        f"    code: Annotated[{code}, FerroField(primary_key=True)]\n" + body
+    )
+
+
+KEYED_TWINS = {
+    "check": (
+        keyed_ticket(
+            "int",
+            '    __ferro_checks__ = (Check("coded", lambda ticket: ticket.code > 0),)\n',
+        ),
+        keyed_ticket(
+            "str",
+            "    __ferro_checks__ = (\n"
+            '        Check("coded", lambda ticket: fn.length(ticket.code) > 0),\n'
+            "    )\n",
+        ),
+    ),
+    "generated_column": (
+        keyed_ticket(
+            "int", "    n: int = Field(generated=lambda ticket: ticket.code + 1)\n"
+        ),
+        keyed_ticket(
+            "str",
+            "    n: int = Field(generated=lambda ticket: fn.length(ticket.code))\n",
+        ),
+    ),
+    "policy": tuple(
+        keyed_ticket(
+            code,
+            '    __ferro_rls__ = RowSecurity(RowPolicy(column="code", setting="app.code"))\n',
+        )
+        for code in ("int", "str")
+    ),
+}
+"""A primary-key ``code`` moved from ``int`` to ``str``, the primary-key
+recipe's change no door runs in place, with each kind of artifact over it
+declared in a body that types only under its own side's ``code``."""
+
+
+@pytest.mark.parametrize("kind", list(KEYED_TWINS))
+def test_what_reads_a_key_column_whose_type_change_is_withheld_runs_nothing(
+    project, pkg, db, kind
+):
+    """The live read cannot print ``length(code)`` against the live integer
+    ``code`` (``function length(integer) does not exist``), so it asks no
+    pair for it, and the pass makes no body decision for it: no DDL and no
+    error, on every pass."""
+    postgres_only(db)
+    before, after = KEYED_TWINS[kind]
+    declare(project, pkg, before)
+    asyncio.run(ferro.connect(db.url, auto_migrate=True))
+    ferro.reset_engine()
+    declare(project, pkg, after)
+
+    for _ in range(2):
+        report = reconnect(db, destructive=True)
+
+        assert schema_sql(report) == []

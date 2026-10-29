@@ -249,6 +249,21 @@ _CARRIED: dict[str, Callable[[dict[str, Any], str], str]] = {
 }
 """The add back of a carried artifact, which says what the pair changes."""
 
+_HELD: dict[str, Callable[[dict[str, Any], str], str]] = {
+    "check": lambda op, name: (
+        f"{name} check not compared while its column's type change is withheld"
+    ),
+    "generated_column": lambda op, name: (
+        f"{op['table']}.{name} generated expression not compared while its "
+        "input's type change is withheld"
+    ),
+    "policy": lambda op, name: (
+        f"{name} policy not compared while its column's type change is withheld"
+    ),
+}
+"""What a type change no door runs holds (``held``), each left standing and
+not compared until the change runs: one line each, after the type line."""
+
 
 def render_op(op: dict[str, Any]) -> str:
     """Render one planner op as one plain-language line.
@@ -451,9 +466,16 @@ def _lines(operations: list[dict[str, Any]]) -> list[str]:
     column's own line says it. A policy or check the planner takes down and
     puts back around such a change (``carried``) has a line, on its add back,
     only when what it puts back is not what the table holds: its body
-    differs, or it could not be compared while its column changes type."""
+    differs, or it could not be compared while its column changes type. A
+    type change no door runs names, after its own line, each check,
+    generated column and policy over the column it holds (``held``): none
+    can be compared until the change runs."""
     lines = []
     for op in operations:
+        if op.get("held"):
+            lines.append(render_op(op))
+            lines.extend(_HELD[held["kind"]](op, held["name"]) for held in op["held"])
+            continue
         replaces = op.get("replaces")
         carried = op.get("carried")
         if carried is not None:

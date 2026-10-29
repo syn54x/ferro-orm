@@ -8181,9 +8181,9 @@ fn a_check_over_a_replaced_generated_column_put_back_unchanged_is_marked_unchang
 fn a_check_over_a_column_whose_type_change_is_refused_is_left_standing() {
     // Live `at` timestamp under `ck_event_after_start`; declared `at` a
     // datetime (timestamptz), a conversion the pass refuses with a warning
-    // and no ALTER. The check is read against the live table, which it will
-    // keep: printed alike, so nothing is dropped and added back, on this
-    // pass or the next.
+    // and no ALTER. The check keeps its live table, which a declared body
+    // may not type-check against: no pair, nothing dropped, added back or
+    // rebuilt, and each alter lists it as held, not compared.
     let event = |at_type: &str| SchemaModel {
         table_checks: vec![SchemaTableCheck {
             name: "ck_event_after_start".to_string(),
@@ -8208,8 +8208,7 @@ fn a_check_over_a_column_whose_type_change_is_refused_is_left_standing() {
     };
     let live_model = event("timestamp");
     let declared_model = event("timestamptz");
-    // The live read asks Postgres to print the pair: the columns keep their
-    // live type.
+    // The live read asks Postgres to print no pair.
     let live_columns = live_model.columns.clone();
     let live_column = |name: &str| live_columns.iter().find(|col| col.name == name);
     let asked: Vec<String> =
@@ -8217,7 +8216,7 @@ fn a_check_over_a_column_whose_type_change_is_refused_is_left_standing() {
             .into_iter()
             .map(|(name, _)| name)
             .collect();
-    assert_eq!(asked, vec!["ck_event_after_start".to_string()]);
+    assert_eq!(asked, Vec::<String>::new());
     let check = live_check("ck_event_after_start", "CHECK ((at >= starts))");
     let check = if asked.contains(&check.name) {
         printed_alike(&check.name, &check.definition, "(event.at >= event.starts)")
@@ -8245,10 +8244,161 @@ fn a_check_over_a_column_whose_type_change_is_refused_is_left_standing() {
             })
             .to_vec()
     );
+    let held: Vec<Vec<crate::HeldArtifact>> = plan
+        .operations
+        .iter()
+        .map(|planned| planned.verdict.held.clone())
+        .collect();
+    let check = crate::HeldArtifact {
+        kind: crate::HeldKind::Check,
+        name: "ck_event_after_start".to_string(),
+    };
+    assert_eq!(held, vec![vec![check.clone()], vec![check]]);
     let rendered = plan.render().expect("renders");
     assert!(
         rendered.iter().all(|op| op.statements.is_empty()),
         "{rendered:?}"
+    );
+}
+
+/// `ticket` keyed by `code` of `key_type`, with `extra` columns after it.
+fn keyed_ticket(key_type: &str, extra: Vec<SchemaColumn>) -> SchemaModel {
+    let mut code = pk_col("code", key_type);
+    code.autoincrement = false;
+    code.logical_type = if key_type == "text" {
+        "string"
+    } else {
+        "integer"
+    }
+    .to_string();
+    schema_model("ticket", std::iter::once(code).chain(extra).collect())
+}
+
+fn length_of(column: &str) -> ferro_schema_ir::ValueExpr {
+    ferro_schema_ir::ValueExpr::Func {
+        name: "length".to_string(),
+        args: vec![ferro_schema_ir::ValueExpr::Column {
+            name: column.to_string(),
+        }],
+    }
+}
+
+#[test]
+fn a_check_that_types_only_under_a_key_columns_withheld_type_is_held_not_read() {
+    // `code` an integer key under `code > 0`, declared a text key under
+    // `length(code) > 0`: the primary-key recipe's change. The live read
+    // would ask Postgres to print `length(code)` against an integer and fail;
+    // it asks no pair, the plan rebuilds nothing, and the refused alter
+    // lists the check as held.
+    let check = |predicate| SchemaTableCheck {
+        name: "ck_ticket_coded".to_string(),
+        predicate,
+    };
+    let live_model = SchemaModel {
+        table_checks: vec![check(ferro_schema_ir::CheckExpr::Cmp {
+            column: "code".to_string(),
+            op: ferro_schema_ir::CheckCmpOp::Gt,
+            other: ferro_schema_ir::CheckOperand::Literal {
+                token: "0".to_string(),
+            },
+        })],
+        ..keyed_ticket("integer", Vec::new())
+    };
+    let declared_model = SchemaModel {
+        table_checks: vec![check(ferro_schema_ir::CheckExpr::Compare {
+            left: length_of("code"),
+            op: ferro_schema_ir::CheckCmpOp::Gt,
+            right: ferro_schema_ir::ValueExpr::Literal {
+                token: "0".to_string(),
+            },
+        })],
+        ..keyed_ticket("text", Vec::new())
+    };
+    let live_columns = live_model.columns.clone();
+    let live_column = |name: &str| live_columns.iter().find(|col| col.name == name);
+    assert!(
+        crate::plan::printed_pair_checks(&declared_model, "ticket", &live_column, &|_| true)
+            .is_empty()
+    );
+    let mut facts = LiveFacts::default();
+    facts.tables.insert(
+        "ticket".to_string(),
+        live_checks(vec![live_check("ck_ticket_coded", "CHECK ((code > 0))")]),
+    );
+    let plan = plan_from_ir(
+        &Side::live(envelope(vec![live_model]), facts).expect("live side"),
+        &Side::declared(envelope(vec![declared_model])),
+        Dialect::Postgres,
+        destructive(),
+    );
+    let [planned] = plan.operations.as_slice() else {
+        panic!("{:?}", plan.op_list());
+    };
+    assert_eq!(
+        planned.op,
+        MigrationOp::AlterColumnType {
+            table: "ticket".to_string(),
+            column: "code".to_string(),
+        }
+    );
+    assert!(matches!(
+        planned.verdict.execution,
+        Execution::Refused(crate::Refusal::PrimaryKeyChange { .. })
+    ));
+    assert_eq!(
+        planned.verdict.held,
+        vec![crate::HeldArtifact {
+            kind: crate::HeldKind::Check,
+            name: "ck_ticket_coded".to_string(),
+        }]
+    );
+    let rendered = plan.render().expect("renders");
+    assert!(
+        rendered.iter().all(|op| op.statements.is_empty()),
+        "{rendered:?}"
+    );
+}
+
+#[test]
+fn a_generated_column_over_a_key_columns_withheld_type_change_is_held_unchanged() {
+    // `n = code + 1` over an integer key, declared `n = length(code)` over a
+    // text key: no expression change and no replace around an alter that
+    // never runs; the alter lists `n` as held.
+    let n = |expr| SchemaColumn {
+        logical_type: "integer".to_string(),
+        generated: Some(expr),
+        ..col("n", "bigint", false)
+    };
+    let before = keyed_ticket(
+        "integer",
+        vec![n(ferro_schema_ir::ValueExpr::Binary {
+            op: ferro_schema_ir::ValueBinaryOp::Add,
+            left: Box::new(ferro_schema_ir::ValueExpr::Column {
+                name: "code".to_string(),
+            }),
+            right: Box::new(ferro_schema_ir::ValueExpr::Literal {
+                token: "1".to_string(),
+            }),
+        })],
+    );
+    let after = keyed_ticket("text", vec![n(length_of("code"))]);
+    let plan = plan_declared(&before, &after, Dialect::Postgres, destructive());
+    let [planned] = plan.operations.as_slice() else {
+        panic!("{:?}", plan.op_list());
+    };
+    assert_eq!(
+        planned.op,
+        MigrationOp::AlterColumnType {
+            table: "ticket".to_string(),
+            column: "code".to_string(),
+        }
+    );
+    assert_eq!(
+        planned.verdict.held,
+        vec![crate::HeldArtifact {
+            kind: crate::HeldKind::GeneratedColumn,
+            name: "n".to_string(),
+        }]
     );
 }
 

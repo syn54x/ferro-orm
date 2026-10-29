@@ -166,7 +166,10 @@ async def _plan_drift(using: str | None, declared_json: str) -> dict[str, Any]:
     ``own_type``) on the two ops of such a pair, ``carried`` on an op that
     takes down or puts back what the plan carries around another change
     (``unchanged``, ``changed`` or ``not_compared``: whether it is put back
-    as it was), and its report shape. Raises
+    as it was), ``held`` on a type change no door runs (the checks,
+    generated columns and policies over the column, each ``{"kind":
+    "check" | "generated_column" | "policy", "name": ...}``, left standing
+    and not compared), and its report shape. Raises
     ``ValueError`` when ``declared_json`` is not a schema envelope, and the
     connection's error when it is not open."""
     ...
