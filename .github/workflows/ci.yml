@@ -238,8 +238,12 @@ jobs:
           name: python-${{ matrix.python-version }}
 
   test-python-backend-matrix:
-    name: Python backend matrix (SQLite + Postgres)
+    name: Python backend matrix (Postgres, shard ${{ matrix.shard }}/2)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
     services:
       postgres:
         image: postgres:17
@@ -289,7 +293,7 @@ jobs:
 
       - name: Run backend matrix tests
         run: |
-          uv run pytest -n logical -m "backend_matrix or postgres_only" --db-backends=postgres
+          uv run pytest -n logical -m "backend_matrix or postgres_only" --db-backends=postgres --shard ${{ matrix.shard }}/2
 
   check-conventional-commits:
     name: Check Conventional Commits

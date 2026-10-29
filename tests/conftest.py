@@ -31,6 +31,29 @@ def pytest_addoption(parser):
         default="sqlite",
         help="Comma-separated database backends to use for backend_matrix tests: sqlite,postgres.",
     )
+    parser.addoption(
+        "--shard",
+        action="store",
+        default="1/1",
+        help="Run the i-th of n equal slices of the collected tests, as i/n.",
+    )
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collection_modifyitems(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    """Keep every ``count``-th test from ``index - 1`` on, in node-id order, so
+    ``--shard 1/2`` and ``--shard 2/2`` on two runners are the whole suite once."""
+    index, count = (int(part) for part in config.getoption("--shard").split("/"))
+    if count == 1:
+        return
+    items.sort(key=lambda item: item.nodeid)
+    kept = items[index - 1 :: count]
+    config.hook.pytest_deselected(
+        items=[item for item in items if item not in set(kept)]
+    )
+    items[:] = kept
 
 
 def pytest_configure(config):
