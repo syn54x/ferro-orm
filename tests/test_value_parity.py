@@ -640,6 +640,24 @@ async def test_a_decimal_literal_computes_in_double_on_both_databases(
 
 
 @pytest.mark.asyncio
+async def test_a_cast_float_literal_is_no_drift_on_a_reconnect(db_url: str, tmp_path):
+    # Postgres prints the CAST back its own way; the pass must still plan nothing.
+    class Sample(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        a: int
+        value: float = Field(generated=lambda sample: sample.a + 0.1)
+
+    for url in (f"sqlite:{tmp_path / 'reconnect.db'}?mode=rwc", db_url):
+        await ferro.connect(url, auto_migrate=True)
+        try:
+            report = await ferro.migrate(destructive=True)
+            assert report.statements == ()
+            assert report.warnings == ()
+        finally:
+            ferro.reset_engine()
+
+
+@pytest.mark.asyncio
 async def test_the_sign_of_an_integer_divides_as_an_integer_on_both_databases(
     db_url: str, tmp_path
 ):

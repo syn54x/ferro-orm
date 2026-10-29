@@ -450,14 +450,18 @@ def test_a_bounded_string_generated_column_is_refused_naming_text(db_type):
             )
 
 
-def test_an_unbounded_string_generated_column_is_accepted():
+@pytest.mark.parametrize("db_type", [None, "text"])
+def test_an_unbounded_string_generated_column_is_accepted(db_type):
+    # No db_type stores a str as an unbounded varchar on Postgres.
+    options = {"db_type": db_type} if db_type else {}
+
     class Contact(Model):
         id: int | None = Field(default=None, primary_key=True)
         nickname: str | None = None
         name: str
         label: str | None = Field(
             generated=lambda contact: fn.coalesce(contact.nickname, contact.name),
-            db_type="text",
+            **options,
         )
 
     assert Contact.__ferro_generated__ == {"label": frozenset({"nickname", "name"})}

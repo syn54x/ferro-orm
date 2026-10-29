@@ -397,16 +397,36 @@ pub struct ValueTyping {
 
 /// How the table's column `name` reads in a value expression.
 pub fn schema_value_column(columns: &[SchemaColumn], name: &str) -> Option<ValueColumn> {
-    let col = columns.iter().find(|col| col.name == name)?;
-    Some(ValueColumn {
-        family: if col.enum_values.is_some() {
+    columns
+        .iter()
+        .find(|col| col.name == name)
+        .map(value_column)
+}
+
+/// How one column reads in a value expression: the one decision of its
+/// value family, read by the class-definition checks and every renderer.
+/// An enum column has none, whatever its storage.
+pub fn value_column(col: &SchemaColumn) -> ValueColumn {
+    let is_enum =
+        col.enum_values.is_some() || col.enum_type_name.is_some() || col.postgres_native_enum;
+    ValueColumn {
+        family: if is_enum {
             None
         } else {
             ValueType::from_token(&col.logical_type)
         },
         nullable: col.nullable,
         retired: col.retired,
-    })
+    }
+}
+
+/// Every value family with the Python annotation it is declared with, in
+/// table order.
+pub fn value_family_annotations() -> Vec<(&'static str, &'static str)> {
+    ValueType::ALL
+        .iter()
+        .map(|family| (family.token(), family.annotation()))
+        .collect()
 }
 
 /// The type of a literal token as both databases read it: `true` / `false`
@@ -1087,6 +1107,17 @@ mod tests {
             "{}",
             refused(&constant)
         );
+    }
+
+    #[test]
+    fn a_column_family_comes_from_its_logical_type_and_an_enum_has_none() {
+        let int = schema_column("a", "integer", None);
+        assert_eq!(value_column(&int).family, Some(ValueType::Integer));
+        let mut labelled = schema_column("e", "string", None);
+        labelled.enum_type_name = Some("status".to_string());
+        assert_eq!(value_column(&labelled).family, None);
+        assert_eq!(value_column(&schema_column("j", "json", None)).family, None);
+        assert_eq!(value_family_annotations()[1], ("number", "float"));
     }
 
     #[test]

@@ -10,8 +10,8 @@ pub use value_expr::{
     NullRule, VALUE_FUNCTIONS, ValueColumn, ValueFunction, ValueSignature, ValueType, ValueTyping,
     check_expr_columns, generated_storage_refusal, literal_type, render_generated_clause,
     render_sqlite_generated_guard, render_stored_generated_clause, render_value_expr,
-    schema_value_column, sqlite_guard_column, sqlite_guard_name, type_value_expr,
-    value_expr_columns, value_function,
+    schema_value_column, sqlite_guard_column, sqlite_guard_name, type_value_expr, value_column,
+    value_expr_columns, value_family_annotations, value_function,
 };
 
 use std::collections::BTreeMap;

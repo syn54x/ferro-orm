@@ -52,35 +52,26 @@ _NOT_A_CONDITION = (
     "as a Check in __ferro_checks__ instead"
 )
 
-#: The value families a column can hold, by its logical type.
-_FAMILIES = frozenset(
-    {"integer", "number", "decimal", "string", "date", "datetime", "boolean"}
-)
+#: The Python annotation each value family is declared with, for refusals;
+#: the family table is the Rust core's.
+_ANNOTATIONS: dict[str, str] = dict(_core._value_family_annotations())
 
-#: The Python annotation each family is declared with, for refusals.
-_ANNOTATIONS = {
-    "integer": "int",
-    "number": "float",
-    "decimal": "Decimal",
-    "string": "str",
-    "date": "date",
-    "datetime": "datetime",
-    "boolean": "bool",
-}
+#: Whether a value of one family fits a parameter of another (an integer
+#: fits a float or decimal), as the Rust core decides it.
+_fits = _core._value_family_fits
 
-#: An integer argument also fits a float or decimal parameter.
-_WIDENS_TO = {"integer": frozenset({"number", "decimal"})}
+
+def _typing_column(spec: Any) -> dict[str, Any]:
+    """A column spec as the Rust typing reads it: its SchemaIR column."""
+    from .ir.compiler import _column_ir_from_spec
+
+    # The typing never reads a default, and a Python default may not be JSON.
+    return {**_column_ir_from_spec(spec), "default": None, "retired": spec.retired}
 
 
 def _column_family(spec: Any) -> str | None:
     """The value family a column holds, or `None` for one no expression yields."""
-    if spec.enum_class is not None or spec.enum_values is not None:
-        return None
-    return spec.logical_type if spec.logical_type in _FAMILIES else None
-
-
-def _fits(argument: str, parameter: str) -> bool:
-    return argument == parameter or parameter in _WIDENS_TO.get(argument, ())
+    return _core._value_column_family(json.dumps(_typing_column(spec)))
 
 
 def value_expr_type(
@@ -104,15 +95,8 @@ def value_expr_type(
         TypeError: The expression could store a different value, or fail
             differently, on SQLite and Postgres.
     """
-    facts = {
-        name: {
-            "family": _column_family(spec),
-            "nullable": spec.nullable,
-            "retired": spec.retired,
-        }
-        for name, spec in columns.items()
-    }
-    return _core._value_expr_type(json.dumps(tree), json.dumps(facts))
+    typing_columns = [_typing_column(spec) for spec in columns.values()]
+    return _core._value_expr_type(json.dumps(tree), json.dumps(typing_columns))
 
 
 @dataclass(frozen=True)
@@ -288,9 +272,7 @@ def _refuse_unequal_family(
             f"different values; annotate the field {_ANNOTATIONS[family]} or "
             f"change the expression to yield {_ANNOTATIONS[column_family]}"
         )
-    from .ir.compiler import _column_ir_from_spec
-
-    refusal = _core._generated_storage_refusal(json.dumps(_column_ir_from_spec(spec)))
+    refusal = _core._generated_storage_refusal(json.dumps(_typing_column(spec)))
     if refusal is not None:
         raise TypeError(f"{where} {refusal}")
 
