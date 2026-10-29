@@ -544,6 +544,10 @@ pub(crate) fn column_riders<'a>(model: &'a SchemaModel, column: &str) -> Riders<
 /// `constraints` is [`ConstraintMode::Plain`] on every door but the
 /// generator, which adds the column's foreign key and check `NOT VALID` on an
 /// existing Postgres table (ADR-0043).
+///
+/// `live_body` is the expression of a column the target holds generated as a
+/// live catalog printed it (a down toward a live database), which its IR
+/// does not declare.
 pub(crate) fn emit_add_column(
     table: &str,
     column: &str,
@@ -551,8 +555,10 @@ pub(crate) fn emit_add_column(
     dialect: Dialect,
     types_created_by_plan: &BTreeSet<String>,
     constraints: ConstraintMode,
+    live_body: Option<&str>,
 ) -> Result<EmissionResult, EmissionError> {
     let col = find_column(model, column)?;
+    let generated = col.generated.is_some() || live_body.is_some();
     let ld = dialect;
     let storage = resolve_column_storage(col, ld).map_err(|message| EmissionError { message })?;
 
@@ -569,20 +575,21 @@ pub(crate) fn emit_add_column(
 
     // Field defaults are Pydantic/client defaults. ADD COLUMN uses them only
     // as a temporary backfill for NOT NULL; nullable adds stay DEFAULT-free.
-    let json_backfill = if col.nullable {
+    // A generated column needs none: the database computes every row.
+    let json_backfill = if col.nullable || generated {
         None
     } else {
         col.default
             .as_ref()
             .and_then(|d| render_json_backfill_default(d, &storage, dialect))
     };
-    let scalar_backfill = if col.nullable || json_backfill.is_some() {
+    let scalar_backfill = if col.nullable || generated || json_backfill.is_some() {
         None
     } else {
         col.default.as_ref().and_then(literal_default_value)
     };
     let has_backfill = json_backfill.is_some() || scalar_backfill.is_some();
-    if !col.nullable && !has_backfill {
+    if !col.nullable && !has_backfill && !generated {
         return Err(EmissionError {
             message: format!(
                 "Cannot add NOT NULL column '{}.{}' to an existing table: it has no \
@@ -603,6 +610,12 @@ pub(crate) fn emit_add_column(
         col_def.default(Expr::cust(expr.clone()));
     } else if let Some(default_value) = &scalar_backfill {
         col_def.default(default_value.clone());
+    }
+    // The clause `CREATE TABLE` writes, after the type and nullability.
+    if let Some(text) = generated_column_text(model, col, dialect)? {
+        col_def.extra(text);
+    } else if let Some(body) = live_body {
+        col_def.extra(ferro_ddl_lowering::render_stored_generated_clause(body));
     }
 
     let riders = column_riders(model, column);

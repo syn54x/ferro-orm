@@ -289,7 +289,9 @@ fn widens(
 /// a table carries ([`column_riders`]), which a table that already exists
 /// builds in its own step too. Laid out table by table in the target's
 /// order, each table's drops first (as the parent declares them), then its
-/// builds (as the target does).
+/// builds (as the target does). A parent's index over a column the plans
+/// drop goes with the column, so a build under its name is a plain add (a
+/// generated column dropped and added back).
 fn index_ops(
     plans: &[Plan],
     before: &IrEnvelope<SchemaIrPayload>,
@@ -297,8 +299,12 @@ fn index_ops(
 ) -> Result<Vec<MigrationOp>, GenerateError> {
     let mut builds: BTreeSet<(String, String)> = BTreeSet::new();
     let mut drops: BTreeSet<(String, String)> = BTreeSet::new();
+    let mut dropped_columns: BTreeSet<(String, String)> = BTreeSet::new();
     for planned in plans.iter().flat_map(|plan| &plan.operations) {
         match &planned.op {
+            MigrationOp::DropColumn { table, column } => {
+                dropped_columns.insert((table.clone(), column.clone()));
+            }
             MigrationOp::AddColumn { table, column } if find_model(before, table).is_some() => {
                 if let Some(model) = find_model(target, table) {
                     let riders = column_riders(model, column);
@@ -326,7 +332,14 @@ fn index_ops(
         };
         let table = &after.table_name;
         let key = |name: &str| (table.clone(), name.to_string());
-        let old = standalone_indexes(parent);
+        let old: Vec<_> = standalone_indexes(parent)
+            .into_iter()
+            .filter(|(_, columns, _)| {
+                !columns
+                    .iter()
+                    .any(|column| dropped_columns.contains(&key(column)))
+            })
+            .collect();
         for (name, ..) in &old {
             if drops.contains(&key(name)) {
                 ops.push(MigrationOp::DropIndex {

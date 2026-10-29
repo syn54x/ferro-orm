@@ -1385,6 +1385,38 @@ fn plan_existing_table(
     let table = new_model.table_name.as_str();
     let facts = old.table_facts(old_model);
     let old_view = old.table_view(old_model, dialect);
+    // A generated column dropped and added back is diffed as the table holds
+    // it after the drop: absent, so the add brings it back with what rides it.
+    let replaced = replaced_generated_columns(
+        old,
+        new,
+        old_view.as_ref(),
+        new_model,
+        dialect,
+        options.destructive,
+    );
+    // A plain column the model makes generated, which only a plan that
+    // drops data replaces: left, and said so.
+    if !options.destructive {
+        plan.reports.extend(
+            new_model
+                .columns
+                .iter()
+                .filter(|col| {
+                    new.holds_generated(new_model, &col.name)
+                        && old_view.columns.iter().any(|was| was.name == col.name)
+                        && !old.holds_generated(old_view.as_ref(), &col.name)
+                })
+                .map(|col| {
+                    ferro_ddl_lowering::plain_column_kept_warning(table, &col.name, dialect)
+                }),
+        );
+    }
+    let old_view = if replaced.is_empty() {
+        old_view
+    } else {
+        Cow::Owned(without_columns(old_view.as_ref(), &replaced))
+    };
     let old_model = old_view.as_ref();
     let mut ops = Vec::new();
     let mut column_drops = Vec::new();
@@ -1402,14 +1434,27 @@ fn plan_existing_table(
         &mut ops,
         &mut plan.reports,
     );
+    ops.extend(replaced.iter().map(|column| MigrationOp::DropColumn {
+        table: table.to_string(),
+        column: column.clone(),
+    }));
+    let mut column_ops = Vec::new();
     diff_model_columns(
         table,
         old_model,
         new_model,
         dialect,
-        &mut ops,
+        &mut column_ops,
         &mut column_drops,
     );
+    // Each replaced column comes back after every other column op: an
+    // input's type change runs between its drop and its add.
+    let (added_back, column_ops): (Vec<MigrationOp>, Vec<MigrationOp>) =
+        column_ops.into_iter().partition(
+            |op| matches!(op, MigrationOp::AddColumn { column, .. } if replaced.contains(column)),
+        );
+    ops.extend(column_ops);
+    ops.extend(added_back);
     diff_generated(old, new, table, old_model, new_model, dialect, &mut ops);
     diff_model_indexes(table, old_model, new_model, options.destructive, &mut ops);
     // Invalid-index rebuilds (#515; ADR-0044) go where `AddIndex` goes: after
@@ -1448,12 +1493,23 @@ fn plan_existing_table(
         .map(|(name, body)| (name, body.text().to_string()))
         .collect();
     let target_names: Vec<String> = target_checks.iter().map(|(name, _)| name.clone()).collect();
+    // Postgres drops every table check reading a column with the column: a
+    // check over a replaced column is gone once its drop runs, so the plan
+    // adds it back after the add (SQLite's rebuild writes the table's checks
+    // into the table it builds).
+    let taken: Vec<String> = if dialect == Dialect::Postgres {
+        checks_reading(new_model, &replaced)
+    } else {
+        Vec::new()
+    };
+    let standing = |name: &String| !taken.contains(name);
     // Check addition (#343; ADR-0013) lands after the column ops, so a CHECK
     // over a newly added column follows its ADD COLUMN.
     let live_check_names: Vec<String> = facts
         .checks
         .iter()
         .map(|check| check.name.clone())
+        .filter(standing)
         .collect();
     ops.extend(missing_checks(
         table,
@@ -1467,7 +1523,7 @@ fn plan_existing_table(
     let live_ferro_owned: Vec<(String, String)> = facts
         .checks
         .iter()
-        .filter(|check| check.ferro_owned)
+        .filter(|check| check.ferro_owned && standing(&check.name))
         .map(|check| (check.name.clone(), check.definition.clone()))
         .collect();
     ops.extend(check_rebuilds(table, &target_checks, &live_ferro_owned));
@@ -1484,6 +1540,7 @@ fn plan_existing_table(
     let check_validity: Vec<LiveCheckValidity> = facts
         .checks
         .iter()
+        .filter(|check| standing(&check.name))
         .map(|check| LiveCheckValidity {
             name: check.name.clone(),
             validated: check.validated,
@@ -2152,9 +2209,12 @@ impl PlannedOp {
 }
 
 /// Whether existing rows need a value for `col` that no statement supplies:
-/// it is `NOT NULL` and declares no default to fill them with.
+/// it is `NOT NULL`, declares no default to fill them with, and is not
+/// generated (the database computes a generated column for every row).
 pub(crate) fn needs_values(col: &ferro_schema_ir::SchemaColumn) -> bool {
-    !col.nullable && col.default.as_ref().is_none_or(serde_json::Value::is_null)
+    !col.nullable
+        && col.generated.is_none()
+        && col.default.as_ref().is_none_or(serde_json::Value::is_null)
 }
 
 /// Whether `col` is stored as a native Postgres enum type.
@@ -2209,24 +2269,49 @@ fn verdict(op: &MigrationOp, before: &Side, target: &Side, dialect: Dialect) -> 
         (before.plans_label_removals() && rides_removed_label(op, was, now))
             .then_some(Rider::RemovedLabel)
     });
+    // A generated column is computed for every row: its add asks the rows
+    // for nothing and brings their values back with it.
+    let generated_add = adds_generated(op, target);
     OpVerdict {
         execution: execution(op, was, now, goes_with, target, dialect),
-        demands_values: demands_values(op, was, now),
-        drops_data: matches!(
-            op,
-            MigrationOp::DropTable { .. }
-                | MigrationOp::DropEnumType { .. }
-                | MigrationOp::DropColumn { .. }
-        ),
-        fails_on_rows: fails_on_rows(op, now),
+        demands_values: !generated_add && demands_values(op, was, now),
+        drops_data: match op {
+            MigrationOp::DropTable { .. } | MigrationOp::DropEnumType { .. } => true,
+            // A generated column dropped to be added back around an input's
+            // type change loses nothing: the add computes every row again.
+            MigrationOp::DropColumn { table, column } => {
+                let stored = |side: &Side| {
+                    side.model(table)
+                        .is_some_and(|model| side.generation(model, column).is_stored())
+                };
+                !(stored(target) && stored(before))
+            }
+            _ => false,
+        },
+        fails_on_rows: if generated_add {
+            RowRisk::None
+        } else {
+            fails_on_rows(op, now)
+        },
         recreates: match op {
             MigrationOp::AddTable { .. } => true,
             MigrationOp::AddColumn { column, .. } => {
-                find_column(now, column).is_some_and(|col| !col.nullable)
+                !generated_add && find_column(now, column).is_some_and(|col| !col.nullable)
             }
             _ => false,
         },
         goes_with,
+    }
+}
+
+/// Whether `op` adds a column `target` holds as a stored generated one (a
+/// live target by its catalog facts, which its IR does not carry).
+fn adds_generated(op: &MigrationOp, target: &Side) -> bool {
+    match op {
+        MigrationOp::AddColumn { table, column } => target
+            .model(table)
+            .is_some_and(|model| target.holds_generated(model, column)),
+        _ => false,
     }
 }
 
@@ -2397,7 +2482,10 @@ fn execution(
     if primary_key {
         return Execution::Refused(Refusal::PrimaryKeyChange { table: table() });
     }
-    if dialect == Dialect::Sqlite && sqlite_rebuilds(op, was, now, goes_with) {
+    // SQLite's `ADD COLUMN` takes no stored generated column.
+    if dialect == Dialect::Sqlite
+        && (sqlite_rebuilds(op, was, now, goes_with) || adds_generated(op, target))
+    {
         return Execution::Rebuild;
     }
     if let MigrationOp::AlterColumnType { column, .. } = op
@@ -2424,7 +2512,8 @@ fn execution(
 /// | drop a plain column | native |
 /// | drop a foreign-key column | rebuild |
 /// | change a column's type or nullability | rebuild |
-/// | change a generated column's expression | rebuild |
+/// | add a generated column (decided by the caller, from the target's side), make one plain, or change its expression | rebuild |
+/// | drop a column to add it back generated | rebuild |
 /// | drop a foreign default | rebuild |
 /// | add, change or drop a check (but a dropped column's own) | rebuild |
 /// | add, retarget or drop a foreign key (on a kept column) | rebuild |
@@ -2480,10 +2569,15 @@ fn sqlite_rebuilds(
         MigrationOp::AddColumn { column, .. } => {
             find_column(now, column).is_some_and(|col| !col.nullable)
         }
-        MigrationOp::DropColumn { column, .. } => has_foreign_key(was, column),
+        // A column the target still holds is dropped to be added back
+        // generated, which only the rebuild does.
+        MigrationOp::DropColumn { column, .. } => {
+            has_foreign_key(was, column) || find_column(now, column).is_some()
+        }
         // SQLite has no `ALTER COLUMN … DROP DEFAULT`.
         MigrationOp::AlterColumnType { .. }
         | MigrationOp::AlterGeneratedExpression { .. }
+        | MigrationOp::DropGeneratedExpression { .. }
         | MigrationOp::AlterColumnNullability { .. }
         | MigrationOp::DropDefault { .. }
         | MigrationOp::ChangePrimaryKey { .. }
@@ -2582,6 +2676,52 @@ pub fn plan_down(up: &[MigrationOp], after: &Side, before: &Side, dialect: Diale
                 Artifact::ForeignKey(table.clone(), column)
             }));
         }
+    }
+    // A column in scope that the down drops and adds back (made generated
+    // again) takes every index, check and foreign key over it with the
+    // drop: the down puts them back too, as `before` holds them.
+    let added_back: Vec<(String, String)> = plan
+        .ops()
+        .filter_map(|op| match op {
+            MigrationOp::DropColumn { table, column }
+                if scope.contains(&Artifact::Column(table.clone(), column.clone()))
+                    && plan.ops().any(|other| {
+                        matches!(other, MigrationOp::AddColumn { table: t, column: c }
+                            if t == table && c == column)
+                    }) =>
+            {
+                Some((table.clone(), column.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    for (table, column) in added_back {
+        let Some(model) = before.model(&table) else {
+            continue;
+        };
+        scope.extend(
+            emit::standalone_indexes(model)
+                .into_iter()
+                .filter(|(_, columns, _)| columns.contains(&column))
+                .map(|(name, ..)| Artifact::Index(table.clone(), name)),
+        );
+        let riders = emit::column_riders(model, &column);
+        scope.extend(
+            riders
+                .check
+                .map(|check| Artifact::Constraint(table.clone(), check.name.clone()))
+                .into_iter()
+                .chain(
+                    checks_reading(model, std::slice::from_ref(&column))
+                        .into_iter()
+                        .map(|name| Artifact::Constraint(table.clone(), name)),
+                ),
+        );
+        scope.extend(
+            riders
+                .foreign_key
+                .map(|_| Artifact::ForeignKey(table.clone(), column.clone())),
+        );
     }
     plan.operations.retain(|planned| {
         is_rename(&planned.op)
@@ -2690,6 +2830,7 @@ fn key(op: &MigrationOp) -> Option<Artifact> {
         | MigrationOp::DropColumn { table, column }
         | MigrationOp::AlterColumnType { table, column }
         | MigrationOp::AlterGeneratedExpression { table, column }
+        | MigrationOp::DropGeneratedExpression { table, column }
         | MigrationOp::AlterColumnNullability { table, column } => {
             Artifact::Column(t(table), column.clone())
         }
@@ -3710,6 +3851,110 @@ fn added_column_riders<'a>(
         .collect()
 }
 
+/// Whether a column both sides hold changes its storage type from `old_col`
+/// to `new_col` on `dialect`: an [`MigrationOp::AlterColumnType`].
+fn type_changes(
+    old_col: &ferro_schema_ir::SchemaColumn,
+    new_col: &ferro_schema_ir::SchemaColumn,
+    dialect: Dialect,
+) -> bool {
+    // A column declared with one native enum type on both sides that moved
+    // to another is a type change too: the storage decision reads a live
+    // native-enum column as already at any enum target, and only a
+    // declared `old` names its type. A move of every column of a type is
+    // its rename, applied before this diff runs (ADR-0032). So is a column
+    // that leaves its native type for a scalar storage, which the storage
+    // decision also reads as no change (a native enum's scalar cascade is
+    // the string's).
+    let moved_enum = dialect == Dialect::Postgres
+        && matches!(
+            (enum_type_of(old_col), enum_type_of(new_col)),
+            (Some((a, _)), Some((b, _))) if a != b
+        )
+        || dialect == Dialect::Postgres
+            && enum_type_of(old_col).is_some()
+            && enum_type_of(new_col).is_none();
+    moved_enum || schema_columns_storage_drift(old_col, new_col, dialect)
+}
+
+/// The stored generated columns of `new_model` (on `new`) that
+/// `old_model` (on `old`) holds too and the plan drops and adds back, in
+/// `new_model`'s order. Each side answers for its own generation (a live
+/// one from its catalog facts):
+///
+/// - one `old` holds plain or `VIRTUAL`: the add replaces the values the
+///   rows hold, so only a `destructive` plan does it;
+/// - one an input of which changes type, which Postgres refuses to alter
+///   while an expression reads it. The add computes every row again, so
+///   nothing is lost. On SQLite the three ops fold into the one rebuild the
+///   type change needs, so both dialects plan the same ops (and the same
+///   index steps).
+fn replaced_generated_columns(
+    old: &Side,
+    new: &Side,
+    old_model: &SchemaModel,
+    new_model: &SchemaModel,
+    dialect: Dialect,
+    destructive: bool,
+) -> Vec<String> {
+    let old_column = |name: &str| old_model.columns.iter().find(|col| col.name == name);
+    let new_column = |name: &str| new_model.columns.iter().find(|col| col.name == name);
+    new_model
+        .columns
+        .iter()
+        .filter(|col| {
+            let now = new.generation(new_model, &col.name);
+            if !now.is_stored() || old_column(&col.name).is_none() {
+                return false;
+            }
+            let was = old.generation(old_model, &col.name);
+            if !was.is_stored() {
+                return destructive;
+            }
+            // The columns it reads, from the side that declares it.
+            let ((Generation::Declared(expr), _) | (_, Generation::Declared(expr))) = (now, was)
+            else {
+                return false;
+            };
+            ferro_ddl_lowering::value_expr_columns(&expr)
+                .iter()
+                .any(|input| match (old_column(input), new_column(input)) {
+                    (Some(was), Some(now)) => type_changes(was, now, dialect),
+                    _ => false,
+                })
+        })
+        .map(|col| col.name.clone())
+        .collect()
+}
+
+/// The table checks of `model` whose body reads any of `columns`.
+fn checks_reading(model: &SchemaModel, columns: &[String]) -> Vec<String> {
+    model
+        .table_checks
+        .iter()
+        .filter(|check| {
+            ferro_ddl_lowering::check_expr_columns(&check.predicate)
+                .iter()
+                .any(|column| columns.contains(column))
+        })
+        .map(|check| check.name.clone())
+        .collect()
+}
+
+/// `model` without `columns` and the indexes, uniques, column checks and
+/// foreign keys over any of them: the table once the plan has dropped them.
+fn without_columns(model: &SchemaModel, columns: &[String]) -> SchemaModel {
+    let gone = |name: &String| columns.contains(name);
+    let mut out = model.clone();
+    out.columns.retain(|col| !gone(&col.name));
+    out.indexes.retain(|index| !index.columns.iter().any(gone));
+    out.uniques
+        .retain(|unique| !unique.columns.iter().any(gone));
+    out.checks.retain(|check| !gone(&check.column));
+    out.foreign_keys.retain(|fk| !gone(&fk.column));
+    out
+}
+
 fn diff_model_columns(
     table: &str,
     old_model: &SchemaModel,
@@ -3745,23 +3990,7 @@ fn diff_model_columns(
         let Some(old_col) = old_cols.get(name) else {
             continue;
         };
-        // A column declared with one native enum type on both sides that moved
-        // to another is a type change too: the storage decision reads a live
-        // native-enum column as already at any enum target, and only a
-        // declared `old` names its type. A move of every column of a type is
-        // its rename, applied before this diff runs (ADR-0032). So is a column
-        // that leaves its native type for a scalar storage, which the storage
-        // decision also reads as no change (a native enum's scalar cascade is
-        // the string's).
-        let moved_enum = dialect == Dialect::Postgres
-            && matches!(
-                (enum_type_of(old_col), enum_type_of(new_col)),
-                (Some((a, _)), Some((b, _))) if a != b
-            )
-            || dialect == Dialect::Postgres
-                && enum_type_of(old_col).is_some()
-                && enum_type_of(new_col).is_none();
-        if moved_enum || schema_columns_storage_drift(old_col, new_col, dialect) {
+        if type_changes(old_col, new_col, dialect) {
             ops.push(MigrationOp::AlterColumnType {
                 table: table.to_string(),
                 column: (*name).to_string(),
@@ -3819,6 +4048,18 @@ enum Generation {
     Live(LiveGeneratedFact),
 }
 
+impl Generation {
+    /// Whether the column is a stored generated one: declared generated
+    /// (ferro declares only `STORED`), or live with `stored` set.
+    fn is_stored(&self) -> bool {
+        match self {
+            Generation::Plain => false,
+            Generation::Declared(_) => true,
+            Generation::Live(fact) => fact.stored,
+        }
+    }
+}
+
 impl Side {
     /// How the side holds `column` of `model`'s generation: a declaration's
     /// expression, or a live column's catalog fact.
@@ -3838,6 +4079,12 @@ impl Side {
                 .cloned()
                 .map_or(Generation::Plain, Generation::Live),
         }
+    }
+
+    /// Whether the side holds `column` of `model` as a stored generated
+    /// column: declared generated, or so in a live catalog.
+    pub(crate) fn holds_generated(&self, model: &SchemaModel, column: &str) -> bool {
+        self.generation(model, column).is_stored()
     }
 
     /// The expression `column` of `model` is generated by, as `SET
@@ -4003,8 +4250,12 @@ fn generation_differs(
     }
 }
 
-/// A [`MigrationOp::AlterGeneratedExpression`] for every column both
-/// models hold whose generation differs ([`generation_differs`]).
+/// The generation changes of every column both models hold: a generated
+/// column the target holds plain is a
+/// [`MigrationOp::DropGeneratedExpression`]; a stored generated column on
+/// both sides whose expression differs ([`generation_differs`]) a
+/// [`MigrationOp::AlterGeneratedExpression`]. A column generated on the
+/// target only is dropped and added ([`replaced_generated_columns`]).
 fn diff_generated(
     old: &Side,
     new: &Side,
@@ -4015,13 +4266,19 @@ fn diff_generated(
     ops: &mut Vec<MigrationOp>,
 ) {
     for col in &new_model.columns {
-        if old_model.columns.iter().any(|was| was.name == col.name)
+        if !old_model.columns.iter().any(|was| was.name == col.name) {
+            continue;
+        }
+        let (table, column) = (table.to_string(), col.name.clone());
+        let was = old.generation(old_model, &col.name);
+        let now = new.generation(new_model, &col.name);
+        if matches!(now, Generation::Plain) && !matches!(was, Generation::Plain) {
+            ops.push(MigrationOp::DropGeneratedExpression { table, column });
+        } else if now.is_stored()
+            && was.is_stored()
             && generation_differs(old, new, old_model, new_model, &col.name, dialect)
         {
-            ops.push(MigrationOp::AlterGeneratedExpression {
-                table: table.to_string(),
-                column: col.name.clone(),
-            });
+            ops.push(MigrationOp::AlterGeneratedExpression { table, column });
         }
     }
 }

@@ -280,10 +280,16 @@ pub fn render_generated_clause(
     dialect: Dialect,
     columns: &[SchemaColumn],
 ) -> Result<String, String> {
-    Ok(format!(
-        "GENERATED ALWAYS AS ({}) STORED",
-        render_value_expr(expr, dialect, columns)?
-    ))
+    Ok(render_stored_generated_clause(&render_value_expr(
+        expr, dialect, columns,
+    )?))
+}
+
+/// `GENERATED ALWAYS AS (<body>) STORED` for an expression already
+/// rendered: a declaration's, or the text a live catalog printed for a
+/// column put back as it was.
+pub fn render_stored_generated_clause(body: &str) -> String {
+    format!("GENERATED ALWAYS AS ({body}) STORED")
 }
 
 /// The prefix of the SQLite guard's constraint name; the column follows it.
@@ -419,6 +425,36 @@ fn is_integer_valued(expr: &ValueExpr, columns: &[SchemaColumn]) -> bool {
 pub fn value_expr_columns(expr: &ValueExpr) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     collect_columns(expr, &mut out);
+    out
+}
+
+/// Every column a table check's body reads: the column each leaf names,
+/// and a comparison's other column.
+pub fn check_expr_columns(expr: &ferro_schema_ir::CheckExpr) -> BTreeSet<String> {
+    use ferro_schema_ir::{CheckExpr, CheckOperand};
+    let mut out = BTreeSet::new();
+    let mut stack = vec![expr];
+    while let Some(expr) = stack.pop() {
+        match expr {
+            CheckExpr::And { left, right } | CheckExpr::Or { left, right } => {
+                stack.push(left);
+                stack.push(right);
+            }
+            CheckExpr::Not { child } => stack.push(child),
+            CheckExpr::Cmp { column, other, .. } => {
+                out.insert(column.clone());
+                if let CheckOperand::Column { name } = other {
+                    out.insert(name.clone());
+                }
+            }
+            CheckExpr::IsNull { column }
+            | CheckExpr::IsNotNull { column }
+            | CheckExpr::In { column, .. }
+            | CheckExpr::Like { column, .. } => {
+                out.insert(column.clone());
+            }
+        }
+    }
     out
 }
 

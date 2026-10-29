@@ -1,4 +1,4 @@
-"""The model-change casebook (cases A–F) as before/after modelsets.
+"""The model-change casebook (cases A–G) as before/after modelsets.
 
 Each case is the pair of ``models.py`` bodies a generator test
 (``tests/test_generate_*.py``, tickets #524–#536) migrates between, built
@@ -15,6 +15,7 @@ from tests import test_generate_backfill as backfill
 from tests import test_generate_columns as columns
 from tests import test_generate_enum_removal as enum_removal
 from tests import test_generate_enums as enums
+from tests import test_generate_generated_columns as generated
 from tests import test_generate_indexes as indexes
 from tests import test_generate_postgres_staging as staging
 from tests import test_generate_renames as renames
@@ -277,6 +278,15 @@ CASES: tuple[Case, ...] = (
         row_security.models(
             row_security.TENANT.format(setting="app.tenant"), row_security.OWNER
         ),
+    ),
+    # -- G: generated columns -----------------------------------------------------
+    Case("G1-add-an-indexed-generated-column", generated.HEAD, generated.INDEXED),
+    Case("G2-change-a-generated-expression", generated.INDEXED, generated.ABS),
+    Case("G3-change-an-input-column-type", generated.INDEXED, generated.WIDE),
+    Case(
+        "G4-change-the-type-of-an-input-a-checked-column-reads",
+        generated.CHECKED,
+        generated.CHECKED_WIDE,
     ),
     # -- F: several changes at once -----------------------------------------------
     Case(

@@ -359,8 +359,50 @@ pub(crate) fn render_from(
                 require_postgres(op, dialect)?;
                 out.statements.push(render_rename_policy(table, old, new));
             }
+            // SQLite's `ADD COLUMN` takes no stored generated column: only a
+            // rebuild adds one, which the pass never runs.
+            MigrationOp::AddColumn { table, column }
+                if dialect == Dialect::Sqlite
+                    && generated_body(
+                        new_side,
+                        find_model(&new_models, table)?,
+                        column,
+                        dialect,
+                    )?
+                    .is_some() =>
+            {
+                let what = if find_model(&old_models, table)
+                    .is_ok_and(|model| find_column(model, column).is_ok())
+                {
+                    "is a plain column in the table and generated in the model"
+                } else {
+                    "is not in the table"
+                };
+                out.reports.push(sqlite_in_place_report(
+                    InPlaceChange::AddGeneratedColumn,
+                    Subject::column(table, column),
+                    format!(
+                        "Generated column '{table}.{column}' {what}, and SQLite cannot add a \
+                         stored generated column in place; `ferro migrate new` adds it by \
+                         rebuilding the table."
+                    ),
+                ));
+            }
+            // On SQLite a column the target still holds is dropped only to
+            // come back generated: the add's rebuild does both, so its
+            // report covers the drop.
+            MigrationOp::DropColumn { table, column }
+                if dialect == Dialect::Sqlite
+                    && find_model(&new_models, table)
+                        .is_ok_and(|model| find_column(model, column).is_ok()) => {}
             MigrationOp::AddColumn { table, column } => {
                 let model = find_model(&new_models, table)?;
+                // A column a live target holds generated is put back with
+                // the expression its catalog printed.
+                let live_body = match find_column(model, column)?.generated {
+                    Some(_) => None,
+                    None => generated_body(new_side, model, column, dialect)?,
+                };
                 let emission = emit_add_column(
                     table,
                     column,
@@ -368,6 +410,7 @@ pub(crate) fn render_from(
                     dialect,
                     &types_created_by_plan,
                     constraints,
+                    live_body.as_deref(),
                 )?;
                 out.statements.extend(emission.statements);
                 out.reports.extend(emission.reports);
@@ -398,24 +441,22 @@ pub(crate) fn render_from(
                 out.statements.extend(emission.statements);
                 out.reports.extend(emission.reports);
             }
-            // ADR-0060: Postgres changes the expression in place (`DROP
-            // EXPRESSION` when the target holds the column plain); SQLite
-            // only by a rebuild, which the pass never runs.
+            // ADR-0060: Postgres changes the expression in place; SQLite only
+            // by a rebuild, which the pass never runs.
             MigrationOp::AlterGeneratedExpression { table, column } => match dialect {
                 Dialect::Postgres => {
                     let model = find_model(&new_models, table)?;
                     let body =
-                        new_side
-                            .generated_body(model, column, dialect)
-                            .map_err(|message| EmissionError {
+                        generated_body(new_side, model, column, dialect)?.ok_or_else(|| {
+                            EmissionError {
                                 message: format!(
-                                    "Cannot render generated column '{table}.{column}': {message}"
+                                    "the plan sets the expression of '{table}.{column}', which the \
+                                 target holds plain; this is a ferro bug, please file an issue"
                                 ),
-                            })?;
-                    out.statements.push(match body {
-                        Some(body) => render_set_generated_expression(table, column, &body),
-                        None => render_drop_generated_expression(table, column),
-                    });
+                            }
+                        })?;
+                    out.statements
+                        .push(render_set_generated_expression(table, column, &body));
                 }
                 Dialect::Sqlite => out.reports.push(sqlite_in_place_report(
                     InPlaceChange::AlterGeneratedExpression,
@@ -424,6 +465,22 @@ pub(crate) fn render_from(
                         "Generated column '{table}.{column}' differs from the model, and \
                          SQLite cannot change a generated column in place; `ferro migrate \
                          new` changes it by rebuilding the table."
+                    ),
+                )),
+            },
+            // Postgres keeps the stored values; SQLite's rebuild copies them.
+            MigrationOp::DropGeneratedExpression { table, column } => match dialect {
+                Dialect::Postgres => out
+                    .statements
+                    .push(render_drop_generated_expression(table, column)),
+                Dialect::Sqlite => out.reports.push(sqlite_in_place_report(
+                    InPlaceChange::DropGeneratedExpression,
+                    Subject::column(table, column),
+                    format!(
+                        "Column '{table}.{column}' is generated in the database and plain in \
+                         the model, and SQLite cannot make a generated column plain in place; \
+                         `ferro migrate new` does it by rebuilding the table, keeping its \
+                         values."
                     ),
                 )),
             },
@@ -814,6 +871,24 @@ fn catalog_check_in_place(table: &str, name: &str) -> Report {
              `ferro migrate new` writes."
         ),
     )
+}
+
+/// The expression `column` of `model` is generated by on `side`
+/// ([`Side::generated_body`]): a declaration's rendering, a live column's
+/// catalog text, or `None` for a plain column.
+fn generated_body(
+    side: &Side,
+    model: &SchemaModel,
+    column: &str,
+    dialect: Dialect,
+) -> Result<Option<String>, EmissionError> {
+    side.generated_body(model, column, dialect)
+        .map_err(|message| EmissionError {
+            message: format!(
+                "Cannot render generated column '{}.{column}': {message}",
+                model.table_name
+            ),
+        })
 }
 
 /// Enum-type and row-security ops exist only on Postgres (SQLite stores enums

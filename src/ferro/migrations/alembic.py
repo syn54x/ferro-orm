@@ -40,6 +40,7 @@ from .._annotation_utils import _VARCHAR_RE
 from .._core import (
     _ddl_fk_name,
     _render_check_body,
+    _render_generated_expression,
     _render_table_check_body,
     _resolve_storage_type,
 )
@@ -149,7 +150,11 @@ def get_metadata(database: "str | None" = None) -> "sa.MetaData":
     return metadata
 
 
-def _build_sa_table_from_ir(metadata: "sa.MetaData", model_ir: Dict[str, Any]) -> None:
+def _build_sa_table_from_ir(
+    metadata: "sa.MetaData", model_ir: Dict[str, Any], dialect: str = "postgres"
+) -> None:
+    """Add ``model_ir``'s table to ``metadata``, a generated column's
+    ``sa.Computed`` rendered for ``dialect`` by the core."""
     table_name = model_ir.get("table_name")
     if not isinstance(table_name, str) or not table_name:
         return
@@ -166,13 +171,31 @@ def _build_sa_table_from_ir(metadata: "sa.MetaData", model_ir: Dict[str, Any]) -
         # No unique=/index= column flags: single-column uniques and indexes are
         # explicit named artifacts below (the IR `uniques[]`/`indexes[]` carry
         # the shared `uq_`/`idx_` names), matching the Rust emitter's shapes.
-        kwargs = {
-            "primary_key": bool(col.get("primary_key", False)),
-            "nullable": bool(col.get("nullable", True))
-            if not bool(col.get("primary_key", False))
-            else False,
-        }
-        columns.append(sa.Column(col_name, sa_type, **kwargs))
+        primary_key = bool(col.get("primary_key", False))
+        nullable = bool(col.get("nullable", True)) if not primary_key else False
+        # A generated column's expression is the core's one rendering, the
+        # text every door's GENERATED ALWAYS AS (…) STORED writes.
+        computed = (
+            [
+                sa.Computed(
+                    _render_generated_expression(
+                        json.dumps(model_ir), col_name, dialect
+                    ),
+                    persisted=True,
+                )
+            ]
+            if col.get("generated")
+            else []
+        )
+        columns.append(
+            sa.Column(
+                col_name,
+                sa_type,
+                *computed,
+                primary_key=primary_key,
+                nullable=nullable,
+            )
+        )
         columns_by_name[col_name] = columns[-1]
 
     table_args: list[Any] = list(columns)

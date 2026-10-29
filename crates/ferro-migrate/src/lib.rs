@@ -257,17 +257,26 @@ pub enum MigrationOp {
         /// Column whose storage type drifted.
         column: String,
     },
-    /// A generated column's expression differs between the sides, or one side
-    /// holds it generated and the other does not (a live `VIRTUAL` column, or
-    /// a column Ferro did not create as generated, reads as different;
-    /// ADR-0060). `ALTER TABLE … ALTER COLUMN … SET EXPRESSION AS (…)` on
-    /// Postgres, every row recomputed (`DROP EXPRESSION` when the target
-    /// declares it plain); a table rebuild on SQLite. Its down restores the
-    /// previous side's expression.
+    /// A stored generated column's expression differs between the sides
+    /// (ADR-0060). `ALTER TABLE … ALTER COLUMN … SET EXPRESSION AS (…)` on
+    /// Postgres, every row recomputed; a table rebuild on SQLite. Its down
+    /// restores the previous side's expression. A column generated on one
+    /// side only is [`MigrationOp::DropGeneratedExpression`], or a
+    /// [`MigrationOp::DropColumn`] and [`MigrationOp::AddColumn`] of it.
     AlterGeneratedExpression {
         /// Owning table.
         table: String,
         /// The generated column.
+        column: String,
+    },
+    /// A generated column the target declares plain: `ALTER TABLE … ALTER
+    /// COLUMN … DROP EXPRESSION` on Postgres, the stored values kept; a
+    /// table rebuild on SQLite, which copies them. Its down is the column
+    /// dropped and added generated again.
+    DropGeneratedExpression {
+        /// Owning table.
+        table: String,
+        /// The column made plain.
         column: String,
     },
     /// `nullable` changed for a column that exists in both snapshots.
@@ -495,6 +504,7 @@ impl MigrationOp {
             | MigrationOp::DropColumn { table, .. }
             | MigrationOp::AlterColumnType { table, .. }
             | MigrationOp::AlterGeneratedExpression { table, .. }
+            | MigrationOp::DropGeneratedExpression { table, .. }
             | MigrationOp::AlterColumnNullability { table, .. }
             | MigrationOp::DropDefault { table, .. }
             | MigrationOp::ChangePrimaryKey { table, .. }
@@ -649,6 +659,13 @@ impl AnsweredBy for Report {
             ReportKind::ForeignDefault { .. } => has(&|op| {
                 matches!((op, &self.subject), (
                     MigrationOp::DropDefault { table, column, .. },
+                    Subject::Column { table: subject, column: on },
+                ) if table == subject && column == on)
+            }),
+            // The plain column, replaced by the generated one.
+            ReportKind::PlainColumnKept => has(&|op| {
+                matches!((op, &self.subject), (
+                    MigrationOp::AddColumn { table, column },
                     Subject::Column { table: subject, column: on },
                 ) if table == subject && column == on)
             }),

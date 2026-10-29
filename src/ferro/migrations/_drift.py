@@ -193,6 +193,9 @@ _RENDERERS: dict[str, Callable[[dict[str, Any]], str]] = {
     "AlterGeneratedExpression": lambda op: (
         f"{_column(op)} generated expression differs"
     ),
+    "DropGeneratedExpression": lambda op: (
+        f"{_column(op)} is generated in the database, plain in the snapshot"
+    ),
     "DropDefault": lambda op: (
         f"{_column(op)} has default {op['was']} in the database, none declared"
     ),
@@ -414,10 +417,52 @@ async def against(
     operations = _describe(plan["operations"], plan["live"], snapshot, plan["dialect"])
     return DriftReport(
         against=migration,
-        lines=[render_op(op) for op in operations],
+        lines=_lines(operations, snapshot),
         operations=operations,
         reports=list(plan["reports"]),
     )
+
+
+def _inputs(expr: dict[str, Any]) -> set[str]:
+    """The columns a generated column's value expression reads."""
+    if expr["kind"] == "column":
+        return {expr["name"]}
+    children = [expr.get("left"), expr.get("right"), expr.get("operand")]
+    children += expr.get("args", [])
+    return {name for child in children if child for name in _inputs(child)}
+
+
+def _lines(operations: list[dict[str, Any]], snapshot: dict[str, Any]) -> list[str]:
+    """One line per op, a generated column the plan drops and adds back read
+    as one difference: the live column is not the stored generated one the
+    snapshot declares (its expression differs), unless the plan takes it
+    down only around a type change of a column it reads, whose own line says
+    so."""
+    columns = _columns(snapshot)
+    dropped = {
+        (op["table"], op["column"]) for op in operations if op["kind"] == "DropColumn"
+    }
+    retyped = {
+        (op["table"], op["column"])
+        for op in operations
+        if op["kind"] == "AlterColumnType"
+    }
+    lines = []
+    for op in operations:
+        if op["kind"] in ("DropColumn", "AddColumn"):
+            table, column = op["table"], op["column"]
+            if op["kind"] == "DropColumn" and (table, column) in columns:
+                continue
+            if op["kind"] == "AddColumn" and (table, column) in dropped:
+                generated = columns[(table, column)].get("generated")
+                if generated and any(
+                    (table, read) in retyped for read in _inputs(generated)
+                ):
+                    continue
+                lines.append(f"{_column(op)} generated expression differs")
+                continue
+        lines.append(render_op(op))
+    return lines
 
 
 async def _audit(name: str, database: DatabaseSettings) -> DriftReport:
