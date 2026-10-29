@@ -1,1 +1,1 @@
-verified 2026-10-29T16:40:04Z: Verify block on abf535e2 (PG18: 1588 passed, 14 skipped, 1 xfailed; cargo green; docs_checks 0); PG17 run in progress
+verified 2026-10-29T16:49:33Z: Verify block on abf535e2: cargo green; pytest PG18 and PG17 each 1588 passed, 14 skipped, 1 xfailed; docs_checks exit 0
