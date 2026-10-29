@@ -504,6 +504,7 @@ Each refusal names the fix. The rules, each from a case where the two databases 
 - **No `*` or `/` over a float, and no arithmetic over a `Decimal`.** PostgreSQL raises when a float product underflows where SQLite stores `0.0`, and SQLite computes decimals in floating point. Keep amounts in integer minor units, or compute the value in your application.
 - **Only the model's own stored columns.** An expression cannot read another generated column, a relation, or a variable from the enclosing scope; inline a constant as a literal. A misspelled column raises with the closest name.
 - **A value, not a condition.** A comparison or `&` / `|` body raises; a condition belongs in a [table check](#table-checks).
+- **A step that overflows fails the row on both databases, in a generated column or a check.** PostgreSQL raises when an integer step passes 64 bits or a float step passes the largest double. SQLite would turn the value into a real or `inf`, so Ferro adds a guard there that fails the same row. In a check, the failure is a `DataError` on PostgreSQL and a `CheckViolationError` on SQLite.
 
 [ADR 0059](https://github.com/syn54x/ferro-orm/blob/main/docs/adr/0059-value-expressions-are-lambdas-over-a-closed-function-table-under-value-parity.md) records why the function table is closed, and [ADR 0058](https://github.com/syn54x/ferro-orm/blob/main/docs/adr/0058-a-generated-columns-value-comes-only-from-the-database.md) why the value is never computed in Python.
 
