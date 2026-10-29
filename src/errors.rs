@@ -42,8 +42,6 @@ pub(crate) fn exception_name_for_database(
         Some("23505") => "UniqueViolationError",
         Some("23502") => "NotNullViolationError",
         Some("23514") => "CheckViolationError",
-        // numeric_value_out_of_range: a value too large for its type.
-        Some("22003") => "DataError",
         _ => match kind {
             ErrorKind::UniqueViolation => "UniqueViolationError",
             ErrorKind::ForeignKeyViolation => "ForeignKeyViolationError",
@@ -1255,10 +1253,12 @@ mod tests {
     }
 
     #[test]
-    fn numeric_value_out_of_range_22003_is_data_error() {
+    fn a_plain_22003_stays_an_operational_error() {
+        // Only `map_write_error` re-classes it, for a generated column's
+        // overflow; every other statement keeps the class it always had.
         assert_eq!(
             exception_name_for_database(ErrorKind::Other, Some("22003")),
-            "DataError"
+            "OperationalError"
         );
     }
 
