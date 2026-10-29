@@ -53,6 +53,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v1
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
 
       - name: Cache pre-commit hook environments
@@ -98,6 +99,9 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v1
+          shared-key: maturin-develop
+          key: py3.13
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
 
       - name: Install documentation and test dependencies
@@ -139,6 +143,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v2
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
 
       - name: Run Rust tests
@@ -179,6 +184,9 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v1
+          shared-key: maturin-develop
+          key: py3.13
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
 
       - name: Install dependencies
@@ -233,6 +241,9 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v1
+          shared-key: maturin-develop
+          key: py${{ matrix.python-version }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
 
       - name: Install dependencies
@@ -311,6 +322,9 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v1
+          shared-key: maturin-develop
+          key: py3.13
+          save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
 
       - name: Install dependencies
