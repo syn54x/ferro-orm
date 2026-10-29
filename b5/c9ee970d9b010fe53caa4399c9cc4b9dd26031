@@ -1,0 +1,1 @@
+verified 2026-10-29T17:09:36Z: Verify block on b5c9ee97: cargo green; pytest PG18 and PG17 each 1597 passed, 14 skipped, 1 xfailed; docs_checks exit 0; ruff clean
