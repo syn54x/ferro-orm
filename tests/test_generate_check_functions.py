@@ -29,7 +29,7 @@ import importlib
 import json
 import sys
 from datetime import datetime
-from typing import Annotated, ClassVar
+from typing import Annotated, Any, ClassVar
 
 import pytest
 
@@ -37,7 +37,7 @@ import ferro
 from ferro import Check, CheckViolationError, Field, Model, fn
 from ferro._core import _render_create_table_sql_for_test
 from ferro.base import FerroField
-from ferro.exceptions import DataError
+from ferro.exceptions import OperationalError
 from ferro.ir import compile_registry_schema_ir
 from tests._pass_harness import auto_migrate, schema_sql
 from tests.test_migrate_drift import drift_api
@@ -253,9 +253,12 @@ def declare_box(body) -> type[Model]:
     return Box
 
 
-def overflow_error(db_url: str) -> type[Exception]:
-    """Postgres raises computing the step; SQLite fails the check's step term."""
-    return CheckViolationError if db_url.startswith("sqlite") else DataError
+def overflow_error(db_url: str) -> Any:
+    """Postgres raises computing the step, an overflow no generated column
+    owns; SQLite fails the check's step term."""
+    if db_url.startswith("sqlite"):
+        return pytest.raises(CheckViolationError, match="ck_box_c")
+    return pytest.raises(OperationalError, match="out of range")
 
 
 @pytest.mark.backend_matrix
@@ -296,7 +299,7 @@ async def test_a_check_step_that_overflows_fails_the_row_on_both_databases(
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
         await Box.create(**fits)
-        with pytest.raises(overflow_error(db_url)):
+        with overflow_error(db_url):
             await Box.create(**overflows)
         assert len(await Box.all()) == 1
 
@@ -310,7 +313,7 @@ async def test_a_step_under_not_still_fails_the_row(db_url):
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
         await Box.create(x=1.0, y=2.0)
-        with pytest.raises(overflow_error(db_url)):
+        with overflow_error(db_url):
             await Box.create(x=1.7e308, y=1.7e308)
 
 
