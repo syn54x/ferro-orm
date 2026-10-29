@@ -609,6 +609,57 @@ def _lower_compare(
     return {"kind": "compare", "left": trees[0], "op": cmp_op, "right": trees[1]}
 
 
+_SYMBOLS = {"add": "+", "sub": "-", "mul": "*", "div": "/"}
+
+
+def _value_text(tree: Mapping[str, Any]) -> str:
+    """A lowered value expression written out, for a refusal."""
+    kind = tree["kind"]
+    if kind == "column":
+        return tree["name"]
+    if kind == "literal":
+        return tree["token"]
+    if kind == "negate":
+        return f"-{_value_text(tree['operand'])}"
+    if kind == "binary":
+        left, right = _value_text(tree["left"]), _value_text(tree["right"])
+        return f"({left} {_SYMBOLS[tree['op']]} {right})"
+    return f"fn.{tree['name']}({', '.join(_value_text(arg) for arg in tree['args'])})"
+
+
+def _refuse_overflow_under_or(
+    tree: Mapping[str, Any], model_name: str, suffix: str, columns: Mapping[str, Any]
+) -> None:
+    """Refuse an OR with an arithmetic step that can overflow under it.
+
+    Both databases fail a row whose step overflows when they compute it, but
+    Postgres does not define which side of an OR it evaluates, so it may
+    skip the step and accept a row SQLite rejects.
+    """
+    from .generated import value_expr_failing_step
+
+    stack = [tree]
+    while stack:
+        node = stack.pop()
+        kind = node["kind"]
+        if kind in ("and", "or"):
+            stack += [node["right"], node["left"]]
+        elif kind == "not":
+            stack.append(node["child"])
+        elif kind == "compare":
+            for operand in (node["left"], node["right"]):
+                step = value_expr_failing_step(operand, columns)
+                if step is not None:
+                    raise TypeError(
+                        f"{model_name}.{FERRO_CHECKS} check {suffix!r} computes "
+                        f"{_value_text(step)} under an OR: Postgres does not "
+                        "define which side of an OR it evaluates, so a row "
+                        "whose step overflows could pass Postgres and fail "
+                        "SQLite; compute the value as a generated column "
+                        "(Field(generated=...)) and compare that column"
+                    )
+
+
 def _lower_node(
     node: QueryNode, model_name: str, suffix: str, columns: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -629,7 +680,10 @@ def _lower_node(
         if node.left is None or node.right is None:
             raise _unsupported(model_name, suffix, "an incomplete compound predicate")
         kind = "and" if node.operator == "AND" else "or"
-        return {"kind": kind, "left": lower(node.left), "right": lower(node.right)}
+        lowered = {"kind": kind, "left": lower(node.left), "right": lower(node.right)}
+        if kind == "or":
+            _refuse_overflow_under_or(lowered, model_name, suffix, columns)
+        return lowered
     if node.path:
         raise _unsupported(
             model_name,

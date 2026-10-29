@@ -8,10 +8,11 @@ mod value_expr;
 
 pub use value_expr::{
     NullRule, VALUE_FUNCTIONS, ValueColumn, ValueFunction, ValueSignature, ValueType, ValueTyping,
-    check_expr_columns, generated_storage_refusal, literal_type, render_generated_clause,
-    render_sqlite_generated_guard, render_stored_generated_clause, render_value_expr,
-    schema_value_column, sqlite_guard_column, sqlite_guard_name, type_value_expr, value_column,
-    value_expr_columns, value_family_annotations, value_function,
+    check_expr_columns, first_failing_step, generated_storage_refusal, literal_type,
+    render_generated_clause, render_sqlite_generated_guard, render_stored_generated_clause,
+    render_value_expr, schema_value_column, sqlite_guard_column, sqlite_guard_name,
+    sqlite_step_terms, type_value_expr, value_column, value_expr_columns, value_family_annotations,
+    value_function, value_step_can_fail,
 };
 
 use std::collections::BTreeMap;
@@ -962,6 +963,19 @@ pub fn table_check_constraint_name(table_lower: &str, suffix: &str) -> String {
 /// parenthesised, so a check calling a value function reads as a generated
 /// column's expression does.
 ///
+/// On SQLite each comparison with a step that can fail ([`value_step_can_fail`]) is
+/// `CASE WHEN NOT (<step terms>) THEN abs(-9223372036854775807 - 1) ELSE (<comparison>) END`:
+/// one [`sqlite_step_terms`] term per step of its operands. Postgres raises
+/// on a step that overflows when it evaluates the comparison; a failed term
+/// makes SQLite raise there too (`integer overflow`) instead of judging a
+/// real or `inf`, so both report a `DataError`. The guard sits on the
+/// comparison, so a conjunct both databases skip (`kind = 2 AND ...` with
+/// `kind` 1) computes nothing on either, and since it raises rather than
+/// returning false, `NOT` cannot invert it. A `NULL` step passes. A check
+/// with such a step under an `OR` is refused when it is declared, as
+/// Postgres does not define which side of an `OR` it evaluates. The
+/// Postgres body carries no terms.
+///
 /// # Errors
 /// As [`render_value_expr`]: a call of a function the table lacks.
 pub fn render_check_expr(
@@ -969,7 +983,50 @@ pub fn render_check_expr(
     dialect: Dialect,
     columns: &[ferro_schema_ir::SchemaColumn],
 ) -> Result<String, String> {
-    let render = |expr: &ferro_schema_ir::CheckExpr| render_check_expr(expr, dialect, columns);
+    render_check_predicate(expr, dialect, columns)
+}
+
+/// Whether a table check computes a step that can fail ([`value_step_can_fail`]): a write to
+/// its table can then fail computing the check, on either database.
+pub fn table_check_computes(
+    check: &ferro_schema_ir::SchemaTableCheck,
+    columns: &[ferro_schema_ir::SchemaColumn],
+) -> bool {
+    check_step_terms(&check.predicate, columns).is_ok_and(|terms| !terms.is_empty())
+}
+
+/// The [`sqlite_step_terms`] of every comparison in a check, in order.
+fn check_step_terms(
+    expr: &ferro_schema_ir::CheckExpr,
+    columns: &[ferro_schema_ir::SchemaColumn],
+) -> Result<Vec<String>, String> {
+    let mut terms = Vec::new();
+    let mut stack = vec![expr];
+    while let Some(expr) = stack.pop() {
+        match expr {
+            ferro_schema_ir::CheckExpr::And { left, right }
+            | ferro_schema_ir::CheckExpr::Or { left, right } => {
+                stack.push(right);
+                stack.push(left);
+            }
+            ferro_schema_ir::CheckExpr::Not { child } => stack.push(child),
+            ferro_schema_ir::CheckExpr::Compare { left, right, .. } => {
+                terms.extend(sqlite_step_terms(left, columns)?);
+                terms.extend(sqlite_step_terms(right, columns)?);
+            }
+            _ => {}
+        }
+    }
+    Ok(terms)
+}
+
+/// The check body, each SQLite comparison with arithmetic guarded.
+fn render_check_predicate(
+    expr: &ferro_schema_ir::CheckExpr,
+    dialect: Dialect,
+    columns: &[ferro_schema_ir::SchemaColumn],
+) -> Result<String, String> {
+    let render = |expr: &ferro_schema_ir::CheckExpr| render_check_predicate(expr, dialect, columns);
     Ok(match expr {
         ferro_schema_ir::CheckExpr::And { left, right } => {
             format!("({}) AND ({})", render(left)?, render(right)?)
@@ -991,12 +1048,29 @@ pub fn render_check_expr(
             };
             format!("{} {} {}", quote_ident(column), check_cmp_op_sql(*op), rhs)
         }
-        ferro_schema_ir::CheckExpr::Compare { left, op, right } => format!(
-            "({} {} {})",
-            render_value_expr(left, dialect, columns)?,
-            check_cmp_op_sql(*op),
-            render_value_expr(right, dialect, columns)?
-        ),
+        ferro_schema_ir::CheckExpr::Compare { left, op, right } => {
+            let comparison = format!(
+                "({} {} {})",
+                render_value_expr(left, dialect, columns)?,
+                check_cmp_op_sql(*op),
+                render_value_expr(right, dialect, columns)?
+            );
+            let terms = if dialect == Dialect::Sqlite {
+                check_step_terms(expr, columns)?
+            } else {
+                Vec::new()
+            };
+            if terms.is_empty() {
+                comparison
+            } else {
+                // abs() of the smallest 64-bit integer is SQLite's own runtime
+                // `integer overflow` error: the CHECK raises it where Postgres raises.
+                format!(
+                    "CASE WHEN NOT ({}) THEN abs(-9223372036854775807 - 1) ELSE {comparison} END",
+                    terms.join(" AND ")
+                )
+            }
+        }
         ferro_schema_ir::CheckExpr::In { column, values } => {
             format!("{} IN ({})", quote_ident(column), values.join(", "))
         }
@@ -5283,12 +5357,17 @@ mod tests {
     #[test]
     fn a_check_comparing_value_expressions_renders_them_per_dialect() {
         let bigint = [col_with_db_type("amount", "integer", None, Some("bigint"))];
-        for dialect in [Dialect::Postgres, Dialect::Sqlite] {
-            assert_eq!(
-                super::render_check_expr(&abs_amount_over_1000(), dialect, &bigint),
-                Ok("(abs(\"amount\") > 1000)".to_string())
-            );
-        }
+        assert_eq!(
+            super::render_check_expr(&abs_amount_over_1000(), Dialect::Postgres, &bigint),
+            Ok("(abs(\"amount\") > 1000)".to_string())
+        );
+        // `abs(-2**63)` raises on both; SQLite's guard names the step.
+        let guarded = "CASE WHEN NOT (typeof(abs(\"amount\")) IN ('integer', 'null')) \
+            THEN abs(-9223372036854775807 - 1) ELSE (abs(\"amount\") > 1000) END";
+        assert_eq!(
+            super::render_check_expr(&abs_amount_over_1000(), Dialect::Sqlite, &bigint),
+            Ok(guarded.to_string())
+        );
         // An `int` field is `integer` on Postgres, widened to 64 bits as a
         // generated column's expression is; SQLite computes at 64 bits.
         let int = [col_with_db_type("amount", "integer", None, None)];
@@ -5298,7 +5377,71 @@ mod tests {
         );
         assert_eq!(
             super::render_check_expr(&abs_amount_over_1000(), Dialect::Sqlite, &int),
-            Ok("(abs(\"amount\") > 1000)".to_string())
+            Ok(guarded.to_string())
+        );
+    }
+
+    #[test]
+    fn a_sqlite_check_guards_each_comparison_computing_arithmetic() {
+        use ferro_schema_ir::{CheckCmpOp, CheckExpr, ValueBinaryOp, ValueExpr};
+        let column = |name: &str| {
+            Box::new(ValueExpr::Column {
+                name: name.to_string(),
+            })
+        };
+        let sum_over_zero = |left: &str, right: &str| CheckExpr::Compare {
+            left: ValueExpr::Binary {
+                op: ValueBinaryOp::Add,
+                left: column(left),
+                right: column(right),
+            },
+            op: CheckCmpOp::Gt,
+            right: ValueExpr::Literal {
+                token: "0".to_string(),
+            },
+        };
+        let expr = CheckExpr::Not {
+            child: Box::new(CheckExpr::And {
+                left: Box::new(sum_over_zero("x", "y")),
+                right: Box::new(sum_over_zero("m", "n")),
+            }),
+        };
+        let columns = [
+            col_with_db_type("x", "number", None, None),
+            col_with_db_type("y", "number", None, None),
+            col_with_db_type("m", "integer", None, Some("bigint")),
+            col_with_db_type("n", "integer", None, Some("bigint")),
+        ];
+        let body = "NOT ((((\"x\" + \"y\") > 0)) AND (((\"m\" + \"n\") > 0)))";
+        assert_eq!(
+            super::render_check_expr(&expr, Dialect::Postgres, &columns),
+            Ok(body.to_string())
+        );
+        assert_eq!(
+            super::render_check_expr(&expr, Dialect::Sqlite, &columns),
+            Ok(
+                "NOT ((CASE WHEN NOT ((abs((\"x\" + \"y\")) <= 1.7976931348623157e308 \
+                OR abs(\"x\") > 1.7976931348623157e308 OR abs(\"y\") > 1.7976931348623157e308)) \
+                THEN abs(-9223372036854775807 - 1) ELSE ((\"x\" + \"y\") > 0) END) \
+                AND (CASE WHEN NOT (typeof((\"m\" + \"n\")) IN ('integer', 'null')) \
+                THEN abs(-9223372036854775807 - 1) ELSE ((\"m\" + \"n\") > 0) END))"
+                    .to_string()
+            )
+        );
+        // A comparison with no step that can fail carries no terms.
+        let float_abs = CheckExpr::Compare {
+            left: ValueExpr::Func {
+                name: "abs".to_string(),
+                args: vec![*column("x")],
+            },
+            op: CheckCmpOp::Gt,
+            right: ValueExpr::Literal {
+                token: "1000".to_string(),
+            },
+        };
+        assert_eq!(
+            super::render_check_expr(&float_abs, Dialect::Sqlite, &columns),
+            Ok("(abs(\"x\") > 1000)".to_string())
         );
     }
 

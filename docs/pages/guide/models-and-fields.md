@@ -317,7 +317,7 @@ Either side of a comparison can call a function from [`ferro.fn`](../api/fields.
     --8<-- "docs/examples/generated_columns_annotated.py:check-model"
     ```
 
-`fn.abs` becomes the database's `abs()`. On PostgreSQL the column is cast to `bigint` first, as integer arithmetic in a [generated column](#generated-columns) is:
+`fn.abs` becomes the database's `abs()`. On PostgreSQL the column is cast to `bigint` first, as integer arithmetic in a [generated column](#generated-columns) is. On SQLite the comparison sits inside a guard, because `abs` of the smallest `bigint` overflows (see [value parity](#value-parity)):
 
 === "SQLite"
 
@@ -326,7 +326,7 @@ Either side of a comparison can call a function from [`ferro.fn`](../api/fields.
     CREATE TABLE IF NOT EXISTS "refund" (
       "amount_minor" integer NOT NULL,
       "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT,
-      CONSTRAINT "ck_refund_within_limit" CHECK ((abs("amount_minor") <= 50000))
+      CONSTRAINT "ck_refund_within_limit" CHECK (CASE WHEN NOT (typeof(abs("amount_minor")) IN ('integer', 'null')) THEN abs(-9223372036854775807 - 1) ELSE (abs("amount_minor") <= 50000) END)
     );
     ```
 
@@ -476,9 +476,17 @@ Each one has a [reference entry](../api/fields.md#ferro.fn). A name that is not 
 
 Ferro admits an expression only when SQLite and PostgreSQL store the same value for it on every row, and it checks that when the class is defined. A float product is one they disagree on:
 
-```python
---8<-- "docs/examples/generated_columns.py:parity"
-```
+=== "Assignment"
+
+    ```python
+    --8<-- "docs/examples/generated_columns.py:parity"
+    ```
+
+=== "Annotated"
+
+    ```python
+    --8<-- "docs/examples/generated_columns_annotated.py:parity"
+    ```
 
 It prints:
 
@@ -496,6 +504,7 @@ Each refusal names the fix. The rules, each from a case where the two databases 
 - **No `*` or `/` over a float, and no arithmetic over a `Decimal`.** PostgreSQL raises when a float product underflows where SQLite stores `0.0`, and SQLite computes decimals in floating point. Keep amounts in integer minor units, or compute the value in your application.
 - **Only the model's own stored columns.** An expression cannot read another generated column, a relation, or a variable from the enclosing scope; inline a constant as a literal. A misspelled column raises with the closest name.
 - **A value, not a condition.** A comparison or `&` / `|` body raises; a condition belongs in a [table check](#table-checks).
+- **A step that overflows fails the row on both databases, in a generated column or a check.** PostgreSQL raises when an integer step, `fn.abs` included, passes 64 bits or a float step passes the largest double. SQLite would turn the value into a real or `inf`, so Ferro adds a guard there that fails the same row. On both databases the failure is a `DataError` naming the generated column or the check.
 
 [ADR 0059](https://github.com/syn54x/ferro-orm/blob/main/docs/adr/0059-value-expressions-are-lambdas-over-a-closed-function-table-under-value-parity.md) records why the function table is closed, and [ADR 0058](https://github.com/syn54x/ferro-orm/blob/main/docs/adr/0058-a-generated-columns-value-comes-only-from-the-database.md) why the value is never computed in Python.
 

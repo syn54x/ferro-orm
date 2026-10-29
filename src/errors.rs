@@ -130,13 +130,15 @@ fn is_arithmetic_routine(routine: &str) -> bool {
     ops.len() < rest.len() && ["pl", "mi", "mul", "div", "um", "abs"].contains(&ops)
 }
 
-/// The table a write goes to, for naming the generated column an overflow
-/// belongs to.
+/// The table a write goes to, for naming the generated column or check an
+/// overflow belongs to.
 pub(crate) struct GeneratedWrite<'a> {
     /// The table written.
     pub table: &'a str,
     /// Its generated columns.
     pub generated: &'a [String],
+    /// Its table checks that compute arithmetic, by constraint name.
+    pub checks: &'a [String],
     /// Whether the statement computes values of its own (a SET's `+` / `-`),
     /// so an overflow may be its own and not a generated column's.
     pub computes: bool,
@@ -149,14 +151,16 @@ fn is_narrowing_routine(routine: &str) -> bool {
     matches!(routine, "int84" | "int82" | "int42")
 }
 
-/// The generated columns an overflow belongs to, as a phrase.
+/// The generated columns or checks an overflow belongs to, as a phrase.
 ///
 /// SQLite's guard names its column. Elsewhere (Postgres's `22003`, SQLite's
-/// `integer overflow` from `abs`) the database names none, so the phrase
-/// names the table's generated columns. It names them alone when only they
-/// can compute (arithmetic, in a statement that computes nothing itself),
-/// and beside the values the statement writes when storing either could
-/// overflow (a narrowing cast, or a SET with its own arithmetic).
+/// `integer overflow` from `abs` or from a check's step guard) the database
+/// names none, so the phrase names the table's generated columns and, for
+/// an overflow computing, its checks that compute arithmetic. It names them
+/// alone when only they can compute (arithmetic, in a statement that
+/// computes nothing itself), and beside the values the statement writes
+/// when storing either could overflow (a narrowing cast into a generated
+/// column, or a SET with its own arithmetic).
 pub(crate) fn generated_overflow_subject(
     code: Option<&str>,
     message: &str,
@@ -166,34 +170,46 @@ pub(crate) fn generated_overflow_subject(
     if let Some(column) = storage_guard_column(message) {
         return Some(format!("the generated column {}", quoted(&column)));
     }
-    let write = write.filter(|write| !write.generated.is_empty())?;
+    let write = write.filter(|write| !write.generated.is_empty() || !write.checks.is_empty())?;
     let computed = message == "integer overflow"
         || (code == Some("22003") && routine.is_some_and(is_arithmetic_routine));
-    let stored = code == Some("22003") && routine.is_some_and(is_narrowing_routine);
+    // Only a generated column stores a computed value; a check stores none.
+    let stored = code == Some("22003")
+        && routine.is_some_and(is_narrowing_routine)
+        && !write.generated.is_empty();
     if !computed && !stored {
         return None;
     }
-    let columns = match write.generated {
-        [one] => format!("the generated column {}", quoted(one)),
+    let named = |kind: &str, names: &[String]| match names {
+        [one] => format!("the {kind} {}", quoted(one)),
         many => format!(
-            "one of the generated columns {}",
+            "one of the {kind}s {}",
             many.iter()
                 .map(|c| quoted(c))
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
     };
+    let mut candidates = Vec::new();
+    if !write.generated.is_empty() {
+        candidates.push(named("generated column", write.generated));
+    }
+    if computed && !write.checks.is_empty() {
+        candidates.push(named("check", write.checks));
+    }
+    let candidates = candidates.join(" or ");
     let table = quoted(write.table);
     Some(if computed && !write.computes {
-        format!("{columns} of {table}")
+        format!("{candidates} of {table}")
     } else {
-        format!("a value written to {table} or {columns}")
+        format!("a value written to {table} or {candidates}")
     })
 }
 
-/// [`map_db_error`] for a write to a table with generated columns: an
-/// overflow computing one of them is a `DataError` naming it, on SQLite and
-/// Postgres alike (value parity covers failures).
+/// [`map_db_error`] for a write to a table with generated columns or checks
+/// that compute arithmetic: an overflow computing one of them is a
+/// `DataError` naming it, on SQLite and Postgres alike (value parity covers
+/// failures).
 pub(crate) fn map_write_error(
     context: &str,
     err: sqlx::Error,
@@ -209,8 +225,8 @@ pub(crate) fn map_write_error(
         {
             let message = format!(
                 "{context}: {subject} is out of range for its type ({}); the \
-                 database computes a generated column from the row, so write \
-                 inputs whose result fits the column's type",
+                 database computes it from the row, so write inputs whose \
+                 result fits",
                 db.message()
             );
             let driver_message = Some(db.message().to_string());
@@ -1233,8 +1249,62 @@ mod tests {
         GeneratedWrite {
             table: "ledger",
             generated,
+            checks: &[],
             computes,
         }
+    }
+
+    #[test]
+    fn an_overflow_computing_a_check_names_the_check() {
+        let checks = ["ck_ledger_c".to_string()];
+        let only_checks = GeneratedWrite {
+            table: "ledger",
+            generated: &[],
+            checks: &checks,
+            computes: false,
+        };
+        for (code, message, routine) in [
+            (Some("22003"), "bigint out of range", Some("int8mul")),
+            (
+                Some("22003"),
+                "value out of range: overflow",
+                Some("float_overflow_error"),
+            ),
+            (Some("1"), "integer overflow", None),
+        ] {
+            assert_eq!(
+                generated_overflow_subject(code, message, routine, Some(&only_checks)).as_deref(),
+                Some("the check \"ck_ledger_c\" of \"ledger\""),
+                "{message}"
+            );
+        }
+        // A narrowing store is a generated column's or the statement's, never a check's.
+        assert_eq!(
+            generated_overflow_subject(
+                Some("22003"),
+                "smallint out of range",
+                Some("int82"),
+                Some(&only_checks)
+            ),
+            None
+        );
+        let total = ["total".to_string()];
+        let both = GeneratedWrite {
+            table: "ledger",
+            generated: &total,
+            checks: &checks,
+            computes: false,
+        };
+        assert_eq!(
+            generated_overflow_subject(
+                Some("22003"),
+                "bigint out of range",
+                Some("int8pl"),
+                Some(&both)
+            )
+            .as_deref(),
+            Some("the generated column \"total\" or the check \"ck_ledger_c\" of \"ledger\"")
+        );
     }
 
     #[test]

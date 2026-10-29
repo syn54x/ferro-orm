@@ -69,6 +69,26 @@ def _typing_column(spec: Any) -> dict[str, Any]:
     return {**_column_ir_from_spec(spec), "default": None, "retired": spec.retired}
 
 
+def value_expr_failing_step(
+    tree: Mapping[str, Any], columns: Mapping[str, Any]
+) -> Mapping[str, Any] | None:
+    """The first step of a lowered value expression that can fail on a value.
+
+    The decision is the Rust core's, the same one the SQLite check guard and
+    the record of which checks compute read.
+
+    Args:
+        tree: The lowered expression, as `lower_value_expr` returns it.
+        columns: The compile's column specs, keyed by column name.
+
+    Returns:
+        The step, in the lowered shape, or `None` when no step can fail.
+    """
+    typing_columns = [_typing_column(spec) for spec in columns.values()]
+    step = _core._value_expr_failing_step(json.dumps(tree), json.dumps(typing_columns))
+    return None if step is None else json.loads(step)
+
+
 def _column_family(spec: Any) -> str | None:
     """The value family a column holds, or `None` for one no expression yields."""
     return _core._value_column_family(json.dumps(_typing_column(spec)))

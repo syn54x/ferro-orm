@@ -32,6 +32,10 @@ pub struct ModelMeta {
     /// The generated columns (ADR-0058), in IR column order: never written,
     /// always read back with `RETURNING` after a save.
     pub generated_cols: Vec<String>,
+    /// The table checks that compute arithmetic, by constraint name: a
+    /// write can overflow computing one of them, as it can a generated
+    /// column (ADR-0059).
+    pub computing_checks: Vec<String>,
 }
 
 impl ModelMeta {
@@ -54,6 +58,7 @@ impl ModelMeta {
                 .filter(|col| col.generated.is_some())
                 .map(|col| col.name.clone())
                 .collect(),
+            computing_checks: Vec::new(),
         }
     }
 }
@@ -86,9 +91,27 @@ impl RegisteredModel {
     /// is the model's runtime view, and no statement the model issues names a
     /// retired column. They stay in the schema modelset the DDL doors read.
     pub fn new(columns: Vec<SchemaColumn>, table_name: String) -> Result<Arc<Self>, String> {
+        Self::new_with_checks(columns, &[], table_name)
+    }
+
+    /// As [`RegisteredModel::new`], with the table's checks, from which the
+    /// ones computing arithmetic are recorded.
+    pub fn new_with_checks(
+        columns: Vec<SchemaColumn>,
+        table_checks: &[ferro_schema_ir::SchemaTableCheck],
+        table_name: String,
+    ) -> Result<Arc<Self>, String> {
+        let computing_checks = table_checks
+            .iter()
+            .filter(|check| ferro_ddl_lowering::table_check_computes(check, &columns))
+            .map(|check| check.name.clone())
+            .collect();
         let columns: Vec<SchemaColumn> = columns.into_iter().filter(|col| !col.retired).collect();
         let codec_plan = crate::codec_plan::ModelCodecPlan::compile_from_columns(&columns)?;
-        let meta = ModelMeta::from_columns(&columns);
+        let meta = ModelMeta {
+            computing_checks,
+            ..ModelMeta::from_columns(&columns)
+        };
         let column_names = columns.iter().map(|col| col.name.clone()).collect();
         Ok(Arc::new(RegisteredModel {
             table_name,
@@ -248,8 +271,12 @@ pub fn install_registration(
     let mut new_registry: HashMap<String, Arc<RegisteredModel>> =
         HashMap::with_capacity(envelope.payload.models.len());
     for model in &envelope.payload.models {
-        let registered = RegisteredModel::new(model.columns.clone(), model.table_name.clone())
-            .map_err(pyo3::exceptions::PyValueError::new_err)?;
+        let registered = RegisteredModel::new_with_checks(
+            model.columns.clone(),
+            &model.table_checks,
+            model.table_name.clone(),
+        )
+        .map_err(pyo3::exceptions::PyValueError::new_err)?;
         new_registry.insert(model.model_name.clone(), registered);
     }
 
