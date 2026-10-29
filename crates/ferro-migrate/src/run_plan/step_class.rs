@@ -282,6 +282,8 @@ fn kind_class(op: &MigrationOp, target: &IrEnvelope<SchemaIrPayload>) -> StepCla
         | MigrationOp::DropTable { .. }
         | MigrationOp::AddColumn { .. }
         | MigrationOp::DropColumn { .. }
+        // The column keeps its values; the previous release never wrote it.
+        | MigrationOp::DropGeneratedExpression { .. }
         | MigrationOp::AlterColumnNullability { .. }
         | MigrationOp::DropIndex { .. }
         | MigrationOp::RenameIndex { .. }

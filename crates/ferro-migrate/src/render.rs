@@ -359,6 +359,31 @@ pub(crate) fn render_from(
                 require_postgres(op, dialect)?;
                 out.statements.push(render_rename_policy(table, old, new));
             }
+            // SQLite's `ADD COLUMN` takes no stored generated column: only a
+            // rebuild adds one, which the pass never runs.
+            MigrationOp::AddColumn { table, column }
+                if dialect == Dialect::Sqlite
+                    && find_column(find_model(&new_models, table)?, column)?
+                        .generated
+                        .is_some() =>
+            {
+                out.reports.push(sqlite_in_place_report(
+                    InPlaceChange::AddGeneratedColumn,
+                    Subject::column(table, column),
+                    format!(
+                        "Generated column '{table}.{column}' is not in the table, and SQLite \
+                         cannot add a stored generated column in place; `ferro migrate new` \
+                         adds it by rebuilding the table."
+                    ),
+                ));
+            }
+            // On SQLite a column the target still holds is dropped only to
+            // come back generated: the add's rebuild does both, so its
+            // report covers the drop.
+            MigrationOp::DropColumn { table, column }
+                if dialect == Dialect::Sqlite
+                    && find_model(&new_models, table)
+                        .is_ok_and(|model| find_column(model, column).is_ok()) => {}
             MigrationOp::AddColumn { table, column } => {
                 let model = find_model(&new_models, table)?;
                 let emission = emit_add_column(
@@ -398,24 +423,26 @@ pub(crate) fn render_from(
                 out.statements.extend(emission.statements);
                 out.reports.extend(emission.reports);
             }
-            // ADR-0060: Postgres changes the expression in place (`DROP
-            // EXPRESSION` when the target holds the column plain); SQLite
-            // only by a rebuild, which the pass never runs.
+            // ADR-0060: Postgres changes the expression in place; SQLite only
+            // by a rebuild, which the pass never runs.
             MigrationOp::AlterGeneratedExpression { table, column } => match dialect {
                 Dialect::Postgres => {
                     let model = find_model(&new_models, table)?;
-                    let body =
-                        new_side
-                            .generated_body(model, column, dialect)
-                            .map_err(|message| EmissionError {
-                                message: format!(
-                                    "Cannot render generated column '{table}.{column}': {message}"
-                                ),
-                            })?;
-                    out.statements.push(match body {
-                        Some(body) => render_set_generated_expression(table, column, &body),
-                        None => render_drop_generated_expression(table, column),
-                    });
+                    let body = new_side
+                        .generated_body(model, column, dialect)
+                        .map_err(|message| EmissionError {
+                            message: format!(
+                                "Cannot render generated column '{table}.{column}': {message}"
+                            ),
+                        })?
+                        .ok_or_else(|| EmissionError {
+                            message: format!(
+                                "the plan sets the expression of '{table}.{column}', which the \
+                                 target holds plain; this is a ferro bug, please file an issue"
+                            ),
+                        })?;
+                    out.statements
+                        .push(render_set_generated_expression(table, column, &body));
                 }
                 Dialect::Sqlite => out.reports.push(sqlite_in_place_report(
                     InPlaceChange::AlterGeneratedExpression,
@@ -424,6 +451,22 @@ pub(crate) fn render_from(
                         "Generated column '{table}.{column}' differs from the model, and \
                          SQLite cannot change a generated column in place; `ferro migrate \
                          new` changes it by rebuilding the table."
+                    ),
+                )),
+            },
+            // Postgres keeps the stored values; SQLite's rebuild copies them.
+            MigrationOp::DropGeneratedExpression { table, column } => match dialect {
+                Dialect::Postgres => out
+                    .statements
+                    .push(render_drop_generated_expression(table, column)),
+                Dialect::Sqlite => out.reports.push(sqlite_in_place_report(
+                    InPlaceChange::DropGeneratedExpression,
+                    Subject::column(table, column),
+                    format!(
+                        "Column '{table}.{column}' is generated in the database and plain in \
+                         the model, and SQLite cannot make a generated column plain in place; \
+                         `ferro migrate new` does it by rebuilding the table, keeping its \
+                         values."
                     ),
                 )),
             },

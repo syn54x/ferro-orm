@@ -6469,43 +6469,6 @@ fn a_postgres_expression_edited_by_hand_is_set_back_in_place() {
     );
 }
 
-#[test]
-fn a_virtual_or_a_plain_live_column_is_not_the_declared_stored_one() {
-    let declared = || transaction_model("amount_minor", Some(sign_of("amount_minor")));
-    let virtual_live = plan_live_generated(
-        transaction_model("amount_minor", None),
-        live_direction(false, PG_REPRINT, Some((PG_REPRINT, PG_REPRINT))),
-        declared(),
-        Dialect::Postgres,
-    );
-    assert_eq!(virtual_live.op_list(), vec![alter_direction()]);
-    for dialect in [Dialect::Postgres, Dialect::Sqlite] {
-        let plain_live = plan_live_generated(
-            transaction_model("amount_minor", None),
-            LiveTableFacts::default(),
-            declared(),
-            dialect,
-        );
-        assert_eq!(plain_live.op_list(), vec![alter_direction()], "{dialect:?}");
-    }
-    // And a live generated column the model declares plain.
-    let plain_declared = plan_live_generated(
-        transaction_model("amount_minor", None),
-        live_direction(true, PG_REPRINT, None),
-        transaction_model("amount_minor", None),
-        Dialect::Postgres,
-    );
-    assert_eq!(plain_declared.op_list(), vec![alter_direction()]);
-    let rendered = plain_declared.render().expect("renders");
-    assert_eq!(
-        rendered[0].statements,
-        vec![ferro_ddl_lowering::render_drop_generated_expression(
-            "transaction",
-            "direction"
-        )]
-    );
-}
-
 /// What SQLite stores for `direction` as ferro created it: the clause and
 /// its range guard.
 fn sqlite_stored_direction() -> String {
@@ -6745,5 +6708,314 @@ fn the_pair_rule_gives_a_pair_only_when_the_column_and_every_input_are_live() {
         crate::plan::printed_pair_column(&model, &model.columns[1], &live(&["amount_minor"])),
         None,
         "a plain column"
+    );
+}
+
+// -- every change to a generated column on an existing table ------------------------
+
+/// `transaction` as [`transaction_model`] builds it, `direction` left out.
+fn transaction_without_direction(input: &str) -> SchemaModel {
+    let mut model = transaction_model(input, None);
+    model.columns.retain(|col| col.name != "direction");
+    model
+}
+
+/// `transaction` with `direction` generated as `sign(amount_minor)` and
+/// indexed, `amount_minor` stored as `input_type`.
+fn indexed_direction(input_type: &str) -> SchemaModel {
+    let mut model = transaction_model("amount_minor", Some(sign_of("amount_minor")));
+    model.columns[1].db_type = Some(input_type.to_string());
+    model.columns[2].index = true;
+    model
+}
+
+fn plan_declared(
+    before: &SchemaModel,
+    after: &SchemaModel,
+    dialect: Dialect,
+    options: PlanOptions,
+) -> Plan {
+    plan_from_ir(
+        &Side::declared(envelope(vec![before.clone()])),
+        &Side::declared(envelope(vec![after.clone()])),
+        dialect,
+        options,
+    )
+}
+
+fn direction_op(kind: &str) -> MigrationOp {
+    let (table, column) = ("transaction".to_string(), "direction".to_string());
+    match kind {
+        "add" => MigrationOp::AddColumn { table, column },
+        "drop" => MigrationOp::DropColumn { table, column },
+        "plain" => MigrationOp::DropGeneratedExpression { table, column },
+        _ => unreachable!("{kind}"),
+    }
+}
+
+fn statements_of(plan: &Plan) -> Vec<String> {
+    plan.render()
+        .expect("renders")
+        .into_iter()
+        .flat_map(|op| op.statements)
+        .collect()
+}
+
+#[test]
+fn adding_a_generated_column_is_native_on_postgres_and_a_rebuild_on_sqlite() {
+    let before = transaction_without_direction("amount_minor");
+    let after = indexed_direction("bigint");
+    let postgres = plan_declared(&before, &after, Dialect::Postgres, updates_only());
+    assert_eq!(postgres.op_list(), vec![direction_op("add")]);
+    let verdict = &postgres.operations[0].verdict;
+    assert_eq!(verdict.execution, Execution::Native);
+    // A required generated column asks the rows already there for nothing.
+    assert!(!verdict.demands_values && !verdict.drops_data && !verdict.recreates);
+    assert_eq!(verdict.fails_on_rows, RowRisk::None);
+    assert_eq!(
+        statements_of(&postgres),
+        vec![
+            "ALTER TABLE \"transaction\" ADD COLUMN \"direction\" bigint NOT NULL \
+             GENERATED ALWAYS AS (sign(\"amount_minor\")) STORED"
+                .to_string(),
+            "CREATE INDEX IF NOT EXISTS \"idx_transaction_direction\" ON \"transaction\" \
+             (\"direction\")"
+                .to_string(),
+        ]
+    );
+
+    let sqlite = plan_declared(&before, &after, Dialect::Sqlite, updates_only());
+    assert_eq!(sqlite.op_list(), vec![direction_op("add")]);
+    assert_eq!(sqlite.operations[0].verdict.execution, Execution::Rebuild);
+    assert!(!sqlite.operations[0].verdict.demands_values);
+    let rendered = sqlite.render().expect("renders");
+    assert!(rendered[0].statements.is_empty(), "{rendered:?}");
+    assert!(matches!(
+        rendered[0].reports[0].kind,
+        ferro_ddl_lowering::ReportKind::SqliteInPlace {
+            what: InPlaceChange::AddGeneratedColumn
+        }
+    ));
+
+    let down = plan_down(
+        &postgres.op_list(),
+        &Side::declared(envelope(vec![after])),
+        &Side::declared(envelope(vec![before])),
+        Dialect::Postgres,
+    );
+    assert_eq!(down.op_list(), vec![direction_op("drop")]);
+}
+
+#[test]
+fn a_generated_column_made_plain_drops_its_expression_and_keeps_the_values() {
+    let generated = transaction_model("amount_minor", Some(sign_of("amount_minor")));
+    let plain = transaction_model("amount_minor", None);
+    let postgres = plan_declared(&generated, &plain, Dialect::Postgres, updates_only());
+    assert_eq!(postgres.op_list(), vec![direction_op("plain")]);
+    let verdict = &postgres.operations[0].verdict;
+    assert_eq!(verdict.execution, Execution::Native);
+    assert!(!verdict.drops_data && !verdict.demands_values);
+    assert_eq!(
+        statements_of(&postgres),
+        vec!["ALTER TABLE \"transaction\" ALTER COLUMN \"direction\" DROP EXPRESSION".to_string()]
+    );
+
+    let sqlite = plan_declared(&generated, &plain, Dialect::Sqlite, updates_only());
+    assert_eq!(sqlite.op_list(), vec![direction_op("plain")]);
+    assert_eq!(sqlite.operations[0].verdict.execution, Execution::Rebuild);
+    let rendered = sqlite.render().expect("renders");
+    assert!(rendered[0].statements.is_empty());
+    assert!(matches!(
+        rendered[0].reports[0].kind,
+        ferro_ddl_lowering::ReportKind::SqliteInPlace {
+            what: InPlaceChange::DropGeneratedExpression
+        }
+    ));
+
+    // Its down makes the column generated again: a drop and an add.
+    let down = plan_down(
+        &postgres.op_list(),
+        &Side::declared(envelope(vec![plain])),
+        &Side::declared(envelope(vec![generated])),
+        Dialect::Postgres,
+    );
+    assert_eq!(down.op_list(), vec![direction_op("drop"), direction_op("add")]);
+}
+
+#[test]
+fn a_plain_column_made_generated_is_a_destructive_drop_and_add() {
+    let plain = transaction_model("amount_minor", None);
+    let generated = transaction_model("amount_minor", Some(sign_of("amount_minor")));
+    for dialect in [Dialect::Postgres, Dialect::Sqlite] {
+        let plan = plan_declared(&plain, &generated, dialect, destructive());
+        assert_eq!(
+            plan.op_list(),
+            vec![direction_op("drop"), direction_op("add")],
+            "{dialect:?}"
+        );
+        assert!(plan.operations[0].verdict.drops_data, "{dialect:?}");
+        assert!(!plan.operations[1].verdict.demands_values, "{dialect:?}");
+        // The rows' values go, so only `migrate_destructive` replaces them.
+        let kept = plan_declared(&plain, &generated, dialect, updates_only());
+        assert_eq!(kept.op_list(), vec![], "{dialect:?}");
+    }
+    let sqlite = plan_declared(&plain, &generated, Dialect::Sqlite, destructive());
+    for planned in &sqlite.operations {
+        assert_eq!(planned.verdict.execution, Execution::Rebuild);
+    }
+    // The pass runs no DDL for it on SQLite: one warning.
+    let rendered = sqlite.render().expect("renders");
+    assert!(
+        rendered.iter().all(|op| op.statements.is_empty()),
+        "{rendered:?}"
+    );
+    assert_eq!(
+        rendered.iter().map(|op| op.reports.len()).sum::<usize>(),
+        1,
+        "{rendered:?}"
+    );
+    let postgres = plan_declared(&plain, &generated, Dialect::Postgres, destructive());
+    assert_eq!(
+        statements_of(&postgres),
+        vec![
+            "ALTER TABLE \"transaction\" DROP COLUMN \"direction\"".to_string(),
+            "ALTER TABLE \"transaction\" ADD COLUMN \"direction\" bigint NOT NULL \
+             GENERATED ALWAYS AS (sign(\"amount_minor\")) STORED"
+                .to_string(),
+        ]
+    );
+}
+
+#[test]
+fn a_live_plain_or_virtual_column_where_the_model_declares_a_stored_one_is_dropped_and_added() {
+    let declared = || transaction_model("amount_minor", Some(sign_of("amount_minor")));
+    let live = |facts: LiveTableFacts, dialect, options| {
+        let mut all = LiveFacts::default();
+        all.tables.insert("transaction".to_string(), facts);
+        plan_from_ir(
+            &Side::live(envelope(vec![transaction_model("amount_minor", None)]), all)
+                .expect("live side"),
+            &Side::declared(envelope(vec![declared()])),
+            dialect,
+            options,
+        )
+    };
+    let virtual_live = live_direction(false, PG_REPRINT, Some((PG_REPRINT, PG_REPRINT)));
+    let virtual_plan = live(virtual_live, Dialect::Postgres, destructive());
+    assert_eq!(
+        virtual_plan.op_list(),
+        vec![direction_op("drop"), direction_op("add")]
+    );
+    assert!(virtual_plan.operations[0].verdict.drops_data);
+    for dialect in [Dialect::Postgres, Dialect::Sqlite] {
+        let plain = live(LiveTableFacts::default(), dialect, destructive());
+        assert_eq!(
+            plain.op_list(),
+            vec![direction_op("drop"), direction_op("add")],
+            "{dialect:?}"
+        );
+        assert_eq!(
+            live(LiveTableFacts::default(), dialect, updates_only()).op_list(),
+            vec![],
+            "{dialect:?}"
+        );
+    }
+    // A live stored generated column the model declares plain.
+    let mut all = LiveFacts::default();
+    all.tables.insert(
+        "transaction".to_string(),
+        live_direction(true, PG_REPRINT, None),
+    );
+    let made_plain = plan_from_ir(
+        &Side::live(envelope(vec![transaction_model("amount_minor", None)]), all)
+            .expect("live side"),
+        &Side::declared(envelope(vec![transaction_model("amount_minor", None)])),
+        Dialect::Postgres,
+        updates_only(),
+    );
+    assert_eq!(made_plain.op_list(), vec![direction_op("plain")]);
+}
+
+#[test]
+fn an_input_type_change_drops_the_generated_column_alters_and_adds_it_back_on_postgres() {
+    let before = indexed_direction("integer");
+    let after = indexed_direction("bigint");
+    let alter = MigrationOp::AlterColumnType {
+        table: "transaction".to_string(),
+        column: "amount_minor".to_string(),
+    };
+    // Values are recomputed, not lost: `migrate_updates` runs it.
+    let postgres = plan_declared(&before, &after, Dialect::Postgres, updates_only());
+    assert_eq!(
+        postgres.op_list(),
+        vec![direction_op("drop"), alter.clone(), direction_op("add")]
+    );
+    assert!(!postgres.operations[0].verdict.drops_data);
+    assert!(!postgres.operations[2].verdict.demands_values);
+    for planned in &postgres.operations {
+        assert_eq!(planned.verdict.execution, Execution::Native);
+    }
+    let statements = statements_of(&postgres);
+    assert_eq!(
+        statements[0],
+        "ALTER TABLE \"transaction\" DROP COLUMN \"direction\""
+    );
+    assert!(
+        statements[1].contains("ALTER COLUMN \"amount_minor\" TYPE bigint"),
+        "{statements:?}"
+    );
+    assert!(
+        statements[2].contains("ADD COLUMN \"direction\""),
+        "{statements:?}"
+    );
+    assert!(
+        statements[3].contains("CREATE INDEX IF NOT EXISTS \"idx_transaction_direction\""),
+        "{statements:?}"
+    );
+
+    let down = plan_down(
+        &postgres.op_list(),
+        &Side::declared(envelope(vec![after.clone()])),
+        &Side::declared(envelope(vec![before.clone()])),
+        Dialect::Postgres,
+    );
+    assert_eq!(
+        down.op_list(),
+        vec![direction_op("drop"), alter.clone(), direction_op("add")]
+    );
+
+    // SQLite rebuilds the table, which computes the column anew.
+    let sqlite = plan_declared(&before, &after, Dialect::Sqlite, updates_only());
+    assert_eq!(sqlite.op_list(), vec![alter]);
+}
+
+#[test]
+fn a_renamed_input_column_between_two_snapshots_is_the_rename_alone() {
+    let before = transaction_model("amount", Some(sign_of("amount")));
+    let mut after = transaction_model("amount_minor", Some(sign_of("amount_minor")));
+    after.columns[1].renamed_from = Some("amount".to_string());
+    for dialect in [Dialect::Postgres, Dialect::Sqlite] {
+        assert_eq!(
+            plan_declared(&before, &after, dialect, destructive()).op_list(),
+            vec![MigrationOp::RenameColumn {
+                table: "transaction".to_string(),
+                old: "amount".to_string(),
+                new: "amount_minor".to_string(),
+            }],
+            "{dialect:?}"
+        );
+    }
+}
+
+#[test]
+fn dropping_a_generated_column_is_a_destructive_column_drop() {
+    let before = transaction_model("amount_minor", Some(sign_of("amount_minor")));
+    let after = transaction_without_direction("amount_minor");
+    let plan = plan_declared(&before, &after, Dialect::Postgres, destructive());
+    assert_eq!(plan.op_list(), vec![direction_op("drop")]);
+    assert!(plan.operations[0].verdict.drops_data);
+    assert_eq!(
+        plan_declared(&before, &after, Dialect::Postgres, updates_only()).op_list(),
+        vec![]
     );
 }

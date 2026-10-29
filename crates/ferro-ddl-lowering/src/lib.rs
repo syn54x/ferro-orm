@@ -3970,6 +3970,8 @@ pub enum InPlaceChange {
     AlterGeneratedExpression,
     /// Turn a generated column into a plain one.
     DropGeneratedExpression,
+    /// Add a generated column, or turn a plain column into one.
+    AddGeneratedColumn,
 }
 
 /// [`ReportKind::ForeignDefault`]: `table.column` has the server default
