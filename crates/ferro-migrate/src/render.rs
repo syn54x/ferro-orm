@@ -429,6 +429,13 @@ pub(crate) fn render_from(
                         ),
                     });
                 }
+                // A policy reads the generated column it drops to add back.
+                if let Some(refusal) = crate::plan::replace_refusal(op, old_side, new_side, dialect)
+                {
+                    return Err(EmissionError {
+                        message: refusal.to_string(),
+                    });
+                }
                 out.statements.push(format!(
                     "ALTER TABLE {} DROP COLUMN {}",
                     quote_ident(table),
@@ -731,7 +738,13 @@ pub(crate) fn render_from(
                 }
             }
             MigrationOp::DropCheck { table, name } => {
-                let still_declared = new_side.check_body(table, name).is_some();
+                // A declared check is dropped only to be added back by the
+                // same ops, around a type change of a column it reads.
+                let added_back = ops.iter().any(|other| {
+                    matches!(other, MigrationOp::AddCheck { table: t, name: n }
+                        if t == table && n == name)
+                });
+                let still_declared = new_side.check_body(table, name).is_some() && !added_back;
                 if still_declared {
                     return Err(EmissionError {
                         message: format!(
@@ -775,7 +788,13 @@ pub(crate) fn render_from(
             }
             MigrationOp::DropRowPolicy { table, name } => {
                 require_postgres(op, dialect)?;
-                let still_declared = new_side.policy(table, name).is_some();
+                // A declared policy is dropped only to be added back by the
+                // same ops, around the replace of a column it reads.
+                let added_back = ops.iter().any(|other| {
+                    matches!(other, MigrationOp::AddRowPolicy { table: t, name: n }
+                        if t == table && n == name)
+                });
+                let still_declared = new_side.policy(table, name).is_some() && !added_back;
                 if still_declared {
                     return Err(EmissionError {
                         message: format!(

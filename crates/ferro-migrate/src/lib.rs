@@ -45,8 +45,8 @@ pub use generate::{
 pub use order::order_by_dependencies;
 pub use plan::{
     Execution, Hint, HintError, LiveCheckFact, LiveFacts, LiveGeneratedFact, LiveTableFacts,
-    OpVerdict, PlanError, PlannedOp, PrintedPair, Refusal, Rider, RowRisk, Side, foreign_default,
-    live_hints, plan_down, plan_from_ir,
+    OpVerdict, PlanError, PlannedOp, PrintedPair, Refusal, Replace, Rider, RowRisk, Side,
+    foreign_default, live_hints, plan_down, plan_from_ir,
 };
 pub use render::{RenderedOp, validate_schema_ir};
 pub use revision::{
@@ -714,10 +714,16 @@ impl Plan {
         dialect: Dialect,
         draft: plan::Draft,
     ) -> Self {
+        let carried = draft.carried;
         let operations = draft
             .operations
             .into_iter()
-            .map(|op| PlannedOp::of(op, &before, &target, dialect))
+            .map(|op| {
+                let carries = carried.contains(&op);
+                let mut planned = PlannedOp::of(op, &before, &target, dialect);
+                planned.verdict.carried = carries;
+                planned
+            })
             .collect();
         Self {
             operations,
@@ -747,6 +753,7 @@ impl Plan {
             plan::Draft {
                 operations,
                 reports: Vec::new(),
+                carried: Vec::new(),
             },
         )
     }

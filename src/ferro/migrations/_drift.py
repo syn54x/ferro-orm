@@ -318,6 +318,7 @@ def _describe(
     compared."""
     if not any(
         op["kind"] in ("AlterColumnType", "AlterColumnNullability", "RedefineIndex")
+        or op.get("replaces") == "own_type"
         for op in operations
     ):
         return operations
@@ -338,7 +339,9 @@ def _describe(
         key = (op.get("table"), op.get("column"))
         before, after = live_columns.get(key), snapshot_columns.get(key)
         if before is not None and after is not None:
-            if op["kind"] == "AlterColumnType":
+            # A generated column whose own type changes is dropped and
+            # added back: its add says the type.
+            if op["kind"] == "AlterColumnType" or op.get("replaces") == "own_type":
                 op = {
                     **op,
                     "live_type": _storage(before, dialect),
@@ -417,51 +420,34 @@ async def against(
     operations = _describe(plan["operations"], plan["live"], snapshot, plan["dialect"])
     return DriftReport(
         against=migration,
-        lines=_lines(operations, snapshot),
+        lines=_lines(operations),
         operations=operations,
         reports=list(plan["reports"]),
     )
 
 
-def _inputs(expr: dict[str, Any]) -> set[str]:
-    """The columns a generated column's value expression reads."""
-    if expr["kind"] == "column":
-        return {expr["name"]}
-    children = [expr.get("left"), expr.get("right"), expr.get("operand")]
-    children += expr.get("args", [])
-    return {name for child in children if child for name in _inputs(child)}
-
-
-def _lines(operations: list[dict[str, Any]], snapshot: dict[str, Any]) -> list[str]:
+def _lines(operations: list[dict[str, Any]]) -> list[str]:
     """One line per op, a generated column the plan drops and adds back read
-    as one difference: the live column is not the stored generated one the
-    snapshot declares (its expression differs), unless the plan takes it
-    down only around a type change of a column it reads, whose own line says
-    so."""
-    columns = _columns(snapshot)
-    dropped = {
-        (op["table"], op["column"]) for op in operations if op["kind"] == "DropColumn"
-    }
-    retyped = {
-        (op["table"], op["column"])
-        for op in operations
-        if op["kind"] == "AlterColumnType"
-    }
+    as one difference, by the reason the planner gives the pair
+    (``replaces``): its type differs, or the live column is not the stored
+    generated one the snapshot declares (its expression differs). One taken
+    down only around a type change of a column it reads has no line: that
+    column's own line says it. Neither has an op the planner marks
+    ``carried``: a policy or check taken down and put back unchanged around
+    such a change."""
     lines = []
     for op in operations:
-        if op["kind"] in ("DropColumn", "AddColumn"):
-            table, column = op["table"], op["column"]
-            if op["kind"] == "DropColumn" and (table, column) in columns:
-                continue
-            if op["kind"] == "AddColumn" and (table, column) in dropped:
-                generated = columns[(table, column)].get("generated")
-                if generated and any(
-                    (table, read) in retyped for read in _inputs(generated)
-                ):
-                    continue
-                lines.append(f"{_column(op)} generated expression differs")
-                continue
-        lines.append(render_op(op))
+        replaces = op.get("replaces")
+        if op.get("carried"):
+            continue
+        if replaces is None:
+            lines.append(render_op(op))
+        elif op["kind"] != "AddColumn" or replaces == "input_type":
+            continue
+        elif replaces == "own_type":
+            lines.append(_type(op))
+        else:
+            lines.append(f"{_column(op)} generated expression differs")
     return lines
 
 

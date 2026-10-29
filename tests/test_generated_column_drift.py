@@ -384,3 +384,50 @@ def test_an_expression_over_a_column_the_same_change_adds_is_planned_not_refused
     assert any('ADD COLUMN "fee_minor"' in s for s in statements), statements
     assert reconnect_statements(db) == []
     assert asyncio.run(drift_lines()) == []
+
+
+# -- a generated column dropped and added back, read by the planner's reason -------
+
+
+def test_an_input_retyped_by_hand_with_its_expression_is_one_type_line(
+    project, pkg, db, capsys
+):
+    if db.backend != "postgres":
+        pytest.skip("the hand edit is Postgres's")
+    migrated(project, pkg, db, capsys)
+    # The input's type and the expression changed together: the declared
+    # expression does not type-check against the live table, so drift asks
+    # Postgres to print none of it.
+    db.execute('ALTER TABLE "transaction" DROP COLUMN "direction"')
+    db.execute(
+        'ALTER TABLE "transaction" ALTER COLUMN "amount_minor" TYPE text '
+        'USING "amount_minor"::text'
+    )
+    db.execute(
+        'ALTER TABLE "transaction" ADD COLUMN "direction" integer NOT NULL '
+        'GENERATED ALWAYS AS (length("amount_minor")) STORED'
+    )
+
+    report = drift_api(db)
+
+    # The column is dropped and added back around its input's type change,
+    # whose own line says it.
+    [line] = report.lines
+    assert line.startswith("transaction.amount_minor has type text"), line
+    replaced = [op for op in report.operations if op.get("replaces")]
+    assert {op["replaces"] for op in replaced} == {"input_type"}, replaced
+
+
+def test_a_generated_column_retyped_by_hand_is_one_type_line(project, pkg, db, capsys):
+    if db.backend != "postgres":
+        pytest.skip("the hand edit is Postgres's")
+    migrated(project, pkg, db, capsys)
+    db.execute('ALTER TABLE "transaction" ALTER COLUMN "direction" TYPE bigint')
+
+    report = drift_api(db)
+
+    assert report.lines == ["transaction.direction has type bigint, snapshot says int"]
+    assert {op["kind"]: op["replaces"] for op in report.operations} == {
+        "DropColumn": "own_type",
+        "AddColumn": "own_type",
+    }

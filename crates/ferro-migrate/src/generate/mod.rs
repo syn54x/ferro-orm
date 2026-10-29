@@ -355,6 +355,10 @@ pub enum GenerateError {
     /// A declared rename hint `new` refuses (ADR-0032): its old name is still
     /// declared, or two hints claim one old name.
     Hint(HintError),
+    /// An op the planner refuses for a reason only its recipe answers (a row
+    /// policy over a generated column the plan drops and adds back): the
+    /// refusal, in every door's words.
+    Refused(Refusal),
     /// An op could not render.
     Render(String),
 }
@@ -410,6 +414,7 @@ impl std::fmt::Display for GenerateError {
                  DDL, which --replace regenerates"
             ),
             GenerateError::Hint(err) => write!(f, "rename hint refused: {err}"),
+            GenerateError::Refused(refusal) => refusal.fmt(f),
             GenerateError::Render(message) => f.write_str(message),
         }
     }
@@ -476,6 +481,9 @@ fn phase_of(op: &PlannedOp, data_steps: bool) -> Result<Phase, GenerateError> {
             column: column.clone(),
             keep: keep.clone(),
         },
+        Execution::Refused(refusal @ Refusal::PolicyReadsReplacedColumn { .. }) => {
+            GenerateError::Refused(refusal.clone())
+        }
         // Between two declared snapshots every op is expressible (ADR-0033):
         // meeting one that is not is a planner bug, said loudly.
         other => GenerateError::Render(format!(
