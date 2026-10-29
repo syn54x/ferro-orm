@@ -17,7 +17,9 @@ use crate::introspect::{
 };
 use ferro_ddl_lowering::{Dialect, LiveRowSecurity, information_schema_to_db_type_token};
 use ferro_migrate::plan::live_table_hints;
-use ferro_migrate::plan::{live_column_name, printed_pair_column, renamed_value_expr};
+use ferro_migrate::plan::{
+    live_column_name, printed_pair_checks, printed_pair_column, renamed_value_expr,
+};
 use ferro_migrate::{
     Hint, HintError, LiveCheckFact, LiveFacts, LiveFkValidity, LiveGeneratedFact,
     LiveIndexValidity, LiveTableFacts, PrintedPair,
@@ -182,6 +184,7 @@ fn table_facts(table: &LiveTable) -> LiveTableFacts {
                 ferro_owned: check.ferro_owned,
                 validated: check.validated,
                 column: check.column.clone(),
+                printed: check.printed.clone(),
             })
             .collect(),
         foreign_keys: table
@@ -234,15 +237,7 @@ fn declared_pairs(
     table: &str,
     columns: &[LiveColumn],
 ) -> PyResult<Vec<(String, String, String)>> {
-    let Some(model) = [false, true].into_iter().find_map(|by_hint| {
-        declared.payload.models.iter().find(|model| {
-            if by_hint {
-                model.renamed_from.as_deref() == Some(table)
-            } else {
-                model.table_name == table
-            }
-        })
-    }) else {
+    let Some(model) = declared_model(declared, table) else {
         return Ok(Vec::new());
     };
     let live = |name: &str| columns.iter().any(|col| col.name == name);
@@ -283,6 +278,65 @@ fn declared_pairs(
                     ))
                 })?;
             Ok((column, rendered, catalog))
+        })
+        .collect()
+}
+
+/// The model of `declared` for the live table `table`: the one of that name,
+/// else the one whose rename hint names it.
+fn declared_model<'a>(
+    declared: &'a IrEnvelope<SchemaIrPayload>,
+    table: &str,
+) -> Option<&'a SchemaModel> {
+    [false, true].into_iter().find_map(|by_hint| {
+        declared.payload.models.iter().find(|model| {
+            if by_hint {
+                model.renamed_from.as_deref() == Some(table)
+            } else {
+                model.table_name == table
+            }
+        })
+    })
+}
+
+/// The `(check, declared body, catalog body)` of every live ferro-owned
+/// check of `table` (its `columns` and `checks`) that `declared` declares,
+/// for Postgres to print side by side beside the generated columns' pairs
+/// (ADR-0060). Which checks get a pair, under which names, is
+/// [`printed_pair_checks`]'s rule, the one the planner demands them by.
+///
+/// # Errors
+/// A declared check body that does not render.
+fn declared_check_pairs(
+    declared: &IrEnvelope<SchemaIrPayload>,
+    table: &str,
+    columns: &[LiveColumn],
+    checks: &[LiveCheck],
+) -> PyResult<Vec<(String, String, String)>> {
+    let Some(model) = declared_model(declared, table) else {
+        return Ok(Vec::new());
+    };
+    let live = |name: &str| columns.iter().any(|col| col.name == name);
+    let live_check = |name: &str| {
+        checks
+            .iter()
+            .any(|check| check.name == name && check.ferro_owned)
+    };
+    printed_pair_checks(model, table, &live, &live_check)
+        .into_iter()
+        .filter_map(|(name, body)| {
+            let catalog = checks
+                .iter()
+                .find(|check| check.name == name && check.ferro_owned)?
+                .expression
+                .clone()?;
+            Some((name, body, catalog))
+        })
+        .map(|(name, body, catalog)| {
+            let body = body.map_err(|message| {
+                pyo3::exceptions::PyValueError::new_err(format!("{message} on table '{table}'"))
+            })?;
+            Ok((name, body, catalog))
         })
         .collect()
 }
@@ -342,9 +396,9 @@ fn select_tables_to_read(
 /// Read the live tables named in `tables` ([`tables_to_read`]) into the
 /// planner's input, plus every live enum type's labels on Postgres, for a
 /// plan toward `declared`: on Postgres each generated column `declared`
-/// declares generated too carries its printed pair ([`printed_pairs`], one
-/// read-only `EXPLAIN` per table that has any, ADR-0060), so the planner
-/// compares strings and does no I/O.
+/// declares generated too, and each ferro-owned check it declares, carries
+/// its printed pair ([`printed_pairs`], one read-only `EXPLAIN` per table
+/// that has any, ADR-0060), so the planner compares strings and does no I/O.
 ///
 /// # Errors
 /// A `PyErr` when an introspection query fails; on Postgres,
@@ -367,20 +421,30 @@ pub async fn live_schema_ir(
             }
             continue;
         };
+        let mut checks = live_table_checks(engine, name).await?;
         let mut printed = BTreeMap::new();
         if postgres {
-            let pairs = declared_pairs(declared, name, &columns)?;
-            if !pairs.is_empty() {
-                let asked: Vec<(String, String)> = pairs
+            // The generated columns' pairs and the checks' share the table's
+            // one EXPLAIN.
+            let generated = declared_pairs(declared, name, &columns)?;
+            let checked = declared_check_pairs(declared, name, &columns, &checks)?;
+            if !generated.is_empty() || !checked.is_empty() {
+                let asked: Vec<(String, String)> = generated
                     .iter()
+                    .chain(&checked)
                     .map(|(_, rendered, catalog)| (rendered.clone(), catalog.clone()))
                     .collect();
-                let answers = printed_pairs(engine, name, &asked).await?;
-                printed = pairs
+                let mut answers = printed_pairs(engine, name, &asked).await?.into_iter();
+                printed = generated
                     .into_iter()
                     .map(|(column, ..)| column)
-                    .zip(answers)
+                    .zip(answers.by_ref())
                     .collect();
+                for ((check, ..), pair) in checked.into_iter().zip(answers) {
+                    if let Some(live) = checks.iter_mut().find(|live| live.name == check) {
+                        live.printed = Some(pair);
+                    }
+                }
             }
         }
         live.push(LiveTable {
@@ -388,7 +452,7 @@ pub async fn live_schema_ir(
             columns,
             indexes: live_table_indexes(engine, name).await?,
             foreign_keys: live_table_foreign_keys(engine, name).await?,
-            checks: live_table_checks(engine, name).await?,
+            checks,
             row_security: live_table_row_security(engine, name).await?,
             name: name.clone(),
         });
@@ -519,6 +583,11 @@ mod tests {
                 ferro_owned: true,
                 validated: false,
                 column: Some("title".to_string()),
+                expression: Some("(title IS NOT NULL)".to_string()),
+                printed: Some(PrintedPair {
+                    declared: "(post.title IS NOT NULL)".to_string(),
+                    catalog: "(post.title IS NOT NULL)".to_string(),
+                }),
             }],
             printed: BTreeMap::new(),
             row_security: LiveRowSecurity {
@@ -675,6 +744,10 @@ mod tests {
                 ferro_owned: true,
                 validated: false,
                 column: Some("title".to_string()),
+                printed: Some(PrintedPair {
+                    declared: "(post.title IS NOT NULL)".to_string(),
+                    catalog: "(post.title IS NOT NULL)".to_string(),
+                }),
             }]
         );
         assert_eq!(

@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from tests import test_generate_backfill as backfill
+from tests import test_generate_check_functions as check_functions
 from tests import test_generate_columns as columns
 from tests import test_generate_enum_removal as enum_removal
 from tests import test_generate_enums as enums
@@ -287,6 +288,11 @@ CASES: tuple[Case, ...] = (
         "G4-change-the-type-of-an-input-a-checked-column-reads",
         generated.CHECKED,
         generated.CHECKED_WIDE,
+    ),
+    Case(
+        "G5-add-a-check-that-calls-fn",
+        check_functions.HEAD,
+        check_functions.LEDGER,
     ),
     # -- F: several changes at once -----------------------------------------------
     Case(

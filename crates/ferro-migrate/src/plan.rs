@@ -26,15 +26,15 @@ use ferro_ddl_lowering::Report;
 pub(crate) use ferro_ddl_lowering::and_list;
 use ferro_ddl_lowering::{
     EnumTypeProvenance, LiveRowPolicy, LiveRowSecurity, ResolvedStorage, RowSecurityFlag,
-    declared_check_bodies, declared_check_names, declared_row_policy_names, drifted_check_names,
+    declared_check_body, declared_check_names, declared_row_policy_names, drifted_check_names,
     dropped_row_security_warning, enum_label_strings, enum_type_provenance,
     excess_row_security_flags, extra_check_names, extra_check_names_warning, extra_enum_labels,
     extra_enum_labels_warning, extra_row_policy_names_warning, ferro_manages_row_security,
     fk_action_from_str, fk_action_sql, fk_name, foreign_default_warning, foreign_fk_drift_warning,
     is_ferro_fk_name, is_ferro_row_policy_name, missing_check_names, missing_enum_labels,
     normalize_check_definition, normalize_row_policy_expr, plan_row_security_reconcile,
-    quote_label, render_check_body, render_table_check_body, resolve_column_storage,
-    row_policy_clauses, row_policy_command_token, schema_columns_storage_drift,
+    quote_label, resolve_column_storage, row_policy_clauses, row_policy_command_token,
+    schema_columns_storage_drift,
 };
 pub use ferro_ddl_lowering::{HintError, hint_refusal_warning, pending_table_rename_warning};
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
@@ -69,6 +69,11 @@ pub struct LiveCheckFact {
     /// with its column, and SQLite drops an inline one with it.
     #[serde(default)]
     pub column: Option<String>,
+    /// Postgres: the declared body and the catalog's, printed side by side
+    /// (ADR-0060), when the live read had a declared check of this name to
+    /// compare it with ([`printed_pair_checks`]). `None` on SQLite.
+    #[serde(default)]
+    pub printed: Option<PrintedPair>,
 }
 
 /// A Postgres rendering and the catalog's reprint of the same body, each as
@@ -155,6 +160,14 @@ pub enum PlanError {
         /// The column.
         column: String,
     },
+    /// A Postgres live ferro-owned check that [`printed_pair_checks`] gives a
+    /// pair carries none: the live read was not given that declaration.
+    MissingCheckPrintedPair {
+        /// The table.
+        table: String,
+        /// The check.
+        check: String,
+    },
 }
 
 impl std::fmt::Display for PlanError {
@@ -170,6 +183,14 @@ impl std::fmt::Display for PlanError {
                 f,
                 "the live facts carry no printed pair for the generated column \
                  '{table}.{column}': they were read against another declaration than the one \
+                 planned toward. Read them again with `_core._live_schema_ir(using, \
+                 declared_json)`, passing the same declared_json the plan is made toward, and \
+                 plan with the facts it returns unchanged"
+            ),
+            PlanError::MissingCheckPrintedPair { table, check } => write!(
+                f,
+                "the live facts carry no printed pair for the CHECK constraint \
+                 '{table}.{check}': they were read against another declaration than the one \
                  planned toward. Read them again with `_core._live_schema_ir(using, \
                  declared_json)`, passing the same declared_json the plan is made toward, and \
                  plan with the facts it returns unchanged"
@@ -203,19 +224,11 @@ enum SideKind {
 /// A check's body as one side holds it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Body {
-    /// The canonical expression, as ferro renders a declaration.
-    Canonical(String),
+    /// The canonical expression, as ferro renders a declaration for the
+    /// dialect it is written on ([`ferro_ddl_lowering::declared_check_body`]).
+    Canonical,
     /// The catalog's text (`CHECK (…)`), restored as the catalog printed it.
     Catalog(String),
-}
-
-impl Body {
-    /// The body's text, for the one normalizer.
-    pub(crate) fn text(&self) -> &str {
-        match self {
-            Body::Canonical(text) | Body::Catalog(text) => text,
-        }
-    }
 }
 
 /// A row policy as one side holds it: its declaration (a live policy as a
@@ -322,9 +335,9 @@ impl Side {
     /// its canonical body; a live table's checks with the catalog's text.
     pub(crate) fn checks(&self, model: &SchemaModel) -> Vec<(String, Body)> {
         match &self.0 {
-            SideKind::Declared(_) => declared_check_bodies(model)
+            SideKind::Declared(_) => declared_check_names(model)
                 .into_iter()
-                .map(|(name, body)| (name, Body::Canonical(body)))
+                .map(|name| (name, Body::Canonical))
                 .collect(),
             SideKind::Live { .. } => self
                 .table_facts(model)
@@ -761,26 +774,27 @@ fn serialize_row_security<S: serde::Serializer>(
 }
 
 /// The facts a table declared in `old` would show live: every declared CHECK
-/// with its canonical body, valid; every FK and index valid; row security on
-/// exactly as declared, each policy's bodies as ferro renders them.
+/// ferro-owned and valid; every FK and index valid; row security on exactly
+/// as declared, each policy's bodies as ferro renders them. A declaration
+/// has no catalog, so its checks carry no `definition`: a declared check's
+/// body is rendered for the dialect where it is compared ([`check_differs`]).
 fn declared_table_facts(old_model: &SchemaModel) -> LiveTableFacts {
     let checks = old_model
         .table_checks
         .iter()
-        .map(|check| (check.name.clone(), render_table_check_body(check), None))
-        .chain(old_model.checks.iter().map(|check| {
-            (
-                check.name.clone(),
-                render_check_body(check),
-                Some(check.column.clone()),
-            )
-        }))
-        .map(|(name, body, column)| LiveCheckFact {
+        .map(|check| (check.name.clone(), None))
+        .chain(
+            old_model
+                .checks
+                .iter()
+                .map(|check| (check.name.clone(), Some(check.column.clone()))),
+        )
+        .map(|(name, column)| LiveCheckFact {
             name,
-            definition: format!("CHECK ({body})"),
             ferro_owned: true,
             validated: true,
             column,
+            ..LiveCheckFact::default()
         })
         .collect();
     LiveTableFacts {
@@ -1148,31 +1162,34 @@ fn renamed_facts(
             let (Some(model), Some(before)) = (declared, before.as_ref()) else {
                 continue;
             };
-            let bodies = model
-                .table_checks
+            let Some(index) = declared_check_names(model)
                 .iter()
-                .position(|c| c.name == check.name)
-                .map(|i| {
-                    (
-                        render_table_check_body(&before.table_checks[i]),
-                        render_table_check_body(&model.table_checks[i]),
-                    )
-                })
-                .or_else(|| {
-                    model
-                        .checks
-                        .iter()
-                        .position(|c| c.name == check.name)
-                        .map(|i| {
-                            (
-                                render_check_body(&before.checks[i]),
-                                render_check_body(&model.checks[i]),
-                            )
-                        })
-                });
-            if let Some((was, now)) = bodies
-                && normalize_check_definition(&was) == normalize_check_definition(&check.definition)
-            {
+                .position(|name| *name == check.name)
+            else {
+                continue;
+            };
+            // A body that does not render is kept as read: the rebuild that
+            // drift then plans fails rendering it, naming the check.
+            let Ok(Some(now)) = declared_check_body(model, &check.name, dialect) else {
+                continue;
+            };
+            // Whether the live body is the declaration under the old names:
+            // on Postgres as Postgres printed both (ADR-0060), on SQLite by
+            // the one normalizer (ADR-0015).
+            let follows = match dialect {
+                Dialect::Postgres => check
+                    .printed
+                    .as_ref()
+                    .is_some_and(|pair| pair.declared == pair.catalog),
+                Dialect::Sqlite => declared_check_names(before)
+                    .get(index)
+                    .and_then(|was| declared_check_body(before, was, dialect).ok().flatten())
+                    .is_some_and(|was| {
+                        normalize_check_definition(&was)
+                            == normalize_check_definition(&check.definition)
+                    }),
+            };
+            if follows {
                 check.definition = format!("CHECK ({now})");
             }
         }
@@ -1485,14 +1502,12 @@ fn plan_existing_table(
         &mut plan.reports,
     );
 
-    // The checks the target holds, each with its body as the target holds it
-    // (a declaration's canonical rendering, or a live table's catalog text).
-    let target_checks: Vec<(String, String)> = new
+    // The checks the target holds, in its order.
+    let target_names: Vec<String> = new
         .checks(new_model)
         .into_iter()
-        .map(|(name, body)| (name, body.text().to_string()))
+        .map(|(name, _)| name)
         .collect();
-    let target_names: Vec<String> = target_checks.iter().map(|(name, _)| name.clone()).collect();
     // Postgres drops every table check reading a column with the column: a
     // check over a replaced column is gone once its drop runs, so the plan
     // adds it back after the add (SQLite's rebuild writes the table's checks
@@ -1518,15 +1533,25 @@ fn plan_existing_table(
         &target_names,
         &live_check_names,
     ));
-    // Body drift (#344; ADR-0015), after the adds. Only ferro-owned names are
-    // eligible: a user-owned CHECK is never dropped.
-    let live_ferro_owned: Vec<(String, String)> = facts
-        .checks
+    // Body drift (#344; ADR-0015, ADR-0060), after the adds. Only ferro-owned
+    // names are eligible: a user-owned CHECK is never dropped.
+    let rebuildable: Vec<&String> = target_names
         .iter()
-        .filter(|check| check.ferro_owned && standing(&check.name))
-        .map(|check| (check.name.clone(), check.definition.clone()))
+        .filter(|name| {
+            facts
+                .checks
+                .iter()
+                .any(|check| check.name == **name && check.ferro_owned && standing(&check.name))
+        })
         .collect();
-    ops.extend(check_rebuilds(table, &target_checks, &live_ferro_owned));
+    ops.extend(check_rebuilds(
+        old,
+        new,
+        old_model,
+        new_model,
+        &rebuildable,
+        dialect,
+    ));
     // Validation (#515; ADR-0043): after every add, leaving out any name a
     // rebuild covers — the rebuild's bare ADD installs a valid constraint.
     let rebuilt: Vec<String> = ops
@@ -1556,9 +1581,11 @@ fn plan_existing_table(
     // Leftovers (#345; ADR-0013): always reported — a leftover CHECK keeps
     // rejecting rows the model now allows — and dropped only when destructive.
     // A dropped column's own check is no leftover: it goes with its column.
-    let live_ferro_owned_names: Vec<String> = live_ferro_owned
+    let live_ferro_owned_names: Vec<String> = facts
+        .checks
         .iter()
-        .map(|(name, _)| name.clone())
+        .filter(|check| check.ferro_owned && standing(&check.name))
+        .map(|check| check.name.clone())
         .collect();
     let extras = extra_check_names(&target_names, &live_ferro_owned_names);
     let riding: Vec<String> = if options.destructive {
@@ -1992,21 +2019,82 @@ fn missing_checks(
 }
 
 /// Plan the [`MigrationOp::RebuildCheck`] operations for one table (#344;
-/// ADR-0015): every check the target holds (`target`, `(name, body)`) whose
-/// counterpart on the old side exists and whose normalized body differs.
-/// `live` is `(name, catalog definition)` pairs of ferro-owned CHECKs.
+/// ADR-0015, ADR-0060): every check of `names` (each held ferro-owned on
+/// both sides) whose body differs between them ([`check_differs`]).
 fn check_rebuilds(
-    table: &str,
-    target: &[(String, String)],
-    live: &[(String, String)],
+    old: &Side,
+    new: &Side,
+    old_model: &SchemaModel,
+    new_model: &SchemaModel,
+    names: &[&String],
+    dialect: Dialect,
 ) -> Vec<MigrationOp> {
-    drifted_check_names(target, live)
-        .into_iter()
+    names
+        .iter()
+        .filter(|name| check_differs(old, new, old_model, new_model, name, dialect))
         .map(|name| MigrationOp::RebuildCheck {
-            table: table.to_string(),
-            name,
+            table: new_model.table_name.clone(),
+            name: (*name).clone(),
         })
         .collect()
+}
+
+/// Whether the check `name`'s body differs between `old_model` on `old` and
+/// `new_model` on `new`. On SQLite, which stores the body as written, the one
+/// normalizer compares the texts (ADR-0015, [`drifted_check_names`]). On
+/// Postgres a live check compares with a declaration through what the live
+/// read gathered, the printed pair: Postgres printed both bodies, so equal
+/// strings are one predicate (ADR-0060). Two declarations, or two catalogs,
+/// compare their texts. A body that does not render, or a live check with no
+/// pair, differs: the rebuild then fails rendering it, naming the check.
+fn check_differs(
+    old: &Side,
+    new: &Side,
+    old_model: &SchemaModel,
+    new_model: &SchemaModel,
+    name: &str,
+    dialect: Dialect,
+) -> bool {
+    let held = |side: &Side, model: &SchemaModel| {
+        side.checks(model)
+            .into_iter()
+            .find(|(check, _)| check == name)
+            .map(|(_, body)| body)
+    };
+    let text = |body: &Body, model: &SchemaModel| match body {
+        Body::Canonical => declared_check_body(model, name, dialect).ok().flatten(),
+        Body::Catalog(definition) => Some(definition.clone()),
+    };
+    let (Some(was), Some(now)) = (held(old, old_model), held(new, new_model)) else {
+        return false;
+    };
+    let same_kind = matches!(
+        (&was, &now),
+        (Body::Canonical, Body::Canonical) | (Body::Catalog(_), Body::Catalog(_))
+    );
+    if dialect == Dialect::Sqlite || same_kind {
+        let (Some(was), Some(now)) = (text(&was, old_model), text(&now, new_model)) else {
+            return true;
+        };
+        return match dialect {
+            Dialect::Sqlite => {
+                !drifted_check_names(&[(name.to_string(), now)], &[(name.to_string(), was)])
+                    .is_empty()
+            }
+            Dialect::Postgres => was != now,
+        };
+    }
+    [old.table_facts(old_model), new.table_facts(new_model)]
+        .iter()
+        .find_map(|facts| {
+            facts
+                .checks
+                .iter()
+                .find(|check| check.name == name)?
+                .printed
+                .clone()
+        })
+        .is_none_or(|pair| pair.declared != pair.catalog)
 }
 
 /// Plan the [`MigrationOp::ValidateConstraint`] operations for one table
@@ -3501,6 +3589,11 @@ fn renamed_check_expr(
                 literal => literal.clone(),
             },
         },
+        CheckExpr::Compare { left, op, right } => CheckExpr::Compare {
+            left: renamed_value_expr(left, column),
+            op: *op,
+            right: renamed_value_expr(right, column),
+        },
         CheckExpr::In { column: c, values } => CheckExpr::In {
             column: column(c),
             values: values.clone(),
@@ -4161,9 +4254,86 @@ impl Side {
                     });
                 }
             }
+            let live_checks = &facts.tables[live_table].checks;
+            let live_check = |name: &str| {
+                live_checks
+                    .iter()
+                    .any(|check| check.name == name && check.ferro_owned)
+            };
+            for (name, _) in printed_pair_checks(model, live_table, &live, &live_check) {
+                let missing = live_checks.iter().any(|check| {
+                    check.name == name && check.ferro_owned && check.printed.is_none()
+                });
+                if missing {
+                    return Err(PlanError::MissingCheckPrintedPair {
+                        table: live_table.clone(),
+                        check: name,
+                    });
+                }
+            }
         }
         Ok(())
     }
+}
+
+/// The checks of `model` whose bodies the live read prints on Postgres
+/// beside the catalog's (ADR-0060), as `(live name, declared body)`: every
+/// check `model` declares whose every column is live (`live`, by name or
+/// rename hint) and that a live ferro-owned check holds (`live_check`), by
+/// its own name or the name a rename of the same change re-derives it from,
+/// its body rendered for Postgres under the live table `live_table`'s
+/// column names. The live read pairs each with that live check, and
+/// [`Side::check_printed_pairs`] demands a pair by the same rule. A check
+/// reading a column that is not live yet gets none: its live namesake, if
+/// any, reads something else and is rebuilt.
+///
+/// A body that does not render is its `Err`, naming the check.
+pub fn printed_pair_checks(
+    model: &SchemaModel,
+    live_table: &str,
+    live: &dyn Fn(&str) -> bool,
+    live_check: &dyn Fn(&str) -> bool,
+) -> Vec<(String, Result<String, String>)> {
+    let hints: Vec<Hint> = std::iter::once(Hint::Table {
+        old: model.table_name.clone(),
+        new: live_table.to_string(),
+    })
+    .chain(model.columns.iter().filter_map(|col| {
+        let name = live_column_name(model, &col.name, live)?;
+        (name != col.name).then(|| Hint::Column {
+            table: live_table.to_string(),
+            old: col.name.clone(),
+            new: name,
+        })
+    }))
+    .collect();
+    let view = renamed_model(model, &Renames { hints: &hints });
+    let table_checks = view.table_checks.iter().map(|check| {
+        (
+            &check.name,
+            ferro_ddl_lowering::check_expr_columns(&check.predicate),
+        )
+    });
+    let column_checks = view
+        .checks
+        .iter()
+        .map(|check| (&check.name, BTreeSet::from([check.column.clone()])));
+    // `renamed_model` keeps the checks in order, one for one.
+    declared_check_names(model)
+        .into_iter()
+        .zip(table_checks.chain(column_checks))
+        .filter(|(_, (_, columns))| columns.iter().all(|column| live(column)))
+        .filter_map(|(declared, (rederived, _))| {
+            let name = [declared.as_str(), rederived.as_str()]
+                .into_iter()
+                .find(|name| live_check(name))?
+                .to_string();
+            let body = declared_check_body(&view, rederived, Dialect::Postgres).and_then(|body| {
+                body.ok_or_else(|| format!("CHECK constraint '{rederived}' is not declared"))
+            });
+            Some((name, body))
+        })
+        .collect()
 }
 
 /// The live name of the declared column `name` of `model`: its own name
@@ -4713,6 +4883,7 @@ mod down_tests {
                     ferro_owned: true,
                     validated: true,
                     column: None,
+                    printed: None,
                 }],
                 ..LiveTableFacts::default()
             },
@@ -4968,6 +5139,7 @@ mod down_tests {
                     ferro_owned: true,
                     validated: true,
                     column: None,
+                    printed: None,
                 }],
                 ..LiveTableFacts::default()
             },

@@ -101,8 +101,9 @@ pub(crate) fn is_ferro_index_name(name: &str) -> bool {
 ///
 /// `definition` is the catalog rendering: Postgres `pg_get_constraintdef`
 /// (`CHECK (...)`, with a trailing ` NOT VALID` when unvalidated), SQLite the
-/// inline `CHECK (...)` fragment from `sqlite_master.sql`. Returned as-is —
-/// body-drift normalization is #344.
+/// inline `CHECK (...)` fragment from `sqlite_master.sql`. Returned as-is:
+/// SQLite's is compared through the one normalizer (ADR-0015), Postgres's
+/// through the printed pair the live read adds (ADR-0060).
 ///
 /// `ferro_owned` is true when the constraint name follows the `ck_*`
 /// convention; user-owned CHECKs are included so reconciliation can skip them.
@@ -123,6 +124,15 @@ pub struct LiveCheck {
     /// columns.
     #[serde(default)]
     pub column: Option<String>,
+    /// Postgres: the body alone, `pg_get_expr(conbin, conrelid)`, the
+    /// catalog half of the check's printed pair. `None` on SQLite.
+    #[serde(default)]
+    pub expression: Option<String>,
+    /// Postgres: the declared body and [`expression`](Self::expression),
+    /// printed side by side when the live read had a declared check of this
+    /// name to compare it with (ADR-0060).
+    #[serde(default)]
+    pub printed: Option<PrintedPair>,
 }
 
 /// Ferro emits table and column CHECKs as `ck_<table>_<suffix>`. Reconciliation
@@ -1037,6 +1047,8 @@ async fn sqlite_table_checks(engine: &EngineHandle, table: &str) -> PyResult<Vec
             // SQLite has no unvalidated constraints.
             validated: true,
             column: check.column,
+            expression: None,
+            printed: None,
         })
         .collect())
 }
@@ -1045,6 +1057,7 @@ async fn postgres_table_checks(engine: &EngineHandle, table: &str) -> PyResult<V
     let sql = r#"
         SELECT con.conname::text AS name,
                pg_get_constraintdef(con.oid)::text AS definition,
+               pg_get_expr(con.conbin, con.conrelid)::text AS expression,
                con.convalidated AS validated,
                CASE WHEN cardinality(con.conkey) = 1 THEN (
                    SELECT att.attname::text
@@ -1075,6 +1088,8 @@ async fn postgres_table_checks(engine: &EngineHandle, table: &str) -> PyResult<V
                 definition,
                 validated: row_bool(row, "validated"),
                 column: row_string(row, "column_name"),
+                expression: row_string(row, "expression"),
+                printed: None,
             })
         })
         .collect())

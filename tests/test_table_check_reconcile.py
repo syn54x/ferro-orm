@@ -146,8 +146,19 @@ def _render(
     )
 
 
-def _live_check(name: str, definition: str, *, ferro_owned: bool = True) -> dict:
-    return {"name": name, "definition": definition, "ferro_owned": ferro_owned}
+def _live_check(
+    name: str,
+    definition: str,
+    *,
+    ferro_owned: bool = True,
+    printed: str | None = None,
+) -> dict:
+    """A live check; on Postgres, `printed` is its body as Postgres printed
+    both it and its declaration (ADR-0060)."""
+    check: dict = {"name": name, "definition": definition, "ferro_owned": ferro_owned}
+    if printed is not None:
+        check["printed"] = {"declared": printed, "catalog": printed}
+    return check
 
 
 # ---------------------------------------------------------------------------
@@ -171,7 +182,13 @@ def test_missing_table_check_renders_one_alter_add_constraint_on_postgres():
 def test_live_table_check_replans_to_nothing():
     """No phantom add: a reconciled table produces no DDL on either dialect."""
     _define_reconcile_with_check()
-    live = [_live_check(SIDE_CHECK_NAME, f"CHECK ({SIDE_CHECK_BODY})")]
+    live = [
+        _live_check(
+            SIDE_CHECK_NAME,
+            f"CHECK ({SIDE_CHECK_BODY})",
+            printed='((reconcile."left" IS NULL) OR (reconcile."right" IS NULL))',
+        )
+    ]
     for dialect in ("postgres", "sqlite"):
         statements, warnings = _render(
             "reconcile", RECONCILE_LIVE_COLUMNS, live, dialect

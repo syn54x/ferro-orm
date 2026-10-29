@@ -869,8 +869,12 @@ def _render_check_body(column: str, values: list[str]) -> str:
     """The shared db_check CHECK body, byte-identical to the Rust emitters."""
     ...
 
-def _render_table_check_body(predicate_json: str) -> str:
-    """The shared table-check CHECK body, byte-identical to the Rust emitters."""
+def _render_table_check_body(
+    predicate_json: str, dialect: str = "postgres", columns_json: str = "[]"
+) -> str:
+    """The shared table-check CHECK body on ``dialect``, over the table's
+    columns ``columns_json`` (schema IR columns), byte-identical to the Rust
+    emitters. Raises ``ValueError`` for a call of an unknown function."""
     ...
 
 def _render_generated_expression(model_json: str, column: str, dialect: str) -> str:

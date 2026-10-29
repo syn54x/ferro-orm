@@ -2016,14 +2016,29 @@ fn plan_live_table(
     )
 }
 
-/// Live CHECK facts, every one validated.
-fn live_checks(checks: &[(&str, &str)]) -> LiveTableFacts {
+/// Live CHECK facts.
+fn live_checks(checks: Vec<LiveCheckFact>) -> LiveTableFacts {
     LiveTableFacts {
-        checks: checks
-            .iter()
-            .map(|(name, definition)| live_check(name, definition))
-            .collect(),
+        checks,
         ..LiveTableFacts::default()
+    }
+}
+
+/// A live CHECK whose body Postgres printed alike to its declaration's, as
+/// `printed` (ADR-0060): no drift.
+fn printed_alike(name: &str, definition: &str, printed: &str) -> LiveCheckFact {
+    printed_unlike(name, definition, printed, printed)
+}
+
+/// A live CHECK whose declared body Postgres printed as `declared` and the
+/// catalog's as `catalog`.
+fn printed_unlike(name: &str, definition: &str, declared: &str, catalog: &str) -> LiveCheckFact {
+    LiveCheckFact {
+        printed: Some(PrintedPair {
+            declared: declared.into(),
+            catalog: catalog.into(),
+        }),
+        ..live_check(name, definition)
     }
 }
 
@@ -2031,6 +2046,21 @@ fn live_checks(checks: &[(&str, &str)]) -> LiveTableFacts {
 /// declared body: catalog wrapping only, so no drift.
 const CATALOG_OUTFLOW_CHECK: &str =
     "CHECK (((outflow_transaction_id IS NULL) OR (outflow_activity_id IS NULL)))";
+
+/// `ck_transfer_at_most_one_outflow`'s body as `EXPLAIN (VERBOSE)` prints
+/// both the declaration and the catalog's reprint.
+const PRINTED_OUTFLOW_CHECK: &str =
+    "((transfer.outflow_transaction_id IS NULL) OR (transfer.outflow_activity_id IS NULL))";
+
+/// The outflow check as the live table holds it, printed alike to its
+/// declaration.
+fn live_outflow_check() -> LiveCheckFact {
+    printed_alike(
+        "ck_transfer_at_most_one_outflow",
+        CATALOG_OUTFLOW_CHECK,
+        PRINTED_OUTFLOW_CHECK,
+    )
+}
 
 #[test]
 fn a_declared_table_check_absent_live_is_added() {
@@ -2056,7 +2086,7 @@ fn a_declared_table_check_the_live_table_already_has_is_not_added() {
     let plan = plan_live_table(
         transfer_model_with_table_checks(vec![]),
         new,
-        live_checks(&[("ck_transfer_at_most_one_outflow", CATALOG_OUTFLOW_CHECK)]),
+        live_checks(vec![live_outflow_check()]),
         updates_only(),
     );
     assert!(
@@ -2225,9 +2255,12 @@ fn a_declared_check_whose_live_body_drifted_is_rebuilt() {
     let plan = plan_live_table(
         transfer_model_with_table_checks(vec![]),
         new,
-        live_checks(&[(
+        live_checks(vec![printed_unlike(
             "ck_transfer_at_most_one_outflow",
-            "CHECK ((\"outflow_transaction_id\" IS NULL) AND (\"outflow_activity_id\" IS NULL))",
+            "CHECK (((outflow_transaction_id IS NULL) AND (outflow_activity_id IS NULL)))",
+            PRINTED_OUTFLOW_CHECK,
+            "((transfer.outflow_transaction_id IS NULL) AND (transfer.outflow_activity_id IS \
+             NULL))",
         )]),
         updates_only(),
     );
@@ -2246,7 +2279,7 @@ fn catalog_wrapping_alone_is_not_check_drift() {
     let plan = plan_live_table(
         transfer_model_with_table_checks(vec![]),
         new,
-        live_checks(&[("ck_transfer_at_most_one_outflow", CATALOG_OUTFLOW_CHECK)]),
+        live_checks(vec![live_outflow_check()]),
         updates_only(),
     );
     assert!(
@@ -2313,10 +2346,10 @@ fn live_ferro_owned_checks_the_model_does_not_declare_drop_in_live_order() {
     let plan = plan_live_table(
         transfer_model_with_table_checks(vec![]),
         new,
-        live_checks(&[
-            ("ck_transfer_orphan", "CHECK ((amount > 0))"),
-            ("ck_transfer_at_most_one_outflow", CATALOG_OUTFLOW_CHECK),
-            ("ck_transfer_old", "CHECK ((amount < 100))"),
+        live_checks(vec![
+            live_check("ck_transfer_orphan", "CHECK ((amount > 0))"),
+            live_outflow_check(),
+            live_check("ck_transfer_old", "CHECK ((amount < 100))"),
         ]),
         destructive(),
     );
@@ -2341,7 +2374,7 @@ fn no_check_drops_when_every_live_name_is_declared() {
     let plan = plan_live_table(
         transfer_model_with_table_checks(vec![]),
         new,
-        live_checks(&[("ck_transfer_at_most_one_outflow", CATALOG_OUTFLOW_CHECK)]),
+        live_checks(vec![live_outflow_check()]),
         destructive(),
     );
     assert!(plan.op_list().is_empty(), "{:?}", plan.op_list());
@@ -3115,6 +3148,9 @@ fn index_validity(name: &str, valid: bool) -> LiveIndexValidity {
 /// `ck_post_title_set` as `pg_get_constraintdef` prints the declared body.
 const CATALOG_POST_TITLE_CHECK: &str = "CHECK ((title IS NOT NULL))";
 
+/// `ck_post_title_set`'s body as `EXPLAIN (VERBOSE)` prints both sides.
+const PRINTED_POST_TITLE_CHECK: &str = "(post.title IS NOT NULL)";
+
 /// Live `post` as the pass reads it: the declared FK, indexes and unique in
 /// the IR, the CHECK beside it with its declared body (absent when
 /// `check_validated` is `None`).
@@ -3131,7 +3167,11 @@ fn live_post(
     let checks = check_validated
         .map(|validated| LiveCheckFact {
             validated,
-            ..live_check("ck_post_title_set", CATALOG_POST_TITLE_CHECK)
+            ..printed_alike(
+                "ck_post_title_set",
+                CATALOG_POST_TITLE_CHECK,
+                PRINTED_POST_TITLE_CHECK,
+            )
         })
         .into_iter()
         .collect();
@@ -3367,17 +3407,23 @@ fn a_not_valid_check_whose_body_drifted_is_a_rebuild_and_an_unchanged_one_is_not
         table_checks: vec![],
         ..new.clone()
     };
-    let not_valid = |definition: &str| LiveTableFacts {
+    // Each live body with the catalog half of its printed pair.
+    let not_valid = |definition: &str, printed: &str| LiveTableFacts {
         checks: vec![LiveCheckFact {
             validated: false,
-            ..live_check("ck_post_title_set", definition)
+            ..printed_unlike(
+                "ck_post_title_set",
+                definition,
+                PRINTED_POST_TITLE_CHECK,
+                printed,
+            )
         }],
         ..LiveTableFacts::default()
     };
     let drifted = plan_live_table(
         old.clone(),
         new.clone(),
-        not_valid("CHECK ((title IS NULL)) NOT VALID"),
+        not_valid("CHECK ((title IS NULL)) NOT VALID", "(post.title IS NULL)"),
         updates_only(),
     );
     assert_eq!(
@@ -3391,7 +3437,10 @@ fn a_not_valid_check_whose_body_drifted_is_a_rebuild_and_an_unchanged_one_is_not
     let unchanged = plan_live_table(
         old,
         new,
-        not_valid("CHECK ((title IS NOT NULL)) NOT VALID"),
+        not_valid(
+            "CHECK ((title IS NOT NULL)) NOT VALID",
+            PRINTED_POST_TITLE_CHECK,
+        ),
         updates_only(),
     );
     assert_eq!(
@@ -3872,14 +3921,16 @@ fn live_check(name: &str, definition: &str) -> LiveCheckFact {
         ferro_owned: name.starts_with("ck_"),
         validated: true,
         column: None,
+        printed: None,
     }
 }
 
 #[test]
 fn a_text_comparison_check_as_postgres_prints_it_is_not_a_rebuild() {
     // `Check("named", lambda t: t.name != "")` over a varchar column: ferro
-    // renders `"name" <> ''`, `pg_get_constraintdef` prints the text casts
-    // Postgres inserted. Same predicate, so no RebuildCheck on every connect.
+    // renders `"name" <> ''`, and Postgres prints it, as it prints the
+    // catalog's body, with the text casts it inserted (ADR-0060). Same
+    // predicate, so no RebuildCheck on every connect.
     let model = SchemaModel {
         table_checks: vec![SchemaTableCheck {
             name: "ck_cknamed_named".to_string(),
@@ -3897,12 +3948,17 @@ fn a_text_comparison_check_as_postgres_prints_it_is_not_a_rebuild() {
         )
     };
     let declared = envelope(vec![model]);
-    let facts_with = |definition: &str| {
+    let facts_with = |definition: &str, printed: &str| {
         let mut facts = LiveFacts::default();
         facts.tables.insert(
             "cknamed".into(),
             LiveTableFacts {
-                checks: vec![live_check("ck_cknamed_named", definition)],
+                checks: vec![printed_unlike(
+                    "ck_cknamed_named",
+                    definition,
+                    "((cknamed.name)::text <> ''::text)",
+                    printed,
+                )],
                 foreign_keys: vec![],
                 indexes: vec![],
                 row_security: ferro_ddl_lowering::LiveRowSecurity::default(),
@@ -3915,7 +3971,10 @@ fn a_text_comparison_check_as_postgres_prints_it_is_not_a_rebuild() {
     let clean = plan_from_ir(
         &Side::live(
             declared.clone(),
-            facts_with("CHECK (((name)::text <> ''::text))").clone(),
+            facts_with(
+                "CHECK (((name)::text <> ''::text))",
+                "((cknamed.name)::text <> ''::text)",
+            ),
         )
         .expect("live side"),
         &Side::declared(declared.clone()),
@@ -3927,7 +3986,10 @@ fn a_text_comparison_check_as_postgres_prints_it_is_not_a_rebuild() {
     let drifted = plan_from_ir(
         &Side::live(
             declared.clone(),
-            facts_with("CHECK (((name)::text <> 'x'::text))").clone(),
+            facts_with(
+                "CHECK (((name)::text <> 'x'::text))",
+                "((cknamed.name)::text <> 'x'::text)",
+            ),
         )
         .expect("live side"),
         &Side::declared(declared.clone()),
@@ -4879,6 +4941,10 @@ mod renames {
         assert_eq!(plan(&parent(), &target(), Dialect::Sqlite), expected);
     }
 
+    /// `ck_writer_genre`'s declared body, as `EXPLAIN (VERBOSE)` prints it
+    /// over the live `writer` table.
+    const GENRE_PRINTED: &str = "((writer.genre)::text = ANY ('{novel,poem}'::text[]))";
+
     #[test]
     fn live_facts_follow_the_renames_so_the_pass_plans_only_the_renames() {
         // The reconciliation pass's shape: facts read from the live database
@@ -4893,6 +4959,10 @@ mod renames {
                     ferro_owned: true,
                     validated: true,
                     column: None,
+                    printed: Some(PrintedPair {
+                        declared: GENRE_PRINTED.to_string(),
+                        catalog: GENRE_PRINTED.to_string(),
+                    }),
                 }],
                 ..Default::default()
             },
@@ -4946,6 +5016,10 @@ mod renames {
                     ferro_owned: true,
                     validated: true,
                     column: None,
+                    printed: Some(PrintedPair {
+                        declared: GENRE_PRINTED.to_string(),
+                        catalog: "((writer.genre)::text = 'novel'::text)".to_string(),
+                    }),
                 }],
                 ..Default::default()
             },
@@ -7170,5 +7244,311 @@ fn check_expr_columns_names_every_column_a_check_reads() {
     assert_eq!(
         ferro_ddl_lowering::check_expr_columns(&expr),
         ["a", "b", "c"].map(String::from).into_iter().collect()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Table checks that call `fn` (#796; ADR-0059, ADR-0060).
+// ---------------------------------------------------------------------------
+
+/// `Check("large", lambda payment: fn.abs(payment.<column>) > <token>)`.
+fn abs_amount_over(column: &str, token: &str) -> ferro_schema_ir::CheckExpr {
+    use ferro_schema_ir::{CheckCmpOp, CheckExpr, ValueExpr};
+    CheckExpr::Compare {
+        left: ValueExpr::Func {
+            name: "abs".to_string(),
+            args: vec![ValueExpr::Column {
+                name: column.to_string(),
+            }],
+        },
+        op: CheckCmpOp::Gt,
+        right: ValueExpr::Literal {
+            token: token.to_string(),
+        },
+    }
+}
+
+/// `payment` with the table check `ck_payment_large`.
+fn payment_with_large_check(token: &str) -> SchemaModel {
+    SchemaModel {
+        table_checks: vec![SchemaTableCheck {
+            name: "ck_payment_large".to_string(),
+            predicate: abs_amount_over("amount", token),
+        }],
+        ..schema_model(
+            "payment",
+            vec![pk_col("id", "bigint"), col("amount", "int", false)],
+        )
+    }
+}
+
+/// `ck_payment_large`'s declared body as `EXPLAIN (VERBOSE)` prints it.
+const PRINTED_LARGE: &str = "(abs((payment.amount)::bigint) > 1000)";
+
+#[test]
+fn check_expr_columns_reads_both_operands_of_a_compare() {
+    use ferro_schema_ir::{CheckCmpOp, CheckExpr, ValueExpr};
+    let expr = CheckExpr::Compare {
+        left: ValueExpr::Func {
+            name: "least".to_string(),
+            args: vec![
+                ValueExpr::Column {
+                    name: "a".to_string(),
+                },
+                ValueExpr::Literal {
+                    token: "28".to_string(),
+                },
+            ],
+        },
+        op: CheckCmpOp::Le,
+        right: ValueExpr::Column {
+            name: "b".to_string(),
+        },
+    };
+    assert_eq!(
+        ferro_ddl_lowering::check_expr_columns(&expr),
+        ["a", "b"].map(String::from).into_iter().collect()
+    );
+}
+
+#[test]
+fn a_check_calling_fn_printed_alike_is_not_rebuilt_and_printed_unlike_is() {
+    let model = payment_with_large_check("1000");
+    let clean = plan_live_table(
+        model.clone(),
+        model.clone(),
+        live_checks(vec![printed_alike(
+            "ck_payment_large",
+            "CHECK ((abs((amount)::bigint) > 1000))",
+            PRINTED_LARGE,
+        )]),
+        updates_only(),
+    );
+    assert_eq!(clean.op_list(), vec![], "a ferro-created check is silent");
+    let edited = plan_live_table(
+        model.clone(),
+        model,
+        live_checks(vec![printed_unlike(
+            "ck_payment_large",
+            "CHECK ((abs((amount)::bigint) > 10))",
+            PRINTED_LARGE,
+            "(abs((payment.amount)::bigint) > 10)",
+        )]),
+        updates_only(),
+    );
+    assert_eq!(
+        edited.op_list(),
+        vec![MigrationOp::RebuildCheck {
+            table: "payment".to_string(),
+            name: "ck_payment_large".to_string(),
+        }],
+        "a hand-edited body rebuilds"
+    );
+    assert_eq!(
+        statements_of(&edited),
+        vec![
+            "ALTER TABLE \"payment\" DROP CONSTRAINT \"ck_payment_large\"".to_string(),
+            "ALTER TABLE \"payment\" ADD CONSTRAINT \"ck_payment_large\" CHECK \
+             ((abs(CAST(\"amount\" AS bigint)) > 1000))"
+                .to_string(),
+        ]
+    );
+}
+
+#[test]
+fn the_normalizer_no_longer_decides_a_postgres_check() {
+    // The live text normalizes equal to the declaration, but Postgres printed
+    // the two unlike: the printed pair decides.
+    let model = payment_with_large_check("1000");
+    let plan = plan_live_table(
+        model.clone(),
+        model,
+        live_checks(vec![printed_unlike(
+            "ck_payment_large",
+            "CHECK ((abs(CAST(\"amount\" AS bigint)) > 1000))",
+            PRINTED_LARGE,
+            "(abs((payment.amount)::bigint) >= 1000)",
+        )]),
+        updates_only(),
+    );
+    assert_eq!(
+        plan.op_list(),
+        vec![MigrationOp::RebuildCheck {
+            table: "payment".to_string(),
+            name: "ck_payment_large".to_string(),
+        }]
+    );
+}
+
+#[test]
+fn a_sqlite_check_calling_fn_compares_its_stored_text() {
+    let model = payment_with_large_check("1000");
+    let plan = |definition: &str| {
+        let mut facts = LiveFacts::default();
+        facts.tables.insert(
+            "payment".to_string(),
+            live_checks(vec![live_check("ck_payment_large", definition)]),
+        );
+        plan_from_ir(
+            &Side::live(envelope(vec![model.clone()]), facts).expect("live side"),
+            &Side::declared(envelope(vec![model.clone()])),
+            Dialect::Sqlite,
+            updates_only(),
+        )
+        .op_list()
+    };
+    assert_eq!(plan("CHECK ((abs(\"amount\") > 1000))"), vec![]);
+    assert_eq!(
+        plan("CHECK ((abs(\"amount\") > 10))"),
+        vec![MigrationOp::RebuildCheck {
+            table: "payment".to_string(),
+            name: "ck_payment_large".to_string(),
+        }]
+    );
+}
+
+#[test]
+fn two_declarations_compare_a_check_calling_fn_by_its_rendering() {
+    let before = payment_with_large_check("1000");
+    let after = payment_with_large_check("10");
+    for dialect in [Dialect::Postgres, Dialect::Sqlite] {
+        assert_eq!(
+            plan_declared(&before, &before, dialect, updates_only()).op_list(),
+            vec![]
+        );
+        assert_eq!(
+            plan_declared(&before, &after, dialect, updates_only()).op_list(),
+            vec![MigrationOp::RebuildCheck {
+                table: "payment".to_string(),
+                name: "ck_payment_large".to_string(),
+            }]
+        );
+    }
+}
+
+#[test]
+fn a_postgres_live_check_with_no_printed_pair_is_refused() {
+    let model = payment_with_large_check("1000");
+    let mut facts = LiveFacts::default();
+    facts.tables.insert(
+        "payment".to_string(),
+        live_checks(vec![live_check(
+            "ck_payment_large",
+            "CHECK ((abs((amount)::bigint) > 1000))",
+        )]),
+    );
+    let live = Side::live(envelope(vec![model.clone()]), facts).expect("live side");
+    let declared = envelope(vec![model]);
+    let refused = live.check_printed_pairs(&declared, Dialect::Postgres);
+    assert_eq!(
+        refused,
+        Err(PlanError::MissingCheckPrintedPair {
+            table: "payment".to_string(),
+            check: "ck_payment_large".to_string(),
+        })
+    );
+    assert!(
+        refused
+            .unwrap_err()
+            .to_string()
+            .contains("_core._live_schema_ir(using, declared_json)"),
+        "the refusal names its fix"
+    );
+    assert_eq!(live.check_printed_pairs(&declared, Dialect::Sqlite), Ok(()));
+}
+
+#[test]
+fn a_check_gets_a_pair_only_when_every_column_it_reads_is_live() {
+    let model = payment_with_large_check("1000");
+    let held = |name: &str| name == "ck_payment_large";
+    let without_amount =
+        crate::plan::printed_pair_checks(&model, "payment", &|name| name != "amount", &held);
+    assert_eq!(
+        without_amount,
+        vec![],
+        "a check over a column not live yet has none"
+    );
+    assert_eq!(
+        crate::plan::printed_pair_checks(&model, "payment", &|_| true, &|_| false),
+        vec![],
+        "a check no live check holds has none: it is an add"
+    );
+    assert_eq!(
+        crate::plan::printed_pair_checks(&model, "payment", &|_| true, &held),
+        vec![(
+            "ck_payment_large".to_string(),
+            Ok("(abs(CAST(\"amount\" AS bigint)) > 1000)".to_string())
+        )]
+    );
+}
+
+#[test]
+fn a_check_is_paired_under_the_names_its_live_table_holds() {
+    // Declared `invoice.total`, renamed from `payment.amount`: the live read
+    // prints the check as the live table names it.
+    let mut model = payment_with_large_check("1000");
+    model.table_name = "invoice".to_string();
+    model.model_name = "invoice".to_string();
+    model.renamed_from = Some("payment".to_string());
+    model.columns[1].name = "total".to_string();
+    model.columns[1].renamed_from = Some("amount".to_string());
+    model.table_checks[0] = SchemaTableCheck {
+        name: "ck_invoice_large".to_string(),
+        predicate: abs_amount_over("total", "1000"),
+    };
+    let live = |name: &str| ["id", "amount"].contains(&name);
+    let pairs = |held: &str| {
+        crate::plan::printed_pair_checks(&model, "payment", &live, &|name| name == held)
+    };
+    let body = Ok("(abs(CAST(\"amount\" AS bigint)) > 1000)".to_string());
+    assert_eq!(
+        pairs("ck_payment_large"),
+        vec![("ck_payment_large".to_string(), body.clone())]
+    );
+    // A rename undone by hand: the table is `payment` again, but its check
+    // keeps the name the rename gave it.
+    assert_eq!(
+        pairs("ck_invoice_large"),
+        vec![("ck_invoice_large".to_string(), body)]
+    );
+}
+
+#[test]
+fn a_table_check_calling_fn_over_a_re_added_generated_column_is_added_back_after_it() {
+    let checked = |input_type: &str| {
+        let mut model = indexed_direction(input_type);
+        model.table_checks.push(SchemaTableCheck {
+            name: "ck_transaction_large".to_string(),
+            predicate: abs_amount_over("direction", "0"),
+        });
+        model
+    };
+    let up = plan_declared(
+        &checked("integer"),
+        &checked("bigint"),
+        Dialect::Postgres,
+        updates_only(),
+    );
+    assert_eq!(
+        up.op_list(),
+        vec![
+            direction_op("drop"),
+            MigrationOp::AlterColumnType {
+                table: "transaction".to_string(),
+                column: "amount_minor".to_string(),
+            },
+            direction_op("add"),
+            MigrationOp::AddCheck {
+                table: "transaction".to_string(),
+                name: "ck_transaction_large".to_string(),
+            },
+        ]
+    );
+    let statements = statements_of(&up);
+    assert!(
+        statements.last().is_some_and(
+            |s| s.contains("\"ck_transaction_large\"") && s.contains("abs(\"direction\")")
+        ),
+        "{statements:?}"
     );
 }

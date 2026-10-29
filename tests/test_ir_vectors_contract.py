@@ -606,6 +606,27 @@ def test_generated_column_schema_compiler_matches_v4_vector(
     }
 
 
+def test_a_check_calling_fn_matches_its_v4_vector(clean_model_registry: None) -> None:
+    """A table check comparing value expressions is the ``compare`` kind
+    inside v4 (ADR-0059): it appears only when an operand is not a plain
+    column or literal, so no version bump and every v4 vector stays valid."""
+    from ferro.ir import compile_registry_schema_ir, schema_ir_fingerprint
+    from ferro.relations import resolve_relationships
+    from tests.test_generate_check_functions import declare_payment
+
+    declare_payment()
+    resolve_relationships()
+
+    compiled = compile_registry_schema_ir()
+    vector = _load_vector(VECTORS_DIR / "schema_check_fn_v4.json")
+
+    assert compiled["ir_version"] == CURRENT_SCHEMA_IR_VERSION == 4
+    assert compiled == vector["ir"]
+    assert schema_ir_fingerprint(compiled) == vector["fingerprint"]
+    ((check,),) = [m["table_checks"] for m in compiled["payload"]["models"]]
+    assert check["predicate"]["kind"] == "compare"
+
+
 def test_phase1_schema_compiler_is_deterministic(clean_model_registry: None) -> None:
     from ferro.ir import compile_registry_schema_ir, schema_ir_fingerprint
     from ferro.relations import resolve_relationships

@@ -271,6 +271,7 @@ pub fn staged_constraints(
         let table = &model.table_name;
         let check = |name: &str| -> Result<StagedConstraint, GenerateError> {
             let add = render_check_addition(table, model, name, dialect, ConstraintMode::NotValid)
+                .map_err(GenerateError::Render)?
                 .and_then(|emission| emission.statement)
                 .ok_or_else(|| {
                     GenerateError::Render(format!(
