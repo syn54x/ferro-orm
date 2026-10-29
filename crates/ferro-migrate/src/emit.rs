@@ -7,9 +7,9 @@ use ferro_ddl_lowering::{
     fk_action_from_str, fk_action_sql, fk_name, literal_default_value, pg_alter_type_target,
     quote_ident, refused_conversion_warning, refused_scalar_conversion, render_db_check,
     render_generated_clause, render_json_backfill_default, render_pg_enum_create_type,
-    render_sqlite_add_column_references, render_sqlite_generated_guard, render_table_check_body,
-    resolve_column_storage, row_security_statements, single_index_name, single_unique_index_name,
-    sqlite_declared_type, sqlite_type_storage_drift,
+    render_sqlite_add_column_references, render_table_check_body, resolve_column_storage,
+    row_security_statements, single_index_name, single_unique_index_name, sqlite_declared_type,
+    sqlite_generated_guard, sqlite_type_storage_drift,
 };
 use ferro_ddl_lowering::{InPlaceChange, Report, Subject, sqlite_in_place_report};
 use ferro_schema_ir::{SchemaColumn, SchemaModel};
@@ -322,14 +322,13 @@ pub(crate) fn generated_column_text(
     // guard enforces the range Postgres stores, so a value that fails there
     // fails here (value parity covers failures).
     if dialect == Dialect::Sqlite
-        && let ResolvedStorage::Scalar(pg_storage) = resolve_column_storage(col, Dialect::Postgres)
+        && let Some((name, body)) = sqlite_generated_guard(col, &model.columns)
             .map_err(|message| EmissionError { message })?
-        && let Some(guard) =
-            render_sqlite_generated_guard(&col.name, pg_storage, expr, &model.columns)
-                .map_err(|message| EmissionError { message })?
     {
-        text.push(' ');
-        text.push_str(&guard);
+        text.push_str(&format!(
+            " CONSTRAINT {} CHECK ({body})",
+            quote_ident(&name)
+        ));
     }
     Ok(Some(text))
 }

@@ -101,29 +101,9 @@ pub fn _render_sqlite_generated_guard(
     model_json: String,
     column: String,
 ) -> PyResult<Option<(String, String)>> {
-    let (model, col, expr) = generated_column(&model_json, &column)?;
-    let render_error = |message| generated_render_error(&model.table_name, &column, message);
-    let ferro_ddl_lowering::ResolvedStorage::Scalar(storage) =
-        ferro_ddl_lowering::resolve_column_storage(&col, Dialect::Postgres)
-            .map_err(render_error)?
-    else {
-        return Ok(None);
-    };
-    let Some(guard) =
-        ferro_ddl_lowering::render_sqlite_generated_guard(&column, storage, &expr, &model.columns)
-            .map_err(render_error)?
-    else {
-        return Ok(None);
-    };
-    let name = ferro_ddl_lowering::sqlite_guard_name(&column);
-    let head = format!("CONSTRAINT \"{}\" CHECK (", name.replace('"', "\"\""));
-    let body = guard
-        .strip_prefix(&head)
-        .and_then(|rest| rest.strip_suffix(')'))
-        .ok_or_else(|| {
-            PyRuntimeError::new_err(format!("unexpected SQLite guard shape: {guard}"))
-        })?;
-    Ok(Some((name, body.to_string())))
+    let (model, col, _) = generated_column(&model_json, &column)?;
+    ferro_ddl_lowering::sqlite_generated_guard(&col, &model.columns)
+        .map_err(|message| generated_render_error(&model.table_name, &column, message))
 }
 
 fn parse_dialects(dialects: &[String]) -> PyResult<Vec<Dialect>> {
