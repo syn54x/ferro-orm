@@ -426,9 +426,7 @@ def test_a_generated_column_retyped_by_hand_is_one_type_line(project, pkg, db, c
 
     report = drift_api(db)
 
-    assert report.lines == [
-        "transaction.direction has type bigint, snapshot says integer"
-    ]
+    assert report.lines == ["transaction.direction has type bigint, snapshot says int"]
     assert {op["kind"]: op["replaces"] for op in report.operations} == {
         "DropColumn": "own_type",
         "AddColumn": "own_type",

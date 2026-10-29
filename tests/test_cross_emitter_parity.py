@@ -1097,6 +1097,10 @@ REBUILD_CASES = (
     "G3-change-an-input-column-type",
     "G4-change-the-type-of-an-input-a-checked-column-reads",
     "G5-add-a-check-that-calls-fn",
+    "G6-add-a-generated-column-with-its-input",
+    "G6b-drop-a-generated-column-with-its-input",
+    "G7-change-a-generated-columns-own-type",
+    "G8-replace-a-generated-column-a-row-policy-reads",
     "F2-a-rename-and-a-type-change",
     "F3-a-type-change-and-a-new-index",
 )
@@ -1110,6 +1114,8 @@ INDEX_STEP_CASES = (
     "G1-add-an-indexed-generated-column",
     "G3-change-an-input-column-type",
     "G4-change-the-type-of-an-input-a-checked-column-reads",
+    "G7-change-a-generated-columns-own-type",
+    "G8-replace-a-generated-column-a-row-policy-reads",
     "F3-a-type-change-and-a-new-index",
 )
 """Postgres index steps (``CONCURRENTLY``, no transaction)."""
