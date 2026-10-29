@@ -1,0 +1,1 @@
+verified: maturin develop; cargo test ferro-schema-ir/ddl-lowering/migrate ok; pytest Verify line PG18 1777 passed 14 skipped 1 xfailed, PG17 1777 passed 14 skipped 1 xfailed; docs_checks exit 0
