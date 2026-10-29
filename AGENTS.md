@@ -171,6 +171,29 @@ For a single model, every emitter must agree on:
       whitespace folded, on SQLite. The bridge writes an added column as
       `sa.Computed(<expr>, persisted=True)` and the other two ops as
       `op.execute` of the pass's statement.
+      On SQLite an integer- or float-family generated column carries
+      Ferro's own guard `_ferro_range_<col>`
+      (`render_sqlite_generated_guard`), written inside the column
+      definition and compared with it: never a `ck_*` check and never in
+      `__ferro_checks__`. It holds the value to the Postgres storage range
+      and re-checks every arithmetic step, so an overflow raises on both
+      databases; Postgres needs none, since its integer arithmetic runs at
+      64 bits (narrower operands are cast to `bigint`) and its column type
+      holds the range.
+    - **Value parity** — a value expression (a generated column's body, or
+      either side of a check's comparison that calls `fn`) is admitted only
+      when SQLite and Postgres store the same value for it on every row,
+      decided once when the model is defined (ADR-0059;
+      `src/ferro/generated.py` over the function table). The expression's
+      type family matches the column's; `least` / `greatest` take numbers
+      or dates and no nullable operand; `year` / `month` / `day` take a
+      `date`; `/` only by a non-zero literal; no float `*` or `/` and no
+      Decimal arithmetic; no other generated column, retired column,
+      relation or closed-over variable. Failures match too: the
+      `_ferro_range_<col>` guard makes an overflow raise on SQLite where
+      Postgres raises. A function joins `fn` only with its rendering per
+      dialect and a row in `tests/test_value_parity.py`, which runs it on
+      both dialects; a divergence is refused, never documented.
 
     Every artifact above reaches every door through the one planner,
     `ferro_migrate::plan_from_ir` (`_core._plan_from_ir` over FFI): its
@@ -178,28 +201,6 @@ For a single model, every emitter must agree on:
     second entry point; `_core._plan_enum_type_provenance` remains as a
     pass-side parity pin. The item is carried by pins **(e)** and **(f)**
     below.
-12. **Generated column guard names** — on SQLite an integer- or
-    float-family generated column carries `_ferro_range_<col>`
-    (`render_sqlite_generated_guard`), a check holding the value to the
-    Postgres storage range and re-checking every arithmetic step, so an
-    overflow raises on both databases. It is Ferro's own guard, written
-    inside the column definition and compared with it: never a `ck_*`
-    check and never in `__ferro_checks__`. Postgres needs none:
-    its integer arithmetic runs at 64 bits (narrower operands are cast to
-    `bigint`) and its column type holds the range.
-13. **Value parity** — a value expression (a generated column's body, or
-    either side of a check's comparison that calls `fn`) is admitted only
-    when SQLite and Postgres store the same value for it on every row,
-    decided once when the model is defined (ADR-0059; `src/ferro/generated.py`
-    over the function table). The expression's type family matches the
-    column's; `least` / `greatest` take numbers or dates and no nullable
-    operand; `year` / `month` / `day` take a `date`; `/` only by a non-zero
-    literal; no float `*` or `/` and no Decimal arithmetic; no other
-    generated column, retired column, relation or closed-over variable.
-    Failures match too: the SQLite guard of item 12 makes an overflow raise
-    where Postgres raises. A function joins `fn` only with its rendering per
-    dialect and a row in `tests/test_value_parity.py`, which runs it on both
-    dialects; a divergence is refused, never documented.
 
 ### The nine pins
 
