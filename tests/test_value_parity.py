@@ -22,12 +22,12 @@ import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 
 import ferro
-from ferro import Field, Model, _core, fn
+from ferro import Check, CheckViolationError, Field, Model, _core, fn
 from ferro.exceptions import DataError
 
 pytestmark = [pytest.mark.usefixtures("clean_registry"), pytest.mark.postgres_only]
@@ -691,3 +691,80 @@ async def test_a_plain_column_overflow_stays_an_operational_error(db_url: str):
             assert raised.value.sqlstate == "22003"
     finally:
         ferro.reset_engine()
+
+
+# -- a step Postgres never evaluates fails on neither database ----------------------
+
+
+@pytest.mark.asyncio
+async def test_a_coalesce_fallback_postgres_skips_stores_alike(db_url: str, tmp_path):
+    # Postgres stops at the first non-null argument, so `a + 1` only
+    # overflows when `n` is NULL; the SQLite guard must not compute it sooner.
+    class Ledger(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        n: int | None = Field(default=None, db_type="bigint")
+        a: int = Field(db_type="bigint")
+        total: int = Field(
+            generated=lambda ledger: fn.coalesce(ledger.n, ledger.a + 1),
+            db_type="bigint",
+        )
+
+    for url in (f"sqlite:{tmp_path / 'coalesce.db'}?mode=rwc", db_url):
+        await ferro.connect(url, auto_migrate=True)
+        try:
+            async with ferro.engines.session():
+                kept = Ledger(n=5, a=2**63 - 1)
+                await kept.save()
+                assert (await Ledger.get(kept.id)).total == 5
+                with pytest.raises(DataError, match=r'generated column "total"'):
+                    await Ledger(a=2**63 - 1).save()
+        finally:
+            ferro.reset_engine()
+
+
+@pytest.mark.asyncio
+async def test_a_coalesce_fallback_in_a_check_postgres_skips_passes_alike(
+    db_url: str, tmp_path
+):
+    class Box(Model):
+        __ferro_checks__: ClassVar[tuple[Check, ...]] = (
+            Check("c", lambda box: fn.coalesce(box.n, box.b + 1) > 0),
+        )
+        id: int | None = Field(default=None, primary_key=True)
+        n: int | None = Field(default=None, db_type="bigint")
+        b: int = Field(db_type="bigint")
+
+    for url in (f"sqlite:{tmp_path / 'coalesce_check.db'}?mode=rwc", db_url):
+        await ferro.connect(url, auto_migrate=True)
+        try:
+            async with ferro.engines.session():
+                await Box.create(n=5, b=2**63 - 1)
+                with pytest.raises(DataError, match='the check "ck_box_c" of "box"'):
+                    await Box.create(b=2**63 - 1)
+                assert len(await Box.all()) == 1
+        finally:
+            ferro.reset_engine()
+
+
+@pytest.mark.asyncio
+async def test_an_integer_beside_a_float_compares_as_a_double_on_both_databases(
+    db_url: str, tmp_path
+):
+    # Postgres converts `a` to a double for greatest(bigint, double), so
+    # 2**53 + 1 rounds to 2**53; SQLite's max() would keep the integer exact.
+    class Box(Model):
+        __ferro_checks__: ClassVar[tuple[Check, ...]] = (
+            Check("c", lambda box: fn.greatest(box.a, 0.5) != 9007199254740992.0),
+        )
+        id: int | None = Field(default=None, primary_key=True)
+        a: int = Field(db_type="bigint")
+
+    for url in (f"sqlite:{tmp_path / 'greatest.db'}?mode=rwc", db_url):
+        await ferro.connect(url, auto_migrate=True)
+        try:
+            async with ferro.engines.session():
+                await Box.create(a=3)
+                with pytest.raises(CheckViolationError, match="ck_box_c"):
+                    await Box.create(a=2**53 + 1)
+        finally:
+            ferro.reset_engine()

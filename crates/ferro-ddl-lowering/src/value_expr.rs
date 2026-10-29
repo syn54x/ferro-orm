@@ -125,6 +125,16 @@ pub struct ValueFunction {
     /// / 2` divides as integers on both.
     #[serde(skip)]
     pub postgres_narrows_integer: bool,
+    /// Whether the call can overflow on an integer argument: `abs(-2**63)`
+    /// raises on both databases. Every other function returns one of its
+    /// arguments, a sign, a length or a date's part, none of which can.
+    #[serde(skip)]
+    pub overflows_on_integer: bool,
+    /// Whether Postgres stops at the first non-null argument and never
+    /// computes the rest (`coalesce`), so a step in a later argument fails
+    /// only on a row whose earlier arguments are all `NULL`.
+    #[serde(skip)]
+    pub skips_after_non_null: bool,
 }
 
 const fn one(arg: &'static [ValueType], result: ValueType) -> ValueSignature {
@@ -179,6 +189,8 @@ pub const VALUE_FUNCTIONS: &[ValueFunction] = &[
         sqlite: "sign({args})",
         postgres: "sign({args})",
         postgres_narrows_integer: true,
+        overflows_on_integer: false,
+        skips_after_non_null: false,
     },
     ValueFunction {
         name: "abs",
@@ -187,6 +199,8 @@ pub const VALUE_FUNCTIONS: &[ValueFunction] = &[
         sqlite: "abs({args})",
         postgres: "abs({args})",
         postgres_narrows_integer: false,
+        overflows_on_integer: true,
+        skips_after_non_null: false,
     },
     ValueFunction {
         name: "least",
@@ -195,6 +209,8 @@ pub const VALUE_FUNCTIONS: &[ValueFunction] = &[
         sqlite: "min({args})",
         postgres: "least({args})",
         postgres_narrows_integer: false,
+        overflows_on_integer: false,
+        skips_after_non_null: false,
     },
     ValueFunction {
         name: "greatest",
@@ -203,12 +219,16 @@ pub const VALUE_FUNCTIONS: &[ValueFunction] = &[
         sqlite: "max({args})",
         postgres: "greatest({args})",
         postgres_narrows_integer: false,
+        overflows_on_integer: false,
+        skips_after_non_null: false,
     },
     ValueFunction {
         name: "coalesce",
         sqlite: "coalesce({args})",
         postgres: "coalesce({args})",
         postgres_narrows_integer: false,
+        overflows_on_integer: false,
+        skips_after_non_null: true,
         signatures: &[
             repeated(
                 &[ValueType::Integer, ValueType::Integer],
@@ -235,6 +255,8 @@ pub const VALUE_FUNCTIONS: &[ValueFunction] = &[
         sqlite: "length({args})",
         postgres: "length({args})",
         postgres_narrows_integer: true,
+        overflows_on_integer: false,
+        skips_after_non_null: false,
     },
     ValueFunction {
         name: "year",
@@ -243,6 +265,8 @@ pub const VALUE_FUNCTIONS: &[ValueFunction] = &[
         sqlite: "CAST(strftime('%Y', {args}) AS integer)",
         postgres: "extract(year from {args})",
         postgres_narrows_integer: true,
+        overflows_on_integer: false,
+        skips_after_non_null: false,
     },
     ValueFunction {
         name: "month",
@@ -251,6 +275,8 @@ pub const VALUE_FUNCTIONS: &[ValueFunction] = &[
         sqlite: "CAST(strftime('%m', {args}) AS integer)",
         postgres: "extract(month from {args})",
         postgres_narrows_integer: true,
+        overflows_on_integer: false,
+        skips_after_non_null: false,
     },
     ValueFunction {
         name: "day",
@@ -259,6 +285,8 @@ pub const VALUE_FUNCTIONS: &[ValueFunction] = &[
         sqlite: "CAST(strftime('%d', {args}) AS integer)",
         postgres: "extract(day from {args})",
         postgres_narrows_integer: true,
+        overflows_on_integer: false,
+        skips_after_non_null: false,
     },
 ];
 
@@ -324,7 +352,12 @@ pub fn render_value_expr(
         ValueExpr::Negate { operand } => format!("(- {})", render(operand)?),
         ValueExpr::Func { name, args } => {
             let function = known_function(name)?;
-            let rendered = args.iter().map(render).collect::<Result<Vec<_>, _>>()?;
+            let mut rendered = args.iter().map(render).collect::<Result<Vec<_>, _>>()?;
+            if !postgres {
+                for i in float_params_over_integers(function, args, columns)? {
+                    rendered[i] = format!("CAST({} AS real)", rendered[i]);
+                }
+            }
             let template = if postgres {
                 function.postgres
             } else {
@@ -366,6 +399,60 @@ fn call_result(
         return Ok(first);
     }
     Ok(type_value_expr(call, &|name| schema_value_column(columns, name))?.family)
+}
+
+/// The arguments of a call that are integers where its signature takes a
+/// float. Postgres converts each to a double (`greatest(bigint, double
+/// precision)`); SQLite's `max()` would compare the integer exactly, so on
+/// SQLite each is cast to `real`, and both compare `2**53 + 1` as `2**53`.
+fn float_params_over_integers(
+    function: &ValueFunction,
+    args: &[ValueExpr],
+    columns: &[SchemaColumn],
+) -> Result<Vec<usize>, String> {
+    let lookup = |name: &str| schema_value_column(columns, name);
+    let families = args
+        .iter()
+        .map(|arg| Ok(type_value_expr(arg, &lookup)?.family))
+        .collect::<Result<Vec<_>, String>>()?;
+    let Some(signature) = matching_signature(function, &families) else {
+        return Ok(Vec::new());
+    };
+    Ok(families
+        .iter()
+        .enumerate()
+        .filter(|(i, family)| {
+            **family == ValueType::Integer && signature_param(signature, *i) == ValueType::Number
+        })
+        .map(|(i, _)| i)
+        .collect())
+}
+
+/// The first signature of `function` the argument families fit.
+fn matching_signature<'f>(
+    function: &'f ValueFunction,
+    families: &[ValueType],
+) -> Option<&'f ValueSignature> {
+    function.signatures.iter().find(|signature| {
+        let arity_fits = if signature.variadic {
+            families.len() >= signature.args.len()
+        } else {
+            families.len() == signature.args.len()
+        };
+        arity_fits
+            && families
+                .iter()
+                .enumerate()
+                .all(|(i, family)| family.fits(signature_param(signature, i)))
+    })
+}
+
+/// The parameter type of argument `i`, the last one repeating.
+fn signature_param(signature: &ValueSignature, i: usize) -> ValueType {
+    *signature
+        .args
+        .get(i)
+        .unwrap_or(&signature.args[signature.args.len() - 1])
 }
 
 /// A Postgres integer value at 64 bits.
@@ -626,19 +713,7 @@ fn call_type(
     typed: &[ValueTyping],
 ) -> Result<ValueTyping, String> {
     let families: Vec<ValueType> = typed.iter().map(|arg| arg.family).collect();
-    let fits = |signature: &ValueSignature| {
-        let params = signature.args;
-        let arity_fits = if signature.variadic {
-            families.len() >= params.len()
-        } else {
-            families.len() == params.len()
-        };
-        arity_fits
-            && families.iter().enumerate().all(|(i, family)| {
-                family.fits(*params.get(i).unwrap_or_else(|| &params[params.len() - 1]))
-            })
-    };
-    let Some(signature) = function.signatures.iter().find(|sig| fits(sig)) else {
+    let Some(signature) = matching_signature(function, &families) else {
         let name = function.name;
         let reason = if families.contains(&ValueType::Datetime)
             && function
@@ -694,13 +769,20 @@ fn call_type(
 /// A bounded `varchar(N)` is refused: Postgres raises on a longer value,
 /// unless its excess is spaces, which it trims to fit, and SQLite stores
 /// every character. No SQLite check reproduces the trim, so no guard can
-/// hold the two to one value.
+/// hold the two to one value. A fixed-width `char(N)` is refused too:
+/// Postgres pads a shorter value with spaces where SQLite stores it as
+/// computed.
 pub fn generated_storage_refusal(storage: CanonicalType) -> Option<String> {
     match storage {
         CanonicalType::Varchar(Some(length)) => Some(format!(
             "stores into varchar({length}): Postgres raises on a longer value (and \
              trims trailing spaces to fit) where SQLite stores every character; drop \
              db_type= so the column is text"
+        )),
+        CanonicalType::Char(length) => Some(format!(
+            "stores into char({length}): Postgres pads a shorter value with spaces \
+             (and raises on a longer one) where SQLite stores the value as computed; \
+             drop db_type= so the column is text"
         )),
         _ => None,
     }
@@ -824,39 +906,64 @@ fn step_terms(
 ) -> Result<Vec<String>, String> {
     let lookup = |name: &str| schema_value_column(columns, name);
     let mut steps = Vec::new();
-    collect_failing_steps(expr, root, &lookup, &mut steps)?;
+    collect_failing_steps(expr, root, &[], &lookup, &mut steps)?;
     let mut terms = Vec::new();
-    for step in steps {
-        let rendered = render_value_expr(step, Dialect::Sqlite, columns)?;
-        if type_value_expr(step, &lookup)?.family == ValueType::Integer {
-            terms.push(integer_term(&rendered));
-            continue;
-        }
-        // What is left is a float `+` or `-`. Postgres raises on it only when
-        // it overflows from finite operands; an operand already infinite (a
-        // stored `inf`) passes.
-        let ValueExpr::Binary { left, right, .. } = step else {
+    for (step, skipped_unless_null) in steps {
+        let Some(term) = step_term(step, columns)? else {
             continue;
         };
-        let mut alternatives = vec![finite_term(&rendered)];
-        for operand in [left, right] {
-            if matches!(**operand, ValueExpr::Literal { .. })
-                || type_value_expr(operand, &lookup)?.family == ValueType::Integer
-            {
-                continue;
-            }
-            let term = infinite_term(&render_value_expr(operand, Dialect::Sqlite, columns)?);
-            if !alternatives.contains(&term) {
-                alternatives.push(term);
-            }
+        if skipped_unless_null.is_empty() {
+            terms.push(term);
+            continue;
         }
-        terms.push(if alternatives.len() == 1 {
-            alternatives.remove(0)
-        } else {
-            format!("({})", alternatives.join(" OR "))
-        });
+        let nulls = skipped_unless_null
+            .iter()
+            .map(|earlier| {
+                Ok(format!(
+                    "{} IS NULL",
+                    render_value_expr(earlier, Dialect::Sqlite, columns)?
+                ))
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        terms.push(format!(
+            "CASE WHEN {} THEN {term} ELSE true END",
+            nulls.join(" AND ")
+        ));
     }
     Ok(terms)
+}
+
+/// The SQLite term of one failing step: false on a row where Postgres
+/// raises computing it.
+fn step_term(step: &ValueExpr, columns: &[SchemaColumn]) -> Result<Option<String>, String> {
+    let lookup = |name: &str| schema_value_column(columns, name);
+    let rendered = render_value_expr(step, Dialect::Sqlite, columns)?;
+    if type_value_expr(step, &lookup)?.family == ValueType::Integer {
+        return Ok(Some(integer_term(&rendered)));
+    }
+    // What is left is a float `+` or `-`. Postgres raises on it only when
+    // it overflows from finite operands; an operand already infinite (a
+    // stored `inf`) passes.
+    let ValueExpr::Binary { left, right, .. } = step else {
+        return Ok(None);
+    };
+    let mut alternatives = vec![finite_term(&rendered)];
+    for operand in [left, right] {
+        if matches!(**operand, ValueExpr::Literal { .. })
+            || type_value_expr(operand, &lookup)?.family == ValueType::Integer
+        {
+            continue;
+        }
+        let term = infinite_term(&render_value_expr(operand, Dialect::Sqlite, columns)?);
+        if !alternatives.contains(&term) {
+            alternatives.push(term);
+        }
+    }
+    Ok(Some(if alternatives.len() == 1 {
+        alternatives.remove(0)
+    } else {
+        format!("({})", alternatives.join(" OR "))
+    }))
 }
 
 /// Whether computing this one node of a value expression can fail on a
@@ -867,10 +974,8 @@ fn step_terms(
 ///
 /// A node can fail when it is an integer or float `+ - *` (the typing
 /// refuses float `*` and `/`), a division by `-1` (`-2**63 / -1`), an
-/// integer unary `-`, or `abs` of an integer (`abs(-2**63)` raises on both).
-/// No other function in [`VALUE_FUNCTIONS`] can overflow: `sign` returns
-/// -1, 0 or 1, `least`, `greatest` and `coalesce` one of their arguments,
-/// `length` a string's length, and `year`, `month` and `day` a date's part.
+/// integer unary `-`, or a call [`ValueFunction::overflows_on_integer`]
+/// marks over an integer (`abs(-2**63)` raises on both).
 ///
 /// # Errors
 /// The typing's refusal ([`type_value_expr`]) of a node it must type.
@@ -888,10 +993,14 @@ pub fn value_step_can_fail(
                 || matches!(&**right, ValueExpr::Literal { token } if token == "-1")
         }
         ValueExpr::Negate { operand } => integer(operand)?,
-        ValueExpr::Func { name, args } => match (name.as_str(), args.as_slice()) {
-            ("abs", [arg]) => integer(arg)?,
-            _ => false,
-        },
+        ValueExpr::Func { name, args } => {
+            known_function(name)?.overflows_on_integer
+                && args
+                    .iter()
+                    .map(integer)
+                    .collect::<Result<Vec<_>, _>>()?
+                    .contains(&true)
+        }
     })
 }
 
@@ -905,31 +1014,46 @@ pub fn first_failing_step<'a>(
     column: &dyn Fn(&str) -> Option<ValueColumn>,
 ) -> Result<Option<&'a ValueExpr>, String> {
     let mut steps = Vec::new();
-    collect_failing_steps(expr, false, column, &mut steps)?;
-    Ok(steps.first().copied())
+    collect_failing_steps(expr, false, &[], column, &mut steps)?;
+    Ok(steps.first().map(|(step, _)| *step))
 }
+
+/// A failing step and the earlier arguments that must all be `NULL` for
+/// Postgres to compute it (empty when it always does).
+type FailingStep<'a> = (&'a ValueExpr, Vec<&'a ValueExpr>);
 
 /// Every node of `expr` that [`value_step_can_fail`] says can fail,
 /// outermost first and left to right; `root` leaves out `expr` itself.
+/// `skipped_unless_null` are the earlier arguments of the enclosing calls
+/// [`ValueFunction::skips_after_non_null`] marks.
 fn collect_failing_steps<'a>(
     expr: &'a ValueExpr,
     root: bool,
+    skipped_unless_null: &[&'a ValueExpr],
     column: &dyn Fn(&str) -> Option<ValueColumn>,
-    out: &mut Vec<&'a ValueExpr>,
+    out: &mut Vec<FailingStep<'a>>,
 ) -> Result<(), String> {
     if !root && value_step_can_fail(expr, column)? {
-        out.push(expr);
+        out.push((expr, skipped_unless_null.to_vec()));
     }
+    let mut collect = |child: &'a ValueExpr, nulls: &[&'a ValueExpr]| {
+        collect_failing_steps(child, false, nulls, column, out)
+    };
     match expr {
         ValueExpr::Column { .. } | ValueExpr::Literal { .. } => {}
         ValueExpr::Binary { left, right, .. } => {
-            collect_failing_steps(left, false, column, out)?;
-            collect_failing_steps(right, false, column, out)?;
+            collect(left, skipped_unless_null)?;
+            collect(right, skipped_unless_null)?;
         }
-        ValueExpr::Negate { operand } => collect_failing_steps(operand, false, column, out)?,
-        ValueExpr::Func { args, .. } => {
+        ValueExpr::Negate { operand } => collect(operand, skipped_unless_null)?,
+        ValueExpr::Func { name, args } => {
+            let skips = known_function(name)?.skips_after_non_null;
+            let mut nulls = skipped_unless_null.to_vec();
             for arg in args {
-                collect_failing_steps(arg, false, column, out)?;
+                collect(arg, &nulls)?;
+                if skips {
+                    nulls.push(arg);
+                }
             }
         }
     }
@@ -1089,7 +1213,14 @@ mod tests {
     }
 
     fn renders(name: &str, args: &[&str], dialect: Dialect) -> String {
-        render_value_expr(&call(name, args), dialect, &[]).unwrap()
+        let columns = [
+            schema_column("a", "integer", Some("bigint")),
+            schema_column("b", "integer", Some("bigint")),
+            schema_column("c", "integer", Some("bigint")),
+            schema_column("name", "string", None),
+            schema_column("d", "date", None),
+        ];
+        render_value_expr(&call(name, args), dialect, &columns).unwrap()
     }
 
     #[test]
@@ -1282,6 +1413,39 @@ mod tests {
             None
         );
         assert_eq!(generated_storage_refusal(CanonicalType::BigInt), None);
+        let err = generated_storage_refusal(CanonicalType::Char(5)).unwrap();
+        assert!(
+            err.contains("char(5)") && err.contains("pads") && err.contains("drop db_type="),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn an_integer_in_a_float_signature_computes_as_a_double_on_sqlite() {
+        // Postgres converts `a` to a double for greatest(bigint, double);
+        // SQLite's max() would compare the integer exactly.
+        let columns = [schema_column("a", "integer", Some("bigint"))];
+        let expr = ValueExpr::Func {
+            name: "greatest".to_string(),
+            args: vec![*column("a"), *literal("0.5")],
+        };
+        assert_eq!(
+            render_value_expr(&expr, Dialect::Sqlite, &columns).unwrap(),
+            "max(CAST(\"a\" AS real), 0.5)"
+        );
+        assert_eq!(
+            render_value_expr(&expr, Dialect::Postgres, &columns).unwrap(),
+            "greatest(\"a\", CAST(0.5 AS double precision))"
+        );
+        // An all-integer call keeps its integers.
+        let ints = ValueExpr::Func {
+            name: "greatest".to_string(),
+            args: vec![*column("a"), *literal("1")],
+        };
+        assert_eq!(
+            render_value_expr(&ints, Dialect::Sqlite, &columns).unwrap(),
+            "max(\"a\", 1)"
+        );
     }
 
     #[test]
@@ -1386,12 +1550,13 @@ mod tests {
             name: "least".to_string(),
             args: vec![call("day", &["date"]), *literal("28")],
         };
+        let columns = [schema_column("date", "date", None)];
         assert_eq!(
-            render_value_expr(&expr, Dialect::Sqlite, &[]).unwrap(),
+            render_value_expr(&expr, Dialect::Sqlite, &columns).unwrap(),
             "min(CAST(strftime('%d', \"date\") AS integer), 28)"
         );
         assert_eq!(
-            render_value_expr(&expr, Dialect::Postgres, &[]).unwrap(),
+            render_value_expr(&expr, Dialect::Postgres, &columns).unwrap(),
             "least(CAST(extract(day from \"date\") AS bigint), 28)"
         );
     }
@@ -1539,6 +1704,41 @@ mod tests {
         assert_eq!(
             guard("n", CanonicalType::BigInt, &nested).unwrap(),
             "CONSTRAINT \"_ferro_range_n\" CHECK (typeof(\"n\") IN ('integer', 'null') AND typeof((\"a\" + 1)) IN ('integer', 'null'))"
+        );
+    }
+
+    #[test]
+    fn the_sqlite_guard_computes_a_coalesce_fallback_only_where_postgres_does() {
+        // coalesce(a, b + 1): Postgres computes `b + 1` only when `a` is NULL.
+        let fallback = ValueExpr::Func {
+            name: "coalesce".to_string(),
+            args: vec![
+                *column("a"),
+                binary(ValueBinaryOp::Add, column("b"), literal("1")),
+            ],
+        };
+        assert_eq!(
+            guard("n", CanonicalType::BigInt, &fallback).unwrap(),
+            "CONSTRAINT \"_ferro_range_n\" CHECK (typeof(\"n\") IN ('integer', 'null') AND CASE WHEN \"a\" IS NULL THEN typeof((\"b\" + 1)) IN ('integer', 'null') ELSE true END)"
+        );
+        // The first argument is always computed; a nested coalesce adds its own.
+        let nested = ValueExpr::Func {
+            name: "coalesce".to_string(),
+            args: vec![
+                binary(ValueBinaryOp::Add, column("a"), literal("1")),
+                *column("b"),
+                ValueExpr::Func {
+                    name: "coalesce".to_string(),
+                    args: vec![
+                        *column("a"),
+                        binary(ValueBinaryOp::Mul, column("b"), column("b")),
+                    ],
+                },
+            ],
+        };
+        assert_eq!(
+            guard("n", CanonicalType::BigInt, &nested).unwrap(),
+            "CONSTRAINT \"_ferro_range_n\" CHECK (typeof(\"n\") IN ('integer', 'null') AND typeof((\"a\" + 1)) IN ('integer', 'null') AND CASE WHEN (\"a\" + 1) IS NULL AND \"b\" IS NULL AND \"a\" IS NULL THEN typeof((\"b\" * \"b\")) IN ('integer', 'null') ELSE true END)"
         );
     }
 
