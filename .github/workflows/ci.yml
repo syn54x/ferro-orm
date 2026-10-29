@@ -14,6 +14,15 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  # Every job compiles Ferro's own crates from scratch (rust-cache keeps only
+  # dependencies): 2.5 to 4 minutes a job. sccache keys each rustc call by its
+  # inputs and stores the object in the Actions cache, so an unchanged crate is
+  # a download. Incremental compilation is off because sccache cannot cache it.
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: sccache
+  CARGO_INCREMENTAL: "0"
+
 jobs:
   lint-and-format:
     name: Lint & Format (Pre-commit / Prek)
@@ -36,6 +45,9 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+
+      - name: Cache compiled Rust crates
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
@@ -79,6 +91,9 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache compiled Rust crates
+        uses: mozilla-actions/sccache-action@v0.0.11
+
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
@@ -117,6 +132,9 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Cache compiled Rust crates
+        uses: mozilla-actions/sccache-action@v0.0.11
+
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
         with:
@@ -153,6 +171,9 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache compiled Rust crates
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
@@ -204,6 +225,9 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache compiled Rust crates
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
@@ -279,6 +303,9 @@ jobs:
 
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache compiled Rust crates
+        uses: mozilla-actions/sccache-action@v0.0.11
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
