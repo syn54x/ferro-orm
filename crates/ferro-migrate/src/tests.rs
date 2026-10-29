@@ -7460,15 +7460,21 @@ fn a_postgres_live_check_with_no_printed_pair_is_refused() {
 #[test]
 fn a_check_gets_a_pair_only_when_every_column_it_reads_is_live() {
     let model = payment_with_large_check("1000");
+    let held = |name: &str| name == "ck_payment_large";
     let without_amount =
-        crate::plan::printed_pair_checks(&model, "payment", &|name| name != "amount");
+        crate::plan::printed_pair_checks(&model, "payment", &|name| name != "amount", &held);
     assert_eq!(
         without_amount,
         vec![],
         "a check over a column not live yet has none"
     );
     assert_eq!(
-        crate::plan::printed_pair_checks(&model, "payment", &|_| true),
+        crate::plan::printed_pair_checks(&model, "payment", &|_| true, &|_| false),
+        vec![],
+        "a check no live check holds has none: it is an add"
+    );
+    assert_eq!(
+        crate::plan::printed_pair_checks(&model, "payment", &|_| true, &held),
         vec![(
             "ck_payment_large".to_string(),
             Ok("(abs(CAST(\"amount\" AS bigint)) > 1000)".to_string())
@@ -7491,12 +7497,19 @@ fn a_check_is_paired_under_the_names_its_live_table_holds() {
         predicate: abs_amount_over("total", "1000"),
     };
     let live = |name: &str| ["id", "amount"].contains(&name);
+    let pairs = |held: &str| {
+        crate::plan::printed_pair_checks(&model, "payment", &live, &|name| name == held)
+    };
+    let body = Ok("(abs(CAST(\"amount\" AS bigint)) > 1000)".to_string());
     assert_eq!(
-        crate::plan::printed_pair_checks(&model, "payment", &live),
-        vec![(
-            "ck_payment_large".to_string(),
-            Ok("(abs(CAST(\"amount\" AS bigint)) > 1000)".to_string())
-        )]
+        pairs("ck_payment_large"),
+        vec![("ck_payment_large".to_string(), body.clone())]
+    );
+    // A rename undone by hand: the table is `payment` again, but its check
+    // keeps the name the rename gave it.
+    assert_eq!(
+        pairs("ck_invoice_large"),
+        vec![("ck_invoice_large".to_string(), body)]
     );
 }
 

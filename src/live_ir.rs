@@ -317,7 +317,12 @@ fn declared_check_pairs(
         return Ok(Vec::new());
     };
     let live = |name: &str| columns.iter().any(|col| col.name == name);
-    printed_pair_checks(model, table, &live)
+    let live_check = |name: &str| {
+        checks
+            .iter()
+            .any(|check| check.name == name && check.ferro_owned)
+    };
+    printed_pair_checks(model, table, &live, &live_check)
         .into_iter()
         .filter_map(|(name, body)| {
             let catalog = checks

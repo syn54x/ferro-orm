@@ -4255,7 +4255,12 @@ impl Side {
                 }
             }
             let live_checks = &facts.tables[live_table].checks;
-            for (name, _) in printed_pair_checks(model, live_table, &live) {
+            let live_check = |name: &str| {
+                live_checks
+                    .iter()
+                    .any(|check| check.name == name && check.ferro_owned)
+            };
+            for (name, _) in printed_pair_checks(model, live_table, &live, &live_check) {
                 let missing = live_checks.iter().any(|check| {
                     check.name == name && check.ferro_owned && check.printed.is_none()
                 });
@@ -4272,11 +4277,12 @@ impl Side {
 }
 
 /// The checks of `model` whose bodies the live read prints on Postgres
-/// beside the catalog's (ADR-0060), as `(name, declared body)` under the
-/// names of its live table `live_table`: every check `model` declares whose
-/// every column is live (`live`, by name or rename hint), named and rendered
-/// for Postgres as on that table, a rename of the same change reversed. The
-/// live read pairs each with the live ferro-owned check of that name, and
+/// beside the catalog's (ADR-0060), as `(live name, declared body)`: every
+/// check `model` declares whose every column is live (`live`, by name or
+/// rename hint) and that a live ferro-owned check holds (`live_check`), by
+/// its own name or the name a rename of the same change re-derives it from,
+/// its body rendered for Postgres under the live table `live_table`'s
+/// column names. The live read pairs each with that live check, and
 /// [`Side::check_printed_pairs`] demands a pair by the same rule. A check
 /// reading a column that is not live yet gets none: its live namesake, if
 /// any, reads something else and is rebuilt.
@@ -4286,6 +4292,7 @@ pub fn printed_pair_checks(
     model: &SchemaModel,
     live_table: &str,
     live: &dyn Fn(&str) -> bool,
+    live_check: &dyn Fn(&str) -> bool,
 ) -> Vec<(String, Result<String, String>)> {
     let hints: Vec<Hint> = std::iter::once(Hint::Table {
         old: model.table_name.clone(),
@@ -4311,14 +4318,20 @@ pub fn printed_pair_checks(
         .checks
         .iter()
         .map(|check| (&check.name, BTreeSet::from([check.column.clone()])));
-    table_checks
-        .chain(column_checks)
-        .filter(|(_, columns)| columns.iter().all(|column| live(column)))
-        .map(|(name, _)| {
-            let body = declared_check_body(&view, name, Dialect::Postgres).and_then(|body| {
-                body.ok_or_else(|| format!("CHECK constraint '{name}' is not declared"))
+    // `renamed_model` keeps the checks in order, one for one.
+    declared_check_names(model)
+        .into_iter()
+        .zip(table_checks.chain(column_checks))
+        .filter(|(_, (_, columns))| columns.iter().all(|column| live(column)))
+        .filter_map(|(declared, (rederived, _))| {
+            let name = [declared.as_str(), rederived.as_str()]
+                .into_iter()
+                .find(|name| live_check(name))?
+                .to_string();
+            let body = declared_check_body(&view, rederived, Dialect::Postgres).and_then(|body| {
+                body.ok_or_else(|| format!("CHECK constraint '{rederived}' is not declared"))
             });
-            (name.clone(), body)
+            Some((name, body))
         })
         .collect()
 }
