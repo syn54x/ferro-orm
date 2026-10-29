@@ -1,0 +1,1 @@
+verified 2026-10-29: maturin develop; cargo test --workspace ok; pytest block sqlite+postgres18 1455 passed 13 skipped 1 xfailed; same block postgres17 1182 passed; docs_checks exit 0
