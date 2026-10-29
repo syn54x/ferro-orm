@@ -9,14 +9,14 @@
 use std::collections::BTreeSet;
 
 use ferro_schema_ir::{ValueBinaryOp, ValueExpr};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use ferro_schema_ir::SchemaColumn;
 
 use crate::{CanonicalType, Dialect, ResolvedStorage, quote_ident, resolve_column_storage};
 
 /// The value families a function admits and returns.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ValueType {
     Integer,
@@ -26,6 +26,57 @@ pub enum ValueType {
     Date,
     Datetime,
     Boolean,
+}
+
+impl ValueType {
+    const ALL: [ValueType; 7] = [
+        ValueType::Integer,
+        ValueType::Number,
+        ValueType::Decimal,
+        ValueType::String,
+        ValueType::Date,
+        ValueType::Datetime,
+        ValueType::Boolean,
+    ];
+
+    /// The family's token, as the IR's `logical_type` and Python name it.
+    pub fn token(self) -> &'static str {
+        match self {
+            ValueType::Integer => "integer",
+            ValueType::Number => "number",
+            ValueType::Decimal => "decimal",
+            ValueType::String => "string",
+            ValueType::Date => "date",
+            ValueType::Datetime => "datetime",
+            ValueType::Boolean => "boolean",
+        }
+    }
+
+    /// The family named by a column's `logical_type`, if it is one.
+    pub fn from_token(token: &str) -> Option<ValueType> {
+        Self::ALL.into_iter().find(|family| family.token() == token)
+    }
+
+    /// The Python annotation the family is declared with.
+    pub fn annotation(self) -> &'static str {
+        match self {
+            ValueType::Integer => "int",
+            ValueType::Number => "float",
+            ValueType::Decimal => "Decimal",
+            ValueType::String => "str",
+            ValueType::Date => "date",
+            ValueType::Datetime => "datetime",
+            ValueType::Boolean => "bool",
+        }
+    }
+
+    /// Whether a value of this family fits a parameter of `parameter`: the
+    /// same family, or an integer where a float or decimal is taken.
+    pub fn fits(self, parameter: ValueType) -> bool {
+        self == parameter
+            || (self == ValueType::Integer
+                && matches!(parameter, ValueType::Number | ValueType::Decimal))
+    }
 }
 
 /// One accepted call shape of a function.
@@ -61,6 +112,19 @@ pub struct ValueFunction {
     pub signatures: &'static [ValueSignature],
     /// How a `NULL` argument reaches the result.
     pub nulls: NullRule,
+    /// The call on SQLite; `{args}` stands for the comma-joined arguments.
+    #[serde(skip)]
+    pub sqlite: &'static str,
+    /// The call on Postgres, likewise.
+    #[serde(skip)]
+    pub postgres: &'static str,
+    /// Whether Postgres returns an integer result at another type than
+    /// `bigint` (`length` is `integer`, `extract` is `numeric`,
+    /// `sign(bigint)` is `double precision`). The renderer then casts the
+    /// call to `bigint`, the type SQLite computes the result at, so `fn.day(d)
+    /// / 2` divides as integers on both.
+    #[serde(skip)]
+    pub postgres_narrows_integer: bool,
 }
 
 const fn one(arg: &'static [ValueType], result: ValueType) -> ValueSignature {
@@ -112,24 +176,39 @@ pub const VALUE_FUNCTIONS: &[ValueFunction] = &[
         name: "sign",
         signatures: NUMERIC_UNARY,
         nulls: NullRule::Propagate,
+        sqlite: "sign({args})",
+        postgres: "sign({args})",
+        postgres_narrows_integer: true,
     },
     ValueFunction {
         name: "abs",
         signatures: NUMERIC_UNARY,
         nulls: NullRule::Propagate,
+        sqlite: "abs({args})",
+        postgres: "abs({args})",
+        postgres_narrows_integer: false,
     },
     ValueFunction {
         name: "least",
         signatures: ORDERED_REPEATED,
         nulls: NullRule::Refused,
+        sqlite: "min({args})",
+        postgres: "least({args})",
+        postgres_narrows_integer: false,
     },
     ValueFunction {
         name: "greatest",
         signatures: ORDERED_REPEATED,
         nulls: NullRule::Refused,
+        sqlite: "max({args})",
+        postgres: "greatest({args})",
+        postgres_narrows_integer: false,
     },
     ValueFunction {
         name: "coalesce",
+        sqlite: "coalesce({args})",
+        postgres: "coalesce({args})",
+        postgres_narrows_integer: false,
         signatures: &[
             repeated(
                 &[ValueType::Integer, ValueType::Integer],
@@ -153,21 +232,33 @@ pub const VALUE_FUNCTIONS: &[ValueFunction] = &[
         name: "length",
         signatures: &[one(&[ValueType::String], ValueType::Integer)],
         nulls: NullRule::Propagate,
+        sqlite: "length({args})",
+        postgres: "length({args})",
+        postgres_narrows_integer: true,
     },
     ValueFunction {
         name: "year",
         signatures: DATE_PART,
         nulls: NullRule::Propagate,
+        sqlite: "CAST(strftime('%Y', {args}) AS integer)",
+        postgres: "extract(year from {args})",
+        postgres_narrows_integer: true,
     },
     ValueFunction {
         name: "month",
         signatures: DATE_PART,
         nulls: NullRule::Propagate,
+        sqlite: "CAST(strftime('%m', {args}) AS integer)",
+        postgres: "extract(month from {args})",
+        postgres_narrows_integer: true,
     },
     ValueFunction {
         name: "day",
         signatures: DATE_PART,
         nulls: NullRule::Propagate,
+        sqlite: "CAST(strftime('%d', {args}) AS integer)",
+        postgres: "extract(day from {args})",
+        postgres_narrows_integer: true,
     },
 ];
 
@@ -183,26 +274,32 @@ pub fn value_function(name: &str) -> Option<&'static ValueFunction> {
 /// Every binary node is parenthesised and unary minus renders as `(- x)`, so
 /// the rendering never depends on operator precedence and never forms `--`.
 ///
-/// On Postgres every integer value narrower than `bigint` (a `smallint` or
-/// `integer` column, `length`, a date part) is cast to `bigint`. Postgres
-/// computes integer arithmetic at its operands' width and SQLite at 64 bits,
-/// so without the cast `a + b - c` over `integer` columns fails on Postgres
-/// at a middle step that SQLite computes fine. With it, both compute at 64
-/// bits and only the column's own range decides, as Postgres's assignment
-/// to the column and the SQLite storage guard enforce.
+/// On Postgres every value computes at the type SQLite computes it at, the
+/// type [`type_value_expr`] gives it: an integer at 64 bits, a float as a
+/// double. Postgres computes integer arithmetic at its operands' width and
+/// SQLite at 64 bits, so an integer value narrower than `bigint` (a
+/// `smallint` or `integer` column, a call [`ValueFunction::postgres_narrows_integer`]
+/// marks) is cast to `bigint`. Postgres types a bare float literal (`0.1`)
+/// as an exact `numeric`, so it is cast to `double precision`. An integer
+/// literal stays bare: [`type_value_expr`] refuses a call over literals
+/// only, so it always meets a `bigint` operand, which carries the step to
+/// 64 bits. Then only the column's own range decides, as Postgres's
+/// assignment to the column and the SQLite storage guard enforce.
 ///
 /// # Errors
-/// A message naming the function when a call names one the table lacks.
+/// A message naming the function when a call names one the table lacks, or
+/// the typing's refusal ([`type_value_expr`]) of an expression it must type.
 pub fn render_value_expr(
     expr: &ValueExpr,
     dialect: Dialect,
     columns: &[SchemaColumn],
 ) -> Result<String, String> {
     let render = |expr: &ValueExpr| render_value_expr(expr, dialect, columns);
+    let postgres = dialect == Dialect::Postgres;
     Ok(match expr {
         ValueExpr::Column { name } => {
             let quoted = quote_ident(name);
-            let narrow = dialect == Dialect::Postgres
+            let narrow = postgres
                 && columns.iter().any(|col| {
                     col.name == *name
                         && matches!(
@@ -214,7 +311,10 @@ pub fn render_value_expr(
                 });
             if narrow { widen(&quoted) } else { quoted }
         }
-        ValueExpr::Literal { token } => token.clone(),
+        ValueExpr::Literal { token } => match literal_type(token)? {
+            ValueType::Number if postgres => format!("CAST({token} AS double precision)"),
+            _ => token.clone(),
+        },
         ValueExpr::Binary { op, left, right } => format!(
             "({} {} {})",
             render(left)?,
@@ -223,17 +323,49 @@ pub fn render_value_expr(
         ),
         ValueExpr::Negate { operand } => format!("(- {})", render(operand)?),
         ValueExpr::Func { name, args } => {
-            let function = value_function(name).ok_or_else(|| {
-                let known: Vec<&str> = VALUE_FUNCTIONS.iter().map(|f| f.name).collect();
-                format!(
-                    "unknown value function '{name}'; the functions are: {}",
-                    known.join(", ")
-                )
-            })?;
+            let function = known_function(name)?;
             let rendered = args.iter().map(render).collect::<Result<Vec<_>, _>>()?;
-            render_call(function, &rendered, dialect)
+            let template = if postgres {
+                function.postgres
+            } else {
+                function.sqlite
+            };
+            let call = template.replace("{args}", &rendered.join(", "));
+            if postgres
+                && function.postgres_narrows_integer
+                && call_result(function, expr, columns)? == ValueType::Integer
+            {
+                widen(&call)
+            } else {
+                call
+            }
         }
     })
+}
+
+/// The table entry named `name`, or a refusal listing the table.
+fn known_function(name: &str) -> Result<&'static ValueFunction, String> {
+    value_function(name).ok_or_else(|| {
+        let known: Vec<&str> = VALUE_FUNCTIONS.iter().map(|f| f.name).collect();
+        format!(
+            "unknown value function '{name}'; the functions are: {}",
+            known.join(", ")
+        )
+    })
+}
+
+/// The result type of a call: the one every signature returns, else the
+/// typing's answer for its arguments.
+fn call_result(
+    function: &ValueFunction,
+    call: &ValueExpr,
+    columns: &[SchemaColumn],
+) -> Result<ValueType, String> {
+    let first = function.signatures[0].result;
+    if function.signatures.iter().all(|sig| sig.result == first) {
+        return Ok(first);
+    }
+    Ok(type_value_expr(call, &|name| schema_value_column(columns, name))?.family)
 }
 
 /// A Postgres integer value at 64 bits.
@@ -241,23 +373,316 @@ fn widen(sql: &str) -> String {
     format!("CAST({sql} AS bigint)")
 }
 
-/// One function call's SQL per dialect.
-fn render_call(function: &ValueFunction, args: &[String], dialect: Dialect) -> String {
-    let joined = args.join(", ");
-    // Postgres's `extract` returns `numeric`; the cast keeps `fn.day(d) / 2`
-    // an integer division, as it is on SQLite, and at 64 bits.
-    let date_part = |pg_field: &str, sqlite_format: &str| match dialect {
-        Dialect::Postgres => widen(&format!("extract({pg_field} from {joined})")),
-        Dialect::Sqlite => format!("CAST(strftime('{sqlite_format}', {joined}) AS integer)"),
+/// A column as a value expression reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+pub struct ValueColumn {
+    /// The value family it holds; `None` for a column no expression reads
+    /// (an enum, a JSON or binary column).
+    pub family: Option<ValueType>,
+    /// Whether it can hold `NULL`.
+    pub nullable: bool,
+    /// Whether it is retired, leaving the table.
+    #[serde(default)]
+    pub retired: bool,
+}
+
+/// The type of a value expression under value parity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ValueTyping {
+    /// The family both databases compute the value in.
+    pub family: ValueType,
+    /// Whether the value can be `NULL`.
+    pub nullable: bool,
+}
+
+/// How the table's column `name` reads in a value expression.
+pub fn schema_value_column(columns: &[SchemaColumn], name: &str) -> Option<ValueColumn> {
+    let col = columns.iter().find(|col| col.name == name)?;
+    Some(ValueColumn {
+        family: if col.enum_values.is_some() {
+            None
+        } else {
+            ValueType::from_token(&col.logical_type)
+        },
+        nullable: col.nullable,
+        retired: col.retired,
+    })
+}
+
+/// The type of a literal token as both databases read it: `true` / `false`
+/// a boolean, a quoted token a string, digits that fit 64 bits an integer,
+/// any other number a float.
+///
+/// # Errors
+/// An integer past 64 bits: SQLite reads it as a float and Postgres as an
+/// exact `numeric`, so the two would compute different values.
+pub fn literal_type(token: &str) -> Result<ValueType, String> {
+    if token == "true" || token == "false" {
+        return Ok(ValueType::Boolean);
+    }
+    if token.starts_with('\'') {
+        return Ok(ValueType::String);
+    }
+    let digits = token.strip_prefix('-').unwrap_or(token);
+    if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+        return token
+            .parse::<i64>()
+            .map(|_| ValueType::Integer)
+            .map_err(|_| {
+                format!(
+                    "holds the integer literal {token}, outside the 64-bit range: SQLite \
+                 computes it as a float and Postgres as an exact numeric, so the \
+                 stored values would differ; write it as a float literal ({token}.0) \
+                 or keep it within -9223372036854775808..9223372036854775807"
+                )
+            });
+    }
+    Ok(ValueType::Number)
+}
+
+fn quoted_name(name: &str) -> String {
+    format!("'{name}'")
+}
+
+/// Type a value expression under value parity (ADR-0059): its family and
+/// whether it can be `NULL`, from the columns `column` describes, the
+/// literal rule ([`literal_type`]) and each call's signature in
+/// [`VALUE_FUNCTIONS`]. Every door that needs an expression's type reads
+/// this one walk: the class-definition refusals in Python over FFI, the
+/// Postgres renderer and the SQLite guard.
+///
+/// # Errors
+/// A sentence naming the fix when the expression could store a different
+/// value, or fail differently, on SQLite and Postgres.
+pub fn type_value_expr(
+    expr: &ValueExpr,
+    column: &dyn Fn(&str) -> Option<ValueColumn>,
+) -> Result<ValueTyping, String> {
+    let typed = |family, nullable| Ok(ValueTyping { family, nullable });
+    match expr {
+        ValueExpr::Column { name } => {
+            let Some(col) = column(name) else {
+                return Err(format!(
+                    "reads {}, which is not a column of the model",
+                    quoted_name(name)
+                ));
+            };
+            if col.retired {
+                return Err(format!(
+                    "reads the retired column {}, which is leaving the table; read a \
+                     column the model still maps",
+                    quoted_name(name)
+                ));
+            }
+            let Some(family) = col.family else {
+                let annotations: Vec<&str> = ValueType::ALL
+                    .iter()
+                    .map(|family| family.annotation())
+                    .collect();
+                return Err(format!(
+                    "reads {}, a column no value expression can read; it takes {} columns",
+                    quoted_name(name),
+                    annotations.join(", ")
+                ));
+            };
+            typed(family, col.nullable)
+        }
+        ValueExpr::Literal { token } => typed(literal_type(token)?, false),
+        ValueExpr::Negate { operand } => {
+            let operand = type_value_expr(operand, column)?;
+            if !matches!(
+                operand.family,
+                ValueType::Integer | ValueType::Number | ValueType::Decimal
+            ) {
+                return Err(format!(
+                    "unary - takes a number, not {}",
+                    operand.family.token()
+                ));
+            }
+            Ok(operand)
+        }
+        ValueExpr::Binary { op, left, right } => {
+            let symbol = binary_op_sql(*op);
+            if *op == ValueBinaryOp::Div && !is_nonzero_number_literal(right) {
+                return Err(
+                    "divides by something other than a non-zero literal: Postgres raises \
+                     on division by zero where SQLite stores NULL; divide by a non-zero \
+                     literal such as / 100"
+                        .to_string(),
+                );
+            }
+            let left = type_value_expr(left, column)?;
+            let right = type_value_expr(right, column)?;
+            arithmetic_type(symbol, left, right)
+        }
+        ValueExpr::Func { name, args } => {
+            let function = known_function(name)?;
+            if args
+                .iter()
+                .all(|arg| matches!(arg, ValueExpr::Literal { .. }))
+            {
+                return Err(format!(
+                    "calls fn.{name} over literals only, a constant that reads no \
+                     column: compute it in Python and write the result as a literal, or \
+                     call fn.{name} on a column"
+                ));
+            }
+            let typed_args = args
+                .iter()
+                .map(|arg| type_value_expr(arg, column))
+                .collect::<Result<Vec<_>, _>>()?;
+            call_type(function, args, &typed_args)
+        }
+    }
+}
+
+fn is_nonzero_number_literal(expr: &ValueExpr) -> bool {
+    let ValueExpr::Literal { token } = expr else {
+        return false;
     };
-    match (function.name, dialect) {
-        ("least", Dialect::Sqlite) => format!("min({joined})"),
-        ("greatest", Dialect::Sqlite) => format!("max({joined})"),
-        ("length", Dialect::Postgres) => widen(&format!("length({joined})")),
-        ("year", _) => date_part("year", "%Y"),
-        ("month", _) => date_part("month", "%m"),
-        ("day", _) => date_part("day", "%d"),
-        (name, _) => format!("{name}({joined})"),
+    matches!(
+        literal_type(token),
+        Ok(ValueType::Integer | ValueType::Number)
+    ) && token.parse::<f64>().is_ok_and(|value| value != 0.0)
+}
+
+fn arithmetic_type(
+    symbol: &str,
+    left: ValueTyping,
+    right: ValueTyping,
+) -> Result<ValueTyping, String> {
+    let families = [left.family, right.family];
+    if families.contains(&ValueType::Decimal) {
+        return Err(format!(
+            "'{symbol}' over a decimal: SQLite computes decimal arithmetic in floating \
+             point and Postgres exactly, so the stored values would differ; store the \
+             amount in minor units as an int"
+        ));
+    }
+    if !families
+        .iter()
+        .all(|family| matches!(family, ValueType::Integer | ValueType::Number))
+    {
+        let mut shown: Vec<&str> = families.iter().map(|family| family.token()).collect();
+        shown.sort_unstable();
+        shown.dedup();
+        return Err(format!(
+            "'{symbol}' takes integers and floats, not {}",
+            shown.join(", ")
+        ));
+    }
+    let family = if families == [ValueType::Integer; 2] {
+        ValueType::Integer
+    } else {
+        ValueType::Number
+    };
+    if family == ValueType::Number && matches!(symbol, "*" | "/") {
+        return Err(format!(
+            "'{symbol}' over a float: Postgres raises when a float product or quotient \
+             underflows to zero where SQLite stores 0.0, so the databases would \
+             disagree; keep the arithmetic in integers (an amount in minor units, such \
+             as amount_minor) or compute the value in the application"
+        ));
+    }
+    Ok(ValueTyping {
+        family,
+        nullable: left.nullable || right.nullable,
+    })
+}
+
+fn signature_text(signature: &ValueSignature) -> String {
+    let mut args: Vec<&str> = signature.args.iter().map(|arg| arg.token()).collect();
+    if signature.variadic {
+        args.push("...");
+    }
+    format!("({}) -> {}", args.join(", "), signature.result.token())
+}
+
+/// The family and nullability of one call, from the first signature its
+/// arguments fit, and the function's null rule.
+fn call_type(
+    function: &ValueFunction,
+    args: &[ValueExpr],
+    typed: &[ValueTyping],
+) -> Result<ValueTyping, String> {
+    let families: Vec<ValueType> = typed.iter().map(|arg| arg.family).collect();
+    let fits = |signature: &ValueSignature| {
+        let params = signature.args;
+        let arity_fits = if signature.variadic {
+            families.len() >= params.len()
+        } else {
+            families.len() == params.len()
+        };
+        arity_fits
+            && families.iter().enumerate().all(|(i, family)| {
+                family.fits(*params.get(i).unwrap_or_else(|| &params[params.len() - 1]))
+            })
+    };
+    let Some(signature) = function.signatures.iter().find(|sig| fits(sig)) else {
+        let name = function.name;
+        let reason = if families.contains(&ValueType::Datetime)
+            && function
+                .signatures
+                .iter()
+                .any(|sig| sig.args.contains(&ValueType::Date))
+        {
+            ": the part of a datetime depends on the session's time zone, which \
+             Postgres refuses in a generated column; read a date field instead"
+        } else if families.contains(&ValueType::String) && matches!(name, "least" | "greatest") {
+            ": text compares by collation on Postgres and byte by byte on SQLite, so it \
+             is refused"
+        } else {
+            ""
+        };
+        let signatures: Vec<String> = function.signatures.iter().map(signature_text).collect();
+        let shown: Vec<&str> = families.iter().map(|family| family.token()).collect();
+        return Err(format!(
+            "fn.{name} takes {}, not ({}){reason}",
+            signatures.join(", "),
+            shown.join(", ")
+        ));
+    };
+    let nullable = match function.nulls {
+        NullRule::Refused => {
+            if let Some(i) = typed.iter().position(|arg| arg.nullable) {
+                let subject = match &args[i] {
+                    ValueExpr::Column { name } => {
+                        format!("the nullable column {}", quoted_name(name))
+                    }
+                    _ => "a nullable argument".to_string(),
+                };
+                return Err(format!(
+                    "fn.{} over {subject}: Postgres skips a NULL where SQLite returns \
+                     NULL; wrap it as fn.coalesce(<column>, <fallback>)",
+                    function.name
+                ));
+            }
+            false
+        }
+        NullRule::FirstNonNull => typed.iter().all(|arg| arg.nullable),
+        NullRule::Propagate => typed.iter().any(|arg| arg.nullable),
+    };
+    Ok(ValueTyping {
+        family: signature.result,
+        nullable,
+    })
+}
+
+/// The refusal of a generated column whose Postgres storage would hold its
+/// value differently from SQLite, or `None` when it holds it alike.
+///
+/// A bounded `varchar(N)` is refused: Postgres raises on a longer value,
+/// unless its excess is spaces, which it trims to fit, and SQLite stores
+/// every character. No SQLite check reproduces the trim, so no guard can
+/// hold the two to one value.
+pub fn generated_storage_refusal(storage: CanonicalType) -> Option<String> {
+    match storage {
+        CanonicalType::Varchar(Some(length)) => Some(format!(
+            "stores into varchar({length}): Postgres raises on a longer value (and \
+             trims trailing spaces to fit) where SQLite stores every character; drop \
+             db_type= so the column is text"
+        )),
+        _ => None,
     }
 }
 
@@ -345,13 +770,16 @@ pub fn render_sqlite_generated_guard(
     }
     let mut steps = Vec::new();
     collect_steps(expr, true, &mut steps);
+    let lookup = |name: &str| schema_value_column(columns, name);
     for step in steps {
         let rendered = render_value_expr(step, Dialect::Sqlite, columns)?;
-        terms.push(if is_integer_valued(step, columns) {
-            integer_term(&rendered)
-        } else {
-            finite_term(&rendered)
-        });
+        terms.push(
+            if type_value_expr(step, &lookup)?.family == ValueType::Integer {
+                integer_term(&rendered)
+            } else {
+                finite_term(&rendered)
+            },
+        );
     }
     Ok((!terms.is_empty()).then(|| {
         format!(
@@ -393,31 +821,6 @@ fn collect_steps<'a>(expr: &'a ValueExpr, root: bool, out: &mut Vec<&'a ValueExp
             collect_steps(operand, false, out);
         }
         ValueExpr::Func { args, .. } => args.iter().for_each(|arg| collect_steps(arg, false, out)),
-    }
-}
-
-/// Whether a step computes an integer (its operands are all integers), as
-/// both databases type it; any float operand makes it a float.
-fn is_integer_valued(expr: &ValueExpr, columns: &[SchemaColumn]) -> bool {
-    match expr {
-        ValueExpr::Column { name } => columns.iter().any(|col| {
-            col.name == *name
-                && matches!(
-                    resolve_column_storage(col, Dialect::Postgres),
-                    Ok(ResolvedStorage::Scalar(
-                        CanonicalType::SmallInt | CanonicalType::Integer | CanonicalType::BigInt
-                    ))
-                )
-        }),
-        ValueExpr::Literal { token } => token.parse::<i64>().is_ok(),
-        ValueExpr::Binary { left, right, .. } => {
-            is_integer_valued(left, columns) && is_integer_valued(right, columns)
-        }
-        ValueExpr::Negate { operand } => is_integer_valued(operand, columns),
-        ValueExpr::Func { name, args } => match name.as_str() {
-            "length" | "year" | "month" | "day" => true,
-            _ => args.iter().all(|arg| is_integer_valued(arg, columns)),
-        },
     }
 }
 
@@ -509,12 +912,14 @@ mod tests {
                 left: column("a"),
                 right: literal("2"),
             };
-            for dialect in DIALECTS {
-                assert_eq!(
-                    render_value_expr(&expr, dialect, &[]).unwrap(),
-                    format!("(\"a\" {symbol} 2)")
-                );
-            }
+            assert_eq!(
+                render_value_expr(&expr, Dialect::Sqlite, &[]).unwrap(),
+                format!("(\"a\" {symbol} 2)")
+            );
+            assert_eq!(
+                render_value_expr(&expr, Dialect::Postgres, &[]).unwrap(),
+                format!("(\"a\" {symbol} 2)")
+            );
         }
     }
 
@@ -523,20 +928,26 @@ mod tests {
         let expr = ValueExpr::Negate {
             operand: literal("-5"),
         };
-        for dialect in DIALECTS {
-            assert_eq!(render_value_expr(&expr, dialect, &[]).unwrap(), "(- -5)");
-        }
+        assert_eq!(
+            render_value_expr(&expr, Dialect::Sqlite, &[]).unwrap(),
+            "(- -5)"
+        );
+        assert_eq!(
+            render_value_expr(&expr, Dialect::Postgres, &[]).unwrap(),
+            "(- -5)"
+        );
     }
 
     #[test]
-    fn sign_renders_the_same_on_both_dialects_with_its_clause() {
+    fn sign_renders_with_its_clause_on_both_dialects() {
         let expr = ValueExpr::Func {
             name: "sign".to_string(),
             args: vec![*column("amount_minor")],
         };
+        let columns = [schema_column("amount_minor", "number", None)];
         for dialect in DIALECTS {
             assert_eq!(
-                render_generated_clause(&expr, dialect, &[]).unwrap(),
+                render_generated_clause(&expr, dialect, &columns).unwrap(),
                 "GENERATED ALWAYS AS (sign(\"amount_minor\")) STORED"
             );
         }
@@ -554,9 +965,151 @@ mod tests {
     }
 
     #[test]
-    fn sign_renders_sign_on_sqlite_and_postgres() {
-        assert_eq!(renders("sign", &["a"], Dialect::Sqlite), "sign(\"a\")");
-        assert_eq!(renders("sign", &["a"], Dialect::Postgres), "sign(\"a\")");
+    fn sign_of_an_integer_is_a_bigint_on_postgres_and_of_a_float_a_double() {
+        // Postgres's sign(bigint) is a double precision; SQLite's is an integer.
+        let columns = [
+            schema_column("a", "integer", Some("bigint")),
+            schema_column("x", "number", None),
+        ];
+        let render = |arg: &str, dialect| {
+            render_value_expr(&call("sign", &[arg]), dialect, &columns).unwrap()
+        };
+        assert_eq!(render("a", Dialect::Sqlite), "sign(\"a\")");
+        assert_eq!(
+            render("a", Dialect::Postgres),
+            "CAST(sign(\"a\") AS bigint)"
+        );
+        assert_eq!(render("x", Dialect::Sqlite), "sign(\"x\")");
+        assert_eq!(render("x", Dialect::Postgres), "sign(\"x\")");
+    }
+
+    #[test]
+    fn a_number_literal_renders_at_the_type_sqlite_computes_it_at_on_postgres() {
+        let sum = |token: &str| ValueExpr::Binary {
+            op: ValueBinaryOp::Add,
+            left: column("a"),
+            right: literal(token),
+        };
+        let columns = [schema_column("a", "integer", Some("bigint"))];
+        let pg = |token| render_value_expr(&sum(token), Dialect::Postgres, &columns).unwrap();
+        assert_eq!(pg("0.1"), "(\"a\" + CAST(0.1 AS double precision))");
+        assert_eq!(pg("1e+20"), "(\"a\" + CAST(1e+20 AS double precision))");
+        // An integer literal meets a bigint operand, which carries the step.
+        assert_eq!(pg("7"), "(\"a\" + 7)");
+        assert_eq!(
+            render_value_expr(&sum("0.1"), Dialect::Sqlite, &columns).unwrap(),
+            "(\"a\" + 0.1)"
+        );
+        for token in ["'x'", "true"] {
+            assert_eq!(
+                render_value_expr(&literal(token), Dialect::Postgres, &[]).unwrap(),
+                token
+            );
+        }
+    }
+
+    #[test]
+    fn the_literal_rule_refuses_an_integer_past_64_bits() {
+        assert_eq!(literal_type("9223372036854775807"), Ok(ValueType::Integer));
+        assert_eq!(literal_type("-9223372036854775808"), Ok(ValueType::Integer));
+        assert_eq!(literal_type("0.5"), Ok(ValueType::Number));
+        let err = literal_type("10000000000000000000").unwrap_err();
+        assert!(
+            err.contains("64-bit") && err.contains("10000000000000000000.0"),
+            "{err}"
+        );
+    }
+
+    fn facts(name: &str) -> Option<ValueColumn> {
+        let family = match name {
+            "a" => ValueType::Integer,
+            "x" => ValueType::Number,
+            "s" => ValueType::String,
+            "d" => ValueType::Date,
+            _ => return None,
+        };
+        Some(ValueColumn {
+            family: Some(family),
+            nullable: name == "s",
+            retired: false,
+        })
+    }
+
+    #[test]
+    fn the_typing_reads_each_call_result_from_its_signature() {
+        let typed = |expr: &ValueExpr| type_value_expr(expr, &facts).unwrap();
+        assert_eq!(
+            typed(&call("length", &["s"])),
+            ValueTyping {
+                family: ValueType::Integer,
+                nullable: true
+            }
+        );
+        assert_eq!(typed(&call("sign", &["x"])).family, ValueType::Number);
+        assert_eq!(typed(&call("day", &["d"])).family, ValueType::Integer);
+        // An integer argument fits a float signature only when no integer one does.
+        assert_eq!(typed(&call("abs", &["a"])).family, ValueType::Integer);
+        let mixed = ValueExpr::Binary {
+            op: ValueBinaryOp::Add,
+            left: column("a"),
+            right: column("x"),
+        };
+        assert_eq!(typed(&mixed).family, ValueType::Number);
+    }
+
+    #[test]
+    fn the_typing_refuses_with_the_fix_named() {
+        let refused = |expr: &ValueExpr| type_value_expr(expr, &facts).unwrap_err();
+        let least = ValueExpr::Func {
+            name: "least".to_string(),
+            args: vec![*column("s"), *column("s")],
+        };
+        assert!(refused(&least).contains("collation"), "{}", refused(&least));
+        let product = ValueExpr::Binary {
+            op: ValueBinaryOp::Mul,
+            left: column("x"),
+            right: column("x"),
+        };
+        assert!(refused(&product).contains("minor units"));
+        let by_column = ValueExpr::Binary {
+            op: ValueBinaryOp::Div,
+            left: column("a"),
+            right: column("a"),
+        };
+        assert!(refused(&by_column).contains("non-zero literal"));
+        assert!(refused(&column("nope")).contains("'nope'"));
+        let constant = ValueExpr::Func {
+            name: "abs".to_string(),
+            args: vec![*literal("-5")],
+        };
+        assert!(
+            refused(&constant).contains("literals only"),
+            "{}",
+            refused(&constant)
+        );
+    }
+
+    #[test]
+    fn a_bounded_varchar_is_refused_as_generated_storage() {
+        let err = generated_storage_refusal(CanonicalType::Varchar(Some(5))).unwrap();
+        assert!(
+            err.contains("varchar(5)") && err.contains("drop db_type="),
+            "{err}"
+        );
+        assert_eq!(generated_storage_refusal(CanonicalType::Text), None);
+        assert_eq!(
+            generated_storage_refusal(CanonicalType::Varchar(None)),
+            None
+        );
+        assert_eq!(generated_storage_refusal(CanonicalType::BigInt), None);
+    }
+
+    #[test]
+    fn every_function_renders_its_arguments_on_both_dialects() {
+        for function in VALUE_FUNCTIONS {
+            assert!(function.sqlite.contains("{args}"), "{}", function.name);
+            assert!(function.postgres.contains("{args}"), "{}", function.name);
+        }
     }
 
     #[test]

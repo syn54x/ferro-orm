@@ -29,6 +29,65 @@ pub fn _value_function_table() -> PyResult<String> {
         .map_err(|err| pyo3::exceptions::PyRuntimeError::new_err(err.to_string()))
 }
 
+fn value_expr_from_json(tree_json: &str) -> PyResult<ferro_schema_ir::ValueExpr> {
+    serde_json::from_str(tree_json).map_err(|err| {
+        pyo3::exceptions::PyValueError::new_err(format!("Invalid value expression: {err}"))
+    })
+}
+
+/// The family token and nullability of a lowered value expression, typed by
+/// `ferro_ddl_lowering::type_value_expr`. `columns_json` maps each column
+/// name to `{family, nullable, retired}`.
+///
+/// # Errors
+/// `TypeError` with the typing's refusal; `ValueError` on malformed JSON.
+#[pyfunction]
+pub fn _value_expr_type(tree_json: String, columns_json: String) -> PyResult<(String, bool)> {
+    let expr = value_expr_from_json(&tree_json)?;
+    let columns: std::collections::HashMap<String, ferro_ddl_lowering::ValueColumn> =
+        serde_json::from_str(&columns_json).map_err(|err| {
+            pyo3::exceptions::PyValueError::new_err(format!("Invalid value columns: {err}"))
+        })?;
+    let typed = ferro_ddl_lowering::type_value_expr(&expr, &|name| columns.get(name).copied())
+        .map_err(pyo3::exceptions::PyTypeError::new_err)?;
+    Ok((typed.family.token().to_string(), typed.nullable))
+}
+
+/// Every column a lowered value expression reads, sorted.
+///
+/// # Errors
+/// `ValueError` on malformed JSON.
+#[pyfunction]
+pub fn _value_expr_columns(tree_json: String) -> PyResult<Vec<String>> {
+    let expr = value_expr_from_json(&tree_json)?;
+    Ok(ferro_ddl_lowering::value_expr_columns(&expr)
+        .into_iter()
+        .collect())
+}
+
+/// The refusal of a generated column's Postgres storage, or `None`.
+///
+/// # Errors
+/// `ValueError` on a malformed column; `RuntimeError` when its storage does
+/// not resolve.
+#[pyfunction]
+pub fn _generated_storage_refusal(column_ir_json: String) -> PyResult<Option<String>> {
+    let col: ferro_schema_ir::SchemaColumn =
+        serde_json::from_str(&column_ir_json).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Invalid SchemaIR column: {e}"))
+        })?;
+    Ok(
+        match ferro_ddl_lowering::resolve_column_storage(&col, Dialect::Postgres)
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?
+        {
+            ResolvedStorage::Scalar(storage) => {
+                ferro_ddl_lowering::generated_storage_refusal(storage)
+            }
+            ResolvedStorage::PgEnum { .. } => None,
+        },
+    )
+}
+
 #[pyfunction]
 pub fn _ddl_single_index_name(table: String, column: String) -> String {
     ferro_ddl_lowering::single_index_name(&table, &column)

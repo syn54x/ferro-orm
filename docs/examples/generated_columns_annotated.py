@@ -68,7 +68,7 @@ DDL_POSTGRES = """
 # --8<-- [start:ddl-postgres]
 CREATE TABLE IF NOT EXISTS "transaction" (
   "amount_minor" integer NOT NULL,
-  "direction" integer NOT NULL GENERATED ALWAYS AS (sign(CAST("amount_minor" AS bigint))) STORED,
+  "direction" integer NOT NULL GENERATED ALWAYS AS (CAST(sign(CAST("amount_minor" AS bigint)) AS bigint)) STORED,
   "id" serial PRIMARY KEY NOT NULL
 );
 CREATE INDEX IF NOT EXISTS "idx_transaction_direction" ON "transaction" ("direction");

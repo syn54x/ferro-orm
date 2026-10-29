@@ -422,11 +422,9 @@ def test_a_ferro_created_check_calling_fn_is_not_drift(project, pkg, db, capsys)
             "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
             "WHERE conname = 'ck_payment_signed' "
             f"AND connamespace = '{db.schema}'::regnamespace"
-        ) == [
-            (
-                "CHECK ((sign((amount_minor)::double precision) <> (0)::double precision))",
-            )
-        ], "the pin is only meaningful if Postgres reprints the body"
+        ) == [("CHECK (((sign((amount_minor)::double precision))::bigint <> 0))",)], (
+            "the pin is only meaningful if Postgres reprints the body"
+        )
 
     report = drift_api(db)
     assert report.lines == [] and report.clean, report.lines
@@ -460,6 +458,6 @@ def test_a_reconnect_rebuilds_a_hand_edited_postgres_check(project, pkg, db):
     assert reconnect_statements(db) == [
         'ALTER TABLE "payment" DROP CONSTRAINT "ck_payment_signed"',
         'ALTER TABLE "payment" ADD CONSTRAINT "ck_payment_signed" '
-        'CHECK ((sign("amount_minor") <> 0))',
+        'CHECK ((CAST(sign("amount_minor") AS bigint) <> 0))',
     ]
     assert reconnect_statements(db) == []

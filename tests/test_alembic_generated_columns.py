@@ -104,7 +104,7 @@ async def test_a_new_model_with_a_generated_column_is_created_generated(
     else:
         assert "op.create_table('gc795ledger'" in upgrade, upgrade
         assert (
-            "sa.Computed('sign(CAST(\"amount_minor\" AS bigint))', persisted=True)"
+            "sa.Computed('CAST(sign(CAST(\"amount_minor\" AS bigint)) AS bigint)', persisted=True)"
             in upgrade
         ), upgrade
     run_revision(upgrade, db_url, postgres_base_url, db_schema_name)
@@ -192,7 +192,7 @@ async def test_the_core_renders_the_expression_sa_computed_writes():
     ]
     assert (
         _core._render_generated_expression(json.dumps(model), "direction", "postgres")
-        == 'sign(CAST("amount_minor" AS bigint))'
+        == 'CAST(sign(CAST("amount_minor" AS bigint)) AS bigint)'
     )
     assert (
         _core._render_generated_expression(json.dumps(model), "direction", "sqlite")

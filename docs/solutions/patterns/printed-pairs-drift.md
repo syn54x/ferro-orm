@@ -20,8 +20,8 @@ printing, with casts that depend on its catalog, so Ferro's rendering and the
 catalog's text differ on a body nobody touched:
 
 ```
-declared:  sign(CAST("amount_minor" AS bigint))
-catalog:   sign(((amount_minor)::bigint)::double precision)
+declared:  CAST(sign(CAST("amount_minor" AS bigint)) AS bigint)
+catalog:   (sign(((amount_minor)::bigint)::double precision))::bigint
 ```
 
 **Takeaway.** Do not teach a normalizer the casts. Ask Postgres to print both

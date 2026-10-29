@@ -7,8 +7,8 @@ class Transaction(Model):
     direction: int = Field(generated=lambda transaction: fn.sign(transaction.amount_minor))
 ```
 
-Postgres stores ``sign(CAST("amount_minor" AS bigint))`` and prints it back
-as ``sign(((amount_minor)::bigint)::double precision)``. Drift asks Postgres
+Postgres stores ``CAST(sign(CAST("amount_minor" AS bigint)) AS bigint)`` and prints it back
+as ``(sign(((amount_minor)::bigint)::double precision))::bigint``. Drift asks Postgres
 to print the declared rendering beside that reprint in one read-only
 ``EXPLAIN``, so the reprint is silent and a hand edit is one line::
 
@@ -138,7 +138,7 @@ def test_a_reprint_is_silent_and_a_reconnect_runs_nothing(project, pkg, db, caps
         assert db.rows(
             "SELECT generation_expression FROM information_schema.columns "
             f"WHERE table_schema = '{db.schema}' AND column_name = 'direction'"
-        ) == [("sign(((amount_minor)::bigint)::double precision)",)], (
+        ) == [("(sign(((amount_minor)::bigint)::double precision))::bigint",)], (
             "the pin is only meaningful if Postgres reprints the expression"
         )
 
@@ -184,7 +184,7 @@ def test_a_virtual_column_differs_from_the_stored_one(project, pkg, db, capsys):
     db.execute('ALTER TABLE "transaction" DROP COLUMN "direction"')
     db.execute(
         'ALTER TABLE "transaction" ADD COLUMN "direction" integer NOT NULL '
-        'GENERATED ALWAYS AS (sign(CAST("amount_minor" AS bigint))) VIRTUAL'
+        'GENERATED ALWAYS AS (CAST(sign(CAST("amount_minor" AS bigint)) AS bigint)) VIRTUAL'
     )
 
     assert drift_api(db).lines == [LINE]
@@ -379,7 +379,7 @@ def test_an_expression_over_a_column_the_same_change_adds_is_planned_not_refused
     statements = reconnect_statements(db)
     assert statements[-1] == (
         'ALTER TABLE "transaction" ALTER COLUMN "direction" '
-        'SET EXPRESSION AS (sign(CAST("fee_minor" AS bigint)))'
+        'SET EXPRESSION AS (CAST(sign(CAST("fee_minor" AS bigint)) AS bigint))'
     ), statements
     assert any('ADD COLUMN "fee_minor"' in s for s in statements), statements
     assert reconnect_statements(db) == []

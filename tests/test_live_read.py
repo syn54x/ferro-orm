@@ -200,7 +200,7 @@ def test_the_live_read_carries_each_generated_column_and_files_no_guard_as_a_che
     assert (generated["column"], generated["stored"]) == ("direction", True)
     if db.backend == "postgres":
         assert generated["catalog"] == (
-            "sign(((amount_minor)::bigint)::double precision)"
+            "(sign(((amount_minor)::bigint)::double precision))::bigint"
         )
         printed = generated["printed"]
         assert printed["declared"] == printed["catalog"] == generated["catalog"]
