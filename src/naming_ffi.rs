@@ -64,6 +64,30 @@ pub fn _value_expr_type(tree_json: String, columns_json: String) -> PyResult<(St
     Ok((typed.family.token().to_string(), typed.nullable))
 }
 
+/// The first step of a lowered value expression that can fail on a value,
+/// as decided by `ferro_ddl_lowering::value_step_can_fail`, as JSON, or
+/// `None` when no step can.
+///
+/// # Errors
+/// `TypeError` with the typing's refusal; `ValueError` on malformed JSON.
+#[pyfunction]
+pub fn _value_expr_failing_step(
+    tree_json: String,
+    columns_json: String,
+) -> PyResult<Option<String>> {
+    let expr = value_expr_from_json(&tree_json)?;
+    let columns = schema_columns_from_json(&columns_json)?;
+    let step = ferro_ddl_lowering::first_failing_step(&expr, &|name| {
+        ferro_ddl_lowering::schema_value_column(&columns, name)
+    })
+    .map_err(pyo3::exceptions::PyTypeError::new_err)?;
+    step.map(|step| {
+        serde_json::to_string(step)
+            .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))
+    })
+    .transpose()
+}
+
 /// The value family one SchemaIR column holds, or `None` for a column no
 /// value expression reads.
 ///

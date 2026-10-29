@@ -627,30 +627,6 @@ def _value_text(tree: Mapping[str, Any]) -> str:
     return f"fn.{tree['name']}({', '.join(_value_text(arg) for arg in tree['args'])})"
 
 
-def _overflowing_step(
-    tree: Mapping[str, Any], columns: Mapping[str, Any]
-) -> Mapping[str, Any] | None:
-    """The first step of a value expression that can overflow: integer
-    `+ - *`, unary `-` and `/ -1`, and float `+ -`."""
-    from .generated import value_expr_type
-
-    kind = tree["kind"]
-    if kind == "binary":
-        divides = tree["op"] == "div"
-        if not divides or tree["right"] == {"kind": "literal", "token": "-1"}:
-            return tree
-        return _overflowing_step(tree["left"], columns)
-    if kind == "negate":
-        if value_expr_type(tree["operand"], columns)[0] == "integer":
-            return tree
-        return _overflowing_step(tree["operand"], columns)
-    for arg in tree.get("args", ()):
-        step = _overflowing_step(arg, columns)
-        if step is not None:
-            return step
-    return None
-
-
 def _refuse_overflow_under_or(
     tree: Mapping[str, Any], model_name: str, suffix: str, columns: Mapping[str, Any]
 ) -> None:
@@ -660,6 +636,8 @@ def _refuse_overflow_under_or(
     Postgres does not define which side of an OR it evaluates, so it may
     skip the step and accept a row SQLite rejects.
     """
+    from .generated import value_expr_failing_step
+
     stack = [tree]
     while stack:
         node = stack.pop()
@@ -670,7 +648,7 @@ def _refuse_overflow_under_or(
             stack.append(node["child"])
         elif kind == "compare":
             for operand in (node["left"], node["right"]):
-                step = _overflowing_step(operand, columns)
+                step = value_expr_failing_step(operand, columns)
                 if step is not None:
                     raise TypeError(
                         f"{model_name}.{FERRO_CHECKS} check {suffix!r} computes "

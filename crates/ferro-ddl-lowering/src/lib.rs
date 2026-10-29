@@ -8,10 +8,11 @@ mod value_expr;
 
 pub use value_expr::{
     NullRule, VALUE_FUNCTIONS, ValueColumn, ValueFunction, ValueSignature, ValueType, ValueTyping,
-    check_expr_columns, generated_storage_refusal, literal_type, render_generated_clause,
-    render_sqlite_generated_guard, render_stored_generated_clause, render_value_expr,
-    schema_value_column, sqlite_guard_column, sqlite_guard_name, sqlite_step_terms,
-    type_value_expr, value_column, value_expr_columns, value_family_annotations, value_function,
+    check_expr_columns, first_failing_step, generated_storage_refusal, literal_type,
+    render_generated_clause, render_sqlite_generated_guard, render_stored_generated_clause,
+    render_value_expr, schema_value_column, sqlite_guard_column, sqlite_guard_name,
+    sqlite_step_terms, type_value_expr, value_column, value_expr_columns, value_family_annotations,
+    value_function, value_step_can_fail,
 };
 
 use std::collections::BTreeMap;
@@ -962,7 +963,7 @@ pub fn table_check_constraint_name(table_lower: &str, suffix: &str) -> String {
 /// parenthesised, so a check calling a value function reads as a generated
 /// column's expression does.
 ///
-/// On SQLite each comparison with arithmetic is
+/// On SQLite each comparison with a step that can fail ([`value_step_can_fail`]) is
 /// `CASE WHEN NOT (<step terms>) THEN abs(-9223372036854775807 - 1) ELSE (<comparison>) END`:
 /// one [`sqlite_step_terms`] term per step of its operands. Postgres raises
 /// on a step that overflows when it evaluates the comparison; a failed term
@@ -985,7 +986,7 @@ pub fn render_check_expr(
     render_check_predicate(expr, dialect, columns)
 }
 
-/// Whether a table check computes arithmetic that can overflow: a write to
+/// Whether a table check computes a step that can fail ([`value_step_can_fail`]): a write to
 /// its table can then fail computing the check, on either database.
 pub fn table_check_computes(
     check: &ferro_schema_ir::SchemaTableCheck,
@@ -5356,12 +5357,17 @@ mod tests {
     #[test]
     fn a_check_comparing_value_expressions_renders_them_per_dialect() {
         let bigint = [col_with_db_type("amount", "integer", None, Some("bigint"))];
-        for dialect in [Dialect::Postgres, Dialect::Sqlite] {
-            assert_eq!(
-                super::render_check_expr(&abs_amount_over_1000(), dialect, &bigint),
-                Ok("(abs(\"amount\") > 1000)".to_string())
-            );
-        }
+        assert_eq!(
+            super::render_check_expr(&abs_amount_over_1000(), Dialect::Postgres, &bigint),
+            Ok("(abs(\"amount\") > 1000)".to_string())
+        );
+        // `abs(-2**63)` raises on both; SQLite's guard names the step.
+        let guarded = "CASE WHEN NOT (typeof(abs(\"amount\")) IN ('integer', 'null')) \
+            THEN abs(-9223372036854775807 - 1) ELSE (abs(\"amount\") > 1000) END";
+        assert_eq!(
+            super::render_check_expr(&abs_amount_over_1000(), Dialect::Sqlite, &bigint),
+            Ok(guarded.to_string())
+        );
         // An `int` field is `integer` on Postgres, widened to 64 bits as a
         // generated column's expression is; SQLite computes at 64 bits.
         let int = [col_with_db_type("amount", "integer", None, None)];
@@ -5371,7 +5377,7 @@ mod tests {
         );
         assert_eq!(
             super::render_check_expr(&abs_amount_over_1000(), Dialect::Sqlite, &int),
-            Ok("(abs(\"amount\") > 1000)".to_string())
+            Ok(guarded.to_string())
         );
     }
 
@@ -5422,10 +5428,20 @@ mod tests {
                     .to_string()
             )
         );
-        // A comparison without arithmetic carries no terms.
+        // A comparison with no step that can fail carries no terms.
+        let float_abs = CheckExpr::Compare {
+            left: ValueExpr::Func {
+                name: "abs".to_string(),
+                args: vec![*column("x")],
+            },
+            op: CheckCmpOp::Gt,
+            right: ValueExpr::Literal {
+                token: "1000".to_string(),
+            },
+        };
         assert_eq!(
-            super::render_check_expr(&abs_amount_over_1000(), Dialect::Sqlite, &columns),
-            Ok("(abs(\"amount\") > 1000)".to_string())
+            super::render_check_expr(&float_abs, Dialect::Sqlite, &columns),
+            Ok("(abs(\"x\") > 1000)".to_string())
         );
     }
 

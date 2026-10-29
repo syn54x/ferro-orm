@@ -189,14 +189,14 @@ def test_a_compare_combines_with_and_or_and_not():
         __ferro_checks__ = (
             Check(
                 "shaped",
-                lambda payment: ~(fn.abs(payment.amount) > 1000) | (payment.amount > 0),
+                lambda payment: ~(fn.abs(payment.amount) > 1000) & (payment.amount > 0),
             ),
         )
         id: int | None = Field(default=None, primary_key=True)
         amount: int
 
     assert predicate("payment", "shaped") == {
-        "kind": "or",
+        "kind": "and",
         "left": {
             "kind": "not",
             "child": {
@@ -325,12 +325,21 @@ async def test_a_step_under_not_still_fails_the_row(db_url):
         (lambda box: (box.kind == 1) | (-box.a > 0), "-a"),
         (lambda box: (box.kind == 1) | (box.a / -1 > 0), "(a / -1)"),
         (lambda box: (box.kind == 1) | (box.x + box.y > 0), "(x + y)"),
+        (lambda box: (box.kind == 1) | (fn.abs(box.a) > 0), "fn.abs(a)"),
         (
             lambda box: ~((box.kind == 1) | ((box.kind == 2) & (box.a - 1 > 0))),
             "(a - 1)",
         ),
     ],
-    ids=["int +", "int *", "int negated", "int over -1", "float +", "nested"],
+    ids=[
+        "int +",
+        "int *",
+        "int negated",
+        "int over -1",
+        "float +",
+        "abs of an int",
+        "nested",
+    ],
 )
 def test_a_step_that_can_overflow_under_an_or_is_refused(body, step):
     """Postgres does not define which side of an OR it evaluates, so it may
@@ -348,14 +357,29 @@ def test_a_step_that_can_overflow_under_an_or_is_refused(body, step):
     [
         lambda box: (box.kind == 1) | (box.a / 2 > 0),
         lambda box: (box.kind == 1) | (-box.x > 0),
-        lambda box: (box.kind == 1) | (fn.abs(box.a) > 0),
+        lambda box: (box.kind == 1) | (fn.abs(box.x) > 0),
+        lambda box: (box.kind == 1) | (fn.sign(box.a) > 0),
         lambda box: (box.kind == 1) & (box.a * box.b > 0),
     ],
-    ids=["int halved", "float negated", "a call", "under AND"],
+    ids=["int halved", "float negated", "abs of a float", "sign", "under AND"],
 )
 def test_a_step_that_cannot_overflow_under_an_or_is_accepted(body):
     declare_box(body)
     assert predicate("box", "c")["kind"] in ("or", "and")
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.asyncio
+async def test_abs_of_the_smallest_bigint_is_a_data_error_on_both_databases(db_url):
+    """`abs(-2**63)` does not fit a bigint: both databases raise computing
+    it, and the write reports the overflow as the check's."""
+    Box = declare_box(lambda box: fn.abs(box.a) > 0)
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        await Box.create(a=-5)
+        with overflow_error():
+            await Box.create(a=-(2**63))
+        assert len(await Box.all()) == 1
 
 
 @pytest.mark.backend_matrix
@@ -504,7 +528,11 @@ def test_fn_in_a_query_stays_refused():
 @pytest.mark.parametrize(
     ("dialect", "body"),
     [
-        ("sqlite", '(abs("amount") > 1000)'),
+        (
+            "sqlite",
+            "CASE WHEN NOT (typeof(abs(\"amount\")) IN ('integer', 'null')) "
+            'THEN abs(-9223372036854775807 - 1) ELSE (abs("amount") > 1000) END',
+        ),
         ("postgres", '(abs(CAST("amount" AS bigint)) > 1000)'),
     ],
 )

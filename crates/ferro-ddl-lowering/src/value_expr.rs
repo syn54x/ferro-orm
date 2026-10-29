@@ -822,9 +822,9 @@ fn step_terms(
     root: bool,
     columns: &[SchemaColumn],
 ) -> Result<Vec<String>, String> {
-    let mut steps = Vec::new();
-    collect_steps(expr, root, &mut steps);
     let lookup = |name: &str| schema_value_column(columns, name);
+    let mut steps = Vec::new();
+    collect_failing_steps(expr, root, &lookup, &mut steps)?;
     let mut terms = Vec::new();
     for step in steps {
         let rendered = render_value_expr(step, Dialect::Sqlite, columns)?;
@@ -832,12 +832,12 @@ fn step_terms(
             terms.push(integer_term(&rendered));
             continue;
         }
-        // Negating a float never overflows.
+        // What is left is a float `+` or `-`. Postgres raises on it only when
+        // it overflows from finite operands; an operand already infinite (a
+        // stored `inf`) passes.
         let ValueExpr::Binary { left, right, .. } = step else {
             continue;
         };
-        // Postgres raises on a float step only when it overflows from finite
-        // operands; an operand already infinite (a stored `inf`) passes.
         let mut alternatives = vec![finite_term(&rendered)];
         for operand in [left, right] {
             if matches!(**operand, ValueExpr::Literal { .. })
@@ -859,6 +859,83 @@ fn step_terms(
     Ok(terms)
 }
 
+/// Whether computing this one node of a value expression can fail on a
+/// value: Postgres raises (`bigint out of range`, `value out of range:
+/// overflow`) where SQLite raises or computes a `real` or `inf`. The one
+/// decision every door reads: the SQLite step terms, the refusal of such a
+/// step under an `OR`, and which checks compute.
+///
+/// A node can fail when it is an integer or float `+ - *` (the typing
+/// refuses float `*` and `/`), a division by `-1` (`-2**63 / -1`), an
+/// integer unary `-`, or `abs` of an integer (`abs(-2**63)` raises on both).
+/// No other function in [`VALUE_FUNCTIONS`] can overflow: `sign` returns
+/// -1, 0 or 1, `least`, `greatest` and `coalesce` one of their arguments,
+/// `length` a string's length, and `year`, `month` and `day` a date's part.
+///
+/// # Errors
+/// The typing's refusal ([`type_value_expr`]) of a node it must type.
+pub fn value_step_can_fail(
+    expr: &ValueExpr,
+    column: &dyn Fn(&str) -> Option<ValueColumn>,
+) -> Result<bool, String> {
+    let integer = |expr: &ValueExpr| -> Result<bool, String> {
+        Ok(type_value_expr(expr, column)?.family == ValueType::Integer)
+    };
+    Ok(match expr {
+        ValueExpr::Column { .. } | ValueExpr::Literal { .. } => false,
+        ValueExpr::Binary { op, right, .. } => {
+            *op != ValueBinaryOp::Div
+                || matches!(&**right, ValueExpr::Literal { token } if token == "-1")
+        }
+        ValueExpr::Negate { operand } => integer(operand)?,
+        ValueExpr::Func { name, args } => match (name.as_str(), args.as_slice()) {
+            ("abs", [arg]) => integer(arg)?,
+            _ => false,
+        },
+    })
+}
+
+/// The first node of `expr`, outermost first and left to right, that
+/// [`value_step_can_fail`] says can fail, or `None` when none can.
+///
+/// # Errors
+/// As [`value_step_can_fail`].
+pub fn first_failing_step<'a>(
+    expr: &'a ValueExpr,
+    column: &dyn Fn(&str) -> Option<ValueColumn>,
+) -> Result<Option<&'a ValueExpr>, String> {
+    let mut steps = Vec::new();
+    collect_failing_steps(expr, false, column, &mut steps)?;
+    Ok(steps.first().copied())
+}
+
+/// Every node of `expr` that [`value_step_can_fail`] says can fail,
+/// outermost first and left to right; `root` leaves out `expr` itself.
+fn collect_failing_steps<'a>(
+    expr: &'a ValueExpr,
+    root: bool,
+    column: &dyn Fn(&str) -> Option<ValueColumn>,
+    out: &mut Vec<&'a ValueExpr>,
+) -> Result<(), String> {
+    if !root && value_step_can_fail(expr, column)? {
+        out.push(expr);
+    }
+    match expr {
+        ValueExpr::Column { .. } | ValueExpr::Literal { .. } => {}
+        ValueExpr::Binary { left, right, .. } => {
+            collect_failing_steps(left, false, column, out)?;
+            collect_failing_steps(right, false, column, out)?;
+        }
+        ValueExpr::Negate { operand } => collect_failing_steps(operand, false, column, out)?,
+        ValueExpr::Func { args, .. } => {
+            for arg in args {
+                collect_failing_steps(arg, false, column, out)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn integer_term(sql: &str) -> String {
     format!("typeof({sql}) IN ('integer', 'null')")
 }
@@ -873,28 +950,6 @@ fn finite_term(sql: &str) -> String {
 
 fn infinite_term(sql: &str) -> String {
     format!("abs({sql}) > {:e}", f64::MAX)
-}
-
-/// Every arithmetic step (`+ - * /`, unary `-`) under the root, in order; the
-/// root itself is the column, which the storage term holds.
-fn collect_steps<'a>(expr: &'a ValueExpr, root: bool, out: &mut Vec<&'a ValueExpr>) {
-    match expr {
-        ValueExpr::Column { .. } | ValueExpr::Literal { .. } => {}
-        ValueExpr::Binary { left, right, .. } => {
-            if !root {
-                out.push(expr);
-            }
-            collect_steps(left, false, out);
-            collect_steps(right, false, out);
-        }
-        ValueExpr::Negate { operand } => {
-            if !root {
-                out.push(expr);
-            }
-            collect_steps(operand, false, out);
-        }
-        ValueExpr::Func { args, .. } => args.iter().for_each(|arg| collect_steps(arg, false, out)),
-    }
 }
 
 /// Every column the expression reads.
@@ -1106,6 +1161,47 @@ mod tests {
             nullable: name == "s",
             retired: false,
         })
+    }
+
+    fn bin(op: ValueBinaryOp, left: Box<ValueExpr>, right: Box<ValueExpr>) -> ValueExpr {
+        ValueExpr::Binary { op, left, right }
+    }
+
+    #[test]
+    fn a_step_can_fail_on_a_value_only_where_a_database_raises() {
+        let fails = |expr: &ValueExpr| value_step_can_fail(expr, &facts).unwrap();
+        assert!(fails(&bin(ValueBinaryOp::Add, column("a"), literal("1"))));
+        assert!(fails(&bin(ValueBinaryOp::Sub, column("x"), column("x"))));
+        assert!(fails(&bin(ValueBinaryOp::Mul, column("a"), column("a"))));
+        assert!(fails(&bin(ValueBinaryOp::Div, column("a"), literal("-1"))));
+        assert!(!fails(&bin(ValueBinaryOp::Div, column("a"), literal("2"))));
+        assert!(fails(&ValueExpr::Negate {
+            operand: column("a")
+        }));
+        assert!(!fails(&ValueExpr::Negate {
+            operand: column("x")
+        }));
+        // abs(-2**63) raises on both databases; abs of a float cannot.
+        assert!(fails(&call("abs", &["a"])));
+        assert!(!fails(&call("abs", &["x"])));
+        for (name, arg) in [("sign", "a"), ("length", "s"), ("day", "d")] {
+            assert!(!fails(&call(name, &[arg])), "{name}");
+        }
+        assert!(!fails(&call("greatest", &["a", "a"])));
+        assert!(!fails(&call("coalesce", &["a", "a"])));
+        assert!(!fails(&column("a")));
+    }
+
+    #[test]
+    fn the_first_failing_step_is_found_under_a_call() {
+        let halved = bin(ValueBinaryOp::Div, column("a"), literal("2"));
+        assert_eq!(first_failing_step(&halved, &facts).unwrap(), None);
+        let inner = call("abs", &["a"]);
+        let expr = ValueExpr::Func {
+            name: "greatest".into(),
+            args: vec![inner.clone(), *column("a")],
+        };
+        assert_eq!(first_failing_step(&expr, &facts).unwrap(), Some(&inner));
     }
 
     #[test]
