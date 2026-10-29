@@ -326,17 +326,24 @@ async def test_the_database_enforces_the_call(declare, db_url):
 
 # -- drift and reconnect -----------------------------------------------------------
 
-LEDGER = """
+HEAD = """
 from ferro import Check, fn
 
 
 class Payment(Model):
-    __ferro_checks__ = (
-        Check("signed", lambda payment: fn.sign(payment.amount_minor) != 0),
-    )
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     amount_minor: Annotated[int, FerroField(db_type="bigint")]
 """
+
+SIGNED_CHECK = """
+    __ferro_checks__ = (
+        Check("signed", lambda payment: fn.sign(payment.amount_minor) != 0),
+    )
+"""
+
+LEDGER = HEAD + SIGNED_CHECK
+"""`HEAD` with a table check calling `fn.sign`: the casebook
+(`tests/_casebook.py`) adds the check to `HEAD` from these bodies."""
 
 LINE = "ck_payment_signed check body differs"
 
