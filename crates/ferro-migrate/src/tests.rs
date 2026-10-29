@@ -996,22 +996,15 @@ fn render_create_table_guards_a_numeric_generated_column_with_its_postgres_range
     let sqlite = render_create_table(&model, Dialect::Sqlite)
         .expect("renders")
         .create_sql;
-    for (column, storage) in [
-        ("copied", ferro_ddl_lowering::CanonicalType::Integer),
-        ("small", ferro_ddl_lowering::CanonicalType::SmallInt),
-    ] {
-        let expr = ferro_schema_ir::ValueExpr::Column {
-            name: "amount".to_string(),
-        };
-        let guard = ferro_ddl_lowering::render_sqlite_generated_guard(
-            column,
-            storage,
-            &expr,
-            &model.columns,
-        )
-        .unwrap()
-        .unwrap();
-        assert!(sqlite.contains(&guard), "{sqlite}");
+    for column in ["copied", "small"] {
+        let col = model.columns.iter().find(|col| col.name == column).unwrap();
+        let (name, body) = ferro_ddl_lowering::sqlite_generated_guard(col, &model.columns)
+            .unwrap()
+            .unwrap();
+        assert!(
+            sqlite.contains(&format!("CONSTRAINT \"{name}\" CHECK ({body})")),
+            "{sqlite}"
+        );
     }
     for column in ["flag", "amount"] {
         assert!(

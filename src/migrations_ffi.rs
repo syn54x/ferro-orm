@@ -31,6 +31,7 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_tracking_tables_for, m)?)?;
     m.add_function(wrap_pyfunction!(_allow_ahead, m)?)?;
     m.add_function(wrap_pyfunction!(_render_generated_expression, m)?)?;
+    m.add_function(wrap_pyfunction!(_render_sqlite_generated_guard, m)?)?;
     m.add_class::<TrackedDatabase>()?;
     m.add_class::<LockScope>()?;
     m.add_class::<LockedDatabase>()?;
@@ -39,6 +40,38 @@ pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<BaselinePlan>()?;
     m.add_class::<RerecordPlan>()?;
     Ok(())
+}
+
+/// The model `model_json` (one `SchemaModel`) and the expression its
+/// generated column `column` is computed by.
+fn generated_column(
+    model_json: &str,
+    column: &str,
+) -> PyResult<(
+    ferro_schema_ir::SchemaModel,
+    ferro_schema_ir::SchemaColumn,
+    ferro_schema_ir::ValueExpr,
+)> {
+    let model: ferro_schema_ir::SchemaModel = serde_json::from_str(model_json)
+        .map_err(|e| PyValueError::new_err(format!("invalid model_json: {e}")))?;
+    let Some((col, expr)) = model
+        .columns
+        .iter()
+        .find(|col| col.name == column)
+        .and_then(|col| Some((col.clone(), col.generated.clone()?)))
+    else {
+        return Err(PyValueError::new_err(format!(
+            "column '{}.{column}' is not a generated column",
+            model.table_name
+        )));
+    };
+    Ok((model, col, expr))
+}
+
+fn generated_render_error(table: &str, column: &str, message: String) -> PyErr {
+    PyValueError::new_err(format!(
+        "Cannot render generated column '{table}.{column}': {message}"
+    ))
 }
 
 /// The expression `column` of the model `model_json` (one `SchemaModel`)
@@ -52,26 +85,25 @@ pub fn _render_generated_expression(
     column: String,
     dialect: String,
 ) -> PyResult<String> {
-    let model: ferro_schema_ir::SchemaModel = serde_json::from_str(&model_json)
-        .map_err(|e| PyValueError::new_err(format!("invalid model_json: {e}")))?;
     let dialect = parse_dialect(&dialect)?;
-    let expr = model
-        .columns
-        .iter()
-        .find(|col| col.name == column)
-        .and_then(|col| col.generated.as_ref())
-        .ok_or_else(|| {
-            PyValueError::new_err(format!(
-                "column '{}.{column}' is not a generated column",
-                model.table_name
-            ))
-        })?;
-    ferro_ddl_lowering::render_value_expr(expr, dialect, &model.columns).map_err(|message| {
-        PyValueError::new_err(format!(
-            "Cannot render generated column '{}.{column}': {message}",
-            model.table_name
-        ))
-    })
+    let (model, _, expr) = generated_column(&model_json, &column)?;
+    ferro_ddl_lowering::render_value_expr(&expr, dialect, &model.columns)
+        .map_err(|message| generated_render_error(&model.table_name, &column, message))
+}
+
+/// The SQLite range guard of generated column `column` of the model
+/// `model_json`, as `(name, body)`: the constraint every door's SQLite
+/// `CREATE TABLE` writes after the column's `STORED`, `CONSTRAINT "<name>"
+/// CHECK (<body>)`, for the Alembic bridge's `sa.CheckConstraint`. `None`
+/// when nothing in the expression can overflow.
+#[pyfunction]
+pub fn _render_sqlite_generated_guard(
+    model_json: String,
+    column: String,
+) -> PyResult<Option<(String, String)>> {
+    let (model, col, _) = generated_column(&model_json, &column)?;
+    ferro_ddl_lowering::sqlite_generated_guard(&col, &model.columns)
+        .map_err(|message| generated_render_error(&model.table_name, &column, message))
 }
 
 fn parse_dialects(dialects: &[String]) -> PyResult<Vec<Dialect>> {

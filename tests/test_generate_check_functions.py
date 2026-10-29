@@ -349,6 +349,8 @@ def test_a_step_that_can_overflow_under_an_or_is_refused(body, step):
     message = str(caught.value)
     assert "Box.__ferro_checks__ check 'c'" in message
     assert f"computes {step} under an OR" in message
+    assert "a row where that operation overflows" in message
+    assert "step" not in message
     assert "generated column" in message
 
 
@@ -432,6 +434,19 @@ async def test_an_update_that_overflows_a_check_is_a_data_error(db_url):
             await row.save()
         with overflow_error():
             await Box.where(lambda box: box.a == 3).update(a=2**40, b=2**40)
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.asyncio
+async def test_a_bulk_create_that_overflows_a_check_is_a_data_error(db_url):
+    """`bulk_create` on a table with a computing check and no generated
+    column reports the overflow as the check's, and inserts no row."""
+    Box = declare_box(lambda box: box.a * box.b > 0)
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        with overflow_error():
+            await Box.bulk_create([Box(a=3, b=4), Box(a=2**40, b=2**40)])
+        assert await Box.all() == []
 
 
 @pytest.mark.backend_matrix

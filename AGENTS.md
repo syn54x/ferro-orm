@@ -73,6 +73,8 @@ For a single model, every emitter must agree on:
    (Python) and `db_check_constraint_name` (Rust); table checks use
    `_ddl_table_check_constraint_name` (Python) and
    `table_check_constraint_name` (Rust).
+   A generated column's SQLite range guard is `_ferro_range_<col>`
+   (`sqlite_guard_name`), part of the column and never a `ck_*` check.
 9. **Default values** — server-side defaults must serialize identically.
    One exception (ADR-0034): on SQLite the reconciliation pass adds a
    required column with a literal default as `NOT NULL DEFAULT <literal>`
@@ -88,7 +90,9 @@ For a single model, every emitter must agree on:
     `ferro_migrate::OpVerdict`, decided once (ADR-0050): whether the dialect
     runs it natively, rebuilds the table, refuses it (naming the fix) or
     cannot reverse it, and whether it demands values from existing rows,
-    drops data or can fail on them. Every door reads that one verdict and
+    drops data or can fail on them, whether it is the drop or add of a
+    generated column the plan replaces (`replaces`) and whether it carries
+    an unchanged policy or check around another change (`carried`). Every door reads that one verdict and
     re-decides none of it. The reconciliation pass runs them directly; the
     migrations door writes them into step files; the bridge's one comparator
     (`dispatch_for("schema")` in `src/ferro/migrations/alembic.py`) reads the
@@ -151,49 +155,97 @@ For a single model, every emitter must agree on:
       (`ferro.migrations.render_item`). This supersedes in part the
       inline-vs-statement provenance of ADR-0020..0022 (ADR-0041).
       Postgres-only (SQLite enums store as text).
-    - **Generated expressions** — a generated column's body is a value
-      expression lowered once (`render_value_expr` over the closed function
-      table `value_function`, which `_core._value_function_table` hands
-      `ferro.fn`) and written as `GENERATED ALWAYS AS (…) STORED`
-      (`render_generated_clause`), never with a `DEFAULT`. Its ops and
-      their verdicts: added with the column (`AddColumn`, native on Postgres,
-      a rebuild on SQLite, no backfill), a changed expression
-      (`AlterGeneratedExpression`, `render_set_generated_expression`, can
-      fail on rows), generated to plain (`DropGeneratedExpression`,
-      `render_drop_generated_expression`, values kept, `migrate_updates`),
-      plain to generated (`DropColumn` + `AddColumn`, destructive; without
-      `migrate_destructive` the pass reports `PlainColumnKept`), an input's
-      type change (drop the expression, alter, re-add, any table check
-      reading the input re-added after it) and an input rename (the rename
-      alone). Drift is a printed pair on Postgres (`printed_pair_column`; a
-      live `VIRTUAL` column or a plain one where the model declares
-      generated differs) and Ferro's rendering against the stored text,
-      whitespace folded, on SQLite. The bridge writes an added column as
-      `sa.Computed(<expr>, persisted=True)` and the other two ops as
-      `op.execute` of the pass's statement.
-      On SQLite an integer- or float-family generated column carries
-      Ferro's own guard `_ferro_range_<col>`
-      (`render_sqlite_generated_guard`), written inside the column
-      definition and compared with it: never a `ck_*` check and never in
-      `__ferro_checks__`. It holds the value to the Postgres storage range
-      and re-checks every arithmetic step, so an overflow raises on both
-      databases; Postgres needs none, since its integer arithmetic runs at
-      64 bits (narrower operands are cast to `bigint`) and its column type
-      holds the range.
+    - **Generated expressions** — take
+      `direction: int = Field(generated=lambda ledger: fn.sign(ledger.amount_minor))`.
+      Every door writes the column as
+      `GENERATED ALWAYS AS (CAST(sign(CAST("amount_minor" AS bigint)) AS bigint)) STORED`
+      on Postgres and `GENERATED ALWAYS AS (sign("amount_minor")) STORED
+      CONSTRAINT "_ferro_range_direction" CHECK (typeof("direction") IN
+      ('integer', 'null') AND "direction" BETWEEN -2147483648 AND
+      2147483647)` on SQLite, never with a `DEFAULT`. The body is lowered
+      once (`render_value_expr` over the closed function table
+      `value_function`, which `_core._value_function_table` hands `ferro.fn`;
+      the clause is `render_generated_clause`) at the type
+      `type_value_expr` gives it, the type SQLite computes it at: on
+      Postgres an integer value computes at 64 bits and a float one as a
+      `double precision`, each operand or call Postgres would type
+      otherwise (a `smallint` or `integer` column, `sign`, `length`, a
+      date part, a literal) cast to that type. Its ops and their verdicts: added with the
+      column (`AddColumn`, native on Postgres, a rebuild on SQLite, no
+      backfill), a changed expression (`AlterGeneratedExpression`,
+      `render_set_generated_expression`, can fail on rows), generated to
+      plain (`DropGeneratedExpression`, `render_drop_generated_expression`,
+      values kept, `migrate_updates`) and an input rename (the rename
+      alone). Three changes drop the column and add it back, each op's
+      verdict naming why in `OpVerdict.replaces`: plain to generated
+      (`Replace::MadeGenerated`, destructive; without `migrate_destructive`
+      the pass reports `PlainColumnKept`), an input's type change
+      (`Replace::InputType`) and its own type change (`Replace::OwnType`),
+      both of which Postgres refuses to alter under an expression. A row
+      policy or table check that reads the column is carried around the
+      pair. A carried artifact is one taken down and put back unchanged
+      around another change, its ops marked `OpVerdict.carried`, which no
+      door reports as a difference; a changed or uncomparable artifact is
+      a difference drift reports. A row policy the plan
+      cannot carry (a raw body it may not rewrite, ADR-0019) refuses the
+      drop with `Refusal::PolicyReadsReplacedColumn`, naming the
+      `DROP POLICY` recipe. Drift is a printed pair on Postgres
+      (`printed_pair_column`; a live `VIRTUAL` column or a plain one where
+      the model declares generated differs) and Ferro's rendering against
+      the stored text, whitespace folded, on SQLite. The bridge writes an
+      added column as `sa.Computed(<expr>, persisted=True)` and the other
+      ops as `op.execute` of the pass's statement; `get_metadata()` gives a
+      SQLite column its guard as a column `CheckConstraint`
+      (`_core._render_sqlite_generated_guard`), so `create_all` builds the
+      pass's table.
+      The SQLite guard `_ferro_range_<col>` (`sqlite_generated_guard`)
+      is written inside the column definition and compared with it: never
+      a `ck_*` check and never in `__ferro_checks__`. Postgres raises where
+      a value does not fit; SQLite would store a `real` or `inf`. So the
+      guard holds a `smallint` or `integer` column to its Postgres range
+      and a `bigint` one to staying an integer, and every operation under
+      the column that can fail on a value is checked on SQLite the way
+      Postgres evaluates it (a `coalesce` fallback only when the earlier
+      arguments are null): an integer result must still be an integer, a
+      float one finite unless an operand already was infinite. A
+      `double precision` column gets no storage term, since
+      Postgres stores the `inf` an input carried. `total: int = a + b`
+      carries only the storage term; Postgres needs no guard, since it
+      computes at 64 bits and its column type holds the range.
     - **Value parity** — a value expression (a generated column's body, or
       either side of a check's comparison that calls `fn`) is admitted only
       when SQLite and Postgres store the same value for it on every row,
-      decided once when the model is defined (ADR-0059;
-      `src/ferro/generated.py` over the function table). The expression's
-      type family matches the column's; `least` / `greatest` take numbers
-      or dates and no nullable operand; `year` / `month` / `day` take a
-      `date`; `/` only by a non-zero literal; no float `*` or `/` and no
-      Decimal arithmetic; no other generated column, retired column,
-      relation or closed-over variable. Failures match too: the
-      `_ferro_range_<col>` guard makes an overflow raise on SQLite where
-      Postgres raises. A function joins `fn` only with its rendering per
-      dialect and a row in `tests/test_value_parity.py`, which runs it on
-      both dialects; a divergence is refused, never documented.
+      and fail on the same rows, decided once when the model is defined
+      (ADR-0059). Two functions decide it, and every door reads them:
+      `ferro_ddl_lowering::type_value_expr` types each node (family and
+      nullability, from the columns, `literal_type` and the signatures in
+      `VALUE_FUNCTIONS`) and refuses what would store differently, read by
+      the class definition over FFI (`_core._value_expr_type`), the
+      Postgres renderer and the SQLite guard; `value_step_can_fail` names
+      the one operation that can fail on a value (an integer or float `+`,
+      `-` or `*`, a `/ -1`, an integer unary `-`, `abs` of an integer),
+      read by the SQLite guard, the check body, the refusal of such an
+      operation under an `OR` (`_core._value_expr_failing_step`) and the
+      error mapping that turns the overflow into a `DataError` naming the
+      column or check (`table_check_computes`). The refusals: the
+      expression's type family matches the column's; `least` / `greatest`
+      take numbers or dates and no nullable operand; `year` / `month` /
+      `day` take a `date`; `/` only by a non-zero literal; no float `*` or
+      `/` and no Decimal arithmetic; no integer literal past 64 bits; no
+      bounded text storage, which Postgres pads or trims and SQLite does
+      not; no
+      other generated column, retired column, relation or closed-over
+      variable. A check's SQLite body guards each comparison with a failing
+      operation (`render_check_predicate`): `lambda box: box.a * box.b > 0`
+      is
+      `CASE WHEN NOT (typeof(("a" * "b")) IN ('integer', 'null')) THEN
+      abs(-9223372036854775807 - 1) ELSE (("a" * "b") > 0) END`, whose
+      `abs` raises SQLite's own `integer overflow` where Postgres raises, so
+      `NOT` cannot invert it and a conjunct both databases skip computes
+      nothing; the Postgres body carries no terms. A function joins `fn`
+      only with its rendering per dialect and a row in
+      `tests/test_value_parity.py`, which runs it on both dialects; a
+      divergence is refused, never documented.
 
     Every artifact above reaches every door through the one planner,
     `ferro_migrate::plan_from_ir` (`_core._plan_from_ir` over FFI): its

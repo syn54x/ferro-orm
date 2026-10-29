@@ -518,6 +518,32 @@ pub fn resolve_column_storage(
     canonical_from_schema_column(col, dialect).map(ResolvedStorage::Scalar)
 }
 
+/// The SQLite range guard of generated column `col` of a table with
+/// `columns`, as its constraint name and CHECK body: the one decision every
+/// door's SQLite `CREATE TABLE` frames as `CONSTRAINT "<name>" CHECK
+/// (<body>)` after the column's `STORED`. `None` for a plain column, a
+/// column whose Postgres storage is no scalar, or an expression nothing in
+/// which can overflow.
+///
+/// # Errors
+/// The column's storage does not resolve, or its expression does not
+/// render ([`render_value_expr`]).
+pub fn sqlite_generated_guard(
+    col: &SchemaColumn,
+    columns: &[SchemaColumn],
+) -> Result<Option<(String, String)>, String> {
+    let Some(expr) = &col.generated else {
+        return Ok(None);
+    };
+    let ResolvedStorage::Scalar(storage) = resolve_column_storage(col, Dialect::Postgres)? else {
+        return Ok(None);
+    };
+    Ok(
+        render_sqlite_generated_guard(&col.name, storage, expr, columns)?
+            .map(|body| (sqlite_guard_name(&col.name), body)),
+    )
+}
+
 /// The idempotent `CREATE TYPE ... AS ENUM` guard for a native Postgres enum.
 /// Same DO-block pattern as [`render_db_check`]: it only *adds when absent*
 /// (schema-scoped via `current_schema()`), so a second boot against an

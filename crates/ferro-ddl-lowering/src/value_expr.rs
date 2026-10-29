@@ -851,8 +851,9 @@ pub fn sqlite_guard_column(constraint: &str) -> Option<&str> {
     constraint.strip_prefix(SQLITE_GUARD_PREFIX)
 }
 
-/// The SQLite range guard of a generated column: one named column check, or
+/// The CHECK body of the SQLite range guard of a generated column, or
 /// `None` when nothing in the expression can overflow.
+/// [`crate::sqlite_generated_guard`] names it and resolves the storage.
 ///
 /// Postgres raises when a value does not fit: the column (`smallint out of
 /// range` at 2^15, `integer out of range` at 2^31) or any step of the
@@ -892,13 +893,7 @@ pub fn render_sqlite_generated_guard(
     // so only its arithmetic is held, the root step included.
     let leave_out_root = storage != CanonicalType::Double;
     terms.extend(step_terms(expr, leave_out_root, columns)?);
-    Ok((!terms.is_empty()).then(|| {
-        format!(
-            "CONSTRAINT {} CHECK ({})",
-            quote_ident(&sqlite_guard_name(column)),
-            terms.join(" AND ")
-        )
-    }))
+    Ok((!terms.is_empty()).then(|| terms.join(" AND ")))
 }
 
 /// One SQLite term per arithmetic step of `expr`, the root included: an
@@ -1656,7 +1651,14 @@ mod tests {
             schema_column("b", "integer", Some("bigint")),
             schema_column("x", "number", None),
         ];
-        render_sqlite_generated_guard(column, storage, expr, &columns).unwrap()
+        render_sqlite_generated_guard(column, storage, expr, &columns)
+            .unwrap()
+            .map(|body| {
+                format!(
+                    "CONSTRAINT {} CHECK ({body})",
+                    quote_ident(&sqlite_guard_name(column))
+                )
+            })
     }
 
     fn binary(op: ValueBinaryOp, left: Box<ValueExpr>, right: Box<ValueExpr>) -> ValueExpr {

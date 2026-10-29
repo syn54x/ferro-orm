@@ -654,8 +654,8 @@ def _refuse_overflow_under_or(
                         f"{model_name}.{FERRO_CHECKS} check {suffix!r} computes "
                         f"{_value_text(step)} under an OR: Postgres does not "
                         "define which side of an OR it evaluates, so a row "
-                        "whose step overflows could pass Postgres and fail "
-                        "SQLite; compute the value as a generated column "
+                        "where that operation overflows could pass Postgres "
+                        "and fail SQLite; compute the value as a generated column "
                         "(Field(generated=...)) and compare that column"
                     )
 

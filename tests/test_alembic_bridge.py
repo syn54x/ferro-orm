@@ -300,16 +300,16 @@ class Priced(Model):
 """
 
 
-def _priced_project(tmp_path, monkeypatch, dialects: str) -> None:
+def _priced_project(tmp_path, monkeypatch, dialects: str, source: str = PRICED) -> None:
     """A configured project with one model whose generated column and check
-    both call `fn.least`, which SQLite spells `min`."""
+    both call `fn.least`, which SQLite spells `min` (or `source`'s models)."""
     import sys
 
     monkeypatch.delenv("FERRO_CONFIG", raising=False)
     package = f"ferro_gm_{tmp_path.name.replace('-', '_').lower()}"
     (tmp_path / package).mkdir()
     (tmp_path / package / "__init__.py").write_text("")
-    (tmp_path / package / "models.py").write_text(PRICED)
+    (tmp_path / package / "models.py").write_text(source)
     (tmp_path / "ferro.toml").write_text(
         f'models = ["{package}.models"]\ndialects = {dialects}\n'
     )
@@ -336,6 +336,58 @@ def test_get_metadata_on_a_sqlite_project_creates_the_sqlite_table(
             ).scalar_one()
             == 10
         )
+
+
+SUMMED = """
+from ferro import Field, Model
+
+
+class Summed(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    a: int
+    b: int
+    total: int = Field(generated=lambda summed: summed.a + summed.b)
+"""
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("isolated_imports")
+async def test_get_metadata_on_sqlite_guards_a_generated_column_as_the_pass_does(
+    tmp_path, monkeypatch
+):
+    """`create_all` on SQLite writes the range guard the pass writes, so a
+    sum past Postgres's `integer` fails here as it fails there, and the
+    table it builds is the pass's: no drift."""
+    from tests.test_alembic_translator import _drift
+
+    _priced_project(tmp_path, monkeypatch, '["sqlite"]', SUMMED)
+    path = tmp_path / "summed.db"
+    engine = sa.create_engine(f"sqlite:///{path}")
+    get_metadata().create_all(engine)
+
+    with engine.begin() as connection:
+        connection.execute(sa.text('INSERT INTO "summed" ("a", "b") VALUES (1, 2)'))
+    with pytest.raises(sa.exc.IntegrityError, match="_ferro_range_total"):
+        with engine.begin() as connection:
+            connection.execute(
+                sa.text('INSERT INTO "summed" ("a", "b") VALUES (2147483647, 1)')
+            )
+    engine.dispose()
+    assert await _drift(f"sqlite:{path}") == []
+
+
+@pytest.mark.usefixtures("isolated_imports")
+def test_get_metadata_on_postgres_writes_no_sqlite_guard(tmp_path, monkeypatch):
+    """The guard is SQLite's: the Postgres `CREATE TABLE` the same metadata
+    compiles carries no `_ferro_range_` constraint."""
+    from sqlalchemy.dialects import postgresql
+    from sqlalchemy.schema import CreateTable
+
+    _priced_project(tmp_path, monkeypatch, '["postgres", "sqlite"]', SUMMED)
+    table = get_metadata().tables["summed"]
+    ddl = str(CreateTable(table).compile(dialect=postgresql.dialect()))
+    assert "GENERATED ALWAYS AS" in ddl, ddl
+    assert "_ferro_range_" not in ddl, ddl
 
 
 @pytest.mark.usefixtures("isolated_imports")

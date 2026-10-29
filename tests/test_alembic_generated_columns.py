@@ -11,7 +11,7 @@ class Gc795Ledger(Model):
 The core decides each op's rendering. A new table or an added column on
 Postgres is Alembic's own op, its column built with `sa.Computed(<the core's
 rendering>, persisted=True)`; a new SQLite table is the pass's `CREATE TABLE`
-as written, because SQLAlchemy cannot write SQLite's range guard. A changed
+as written, its range guard included. A changed
 expression and a column made plain are always `op.execute` of the pass's
 statement. Autogenerate against an auto-migrated database is empty.
 """
@@ -200,3 +200,19 @@ async def test_the_core_renders_the_expression_sa_computed_writes():
     )
     with pytest.raises(ValueError, match="not a generated column"):
         _core._render_generated_expression(json.dumps(model), "amount_minor", "sqlite")
+
+
+async def test_the_core_renders_the_sqlite_guard_the_metadata_writes():
+    _with_direction()
+    [model] = [
+        m
+        for m in ensure_resolved_modelset()["payload"]["models"]
+        if m["table_name"] == "gc795ledger"
+    ]
+    assert _core._render_sqlite_generated_guard(json.dumps(model), "direction") == (
+        "_ferro_range_direction",
+        "typeof(\"direction\") IN ('integer', 'null')"
+        ' AND "direction" BETWEEN -2147483648 AND 2147483647',
+    )
+    with pytest.raises(ValueError, match="not a generated column"):
+        _core._render_sqlite_generated_guard(json.dumps(model), "amount_minor")

@@ -908,6 +908,16 @@ def _render_generated_expression(model_json: str, column: str, dialect: str) -> 
     text. Raises ``ValueError`` for a plain column."""
     ...
 
+def _render_sqlite_generated_guard(
+    model_json: str, column: str
+) -> tuple[str, str] | None:
+    """The SQLite range guard of generated column ``column`` of the model
+    ``model_json`` (one schema IR model), as ``(name, body)``: the
+    ``CONSTRAINT "<name>" CHECK (<body>)`` every SQLite ``CREATE TABLE``
+    writes after the column's ``STORED``. ``None`` when nothing in the
+    expression can overflow. Raises ``ValueError`` for a plain column."""
+    ...
+
 def _tracking_table_names() -> tuple[str, str]:
     """The tracking tables' names: ``("_ferro_migrations",
     "_ferro_migrations_format")``."""
