@@ -40,6 +40,18 @@ class Refund(Model):
 
 # --8<-- [end:check-model]
 
+# --8<-- [start:parity]
+try:
+
+    class Rate(Model):
+        id: Annotated[int | None, Field(primary_key=True)] = None
+        amount: float
+        doubled: Annotated[float, Field(generated=lambda rate: rate.amount * 2)]
+
+except TypeError as exc:
+    print(f"{type(exc).__name__}: {exc}")
+# --8<-- [end:parity]
+
 DDL_SQLITE = """
 # --8<-- [start:ddl-sqlite]
 CREATE TABLE IF NOT EXISTS "transaction" (
@@ -126,18 +138,6 @@ async def main() -> None:
         except TypeError as exc:
             print(f"{type(exc).__name__}: {exc}")
         # --8<-- [end:refusals]
-
-    # --8<-- [start:parity]
-    try:
-
-        class Rate(Model):
-            id: Annotated[int | None, Field(primary_key=True)] = None
-            amount: float
-            doubled: Annotated[float, Field(generated=lambda rate: rate.amount * 2)]
-
-    except TypeError as exc:
-        print(f"{type(exc).__name__}: {exc}")
-    # --8<-- [end:parity]
 
     print("generated_columns example ran successfully")
 

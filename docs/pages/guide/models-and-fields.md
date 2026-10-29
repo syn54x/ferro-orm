@@ -484,7 +484,7 @@ It prints:
 
 <!-- prints: generated_columns.py:parity -->
 ```text
-TypeError: __main__.main.<locals>.Rate.doubled '*' over a float: Postgres raises when a float product or quotient underflows to zero where SQLite stores 0.0, so the databases would disagree; keep the arithmetic in integers (an amount in minor units, such as amount_minor) or compute the value in the application
+TypeError: __main__.Rate.doubled '*' over a float: Postgres raises when a float product or quotient underflows to zero where SQLite stores 0.0, so the databases would disagree; keep the arithmetic in integers (an amount in minor units, such as amount_minor) or compute the value in the application
 ```
 
 Each refusal names the fix. The rules, each from a case where the two databases would store different values:

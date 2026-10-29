@@ -285,23 +285,33 @@ class ModelMetaclass(type(BaseModel)):
             cls, "__ferro_historical__", namespace.get("__ferro_historical__") is True
         )
         cls.__ferro_renamed_from__ = mcs._resolve_renamed_from(name, namespace)
-        for field_name, metadata in pending_relations:
-            REGISTRY.defer_relation(cls.__ferro_identity__, field_name, metadata)
 
-        mcs._register_model(cls, cls.__ferro_identity__, local_relations)
-        ferro_fields = mcs._parse_ferro_field_metadata(cls)
-        cls.ferro_fields = ferro_fields
-        mcs._validate_db_type_options(cls, ferro_fields)
-        mcs._validate_generated_options(cls, ferro_fields)
-        mcs._retire_fields(cls, retired_relations)
-        mcs._inject_relation_descriptors(cls, local_relations)
-        mcs._generate_and_register_schema(cls, cls.__ferro_identity__)
+        # Refusals raise from the schema compile, which itself writes the
+        # registry (the envelope, join tables), so no order puts every refusal
+        # before every write: a refused class is rolled back out of every
+        # store instead, leaving the registry as it was before the class body.
+        before = REGISTRY.snapshot()
+        try:
+            for field_name, metadata in pending_relations:
+                REGISTRY.defer_relation(cls.__ferro_identity__, field_name, metadata)
 
-        # Spec-derived runtime attributes (read specs at use time everywhere
-        # else; these two bake *names only*, which are stable across epochs).
-        cls.__ferro_query_columns__ = frozenset(cls.__ferro_columns__)
-        mcs._register_enum_fields(cls)
-        mcs._register_hydration_converters(cls)
+            mcs._register_model(cls, cls.__ferro_identity__, local_relations)
+            ferro_fields = mcs._parse_ferro_field_metadata(cls)
+            cls.ferro_fields = ferro_fields
+            mcs._validate_db_type_options(cls, ferro_fields)
+            mcs._validate_generated_options(cls, ferro_fields)
+            mcs._retire_fields(cls, retired_relations)
+            mcs._inject_relation_descriptors(cls, local_relations)
+            mcs._generate_and_register_schema(cls, cls.__ferro_identity__)
+
+            # Spec-derived runtime attributes (read specs at use time everywhere
+            # else; these two bake *names only*, which are stable across epochs).
+            cls.__ferro_query_columns__ = frozenset(cls.__ferro_columns__)
+            mcs._register_enum_fields(cls)
+            mcs._register_hydration_converters(cls)
+        except BaseException:
+            REGISTRY.restore(before)
+            raise
         if cls.__ferro_generated__:
             cls.__setattr__ = _generated_setattr(cls.__setattr__)
 
