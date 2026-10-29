@@ -340,18 +340,35 @@ def test_get_metadata_on_a_sqlite_project_creates_the_sqlite_table(
 
 @pytest.mark.usefixtures("isolated_imports")
 def test_get_metadata_compiles_each_dialects_own_spelling(tmp_path, monkeypatch):
-    """One metadata, compiled per engine: `min` on SQLite, `least` on
-    Postgres, and a refusal naming both on any other database."""
+    """One metadata, compiled per engine: the core's rendering for that
+    dialect (`min` on SQLite, `least` on Postgres), and a refusal naming
+    both on any other database."""
+    import json
+
     from sqlalchemy.dialects import mysql, postgresql, sqlite
     from sqlalchemy.schema import CreateTable
 
-    _priced_project(tmp_path, monkeypatch, '["postgres", "sqlite"]')
-    table = get_metadata().tables["priced"]
+    from ferro._core import _render_generated_expression, _render_table_check_body
 
-    sqlite_ddl = str(CreateTable(table).compile(dialect=sqlite.dialect()))
-    assert 'min("qty", 10)' in sqlite_ddl and "least" not in sqlite_ddl
-    postgres_ddl = str(CreateTable(table).compile(dialect=postgresql.dialect()))
-    assert 'least(CAST("qty" AS bigint), 10)' in postgres_ddl
-    assert "min(" not in postgres_ddl
+    _priced_project(tmp_path, monkeypatch, '["postgres", "sqlite"]')
+    metadata = get_metadata()
+    table = metadata.tables["priced"]
+    [model_ir] = metadata.info["ferro"].envelope["payload"]["models"]
+    [check] = model_ir["table_checks"]
+
+    for ours, sa_dialect, other in [
+        ("sqlite", sqlite.dialect(), "least("),
+        ("postgres", postgresql.dialect(), "min("),
+    ]:
+        ddl = str(CreateTable(table).compile(dialect=sa_dialect))
+        expression = _render_generated_expression(
+            json.dumps(model_ir), "capped_qty", ours
+        )
+        body = _render_table_check_body(
+            json.dumps(check["predicate"]), ours, json.dumps(model_ir["columns"])
+        )
+        assert f"GENERATED ALWAYS AS ({expression}) STORED" in ddl, ddl
+        assert f"CHECK ({body})" in ddl, ddl
+        assert other not in ddl, ddl
     with pytest.raises(sa.exc.CompileError, match="Postgres and SQLite"):
         CreateTable(table).compile(dialect=mysql.dialect())
