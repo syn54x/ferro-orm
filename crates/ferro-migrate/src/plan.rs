@@ -1451,10 +1451,10 @@ fn plan_existing_table(
         &mut ops,
         &mut plan.reports,
     );
-    // Postgres refuses to drop a column a policy reads: a shorthand policy
-    // the target declares over a replaced column is dropped first and added
-    // back with the table's row security, after the add. Any other policy
-    // that reads it refuses the drop ([`policy_blocking_replace`]).
+    // Postgres refuses to drop a column a policy reads: a policy the plan
+    // can carry ([`carries_policy`]) is dropped first and added back with the
+    // table's row security, after the add. Any other policy that reads a
+    // replaced column refuses its drop ([`policy_blocking_replace`]).
     let declaration = new.declaration(new_model);
     let carried: Vec<String> = if dialect == Dialect::Postgres {
         facts
