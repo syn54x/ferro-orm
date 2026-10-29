@@ -1,0 +1,1 @@
+verified 2026-10-29T15:06:03Z: maturin develop; cargo test ferro-schema-ir/ferro-ddl-lowering/ferro-migrate 808 passed; pytest Verify set sqlite+pg18 1751 passed 14 skipped 1 xfailed; sqlite+pg17 1751 passed 14 skipped 1 xfailed; docs lint exit 0
