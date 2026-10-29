@@ -432,10 +432,14 @@ def _lines(operations: list[dict[str, Any]]) -> list[str]:
     (``replaces``): its type differs, or the live column is not the stored
     generated one the snapshot declares (its expression differs). One taken
     down only around a type change of a column it reads has no line: that
-    column's own line says it."""
+    column's own line says it. Neither has an op the planner marks
+    ``carried``: a policy or check taken down and put back unchanged around
+    such a change."""
     lines = []
     for op in operations:
         replaces = op.get("replaces")
+        if op.get("carried"):
+            continue
         if replaces is None:
             lines.append(render_op(op))
         elif op["kind"] != "AddColumn" or replaces == "input_type":

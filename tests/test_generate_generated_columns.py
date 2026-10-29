@@ -158,6 +158,28 @@ POLICED_WIDE = policed(WIDE_HEAD, DIRECTION_POLICY)
 RAW_POLICED = policed(HEAD, RAW_POLICY)
 RAW_POLICED_WIDE = policed(WIDE_HEAD, RAW_POLICY)
 
+CHECKED_CODE = """
+from ferro import Check, fn
+
+
+class Ticket(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    code: int
+    __ferro_checks__ = (Check("coded", lambda ticket: ticket.code > 0),)
+"""
+CHECKED_CODE_TEXT = """
+from ferro import Check, fn
+
+
+class Ticket(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    code: str
+    __ferro_checks__ = (Check("coded", lambda ticket: fn.length(ticket.code) > 0),)
+"""
+"""``CHECKED_CODE`` with the column's type and the check's body changed
+together: the old body does not type-check against the new column, so the
+check is dropped before the alter and added back after."""
+
 
 # -- helpers --------------------------------------------------------------------------
 
@@ -514,3 +536,41 @@ def test_a_raw_policy_over_a_re_added_generated_column_is_dropped_and_added_back
     assert drift_api(db).lines == []
     assert run("migrate", "down", "--yes", "--url", db.url) == 0
     assert drift_api(db).lines == []
+
+
+def test_drift_says_nothing_of_a_policy_carried_around_a_replace(project, pkg, db):
+    if db.backend != "postgres":
+        pytest.skip("row policies are Postgres's")
+    start(project, pkg, db, POLICED)
+    # The input retyped by hand, the column and its policy put back alike.
+    [(using,)] = db.rows(
+        "SELECT pg_get_expr(polqual, polrelid) FROM pg_policy "
+        "WHERE polname = 'rls_transaction_direction'"
+    )
+    [(expression,)] = db.rows(
+        "SELECT pg_get_expr(adbin, adrelid) FROM pg_attrdef d JOIN pg_attribute a "
+        "ON a.attrelid = d.adrelid AND a.attnum = d.adnum "
+        "WHERE a.attname = 'direction' AND d.adrelid = '\"transaction\"'::regclass"
+    )
+    db.execute('DROP POLICY "rls_transaction_direction" ON "transaction"')
+    db.execute('ALTER TABLE "transaction" DROP COLUMN "direction"')
+    db.execute('ALTER TABLE "transaction" ALTER COLUMN "amount_minor" TYPE bigint')
+    db.execute(
+        f'ALTER TABLE "transaction" ADD COLUMN "direction" integer NOT NULL '
+        f"GENERATED ALWAYS AS ({expression}) STORED"
+    )
+    db.execute(
+        f'CREATE POLICY "rls_transaction_direction" ON "transaction" '
+        f"USING ({using}) WITH CHECK ({using})"
+    )
+
+    report = drift_api(db)
+
+    # The policy is live and declared: its carried drop and add say nothing.
+    assert report.lines == [
+        "transaction.amount_minor has type bigint, snapshot says int"
+    ], report.lines
+    assert {op["kind"] for op in report.operations if op.get("carried")} == {
+        "DropRowPolicy",
+        "AddRowPolicy",
+    }

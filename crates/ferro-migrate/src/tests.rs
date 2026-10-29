@@ -7840,6 +7840,9 @@ fn a_policy_over_a_re_added_generated_column_is_dropped_before_and_added_after()
     ];
     let up = plan_declared(&before, &after, Dialect::Postgres, updates_only());
     assert_eq!(up.op_list(), expected);
+    // The policy ops carry it unchanged: no door reports them as a difference.
+    let carried: Vec<bool> = up.operations.iter().map(|p| p.verdict.carried).collect();
+    assert_eq!(carried, vec![true, false, false, false, true]);
     for planned in &up.operations {
         assert_eq!(planned.verdict.execution, Execution::Native, "{planned:?}");
     }
@@ -7991,11 +7994,13 @@ fn an_input_whose_live_type_changes_gets_no_printed_pair_and_is_not_refused() {
 }
 
 #[test]
-fn a_check_over_an_input_whose_type_changes_is_no_body_decision_this_round() {
-    // Live `amount` int under `ck_payment_large`; declared `amount` bigint,
-    // the check's body unchanged. The live read prints no pair (the column's
-    // type differs), and the plan alters the type alone: Postgres revalidates
-    // the check itself, and the next read compares its body.
+fn a_check_over_a_live_column_whose_type_changes_is_carried_around_the_alter() {
+    // Live `amount` int under `ck_payment_large`; declared `amount` bigint.
+    // The live read prints no pair (the column's type differs), so the body
+    // cannot be compared this round, and Postgres would refuse the alter
+    // under an old body that no longer type-checks. The plan takes the check
+    // down before the alter and puts the declared one back after: carried,
+    // never a body difference.
     let live_model = payment_with_large_check("1000");
     let mut declared = payment_with_large_check("1000");
     declared.columns[1].db_type = Some("bigint".to_string());
@@ -8019,11 +8024,75 @@ fn a_check_over_an_input_whose_type_changes_is_no_body_decision_this_round() {
         Dialect::Postgres,
         destructive(),
     );
+    let check = |add: bool| {
+        let (table, name) = ("payment".to_string(), "ck_payment_large".to_string());
+        if add {
+            MigrationOp::AddCheck { table, name }
+        } else {
+            MigrationOp::DropCheck { table, name }
+        }
+    };
     assert_eq!(
         plan.op_list(),
+        vec![
+            check(false),
+            MigrationOp::AlterColumnType {
+                table: "payment".to_string(),
+                column: "amount".to_string(),
+            },
+            check(true),
+        ]
+    );
+    let carried: Vec<bool> = plan
+        .operations
+        .iter()
+        .map(|planned| planned.verdict.carried)
+        .collect();
+    assert_eq!(carried, vec![true, false, true]);
+    plan.render().expect("renders");
+}
+
+#[test]
+fn a_check_over_a_retyped_column_between_two_declarations_is_carried_only_when_it_changes() {
+    // `amount >= 0` renders alike whatever `amount`'s type: unchanged,
+    // Postgres revalidates it on the alter, which runs alone.
+    let mut before = payment_with_large_check("1000");
+    before.table_checks[0].predicate = ferro_schema_ir::CheckExpr::Cmp {
+        column: "amount".to_string(),
+        op: ferro_schema_ir::CheckCmpOp::Ge,
+        other: ferro_schema_ir::CheckOperand::Literal {
+            token: "0".to_string(),
+        },
+    };
+    let mut after = before.clone();
+    after.columns[1].db_type = Some("bigint".to_string());
+    assert_eq!(
+        plan_declared(&before, &after, Dialect::Postgres, updates_only()).op_list(),
         vec![MigrationOp::AlterColumnType {
             table: "payment".to_string(),
             column: "amount".to_string(),
         }]
     );
+    // Changed: dropped before the alter, the new body added after.
+    let changed = payment_with_large_check("2000");
+    let after = SchemaModel {
+        columns: after.columns.clone(),
+        ..changed
+    };
+    let plan = plan_declared(&before, &after, Dialect::Postgres, updates_only());
+    assert!(
+        matches!(
+            &plan.op_list()[..],
+            [
+                MigrationOp::DropCheck { .. },
+                MigrationOp::AlterColumnType { .. },
+                MigrationOp::AddCheck { .. },
+            ]
+        ),
+        "{:?}",
+        plan.op_list()
+    );
+    assert!(plan.operations.iter().all(|planned| {
+        planned.verdict.carried != matches!(planned.op, MigrationOp::AlterColumnType { .. })
+    }));
 }

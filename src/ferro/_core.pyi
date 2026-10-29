@@ -163,7 +163,9 @@ async def _plan_drift(using: str | None, declared_json: str) -> dict[str, Any]:
     [...]}``: ``_plan_from_ir``'s ops without their verdicts (drift says what
     would change, never how it runs) but its ``replaces`` (why a generated
     column is dropped and added back: ``made_generated``, ``input_type`` or
-    ``own_type``) on the two ops of such a pair, and its report shape. Raises
+    ``own_type``) on the two ops of such a pair, ``carried: True`` on an op
+    that takes down or puts back, unchanged, what the plan carries around
+    another change, and its report shape. Raises
     ``ValueError`` when ``declared_json`` is not a schema envelope, and the
     connection's error when it is not open."""
     ...

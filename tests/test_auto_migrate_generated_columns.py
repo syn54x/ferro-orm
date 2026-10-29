@@ -44,6 +44,10 @@ from tests.test_generate_generated_columns import (
     RAW_POLICED_WIDE,
     WIDE,
 )
+from tests.test_generate_generated_columns import (
+    CHECKED_CODE,
+    CHECKED_CODE_TEXT,
+)
 from tests.test_migrate_new import (  # noqa: F401 - fixtures
     pkg,
     project,
@@ -391,11 +395,11 @@ WIDE_TEAM = TEAM.replace(
 )
 
 
-def test_an_input_type_change_under_an_unchanged_check_rebuilds_no_check(
-    project, pkg, db
-):
-    """No printed pair (the column's type differs) is no body decision:
-    the type change runs alone, and Postgres keeps the check through it."""
+def test_a_check_over_a_retyped_column_is_carried_around_the_alter(project, pkg, db):
+    """The live read cannot compare a check over a column whose type changes
+    (no printed pair), and Postgres refuses the alter under an old body that
+    no longer type-checks: the pass drops the check, alters, and adds the
+    declared one back."""
     postgres_only(db)
     declare(project, pkg, TEAM)
     asyncio.run(ferro.connect(db.url, auto_migrate=True))
@@ -405,9 +409,39 @@ def test_an_input_type_change_under_an_unchanged_check_rebuilds_no_check(
 
     statements = schema_sql(reconnect(db))
 
-    assert statements == [
-        'ALTER TABLE "team" ALTER COLUMN "size" TYPE bigint USING "size"::bigint'
-    ]
+    drop, alter, add = positions(
+        statements,
+        'DROP CONSTRAINT "ck_team_size_ok"',
+        'ALTER COLUMN "size" TYPE bigint',
+        'ADD CONSTRAINT "ck_team_size_ok"',
+    )
+    assert drop < alter < add, statements
     with pytest.raises(Exception, match="(?i)check"):
         db.execute('INSERT INTO "team" ("size") VALUES (-1)')
+    assert schema_sql(reconnect(db)) == []
+
+
+def test_a_check_changed_with_the_type_of_the_column_it_reads_is_carried(
+    project, pkg, db
+):
+    """``code > 0`` over an integer, then ``length(code) > 0`` over text: the
+    alter under the old body would fail (``character varying > integer``)."""
+    postgres_only(db)
+    declare(project, pkg, CHECKED_CODE)
+    asyncio.run(ferro.connect(db.url, auto_migrate=True))
+    ferro.reset_engine()
+    db.execute('INSERT INTO "ticket" ("code") VALUES (12)')
+    declare(project, pkg, CHECKED_CODE_TEXT)
+
+    statements = schema_sql(reconnect(db))
+
+    drop, alter, add = positions(
+        statements,
+        'DROP CONSTRAINT "ck_ticket_coded"',
+        'ALTER COLUMN "code" TYPE',
+        'ADD CONSTRAINT "ck_ticket_coded"',
+    )
+    assert drop < alter < add, statements
+    with pytest.raises(Exception, match="(?i)check"):
+        db.execute('INSERT INTO "ticket" ("code") VALUES (\'\')')
     assert schema_sql(reconnect(db)) == []

@@ -948,6 +948,9 @@ pub(crate) struct Draft {
     pub(crate) operations: Vec<MigrationOp>,
     /// The reports, in the order planning raised them.
     pub(crate) reports: Vec<Report>,
+    /// The ops that take down or put back, unchanged, an artifact the plan
+    /// carries around another change ([`OpVerdict::carried`]).
+    pub(crate) carried: Vec<MigrationOp>,
 }
 
 /// `old` as the renames [`plan_from_ir`]`(old, new, dialect, …)` plans leave
@@ -1471,10 +1474,48 @@ fn plan_existing_table(
     } else {
         Vec::new()
     };
+    // A check over a column whose type changes whose body changes too, or
+    // that a live read could not compare (no printed pair, ADR-0060), goes
+    // the same way: dropped before the type change, which Postgres would
+    // otherwise refuse under the old body, and added back after it.
+    let retyped: Vec<String> = if dialect == Dialect::Postgres {
+        new.checks(new_model)
+            .into_iter()
+            .map(|(name, _)| name)
+            .filter(|name| {
+                !checks_reading(new_model, &replaced).contains(name)
+                    && facts
+                        .checks
+                        .iter()
+                        .any(|check| &check.name == name && check.ferro_owned)
+                    && reads_retyped_column(old_model, new_model, name, dialect)
+                    && check_differs(old, new, old_model, new_model, name, dialect)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    for name in &carried {
+        let (table, name) = (table.to_string(), name.clone());
+        plan.carried.push(MigrationOp::DropRowPolicy {
+            table: table.clone(),
+            name: name.clone(),
+        });
+        plan.carried.push(MigrationOp::AddRowPolicy { table, name });
+    }
     ops.extend(carried.iter().map(|name| MigrationOp::DropRowPolicy {
         table: table.to_string(),
         name: name.clone(),
     }));
+    ops.extend(retyped.iter().map(|name| MigrationOp::DropCheck {
+        table: table.to_string(),
+        name: name.clone(),
+    }));
+    plan.carried
+        .extend(retyped.iter().map(|name| MigrationOp::DropCheck {
+            table: table.to_string(),
+            name: name.clone(),
+        }));
     ops.extend(replaced.iter().map(|column| MigrationOp::DropColumn {
         table: table.to_string(),
         column: column.clone(),
@@ -1539,11 +1580,26 @@ fn plan_existing_table(
     // check over a replaced column is gone once its drop runs, so the plan
     // adds it back after the add (SQLite's rebuild writes the table's checks
     // into the table it builds).
+    // A check over a retyped column carried around the type change is taken
+    // down too.
     let taken: Vec<String> = if dialect == Dialect::Postgres {
         checks_reading(new_model, &replaced)
+            .into_iter()
+            .chain(retyped.iter().cloned())
+            .collect()
     } else {
         Vec::new()
     };
+    // Its add back puts back a check the table held: carried, no difference.
+    plan.carried.extend(
+        taken
+            .iter()
+            .filter(|name| facts.checks.iter().any(|check| &check.name == *name))
+            .map(|name| MigrationOp::AddCheck {
+                table: table.to_string(),
+                name: name.clone(),
+            }),
+    );
     let standing = |name: &String| !taken.contains(name);
     // Check addition (#343; ADR-0013) lands after the column ops, so a CHECK
     // over a newly added column follows its ADD COLUMN.
@@ -2085,11 +2141,10 @@ fn check_rebuilds(
 /// read gathered, the printed pair: Postgres printed both bodies, so equal
 /// strings are one predicate (ADR-0060). Two declarations, or two catalogs,
 /// compare their texts. A body that does not render, or a live check with no
-/// pair, differs: the rebuild then fails rendering it, naming the check. One
-/// exception: a live check with no pair because a column it reads changes
-/// type ([`printed_pair_checks`]) is no body decision this round. Postgres
-/// revalidates it itself on the `ALTER COLUMN ... TYPE` (refusing the alter
-/// if a row fails), and the next read, with the type alike, compares it.
+/// pair, differs: the rebuild then fails rendering it, naming the check. A
+/// check over a column whose type changes that differs, or cannot be
+/// compared, is carried around the type change instead (dropped before it,
+/// added back after), never rebuilt.
 fn check_differs(
     old: &Side,
     new: &Side,
@@ -2137,10 +2192,7 @@ fn check_differs(
                 .printed
                 .clone()
         });
-    match pair {
-        Some(pair) => pair.declared != pair.catalog,
-        None => !reads_retyped_column(old_model, new_model, name, dialect),
-    }
+    pair.is_none_or(|pair| pair.declared != pair.catalog)
 }
 
 /// Whether the check `name`, as whichever of `old_model` and `new_model`
@@ -2276,6 +2328,12 @@ pub struct OpVerdict {
     /// drops and adds back, and why.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replaces: Option<Replace>,
+    /// It takes down or puts back, unchanged, an artifact the plan carries
+    /// around another change: a row policy around a generated column's drop
+    /// and add, a check around it or around a type change of a column it
+    /// reads. No door reports it as a difference.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub carried: bool,
 }
 
 /// How the dialect runs an op.
@@ -2502,6 +2560,8 @@ fn verdict(op: &MigrationOp, before: &Side, target: &Side, dialect: Dialect) -> 
         },
         goes_with,
         replaces,
+        // Marked by the planner, which carries it ([`Draft::carried`]).
+        carried: false,
     }
 }
 
@@ -4607,7 +4667,7 @@ pub fn printed_pair_checks<'a>(
                     view.columns
                         .iter()
                         .find(|col| &col.name == column)
-                        .is_some_and(|col| !type_changes(live_col, col, Dialect::Postgres))
+                        .is_some_and(|col| stored_as_declared(live_col, col))
                 })
             })
         })
@@ -4656,7 +4716,16 @@ fn live_as_declared<'a>(
         .into_iter()
         .flatten()
         .find_map(|name| live(name))
-        .is_some_and(|live_col| !type_changes(live_col, declared, Dialect::Postgres))
+        .is_some_and(|live_col| stored_as_declared(live_col, declared))
+}
+
+/// Whether the live column `live` is stored as `declared` declares it on
+/// Postgres: the one type rule the live read's pairs are asked by.
+fn stored_as_declared(
+    live: &ferro_schema_ir::SchemaColumn,
+    declared: &ferro_schema_ir::SchemaColumn,
+) -> bool {
+    !type_changes(live, declared, Dialect::Postgres)
 }
 
 /// The live name of `col` when the live read prints its pair on Postgres

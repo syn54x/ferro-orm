@@ -1101,6 +1101,7 @@ REBUILD_CASES = (
     "G6b-drop-a-generated-column-with-its-input",
     "G7-change-a-generated-columns-own-type",
     "G8-replace-a-generated-column-a-row-policy-reads",
+    "G9-retype-a-checked-column-and-change-its-check",
     "F2-a-rename-and-a-type-change",
     "F3-a-type-change-and-a-new-index",
 )
@@ -1129,6 +1130,7 @@ VALIDATE_CASES = (
     "C3-retarget-a-foreign-key",
     "G4-change-the-type-of-an-input-a-checked-column-reads",
     "G5-add-a-check-that-calls-fn",
+    "G9-retype-a-checked-column-and-change-its-check",
 )
 """Postgres ``NOT VALID`` adds and their validate step."""
 

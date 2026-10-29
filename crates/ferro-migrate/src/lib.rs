@@ -714,10 +714,16 @@ impl Plan {
         dialect: Dialect,
         draft: plan::Draft,
     ) -> Self {
+        let carried = draft.carried;
         let operations = draft
             .operations
             .into_iter()
-            .map(|op| PlannedOp::of(op, &before, &target, dialect))
+            .map(|op| {
+                let carries = carried.contains(&op);
+                let mut planned = PlannedOp::of(op, &before, &target, dialect);
+                planned.verdict.carried = carries;
+                planned
+            })
             .collect();
         Self {
             operations,
@@ -747,6 +753,7 @@ impl Plan {
             plan::Draft {
                 operations,
                 reports: Vec::new(),
+                carried: Vec::new(),
             },
         )
     }

@@ -738,7 +738,13 @@ pub(crate) fn render_from(
                 }
             }
             MigrationOp::DropCheck { table, name } => {
-                let still_declared = new_side.check_body(table, name).is_some();
+                // A declared check is dropped only to be added back by the
+                // same ops, around a type change of a column it reads.
+                let added_back = ops.iter().any(|other| {
+                    matches!(other, MigrationOp::AddCheck { table: t, name: n }
+                        if t == table && n == name)
+                });
+                let still_declared = new_side.check_body(table, name).is_some() && !added_back;
                 if still_declared {
                     return Err(EmissionError {
                         message: format!(

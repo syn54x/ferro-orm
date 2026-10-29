@@ -314,6 +314,11 @@ CASES: tuple[Case, ...] = (
         generated.POLICED,
         generated.POLICED_WIDE,
     ),
+    Case(
+        "G9-retype-a-checked-column-and-change-its-check",
+        generated.CHECKED_CODE,
+        generated.CHECKED_CODE_TEXT,
+    ),
     # -- F: several changes at once -----------------------------------------------
     Case(
         "F1-several-models-at-once",
