@@ -999,7 +999,6 @@ fn render_create_table_guards_a_numeric_generated_column_with_its_postgres_range
     for (column, storage) in [
         ("copied", ferro_ddl_lowering::CanonicalType::Integer),
         ("small", ferro_ddl_lowering::CanonicalType::SmallInt),
-        ("ratio", ferro_ddl_lowering::CanonicalType::Double),
     ] {
         let expr = ferro_schema_ir::ValueExpr::Column {
             name: "amount".to_string(),
@@ -1020,6 +1019,8 @@ fn render_create_table_guards_a_numeric_generated_column_with_its_postgres_range
             "{sqlite}"
         );
     }
+    // A float copy computes nothing; Postgres stores an `inf` it carries.
+    assert!(!sqlite.contains("_ferro_range_ratio"), "{sqlite}");
     let postgres = render_create_table(&model, Dialect::Postgres)
         .expect("renders")
         .create_sql;

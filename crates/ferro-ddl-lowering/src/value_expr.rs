@@ -785,10 +785,12 @@ pub fn render_sqlite_generated_guard(
             terms.push(integer_range(&quoted, i32::MIN.into(), i32::MAX.into()))
         }
         CanonicalType::BigInt => terms.push(integer_term(&quoted)),
-        CanonicalType::Double => terms.push(finite_term(&quoted)),
         _ => {}
     }
-    terms.extend(step_terms(expr, true, columns)?);
+    // A float column may hold `inf` (Postgres stores one an input carried),
+    // so only its arithmetic is held, the root step included.
+    let leave_out_root = storage != CanonicalType::Double;
+    terms.extend(step_terms(expr, leave_out_root, columns)?);
     Ok((!terms.is_empty()).then(|| {
         format!(
             "CONSTRAINT {} CHECK ({})",
@@ -823,19 +825,38 @@ fn step_terms(
     let mut steps = Vec::new();
     collect_steps(expr, root, &mut steps);
     let lookup = |name: &str| schema_value_column(columns, name);
-    steps
-        .into_iter()
-        .map(|step| {
-            let rendered = render_value_expr(step, Dialect::Sqlite, columns)?;
-            Ok(
-                if type_value_expr(step, &lookup)?.family == ValueType::Integer {
-                    integer_term(&rendered)
-                } else {
-                    finite_term(&rendered)
-                },
-            )
-        })
-        .collect()
+    let mut terms = Vec::new();
+    for step in steps {
+        let rendered = render_value_expr(step, Dialect::Sqlite, columns)?;
+        if type_value_expr(step, &lookup)?.family == ValueType::Integer {
+            terms.push(integer_term(&rendered));
+            continue;
+        }
+        // Negating a float never overflows.
+        let ValueExpr::Binary { left, right, .. } = step else {
+            continue;
+        };
+        // Postgres raises on a float step only when it overflows from finite
+        // operands; an operand already infinite (a stored `inf`) passes.
+        let mut alternatives = vec![finite_term(&rendered)];
+        for operand in [left, right] {
+            if matches!(**operand, ValueExpr::Literal { .. })
+                || type_value_expr(operand, &lookup)?.family == ValueType::Integer
+            {
+                continue;
+            }
+            let term = infinite_term(&render_value_expr(operand, Dialect::Sqlite, columns)?);
+            if !alternatives.contains(&term) {
+                alternatives.push(term);
+            }
+        }
+        terms.push(if alternatives.len() == 1 {
+            alternatives.remove(0)
+        } else {
+            format!("({})", alternatives.join(" OR "))
+        });
+    }
+    Ok(terms)
 }
 
 fn integer_term(sql: &str) -> String {
@@ -848,6 +869,10 @@ fn integer_range(sql: &str, low: i64, high: i64) -> String {
 
 fn finite_term(sql: &str) -> String {
     format!("abs({sql}) <= {:e}", f64::MAX)
+}
+
+fn infinite_term(sql: &str) -> String {
+    format!("abs({sql}) > {:e}", f64::MAX)
 }
 
 /// Every arithmetic step (`+ - * /`, unary `-`) under the root, in order; the
@@ -1373,10 +1398,9 @@ mod tests {
             guard("n", CanonicalType::BigInt, &a).unwrap(),
             "CONSTRAINT \"_ferro_range_n\" CHECK (typeof(\"n\") IN ('integer', 'null'))"
         );
-        assert_eq!(
-            guard("x", CanonicalType::Double, &a).unwrap(),
-            "CONSTRAINT \"_ferro_range_x\" CHECK (abs(\"x\") <= 1.7976931348623157e308)"
-        );
+        // A float column may hold an `inf` its input carried, as Postgres
+        // stores it; with no arithmetic there is nothing to hold.
+        assert_eq!(guard("x", CanonicalType::Double, &a), None);
         assert_eq!(guard("t", CanonicalType::Text, &a), None);
         assert_eq!(guard("f", CanonicalType::Boolean, &a), None);
     }
@@ -1395,7 +1419,8 @@ mod tests {
             guard("n", CanonicalType::BigInt, &least).unwrap(),
             "CONSTRAINT \"_ferro_range_n\" CHECK (typeof(\"n\") IN ('integer', 'null') AND typeof((\"a\" * \"b\")) IN ('integer', 'null'))"
         );
-        // greatest(x + x, -x): float steps are held finite.
+        // greatest(x + x, -x): a float sum is held finite unless an operand
+        // is already infinite; a negation never overflows.
         let greatest = ValueExpr::Func {
             name: "greatest".to_string(),
             args: vec![
@@ -1407,7 +1432,7 @@ mod tests {
         };
         assert_eq!(
             guard("y", CanonicalType::Double, &greatest).unwrap(),
-            "CONSTRAINT \"_ferro_range_y\" CHECK (abs(\"y\") <= 1.7976931348623157e308 AND abs((\"x\" + \"x\")) <= 1.7976931348623157e308 AND abs((- \"x\")) <= 1.7976931348623157e308)"
+            "CONSTRAINT \"_ferro_range_y\" CHECK ((abs((\"x\" + \"x\")) <= 1.7976931348623157e308 OR abs(\"x\") > 1.7976931348623157e308))"
         );
         // A nested step and the length function are integer steps; the root is the column.
         let nested = binary(

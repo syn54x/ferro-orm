@@ -3190,7 +3190,20 @@ pub fn update_record<'py>(
                         &bind_values.0,
                     )
                     .await
-                    .map_err(|e| crate::errors::map_db_error("Update failed", e))?;
+                    .map_err(|e| {
+                        // No generated column to read back, but a check may
+                        // still overflow computing the row.
+                        crate::errors::map_write_error(
+                            "Update failed",
+                            e,
+                            Some(&crate::errors::GeneratedWrite {
+                                table: &schema.table_name,
+                                generated: &schema.meta.generated_cols,
+                                checks: &schema.meta.computing_checks,
+                                computes: false,
+                            }),
+                        )
+                    })?;
                     Ok((rows_affected, ReturnedRow::default()))
                 }
                 UpdateByPkSql::ExistenceCheck(sql, bind_values) => {

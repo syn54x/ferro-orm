@@ -249,6 +249,7 @@ def declare_box(body) -> type[Model]:
         b: BIG = 0
         x: float = 0.0
         y: float = 0.0
+        kind: int = 0
 
     return Box
 
@@ -314,6 +315,99 @@ async def test_a_step_under_not_still_fails_the_row(db_url):
         await Box.create(x=1.0, y=2.0)
         with overflow_error():
             await Box.create(x=1.7e308, y=1.7e308)
+
+
+@pytest.mark.parametrize(
+    ("body", "step"),
+    [
+        (lambda box: (box.kind == 1) | (box.a + box.b > 0), "(a + b)"),
+        (lambda box: (box.kind == 1) | (box.a * box.b > 0), "(a * b)"),
+        (lambda box: (box.kind == 1) | (-box.a > 0), "-a"),
+        (lambda box: (box.kind == 1) | (box.a / -1 > 0), "(a / -1)"),
+        (lambda box: (box.kind == 1) | (box.x + box.y > 0), "(x + y)"),
+        (
+            lambda box: ~((box.kind == 1) | ((box.kind == 2) & (box.a - 1 > 0))),
+            "(a - 1)",
+        ),
+    ],
+    ids=["int +", "int *", "int negated", "int over -1", "float +", "nested"],
+)
+def test_a_step_that_can_overflow_under_an_or_is_refused(body, step):
+    """Postgres does not define which side of an OR it evaluates, so it may
+    skip a step SQLite's guard raises on; the check is refused instead."""
+    with pytest.raises(TypeError) as caught:
+        declare_box(body)
+    message = str(caught.value)
+    assert "Box.__ferro_checks__ check 'c'" in message
+    assert f"computes {step} under an OR" in message
+    assert "generated column" in message
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        lambda box: (box.kind == 1) | (box.a / 2 > 0),
+        lambda box: (box.kind == 1) | (-box.x > 0),
+        lambda box: (box.kind == 1) | (fn.abs(box.a) > 0),
+        lambda box: (box.kind == 1) & (box.a * box.b > 0),
+    ],
+    ids=["int halved", "float negated", "a call", "under AND"],
+)
+def test_a_step_that_cannot_overflow_under_an_or_is_accepted(body):
+    declare_box(body)
+    assert predicate("box", "c")["kind"] in ("or", "and")
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.asyncio
+async def test_a_step_beside_a_false_conjunct_fails_the_same_way(db_url):
+    """`kind == 2` is false, so neither database reaches `a * b`: the row
+    is the check's violation on both. With `kind == 2` the product is
+    computed and its overflow is a `DataError` on both."""
+    Box = declare_box(lambda box: (box.kind == 2) & (box.a * box.b > 0))
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        await Box.create(kind=2, a=3, b=4)
+        with pytest.raises(CheckViolationError, match="ck_box_c"):
+            await Box.create(kind=1, a=2**40, b=2**40)
+        with overflow_error():
+            await Box.create(kind=2, a=2**40, b=2**40)
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.asyncio
+async def test_a_stored_infinite_input_passes_on_both_databases(db_url):
+    """Postgres adds an already infinite float without raising, so the
+    guard lets an infinite operand through; a fresh overflow still fails."""
+    Box = declare_box(lambda box: box.x + box.y > 0)
+    await ferro.connect(db_url, auto_migrate=True)
+    # Ferro never binds a non-finite float, so the row is written by hand.
+    infinity = "9e999" if db_url.startswith("sqlite") else "'Infinity'::float8"
+    async with ferro.engines.session():
+        written = await ferro.execute(
+            'INSERT INTO "box" ("a", "b", "x", "y", "kind") '
+            f"VALUES (0, 0, {infinity}, 1.0, 0)"
+        )
+        assert written == 1
+        with overflow_error():
+            await Box.create(x=1.7e308, y=1.7e308)
+
+
+@pytest.mark.backend_matrix
+@pytest.mark.asyncio
+async def test_an_update_that_overflows_a_check_is_a_data_error(db_url):
+    """A table with a computing check and no generated column: saving a
+    persisted row and an `update()` both report the overflow as the check's."""
+    Box = declare_box(lambda box: box.a * box.b > 0)
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        row = await Box.create(a=3, b=4)
+        row.a = 2**40
+        row.b = 2**40
+        with overflow_error():
+            await row.save()
+        with overflow_error():
+            await Box.where(lambda box: box.a == 3).update(a=2**40, b=2**40)
 
 
 @pytest.mark.backend_matrix

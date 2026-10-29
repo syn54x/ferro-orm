@@ -962,14 +962,18 @@ pub fn table_check_constraint_name(table_lower: &str, suffix: &str) -> String {
 /// parenthesised, so a check calling a value function reads as a generated
 /// column's expression does.
 ///
-/// On SQLite a body with arithmetic is
-/// `CASE WHEN NOT (<step terms>) THEN abs(-9223372036854775807 - 1) ELSE (<body>) END`:
-/// one [`sqlite_step_terms`] term per step of every comparison, at the top
-/// level where no `NOT` or `OR` can invert it. Postgres raises on a step
-/// that overflows; a failed term makes SQLite raise too (`integer
-/// overflow`) instead of judging a real or `inf`, so both report a
-/// `DataError`. A `NULL` step passes, and a false body stays the check's own
-/// violation. The Postgres body carries no terms.
+/// On SQLite each comparison with arithmetic is
+/// `CASE WHEN NOT (<step terms>) THEN abs(-9223372036854775807 - 1) ELSE (<comparison>) END`:
+/// one [`sqlite_step_terms`] term per step of its operands. Postgres raises
+/// on a step that overflows when it evaluates the comparison; a failed term
+/// makes SQLite raise there too (`integer overflow`) instead of judging a
+/// real or `inf`, so both report a `DataError`. The guard sits on the
+/// comparison, so a conjunct both databases skip (`kind = 2 AND ...` with
+/// `kind` 1) computes nothing on either, and since it raises rather than
+/// returning false, `NOT` cannot invert it. A `NULL` step passes. A check
+/// with such a step under an `OR` is refused when it is declared, as
+/// Postgres does not define which side of an `OR` it evaluates. The
+/// Postgres body carries no terms.
 ///
 /// # Errors
 /// As [`render_value_expr`]: a call of a function the table lacks.
@@ -978,21 +982,7 @@ pub fn render_check_expr(
     dialect: Dialect,
     columns: &[ferro_schema_ir::SchemaColumn],
 ) -> Result<String, String> {
-    let body = render_check_predicate(expr, dialect, columns)?;
-    if dialect != Dialect::Sqlite {
-        return Ok(body);
-    }
-    let terms = check_step_terms(expr, columns)?;
-    Ok(if terms.is_empty() {
-        body
-    } else {
-        // abs() of the smallest 64-bit integer is SQLite's own runtime
-        // `integer overflow` error: the CHECK raises it where Postgres raises.
-        format!(
-            "CASE WHEN NOT ({}) THEN abs(-9223372036854775807 - 1) ELSE ({body}) END",
-            terms.join(" AND ")
-        )
-    })
+    render_check_predicate(expr, dialect, columns)
 }
 
 /// Whether a table check computes arithmetic that can overflow: a write to
@@ -1029,7 +1019,7 @@ fn check_step_terms(
     Ok(terms)
 }
 
-/// The check body without SQLite's step terms.
+/// The check body, each SQLite comparison with arithmetic guarded.
 fn render_check_predicate(
     expr: &ferro_schema_ir::CheckExpr,
     dialect: Dialect,
@@ -1057,12 +1047,29 @@ fn render_check_predicate(
             };
             format!("{} {} {}", quote_ident(column), check_cmp_op_sql(*op), rhs)
         }
-        ferro_schema_ir::CheckExpr::Compare { left, op, right } => format!(
-            "({} {} {})",
-            render_value_expr(left, dialect, columns)?,
-            check_cmp_op_sql(*op),
-            render_value_expr(right, dialect, columns)?
-        ),
+        ferro_schema_ir::CheckExpr::Compare { left, op, right } => {
+            let comparison = format!(
+                "({} {} {})",
+                render_value_expr(left, dialect, columns)?,
+                check_cmp_op_sql(*op),
+                render_value_expr(right, dialect, columns)?
+            );
+            let terms = if dialect == Dialect::Sqlite {
+                check_step_terms(expr, columns)?
+            } else {
+                Vec::new()
+            };
+            if terms.is_empty() {
+                comparison
+            } else {
+                // abs() of the smallest 64-bit integer is SQLite's own runtime
+                // `integer overflow` error: the CHECK raises it where Postgres raises.
+                format!(
+                    "CASE WHEN NOT ({}) THEN abs(-9223372036854775807 - 1) ELSE {comparison} END",
+                    terms.join(" AND ")
+                )
+            }
+        }
         ferro_schema_ir::CheckExpr::In { column, values } => {
             format!("{} IN ({})", quote_ident(column), values.join(", "))
         }
@@ -5369,7 +5376,7 @@ mod tests {
     }
 
     #[test]
-    fn a_sqlite_check_ands_every_step_term_at_the_top_level() {
+    fn a_sqlite_check_guards_each_comparison_computing_arithmetic() {
         use ferro_schema_ir::{CheckCmpOp, CheckExpr, ValueBinaryOp, ValueExpr};
         let column = |name: &str| {
             Box::new(ValueExpr::Column {
@@ -5388,7 +5395,7 @@ mod tests {
             },
         };
         let expr = CheckExpr::Not {
-            child: Box::new(CheckExpr::Or {
+            child: Box::new(CheckExpr::And {
                 left: Box::new(sum_over_zero("x", "y")),
                 right: Box::new(sum_over_zero("m", "n")),
             }),
@@ -5399,18 +5406,21 @@ mod tests {
             col_with_db_type("m", "integer", None, Some("bigint")),
             col_with_db_type("n", "integer", None, Some("bigint")),
         ];
-        let body = "NOT ((((\"x\" + \"y\") > 0)) OR (((\"m\" + \"n\") > 0)))";
+        let body = "NOT ((((\"x\" + \"y\") > 0)) AND (((\"m\" + \"n\") > 0)))";
         assert_eq!(
             super::render_check_expr(&expr, Dialect::Postgres, &columns),
             Ok(body.to_string())
         );
         assert_eq!(
             super::render_check_expr(&expr, Dialect::Sqlite, &columns),
-            Ok(format!(
-                "CASE WHEN NOT (abs((\"x\" + \"y\")) <= 1.7976931348623157e308 \
-                 AND typeof((\"m\" + \"n\")) IN ('integer', 'null')) \
-                 THEN abs(-9223372036854775807 - 1) ELSE ({body}) END"
-            ))
+            Ok(
+                "NOT ((CASE WHEN NOT ((abs((\"x\" + \"y\")) <= 1.7976931348623157e308 \
+                OR abs(\"x\") > 1.7976931348623157e308 OR abs(\"y\") > 1.7976931348623157e308)) \
+                THEN abs(-9223372036854775807 - 1) ELSE ((\"x\" + \"y\") > 0) END) \
+                AND (CASE WHEN NOT (typeof((\"m\" + \"n\")) IN ('integer', 'null')) \
+                THEN abs(-9223372036854775807 - 1) ELSE ((\"m\" + \"n\") > 0) END))"
+                    .to_string()
+            )
         );
         // A comparison without arithmetic carries no terms.
         assert_eq!(
