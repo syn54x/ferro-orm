@@ -234,6 +234,22 @@ _RENDERERS: dict[str, Callable[[dict[str, Any]], str]] = {
 new variant without a line here fails."""
 
 
+def _carried_line(noun: str) -> Callable[[dict[str, Any], str], str]:
+    def line(op: dict[str, Any], carried: str) -> str:
+        if carried == "changed":
+            return f"{op['name']} {noun} body differs"
+        return f"{op['name']} {noun} not compared while its column changes type"
+
+    return line
+
+
+_CARRIED: dict[str, Callable[[dict[str, Any], str], str]] = {
+    "AddCheck": _carried_line("check"),
+    "AddRowPolicy": _carried_line("policy"),
+}
+"""The add back of a carried artifact, which says what the pair changes."""
+
+
 def render_op(op: dict[str, Any]) -> str:
     """Render one planner op as one plain-language line.
 
@@ -432,13 +448,17 @@ def _lines(operations: list[dict[str, Any]]) -> list[str]:
     (``replaces``): its type differs, or the live column is not the stored
     generated one the snapshot declares (its expression differs). One taken
     down only around a type change of a column it reads has no line: that
-    column's own line says it. Neither has an op the planner marks
-    ``carried``: a policy or check taken down and put back unchanged around
-    such a change."""
+    column's own line says it. A policy or check the planner takes down and
+    puts back around such a change (``carried``) has a line, on its add back,
+    only when what it puts back is not what the table holds: its body
+    differs, or it could not be compared while its column changes type."""
     lines = []
     for op in operations:
         replaces = op.get("replaces")
-        if op.get("carried"):
+        carried = op.get("carried")
+        if carried is not None:
+            if carried != "unchanged" and op["kind"] in _CARRIED:
+                lines.append(_CARRIED[op["kind"]](op, carried))
             continue
         if replaces is None:
             lines.append(render_op(op))

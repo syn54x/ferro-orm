@@ -789,6 +789,48 @@ pub(crate) fn find_foreign_key<'a>(
         })
 }
 
+/// Why Postgres's in-place type change of `column` on `table` from
+/// `old_col` to `new_col` does not run on any door ([`withheld_alter`]).
+pub(crate) enum WithheldAlter {
+    /// A primary-key column: the change is the primary-key recipe's
+    /// ([`crate::Refusal::PrimaryKeyChange`]).
+    PrimaryKey,
+    /// To, from or between native enum types, which no statement converts
+    /// in place ([`crate::Refusal::EnumTypeMove`]).
+    EnumTypeMove(crate::Refusal),
+    /// A conversion that could reinterpret or destroy stored values, refused
+    /// with a warning, from the live storage it names.
+    Conversion(
+        ferro_ddl_lowering::RefusedConversion,
+        ferro_ddl_lowering::CanonicalType,
+    ),
+}
+
+/// Why Postgres's in-place type change from `old_col` to `new_col` is
+/// withheld, if it is: the one decision the renderer refuses or warns by
+/// and the planner leaves the column's checks, policies and generated
+/// columns standing by, compared against the live table. A live type ferro
+/// cannot read is no conversion it knows to refuse.
+pub(crate) fn withheld_alter(
+    table: &str,
+    column: &str,
+    old_col: &SchemaColumn,
+    new_col: &SchemaColumn,
+) -> Option<WithheldAlter> {
+    if old_col.primary_key || new_col.primary_key {
+        return Some(WithheldAlter::PrimaryKey);
+    }
+    if let Some(refusal) = crate::plan::enum_type_move(table, column, old_col, new_col) {
+        return Some(WithheldAlter::EnumTypeMove(refusal));
+    }
+    let Ok(ResolvedStorage::Scalar(new)) = resolve_column_storage(new_col, Dialect::Postgres)
+    else {
+        return None;
+    };
+    let old = canonical_from_schema_column(old_col, Dialect::Postgres).ok()?;
+    refused_scalar_conversion(old, new).map(|kind| WithheldAlter::Conversion(kind, old))
+}
+
 pub(crate) fn emit_alter_column_type(
     table: &str,
     column: &str,
@@ -801,26 +843,32 @@ pub(crate) fn emit_alter_column_type(
 
     match dialect {
         Dialect::Postgres => {
-            if old_col.primary_key || new_col.primary_key {
-                return Ok(result);
-            }
-            // To, from or between native enum types no statement converts the
-            // column in place: no door does, and every door says so in the
-            // generator's words, the recipe a migration follows instead.
-            if let Some(crate::Refusal::EnumTypeMove {
-                table,
-                column,
-                keep,
-            }) = crate::plan::enum_type_move(table, column, old_col, new_col)
-            {
-                result
-                    .reports
-                    .push(ferro_ddl_lowering::enum_type_move_report(
-                        &table,
-                        &column,
-                        keep.as_deref(),
-                    ));
-                return Ok(result);
+            let withheld = withheld_alter(table, column, old_col, new_col);
+            match &withheld {
+                // The primary-key recipe's change, refused by the verdict.
+                Some(WithheldAlter::PrimaryKey) => return Ok(result),
+                // To, from or between native enum types no statement converts
+                // the column in place: no door does, and every door says so in
+                // the generator's words, the recipe a migration follows
+                // instead.
+                Some(WithheldAlter::EnumTypeMove(refusal)) => {
+                    if let crate::Refusal::EnumTypeMove {
+                        table,
+                        column,
+                        keep,
+                    } = refusal
+                    {
+                        result
+                            .reports
+                            .push(ferro_ddl_lowering::enum_type_move_report(
+                                table,
+                                column,
+                                keep.as_deref(),
+                            ));
+                    }
+                    return Ok(result);
+                }
+                _ => {}
             }
             let cannot = |message: String| EmissionError {
                 message: format!("Cannot alter type for '{}.{}': {}", table, column, message),
@@ -836,11 +884,8 @@ pub(crate) fn emit_alter_column_type(
             };
             // Refusal rails (#154 generalized): a conversion that could
             // reinterpret or destroy stored values warns and skips — never a
-            // silent ALTER (FF-B B1/B2). A live type ferro cannot read is no
-            // conversion it knows to refuse.
-            if let Ok(old_canonical) = canonical_from_schema_column(old_col, ld)
-                && let Some(kind) = refused_scalar_conversion(old_canonical, new_canonical)
-            {
+            // silent ALTER (FF-B B1/B2).
+            if let Some(WithheldAlter::Conversion(kind, old_canonical)) = withheld {
                 result.reports.push(refused_conversion_warning(
                     kind,
                     table,

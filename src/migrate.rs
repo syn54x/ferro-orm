@@ -1401,9 +1401,10 @@ pub fn _plan_revision(
 /// "reports": [report…]}`. Drift reports what would change, never how it
 /// runs, so the ops carry no verdict but its `replaces` (why a generated
 /// column is dropped and added back, `made_generated`, `input_type` or
-/// `own_type`), on the two ops of such a pair only, and `carried: true` on
-/// an op that takes down or puts back, unchanged, what the plan carries
-/// around another change; reports are in `_plan_from_ir`'s shape.
+/// `own_type`), on the two ops of such a pair only, and `carried` on an op
+/// that takes down or puts back what the plan carries around another change
+/// (`unchanged`, `changed` or `not_compared`: whether it is put back as it
+/// was); reports are in `_plan_from_ir`'s shape.
 ///
 /// # Errors
 /// `ValueError` when `declared_json` is not a schema IR envelope or a side
@@ -1440,8 +1441,8 @@ pub fn _plan_drift(
                     if let Some(replace) = planned.verdict.replaces {
                         fields.insert("replaces".into(), serde_json::to_value(replace)?);
                     }
-                    if planned.verdict.carried {
-                        fields.insert("carried".into(), true.into());
+                    if let Some(carry) = planned.verdict.carried {
+                        fields.insert("carried".into(), serde_json::to_value(carry)?);
                     }
                 }
                 Ok(op)

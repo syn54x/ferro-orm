@@ -948,9 +948,10 @@ pub(crate) struct Draft {
     pub(crate) operations: Vec<MigrationOp>,
     /// The reports, in the order planning raised them.
     pub(crate) reports: Vec<Report>,
-    /// The ops that take down or put back, unchanged, an artifact the plan
-    /// carries around another change ([`OpVerdict::carried`]).
-    pub(crate) carried: Vec<MigrationOp>,
+    /// The ops that take down or put back an artifact the plan carries
+    /// around another change, each with whether it is put back as it was
+    /// ([`OpVerdict::carried`]).
+    pub(crate) carried: Vec<(MigrationOp, Carry)>,
 }
 
 /// `old` as the renames [`plan_from_ir`]`(old, new, dialect, …)` plans leave
@@ -1432,12 +1433,17 @@ fn plan_existing_table(
                 }),
         );
     }
+    // The table as it stands before any drop: what a carried artifact put
+    // back is compared with.
+    let standing_view = old_view.clone();
     let old_view = if replaced.is_empty() {
         old_view
     } else {
         Cow::Owned(without_columns(old_view.as_ref(), &replaced))
     };
     let old_model = old_view.as_ref();
+    let carry_of_check =
+        |name: &str| check_compared(old, new, standing_view.as_ref(), new_model, name, dialect);
     let mut ops = Vec::new();
     let mut column_drops = Vec::new();
 
@@ -1495,13 +1501,36 @@ fn plan_existing_table(
     } else {
         Vec::new()
     };
+    // Whether a carried policy is put back as the table holds it: the one
+    // row-security decision, over the policies as they stand, says which it
+    // would rebuild (and, from a declaration, an edited raw body is one).
+    let policy_drift =
+        plan_row_security_reconcile(&declaration, &facts.row_security, dialect, false).ok();
+    let carry_of_policy = |name: &String| match &policy_drift {
+        Some(drift)
+            if drift.drifted.contains(name)
+                || (old.rebuilds_unverifiable_bodies() && drift.unverifiable.contains(name)) =>
+        {
+            Carry::Changed
+        }
+        Some(drift) if drift.unverifiable.contains(name) => Carry::NotCompared,
+        Some(_) => Carry::Unchanged,
+        // A declared policy whose clauses cannot render: invalid IR, which
+        // `Plan::render` rejects before anything executes.
+        None => Carry::Changed,
+    };
     for name in &carried {
+        let carry = carry_of_policy(name);
         let (table, name) = (table.to_string(), name.clone());
-        plan.carried.push(MigrationOp::DropRowPolicy {
-            table: table.clone(),
-            name: name.clone(),
-        });
-        plan.carried.push(MigrationOp::AddRowPolicy { table, name });
+        plan.carried.push((
+            MigrationOp::DropRowPolicy {
+                table: table.clone(),
+                name: name.clone(),
+            },
+            carry,
+        ));
+        plan.carried
+            .push((MigrationOp::AddRowPolicy { table, name }, carry));
     }
     ops.extend(carried.iter().map(|name| MigrationOp::DropRowPolicy {
         table: table.to_string(),
@@ -1511,11 +1540,15 @@ fn plan_existing_table(
         table: table.to_string(),
         name: name.clone(),
     }));
-    plan.carried
-        .extend(retyped.iter().map(|name| MigrationOp::DropCheck {
-            table: table.to_string(),
-            name: name.clone(),
-        }));
+    plan.carried.extend(retyped.iter().map(|name| {
+        (
+            MigrationOp::DropCheck {
+                table: table.to_string(),
+                name: name.clone(),
+            },
+            carry_of_check(name),
+        )
+    }));
     ops.extend(replaced.iter().map(|column| MigrationOp::DropColumn {
         table: table.to_string(),
         column: column.clone(),
@@ -1590,14 +1623,19 @@ fn plan_existing_table(
     } else {
         Vec::new()
     };
-    // Its add back puts back a check the table held: carried, no difference.
+    // Its add back puts back a check the table held, as it was or not.
     plan.carried.extend(
         taken
             .iter()
             .filter(|name| facts.checks.iter().any(|check| &check.name == *name))
-            .map(|name| MigrationOp::AddCheck {
-                table: table.to_string(),
-                name: name.clone(),
+            .map(|name| {
+                (
+                    MigrationOp::AddCheck {
+                        table: table.to_string(),
+                        name: name.clone(),
+                    },
+                    carry_of_check(name),
+                )
             }),
     );
     let standing = |name: &String| !taken.contains(name);
@@ -2153,6 +2191,28 @@ fn check_differs(
     name: &str,
     dialect: Dialect,
 ) -> bool {
+    check_compared(old, new, old_model, new_model, name, dialect) != Carry::Unchanged
+}
+
+/// How the check `name`'s body compares between `old_model` on `old` and
+/// `new_model` on `new` ([`check_differs`]): the same, different (a body
+/// that does not render included), or not comparable (a live check with no
+/// printed pair).
+fn check_compared(
+    old: &Side,
+    new: &Side,
+    old_model: &SchemaModel,
+    new_model: &SchemaModel,
+    name: &str,
+    dialect: Dialect,
+) -> Carry {
+    let differs = |differs: bool| {
+        if differs {
+            Carry::Changed
+        } else {
+            Carry::Unchanged
+        }
+    };
     let held = |side: &Side, model: &SchemaModel| {
         side.checks(model)
             .into_iter()
@@ -2164,7 +2224,7 @@ fn check_differs(
         Body::Catalog(definition) => Some(definition.clone()),
     };
     let (Some(was), Some(now)) = (held(old, old_model), held(new, new_model)) else {
-        return false;
+        return Carry::Unchanged;
     };
     let same_kind = matches!(
         (&was, &now),
@@ -2172,15 +2232,15 @@ fn check_differs(
     );
     if dialect == Dialect::Sqlite || same_kind {
         let (Some(was), Some(now)) = (text(&was, old_model), text(&now, new_model)) else {
-            return true;
+            return Carry::Changed;
         };
-        return match dialect {
+        return differs(match dialect {
             Dialect::Sqlite => {
                 !drifted_check_names(&[(name.to_string(), now)], &[(name.to_string(), was)])
                     .is_empty()
             }
             Dialect::Postgres => was != now,
-        };
+        });
     }
     let pair = [old.table_facts(old_model), new.table_facts(new_model)]
         .iter()
@@ -2192,7 +2252,10 @@ fn check_differs(
                 .printed
                 .clone()
         });
-    pair.is_none_or(|pair| pair.declared != pair.catalog)
+    match pair {
+        None => Carry::NotCompared,
+        Some(pair) => differs(pair.declared != pair.catalog),
+    }
 }
 
 /// Whether the check `name`, as whichever of `old_model` and `new_model`
@@ -2226,7 +2289,7 @@ fn reads_retyped_column(
         .iter()
         .any(
             |input| match (column(old_model, input), column(new_model, input)) {
-                (Some(was), Some(now)) => type_changes(&was, &now, dialect),
+                (Some(was), Some(now)) => type_change_runs(&was, &now, dialect),
                 _ => false,
             },
         )
@@ -2328,12 +2391,29 @@ pub struct OpVerdict {
     /// drops and adds back, and why.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replaces: Option<Replace>,
-    /// It takes down or puts back, unchanged, an artifact the plan carries
-    /// around another change: a row policy around a generated column's drop
-    /// and add, a check around it or around a type change of a column it
-    /// reads. No door reports it as a difference.
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub carried: bool,
+    /// It takes down or puts back an artifact the plan carries around
+    /// another change (a row policy around a generated column's drop and
+    /// add, a check around it or around a type change of a column it
+    /// reads), and whether what it puts back is what it took down. Only an
+    /// [`Carry::Unchanged`] one is no difference.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub carried: Option<Carry>,
+}
+
+/// Whether an artifact the plan takes down and puts back around another
+/// change is put back as it was, decided once for both of its ops.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Carry {
+    /// What it puts back is what it took down: no difference.
+    Unchanged,
+    /// What it puts back differs from what it took down: the change rides
+    /// the pair.
+    Changed,
+    /// The two could not be compared: a live check over a column whose
+    /// type changes, which Postgres prints against the live table only
+    /// under the types it has.
+    NotCompared,
 }
 
 /// How the dialect runs an op.
@@ -2561,7 +2641,7 @@ fn verdict(op: &MigrationOp, before: &Side, target: &Side, dialect: Dialect) -> 
         goes_with,
         replaces,
         // Marked by the planner, which carries it ([`Draft::carried`]).
-        carried: false,
+        carried: None,
     }
 }
 
@@ -4186,6 +4266,23 @@ fn type_changes(
     moved_enum || schema_columns_storage_drift(old_col, new_col, dialect)
 }
 
+/// Whether the plan changes a column's type from `old_col` to `new_col` on
+/// `dialect` and the change runs: a type change ([`type_changes`]) but one
+/// Postgres's doors withhold ([`emit::withheld_alter`]: a primary-key
+/// column, an enum type move, a refused conversion). A withheld one leaves
+/// the column as it is, so the checks, policies and generated columns over
+/// it stay standing and compare against the live table, rather than going
+/// down and back up on every pass around an alter that never runs.
+fn type_change_runs(
+    old_col: &ferro_schema_ir::SchemaColumn,
+    new_col: &ferro_schema_ir::SchemaColumn,
+    dialect: Dialect,
+) -> bool {
+    type_changes(old_col, new_col, dialect)
+        && !(dialect == Dialect::Postgres
+            && emit::withheld_alter("", &new_col.name, old_col, new_col).is_some())
+}
+
 /// Why the plan drops a stored generated column and adds it back, decided
 /// once ([`replace_of`]) and carried on both ops' verdicts, so every door
 /// says the same of the pair.
@@ -4228,7 +4325,7 @@ fn replace_of(
     if !was.is_stored() {
         return Some(Replace::MadeGenerated);
     }
-    if type_changes(was_col, now_col, dialect) {
+    if type_change_runs(was_col, now_col, dialect) {
         return Some(Replace::OwnType);
     }
     // The columns it reads, from the side that declares it.
@@ -4238,7 +4335,7 @@ fn replace_of(
     ferro_ddl_lowering::value_expr_columns(&expr)
         .iter()
         .any(|input| match (old_column(input), new_column(input)) {
-            (Some(was), Some(now)) => type_changes(was, now, dialect),
+            (Some(was), Some(now)) => type_change_runs(was, now, dialect),
             _ => false,
         })
         .then_some(Replace::InputType)
@@ -4720,12 +4817,14 @@ fn live_as_declared<'a>(
 }
 
 /// Whether the live column `live` is stored as `declared` declares it on
-/// Postgres: the one type rule the live read's pairs are asked by.
+/// Postgres, or will stay as it is because its type change is refused
+/// ([`type_change_runs`]): the one type rule the live read's pairs are asked
+/// by.
 fn stored_as_declared(
     live: &ferro_schema_ir::SchemaColumn,
     declared: &ferro_schema_ir::SchemaColumn,
 ) -> bool {
-    !type_changes(live, declared, Dialect::Postgres)
+    !type_change_runs(live, declared, Dialect::Postgres)
 }
 
 /// The live name of `col` when the live read prints its pair on Postgres

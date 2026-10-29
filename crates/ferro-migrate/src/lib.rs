@@ -44,7 +44,7 @@ pub use generate::{
 };
 pub use order::order_by_dependencies;
 pub use plan::{
-    Execution, Hint, HintError, LiveCheckFact, LiveFacts, LiveGeneratedFact, LiveTableFacts,
+    Carry, Execution, Hint, HintError, LiveCheckFact, LiveFacts, LiveGeneratedFact, LiveTableFacts,
     OpVerdict, PlanError, PlannedOp, PrintedPair, Refusal, Replace, Rider, RowRisk, Side,
     foreign_default, live_hints, plan_down, plan_from_ir,
 };
@@ -719,9 +719,12 @@ impl Plan {
             .operations
             .into_iter()
             .map(|op| {
-                let carries = carried.contains(&op);
+                let carry = carried
+                    .iter()
+                    .find(|(carried, _)| *carried == op)
+                    .map(|(_, carry)| *carry);
                 let mut planned = PlannedOp::of(op, &before, &target, dialect);
-                planned.verdict.carried = carries;
+                planned.verdict.carried = carry;
                 planned
             })
             .collect();

@@ -538,12 +538,17 @@ def test_a_raw_policy_over_a_re_added_generated_column_is_dropped_and_added_back
     assert drift_api(db).lines == []
 
 
-def test_drift_says_nothing_of_a_policy_carried_around_a_replace(project, pkg, db):
+def postgres_drift_only(db) -> None:
     if db.backend != "postgres":
-        pytest.skip("row policies are Postgres's")
-    start(project, pkg, db, POLICED)
-    # The input retyped by hand, the column and its policy put back alike.
-    [(using,)] = db.rows(
+        pytest.skip("drift compares carried policies and checks on Postgres")
+
+
+def retyped_by_hand(db, *, check: str | None = None, policy: str = "") -> None:
+    """``amount_minor`` retyped to bigint by hand, ``direction`` put back as
+    it was, then ``check`` (a body for ``ck_transaction_nonzero``) and the
+    policy (``policy`` its clauses after the name, the live ones by default)
+    put back over it."""
+    policies = db.rows(
         "SELECT pg_get_expr(polqual, polrelid) FROM pg_policy "
         "WHERE polname = 'rls_transaction_direction'"
     )
@@ -552,25 +557,110 @@ def test_drift_says_nothing_of_a_policy_carried_around_a_replace(project, pkg, d
         "ON a.attrelid = d.adrelid AND a.attnum = d.adnum "
         "WHERE a.attname = 'direction' AND d.adrelid = '\"transaction\"'::regclass"
     )
-    db.execute('DROP POLICY "rls_transaction_direction" ON "transaction"')
+    if policies:
+        db.execute('DROP POLICY "rls_transaction_direction" ON "transaction"')
     db.execute('ALTER TABLE "transaction" DROP COLUMN "direction"')
     db.execute('ALTER TABLE "transaction" ALTER COLUMN "amount_minor" TYPE bigint')
     db.execute(
         f'ALTER TABLE "transaction" ADD COLUMN "direction" integer NOT NULL '
         f"GENERATED ALWAYS AS ({expression}) STORED"
     )
-    db.execute(
-        f'CREATE POLICY "rls_transaction_direction" ON "transaction" '
-        f"USING ({using}) WITH CHECK ({using})"
-    )
+    if check is not None:
+        db.execute(
+            'ALTER TABLE "transaction" ADD CONSTRAINT "ck_transaction_nonzero" '
+            f"CHECK ({check})"
+        )
+    if policies:
+        [(using,)] = policies
+        clauses = policy or f"USING ({using}) WITH CHECK ({using})"
+        db.execute(
+            f'CREATE POLICY "rls_transaction_direction" ON "transaction" {clauses}'
+        )
+
+
+RETYPED = "transaction.amount_minor has type bigint, snapshot says int"
+
+
+def carried(report) -> dict[str, str]:
+    return {op["kind"]: op["carried"] for op in report.operations if "carried" in op}
+
+
+def test_drift_says_nothing_of_a_policy_carried_around_a_replace(project, pkg, db):
+    postgres_drift_only(db)
+    start(project, pkg, db, POLICED)
+    retyped_by_hand(db)
 
     report = drift_api(db)
 
     # The policy is live and declared: its carried drop and add say nothing.
-    assert report.lines == [
-        "transaction.amount_minor has type bigint, snapshot says int"
-    ], report.lines
-    assert {op["kind"] for op in report.operations if op.get("carried")} == {
-        "DropRowPolicy",
-        "AddRowPolicy",
+    assert report.lines == [RETYPED], report.lines
+    assert carried(report) == {
+        "DropRowPolicy": "unchanged",
+        "AddRowPolicy": "unchanged",
     }
+
+
+def test_drift_says_a_policy_carried_around_a_replace_differs(project, pkg, db):
+    postgres_drift_only(db)
+    start(project, pkg, db, POLICED)
+    retyped_by_hand(
+        db,
+        policy="FOR SELECT USING (direction = current_setting('app.direction')::integer)",
+    )
+
+    report = drift_api(db)
+
+    assert report.lines == [
+        RETYPED,
+        "rls_transaction_direction policy body differs",
+    ], report.lines
+    assert carried(report)["AddRowPolicy"] == "changed"
+
+
+def test_drift_says_nothing_of_a_check_put_back_alike_around_a_replace(
+    project, pkg, db
+):
+    postgres_drift_only(db)
+    start(project, pkg, db, CHECKED)
+    retyped_by_hand(db, check="direction <> 0")
+
+    report = drift_api(db)
+
+    assert report.lines == [RETYPED], report.lines
+    assert carried(report) == {"AddCheck": "unchanged"}
+
+
+def test_drift_says_a_check_put_back_edited_around_a_replace_differs(project, pkg, db):
+    postgres_drift_only(db)
+    start(project, pkg, db, CHECKED)
+    retyped_by_hand(db, check="direction <> 2")
+
+    report = drift_api(db)
+
+    assert report.lines == [
+        RETYPED,
+        "ck_transaction_nonzero check body differs",
+    ], report.lines
+    assert carried(report) == {"AddCheck": "changed"}
+
+
+def test_drift_says_a_check_over_a_retyped_column_was_not_compared(project, pkg, db):
+    """The live read cannot print ``code > 0`` against a column whose type
+    the snapshot changes, so the carried check is a possible difference: a
+    hand-edited body would hide behind the type line otherwise."""
+    postgres_drift_only(db)
+    configure(project, pkg, db.backend)
+    write_models(project, pkg, CHECKED_CODE)
+    new("create")
+    assert run("migrate", "up", "--url", db.url) == 0
+    db.execute('ALTER TABLE "ticket" DROP CONSTRAINT "ck_ticket_coded"')
+    db.execute('ALTER TABLE "ticket" ALTER COLUMN "code" TYPE bigint')
+    db.execute('ALTER TABLE "ticket" ADD CONSTRAINT "ck_ticket_coded" CHECK (code > 5)')
+
+    report = drift_api(db)
+
+    assert report.lines == [
+        "ticket.code has type bigint, snapshot says int",
+        "ck_ticket_coded check not compared while its column changes type",
+    ], report.lines
+    assert carried(report) == {"DropCheck": "not_compared", "AddCheck": "not_compared"}
