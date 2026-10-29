@@ -65,11 +65,13 @@ impl std::fmt::Display for SnapshotError {
 
 impl std::error::Error for SnapshotError {}
 
-/// The schema `ir_version` this ferro writes. Version 3 added the optional
+/// The schema `ir_version` this ferro writes. Version 4 added the optional
+/// column key `generated`, a generated column's value expression
+/// (ADR-0058); version 3 added the optional
 /// envelope key `replaces`, a squash's witness (ADR-0056); version 2 added
 /// the rename hints (`renamed_from` on a model, a column and a foreign key;
 /// ADR-0032); version 1 is the same shape without either.
-pub const CURRENT_SCHEMA_IR_VERSION: u32 = 3;
+pub const CURRENT_SCHEMA_IR_VERSION: u32 = 4;
 
 /// The key beside the envelope's own that links a snapshot to its parent.
 const PARENT_CHECKSUM_KEY: &str = "parent_checksum";
@@ -79,6 +81,9 @@ const REPLACES_KEY: &str = "replaces";
 
 /// The first schema `ir_version` whose envelope may carry `replaces`.
 const WITNESS_IR_VERSION: u32 = 3;
+
+/// The first schema `ir_version` whose columns may carry `generated`.
+pub const GENERATED_IR_VERSION: u32 = 4;
 
 impl Snapshot {
     /// Load an `ir.json` written by any ferro version.
@@ -91,12 +96,13 @@ impl Snapshot {
     ///
     /// A squash's witness (`replaces`) is read beside `parent_checksum`, and
     /// only from a version 3 envelope or later; an absent one reads as none.
+    /// A column's `generated` is read only from a version 4 envelope or later.
     ///
     /// # Errors
     /// A [`SnapshotError`] naming the problem when the bytes are not JSON, not
     /// a `schema` IR, of an `ir_version` newer than this ferro reads, or carry a
     /// malformed `parent_checksum` or witness, or a witness on an envelope
-    /// older than version 3.
+    /// older than version 3, or a generated column on one older than 4.
     pub fn load(bytes: &[u8]) -> Result<Snapshot, SnapshotError> {
         let fail = |message: String| SnapshotError { message };
         let mut document: serde_json::Value = serde_json::from_slice(bytes)
@@ -157,6 +163,21 @@ impl Snapshot {
                 })?
             }
         };
+        if ir.ir_version < GENERATED_IR_VERSION
+            && let Some((model, column)) = ir.payload.models.iter().find_map(|model| {
+                model
+                    .columns
+                    .iter()
+                    .find(|col| col.generated.is_some())
+                    .map(|col| (model, col))
+            })
+        {
+            return Err(fail(format!(
+                "is a schema IR v{version} envelope whose column '{}.{}' carries generated, \
+                 which only schema ir_version {GENERATED_IR_VERSION} records",
+                model.table_name, column.name
+            )));
+        }
         Ok(Snapshot {
             ir,
             checksum: sha384(bytes),
@@ -500,7 +521,7 @@ mod tests {
         let ir = Snapshot::load(bytes)
             .unwrap_or_else(|err| panic!("{name} must load: {}", err.message))
             .ir;
-        assert_eq!(u64::from(CURRENT_SCHEMA_IR_VERSION), 3);
+        assert_eq!(u64::from(CURRENT_SCHEMA_IR_VERSION), 4);
         let models = &ir.payload.models;
         assert!(
             models.iter().any(|m| m.renamed_from.is_some()),
@@ -621,11 +642,11 @@ mod tests {
     }
 
     #[test]
-    fn a_v4_envelope_keeps_the_upgrade_refusal() {
+    fn a_v5_envelope_keeps_the_upgrade_refusal() {
         let mut ir = witness_vector();
-        ir["ir_version"] = serde_json::json!(4);
+        ir["ir_version"] = serde_json::json!(5);
         let err = Snapshot::load(&canonical_bytes(&ir)).expect_err("newer");
-        assert!(err.message.contains("ir_version 4"), "{}", err.message);
+        assert!(err.message.contains("ir_version 5"), "{}", err.message);
         assert!(err.message.contains("upgrade ferro"), "{}", err.message);
     }
 
@@ -694,5 +715,53 @@ mod tests {
         v2.ir_version = 2;
         let err = Snapshot::store(&v2, None, &snapshot.replaces).expect_err("v2 has no witness");
         assert!(err.message.contains("replaces"), "{}", err.message);
+    }
+
+    /// The golden vector of a generated column.
+    const GENERATED_VECTOR: &str = "schema_generated_column_v4.json";
+
+    fn generated_vector() -> serde_json::Value {
+        let path = vectors_dir().join(GENERATED_VECTOR);
+        let vector: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).expect("read vector")).expect("json");
+        vector["ir"].clone()
+    }
+
+    #[test]
+    fn the_v4_vector_reads_its_generated_column_and_stores_back_byte_for_byte() {
+        let mut ir = generated_vector();
+        ir["parent_checksum"] = serde_json::Value::Null;
+        let bytes = canonical_bytes(&ir);
+        let snapshot = Snapshot::load(&bytes).expect("the v4 vector loads");
+        assert_eq!(snapshot.ir.ir_version, GENERATED_IR_VERSION);
+        assert!(
+            snapshot
+                .ir
+                .payload
+                .models
+                .iter()
+                .flat_map(|m| &m.columns)
+                .any(|c| c.generated.is_some()),
+            "a generated column"
+        );
+        let stored = Snapshot::store(&snapshot.ir, None, &[]).expect("store");
+        assert_eq!(
+            String::from_utf8(stored).expect("utf-8"),
+            String::from_utf8(bytes).expect("utf-8")
+        );
+    }
+
+    #[test]
+    fn a_v1_to_v3_envelope_carrying_generated_is_refused() {
+        for version in [1, 2, 3] {
+            let mut ir = generated_vector();
+            ir["ir_version"] = serde_json::json!(version);
+            let err = Snapshot::load(&canonical_bytes(&ir)).expect_err("generated is v4's");
+            assert!(
+                err.message.contains(&format!("v{version}")) && err.message.contains("generated"),
+                "{}",
+                err.message
+            );
+        }
     }
 }

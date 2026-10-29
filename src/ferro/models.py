@@ -45,7 +45,7 @@ from ._core import (
 )
 from .base import ForeignKey, foreign_key_allows_none
 from .exceptions import ModelDoesNotExist
-from .metaclass import ModelMetaclass
+from .metaclass import ModelMetaclass, generated_refusal
 from .query import Predicate, Query
 from .state import (
     _CURRENT_TRANSACTION,
@@ -258,6 +258,29 @@ async def transaction(
         _CURRENT_TRANSACTION_CONNECTION.reset(connection_token)
 
 
+def _hydrated_returning(cls: type["Model"], returned: dict[str, Any]) -> dict[str, Any]:
+    """The values a write read back, converted as a fetch converts them.
+
+    A fetch writes each column straight into the instance and wraps a
+    non-null value through the class's hydration converter (a secret field
+    in its `SecretStr` / `SecretBytes`); the values `RETURNING` reads back
+    take the same converters, so a saved instance reads as a fetched one.
+    """
+    converted = dict(returned)
+    for name, value in returned.items():
+        entry = cls._hydration_converters.get(name)
+        if entry is None or value is None:
+            continue
+        kind, convert = entry
+        try:
+            converted[name] = convert(value)
+        except Exception as err:
+            raise ValueError(
+                f"Failed to hydrate {kind} field {cls.__name__}.{name}: {err}"
+            ) from err
+    return converted
+
+
 class Model(BaseModel, metaclass=ModelMetaclass):
     """The base class of every Ferro model: a Pydantic model backed by a table.
 
@@ -308,6 +331,9 @@ class Model(BaseModel, metaclass=ModelMetaclass):
     #: Every name a retired declaration took out of the model: retired fields,
     #: retired relations and their shadow ``*_id`` columns.
     __ferro_retired_names__: ClassVar[frozenset[str]] = frozenset()
+    #: Each generated column (ADR-0058) and the columns its expression reads,
+    #: refreshed at the same compile choke point.
+    __ferro_generated__: ClassVar[dict[str, frozenset[str]]] = {}
     _enum_fields: ClassVar[dict[str, type[Enum]]] = {}
     #: Field → ``(kind, convert)``: the conversion hydration applies to each
     #: non-null decoded value (an enum class, or a secret type's wrapper).
@@ -335,7 +361,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                 instance or its primary key.
 
         Raises:
-            TypeError: A value names a retired field.
+            TypeError: A value names a retired field or a generated one.
             ValueError: A related instance's model has no primary key.
         """
         retired = self.__class__.__ferro_retired_names__
@@ -345,6 +371,12 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                 f"{self.__class__.__name__}.{name} is retired in this release: the "
                 f"model no longer reads or writes it (ADR-0053); drop {name}= from "
                 "the call"
+            )
+        generated = self.__class__.__ferro_generated__
+        if generated and not generated.keys().isdisjoint(data):
+            name = min(generated.keys() & data.keys())
+            raise TypeError(
+                f"{generated_refusal(self.__class__, name)}; drop {name}= from the call"
             )
         # 1. Handle relationship inputs (e.g. Product(category=my_cat))
         relations = getattr(self.__class__, "ferro_relations", {})
@@ -491,9 +523,9 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                 )
         route, identity_using = await _instance_transaction_route(self, using, session)
         secrets = deferred_secret_values(field_values([self]))
-        new_id = None
+        returned: dict[str, Any] = {}
         if on_conflict == "update":
-            new_id = await save_record(
+            returned = await save_record(
                 self.__class__.__ferro_identity__,
                 save_bind_payload(self),
                 route,
@@ -513,7 +545,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                 payload = apply_save_only(self, payload, only)
             elif exclude is not None:
                 payload = apply_save_exclude(self, payload, exclude)
-            rows_affected = await update_record(
+            rows_affected, returned = await update_record(
                 self.__class__.__ferro_identity__,
                 payload,
                 route,
@@ -522,7 +554,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             if rows_affected == 0:
                 raise ModelDoesNotExist(self.__class__, pk_val)
         else:
-            new_id = await save_record(
+            returned = await save_record(
                 self.__class__.__ferro_identity__,
                 save_bind_payload(self),
                 route,
@@ -530,8 +562,10 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                 secret_values=secrets,
             )
 
+        returned = _hydrated_returning(self.__class__, returned)
         pk_val = None
         pk_field_name = self.__class__.__ferro_pk__
+        new_id = returned.pop(pk_field_name, None) if pk_field_name else None
 
         if pk_field_name is not None:
             spec = self.__class__.__ferro_columns__[pk_field_name]
@@ -542,6 +576,11 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             ):
                 setattr(self, pk_field_name, new_id)
             pk_val = getattr(self, pk_field_name)
+        # The generated columns hold what the database computed, written
+        # straight to the instance and never marked as set by the caller. They
+        # go in after the key: assigning the key clears every generated column
+        # that reads it.
+        self.__dict__.update(returned)
 
         if pk_val is not None:
             register_instance(

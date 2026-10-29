@@ -639,6 +639,23 @@ def _split_rebuilds(statements: list[str]) -> tuple[list[str], list[Rebuild]]:
     return natives, rebuilds
 
 
+def _rides_a_declined_column(statement: str, ops: list[dict]) -> bool:
+    """Whether ``statement`` builds an index over a column the pass declines
+    to add: an ``AddColumn`` it renders no statement for, only a warning (a
+    generated column SQLite adds only by a rebuild). The pass, which never
+    adds the column, builds nothing over it."""
+    return any(
+        op["kind"] == "AddColumn"
+        and not op["statements"]
+        and re.match(
+            rf'^CREATE (UNIQUE )?INDEX IF NOT EXISTS "[^"]+" '
+            rf'ON "{re.escape(op["table"])}" \("{re.escape(op["column"])}"\)$',
+            statement,
+        )
+        for op in ops
+    )
+
+
 def _op_subjects(op: dict) -> set[str]:
     """The tables (and ``type:<type>``) a planner op touches."""
     subjects = {op["table"]} if op.get("table") else set()
@@ -815,16 +832,25 @@ def door_statements(door: Door, dialect: str) -> list[str]:
     stands for what it carries: the pass's statements for the ops on its
     table (or type) that no native statement of the migration runs — on
     SQLite mostly none, since the pass only warns there; pin (b) compares the
-    rebuild itself. Data steps hold no DDL."""
+    rebuild itself. A column the pass declines that way (a generated column
+    SQLite adds only by a rebuild) takes the index build riding it along:
+    the pass, which never adds the column, builds no index over it. A
+    parent's index over a column the plan drops goes with the column, so a
+    build under its name is a plain build. Data steps hold no DDL."""
     steps = [s for s in door.stems if not door.is_data(s)]
     split = {s: _split_rebuilds(door.statements(s, "up", dialect)) for s in steps}
+    ops = [op for plan in door.pass_plans(dialect) for op in plan]
+    dropped = {(op["table"], op["column"]) for op in ops if op["kind"] == "DropColumn"}
     parent_indexes = frozenset(
         index["name"]
         for model in door.parent["payload"]["models"]
         for index in [*(model.get("indexes") or []), *(model.get("uniques") or [])]
+        if not any(
+            (model["table_name"], column) in dropped
+            for column in index.get("columns") or []
+        )
     )
     natives = [t for s in steps for t in _plain_twins(split[s][0], parent_indexes)]
-    ops = [op for plan in door.pass_plans(dialect) for op in plan]
     remaining = Counter(natives)
     out = list(natives)
     carried: set[int] = set()
@@ -834,6 +860,7 @@ def door_statements(door: Door, dialect: str) -> list[str]:
             if at in carried or not _op_subjects(op) & rebuilt:
                 continue
             carried.add(at)
+            out = [s for s in out if not _rides_a_declined_column(s, [op])]
             for statement in op["statements"]:
                 if remaining[statement]:
                     remaining[statement] -= 1
@@ -1065,6 +1092,16 @@ REBUILD_CASES = (
     "C3-retarget-a-foreign-key",
     "C4-drop-a-foreign-key-keep-its-column",
     "D3-rename-a-label",
+    "G1-add-an-indexed-generated-column",
+    "G2-change-a-generated-expression",
+    "G3-change-an-input-column-type",
+    "G4-change-the-type-of-an-input-a-checked-column-reads",
+    "G5-add-a-check-that-calls-fn",
+    "G6-add-a-generated-column-with-its-input",
+    "G6b-drop-a-generated-column-with-its-input",
+    "G7-change-a-generated-columns-own-type",
+    "G8-replace-a-generated-column-a-row-policy-reads",
+    "G9-retype-a-checked-column-and-change-its-check",
     "F2-a-rename-and-a-type-change",
     "F3-a-type-change-and-a-new-index",
 )
@@ -1075,6 +1112,11 @@ INDEX_STEP_CASES = (
     "A9-drop-a-unique",
     "A11-redefine-an-index-under-a-cut-name",
     "A11-redefine-an-index-under-a-joined-name",
+    "G1-add-an-indexed-generated-column",
+    "G3-change-an-input-column-type",
+    "G4-change-the-type-of-an-input-a-checked-column-reads",
+    "G7-change-a-generated-columns-own-type",
+    "G8-replace-a-generated-column-a-row-policy-reads",
     "F3-a-type-change-and-a-new-index",
 )
 """Postgres index steps (``CONCURRENTLY``, no transaction)."""
@@ -1086,6 +1128,9 @@ VALIDATE_CASES = (
     "A10-change-a-table-check",
     "C1-add-an-optional-foreign-key",
     "C3-retarget-a-foreign-key",
+    "G4-change-the-type-of-an-input-a-checked-column-reads",
+    "G5-add-a-check-that-calls-fn",
+    "G9-retype-a-checked-column-and-change-its-check",
 )
 """Postgres ``NOT VALID`` adds and their validate step."""
 
@@ -1173,8 +1218,10 @@ def test_pin_b_a_rebuild_creates_the_shape_its_step_leaves_as_the_create_pass(
     """The rebuild's ``CREATE TABLE "_ferro_new_<t>"`` is byte for byte the
     create pass's ``CREATE TABLE "<t>"`` for the shape the step leaves (the
     relaxed shape for an expand, the target for a contract, the parent going
-    down), and the indexes it re-creates are the create pass's (ADR-0046) but
-    the ones a later index step of the migration builds.
+    down), and the indexes it re-creates are the create pass's (ADR-0046) but,
+    going up, the ones a later index step of the migration builds. Going
+    down, a later index step's down has run first, and the rebuild puts back
+    every index of the shape it leaves.
     Postgres alters every one of these in place: it writes no rebuild."""
     door = doors(case_id)
     if dialect == "postgres":
@@ -1189,7 +1236,11 @@ def test_pin_b_a_rebuild_creates_the_shape_its_step_leaves_as_the_create_pass(
             door.shape_left(stem, direction), "sqlite", table
         )
         # An index a later index step builds is that step's (ADR-0044).
-        later = {f'"{s.split("_", 1)[1]}"' for s in _index_steps(door) if s > stem}
+        later = {
+            f'"{s.split("_", 1)[1]}"'
+            for s in _index_steps(door)
+            if s > stem and direction == "up"
+        }
         indexes = [i for i in indexes if i.split(" ON ")[0].split()[-1] not in later]
         where = f"{case_id} {stem}.{direction}"
         assert (
@@ -1220,13 +1271,16 @@ def test_pin_c_a_concurrent_index_statement_is_the_pass_but_for_one_token(
     the pass's ``CREATE [UNIQUE] INDEX IF NOT EXISTS`` with that one token
     swapped, and its ``DROP INDEX CONCURRENTLY IF EXISTS`` the pass's ``DROP
     INDEX IF EXISTS`` plus it. SQLite's index step is the pass's statement
-    itself."""
+    itself, but for one over a column the pass declines to add, which the
+    pass's warning covers."""
     door = doors(case_id)
     planned = pass_statements(door, dialect)
     if dialect == "sqlite":
+        ops = [op for plan in door.pass_plans("sqlite") for op in plan]
         for stem in _index_steps(door):
             for sql in door.statements(stem, "up", "sqlite"):
-                assert sql in planned, (case_id, sql)
+                if not _rides_a_declined_column(sql, ops):
+                    assert sql in planned, (case_id, sql)
         return
     online = [
         sql
@@ -1650,7 +1704,14 @@ def test_pin_d_the_validate_step_is_the_pass_statement(
             "writes no validate step there and the pass plans none"
         )
     migration = migrate_through(project, CASEBOOK[case_id], db_url, db_backend)
-    assert _cli("migrate", "down", "--yes", "--to", "0002:01", "--url", db_url) == 0
+    # The validate step is the last; every step before it (the schema step,
+    # an index step) stays applied.
+    [validate] = sorted(migration.glob("*_validate.up.postgres.sql"))
+    before = int(validate.name[:2]) - 1
+    assert (
+        _cli("migrate", "down", "--yes", "--to", f"0002:{before:02}", "--url", db_url)
+        == 0
+    )
     target = json.loads((migration / "ir.json").read_text())
 
     live, facts = asyncio.run(_read_live(db_url, target))
@@ -1661,9 +1722,7 @@ def test_pin_d_the_validate_step_is_the_pass_statement(
     )["operations"]
 
     assert {op["kind"] for op in plan} == {"ValidateConstraint"}
-    assert [sql for op in plan for sql in op["statements"]] == statements(
-        migration / "02_validate.up.postgres.sql"
-    )
+    assert [sql for op in plan for sql in op["statements"]] == statements(validate)
 
 
 # -- pin (e): a migrated database is an auto-migrated one -----------------------------
@@ -1696,13 +1755,67 @@ def column_defaults(db: Db) -> dict[tuple[str, str], str | None]:
     }
 
 
+def _sqlite_generated_text(create_sql: str, column: str) -> str | None:
+    """The definition of generated column ``column`` in a SQLite ``CREATE
+    TABLE`` from its ``GENERATED`` clause to the end of the column."""
+    quoted = f'"{column}"'
+    at = create_sql.find(quoted)
+    if at < 0:
+        return None
+    start = create_sql.upper().find("GENERATED", at)
+    if start < 0:
+        return None
+    depth, end = 0, len(create_sql)
+    for i in range(start, len(create_sql)):
+        ch = create_sql[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            if depth == 0:
+                end = i
+                break
+            depth -= 1
+        elif ch == "," and depth == 0:
+            end = i
+            break
+    return create_sql[start:end]
+
+
+def generation_expressions(db: Db) -> dict[tuple[str, str], str]:
+    """Every generated column's expression as the catalog holds it (Postgres
+    ``information_schema.columns.generation_expression``, SQLite the column's
+    clause in ``sqlite_master``), whitespace folded as drift folds it, keyed
+    ``(table, column)``, ferro's own ``_ferro_*`` tables left out."""
+    if db.backend == "sqlite":
+        rows = []
+        for table, create in db.rows(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'table' "
+            "AND name NOT LIKE 'sqlite%'"
+        ):
+            for row in db.rows(f'PRAGMA table_xinfo("{table}")'):
+                if row[6] in (2, 3):
+                    rows.append((table, row[1], _sqlite_generated_text(create, row[1])))
+    else:
+        rows = db.rows(
+            "SELECT table_name, column_name, generation_expression "
+            f"FROM information_schema.columns WHERE table_schema = '{db.schema}' "
+            "AND is_generated = 'ALWAYS'"
+        )
+    return {
+        (table, column): " ".join((expr or "").split())
+        for table, column, expr in rows
+        if not table.startswith("_ferro_")
+    }
+
+
 @pytest.mark.parametrize("case_id", CASE_IDS)
 def test_pin_e_a_migrated_database_is_the_auto_migrated_one(
     project, second_db, case_id, db_url, db_backend, postgres_base_url, db_schema_name
 ):
     """The chain ``0001`` → ``0002`` leaves no drift; a second database
     ``connect(auto_migrate=True)`` builds from the same models has the same
-    live schema, facts included; Alembic autogenerate writes nothing against
+    live schema, facts included, and the same expression on every generated
+    column (``generation_expressions``); Alembic autogenerate writes nothing against
     the auto-migrated one. Against the migrated one it refuses, by design:
     a database the tracking table marks is ``ferro migrate new``'s, and the
     bridge reads the very live schema just shown equal, so it has nothing
@@ -1717,6 +1830,11 @@ def test_pin_e_a_migrated_database_is_the_auto_migrated_one(
     auto_migrate(second)
 
     assert live_schema(db_url, after) == live_schema(second, after)
+    assert generation_expressions(
+        Db(db_url, db_backend, postgres_base_url, db_schema_name)
+    ) == generation_expressions(
+        Db(second, db_backend, postgres_base_url, second_schema)
+    )
     _empty_autogenerate(second, postgres_base_url, second_schema)
     with pytest.raises(RuntimeError, match="tracked by ferro migrations"):
         autogenerate(db_url, postgres_base_url, db_schema_name)
@@ -1859,7 +1977,8 @@ def test_pin_i_an_inherited_database_is_the_squashed_one(
     ``up`` against the squashed directory is the database that ran the
     squashed ``0001`` from empty: the same live schema and facts (columns,
     types, nullability, indexes, constraints, policies), the same server
-    default on every column (``column_defaults``), the same tracking table
+    default on every column (``column_defaults``) and generation expression
+    on every generated one (``generation_expressions``), the same tracking table
     bar origin and times, no drift on either, and ``down --all`` leaves both
     with no table of the models and no record."""
     expect_finding(request, case_id, db_backend, "i")
@@ -1885,6 +2004,7 @@ def test_pin_i_an_inherited_database_is_the_squashed_one(
 
     assert live_schema(db_url, after) == live_schema(second_url, after)
     assert column_defaults(inherited) == column_defaults(scratch)
+    assert generation_expressions(inherited) == generation_expressions(scratch)
     assert inherited.rows(_TRACKING) == scratch.rows(_TRACKING)
     assert inherited.rows(_TRACKING), "the squashed migration is recorded"
     for url in (db_url, second_url):

@@ -4,7 +4,7 @@ description: "API reference for Field, FerroField, DbType and the other field me
 
 # Field, FerroField and DbType
 
-Fields are declared as type annotations on a [`Model`](model.md), with `Field(...)` supplying database options (primary key, unique, index, defaults). The other entries on this page (`FerroField`, `FerroNullable`, `varchar`, `DbType` and `DbTypeToken`) describe the field metadata and the explicit column types `db_type=` takes.
+Fields are declared as type annotations on a [`Model`](model.md), with `Field(...)` supplying database options (primary key, unique, index, defaults). The other entries on this page (`FerroField`, `FerroNullable`, `varchar`, `DbType` and `DbTypeToken`) describe the field metadata and the explicit column types `db_type=` takes. `fn` holds the database functions a generated column's expression or a check can call.
 
 ::: ferro.Field
     options:
@@ -20,3 +20,5 @@ Fields are declared as type annotations on a [`Model`](model.md), with `Field(..
 ::: ferro.DbType
 
 ::: ferro.DbTypeToken
+
+::: ferro.fn

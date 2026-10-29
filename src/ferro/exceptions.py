@@ -102,7 +102,11 @@ class DataError(FerroError):
     """A value could not be decoded or converted.
 
     Raised when a fetched value cannot be decoded into the expected Python
-    type or a bound value cannot be represented for the column type.
+    type or a bound value cannot be represented for the column type. Also
+    raised, on both databases, when a write overflows while computing a
+    generated column or a check's arithmetic (`a * b` past `bigint`); the
+    message names the column or check. Any other out-of-range error from
+    the database is an [`OperationalError`][ferro.OperationalError].
     """
 
 
@@ -128,7 +132,12 @@ class NotNullViolationError(IntegrityError):
 
 
 class CheckViolationError(IntegrityError):
-    """A `CHECK` constraint rejected the statement."""
+    """A `CHECK` constraint rejected the statement.
+
+    Raised when a check's condition is false for the row. A check whose
+    arithmetic overflows while it is computed raises
+    [`DataError`][ferro.DataError] instead.
+    """
 
 
 class ModelDoesNotExist(FerroError, LookupError):

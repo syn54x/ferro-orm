@@ -540,7 +540,20 @@ fn written(
             .map(RevisionForeignKey::from),
         _ => None,
     };
-    let twin = has_twin(&planned.op, &statements, target, plan.dialect());
+    // A column the target holds generated only as a live catalog fact (a
+    // downgrade toward the database) is not in the IR Alembic's twin is
+    // built from: the pass's statement, as written.
+    let live_generated = match &planned.op {
+        MigrationOp::AddColumn { table, column } => plan.target.model(table).is_some_and(|model| {
+            plan.target.holds_generated(model, column)
+                && model
+                    .columns
+                    .iter()
+                    .any(|col| &col.name == column && col.generated.is_none())
+        }),
+        _ => false,
+    };
+    let twin = !live_generated && has_twin(&planned.op, &statements, target, plan.dialect());
     let index = match &planned.op {
         MigrationOp::RedefineIndex { table, name } => {
             Some(crate::declared_index(target, table, name).ok_or_else(|| {
@@ -611,8 +624,20 @@ fn has_twin(
                 && model.is_some_and(|model| inline_constraint(model, column));
             !(has_default || inline)
         }
-        MigrationOp::AddTable { .. }
-        | MigrationOp::DropTable { .. }
+        // SQLite stores a generated column's text as written, its range
+        // guard included, which `sa.Computed` cannot write: the pass's
+        // `CREATE TABLE`, as written.
+        MigrationOp::AddTable { table } => {
+            dialect != Dialect::Sqlite
+                || !target
+                    .payload
+                    .models
+                    .iter()
+                    .filter(|model| &model.table_name == table)
+                    .flat_map(|model| &model.columns)
+                    .any(|col| col.generated.is_some())
+        }
+        MigrationOp::DropTable { .. }
         | MigrationOp::RenameTable { .. }
         | MigrationOp::RenameColumn { .. }
         | MigrationOp::DropColumn { .. }
@@ -624,7 +649,11 @@ fn has_twin(
         | MigrationOp::RedefineIndex { .. }
         | MigrationOp::AddForeignKey { .. }
         | MigrationOp::DropForeignKey { .. } => true,
-        MigrationOp::AddEnumLabel { .. }
+        // Alembic has no op that changes a generated expression or drops
+        // one: the pass's statement, as written.
+        MigrationOp::AlterGeneratedExpression { .. }
+        | MigrationOp::DropGeneratedExpression { .. }
+        | MigrationOp::AddEnumLabel { .. }
         | MigrationOp::CreateEnumType { .. }
         | MigrationOp::DropEnumType { .. }
         | MigrationOp::RenameEnumLabel { .. }
@@ -701,6 +730,8 @@ fn op_column(op: &MigrationOp) -> Option<&str> {
         MigrationOp::AddColumn { column, .. }
         | MigrationOp::DropColumn { column, .. }
         | MigrationOp::AlterColumnType { column, .. }
+        | MigrationOp::AlterGeneratedExpression { column, .. }
+        | MigrationOp::DropGeneratedExpression { column, .. }
         | MigrationOp::AlterColumnNullability { column, .. }
         | MigrationOp::DropDefault { column, .. }
         | MigrationOp::AddForeignKey { column, .. }

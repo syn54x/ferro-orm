@@ -4,10 +4,20 @@
 //! `ferro-migrate` and (eventually) the runtime schema emitter.
 
 mod policy_expr;
+mod value_expr;
+
+pub use value_expr::{
+    NullRule, VALUE_FUNCTIONS, ValueColumn, ValueFunction, ValueSignature, ValueType, ValueTyping,
+    check_expr_columns, first_failing_step, generated_storage_refusal, literal_type,
+    render_generated_clause, render_sqlite_generated_guard, render_stored_generated_clause,
+    render_value_expr, schema_value_column, sqlite_computes_as_double, sqlite_double,
+    sqlite_guard_column, sqlite_guard_name, sqlite_step_terms, type_value_expr, value_column,
+    value_expr_columns, value_family_annotations, value_function, value_step_can_fail,
+};
 
 use std::collections::BTreeMap;
 
-use ferro_schema_ir::SchemaColumn;
+use ferro_schema_ir::{SchemaColumn, ValueExpr};
 use sea_query::{ColumnDef, ForeignKeyAction};
 
 /// The one SQL dialect / database backend Ferro targets. Selects both the
@@ -508,6 +518,32 @@ pub fn resolve_column_storage(
     canonical_from_schema_column(col, dialect).map(ResolvedStorage::Scalar)
 }
 
+/// The SQLite range guard of generated column `col` of a table with
+/// `columns`, as its constraint name and CHECK body: the one decision every
+/// door's SQLite `CREATE TABLE` frames as `CONSTRAINT "<name>" CHECK
+/// (<body>)` after the column's `STORED`. `None` for a plain column, a
+/// column whose Postgres storage is no scalar, or an expression nothing in
+/// which can overflow.
+///
+/// # Errors
+/// The column's storage does not resolve, or its expression does not
+/// render ([`render_value_expr`]).
+pub fn sqlite_generated_guard(
+    col: &SchemaColumn,
+    columns: &[SchemaColumn],
+) -> Result<Option<(String, String)>, String> {
+    let Some(expr) = &col.generated else {
+        return Ok(None);
+    };
+    let ResolvedStorage::Scalar(storage) = resolve_column_storage(col, Dialect::Postgres)? else {
+        return Ok(None);
+    };
+    Ok(
+        render_sqlite_generated_guard(&col.name, storage, expr, columns)?
+            .map(|body| (sqlite_guard_name(&col.name), body)),
+    )
+}
+
 /// The idempotent `CREATE TYPE ... AS ENUM` guard for a native Postgres enum.
 /// Same DO-block pattern as [`render_db_check`]: it only *adds when absent*
 /// (schema-scoped via `current_schema()`), so a second boot against an
@@ -945,20 +981,86 @@ pub fn table_check_constraint_name(table_lower: &str, suffix: &str) -> String {
     raw
 }
 
-/// Render a structured check predicate to its CHECK body SQL fragment.
-pub fn render_check_expr(expr: &ferro_schema_ir::CheckExpr) -> String {
-    match expr {
-        ferro_schema_ir::CheckExpr::And { left, right } => format!(
-            "({}) AND ({})",
-            render_check_expr(left),
-            render_check_expr(right)
-        ),
-        ferro_schema_ir::CheckExpr::Or { left, right } => format!(
-            "({}) OR ({})",
-            render_check_expr(left),
-            render_check_expr(right)
-        ),
-        ferro_schema_ir::CheckExpr::Not { child } => format!("NOT ({})", render_check_expr(child)),
+/// Render a structured check predicate to its CHECK body SQL fragment, for
+/// `dialect` over the table's `columns`.
+///
+/// Every kind but `compare` renders the same on both dialects. A `compare`
+/// renders each operand through [`render_value_expr`], the whole comparison
+/// parenthesised, so a check calling a value function reads as a generated
+/// column's expression does.
+///
+/// On SQLite each comparison with a step that can fail ([`value_step_can_fail`]) is
+/// `CASE WHEN NOT (<step terms>) THEN abs(-9223372036854775807 - 1) ELSE (<comparison>) END`:
+/// one [`sqlite_step_terms`] term per step of its operands. Postgres raises
+/// on a step that overflows when it evaluates the comparison; a failed term
+/// makes SQLite raise there too (`integer overflow`) instead of judging a
+/// real or `inf`, so both report a `DataError`. The guard sits on the
+/// comparison, so a conjunct both databases skip (`kind = 2 AND ...` with
+/// `kind` 1) computes nothing on either, and since it raises rather than
+/// returning false, `NOT` cannot invert it. A `NULL` step passes. A check
+/// with such a step under an `OR` is refused when it is declared, as
+/// Postgres does not define which side of an `OR` it evaluates. The
+/// Postgres body carries no terms.
+///
+/// # Errors
+/// As [`render_value_expr`]: a call of a function the table lacks.
+pub fn render_check_expr(
+    expr: &ferro_schema_ir::CheckExpr,
+    dialect: Dialect,
+    columns: &[ferro_schema_ir::SchemaColumn],
+) -> Result<String, String> {
+    render_check_predicate(expr, dialect, columns)
+}
+
+/// Whether a table check computes a step that can fail ([`value_step_can_fail`]): a write to
+/// its table can then fail computing the check, on either database.
+pub fn table_check_computes(
+    check: &ferro_schema_ir::SchemaTableCheck,
+    columns: &[ferro_schema_ir::SchemaColumn],
+) -> bool {
+    check_step_terms(&check.predicate, columns).is_ok_and(|terms| !terms.is_empty())
+}
+
+/// The [`sqlite_step_terms`] of every comparison in a check, in order.
+fn check_step_terms(
+    expr: &ferro_schema_ir::CheckExpr,
+    columns: &[ferro_schema_ir::SchemaColumn],
+) -> Result<Vec<String>, String> {
+    let mut terms = Vec::new();
+    let mut stack = vec![expr];
+    while let Some(expr) = stack.pop() {
+        match expr {
+            ferro_schema_ir::CheckExpr::And { left, right }
+            | ferro_schema_ir::CheckExpr::Or { left, right } => {
+                stack.push(right);
+                stack.push(left);
+            }
+            ferro_schema_ir::CheckExpr::Not { child } => stack.push(child),
+            ferro_schema_ir::CheckExpr::Compare { left, right, .. } => {
+                terms.extend(sqlite_step_terms(left, columns)?);
+                terms.extend(sqlite_step_terms(right, columns)?);
+            }
+            _ => {}
+        }
+    }
+    Ok(terms)
+}
+
+/// The check body, each SQLite comparison with arithmetic guarded.
+fn render_check_predicate(
+    expr: &ferro_schema_ir::CheckExpr,
+    dialect: Dialect,
+    columns: &[ferro_schema_ir::SchemaColumn],
+) -> Result<String, String> {
+    let render = |expr: &ferro_schema_ir::CheckExpr| render_check_predicate(expr, dialect, columns);
+    Ok(match expr {
+        ferro_schema_ir::CheckExpr::And { left, right } => {
+            format!("({}) AND ({})", render(left)?, render(right)?)
+        }
+        ferro_schema_ir::CheckExpr::Or { left, right } => {
+            format!("({}) OR ({})", render(left)?, render(right)?)
+        }
+        ferro_schema_ir::CheckExpr::Not { child } => format!("NOT ({})", render(child)?),
         ferro_schema_ir::CheckExpr::IsNull { column } => {
             format!("{} IS NULL", quote_ident(column))
         }
@@ -966,11 +1068,51 @@ pub fn render_check_expr(expr: &ferro_schema_ir::CheckExpr) -> String {
             format!("{} IS NOT NULL", quote_ident(column))
         }
         ferro_schema_ir::CheckExpr::Cmp { column, op, other } => {
+            // A plain comparison is outside value parity (ADR-0059): it renders
+            // as it always has, and each database compares it its own way.
             let rhs = match other {
                 ferro_schema_ir::CheckOperand::Column { name } => quote_ident(name),
                 ferro_schema_ir::CheckOperand::Literal { token } => token.clone(),
             };
             format!("{} {} {}", quote_ident(column), check_cmp_op_sql(*op), rhs)
+        }
+        ferro_schema_ir::CheckExpr::Compare { left, op, right } => {
+            // The declaration's typing refuses an operand it cannot type;
+            // one that reaches the renderer untyped never meets a float.
+            let family = |operand: &ValueExpr| {
+                type_value_expr(operand, &|name| schema_value_column(columns, name))
+                    .ok()
+                    .map(|typed| typed.family)
+            };
+            let (lhs, rhs) = sqlite_double_operands(
+                dialect,
+                (
+                    left,
+                    family(left),
+                    render_value_expr(left, dialect, columns)?,
+                ),
+                (
+                    right,
+                    family(right),
+                    render_value_expr(right, dialect, columns)?,
+                ),
+            );
+            let comparison = format!("({lhs} {} {rhs})", check_cmp_op_sql(*op));
+            let terms = if dialect == Dialect::Sqlite {
+                check_step_terms(expr, columns)?
+            } else {
+                Vec::new()
+            };
+            if terms.is_empty() {
+                comparison
+            } else {
+                // abs() of the smallest 64-bit integer is SQLite's own runtime
+                // `integer overflow` error: the CHECK raises it where Postgres raises.
+                format!(
+                    "CASE WHEN NOT ({}) THEN abs(-9223372036854775807 - 1) ELSE {comparison} END",
+                    terms.join(" AND ")
+                )
+            }
         }
         ferro_schema_ir::CheckExpr::In { column, values } => {
             format!("{} IN ({})", quote_ident(column), values.join(", "))
@@ -978,7 +1120,30 @@ pub fn render_check_expr(expr: &ferro_schema_ir::CheckExpr) -> String {
         ferro_schema_ir::CheckExpr::Like { column, pattern } => {
             format!("{} LIKE {}", quote_ident(column), pattern)
         }
-    }
+    })
+}
+
+/// The two operands of a check comparison as rendered, an integer beside
+/// a float cast to `real` on SQLite ([`sqlite_computes_as_double`]), so
+/// both databases compare it as a double. Postgres already does.
+fn sqlite_double_operands(
+    dialect: Dialect,
+    left: (&ValueExpr, Option<ValueType>, String),
+    right: (&ValueExpr, Option<ValueType>, String),
+) -> (String, String) {
+    let side = |(operand, family, sql): &(&ValueExpr, Option<ValueType>, String),
+                other: Option<ValueType>| {
+        match (family, other) {
+            (Some(family), Some(other))
+                if dialect == Dialect::Sqlite
+                    && sqlite_computes_as_double(operand, *family, other) =>
+            {
+                sqlite_double(sql)
+            }
+            _ => sql.clone(),
+        }
+    };
+    (side(&left, right.1), side(&right, left.1))
 }
 
 fn check_cmp_op_sql(op: ferro_schema_ir::CheckCmpOp) -> &'static str {
@@ -992,9 +1157,18 @@ fn check_cmp_op_sql(op: ferro_schema_ir::CheckCmpOp) -> &'static str {
     }
 }
 
-/// The CHECK body for a table check — byte-identical across emitters (I-1).
-pub fn render_table_check_body(check: &ferro_schema_ir::SchemaTableCheck) -> String {
-    render_check_expr(&check.predicate)
+/// The CHECK body for a table check on `dialect`, over its table's
+/// `columns` — byte-identical across emitters (I-1).
+///
+/// # Errors
+/// As [`render_check_expr`], naming the check.
+pub fn render_table_check_body(
+    check: &ferro_schema_ir::SchemaTableCheck,
+    dialect: Dialect,
+    columns: &[ferro_schema_ir::SchemaColumn],
+) -> Result<String, String> {
+    render_check_expr(&check.predicate, dialect, columns)
+        .map_err(|message| format!("Cannot render CHECK constraint '{}': {message}", check.name))
 }
 
 /// The CHECK body for a `db_check` enum constraint — byte-identical across the
@@ -1216,6 +1390,29 @@ pub fn render_rename_column(table: &str, old: &str, new: &str) -> String {
     )
 }
 
+/// `ALTER TABLE "t" ALTER COLUMN "c" SET EXPRESSION AS (<body>)`: a stored
+/// generated column's expression changed in place, every row recomputed.
+/// Postgres 17 and later; SQLite rebuilds the table instead. `body` is the
+/// rendered value expression ([`render_value_expr`]).
+pub fn render_set_generated_expression(table: &str, column: &str, body: &str) -> String {
+    format!(
+        "ALTER TABLE {} ALTER COLUMN {} SET EXPRESSION AS ({body})",
+        quote_ident(table),
+        quote_ident(column)
+    )
+}
+
+/// `ALTER TABLE "t" ALTER COLUMN "c" DROP EXPRESSION`: a generated column
+/// made plain, its stored values kept. Postgres only; SQLite rebuilds the
+/// table instead.
+pub fn render_drop_generated_expression(table: &str, column: &str) -> String {
+    format!(
+        "ALTER TABLE {} ALTER COLUMN {} DROP EXPRESSION",
+        quote_ident(table),
+        quote_ident(column)
+    )
+}
+
 /// `ALTER INDEX "old" RENAME TO "new"` — an `idx_` / `uq_` name a rename
 /// drags (ADR-0032). Postgres only: SQLite has no index rename, so it drops
 /// the index and creates it under the new name.
@@ -1373,18 +1570,23 @@ pub fn declared_check_names(model: &ferro_schema_ir::SchemaModel) -> Vec<String>
 ///
 /// `mode` appends ` NOT VALID` to the Postgres ADD ([`ConstraintMode`]); every
 /// door but the generator's staged constraint passes `Plain`.
+///
+/// # Errors
+/// A table check whose body does not render ([`render_table_check_body`]).
 pub fn render_check_addition(
     table: &str,
     model: &ferro_schema_ir::SchemaModel,
     name: &str,
     dialect: Dialect,
     mode: ConstraintMode,
-) -> Option<CheckEmission> {
+) -> Result<Option<CheckEmission>, String> {
     if let Some(check) = model.table_checks.iter().find(|check| check.name == name) {
-        return Some(render_add_table_check(table, check, dialect, mode));
+        return render_add_table_check(table, model, check, dialect, mode).map(Some);
     }
-    let check = model.checks.iter().find(|check| check.name == name)?;
-    Some(match dialect {
+    let Some(check) = model.checks.iter().find(|check| check.name == name) else {
+        return Ok(None);
+    };
+    Ok(Some(match dialect {
         Dialect::Postgres => render_db_check(table, check, dialect, mode),
         Dialect::Sqlite => CheckEmission {
             statement: None,
@@ -1401,7 +1603,7 @@ pub fn render_check_addition(
                 ),
             )),
         },
-    })
+    }))
 }
 
 /// `ALTER TABLE … ADD CONSTRAINT <name> <definition>` for a CHECK put back
@@ -1421,17 +1623,18 @@ pub fn render_check_restore(table: &str, name: &str, definition: &str) -> String
 /// The table-check half of [`render_check_addition`].
 fn render_add_table_check(
     table: &str,
+    model: &ferro_schema_ir::SchemaModel,
     check: &ferro_schema_ir::SchemaTableCheck,
     dialect: Dialect,
     mode: ConstraintMode,
-) -> CheckEmission {
-    match dialect {
+) -> Result<CheckEmission, String> {
+    Ok(match dialect {
         Dialect::Postgres => CheckEmission {
             statement: Some(format!(
                 "ALTER TABLE {} ADD CONSTRAINT {} CHECK ({}){}",
                 quote_ident(table),
                 quote_ident(&check.name),
-                render_table_check_body(check),
+                render_table_check_body(check, dialect, &model.columns)?,
                 mode.suffix(),
             )),
             inline: None,
@@ -1452,7 +1655,7 @@ fn render_add_table_check(
                 ),
             )),
         },
-    }
+    })
 }
 
 /// Outcome of rendering a CHECK constraint rebuild (ADR-0015).
@@ -1524,7 +1727,9 @@ pub fn render_validate_constraint(table: &str, name: &str) -> String {
 /// `target` is `(name, body)` pairs: a declaration's canonical renderings
 /// ([`declared_check_bodies`]), or a live database's catalog text when the
 /// plan leads to one. One normalizer compares them
-/// ([`normalize_check_definition`], ADR-0015).
+/// ([`normalize_check_definition`], ADR-0015). This decides check drift on
+/// SQLite, which stores the body as written; on Postgres the planner
+/// compares the bodies as Postgres printed them (ADR-0060).
 ///
 /// Absent-live names are an add (`missing_check_names`, #343), not a rebuild.
 /// Live names the target does not hold are leftover handling (#345).
@@ -1542,18 +1747,27 @@ pub fn drifted_check_names(target: &[(String, String)], live: &[(String, String)
         .collect()
 }
 
-/// Every CHECK the model declares as `(name, canonical body)`, table checks
-/// first: the bodies [`render_check_addition`] writes.
-pub fn declared_check_bodies(model: &ferro_schema_ir::SchemaModel) -> Vec<(String, String)> {
+/// Every CHECK the model declares as `(name, canonical body)` on `dialect`,
+/// table checks first: the bodies [`render_check_addition`] writes.
+///
+/// # Errors
+/// The first table check whose body does not render.
+pub fn declared_check_bodies(
+    model: &ferro_schema_ir::SchemaModel,
+    dialect: Dialect,
+) -> Result<Vec<(String, String)>, String> {
     model
         .table_checks
         .iter()
-        .map(|check| (check.name.clone(), render_table_check_body(check)))
+        .map(|check| {
+            render_table_check_body(check, dialect, &model.columns)
+                .map(|body| (check.name.clone(), body))
+        })
         .chain(
             model
                 .checks
                 .iter()
-                .map(|check| (check.name.clone(), render_check_body(check))),
+                .map(|check| Ok((check.name.clone(), render_check_body(check)))),
         )
         .collect()
 }
@@ -1563,15 +1777,20 @@ pub fn declared_check_bodies(model: &ferro_schema_ir::SchemaModel) -> Vec<(Strin
 ///
 /// `mode` stages the ADD half ([`ConstraintMode`]; ADR-0043 stages the `ADD`
 /// half of a rebuild on an existing Postgres table like any other add).
+///
+/// # Errors
+/// A table check whose body does not render ([`render_table_check_body`]).
 pub fn render_check_rebuild(
     table: &str,
     model: &ferro_schema_ir::SchemaModel,
     name: &str,
     dialect: Dialect,
     mode: ConstraintMode,
-) -> Option<CheckRebuildEmission> {
-    let body = declared_check_body(model, name)?;
-    Some(match dialect {
+) -> Result<Option<CheckRebuildEmission>, String> {
+    let Some(body) = declared_check_body(model, name, dialect)? else {
+        return Ok(None);
+    };
+    Ok(Some(match dialect {
         Dialect::Postgres => CheckRebuildEmission {
             statements: vec![
                 render_drop_constraint(table, name),
@@ -1599,18 +1818,28 @@ pub fn render_check_rebuild(
                 ),
             )),
         },
-    })
+    }))
 }
 
-fn declared_check_body(model: &ferro_schema_ir::SchemaModel, name: &str) -> Option<String> {
+/// The canonical body on `dialect` of the check `name` that `model`
+/// declares, a table check or a column check; `None` when it declares none
+/// of that name.
+///
+/// # Errors
+/// A table check whose body does not render ([`render_table_check_body`]).
+pub fn declared_check_body(
+    model: &ferro_schema_ir::SchemaModel,
+    name: &str,
+    dialect: Dialect,
+) -> Result<Option<String>, String> {
     if let Some(check) = model.table_checks.iter().find(|check| check.name == name) {
-        return Some(render_table_check_body(check));
+        return render_table_check_body(check, dialect, &model.columns).map(Some);
     }
-    model
+    Ok(model
         .checks
         .iter()
         .find(|check| check.name == name)
-        .map(render_check_body)
+        .map(render_check_body))
 }
 
 /// Live ferro-owned CHECK names the model no longer declares, in live order
@@ -3878,6 +4107,10 @@ pub enum ReportKind {
         /// folded (`''`, `datetime('now')`).
         was: String,
     },
+    /// A live plain (or `VIRTUAL`) column the model declares stored
+    /// generated, left in place by a plan that drops no data: replacing it
+    /// drops the values it holds.
+    PlainColumnKept,
     // -- the renderer's ---------------------------------------------------
     /// A storage conversion that could reinterpret or destroy stored values,
     /// not executed.
@@ -3936,6 +4169,12 @@ pub enum InPlaceChange {
     AlterColumnNullability,
     /// Drop a column's server default.
     DropDefault,
+    /// Change a generated column's expression.
+    AlterGeneratedExpression,
+    /// Turn a generated column into a plain one.
+    DropGeneratedExpression,
+    /// Add a generated column, or turn a plain column into one.
+    AddGeneratedColumn,
 }
 
 /// [`ReportKind::ForeignDefault`]: `table.column` has the server default
@@ -3962,6 +4201,31 @@ pub fn foreign_default_warning(table: &str, column: &str, was: &str, dialect: Di
         format!(
             "{table}.{column} has default {was} in the database, none declared; it is left \
              in place: {fix}."
+        ),
+    )
+}
+
+/// [`ReportKind::PlainColumnKept`]: `table.column` is a plain column in the
+/// database and stored generated in the model, and a plan that drops no data
+/// leaves it. Every insert then leaves the column out, which a `NOT NULL`
+/// column refuses. The sentence names the fix on `dialect`:
+/// `migrate_destructive` or a migration on Postgres; a migration on SQLite,
+/// whose pass never rebuilds. It holds until someone acts, so it recurs.
+pub fn plain_column_kept_warning(table: &str, column: &str, dialect: Dialect) -> Report {
+    let fix = match dialect {
+        Dialect::Postgres => {
+            "connect(..., migrate_destructive=True) replaces it, or `ferro migrate new` \
+             writes the change"
+        }
+        Dialect::Sqlite => "`ferro migrate new` replaces it by rebuilding the table",
+    };
+    Report::recurring(
+        ReportKind::PlainColumnKept,
+        Subject::column(table, column),
+        format!(
+            "{table}.{column} is a plain column in the database and generated in the model; \
+             replacing it drops its values, so it is left in place, and an insert that \
+             leaves it out fails while it is NOT NULL: {fix}."
         ),
     )
 }
@@ -4069,6 +4333,20 @@ pub fn primary_key_kept_warning(table: &str, declared: &[String], live: &[String
             table,
             declared.join(", "),
             live.join(", "),
+        ),
+    )
+}
+
+/// [`ReportKind::PrimaryKeyKept`]: the primary-key column `table.column`
+/// changes type, which no door runs in place, so it keeps its type; `recipe`
+/// is the primary-key recipe that makes the change.
+pub fn primary_key_type_kept_warning(table: &str, column: &str, recipe: &str) -> Report {
+    Report::new(
+        ReportKind::PrimaryKeyKept,
+        Subject::column(table, column),
+        format!(
+            "column \"{table}\".\"{column}\" is in the primary key and changes type, which \
+             no door runs in place, so it keeps its type; {recipe}"
         ),
     )
 }
@@ -4303,6 +4581,61 @@ impl std::error::Error for HintError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A plain check (no `compare`) renders the same on both dialects and
+    // over any columns, so the plain-check tests below call these shims; the
+    // `compare` tests call the renderers through `super::`.
+    fn render_check_expr(expr: &ferro_schema_ir::CheckExpr) -> String {
+        super::render_check_expr(expr, Dialect::Postgres, &[]).expect("a plain check renders")
+    }
+
+    fn render_table_check_body(check: &ferro_schema_ir::SchemaTableCheck) -> String {
+        super::render_table_check_body(check, Dialect::Postgres, &[])
+            .expect("a plain check renders")
+    }
+
+    fn declared_check_bodies(model: &ferro_schema_ir::SchemaModel) -> Vec<(String, String)> {
+        super::declared_check_bodies(model, Dialect::Postgres).expect("plain checks render")
+    }
+
+    fn render_check_addition(
+        table: &str,
+        model: &ferro_schema_ir::SchemaModel,
+        name: &str,
+        dialect: Dialect,
+        mode: ConstraintMode,
+    ) -> Option<CheckEmission> {
+        super::render_check_addition(table, model, name, dialect, mode)
+            .expect("a plain check renders")
+    }
+
+    fn render_check_rebuild(
+        table: &str,
+        model: &ferro_schema_ir::SchemaModel,
+        name: &str,
+        dialect: Dialect,
+        mode: ConstraintMode,
+    ) -> Option<CheckRebuildEmission> {
+        super::render_check_rebuild(table, model, name, dialect, mode)
+            .expect("a plain check renders")
+    }
+
+    #[test]
+    fn a_generated_expression_is_set_and_dropped_in_place_on_postgres() {
+        assert_eq!(
+            render_set_generated_expression(
+                "transaction",
+                "direction",
+                "sign(CAST(\"amount_minor\" AS bigint))"
+            ),
+            "ALTER TABLE \"transaction\" ALTER COLUMN \"direction\" SET EXPRESSION AS \
+             (sign(CAST(\"amount_minor\" AS bigint)))"
+        );
+        assert_eq!(
+            render_drop_generated_expression("transaction", "direction"),
+            "ALTER TABLE \"transaction\" ALTER COLUMN \"direction\" DROP EXPRESSION"
+        );
+    }
 
     #[test]
     fn db_type_tokens_match_canonical_vocabulary() {
@@ -5086,6 +5419,195 @@ mod tests {
     }
 
     #[test]
+    fn a_check_compares_a_bigint_beside_a_float_as_postgres_does() {
+        use ferro_schema_ir::{CheckCmpOp, CheckExpr, CheckOperand, ValueBinaryOp, ValueExpr};
+        let columns = [
+            col_with_db_type("a", "integer", None, Some("bigint")),
+            col_with_db_type("x", "number", None, None),
+        ];
+        let render =
+            |expr: &CheckExpr, dialect| super::render_check_expr(expr, dialect, &columns).unwrap();
+        let cmp = |other| CheckExpr::Cmp {
+            column: "a".to_string(),
+            op: CheckCmpOp::Ne,
+            other,
+        };
+        // A plain comparison is outside value parity: it renders as before
+        // the value expressions, on both dialects, whatever its columns' types.
+        let float_column = cmp(CheckOperand::Column {
+            name: "x".to_string(),
+        });
+        for dialect in [Dialect::Sqlite, Dialect::Postgres] {
+            assert_eq!(render(&float_column, dialect), "\"a\" <> \"x\"");
+        }
+        for literal in ["9007199254740992.0", "0"] {
+            let plain = cmp(CheckOperand::Literal {
+                token: literal.to_string(),
+            });
+            for dialect in [Dialect::Sqlite, Dialect::Postgres] {
+                assert_eq!(render(&plain, dialect), format!("\"a\" <> {literal}"));
+            }
+        }
+        // A value expression's float literal is a double on Postgres.
+        let compare = CheckExpr::Compare {
+            left: ValueExpr::Binary {
+                op: ValueBinaryOp::Add,
+                left: Box::new(ValueExpr::Column {
+                    name: "a".to_string(),
+                }),
+                right: Box::new(ValueExpr::Literal {
+                    token: "0".to_string(),
+                }),
+            },
+            op: CheckCmpOp::Ne,
+            right: ValueExpr::Literal {
+                token: "9007199254740992.0".to_string(),
+            },
+        };
+        assert!(
+            render(&compare, Dialect::Sqlite)
+                .ends_with("ELSE (CAST((\"a\" + 0) AS real) <> 9007199254740992.0) END"),
+            "{}",
+            render(&compare, Dialect::Sqlite)
+        );
+        assert_eq!(
+            render(&compare, Dialect::Postgres),
+            "((\"a\" + 0) <> CAST(9007199254740992.0 AS double precision))"
+        );
+    }
+
+    fn abs_amount_over_1000() -> ferro_schema_ir::CheckExpr {
+        use ferro_schema_ir::{CheckCmpOp, CheckExpr, ValueExpr};
+        CheckExpr::Compare {
+            left: ValueExpr::Func {
+                name: "abs".to_string(),
+                args: vec![ValueExpr::Column {
+                    name: "amount".to_string(),
+                }],
+            },
+            op: CheckCmpOp::Gt,
+            right: ValueExpr::Literal {
+                token: "1000".to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn a_check_comparing_value_expressions_renders_them_per_dialect() {
+        let bigint = [col_with_db_type("amount", "integer", None, Some("bigint"))];
+        assert_eq!(
+            super::render_check_expr(&abs_amount_over_1000(), Dialect::Postgres, &bigint),
+            Ok("(abs(\"amount\") > 1000)".to_string())
+        );
+        // `abs(-2**63)` raises on both; SQLite's guard names the step.
+        let guarded = "CASE WHEN NOT (typeof(abs(\"amount\")) IN ('integer', 'null')) \
+            THEN abs(-9223372036854775807 - 1) ELSE (abs(\"amount\") > 1000) END";
+        assert_eq!(
+            super::render_check_expr(&abs_amount_over_1000(), Dialect::Sqlite, &bigint),
+            Ok(guarded.to_string())
+        );
+        // An `int` field is `integer` on Postgres, widened to 64 bits as a
+        // generated column's expression is; SQLite computes at 64 bits.
+        let int = [col_with_db_type("amount", "integer", None, None)];
+        assert_eq!(
+            super::render_check_expr(&abs_amount_over_1000(), Dialect::Postgres, &int),
+            Ok("(abs(CAST(\"amount\" AS bigint)) > 1000)".to_string())
+        );
+        assert_eq!(
+            super::render_check_expr(&abs_amount_over_1000(), Dialect::Sqlite, &int),
+            Ok(guarded.to_string())
+        );
+    }
+
+    #[test]
+    fn a_sqlite_check_guards_each_comparison_computing_arithmetic() {
+        use ferro_schema_ir::{CheckCmpOp, CheckExpr, ValueBinaryOp, ValueExpr};
+        let column = |name: &str| {
+            Box::new(ValueExpr::Column {
+                name: name.to_string(),
+            })
+        };
+        let sum_over_zero = |left: &str, right: &str| CheckExpr::Compare {
+            left: ValueExpr::Binary {
+                op: ValueBinaryOp::Add,
+                left: column(left),
+                right: column(right),
+            },
+            op: CheckCmpOp::Gt,
+            right: ValueExpr::Literal {
+                token: "0".to_string(),
+            },
+        };
+        let expr = CheckExpr::Not {
+            child: Box::new(CheckExpr::And {
+                left: Box::new(sum_over_zero("x", "y")),
+                right: Box::new(sum_over_zero("m", "n")),
+            }),
+        };
+        let columns = [
+            col_with_db_type("x", "number", None, None),
+            col_with_db_type("y", "number", None, None),
+            col_with_db_type("m", "integer", None, Some("bigint")),
+            col_with_db_type("n", "integer", None, Some("bigint")),
+        ];
+        let body = "NOT ((((\"x\" + \"y\") > 0)) AND (((\"m\" + \"n\") > 0)))";
+        assert_eq!(
+            super::render_check_expr(&expr, Dialect::Postgres, &columns),
+            Ok(body.to_string())
+        );
+        assert_eq!(
+            super::render_check_expr(&expr, Dialect::Sqlite, &columns),
+            Ok(
+                "NOT ((CASE WHEN NOT ((abs((\"x\" + \"y\")) <= 1.7976931348623157e308 \
+                OR abs(\"x\") > 1.7976931348623157e308 OR abs(\"y\") > 1.7976931348623157e308)) \
+                THEN abs(-9223372036854775807 - 1) ELSE ((\"x\" + \"y\") > 0) END) \
+                AND (CASE WHEN NOT (typeof((\"m\" + \"n\")) IN ('integer', 'null')) \
+                THEN abs(-9223372036854775807 - 1) ELSE ((\"m\" + \"n\") > 0) END))"
+                    .to_string()
+            )
+        );
+        // A comparison with no step that can fail carries no terms.
+        let float_abs = CheckExpr::Compare {
+            left: ValueExpr::Func {
+                name: "abs".to_string(),
+                args: vec![*column("x")],
+            },
+            op: CheckCmpOp::Gt,
+            right: ValueExpr::Literal {
+                token: "1000".to_string(),
+            },
+        };
+        assert_eq!(
+            super::render_check_expr(&float_abs, Dialect::Sqlite, &columns),
+            Ok("(abs(\"x\") > 1000)".to_string())
+        );
+    }
+
+    #[test]
+    fn a_compare_calling_an_unknown_function_does_not_render() {
+        let mut expr = abs_amount_over_1000();
+        if let ferro_schema_ir::CheckExpr::Compare { left, .. } = &mut expr {
+            *left = ferro_schema_ir::ValueExpr::Func {
+                name: "random".to_string(),
+                args: Vec::new(),
+            };
+        }
+        let rendered = super::render_check_expr(
+            &ferro_schema_ir::CheckExpr::Not {
+                child: Box::new(expr),
+            },
+            Dialect::Postgres,
+            &[],
+        );
+        assert!(
+            rendered
+                .as_ref()
+                .is_err_and(|e| e.contains("unknown value function 'random'")),
+            "{rendered:?}"
+        );
+    }
+
+    #[test]
     fn a_restored_check_keeps_the_catalog_body_verbatim() {
         assert_eq!(
             render_check_restore("card", "ck_card_legacy", "CHECK ((id > 0))"),
@@ -5185,6 +5707,7 @@ mod tests {
             enum_retired_labels: Default::default(),
             default_factory: None,
             retired: false,
+            generated: None,
         }
     }
 
@@ -5215,6 +5738,7 @@ mod tests {
             enum_retired_labels: Default::default(),
             default_factory: None,
             retired: false,
+            generated: None,
         }
     }
 
@@ -5506,6 +6030,7 @@ mod tests {
             enum_retired_labels: Default::default(),
             default_factory: None,
             retired: false,
+            generated: None,
         };
         assert_eq!(
             logical_canonical_from_schema_column(&col, Dialect::Postgres),
@@ -5539,6 +6064,7 @@ mod tests {
             enum_retired_labels: Default::default(),
             default_factory: None,
             retired: false,
+            generated: None,
         };
         assert!(logical_canonical_from_schema_column(&col, Dialect::Postgres).is_err());
     }

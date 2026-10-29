@@ -22,6 +22,7 @@ from .._core import (
 )
 from ..base import ForeignKey
 from ..checks import TableCheckSpec, compile_table_checks
+from ..generated import GeneratedColumnSpec, compile_generated_columns
 from ..columns import (
     ColumnSpec,
     build_column_specs,
@@ -35,10 +36,12 @@ from ..composite_uniques import normalized_composite_uniques
 from ..registry import REGISTRY, ir_fingerprint
 from ..rowsecurity import RowSecurity, _declared_row_security, compile_row_security
 
-# Schema IR v3 adds the optional envelope key `replaces`, a squash's witness
-# (ADR-0056), which the compiler never writes; v2 records rename hints
-# (`renamed_from`, ADR-0032). Every earlier snapshot keeps loading (ADR-0023).
-_IR_VERSION = 3
+# Schema IR v4 adds the optional column key `generated`, a generated column's
+# value expression (ADR-0058); v3 adds the optional envelope key `replaces`, a
+# squash's witness (ADR-0056), which the compiler never writes; v2 records
+# rename hints (`renamed_from`, ADR-0032). Every earlier snapshot keeps
+# loading (ADR-0023).
+_IR_VERSION = 4
 
 
 @dataclass(frozen=True)
@@ -281,6 +284,7 @@ def compile_schema_ir_payload(
     row_security: RowSecurity | None = None,
     rename_hints: RenameHints | None = None,
     default_factories: Mapping[str, str] | None = None,
+    generated: Mapping[str, GeneratedColumnSpec] | None = None,
 ) -> dict[str, Any]:
     """Compile column specs into a SchemaIR payload object (locked shape).
 
@@ -300,6 +304,9 @@ def compile_schema_ir_payload(
         default_factories: Column name to its field's ``default_factory``
             (``uuid.uuid4``), recorded as ``default_factory`` on a column no
             server default stands in for (:func:`declared_default_factories`).
+        generated: Column name to its compiled generated expression,
+            recorded as ``generated`` on the column
+            (:func:`ferro.generated.compile_generated_columns`).
 
     Returns:
         A SchemaIR payload object ready to be wrapped in an IR envelope.
@@ -333,6 +340,11 @@ def compile_schema_ir_payload(
         # only on a retired one, so every other envelope stays byte-identical.
         if deduped[entry["name"]].retired:
             entry["retired"] = True
+        # Absent for a plain column, so every other envelope stays
+        # byte-identical (ADR-0058).
+        spec_generated = (generated or {}).get(entry["name"])
+        if spec_generated is not None:
+            entry["generated"] = spec_generated.expression
 
     foreign_keys: list[dict[str, Any]] = []
     indexes: list[dict[str, Any]] = []
@@ -462,6 +474,7 @@ def _compile_and_persist_model_envelope(
     row_security: RowSecurity | None = None,
     rename_hints: RenameHints | None = None,
     default_factories: Mapping[str, str] | None = None,
+    generated: Mapping[str, GeneratedColumnSpec] | None = None,
 ) -> dict[str, Any]:
     """Compile one model or join table to SchemaIR and persist its envelope.
 
@@ -480,6 +493,7 @@ def _compile_and_persist_model_envelope(
         row_security=row_security,
         rename_hints=rename_hints,
         default_factories=default_factories,
+        generated=generated,
     )
     envelope = wrap_schema_ir(payload)
     _persist_schema_ir_envelope(model_name, envelope)
@@ -561,6 +575,8 @@ def compile_model_schema_ir(
     # published ones), so a predicate can reference a shadow FK column at class
     # definition and the resolved second pass re-lowers against fresh specs.
     table_checks = compile_table_checks(model_cls, model_name, schema_specs)
+    # Generated expressions lower beside them, against the same fresh specs.
+    generated = compile_generated_columns(model_cls, model_name, schema_specs)
     # Row security lowers against the same fresh column IR for the same reason:
     # a shorthand policy's column type is validated on every compile pass, so a
     # declaration can never outlive the column it scopes on.
@@ -575,6 +591,7 @@ def compile_model_schema_ir(
         row_security=row_security,
         rename_hints=declared_rename_hints(model_cls),
         default_factories=declared_default_factories(model_cls),
+        generated=generated,
     )
     # Publish specs onto the class only after compile + persist succeed, so a
     # composite-validation or persist failure leaves the prior specs in place
@@ -583,6 +600,11 @@ def compile_model_schema_ir(
     # invariant, made atomic.
     model_cls.__ferro_columns__ = specs
     model_cls.__ferro_retired_columns__ = retired
+    # Each generated column and the columns it reads: the write path drops
+    # it, and assigning one of its inputs clears it (ADR-0058).
+    model_cls.__ferro_generated__ = {
+        name: spec.inputs for name, spec in generated.items()
+    }
     # Same choke point caches the PK fact: every ``__ferro_columns__`` refresh
     # re-derives ``__ferro_pk__``, so it can never go stale relative to specs.
     model_cls.__ferro_pk__ = pk_field

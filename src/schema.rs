@@ -602,6 +602,9 @@ pub fn infer_test_schema_columns(schema: &serde_json::Value) -> Vec<ferro_schema
             enum_retired_labels: Default::default(),
             default_factory: None,
             retired: false,
+            generated: raw_col
+                .get("generated")
+                .and_then(|expr| serde_json::from_value(expr.clone()).ok()),
         });
     }
     columns
@@ -799,6 +802,7 @@ mod tests {
                 enum_retired_labels: Default::default(),
                 default_factory: None,
                 retired: false,
+                generated: None,
             }
         }
 

@@ -217,7 +217,7 @@ def test_a_run_becomes_the_migration_new_would_have_written_carrying_its_steps(
     assert int(fix_up[:2]) < int(carried[:2])  # chain order, as new places them
 
     ir = snapshot(project, "0002_epic")
-    assert ir["ir_version"] == 3
+    assert ir["ir_version"] == 4
     assert ir["parent_checksum"] == sha384(
         migrations(project) / "0001_create_author/ir.json"
     )

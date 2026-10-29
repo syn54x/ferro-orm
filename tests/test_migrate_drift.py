@@ -208,6 +208,44 @@ def test_a_text_comparison_check_is_not_rebuilt_on_every_connect(project, pkg, d
     assert migrate_updates_statements(db.url, "ckn_named") == []
 
 
+STOCKED = """
+from ferro import Check
+
+
+class Ckn_Stocked(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    qty: int
+    price: float
+    __ferro_checks__ = (Check("cheap", lambda stocked: stocked.qty < stocked.price),)
+"""
+
+
+def test_a_plain_mixed_type_check_a_released_ferro_wrote_is_not_drift(
+    project, pkg, db, capsys
+):
+    """``qty < price`` over an ``int`` and a ``float`` column is a plain
+    comparison, outside value parity: a SQLite database holds it as
+    ``CHECK ("qty" < "price")``, the text every Ferro release wrote. Put back
+    in that form by hand, it reads clean."""
+    if db.backend != "sqlite":
+        pytest.skip("SQLite keeps the check body as written")
+    configure(project, pkg, db.backend)
+    write_models(project, pkg, STOCKED)
+    new("create_stocked")
+    assert run("migrate", "up", "--url", db.url) == 0
+    capsys.readouterr()
+    [(create,)] = db.rows(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'ckn_stocked'"
+    )
+    old_form = create.replace('CAST("qty" AS real)', '"qty"')
+    assert 'CHECK ("qty" < "price")' in old_form, old_form
+    db.execute('DROP TABLE "ckn_stocked"')
+    db.execute(old_form)
+
+    report = drift_api(db)
+    assert report.lines == [] and report.clean, report.lines
+
+
 PRICED = """
 from decimal import Decimal
 
@@ -365,7 +403,10 @@ def test_a_changed_type_and_nullability_name_both_sides(project, pkg, db, capsys
     db.execute('ALTER TABLE "team" ALTER COLUMN "size" TYPE bigint')
     db.execute('ALTER TABLE "team" ALTER COLUMN "name" DROP NOT NULL')
 
+    # `ck_team_size_ok` reads `size`, which the catalog cannot print the
+    # snapshot's body against while its type differs: a possible difference.
     assert sorted(drift_api(db).lines) == [
+        "ck_team_size_ok check not compared while its column changes type",
         "team.name is nullable, snapshot says NOT NULL",
         "team.size has type bigint, snapshot says int",
     ]

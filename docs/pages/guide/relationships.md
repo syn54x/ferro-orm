@@ -21,17 +21,19 @@ Rustaceans ['Ferris']
 
 `await ferris.team` runs one query and returns the `Team`. `rustaceans.players` is a query that runs when you call a terminal such as `.all()`. Every example on this page runs inside the session this program opens; see [Sessions](connections.md#sessions) for why and how to open one.
 
-Every example on this page is followed by the SQL it sends, captured from Ferro when the example runs. The two creates and the two reads send these statements. PostgreSQL also asks each single-row `INSERT` for the new `id` with `RETURNING`:
+Every example on this page is followed by the SQL it sends, captured from Ferro when the example runs. The two creates and the two reads send these statements. Each single-row `INSERT` asks for the new `id` with `RETURNING`:
 
 === "SQLite"
 
     ```sql
     -- relationships.py:first (sqlite)
     INSERT INTO "team" ("name")
-    VALUES (?);
+    VALUES (?)
+    RETURNING "id";
 
     INSERT INTO "player" ("name", "team_id", "mentor_id")
-    VALUES (?, ?, ?);
+    VALUES (?, ?, ?)
+    RETURNING "id";
 
     SELECT "team"."id", "team"."name"
     FROM "team"
@@ -97,20 +99,23 @@ Each relation has two sides. The forward side is a [`ForeignKey`][ferro.ForeignK
 
 Gordon plays for the Gophers, so the Rustaceans' roster is Corro and Ferris. `rustaceans.players` is a query, so you can filter, order and page it before you run it.
 
-The three creates and the roster query send these statements. PostgreSQL also asks each single-row `INSERT` for the new `id` with `RETURNING`:
+The three creates and the roster query send these statements. Each single-row `INSERT` asks for the new `id` with `RETURNING`:
 
 === "SQLite"
 
     ```sql
     -- relationships.py:one-to-many (sqlite)
     INSERT INTO "player" ("name", "team_id", "mentor_id")
-    VALUES (?, ?, ?);
+    VALUES (?, ?, ?)
+    RETURNING "id";
 
     INSERT INTO "team" ("name")
-    VALUES (?);
+    VALUES (?)
+    RETURNING "id";
 
     INSERT INTO "player" ("name", "team_id", "mentor_id")
-    VALUES (?, ?, ?);
+    VALUES (?, ?, ?)
+    RETURNING "id";
 
     SELECT "player"."id", "player"."mentor_id", "player"."name", "player"."team_id"
     FROM "player"
@@ -249,14 +254,15 @@ Add `unique=True` to a `ForeignKey` to allow at most one child per parent. `Prof
 
 Ferris's profile comes back as one `Profile`. Corro has none, so `await corro.profile` returns `None`. Ferro backs `unique=True` with a unique index on the shadow column, `uq_profile_player_id`, so a second profile for Ferris would fail. That index also serves lookups, so `index=True` next to `unique=True` is redundant, and Ferro warns with a `UserWarning` and ignores it.
 
-The create and the two reads send these statements. PostgreSQL also asks each single-row `INSERT` for the new `id` with `RETURNING`:
+The create and the two reads send these statements. Each single-row `INSERT` asks for the new `id` with `RETURNING`:
 
 === "SQLite"
 
     ```sql
     -- relationships.py:one-to-one (sqlite)
     INSERT INTO "profile" ("bio", "player_id")
-    VALUES (?, ?);
+    VALUES (?, ?)
+    RETURNING "id";
 
     SELECT "profile"."bio", "profile"."id", "profile"."player_id"
     FROM "profile"
@@ -298,17 +304,19 @@ Declare [`ManyToMany(related_name=...)`][ferro.ManyToMany] on one side and a `Ba
 --8<-- "docs/examples/relationships.py:many-to-many"
 ```
 
-Ferris entered both tournaments, and the Spring Open has Ferris and Gordon. The creates, the links and the two reads send these statements. PostgreSQL also asks each single-row `INSERT` for the new `id` with `RETURNING`:
+Ferris entered both tournaments, and the Spring Open has Ferris and Gordon. The creates, the links and the two reads send these statements. Each single-row `INSERT` asks for the new `id` with `RETURNING`:
 
 === "SQLite"
 
     ```sql
     -- relationships.py:many-to-many (sqlite)
     INSERT INTO "tournament" ("name", "winner_id")
-    VALUES (?, ?);
+    VALUES (?, ?)
+    RETURNING "id";
 
     INSERT INTO "tournament" ("name", "winner_id")
-    VALUES (?, ?);
+    VALUES (?, ?)
+    RETURNING "id";
 
     INSERT INTO "player_tournaments" ("player_id", "tournament_id")
     VALUES (?, ?), (?, ?);
@@ -464,14 +472,15 @@ A model can point at itself, for mentors, org charts, threads or category trees.
 
 Crabby's mentor is Ferris, and Ferris's mentees are Crabby. Ferris has no mentor, which the `mentor_id` column allows only because of `nullable=True`. Writing `"Player | None"` instead fails at `connect()` with `RuntimeError: Relationship resolution failed: 'Player | None' not found`.
 
-The create and the two reads send these statements. PostgreSQL also asks each single-row `INSERT` for the new `id` with `RETURNING`:
+The create and the two reads send these statements. Each single-row `INSERT` asks for the new `id` with `RETURNING`:
 
 === "SQLite"
 
     ```sql
     -- relationships.py:self-referential (sqlite)
     INSERT INTO "player" ("name", "team_id", "mentor_id")
-    VALUES (?, ?, ?);
+    VALUES (?, ?, ?)
+    RETURNING "id";
 
     SELECT "player"."id", "player"."mentor_id", "player"."name", "player"."team_id"
     FROM "player"

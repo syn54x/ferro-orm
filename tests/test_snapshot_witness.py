@@ -80,14 +80,14 @@ def dialect_list(backend: str) -> str:
 # -- the format ----------------------------------------------------------------------
 
 
-def test_new_writes_a_v3_snapshot_without_a_witness(project, pkg):
+def test_new_writes_a_v4_snapshot_without_a_witness(project, pkg):
     write_config(project, pkg)
     write_models(project, pkg, AUTHOR)
     new("create_author")
 
     snapshot = migrations(project) / "0001_create_author/ir.json"
     ir = json.loads(snapshot.read_text())
-    assert ir["ir_version"] == 3
+    assert ir["ir_version"] == 4
     assert "replaces" not in ir
 
     loaded = json.loads(_core._load_snapshot(snapshot.read_text()))

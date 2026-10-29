@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from .. import _core
+from ..exceptions import OperationalError
 from . import runner
 from .errors import MigrationRefused
 from .report import RunRefused, StatusReport
@@ -189,6 +190,12 @@ _RENDERERS: dict[str, Callable[[dict[str, Any]], str]] = {
     "DropColumn": lambda op: f"{_column(op)} column is extra",
     "AlterColumnType": _type,
     "AlterColumnNullability": _nullability,
+    "AlterGeneratedExpression": lambda op: (
+        f"{_column(op)} generated expression differs"
+    ),
+    "DropGeneratedExpression": lambda op: (
+        f"{_column(op)} is generated in the database, plain in the snapshot"
+    ),
     "DropDefault": lambda op: (
         f"{_column(op)} has default {op['was']} in the database, none declared"
     ),
@@ -225,6 +232,47 @@ _RENDERERS: dict[str, Callable[[dict[str, Any]], str]] = {
 }
 """One renderer per ``MigrationOp`` variant; a test walks the Rust enum so a
 new variant without a line here fails."""
+
+
+def _carried_line(noun: str) -> Callable[[dict[str, Any], str], str]:
+    def line(op: dict[str, Any], carried: str) -> str:
+        if carried == "changed":
+            return f"{op['name']} {noun} body differs"
+        return f"{op['name']} {noun} not compared while its column changes type"
+
+    return line
+
+
+_CARRIED: dict[str, Callable[[dict[str, Any], str], str]] = {
+    "AddCheck": _carried_line("check"),
+    "AddRowPolicy": _carried_line("policy"),
+}
+"""The add back of a carried artifact, which says what the pair changes."""
+
+_HELD: dict[str, Callable[[dict[str, Any], str], str]] = {
+    "check": lambda op, name: (
+        f"{name} check not compared while its column's type change is withheld"
+    ),
+    "generated_column": lambda op, name: (
+        f"{op['table']}.{name} generated expression not compared while its "
+        "input's type change is withheld"
+    ),
+    "policy": lambda op, name: (
+        f"{name} policy not compared while its column's type change is withheld"
+    ),
+}
+"""What a type change no door runs holds (``held``), each left standing and
+not compared until the change runs: one line each, after the type line,
+ending with the fix that makes the change run."""
+
+
+def _held_lines(op: dict[str, Any]) -> list[str]:
+    held = op["held"]
+    fix = f'resolve the type change of "{op["column"]}" first: {held["fix"]}'
+    return [
+        f"{_HELD[artifact['kind']](op, artifact['name'])}; {fix}"
+        for artifact in held["artifacts"]
+    ]
 
 
 def render_op(op: dict[str, Any]) -> str:
@@ -311,6 +359,7 @@ def _describe(
     compared."""
     if not any(
         op["kind"] in ("AlterColumnType", "AlterColumnNullability", "RedefineIndex")
+        or op.get("replaces") == "own_type"
         for op in operations
     ):
         return operations
@@ -331,7 +380,9 @@ def _describe(
         key = (op.get("table"), op.get("column"))
         before, after = live_columns.get(key), snapshot_columns.get(key)
         if before is not None and after is not None:
-            if op["kind"] == "AlterColumnType":
+            # A generated column whose own type changes is dropped and
+            # added back: its add says the type.
+            if op["kind"] == "AlterColumnType" or op.get("replaces") == "own_type":
                 op = {
                     **op,
                     "live_type": _storage(before, dialect),
@@ -384,7 +435,9 @@ async def against(
         The drift report.
 
     Raises:
-        MigrationRefused: `using` is not an open connection.
+        MigrationRefused: `using` is not an open connection, or on Postgres
+            the role cannot read a table the snapshot holds (the message
+            names the `GRANT SELECT` it needs).
 
     Examples:
         ```python {test=compile reason="needs a migrations project and a database"}
@@ -397,14 +450,57 @@ async def against(
     # One core call reads the snapshot's live tables (and the old table of
     # each live rename hint, ADR-0032) by the pass's own rule (ADR-0047) and
     # plans them toward the snapshot, destructive changes on.
-    plan = await _core._plan_drift(using, json.dumps(snapshot))
+    try:
+        plan = await _core._plan_drift(using, json.dumps(snapshot))
+    except OperationalError as err:
+        # The role cannot read a table drift compares; the message names the
+        # GRANT.
+        if err.sqlstate == "42501":
+            raise MigrationRefused(str(err)) from None
+        raise
     operations = _describe(plan["operations"], plan["live"], snapshot, plan["dialect"])
     return DriftReport(
         against=migration,
-        lines=[render_op(op) for op in operations],
+        lines=_lines(operations),
         operations=operations,
         reports=list(plan["reports"]),
     )
+
+
+def _lines(operations: list[dict[str, Any]]) -> list[str]:
+    """One line per op, a generated column the plan drops and adds back read
+    as one difference, by the reason the planner gives the pair
+    (``replaces``): its type differs, or the live column is not the stored
+    generated one the snapshot declares (its expression differs). One taken
+    down only around a type change of a column it reads has no line: that
+    column's own line says it. A policy or check the planner takes down and
+    puts back around such a change (``carried``) has a line, on its add back,
+    only when what it puts back is not what the table holds: its body
+    differs, or it could not be compared while its column changes type. A
+    type change no door runs names, after its own line, each check,
+    generated column and policy over the column it holds (``held``): none
+    can be compared until the change runs."""
+    lines = []
+    for op in operations:
+        if op.get("held"):
+            lines.append(render_op(op))
+            lines.extend(_held_lines(op))
+            continue
+        replaces = op.get("replaces")
+        carried = op.get("carried")
+        if carried is not None:
+            if carried != "unchanged" and op["kind"] in _CARRIED:
+                lines.append(_CARRIED[op["kind"]](op, carried))
+            continue
+        if replaces is None:
+            lines.append(render_op(op))
+        elif op["kind"] != "AddColumn" or replaces == "input_type":
+            continue
+        elif replaces == "own_type":
+            lines.append(_type(op))
+        else:
+            lines.append(f"{_column(op)} generated expression differs")
+    return lines
 
 
 async def _audit(name: str, database: DatabaseSettings) -> DriftReport:

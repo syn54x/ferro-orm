@@ -17,6 +17,143 @@ pub fn _tracking_table_names() -> (&'static str, &'static str) {
     (crate::run::TRACKING_TABLE, crate::run::FORMAT_TABLE)
 }
 
+/// The value function table as JSON: a list of `{name, signatures}`, each
+/// signature `{args, variadic, result}` over the value type tokens. `ferro.fn`
+/// is pinned to these names.
+///
+/// # Errors
+/// `PyRuntimeError` if the table does not serialize.
+#[pyfunction]
+pub fn _value_function_table() -> PyResult<String> {
+    serde_json::to_string(ferro_ddl_lowering::VALUE_FUNCTIONS)
+        .map_err(|err| pyo3::exceptions::PyRuntimeError::new_err(err.to_string()))
+}
+
+fn value_expr_from_json(tree_json: &str) -> PyResult<ferro_schema_ir::ValueExpr> {
+    serde_json::from_str(tree_json).map_err(|err| {
+        pyo3::exceptions::PyValueError::new_err(format!("Invalid value expression: {err}"))
+    })
+}
+
+fn schema_columns_from_json(columns_json: &str) -> PyResult<Vec<ferro_schema_ir::SchemaColumn>> {
+    serde_json::from_str(columns_json).map_err(|err| {
+        pyo3::exceptions::PyValueError::new_err(format!("Invalid SchemaIR columns: {err}"))
+    })
+}
+
+fn value_type_from_token(token: &str) -> PyResult<ferro_ddl_lowering::ValueType> {
+    ferro_ddl_lowering::ValueType::from_token(token).ok_or_else(|| {
+        pyo3::exceptions::PyValueError::new_err(format!("Unknown value family {token:?}"))
+    })
+}
+
+/// The family token and nullability of a lowered value expression, typed by
+/// `ferro_ddl_lowering::type_value_expr` over the table's columns
+/// (`columns_json`, a list of SchemaIR columns).
+///
+/// # Errors
+/// `TypeError` with the typing's refusal; `ValueError` on malformed JSON.
+#[pyfunction]
+pub fn _value_expr_type(tree_json: String, columns_json: String) -> PyResult<(String, bool)> {
+    let expr = value_expr_from_json(&tree_json)?;
+    let columns = schema_columns_from_json(&columns_json)?;
+    let typed = ferro_ddl_lowering::type_value_expr(&expr, &|name| {
+        ferro_ddl_lowering::schema_value_column(&columns, name)
+    })
+    .map_err(pyo3::exceptions::PyTypeError::new_err)?;
+    Ok((typed.family.token().to_string(), typed.nullable))
+}
+
+/// The first step of a lowered value expression that can fail on a value,
+/// as decided by `ferro_ddl_lowering::value_step_can_fail`, as JSON, or
+/// `None` when no step can.
+///
+/// # Errors
+/// `TypeError` with the typing's refusal; `ValueError` on malformed JSON.
+#[pyfunction]
+pub fn _value_expr_failing_step(
+    tree_json: String,
+    columns_json: String,
+) -> PyResult<Option<String>> {
+    let expr = value_expr_from_json(&tree_json)?;
+    let columns = schema_columns_from_json(&columns_json)?;
+    let step = ferro_ddl_lowering::first_failing_step(&expr, &|name| {
+        ferro_ddl_lowering::schema_value_column(&columns, name)
+    })
+    .map_err(pyo3::exceptions::PyTypeError::new_err)?;
+    step.map(|step| {
+        serde_json::to_string(step)
+            .map_err(|err| pyo3::exceptions::PyValueError::new_err(err.to_string()))
+    })
+    .transpose()
+}
+
+/// The value family one SchemaIR column holds, or `None` for a column no
+/// value expression reads.
+///
+/// # Errors
+/// `ValueError` on a malformed column.
+#[pyfunction]
+pub fn _value_column_family(column_ir_json: String) -> PyResult<Option<String>> {
+    let col: ferro_schema_ir::SchemaColumn =
+        serde_json::from_str(&column_ir_json).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Invalid SchemaIR column: {e}"))
+        })?;
+    Ok(ferro_ddl_lowering::value_column(&col)
+        .family
+        .map(|family| family.token().to_string()))
+}
+
+/// Every value family with its Python annotation, in table order.
+#[pyfunction]
+pub fn _value_family_annotations() -> Vec<(&'static str, &'static str)> {
+    ferro_ddl_lowering::value_family_annotations()
+}
+
+/// Whether a value of family `argument` fits a parameter of `parameter`.
+///
+/// # Errors
+/// `ValueError` on an unknown family token.
+#[pyfunction]
+pub fn _value_family_fits(argument: String, parameter: String) -> PyResult<bool> {
+    Ok(value_type_from_token(&argument)?.fits(value_type_from_token(&parameter)?))
+}
+
+/// Every column a lowered value expression reads, sorted.
+///
+/// # Errors
+/// `ValueError` on malformed JSON.
+#[pyfunction]
+pub fn _value_expr_columns(tree_json: String) -> PyResult<Vec<String>> {
+    let expr = value_expr_from_json(&tree_json)?;
+    Ok(ferro_ddl_lowering::value_expr_columns(&expr)
+        .into_iter()
+        .collect())
+}
+
+/// The refusal of a generated column's Postgres storage, or `None`.
+///
+/// # Errors
+/// `ValueError` on a malformed column; `RuntimeError` when its storage does
+/// not resolve.
+#[pyfunction]
+pub fn _generated_storage_refusal(column_ir_json: String) -> PyResult<Option<String>> {
+    let col: ferro_schema_ir::SchemaColumn =
+        serde_json::from_str(&column_ir_json).map_err(|e| {
+            pyo3::exceptions::PyValueError::new_err(format!("Invalid SchemaIR column: {e}"))
+        })?;
+    Ok(
+        match ferro_ddl_lowering::resolve_column_storage(&col, Dialect::Postgres)
+            .map_err(pyo3::exceptions::PyRuntimeError::new_err)?
+        {
+            ResolvedStorage::Scalar(storage) => {
+                ferro_ddl_lowering::generated_storage_refusal(storage)
+            }
+            ResolvedStorage::PgEnum { .. } => None,
+        },
+    )
+}
+
 #[pyfunction]
 pub fn _ddl_single_index_name(table: String, column: String) -> String {
     ferro_ddl_lowering::single_index_name(&table, &column)
@@ -189,15 +326,26 @@ pub fn _render_check_body(column: String, values: Vec<String>) -> String {
 }
 
 /// Render a table-check CHECK body from a structured predicate JSON object
-/// (the `predicate` field of `SchemaTableCheck`). Byte-identical to the Rust
+/// (the `predicate` field of `SchemaTableCheck`) for `dialect`, over the
+/// table's columns `columns_json` (its `SchemaColumn`s; a check calling a
+/// value function widens by their types). Byte-identical to the Rust
 /// emitters (I-1).
 #[pyfunction]
-pub fn _render_table_check_body(predicate_json: String) -> PyResult<String> {
+#[pyo3(signature = (predicate_json, dialect="postgres".to_string(), columns_json="[]".to_string()))]
+pub fn _render_table_check_body(
+    predicate_json: String,
+    dialect: String,
+    columns_json: String,
+) -> PyResult<String> {
     let predicate: ferro_schema_ir::CheckExpr =
         serde_json::from_str(&predicate_json).map_err(|e| {
             pyo3::exceptions::PyValueError::new_err(format!("Invalid check predicate: {e}"))
         })?;
-    Ok(ferro_ddl_lowering::render_check_expr(&predicate))
+    let columns: Vec<ferro_schema_ir::SchemaColumn> = serde_json::from_str(&columns_json)
+        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Invalid columns: {e}")))?;
+    let dialect = crate::migrate::parse_dialect(&dialect)?;
+    ferro_ddl_lowering::render_check_expr(&predicate, dialect, &columns)
+        .map_err(pyo3::exceptions::PyValueError::new_err)
 }
 
 /// Canonical row-policy name (`rls_<table>_<name>`) — the shared builder the

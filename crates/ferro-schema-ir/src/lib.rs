@@ -206,6 +206,48 @@ pub struct SchemaColumn {
     /// byte-identical.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub retired: bool,
+    /// Generated column (`Field(generated=…)`; schema `ir_version` 4,
+    /// ADR-0058): the value expression the database computes the column
+    /// from on every write. Absent when the column is not generated, so
+    /// every other envelope is byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generated: Option<ValueExpr>,
+}
+
+/// A value expression over one row's columns (ADR-0059): a generated
+/// column's body. Literals carry a pre-rendered SQL token, as checks do.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind")]
+pub enum ValueExpr {
+    /// A column of the same row.
+    #[serde(rename = "column")]
+    Column { name: String },
+    /// A pre-rendered SQL literal token (`1`, `'x'`, `true`).
+    #[serde(rename = "literal")]
+    Literal { token: String },
+    /// An arithmetic operator over two operands.
+    #[serde(rename = "binary")]
+    Binary {
+        op: ValueBinaryOp,
+        left: Box<ValueExpr>,
+        right: Box<ValueExpr>,
+    },
+    /// Unary minus.
+    #[serde(rename = "negate")]
+    Negate { operand: Box<ValueExpr> },
+    /// A call of a function in the value function table.
+    #[serde(rename = "func")]
+    Func { name: String, args: Vec<ValueExpr> },
+}
+
+/// Operator of [`ValueExpr::Binary`].
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ValueBinaryOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
 }
 
 /// An enum class's `__ferro_renamed_labels__` declaration.
@@ -310,6 +352,15 @@ pub enum CheckExpr {
         column: String,
         op: CheckCmpOp,
         other: CheckOperand,
+    },
+    /// A comparison of two value expressions (ADR-0059), emitted only when
+    /// an operand is not a plain column or literal: a plain comparison stays
+    /// [`CheckExpr::Cmp`], so its IR bytes never change.
+    #[serde(rename = "compare")]
+    Compare {
+        left: ValueExpr,
+        op: CheckCmpOp,
+        right: ValueExpr,
     },
     /// Column membership in a pre-rendered literal list.
     #[serde(rename = "in")]
@@ -806,6 +857,79 @@ mod tests {
     }
 
     #[test]
+    fn schema_generated_column_v4_roundtrip() {
+        let fixture =
+            include_str!("../../../tests/fixtures/ir_vectors/schema_generated_column_v4.json");
+        let parsed: serde_json::Value =
+            serde_json::from_str(fixture).expect("schema fixture must parse");
+        let ir = parsed.get("ir").cloned().expect("fixture must contain ir");
+        let envelope: IrEnvelope<SchemaIrPayload> =
+            serde_json::from_value(ir.clone()).expect("schema IR v4 must deserialize");
+        assert_eq!(envelope.ir_version, 4);
+        let generated: Vec<_> = envelope.payload.models[0]
+            .columns
+            .iter()
+            .filter_map(|col| col.generated.as_ref().map(|expr| (col.name.as_str(), expr)))
+            .collect();
+        assert_eq!(
+            generated,
+            [(
+                "direction",
+                &ValueExpr::Func {
+                    name: "sign".to_string(),
+                    args: vec![ValueExpr::Column {
+                        name: "amount_minor".to_string()
+                    }],
+                }
+            )]
+        );
+        let encoded = serde_json::to_value(&envelope).expect("schema IR must serialize");
+        assert_eq!(encoded, ir, "schema v4 round-trip must not drift");
+    }
+
+    #[test]
+    fn schema_check_fn_v4_roundtrip() {
+        let fixture = include_str!("../../../tests/fixtures/ir_vectors/schema_check_fn_v4.json");
+        let parsed: serde_json::Value =
+            serde_json::from_str(fixture).expect("schema fixture must parse");
+        let ir = parsed.get("ir").cloned().expect("fixture must contain ir");
+        let envelope: IrEnvelope<SchemaIrPayload> =
+            serde_json::from_value(ir.clone()).expect("schema IR v4 must deserialize");
+        assert_eq!(envelope.ir_version, 4);
+        assert!(matches!(
+            envelope.payload.models[0].table_checks[0].predicate,
+            CheckExpr::Compare { .. }
+        ));
+        let encoded = serde_json::to_value(&envelope).expect("schema IR must serialize");
+        assert_eq!(encoded, ir, "schema v4 round-trip must not drift");
+    }
+
+    #[test]
+    fn value_expr_binary_ops_serialize_as_their_tokens() {
+        for (op, token) in [
+            (ValueBinaryOp::Add, "add"),
+            (ValueBinaryOp::Sub, "sub"),
+            (ValueBinaryOp::Mul, "mul"),
+            (ValueBinaryOp::Div, "div"),
+        ] {
+            assert_eq!(serde_json::to_value(op).unwrap(), token);
+        }
+        let negate: ValueExpr = serde_json::from_value(serde_json::json!({
+            "kind": "negate",
+            "operand": {"kind": "literal", "token": "1"}
+        }))
+        .unwrap();
+        assert_eq!(
+            negate,
+            ValueExpr::Negate {
+                operand: Box::new(ValueExpr::Literal {
+                    token: "1".to_string()
+                })
+            }
+        );
+    }
+
+    #[test]
     fn a_retired_column_carries_the_flag_and_an_unretired_one_has_no_key() {
         let declared = serde_json::json!({
             "name": "bio",
@@ -930,6 +1054,33 @@ mod tests {
             serde_json::from_value(ir.clone()).expect("schema IR must deserialize");
         let encoded = serde_json::to_value(&envelope).expect("schema IR must serialize");
         assert_eq!(encoded, ir, "schema round-trip must not drift");
+    }
+
+    #[test]
+    fn a_check_comparing_value_expressions_is_the_compare_kind() {
+        let wire = serde_json::json!({
+            "kind": "compare",
+            "left": {"kind": "func", "name": "abs", "args": [{"kind": "column", "name": "amount"}]},
+            "op": "gt",
+            "right": {"kind": "literal", "token": "1000"}
+        });
+        let expr: CheckExpr = serde_json::from_value(wire.clone()).expect("compare deserializes");
+        assert_eq!(
+            expr,
+            CheckExpr::Compare {
+                left: ValueExpr::Func {
+                    name: "abs".to_string(),
+                    args: vec![ValueExpr::Column {
+                        name: "amount".to_string()
+                    }],
+                },
+                op: CheckCmpOp::Gt,
+                right: ValueExpr::Literal {
+                    token: "1000".to_string()
+                },
+            }
+        );
+        assert_eq!(serde_json::to_value(&expr).expect("serializes"), wire);
     }
 
     #[test]

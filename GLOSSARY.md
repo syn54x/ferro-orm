@@ -454,3 +454,15 @@ _Avoid_: Query log, SQL echo, debug SQL, verbose mode
 **Rendered statement**:
 What one `Query` terminal would send, returned by its `.sql()` without sending it: the same SQL and parameters the *statement log* records for the call, produced by the same function, for the database the call would run on. Secrets are `***` here too.
 _Avoid_: Compiled query (that is `compile_query`'s artifact), SQL preview, dry run, pretty-printed query
+
+**Generated column**:
+A column whose value the database computes from other columns of the same row, on every write. The application never writes it; an instance holds the database's value, or `None` while that value is unknown (before the row is saved, or after one of the columns it reads is assigned).
+_Avoid_: Computed column, computed field (Pydantic's `computed_field` is a Python-only value), virtual column, derived field
+
+**Value expression**:
+A lambda body that produces a value from one row's columns, built from columns, literals, arithmetic and the functions in Ferro's function table. A generated column's body is a value expression, and a check compares value expressions.
+_Avoid_: SQL expression, formula, computed expression
+
+**Value parity**:
+The rule that a value expression is admitted only when SQLite and PostgreSQL store the same value for it on every row. Where the two databases disagree (a `NULL` argument, a cast into the column's type, case mapping), the expression is refused when the model is defined.
+_Avoid_: Dialect equivalence, portable SQL

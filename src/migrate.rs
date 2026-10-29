@@ -221,6 +221,21 @@ fn plan_error(err: ferro_migrate::PlanError) -> PyErr {
     pyo3::exceptions::PyValueError::new_err(err.to_string())
 }
 
+/// The live side `live` and `facts` read, refused when it cannot be compared
+/// with `declared` on `dialect` (a live table without facts, a generated
+/// column without its printed pair).
+fn live_side(
+    live: IrEnvelope<SchemaIrPayload>,
+    facts: LiveFacts,
+    declared: &IrEnvelope<SchemaIrPayload>,
+    dialect: Dialect,
+) -> PyResult<Side> {
+    let side = Side::live(live, facts).map_err(plan_error)?;
+    side.check_printed_pairs(declared, dialect)
+        .map_err(plan_error)?;
+    Ok(side)
+}
+
 /// What one auto-migrate pass did (ADR-0049): every statement it sent to the
 /// database, in execution order across the create pass, the type statements
 /// and the reconciliation, and every warning it raised, in the order raised.
@@ -692,9 +707,12 @@ async fn tracking_named_tables(engine: &EngineHandle) -> PyResult<HashSet<(Strin
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (?, ?)",
             None,
         ),
+        // `pg_class`, not `information_schema.tables`, which hides a table the
+        // role holds no privilege on: such a tracking table still governs.
         Dialect::Postgres => (
-            "SELECT table_name::text, table_schema::text FROM information_schema.tables \
-             WHERE table_name IN ($1, $2)",
+            "SELECT c.relname::text, n.nspname::text FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE c.relkind IN ('r', 'p') AND c.relname IN ($1, $2)",
             Some(1),
         ),
     };
@@ -937,9 +955,9 @@ async fn run_passes(
             tables_before_create.contains(*table) || renames.iter().any(|(_, new)| new == table)
         })
         .collect();
-    let (live, facts) = live_schema_ir(&engine, &existing).await?;
+    let (live, facts) = live_schema_ir(&engine, &modelset, &existing).await?;
     let plan = plan_from_ir(
-        &Side::live(live, facts).map_err(plan_error)?,
+        &live_side(live, facts, &modelset, backend)?,
         &Side::declared(modelset.clone()),
         backend,
         opts.plan_options(),
@@ -1289,6 +1307,7 @@ pub fn _render_migration_sql_for_test(
             &live_row_security_json,
             "live-row-security",
         )?,
+        printed: Default::default(),
     };
 
     let opts = MigrateOptions::laddered(updates, destructive);
@@ -1297,7 +1316,7 @@ pub fn _render_migration_sql_for_test(
     }
     let (live, facts) = live_tables_to_schema_ir(vec![table], Default::default(), backend);
     let plan = plan_from_ir(
-        &Side::live(live, facts).map_err(plan_error)?,
+        &live_side(live, facts, &declared, backend)?,
         &Side::declared(declared),
         backend,
         opts.plan_options(),
@@ -1350,7 +1369,7 @@ pub fn _plan_revision(
     let facts: LiveFacts = serde_json::from_str(&facts_json)
         .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("invalid facts_json: {e}")))?;
     validate_schema_ir(&declared).map_err(emission_error)?;
-    let live = Side::live(live, facts).map_err(plan_error)?;
+    let live = live_side(live, facts, &declared, backend)?;
     let wire = match plan_revision(&live, &declared, backend) {
         Ok(revision) => {
             let mut value = serde_json::to_value(&revision).map_err(serialize_error)?;
@@ -1380,8 +1399,16 @@ pub fn _plan_revision(
 /// Resolves to a dict: `{"dialect": "postgres" | "sqlite", "live": <the live
 /// schema IR envelope>, "operations": [{"kind": …, <op fields>}],
 /// "reports": [report…]}`. Drift reports what would change, never how it
-/// runs, so the ops carry no verdict; reports are in `_plan_from_ir`'s
-/// shape.
+/// runs, so the ops carry no verdict but its `replaces` (why a generated
+/// column is dropped and added back, `made_generated`, `input_type` or
+/// `own_type`), on the two ops of such a pair only, and `carried` on an op
+/// that takes down or puts back what the plan carries around another change
+/// (`unchanged`, `changed` or `not_compared`: whether it is put back as it
+/// was), and `held` on a type change no door runs: `{"fix": <what makes it
+/// run>, "artifacts": [{"kind": "check" | "generated_column" | "policy",
+/// "name": …}]}`, the checks, generated columns and policies over the
+/// column, left standing and not compared; reports are in
+/// `_plan_from_ir`'s shape.
 ///
 /// # Errors
 /// `ValueError` when `declared_json` is not a schema IR envelope or a side
@@ -1399,19 +1426,34 @@ pub fn _plan_drift(
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let engine = engine_for_connection(using)?;
         let tables = tables_to_read(&engine, &declared, &[], &[]).await?;
-        let (live, facts) = live_schema_ir(&engine, &tables).await?;
+        let (live, facts) = live_schema_ir(&engine, &declared, &tables).await?;
         validate_schema_ir(&live).map_err(emission_error)?;
         let dialect = engine.backend();
         let live_json = serde_json::to_value(&live).map_err(serialize_error)?;
         let plan = plan_from_ir(
-            &Side::live(live, facts).map_err(plan_error)?,
+            &live_side(live, facts, &declared, dialect)?,
             &Side::declared(declared),
             dialect,
             PlanOptions { destructive: true },
         );
         let operations = plan
-            .ops()
-            .map(serde_json::to_value)
+            .operations
+            .iter()
+            .map(|planned| {
+                let mut op = serde_json::to_value(&planned.op)?;
+                if let Some(fields) = op.as_object_mut() {
+                    if let Some(replace) = planned.verdict.replaces {
+                        fields.insert("replaces".into(), serde_json::to_value(replace)?);
+                    }
+                    if let Some(carry) = planned.verdict.carried {
+                        fields.insert("carried".into(), serde_json::to_value(carry)?);
+                    }
+                    if let Some(held) = &planned.verdict.held {
+                        fields.insert("held".into(), serde_json::to_value(held)?);
+                    }
+                }
+                Ok(op)
+            })
             .collect::<serde_json::Result<Vec<_>>>()
             .map_err(serialize_error)?;
         let wire = serde_json::json!({
@@ -1536,7 +1578,7 @@ pub fn _plan_from_ir(
             let facts: LiveFacts = serde_json::from_str(&json).map_err(|e| {
                 pyo3::exceptions::PyValueError::new_err(format!("invalid facts_json: {e}"))
             })?;
-            Side::live(old, facts).map_err(plan_error)?
+            live_side(old, facts, &new, backend)?
         }
         None => Side::declared(old),
     };

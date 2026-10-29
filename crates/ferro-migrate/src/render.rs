@@ -13,14 +13,15 @@ use ferro_ddl_lowering::{
     fk_action_sql, is_pg_serial_column, primary_key_kept_warning, quote_ident,
     render_check_addition, render_check_drop, render_check_rebuild, render_check_restore,
     render_create_row_policy, render_disable_row_security, render_drop_constraint,
-    render_drop_index_sql, render_drop_row_policy, render_enable_row_security,
-    render_force_row_security, render_label_update, render_no_force_row_security,
-    render_pg_enum_add_value, render_pg_enum_create_type, render_pg_enum_drop_type,
-    render_pg_enum_rename_type, render_pg_enum_rename_value, render_pg_serial_sequence_rename,
-    render_rename_column, render_rename_constraint, render_rename_index, render_rename_policy,
-    render_rename_table, render_validate_constraint, resolve_column_storage, row_policy_clauses,
-    row_policy_rebuild_statements, row_security_statements, sqlite_drop_default_report,
-    sqlite_in_place_report,
+    render_drop_generated_expression, render_drop_index_sql, render_drop_row_policy,
+    render_enable_row_security, render_force_row_security, render_label_update,
+    render_no_force_row_security, render_pg_enum_add_value, render_pg_enum_create_type,
+    render_pg_enum_drop_type, render_pg_enum_rename_type, render_pg_enum_rename_value,
+    render_pg_serial_sequence_rename, render_rename_column, render_rename_constraint,
+    render_rename_index, render_rename_policy, render_rename_table,
+    render_set_generated_expression, render_validate_constraint, resolve_column_storage,
+    row_policy_clauses, row_policy_rebuild_statements, row_security_statements,
+    sqlite_drop_default_report, sqlite_in_place_report,
 };
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -242,6 +243,7 @@ pub(crate) fn render_from(
                                 dialect,
                                 ConstraintMode::Plain,
                             )
+                            .map_err(|message| EmissionError { message })?
                             .ok_or_else(|| EmissionError {
                                 message: format!(
                                     "Label rename on '{table}.{column}' has no CHECK '{}' in \
@@ -358,8 +360,56 @@ pub(crate) fn render_from(
                 require_postgres(op, dialect)?;
                 out.statements.push(render_rename_policy(table, old, new));
             }
+            // SQLite's `ADD COLUMN` takes no stored generated column: only a
+            // rebuild adds one, which the pass never runs.
+            MigrationOp::AddColumn { table, column }
+                if dialect == Dialect::Sqlite
+                    && generated_body(
+                        new_side,
+                        find_model(&new_models, table)?,
+                        column,
+                        dialect,
+                    )?
+                    .is_some() =>
+            {
+                let what = if find_model(&old_models, table)
+                    .is_ok_and(|model| find_column(model, column).is_ok())
+                {
+                    "is a plain column in the table and generated in the model"
+                } else {
+                    "is not in the table"
+                };
+                out.reports.push(sqlite_in_place_report(
+                    InPlaceChange::AddGeneratedColumn,
+                    Subject::column(table, column),
+                    format!(
+                        "Generated column '{table}.{column}' {what}, and SQLite cannot add a \
+                         stored generated column in place; `ferro migrate new` adds it by \
+                         rebuilding the table."
+                    ),
+                ));
+            }
+            // On SQLite a column the target still holds is dropped only to
+            // come back generated: the add's rebuild does both, so its
+            // report covers the drop.
+            MigrationOp::DropColumn { table, column }
+                if dialect == Dialect::Sqlite
+                    && find_model(&new_models, table)
+                        .is_ok_and(|model| find_column(model, column).is_ok()) => {}
             MigrationOp::AddColumn { table, column } => {
+                // A change in the way of what a withheld type change holds.
+                if let Some(refusal) = crate::plan::held_refusal(op, old_side, new_side, dialect) {
+                    return Err(EmissionError {
+                        message: refusal.to_string(),
+                    });
+                }
                 let model = find_model(&new_models, table)?;
+                // A column a live target holds generated is put back with
+                // the expression its catalog printed.
+                let live_body = match find_column(model, column)?.generated {
+                    Some(_) => None,
+                    None => generated_body(new_side, model, column, dialect)?,
+                };
                 let emission = emit_add_column(
                     table,
                     column,
@@ -367,6 +417,7 @@ pub(crate) fn render_from(
                     dialect,
                     &types_created_by_plan,
                     constraints,
+                    live_body.as_deref(),
                 )?;
                 out.statements.extend(emission.statements);
                 out.reports.extend(emission.reports);
@@ -384,6 +435,14 @@ pub(crate) fn render_from(
                         ),
                     });
                 }
+                // A policy reads the generated column it drops to add back.
+                if let Some(refusal) = crate::plan::replace_refusal(op, old_side, new_side, dialect)
+                    .or_else(|| crate::plan::held_refusal(op, old_side, new_side, dialect))
+                {
+                    return Err(EmissionError {
+                        message: refusal.to_string(),
+                    });
+                }
                 out.statements.push(format!(
                     "ALTER TABLE {} DROP COLUMN {}",
                     quote_ident(table),
@@ -391,12 +450,61 @@ pub(crate) fn render_from(
                 ));
             }
             MigrationOp::AlterColumnType { table, column } => {
+                // A change in the way of what a withheld type change holds.
+                if let Some(refusal) = crate::plan::held_refusal(op, old_side, new_side, dialect) {
+                    return Err(EmissionError {
+                        message: refusal.to_string(),
+                    });
+                }
                 let old_col = find_column(find_model(&old_models, table)?, column)?;
                 let new_col = find_column(find_model(&new_models, table)?, column)?;
                 let emission = emit_alter_column_type(table, column, old_col, new_col, dialect)?;
                 out.statements.extend(emission.statements);
                 out.reports.extend(emission.reports);
             }
+            // ADR-0060: Postgres changes the expression in place; SQLite only
+            // by a rebuild, which the pass never runs.
+            MigrationOp::AlterGeneratedExpression { table, column } => match dialect {
+                Dialect::Postgres => {
+                    let model = find_model(&new_models, table)?;
+                    let body =
+                        generated_body(new_side, model, column, dialect)?.ok_or_else(|| {
+                            EmissionError {
+                                message: format!(
+                                    "the plan sets the expression of '{table}.{column}', which the \
+                                 target holds plain; this is a ferro bug, please file an issue"
+                                ),
+                            }
+                        })?;
+                    out.statements
+                        .push(render_set_generated_expression(table, column, &body));
+                }
+                Dialect::Sqlite => out.reports.push(sqlite_in_place_report(
+                    InPlaceChange::AlterGeneratedExpression,
+                    Subject::column(table, column),
+                    format!(
+                        "Generated column '{table}.{column}' differs from the model, and \
+                         SQLite cannot change a generated column in place; `ferro migrate \
+                         new` changes it by rebuilding the table."
+                    ),
+                )),
+            },
+            // Postgres keeps the stored values; SQLite's rebuild copies them.
+            MigrationOp::DropGeneratedExpression { table, column } => match dialect {
+                Dialect::Postgres => out
+                    .statements
+                    .push(render_drop_generated_expression(table, column)),
+                Dialect::Sqlite => out.reports.push(sqlite_in_place_report(
+                    InPlaceChange::DropGeneratedExpression,
+                    Subject::column(table, column),
+                    format!(
+                        "Column '{table}.{column}' is generated in the database and plain in \
+                         the model, and SQLite cannot make a generated column plain in place; \
+                         `ferro migrate new` does it by rebuilding the table, keeping its \
+                         values."
+                    ),
+                )),
+            },
             MigrationOp::AlterColumnNullability { table, column } => {
                 let old_col = find_column(find_model(&old_models, table)?, column)?;
                 let new_col = find_column(find_model(&new_models, table)?, column)?;
@@ -597,9 +705,10 @@ pub(crate) fn render_from(
                     ),
                 };
                 match new_side.check_body(table, name).ok_or_else(missing)? {
-                    Body::Canonical(_) => {
+                    Body::Canonical => {
                         let emission =
                             render_check_addition(table, model, name, dialect, constraints)
+                                .map_err(|message| EmissionError { message })?
                                 .ok_or_else(missing)?;
                         out.statements.extend(emission.statement);
                         out.reports.extend(emission.warning);
@@ -623,9 +732,10 @@ pub(crate) fn render_from(
                     ),
                 };
                 match new_side.check_body(table, name).ok_or_else(missing)? {
-                    Body::Canonical(_) => {
+                    Body::Canonical => {
                         let emission =
                             render_check_rebuild(table, model, name, dialect, constraints)
+                                .map_err(|message| EmissionError { message })?
                                 .ok_or_else(missing)?;
                         out.statements.extend(emission.statements);
                         out.reports.extend(emission.warning);
@@ -641,7 +751,13 @@ pub(crate) fn render_from(
                 }
             }
             MigrationOp::DropCheck { table, name } => {
-                let still_declared = new_side.check_body(table, name).is_some();
+                // A declared check is dropped only to be added back by the
+                // same ops, around a type change of a column it reads.
+                let added_back = ops.iter().any(|other| {
+                    matches!(other, MigrationOp::AddCheck { table: t, name: n }
+                        if t == table && n == name)
+                });
+                let still_declared = new_side.check_body(table, name).is_some() && !added_back;
                 if still_declared {
                     return Err(EmissionError {
                         message: format!(
@@ -685,7 +801,13 @@ pub(crate) fn render_from(
             }
             MigrationOp::DropRowPolicy { table, name } => {
                 require_postgres(op, dialect)?;
-                let still_declared = new_side.policy(table, name).is_some();
+                // A declared policy is dropped only to be added back by the
+                // same ops, around the replace of a column it reads.
+                let added_back = ops.iter().any(|other| {
+                    matches!(other, MigrationOp::AddRowPolicy { table: t, name: n }
+                        if t == table && n == name)
+                });
+                let still_declared = new_side.policy(table, name).is_some() && !added_back;
                 if still_declared {
                     return Err(EmissionError {
                         message: format!(
@@ -784,6 +906,24 @@ fn catalog_check_in_place(table: &str, name: &str) -> Report {
              `ferro migrate new` writes."
         ),
     )
+}
+
+/// The expression `column` of `model` is generated by on `side`
+/// ([`Side::generated_body`]): a declaration's rendering, a live column's
+/// catalog text, or `None` for a plain column.
+fn generated_body(
+    side: &Side,
+    model: &SchemaModel,
+    column: &str,
+    dialect: Dialect,
+) -> Result<Option<String>, EmissionError> {
+    side.generated_body(model, column, dialect)
+        .map_err(|message| EmissionError {
+            message: format!(
+                "Cannot render generated column '{}.{column}': {message}",
+                model.table_name
+            ),
+        })
 }
 
 /// Enum-type and row-security ops exist only on Postgres (SQLite stores enums

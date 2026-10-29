@@ -270,7 +270,7 @@ jobs:
           name: python-${{ matrix.python-version }}
 
   test-python-backend-matrix:
-    name: Python backend matrix (Postgres, shard ${{ matrix.shard }}/2)
+    name: Python backend matrix (Postgres ${{ matrix.postgres }}, shard ${{ matrix.shard }}/2)
     # A slice PR into an integration branch skips the matrix; the open PR
     # from that branch to main runs it on every merge into the branch.
     if: github.event_name != 'pull_request' || github.base_ref == 'main'
@@ -278,10 +278,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        postgres: ['17', '18']
         shard: [1, 2]
     services:
       postgres:
-        image: postgres:17
+        image: postgres:${{ matrix.postgres }}
         env:
           POSTGRES_USER: ferro
           POSTGRES_PASSWORD: ferro

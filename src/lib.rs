@@ -174,6 +174,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(connection::set_default_connection, m)?)?;
     m.add_function(wrap_pyfunction!(connection::connection_backend, m)?)?;
     m.add_function(wrap_pyfunction!(connection::default_connection_name, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        connection::report_server_version_for_test,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(clear_registry, m)?)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(schema::create_tables, m)?)?;
@@ -202,6 +206,14 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(migrate::_declared_index, m)?)?;
     m.add_function(wrap_pyfunction!(live_ir::_live_schema_ir, m)?)?;
     migrations_ffi::register(m)?;
+    m.add_function(wrap_pyfunction!(naming_ffi::_value_function_table, m)?)?;
+    m.add_function(wrap_pyfunction!(naming_ffi::_value_expr_type, m)?)?;
+    m.add_function(wrap_pyfunction!(naming_ffi::_value_expr_failing_step, m)?)?;
+    m.add_function(wrap_pyfunction!(naming_ffi::_value_expr_columns, m)?)?;
+    m.add_function(wrap_pyfunction!(naming_ffi::_value_column_family, m)?)?;
+    m.add_function(wrap_pyfunction!(naming_ffi::_value_family_annotations, m)?)?;
+    m.add_function(wrap_pyfunction!(naming_ffi::_value_family_fits, m)?)?;
+    m.add_function(wrap_pyfunction!(naming_ffi::_generated_storage_refusal, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_ddl_single_index_name, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_ddl_single_unique_name, m)?)?;
     m.add_function(wrap_pyfunction!(naming_ffi::_ddl_composite_index_name, m)?)?;

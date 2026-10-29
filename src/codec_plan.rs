@@ -389,6 +389,7 @@ mod tests {
             enum_retired_labels: Default::default(),
             default_factory: None,
             retired: false,
+            generated: None,
         }
     }
 

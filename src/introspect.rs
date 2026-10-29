@@ -9,8 +9,9 @@ use crate::backend::{EngineBindValue, EngineHandle, EngineRow, EngineValue};
 use crate::state::Dialect;
 use ferro_ddl_lowering::{
     LiveRowPolicy, LiveRowSecurity, is_ferro_row_policy_name, quote_ident,
-    row_policy_command_from_catalog_code,
+    row_policy_command_from_catalog_code, sqlite_guard_column,
 };
+use ferro_migrate::PrintedPair;
 use pyo3::prelude::*;
 
 fn serde_default_true() -> bool {
@@ -25,7 +26,7 @@ fn serde_default_true() -> bool {
 #[derive(Clone, Debug, serde::Deserialize)]
 pub struct LiveColumn {
     pub name: String,
-    /// SQLite: the declared type from `PRAGMA table_info` (e.g. `varchar`,
+    /// SQLite: the declared type from `PRAGMA table_xinfo` (e.g. `varchar`,
     /// `uuid_text`, `datetime_text`). Postgres: `information_schema.data_type`
     /// (e.g. `character varying`, `timestamp with time zone`).
     #[serde(default)]
@@ -49,7 +50,7 @@ pub struct LiveColumn {
     pub enum_type_name: Option<String>,
     /// The column's server default as the catalog prints it: Postgres
     /// `information_schema.columns.column_default` (`''::character varying`,
-    /// `nextval('author_id_seq'::regclass)`), SQLite `PRAGMA table_info`'s
+    /// `nextval('author_id_seq'::regclass)`), SQLite `PRAGMA table_xinfo`'s
     /// `dflt_value` (`'free'`, `0`, `CURRENT_TIMESTAMP`). `None` for a column
     /// with no default. Whether ferro left it is the planner's decision
     /// (`ferro_migrate`'s foreign default, ADR-0027 as amended).
@@ -60,6 +61,18 @@ pub struct LiveColumn {
     /// own whatever the sequence is called. Always `false` on SQLite.
     #[serde(default)]
     pub owns_sequence: bool,
+    /// How the column is generated, `"stored"` or `"virtual"` (Postgres
+    /// `pg_attribute.attgenerated`, SQLite `PRAGMA table_xinfo`'s `hidden`);
+    /// `None` for a plain column.
+    #[serde(default)]
+    pub generated_kind: Option<String>,
+    /// A generated column's expression as the catalog holds it: Postgres
+    /// `pg_get_expr` (`sign(((amount_minor)::bigint)::double precision)`);
+    /// SQLite the column definition from its generated clause on, its range
+    /// guard included, as `sqlite_master` stores it. `None` for a plain
+    /// column.
+    #[serde(default)]
+    pub generation_expression: Option<String>,
 }
 
 /// One live standalone index that Ferro owns (its name follows the `idx_`/`uq_`
@@ -88,8 +101,9 @@ pub(crate) fn is_ferro_index_name(name: &str) -> bool {
 ///
 /// `definition` is the catalog rendering: Postgres `pg_get_constraintdef`
 /// (`CHECK (...)`, with a trailing ` NOT VALID` when unvalidated), SQLite the
-/// inline `CHECK (...)` fragment from `sqlite_master.sql`. Returned as-is —
-/// body-drift normalization is #344.
+/// inline `CHECK (...)` fragment from `sqlite_master.sql`. Returned as-is:
+/// SQLite's is compared through the one normalizer (ADR-0015), Postgres's
+/// through the printed pair the live read adds (ADR-0060).
 ///
 /// `ferro_owned` is true when the constraint name follows the `ck_*`
 /// convention; user-owned CHECKs are included so reconciliation can skip them.
@@ -110,6 +124,15 @@ pub struct LiveCheck {
     /// columns.
     #[serde(default)]
     pub column: Option<String>,
+    /// Postgres: the body alone, `pg_get_expr(conbin, conrelid)`, the
+    /// catalog half of the check's printed pair. `None` on SQLite.
+    #[serde(default)]
+    pub expression: Option<String>,
+    /// Postgres: the declared body and [`expression`](Self::expression),
+    /// printed side by side when the live read had a declared check of this
+    /// name to compare it with (ADR-0060).
+    #[serde(default)]
+    pub printed: Option<PrintedPair>,
 }
 
 /// Ferro emits table and column CHECKs as `ck_<table>_<suffix>`. Reconciliation
@@ -241,9 +264,13 @@ pub async fn live_table_names(
             "sqlite_master",
         ),
         Dialect::Postgres => (
-            "SELECT table_name::text AS name FROM information_schema.tables \
-             WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'",
-            "information_schema.tables",
+            // `pg_class`, not `information_schema.tables`, which hides a
+            // table the role holds no privilege on: such a table is live,
+            // and its read is refused naming the GRANT (ADR-0060).
+            "SELECT c.relname::text AS name FROM pg_class c \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             WHERE n.nspname = current_schema() AND c.relkind IN ('r', 'p')",
+            "pg_class",
         ),
     };
     let rows = engine
@@ -519,18 +546,40 @@ async fn postgres_table_foreign_keys(
         .collect())
 }
 
+/// The table's columns from `PRAGMA table_xinfo`, generated ones included:
+/// `hidden` is 0 for a plain column, 2 and 3 for a virtual and a stored
+/// generated one, and 1 for a virtual table's hidden column, which is not a
+/// column of the table.
 async fn sqlite_table_columns(engine: &EngineHandle, table: &str) -> PyResult<Vec<LiveColumn>> {
-    let sql = format!("PRAGMA table_info({})", quote_ident(table));
+    let sql = format!("PRAGMA table_xinfo({})", quote_ident(table));
     let rows = engine
         .fetch_all_sql_unprepared(&sql)
         .await
-        .map_err(|e| introspection_error("PRAGMA table_info", table, e))?;
+        .map_err(|e| introspection_error("PRAGMA table_xinfo", table, e))?;
+    let kind = |row: &EngineRow| match row_opt_i64(row, "hidden") {
+        Some(2) => Some("virtual".to_string()),
+        Some(3) => Some("stored".to_string()),
+        _ => None,
+    };
+    let create_sql = if rows.iter().any(|row| kind(row).is_some()) {
+        sqlite_create_sql(engine, table).await?
+    } else {
+        None
+    };
 
     Ok(rows
         .iter()
+        .filter(|row| row_opt_i64(row, "hidden").unwrap_or(0) != 1)
         .filter_map(|row| {
             let name = row_string(row, "name")?;
+            let generated_kind = kind(row);
+            let generation_expression = generated_kind
+                .as_ref()
+                .and(create_sql.as_deref())
+                .and_then(|sql| sqlite_generated_text(sql, &name));
             Some(LiveColumn {
+                generated_kind,
+                generation_expression,
                 name,
                 declared_type: row_string(row, "type").unwrap_or_default(),
                 is_nullable: row_opt_i64(row, "notnull") == Some(0),
@@ -544,6 +593,39 @@ async fn sqlite_table_columns(engine: &EngineHandle, table: &str) -> PyResult<Ve
             })
         })
         .collect())
+}
+
+/// `table`'s `CREATE TABLE` statement as `sqlite_master` stores it.
+async fn sqlite_create_sql(engine: &EngineHandle, table: &str) -> PyResult<Option<String>> {
+    let sql = format!(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = {}",
+        quote_ident(table)
+    );
+    let rows = engine
+        .fetch_all_sql_unprepared(&sql)
+        .await
+        .map_err(|e| introspection_error("sqlite_master", table, e))?;
+    Ok(rows.first().and_then(|row| row_string(row, "sql")))
+}
+
+/// The definition of generated column `column` in `create_sql` from its
+/// generated clause on (`GENERATED ALWAYS AS (…) STORED` and whatever
+/// follows it in the definition, ferro's range guard included), trimmed.
+/// A clause written as the bare `AS (…)` is taken from `AS`.
+pub(crate) fn sqlite_generated_text(create_sql: &str, column: &str) -> Option<String> {
+    let bytes = create_sql.as_bytes();
+    let open = first_unquoted(bytes, b'(')?;
+    let close = matching_close_paren(bytes, open)?;
+    let item = top_level_items(create_sql, open + 1, close)
+        .into_iter()
+        .find(|item| column_definition_name(item).as_deref() == Some(column))?;
+    let item_bytes = item.as_bytes();
+    let mut after_name = skip_ascii_whitespace(item_bytes, 0);
+    parse_sql_identifier(item_bytes, &mut after_name)?;
+    let at = find_ascii_case_insensitive(item_bytes, after_name, b"GENERATED").or_else(|| {
+        find_ascii_case_insensitive(item_bytes, after_name, b" AS ").map(|at| at + 1)
+    })?;
+    Some(item[at..].trim().to_string())
 }
 
 async fn postgres_table_columns(engine: &EngineHandle, table: &str) -> PyResult<Vec<LiveColumn>> {
@@ -589,7 +671,21 @@ async fn postgres_table_columns(engine: &EngineHandle, table: &str) -> PyResult<
                   AND cl.relname = c.table_name
                   AND i.indisprimary
                   AND a.attname = c.column_name
-            ) AS is_primary_key
+            ) AS is_primary_key,
+            (
+                SELECT a.attgenerated::text
+                FROM pg_attribute a
+                WHERE a.attrelid = format('%I.%I', c.table_schema, c.table_name)::regclass
+                  AND a.attname = c.column_name
+            ) AS attgenerated,
+            (
+                SELECT pg_get_expr(d.adbin, d.adrelid)
+                FROM pg_attribute a
+                JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+                WHERE a.attrelid = format('%I.%I', c.table_schema, c.table_name)::regclass
+                  AND a.attname = c.column_name
+                  AND a.attgenerated <> ''
+            ) AS generation_expression
         FROM information_schema.columns c
         WHERE c.table_schema = current_schema()
           AND c.table_name = $1
@@ -615,9 +711,132 @@ async fn postgres_table_columns(engine: &EngineHandle, table: &str) -> PyResult<
                 enum_type_name: row_string(row, "enum_type_name"),
                 column_default: row_string(row, "column_default"),
                 owns_sequence: row_bool(row, "owns_sequence"),
+                generated_kind: match row_string(row, "attgenerated").as_deref() {
+                    Some("s") => Some("stored".to_string()),
+                    Some("v") => Some("virtual".to_string()),
+                    _ => None,
+                },
+                generation_expression: row_string(row, "generation_expression"),
             })
         })
         .collect())
+}
+
+/// Postgres's own printing of each `(declared rendering, catalog reprint)`
+/// of `pairs` over `table` (ADR-0060): one `EXPLAIN (VERBOSE, FORMAT JSON)
+/// SELECT <declared>, <catalog>, … FROM <table>`, inside `BEGIN READ ONLY`
+/// on a pinned connection, so both sides pass through the same analysis and
+/// nothing is written. Works under a read-only role and on a replica. With no
+/// pairs it still plans `SELECT FROM <table>`: the privilege the comparison
+/// needs, asked alone.
+///
+/// # Errors
+/// `ferro.exceptions.OperationalError` (sqlstate `42501`) naming `GRANT
+/// SELECT ON "<table>" TO <role>` when the role cannot read the table; the
+/// database's error for any other failure, or when the plan does not print
+/// one output per expression.
+pub async fn printed_pairs(
+    engine: &EngineHandle,
+    table: &str,
+    pairs: &[(String, String)],
+) -> PyResult<Vec<PrintedPair>> {
+    let selected: Vec<&str> = pairs
+        .iter()
+        .flat_map(|(declared, catalog)| [declared.as_str(), catalog.as_str()])
+        .collect();
+    let sql = format!(
+        "EXPLAIN (VERBOSE, FORMAT JSON) SELECT {} FROM {}",
+        selected.join(", "),
+        quote_ident(table)
+    );
+    let context = "EXPLAIN (VERBOSE, FORMAT JSON)";
+    let mut conn = engine
+        .acquire_pinned_connection()
+        .await
+        .map_err(|e| introspection_error(context, table, e))?;
+    let role = conn
+        .fetch_all_sql_unprepared_with_binds("SELECT current_user::text AS role", &[])
+        .await
+        .map_err(|e| introspection_error("current_user", table, e))?
+        .first()
+        .and_then(|row| row_string(row, "role"))
+        .unwrap_or_default();
+    conn.execute_sql_unprepared("BEGIN READ ONLY")
+        .await
+        .map_err(|e| introspection_error(context, table, e))?;
+    let result = conn.fetch_all_sql_unprepared_with_binds(&sql, &[]).await;
+    if conn.execute_sql_unprepared("ROLLBACK").await.is_err() {
+        // A connection whose transaction state is unknown never goes back to
+        // the pool.
+        let _ = conn.detach_and_close().await;
+    }
+    let rows = result.map_err(|e| {
+        let denied =
+            matches!(&e, sqlx::Error::Database(db) if db.code().as_deref() == Some("42501"));
+        if denied {
+            crate::errors::map_db_error(
+                &format!(
+                    "ferro cannot read {quoted} to compare its schema with the models: role \
+                     {role} has no SELECT on it. Run GRANT SELECT ON {quoted} TO {role}",
+                    quoted = quote_ident(table),
+                    role = quote_ident(&role),
+                ),
+                e,
+            )
+        } else {
+            introspection_error(context, table, e)
+        }
+    })?;
+    let output: Vec<String> = rows
+        .first()
+        .and_then(|row| row.values.first())
+        .and_then(|(_, value)| match value {
+            EngineValue::Json(json) => Some(json.clone()),
+            EngineValue::String(text) => serde_json::from_str(text).ok(),
+            _ => None,
+        })
+        .and_then(|plan| {
+            plan.get(0)?
+                .get("Plan")?
+                .get("Output")?
+                .as_array()?
+                .iter()
+                .map(|item| item.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    if output.len() != selected.len() {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+            "Schema introspection failed (EXPLAIN for table '{table}'): Postgres printed {} \
+             outputs for {} expressions",
+            output.len(),
+            selected.len()
+        )));
+    }
+    Ok(output
+        .chunks(2)
+        .map(|pair| PrintedPair {
+            declared: pair[0].clone(),
+            catalog: pair[1].clone(),
+        })
+        .collect())
+}
+
+/// Whether `table` exists in the connected schema though the role holds no
+/// privilege on it, so `information_schema` shows none of its columns.
+/// Postgres only.
+pub async fn postgres_table_hidden_by_privilege(
+    engine: &EngineHandle,
+    table: &str,
+) -> PyResult<bool> {
+    let sql = "SELECT NOT has_table_privilege(c.oid, 'SELECT') AS hidden \
+               FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace \
+               WHERE n.nspname = current_schema() AND c.relname = $1";
+    let rows = engine
+        .fetch_all_sql_unprepared_with_binds(sql, &[EngineBindValue::String(table.to_string())])
+        .await
+        .map_err(|e| introspection_error("pg_class", table, e))?;
+    Ok(rows.first().is_some_and(|row| row_bool(row, "hidden")))
 }
 
 /// Live SQLite indexes that cover `column` on `table` (any position, including
@@ -818,6 +1037,9 @@ async fn sqlite_table_checks(engine: &EngineHandle, table: &str) -> PyResult<Vec
     };
     Ok(parse_sqlite_inline_named_checks(&create_sql)
         .into_iter()
+        // A generated column's range guard is part of the column, compared
+        // with its expression; never a check of the table's.
+        .filter(|check| sqlite_guard_column(&check.name).is_none())
         .map(|check| LiveCheck {
             ferro_owned: is_ferro_check_name(&check.name),
             name: check.name,
@@ -825,6 +1047,8 @@ async fn sqlite_table_checks(engine: &EngineHandle, table: &str) -> PyResult<Vec
             // SQLite has no unvalidated constraints.
             validated: true,
             column: check.column,
+            expression: None,
+            printed: None,
         })
         .collect())
 }
@@ -833,6 +1057,7 @@ async fn postgres_table_checks(engine: &EngineHandle, table: &str) -> PyResult<V
     let sql = r#"
         SELECT con.conname::text AS name,
                pg_get_constraintdef(con.oid)::text AS definition,
+               pg_get_expr(con.conbin, con.conrelid)::text AS expression,
                con.convalidated AS validated,
                CASE WHEN cardinality(con.conkey) = 1 THEN (
                    SELECT att.attname::text
@@ -863,6 +1088,8 @@ async fn postgres_table_checks(engine: &EngineHandle, table: &str) -> PyResult<V
                 definition,
                 validated: row_bool(row, "validated"),
                 column: row_string(row, "column_name"),
+                expression: row_string(row, "expression"),
+                printed: None,
             })
         })
         .collect())
@@ -1421,6 +1648,74 @@ mod tests {
             .expect("user-owned check");
         assert!(!user.ferro_owned);
         assert_eq!(user.definition, "CHECK (amount > 0)");
+    }
+
+    #[tokio::test]
+    async fn a_sqlite_generated_column_reads_its_kind_and_stored_text_and_its_guard_is_no_check() {
+        let engine = memory_engine().await;
+        engine
+            .execute_sql(
+                "CREATE TABLE \"transaction\" (\
+                 \"id\" integer PRIMARY KEY, \
+                 \"amount_minor\" bigint NOT NULL, \
+                 \"direction\" bigint NOT NULL GENERATED ALWAYS AS (sign(\"amount_minor\")) \
+                   STORED CONSTRAINT \"_ferro_range_direction\" \
+                   CHECK (typeof(\"direction\") IN ('integer', 'null')), \
+                 \"twice\" bigint AS (\"amount_minor\" * 2), \
+                 CONSTRAINT \"ck_transaction_positive\" CHECK (\"amount_minor\" > 0))",
+            )
+            .await
+            .unwrap();
+
+        let columns = live_table_columns(&engine, "transaction")
+            .await
+            .unwrap()
+            .expect("table");
+        let read: Vec<(&str, Option<&str>, Option<&str>)> = columns
+            .iter()
+            .map(|col| {
+                (
+                    col.name.as_str(),
+                    col.generated_kind.as_deref(),
+                    col.generation_expression.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            read,
+            vec![
+                ("id", None, None),
+                ("amount_minor", None, None),
+                (
+                    "direction",
+                    Some("stored"),
+                    Some(
+                        "GENERATED ALWAYS AS (sign(\"amount_minor\")) \
+                         STORED CONSTRAINT \"_ferro_range_direction\" \
+                         CHECK (typeof(\"direction\") IN ('integer', 'null'))"
+                    )
+                ),
+                ("twice", Some("virtual"), Some("AS (\"amount_minor\" * 2)")),
+            ]
+        );
+        let checks: Vec<String> = live_table_checks(&engine, "transaction")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|check| check.name)
+            .collect();
+        assert_eq!(checks, vec!["ck_transaction_positive".to_string()]);
+    }
+
+    #[test]
+    fn a_column_named_like_the_keyword_is_not_its_clause() {
+        let sql = "CREATE TABLE t (\"generated_at\" text, \
+                   \"n\" bigint GENERATED ALWAYS AS (length(\"generated_at\")) STORED)";
+        assert_eq!(sqlite_generated_text(sql, "generated_at"), None);
+        assert_eq!(
+            sqlite_generated_text(sql, "n").as_deref(),
+            Some("GENERATED ALWAYS AS (length(\"generated_at\")) STORED")
+        );
     }
 
     #[tokio::test]

@@ -181,9 +181,15 @@ def save_bind_payload(instance: Any) -> dict[str, Any]:
     are bound apart from it.
     """
     raw = _raw_bound_fields(instance)
-    payload: dict[str, Any] = instance.model_dump(mode="json", exclude=set(raw))
+    # A generated column is the database's to write (ADR-0058): never bound.
+    generated = getattr(type(instance), "__ferro_generated__", {})
+    payload: dict[str, Any] = instance.model_dump(
+        mode="json", exclude=set(raw) | set(generated)
+    )
     ordered: dict[str, Any] = {}
     for name in type(instance).model_fields:
+        if name in generated:
+            continue
         if name in raw:
             ordered[name] = raw[name]
         elif name in payload:
@@ -268,6 +274,13 @@ def _validate_save_column_names(
                 f"{retired_clause(model_cls, name)} "
                 f"Legal persisted columns: {legal}."
             )
+        inputs = getattr(model_cls, "__ferro_generated__", {}).get(name)
+        if inputs is not None and param == "only":
+            raise ValueError(
+                f"save(only=...) names {name!r}, a generated column the database "
+                f"computes from {', '.join(sorted(inputs))}: name those columns "
+                "instead, and save() reads the new value back."
+            )
     return columns
 
 
@@ -331,7 +344,12 @@ def apply_save_exclude(
     pk = getattr(model_cls, "__ferro_pk__", None)
     legal = ", ".join(sorted(columns))
 
-    write = {name for name in columns if name not in names and name != pk}
+    generated = getattr(model_cls, "__ferro_generated__", {})
+    write = {
+        name
+        for name in columns
+        if name not in names and name != pk and name not in generated
+    }
     if not write:
         raise ValueError(
             "save(exclude=...) produced an empty write-set "

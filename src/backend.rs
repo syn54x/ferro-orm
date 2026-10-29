@@ -174,6 +174,20 @@ pub struct TableCatalog {
     pub ts_cast: HashMap<String, String>,
 }
 
+/// `SHOW server_version_num` on `pool`, over the simple protocol so it never
+/// enters a statement cache.
+async fn read_server_version_num(pool: &PgPool) -> Result<u32, sqlx::Error> {
+    let row = sqlx::raw_sql("SHOW server_version_num")
+        .fetch_one(pool)
+        .await?;
+    let shown: String = row.try_get(0)?;
+    shown.trim().parse().map_err(|_| {
+        sqlx::Error::Protocol(format!(
+            "the server reported server_version_num {shown:?}, which is not a number"
+        ))
+    })
+}
+
 /// Persistent runtime engine state for the currently connected backend.
 ///
 /// The pool lives behind a shared `RwLock` so [`EngineHandle::refresh_pool`]
@@ -205,6 +219,9 @@ pub struct EngineHandle {
     /// what `ferro migrate status` reports it works on. Empty for a handle
     /// wrapped around an externally built pool.
     shown_url: Arc<str>,
+    /// The Postgres server's `server_version_num`, read once at connect.
+    /// `None` on SQLite and for a handle wrapped around an externally built pool.
+    server_version_num: Option<u32>,
 }
 
 #[derive(Clone, Debug)]
@@ -383,6 +400,10 @@ impl EngineHandle {
         let pins = spec.pins.clone();
         let shown_url = Arc::from(crate::connection::redact_connection_url(&spec.url));
         let pool = spec.build().await?;
+        let server_version_num = match &pool {
+            BackendPool::Sqlite(_) => None,
+            BackendPool::Postgres(pool) => Some(read_server_version_num(pool).await?),
+        };
         Ok(Self {
             backend,
             pool: Arc::new(RwLock::new(pool)),
@@ -393,6 +414,7 @@ impl EngineHandle {
             settings_delivery,
             pins,
             shown_url,
+            server_version_num,
         })
     }
 
@@ -411,6 +433,7 @@ impl EngineHandle {
             settings_delivery: SettingsDelivery::Transaction,
             pins: Arc::new(AtomicUsize::new(0)),
             shown_url: Arc::from(""),
+            server_version_num: None,
         }
     }
 
@@ -429,6 +452,7 @@ impl EngineHandle {
             settings_delivery: SettingsDelivery::Transaction,
             pins: Arc::new(AtomicUsize::new(0)),
             shown_url: Arc::from(""),
+            server_version_num: None,
         }
     }
 
@@ -568,6 +592,13 @@ impl EngineHandle {
     #[must_use]
     pub fn shown_url(&self) -> &str {
         &self.shown_url
+    }
+
+    /// The Postgres server's `server_version_num` (`170004` for 17.4), read
+    /// once when the engine connected; `None` on SQLite.
+    #[must_use]
+    pub fn server_version_num(&self) -> Option<u32> {
+        self.server_version_num
     }
 
     /// How this connection's pool delivers session settings.
@@ -1870,6 +1901,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(rows.len(), 1, "in-memory data must survive refresh_pool");
+        assert_eq!(
+            engine.server_version_num(),
+            None,
+            "SQLite has no server version"
+        );
     }
 
     #[tokio::test]

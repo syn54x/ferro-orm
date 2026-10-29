@@ -21,6 +21,7 @@ from ferro import (
     clear_registry,
     connect,
     engines,
+    fn,
     reset_engine,
 )
 from ferro._core import _render_table_check_body
@@ -177,7 +178,10 @@ def test_closed_over_variable_fails_at_class_definition():
 
 
 def test_function_call_in_predicate_fails_at_class_definition():
-    with pytest.raises(TypeError, match="function call"):
+    """Python's builtin `abs` would run on the stand-in, not in the database,
+    so it stays refused: a check calls the functions in `ferro.fn`
+    (`fn.abs`), which `test_generate_check_functions.py` covers."""
+    with pytest.raises(TypeError, match=r"function call.*ferro\.fn"):
 
         class BadCall(Model):
             __ferro_checks__: ClassVar[tuple[Check, ...]] = (
@@ -186,6 +190,19 @@ def test_function_call_in_predicate_fails_at_class_definition():
 
             id: int | None = Field(default=None, primary_key=True)
             amount: int = 0
+
+
+def test_a_check_may_call_ferro_fn():
+    class Called(Model):
+        __ferro_checks__: ClassVar[tuple[Check, ...]] = (
+            Check("abs_positive", lambda called: fn.abs(called.amount) > 5),
+        )
+
+        id: int | None = Field(default=None, primary_key=True)
+        amount: int = 0
+
+    [check] = _model_payload("called")["table_checks"]
+    assert check["predicate"]["kind"] == "compare"
 
 
 def test_module_global_fails_at_class_definition():

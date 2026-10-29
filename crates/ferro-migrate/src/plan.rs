@@ -26,15 +26,15 @@ use ferro_ddl_lowering::Report;
 pub(crate) use ferro_ddl_lowering::and_list;
 use ferro_ddl_lowering::{
     EnumTypeProvenance, LiveRowPolicy, LiveRowSecurity, ResolvedStorage, RowSecurityFlag,
-    declared_check_bodies, declared_check_names, declared_row_policy_names, drifted_check_names,
+    declared_check_body, declared_check_names, declared_row_policy_names, drifted_check_names,
     dropped_row_security_warning, enum_label_strings, enum_type_provenance,
     excess_row_security_flags, extra_check_names, extra_check_names_warning, extra_enum_labels,
     extra_enum_labels_warning, extra_row_policy_names_warning, ferro_manages_row_security,
     fk_action_from_str, fk_action_sql, fk_name, foreign_default_warning, foreign_fk_drift_warning,
     is_ferro_fk_name, is_ferro_row_policy_name, missing_check_names, missing_enum_labels,
     normalize_check_definition, normalize_row_policy_expr, plan_row_security_reconcile,
-    quote_label, render_check_body, render_table_check_body, resolve_column_storage,
-    row_policy_clauses, row_policy_command_token, schema_columns_storage_drift,
+    quote_label, resolve_column_storage, row_policy_clauses, row_policy_command_token,
+    schema_columns_storage_drift,
 };
 pub use ferro_ddl_lowering::{HintError, hint_refusal_warning, pending_table_rename_warning};
 use ferro_schema_ir::{IrEnvelope, SchemaIrPayload, SchemaModel};
@@ -69,6 +69,42 @@ pub struct LiveCheckFact {
     /// with its column, and SQLite drops an inline one with it.
     #[serde(default)]
     pub column: Option<String>,
+    /// Postgres: the declared body and the catalog's, printed side by side
+    /// (ADR-0060), when the live read had a declared check of this name to
+    /// compare it with ([`printed_pair_checks`]). `None` on SQLite.
+    #[serde(default)]
+    pub printed: Option<PrintedPair>,
+}
+
+/// A Postgres rendering and the catalog's reprint of the same body, each as
+/// Postgres printed it back through one `EXPLAIN (VERBOSE, FORMAT JSON)`
+/// (ADR-0060): both passed through the same analysis, so equal strings are
+/// the same expression.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PrintedPair {
+    /// The declared rendering, as Postgres printed it.
+    pub declared: String,
+    /// The catalog's reprint, as Postgres printed it.
+    pub catalog: String,
+}
+
+/// One live generated column as the catalog reports it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LiveGeneratedFact {
+    /// The column.
+    pub column: String,
+    /// `STORED` (Postgres `attgenerated = 's'`, SQLite `hidden = 3`); a
+    /// `VIRTUAL` one is never the column ferro creates.
+    pub stored: bool,
+    /// Postgres: `pg_get_expr` of the expression. SQLite: the column
+    /// definition from its generated clause on, its range guard included,
+    /// as `sqlite_master` stores it.
+    pub catalog: String,
+    /// Postgres: the declared rendering and `catalog`, printed side by side,
+    /// when the live read had a declared generated column to compare it
+    /// with. `None` on SQLite.
+    #[serde(default)]
+    pub printed: Option<PrintedPair>,
 }
 
 /// Everything about one live table the planner reads that is not IR.
@@ -87,6 +123,9 @@ pub struct LiveTableFacts {
     /// the catalog prints them. The "off, no policies" state on SQLite.
     #[serde(default, serialize_with = "serialize_row_security")]
     pub row_security: LiveRowSecurity,
+    /// Every live generated column.
+    #[serde(default)]
+    pub generated: Vec<LiveGeneratedFact>,
 }
 
 /// The facts a live database holds beside its IR, keyed by table: every live
@@ -112,6 +151,23 @@ pub enum PlanError {
         /// The table.
         table: String,
     },
+    /// A Postgres live generated column the declared side also declares
+    /// generated carries no printed pair: the live read was not given that
+    /// declaration.
+    MissingPrintedPair {
+        /// The table.
+        table: String,
+        /// The column.
+        column: String,
+    },
+    /// A Postgres live ferro-owned check that [`printed_pair_checks`] gives a
+    /// pair carries none: the live read was not given that declaration.
+    MissingCheckPrintedPair {
+        /// The table.
+        table: String,
+        /// The check.
+        check: String,
+    },
 }
 
 impl std::fmt::Display for PlanError {
@@ -122,6 +178,22 @@ impl std::fmt::Display for PlanError {
                 "the live facts carry no entry for table '{table}', which the live schema \
                  holds: read the schema and its facts together, from one introspection \
                  (`_live_schema_ir`), or plan two declared snapshots without facts"
+            ),
+            PlanError::MissingPrintedPair { table, column } => write!(
+                f,
+                "the live facts carry no printed pair for the generated column \
+                 '{table}.{column}': they were read against another declaration than the one \
+                 planned toward. Read them again with `_core._live_schema_ir(using, \
+                 declared_json)`, passing the same declared_json the plan is made toward, and \
+                 plan with the facts it returns unchanged"
+            ),
+            PlanError::MissingCheckPrintedPair { table, check } => write!(
+                f,
+                "the live facts carry no printed pair for the CHECK constraint \
+                 '{table}.{check}': they were read against another declaration than the one \
+                 planned toward. Read them again with `_core._live_schema_ir(using, \
+                 declared_json)`, passing the same declared_json the plan is made toward, and \
+                 plan with the facts it returns unchanged"
             ),
         }
     }
@@ -152,19 +224,11 @@ enum SideKind {
 /// A check's body as one side holds it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Body {
-    /// The canonical expression, as ferro renders a declaration.
-    Canonical(String),
+    /// The canonical expression, as ferro renders a declaration for the
+    /// dialect it is written on ([`ferro_ddl_lowering::declared_check_body`]).
+    Canonical,
     /// The catalog's text (`CHECK (…)`), restored as the catalog printed it.
     Catalog(String),
-}
-
-impl Body {
-    /// The body's text, for the one normalizer.
-    pub(crate) fn text(&self) -> &str {
-        match self {
-            Body::Canonical(text) | Body::Catalog(text) => text,
-        }
-    }
 }
 
 /// A row policy as one side holds it: its declaration (a live policy as a
@@ -271,9 +335,9 @@ impl Side {
     /// its canonical body; a live table's checks with the catalog's text.
     pub(crate) fn checks(&self, model: &SchemaModel) -> Vec<(String, Body)> {
         match &self.0 {
-            SideKind::Declared(_) => declared_check_bodies(model)
+            SideKind::Declared(_) => declared_check_names(model)
                 .into_iter()
-                .map(|(name, body)| (name, Body::Canonical(body)))
+                .map(|name| (name, Body::Canonical))
                 .collect(),
             SideKind::Live { .. } => self
                 .table_facts(model)
@@ -710,26 +774,27 @@ fn serialize_row_security<S: serde::Serializer>(
 }
 
 /// The facts a table declared in `old` would show live: every declared CHECK
-/// with its canonical body, valid; every FK and index valid; row security on
-/// exactly as declared, each policy's bodies as ferro renders them.
+/// ferro-owned and valid; every FK and index valid; row security on exactly
+/// as declared, each policy's bodies as ferro renders them. A declaration
+/// has no catalog, so its checks carry no `definition`: a declared check's
+/// body is rendered for the dialect where it is compared ([`check_differs`]).
 fn declared_table_facts(old_model: &SchemaModel) -> LiveTableFacts {
     let checks = old_model
         .table_checks
         .iter()
-        .map(|check| (check.name.clone(), render_table_check_body(check), None))
-        .chain(old_model.checks.iter().map(|check| {
-            (
-                check.name.clone(),
-                render_check_body(check),
-                Some(check.column.clone()),
-            )
-        }))
-        .map(|(name, body, column)| LiveCheckFact {
+        .map(|check| (check.name.clone(), None))
+        .chain(
+            old_model
+                .checks
+                .iter()
+                .map(|check| (check.name.clone(), Some(check.column.clone()))),
+        )
+        .map(|(name, column)| LiveCheckFact {
             name,
-            definition: format!("CHECK ({body})"),
             ferro_owned: true,
             validated: true,
             column,
+            ..LiveCheckFact::default()
         })
         .collect();
     LiveTableFacts {
@@ -737,6 +802,7 @@ fn declared_table_facts(old_model: &SchemaModel) -> LiveTableFacts {
         foreign_keys: Vec::new(),
         indexes: Vec::new(),
         row_security: declared_row_security(old_model),
+        generated: Vec::new(),
     }
 }
 
@@ -882,6 +948,13 @@ pub(crate) struct Draft {
     pub(crate) operations: Vec<MigrationOp>,
     /// The reports, in the order planning raised them.
     pub(crate) reports: Vec<Report>,
+    /// The ops that take down or put back an artifact the plan carries
+    /// around another change, each with whether it is put back as it was
+    /// ([`OpVerdict::carried`]).
+    pub(crate) carried: Vec<(MigrationOp, Carry)>,
+    /// The withheld type changes, each with what it holds
+    /// ([`OpVerdict::held`]).
+    pub(crate) held: Vec<(MigrationOp, Held)>,
 }
 
 /// `old` as the renames [`plan_from_ir`]`(old, new, dialect, …)` plans leave
@@ -1096,32 +1169,74 @@ fn renamed_facts(
             let (Some(model), Some(before)) = (declared, before.as_ref()) else {
                 continue;
             };
-            let bodies = model
-                .table_checks
+            let Some(index) = declared_check_names(model)
                 .iter()
-                .position(|c| c.name == check.name)
-                .map(|i| {
-                    (
-                        render_table_check_body(&before.table_checks[i]),
-                        render_table_check_body(&model.table_checks[i]),
-                    )
-                })
-                .or_else(|| {
-                    model
-                        .checks
-                        .iter()
-                        .position(|c| c.name == check.name)
-                        .map(|i| {
-                            (
-                                render_check_body(&before.checks[i]),
-                                render_check_body(&model.checks[i]),
-                            )
-                        })
-                });
-            if let Some((was, now)) = bodies
-                && normalize_check_definition(&was) == normalize_check_definition(&check.definition)
-            {
+                .position(|name| *name == check.name)
+            else {
+                continue;
+            };
+            // A body that does not render is kept as read: the rebuild that
+            // drift then plans fails rendering it, naming the check.
+            let Ok(Some(now)) = declared_check_body(model, &check.name, dialect) else {
+                continue;
+            };
+            // Whether the live body is the declaration under the old names:
+            // on Postgres as Postgres printed both (ADR-0060), on SQLite by
+            // the one normalizer (ADR-0015).
+            let follows = match dialect {
+                Dialect::Postgres => check
+                    .printed
+                    .as_ref()
+                    .is_some_and(|pair| pair.declared == pair.catalog),
+                Dialect::Sqlite => declared_check_names(before)
+                    .get(index)
+                    .and_then(|was| declared_check_body(before, was, dialect).ok().flatten())
+                    .is_some_and(|was| {
+                        normalize_check_definition(&was)
+                            == normalize_check_definition(&check.definition)
+                    }),
+            };
+            if follows {
                 check.definition = format!("CHECK ({now})");
+            }
+        }
+        for generated in &mut live.generated {
+            if let Some(new) = ops.iter().find_map(|op| match op {
+                MigrationOp::RenameColumn { table: t, old, new }
+                    if t == table && *old == generated.column =>
+                {
+                    Some(new.clone())
+                }
+                _ => None,
+            }) {
+                generated.column = new;
+            }
+            // SQLite rewrites a stored expression's column names on a rename,
+            // as Postgres does; only SQLite's catalog is compared as text.
+            if dialect != Dialect::Sqlite {
+                continue;
+            }
+            let (Some(model), Some(before)) = (declared, before.as_ref()) else {
+                continue;
+            };
+            let Some(i) = model
+                .columns
+                .iter()
+                .position(|col| col.name == generated.column)
+            else {
+                continue;
+            };
+            let text = |model: &SchemaModel, col| {
+                emit::generated_column_text(model, col, Dialect::Sqlite)
+                    .ok()
+                    .flatten()
+            };
+            if let (Some(was), Some(now)) = (
+                text(before, &before.columns[i]),
+                text(model, &model.columns[i]),
+            ) && fold_whitespace(&was) == fold_whitespace(&generated.catalog)
+            {
+                generated.catalog = now;
             }
         }
         for fk in &mut live.foreign_keys {
@@ -1294,7 +1409,50 @@ fn plan_existing_table(
     let table = new_model.table_name.as_str();
     let facts = old.table_facts(old_model);
     let old_view = old.table_view(old_model, dialect);
+    // What the table's withheld type changes hold, decided once: never taken
+    // down, put back, rebuilt or compared, by any path below.
+    let held = held_of(old, new, table, dialect);
+    // A generated column dropped and added back is diffed as the table holds
+    // it after the drop: absent, so the add brings it back with what rides it.
+    let replaced: Vec<String> = replaced_generated_columns(
+        old,
+        new,
+        old_view.as_ref(),
+        new_model,
+        dialect,
+        options.destructive,
+    )
+    .into_iter()
+    .filter(|column| !held.holds(HeldKind::GeneratedColumn, column))
+    .collect();
+    // A plain column the model makes generated, which only a plan that
+    // drops data replaces: left, and said so.
+    if !options.destructive {
+        plan.reports.extend(
+            new_model
+                .columns
+                .iter()
+                .filter(|col| {
+                    new.holds_generated(new_model, &col.name)
+                        && old_view.columns.iter().any(|was| was.name == col.name)
+                        && !old.holds_generated(old_view.as_ref(), &col.name)
+                })
+                .map(|col| {
+                    ferro_ddl_lowering::plain_column_kept_warning(table, &col.name, dialect)
+                }),
+        );
+    }
+    // The table as it stands before any drop: what a carried artifact put
+    // back is compared with.
+    let standing_view = old_view.clone();
+    let old_view = if replaced.is_empty() {
+        old_view
+    } else {
+        Cow::Owned(without_columns(old_view.as_ref(), &replaced))
+    };
     let old_model = old_view.as_ref();
+    let carry_of_check =
+        |name: &str| check_compared(old, new, standing_view.as_ref(), new_model, name, dialect);
     let mut ops = Vec::new();
     let mut column_drops = Vec::new();
 
@@ -1311,14 +1469,122 @@ fn plan_existing_table(
         &mut ops,
         &mut plan.reports,
     );
+    // Postgres refuses to drop a column a policy reads: a policy the plan
+    // can carry ([`carries_policy`]) is dropped first and added back with the
+    // table's row security, after the add. Any other policy that reads a
+    // replaced column refuses its drop ([`policy_blocking_replace`]).
+    let declaration = new.declaration(new_model);
+    let carried: Vec<String> = if dialect == Dialect::Postgres {
+        facts
+            .row_security
+            .policies
+            .iter()
+            .filter(|policy| {
+                !held.holds(HeldKind::Policy, &policy.name)
+                    && replaced
+                        .iter()
+                        .any(|column| carries_policy(old, new, &declaration, policy, column))
+            })
+            .map(|policy| policy.name.clone())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    // A check over a column whose type changes whose body changes too, or
+    // that a live read could not compare (no printed pair, ADR-0060), goes
+    // the same way: dropped before the type change, which Postgres would
+    // otherwise refuse under the old body, and added back after it.
+    let retyped: Vec<String> = if dialect == Dialect::Postgres {
+        new.checks(new_model)
+            .into_iter()
+            .map(|(name, _)| name)
+            .filter(|name| {
+                !checks_reading(new_model, &replaced).contains(name)
+                    && !held.holds(HeldKind::Check, name)
+                    && facts
+                        .checks
+                        .iter()
+                        .any(|check| &check.name == name && check.ferro_owned)
+                    && check_reads_column(old_model, new_model, name, dialect)
+                    && check_differs(old, new, old_model, new_model, name, dialect)
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    // Whether a carried policy is put back as the table holds it: the one
+    // row-security decision, over the policies as they stand, says which it
+    // would rebuild (and, from a declaration, an edited raw body is one).
+    let policy_drift =
+        plan_row_security_reconcile(&declaration, &facts.row_security, dialect, false).ok();
+    let carry_of_policy = |name: &String| match &policy_drift {
+        Some(drift)
+            if drift.drifted.contains(name)
+                || (old.rebuilds_unverifiable_bodies() && drift.unverifiable.contains(name)) =>
+        {
+            Carry::Changed
+        }
+        Some(drift) if drift.unverifiable.contains(name) => Carry::NotCompared,
+        Some(_) => Carry::Unchanged,
+        // A declared policy whose clauses cannot render: invalid IR, which
+        // `Plan::render` rejects before anything executes.
+        None => Carry::Changed,
+    };
+    for name in &carried {
+        let carry = carry_of_policy(name);
+        let (table, name) = (table.to_string(), name.clone());
+        plan.carried.push((
+            MigrationOp::DropRowPolicy {
+                table: table.clone(),
+                name: name.clone(),
+            },
+            carry,
+        ));
+        plan.carried
+            .push((MigrationOp::AddRowPolicy { table, name }, carry));
+    }
+    ops.extend(carried.iter().map(|name| MigrationOp::DropRowPolicy {
+        table: table.to_string(),
+        name: name.clone(),
+    }));
+    ops.extend(retyped.iter().map(|name| MigrationOp::DropCheck {
+        table: table.to_string(),
+        name: name.clone(),
+    }));
+    plan.carried.extend(retyped.iter().map(|name| {
+        (
+            MigrationOp::DropCheck {
+                table: table.to_string(),
+                name: name.clone(),
+            },
+            carry_of_check(name),
+        )
+    }));
+    ops.extend(replaced.iter().map(|column| MigrationOp::DropColumn {
+        table: table.to_string(),
+        column: column.clone(),
+    }));
+    let mut column_ops = Vec::new();
     diff_model_columns(
         table,
         old_model,
         new_model,
         dialect,
-        &mut ops,
+        &mut column_ops,
         &mut column_drops,
     );
+    // Every generated column is added after every other column op: after
+    // the inputs its expression reads are added, and a replaced one after
+    // the type change of an input it reads (Postgres's expression reads no
+    // other generated column).
+    let (added_back, column_ops): (Vec<MigrationOp>, Vec<MigrationOp>) =
+        column_ops.into_iter().partition(|op| {
+            matches!(op, MigrationOp::AddColumn { column, .. }
+                if new.holds_generated(new_model, column))
+        });
+    ops.extend(column_ops);
+    ops.extend(added_back);
+    diff_generated(old, new, old_model, new_model, dialect, &held, &mut ops);
     diff_model_indexes(table, old_model, new_model, options.destructive, &mut ops);
     // Invalid-index rebuilds (#515; ADR-0044) go where `AddIndex` goes: after
     // the column ops, ahead of the foreign-key ops. An invalid index is
@@ -1348,37 +1614,84 @@ fn plan_existing_table(
         &mut plan.reports,
     );
 
-    // The checks the target holds, each with its body as the target holds it
-    // (a declaration's canonical rendering, or a live table's catalog text).
-    let target_checks: Vec<(String, String)> = new
+    // The checks the target holds, in its order.
+    let target_names: Vec<String> = new
         .checks(new_model)
         .into_iter()
-        .map(|(name, body)| (name, body.text().to_string()))
+        .map(|(name, _)| name)
         .collect();
-    let target_names: Vec<String> = target_checks.iter().map(|(name, _)| name.clone()).collect();
+    // Postgres drops every table check reading a column with the column: a
+    // check over a replaced column is gone once its drop runs, so the plan
+    // adds it back after the add (SQLite's rebuild writes the table's checks
+    // into the table it builds).
+    // A check over a retyped column carried around the type change is taken
+    // down too.
+    let taken: Vec<String> = if dialect == Dialect::Postgres {
+        checks_reading(new_model, &replaced)
+            .into_iter()
+            .filter(|name| !held.holds(HeldKind::Check, name))
+            .chain(retyped.iter().cloned())
+            .collect()
+    } else {
+        Vec::new()
+    };
+    // Its add back puts back a check the table held, as it was or not.
+    plan.carried.extend(
+        taken
+            .iter()
+            .filter(|name| facts.checks.iter().any(|check| &check.name == *name))
+            .map(|name| {
+                (
+                    MigrationOp::AddCheck {
+                        table: table.to_string(),
+                        name: name.clone(),
+                    },
+                    carry_of_check(name),
+                )
+            }),
+    );
+    let standing = |name: &String| !taken.contains(name);
     // Check addition (#343; ADR-0013) lands after the column ops, so a CHECK
     // over a newly added column follows its ADD COLUMN.
     let live_check_names: Vec<String> = facts
         .checks
         .iter()
         .map(|check| check.name.clone())
+        .filter(standing)
         .collect();
-    ops.extend(missing_checks(
-        table,
+    ops.extend(
+        missing_checks(
+            table,
+            old_model,
+            new_model,
+            &target_names,
+            &live_check_names,
+        )
+        .into_iter()
+        .filter(|op| !matches!(op, MigrationOp::AddCheck { name, .. } if held.holds(HeldKind::Check, name))),
+    );
+    // Body drift (#344; ADR-0015, ADR-0060), after the adds. Only ferro-owned
+    // names are eligible: a user-owned CHECK is never dropped.
+    // A check over a column whose type change is withheld has no printed
+    // pair: no body decision until the change runs.
+    let rebuildable: Vec<&String> = target_names
+        .iter()
+        .filter(|name| {
+            facts
+                .checks
+                .iter()
+                .any(|check| check.name == **name && check.ferro_owned && standing(&check.name))
+                && !held.holds(HeldKind::Check, name)
+        })
+        .collect();
+    ops.extend(check_rebuilds(
+        old,
+        new,
         old_model,
         new_model,
-        &target_names,
-        &live_check_names,
+        &rebuildable,
+        dialect,
     ));
-    // Body drift (#344; ADR-0015), after the adds. Only ferro-owned names are
-    // eligible: a user-owned CHECK is never dropped.
-    let live_ferro_owned: Vec<(String, String)> = facts
-        .checks
-        .iter()
-        .filter(|check| check.ferro_owned)
-        .map(|check| (check.name.clone(), check.definition.clone()))
-        .collect();
-    ops.extend(check_rebuilds(table, &target_checks, &live_ferro_owned));
     // Validation (#515; ADR-0043): after every add, leaving out any name a
     // rebuild covers — the rebuild's bare ADD installs a valid constraint.
     let rebuilt: Vec<String> = ops
@@ -1392,6 +1705,7 @@ fn plan_existing_table(
     let check_validity: Vec<LiveCheckValidity> = facts
         .checks
         .iter()
+        .filter(|check| standing(&check.name))
         .map(|check| LiveCheckValidity {
             name: check.name.clone(),
             validated: check.validated,
@@ -1407,9 +1721,11 @@ fn plan_existing_table(
     // Leftovers (#345; ADR-0013): always reported — a leftover CHECK keeps
     // rejecting rows the model now allows — and dropped only when destructive.
     // A dropped column's own check is no leftover: it goes with its column.
-    let live_ferro_owned_names: Vec<String> = live_ferro_owned
+    let live_ferro_owned_names: Vec<String> = facts
+        .checks
         .iter()
-        .map(|(name, _)| name.clone())
+        .filter(|check| check.ferro_owned && standing(&check.name))
+        .map(|check| check.name.clone())
         .collect();
     let extras = extra_check_names(&target_names, &live_ferro_owned_names);
     let riding: Vec<String> = if options.destructive {
@@ -1440,18 +1756,37 @@ fn plan_existing_table(
     // Row security lands last for the table (#413; PRD #406 user story 20):
     // every column change and data-shaped step above has run before any
     // policy starts filtering the rows it touches.
+    let mut row_security = facts.row_security.clone();
+    row_security
+        .policies
+        .retain(|policy| !carried.contains(&policy.name));
+    // A held policy is neither added nor rebuilt.
+    let mut security_ops = Vec::new();
     plan_row_security(
         old,
-        &new.declaration(new_model),
-        &facts.row_security,
+        &declaration,
+        &row_security,
         dialect,
         options.destructive,
-        &mut ops,
+        &mut security_ops,
         &mut plan.reports,
     );
+    ops.extend(security_ops.into_iter().filter(|op| {
+        !matches!(op, MigrationOp::RebuildRowPolicy { name, .. }
+            | MigrationOp::AddRowPolicy { name, .. } if held.holds(HeldKind::Policy, name))
+    }));
+    plan.held.extend(held.verdicts(table));
 
     if options.destructive {
-        ops.extend(column_drops);
+        // A generated column goes before the inputs its expression reads,
+        // which Postgres refuses to drop while it reads them.
+        let (generated, plain): (Vec<MigrationOp>, Vec<MigrationOp>) =
+            column_drops.into_iter().partition(|op| {
+                matches!(op, MigrationOp::DropColumn { column, .. }
+                    if old.holds_generated(old_model, column))
+            });
+        ops.extend(generated);
+        ops.extend(plain);
     }
     plan.operations.extend(ops);
 }
@@ -1843,21 +2178,154 @@ fn missing_checks(
 }
 
 /// Plan the [`MigrationOp::RebuildCheck`] operations for one table (#344;
-/// ADR-0015): every check the target holds (`target`, `(name, body)`) whose
-/// counterpart on the old side exists and whose normalized body differs.
-/// `live` is `(name, catalog definition)` pairs of ferro-owned CHECKs.
+/// ADR-0015, ADR-0060): every check of `names` (each held ferro-owned on
+/// both sides) whose body differs between them ([`check_differs`]).
 fn check_rebuilds(
-    table: &str,
-    target: &[(String, String)],
-    live: &[(String, String)],
+    old: &Side,
+    new: &Side,
+    old_model: &SchemaModel,
+    new_model: &SchemaModel,
+    names: &[&String],
+    dialect: Dialect,
 ) -> Vec<MigrationOp> {
-    drifted_check_names(target, live)
-        .into_iter()
+    names
+        .iter()
+        .filter(|name| check_differs(old, new, old_model, new_model, name, dialect))
         .map(|name| MigrationOp::RebuildCheck {
-            table: table.to_string(),
-            name,
+            table: new_model.table_name.clone(),
+            name: (*name).clone(),
         })
         .collect()
+}
+
+/// Whether the check `name`'s body differs between `old_model` on `old` and
+/// `new_model` on `new`. On SQLite, which stores the body as written, the one
+/// normalizer compares the texts (ADR-0015, [`drifted_check_names`]). On
+/// Postgres a live check compares with a declaration through what the live
+/// read gathered, the printed pair: Postgres printed both bodies, so equal
+/// strings are one predicate (ADR-0060). Two declarations, or two catalogs,
+/// compare their texts. A body that does not render, or a live check with no
+/// pair, differs: the rebuild then fails rendering it, naming the check. A
+/// check over a column whose type changes that differs, or cannot be
+/// compared, is carried around the type change instead (dropped before it,
+/// added back after), never rebuilt.
+fn check_differs(
+    old: &Side,
+    new: &Side,
+    old_model: &SchemaModel,
+    new_model: &SchemaModel,
+    name: &str,
+    dialect: Dialect,
+) -> bool {
+    check_compared(old, new, old_model, new_model, name, dialect) != Carry::Unchanged
+}
+
+/// How the check `name`'s body compares between `old_model` on `old` and
+/// `new_model` on `new` ([`check_differs`]): the same, different (a body
+/// that does not render included), or not comparable (a live check with no
+/// printed pair).
+fn check_compared(
+    old: &Side,
+    new: &Side,
+    old_model: &SchemaModel,
+    new_model: &SchemaModel,
+    name: &str,
+    dialect: Dialect,
+) -> Carry {
+    let differs = |differs: bool| {
+        if differs {
+            Carry::Changed
+        } else {
+            Carry::Unchanged
+        }
+    };
+    let held = |side: &Side, model: &SchemaModel| {
+        side.checks(model)
+            .into_iter()
+            .find(|(check, _)| check == name)
+            .map(|(_, body)| body)
+    };
+    let text = |body: &Body, model: &SchemaModel| match body {
+        Body::Canonical => declared_check_body(model, name, dialect).ok().flatten(),
+        Body::Catalog(definition) => Some(definition.clone()),
+    };
+    let (Some(was), Some(now)) = (held(old, old_model), held(new, new_model)) else {
+        return Carry::Unchanged;
+    };
+    let same_kind = matches!(
+        (&was, &now),
+        (Body::Canonical, Body::Canonical) | (Body::Catalog(_), Body::Catalog(_))
+    );
+    if dialect == Dialect::Sqlite || same_kind {
+        let (Some(was), Some(now)) = (text(&was, old_model), text(&now, new_model)) else {
+            return Carry::Changed;
+        };
+        return differs(match dialect {
+            Dialect::Sqlite => {
+                !drifted_check_names(&[(name.to_string(), now)], &[(name.to_string(), was)])
+                    .is_empty()
+            }
+            Dialect::Postgres => was != now,
+        });
+    }
+    let pair = [old.table_facts(old_model), new.table_facts(new_model)]
+        .iter()
+        .find_map(|facts| {
+            facts
+                .checks
+                .iter()
+                .find(|check| check.name == name)?
+                .printed
+                .clone()
+        });
+    match pair {
+        None => Carry::NotCompared,
+        Some(pair) => differs(pair.declared != pair.catalog),
+    }
+}
+
+/// Whether the check `name`, as whichever of `old_model` and `new_model`
+/// declares it, reads a column both hold whose type change between them
+/// runs ([`type_change_runs`]): it is carried around the change.
+fn check_reads_column(
+    old_model: &SchemaModel,
+    new_model: &SchemaModel,
+    name: &str,
+    dialect: Dialect,
+) -> bool {
+    let column = |model: &SchemaModel, name: &str| {
+        model.columns.iter().find(|col| col.name == name).cloned()
+    };
+    check_columns(old_model, new_model, name)
+        .iter()
+        .any(
+            |input| match (column(old_model, input), column(new_model, input)) {
+                (Some(was), Some(now)) => type_change_runs(&was, &now, dialect),
+                _ => false,
+            },
+        )
+}
+
+/// The columns the check `name` reads, as whichever of `new_model` and
+/// `old_model` declares it (`new_model` first).
+fn check_columns(old_model: &SchemaModel, new_model: &SchemaModel, name: &str) -> BTreeSet<String> {
+    let read = |model: &SchemaModel| -> Option<BTreeSet<String>> {
+        model
+            .table_checks
+            .iter()
+            .find(|check| check.name == name)
+            .map(|check| ferro_ddl_lowering::check_expr_columns(&check.predicate))
+            .or_else(|| {
+                model
+                    .checks
+                    .iter()
+                    .find(|check| check.name == name)
+                    .map(|check| BTreeSet::from([check.column.clone()]))
+            })
+    };
+    read(new_model)
+        .or_else(|| read(old_model))
+        .unwrap_or_default()
 }
 
 /// Plan the [`MigrationOp::ValidateConstraint`] operations for one table
@@ -1952,6 +2420,85 @@ pub struct OpVerdict {
     pub recreates: bool,
     /// It rides the statement of a column the same plan drops or adds.
     pub goes_with: Option<Rider>,
+    /// It is the drop or the add of a stored generated column the plan
+    /// drops and adds back, and why.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replaces: Option<Replace>,
+    /// It takes down or puts back an artifact the plan carries around
+    /// another change (a row policy around a generated column's drop and
+    /// add, a check around it or around a type change of a column it
+    /// reads), and whether what it puts back is what it took down. Only an
+    /// [`Carry::Unchanged`] one is no difference.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub carried: Option<Carry>,
+    /// On a type change no door runs ([`type_change_withheld`]): the checks,
+    /// generated columns and row policies that read the column ([`held_of`]),
+    /// which stay standing, never taken down, put back, rebuilt or compared,
+    /// until the change runs, and the fix that makes it run. `None` on every
+    /// other op.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub held: Option<Held>,
+}
+
+/// What a withheld type change holds ([`OpVerdict::held`]).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct Held {
+    /// What every door reports of the withheld change, naming its fix: the
+    /// primary-key recipe, the enum type move's recipe, or the refused
+    /// conversion's warning.
+    pub fix: String,
+    /// The artifacts over the column, checks first, then generated columns,
+    /// then policies.
+    pub artifacts: Vec<HeldArtifact>,
+}
+
+/// An artifact a withheld type change holds ([`OpVerdict::held`]).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct HeldArtifact {
+    /// What it is.
+    pub kind: HeldKind,
+    /// Its name: the check's or policy's, or the generated column's.
+    pub name: String,
+}
+
+impl HeldArtifact {
+    /// `check "ck_ticket_coded"`, `generated column "n"`, `row policy "…"`.
+    fn describe(&self) -> String {
+        let noun = match self.kind {
+            HeldKind::Check => "check",
+            HeldKind::GeneratedColumn => "generated column",
+            HeldKind::Policy => "row policy",
+        };
+        format!("{noun} \"{}\"", self.name)
+    }
+}
+
+/// The kind of a [`HeldArtifact`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HeldKind {
+    /// A check that reads the column.
+    Check,
+    /// A stored generated column that is the column or reads it.
+    GeneratedColumn,
+    /// A row policy whose body reads the column.
+    Policy,
+}
+
+/// Whether an artifact the plan takes down and puts back around another
+/// change is put back as it was, decided once for both of its ops.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Carry {
+    /// What it puts back is what it took down: no difference.
+    Unchanged,
+    /// What it puts back differs from what it took down: the change rides
+    /// the pair.
+    Changed,
+    /// The two could not be compared: a live check over a column whose
+    /// type changes, which Postgres prints against the live table only
+    /// under the types it has.
+    NotCompared,
 }
 
 /// How the dialect runs an op.
@@ -1993,6 +2540,33 @@ pub enum Refusal {
         /// ([`ferro_ddl_lowering::string_storage_token`]).
         keep: Option<String>,
     },
+    /// The op would take down, or alter a column under, an artifact a
+    /// withheld type change holds ([`held_of`]): the artifact cannot be
+    /// rebuilt against the column's old type, so the change waits for the
+    /// withheld one.
+    HeldByWithheldAlter {
+        /// The table.
+        table: String,
+        /// The column the op changes.
+        column: String,
+        /// The held artifact in its way.
+        artifact: HeldArtifact,
+        /// The column whose type change is withheld.
+        withheld: String,
+        /// What makes the withheld change run ([`Held::fix`]).
+        fix: String,
+    },
+    /// The op drops a generated column to add it back ([`Replace`]), and a
+    /// row policy ferro cannot carry around the drop reads it: Postgres
+    /// refuses to drop a column a policy reads.
+    PolicyReadsReplacedColumn {
+        /// The table.
+        table: String,
+        /// The generated column.
+        column: String,
+        /// The policy that reads it.
+        policy: String,
+    },
 }
 
 impl std::fmt::Display for Refusal {
@@ -2010,6 +2584,32 @@ impl std::fmt::Display for Refusal {
                 keep,
             } => f.write_str(
                 &ferro_ddl_lowering::enum_type_move_report(table, column, keep.as_deref()).text,
+            ),
+            Refusal::HeldByWithheldAlter {
+                table,
+                column,
+                artifact,
+                withheld,
+                fix,
+            } => write!(
+                f,
+                "changing \"{table}\".\"{column}\" would take down {}, which reads \
+                 \"{withheld}\", whose type change is withheld, so it cannot be rebuilt \
+                 against the old type: resolve the type change of \"{withheld}\" first: {fix}",
+                artifact.describe()
+            ),
+            Refusal::PolicyReadsReplacedColumn {
+                table,
+                column,
+                policy,
+            } => write!(
+                f,
+                "the generated column \"{table}\".\"{column}\" is dropped and added back \
+                 for this change, and row policy \"{policy}\" reads it, which Postgres \
+                 refuses to drop under a policy and ferro cannot carry around the drop: \
+                 take the policy out of the model and migrate, make this change, then \
+                 declare the policy again (or run `DROP POLICY \"{policy}\" ON \"{table}\"` \
+                 before this change and create it again after)"
             ),
         }
     }
@@ -2060,9 +2660,12 @@ impl PlannedOp {
 }
 
 /// Whether existing rows need a value for `col` that no statement supplies:
-/// it is `NOT NULL` and declares no default to fill them with.
+/// it is `NOT NULL`, declares no default to fill them with, and is not
+/// generated (the database computes a generated column for every row).
 pub(crate) fn needs_values(col: &ferro_schema_ir::SchemaColumn) -> bool {
-    !col.nullable && col.default.as_ref().is_none_or(serde_json::Value::is_null)
+    !col.nullable
+        && col.generated.is_none()
+        && col.default.as_ref().is_none_or(serde_json::Value::is_null)
 }
 
 /// Whether `col` is stored as a native Postgres enum type.
@@ -2117,24 +2720,100 @@ fn verdict(op: &MigrationOp, before: &Side, target: &Side, dialect: Dialect) -> 
         (before.plans_label_removals() && rides_removed_label(op, was, now))
             .then_some(Rider::RemovedLabel)
     });
+    // A generated column is computed for every row: its add asks the rows
+    // for nothing and brings their values back with it, and can fail on any
+    // of them (an overflow), as a change of its expression can.
+    let generated_add = adds_generated(op, target);
+    let replaces = op_replace(op, before, target, dialect);
     OpVerdict {
-        execution: execution(op, was, now, goes_with, target, dialect),
-        demands_values: demands_values(op, was, now),
-        drops_data: matches!(
-            op,
-            MigrationOp::DropTable { .. }
-                | MigrationOp::DropEnumType { .. }
-                | MigrationOp::DropColumn { .. }
-        ),
-        fails_on_rows: fails_on_rows(op, now),
+        execution: replace_refusal(op, before, target, dialect)
+            .or_else(|| held_refusal(op, before, target, dialect))
+            .map_or_else(
+                || execution(op, was, now, goes_with, target, dialect),
+                Execution::Refused,
+            ),
+        demands_values: !generated_add && demands_values(op, was, now),
+        drops_data: match op {
+            MigrationOp::DropTable { .. } | MigrationOp::DropEnumType { .. } => true,
+            // A generated column dropped to be added back around a type
+            // change loses nothing: the add computes every row again.
+            MigrationOp::DropColumn { .. } => {
+                !matches!(replaces, Some(Replace::InputType | Replace::OwnType))
+            }
+            _ => false,
+        },
+        fails_on_rows: if generated_add {
+            RowRisk::Always
+        } else {
+            fails_on_rows(op, now)
+        },
         recreates: match op {
             MigrationOp::AddTable { .. } => true,
             MigrationOp::AddColumn { column, .. } => {
-                find_column(now, column).is_some_and(|col| !col.nullable)
+                !generated_add && find_column(now, column).is_some_and(|col| !col.nullable)
             }
             _ => false,
         },
         goes_with,
+        replaces,
+        // Marked by the planner, which carries it ([`Draft::carried`]).
+        carried: None,
+        // Marked by the planner, from the same rule ([`Draft::held`]).
+        held: None,
+    }
+}
+
+/// Why `op`, an add or a drop of a column, is half of a stored generated
+/// column's drop and add back between `before` and `target` ([`replace_of`]).
+fn op_replace(op: &MigrationOp, before: &Side, target: &Side, dialect: Dialect) -> Option<Replace> {
+    let (MigrationOp::AddColumn { table, column } | MigrationOp::DropColumn { table, column }) = op
+    else {
+        return None;
+    };
+    let (was, now) = (before.model(table)?, target.model(table)?);
+    replace_of(
+        before,
+        target,
+        before.table_view(was, dialect).as_ref(),
+        now,
+        column,
+        dialect,
+    )
+}
+
+/// The refusal of `op` when it drops a generated column to add it back
+/// ([`op_replace`]) and a row policy the plan cannot carry around the drop
+/// reads it ([`policy_blocking_replace`]): Postgres refuses the drop. The
+/// verdict refuses with it; the renderer fails with it in the same words.
+pub(crate) fn replace_refusal(
+    op: &MigrationOp,
+    before: &Side,
+    target: &Side,
+    dialect: Dialect,
+) -> Option<Refusal> {
+    let MigrationOp::DropColumn { table, column } = op else {
+        return None;
+    };
+    if dialect != Dialect::Postgres {
+        return None;
+    }
+    op_replace(op, before, target, dialect)?;
+    let policy = policy_blocking_replace(before, target, table, column)?;
+    Some(Refusal::PolicyReadsReplacedColumn {
+        table: table.clone(),
+        column: column.clone(),
+        policy,
+    })
+}
+
+/// Whether `op` adds a column `target` holds as a stored generated one (a
+/// live target by its catalog facts, which its IR does not carry).
+fn adds_generated(op: &MigrationOp, target: &Side) -> bool {
+    match op {
+        MigrationOp::AddColumn { table, column } => target
+            .model(table)
+            .is_some_and(|model| target.holds_generated(model, column)),
+        _ => false,
     }
 }
 
@@ -2163,7 +2842,10 @@ fn demands_values(op: &MigrationOp, was: Option<&SchemaModel>, now: Option<&Sche
 fn fails_on_rows(op: &MigrationOp, now: Option<&SchemaModel>) -> RowRisk {
     let always = |yes: bool| if yes { RowRisk::Always } else { RowRisk::None };
     match op {
-        MigrationOp::AlterColumnType { .. } => RowRisk::Always,
+        // Both recompute every row, which can overflow.
+        MigrationOp::AlterColumnType { .. } | MigrationOp::AlterGeneratedExpression { .. } => {
+            RowRisk::Always
+        }
         MigrationOp::AlterColumnNullability { column, .. } => {
             always(find_column(now, column).is_some_and(|col| !col.nullable))
         }
@@ -2302,7 +2984,10 @@ fn execution(
     if primary_key {
         return Execution::Refused(Refusal::PrimaryKeyChange { table: table() });
     }
-    if dialect == Dialect::Sqlite && sqlite_rebuilds(op, was, now, goes_with) {
+    // SQLite's `ADD COLUMN` takes no stored generated column.
+    if dialect == Dialect::Sqlite
+        && (sqlite_rebuilds(op, was, now, goes_with) || adds_generated(op, target))
+    {
         return Execution::Rebuild;
     }
     if let MigrationOp::AlterColumnType { column, .. } = op
@@ -2329,6 +3014,8 @@ fn execution(
 /// | drop a plain column | native |
 /// | drop a foreign-key column | rebuild |
 /// | change a column's type or nullability | rebuild |
+/// | add a generated column (decided by the caller, from the target's side), make one plain, or change its expression | rebuild |
+/// | drop a column to add it back generated | rebuild |
 /// | drop a foreign default | rebuild |
 /// | add, change or drop a check (but a dropped column's own) | rebuild |
 /// | add, retarget or drop a foreign key (on a kept column) | rebuild |
@@ -2384,9 +3071,15 @@ fn sqlite_rebuilds(
         MigrationOp::AddColumn { column, .. } => {
             find_column(now, column).is_some_and(|col| !col.nullable)
         }
-        MigrationOp::DropColumn { column, .. } => has_foreign_key(was, column),
+        // A column the target still holds is dropped to be added back
+        // generated, which only the rebuild does.
+        MigrationOp::DropColumn { column, .. } => {
+            has_foreign_key(was, column) || find_column(now, column).is_some()
+        }
         // SQLite has no `ALTER COLUMN … DROP DEFAULT`.
         MigrationOp::AlterColumnType { .. }
+        | MigrationOp::AlterGeneratedExpression { .. }
+        | MigrationOp::DropGeneratedExpression { .. }
         | MigrationOp::AlterColumnNullability { .. }
         | MigrationOp::DropDefault { .. }
         | MigrationOp::ChangePrimaryKey { .. }
@@ -2485,6 +3178,52 @@ pub fn plan_down(up: &[MigrationOp], after: &Side, before: &Side, dialect: Diale
                 Artifact::ForeignKey(table.clone(), column)
             }));
         }
+    }
+    // A column in scope that the down drops and adds back (made generated
+    // again) takes every index, check and foreign key over it with the
+    // drop: the down puts them back too, as `before` holds them.
+    let added_back: Vec<(String, String)> = plan
+        .ops()
+        .filter_map(|op| match op {
+            MigrationOp::DropColumn { table, column }
+                if scope.contains(&Artifact::Column(table.clone(), column.clone()))
+                    && plan.ops().any(|other| {
+                        matches!(other, MigrationOp::AddColumn { table: t, column: c }
+                            if t == table && c == column)
+                    }) =>
+            {
+                Some((table.clone(), column.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    for (table, column) in added_back {
+        let Some(model) = before.model(&table) else {
+            continue;
+        };
+        scope.extend(
+            emit::standalone_indexes(model)
+                .into_iter()
+                .filter(|(_, columns, _)| columns.contains(&column))
+                .map(|(name, ..)| Artifact::Index(table.clone(), name)),
+        );
+        let riders = emit::column_riders(model, &column);
+        scope.extend(
+            riders
+                .check
+                .map(|check| Artifact::Constraint(table.clone(), check.name.clone()))
+                .into_iter()
+                .chain(
+                    checks_reading(model, std::slice::from_ref(&column))
+                        .into_iter()
+                        .map(|name| Artifact::Constraint(table.clone(), name)),
+                ),
+        );
+        scope.extend(
+            riders
+                .foreign_key
+                .map(|_| Artifact::ForeignKey(table.clone(), column.clone())),
+        );
     }
     plan.operations.retain(|planned| {
         is_rename(&planned.op)
@@ -2592,6 +3331,8 @@ fn key(op: &MigrationOp) -> Option<Artifact> {
         MigrationOp::AddColumn { table, column }
         | MigrationOp::DropColumn { table, column }
         | MigrationOp::AlterColumnType { table, column }
+        | MigrationOp::AlterGeneratedExpression { table, column }
+        | MigrationOp::DropGeneratedExpression { table, column }
         | MigrationOp::AlterColumnNullability { table, column } => {
             Artifact::Column(t(table), column.clone())
         }
@@ -3262,6 +4003,11 @@ fn renamed_check_expr(
                 literal => literal.clone(),
             },
         },
+        CheckExpr::Compare { left, op, right } => CheckExpr::Compare {
+            left: renamed_value_expr(left, column),
+            op: *op,
+            right: renamed_value_expr(right, column),
+        },
         CheckExpr::In { column: c, values } => CheckExpr::In {
             column: column(c),
             values: values.clone(),
@@ -3294,6 +4040,9 @@ fn renamed_model(model: &SchemaModel, renames: &Renames<'_>) -> SchemaModel {
     let mut relabelled: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
     for column in &mut out.columns {
         column.name = col(&column.name);
+        if let Some(expr) = &mut column.generated {
+            *expr = renamed_value_expr(expr, &|c| col(c));
+        }
         let renamed = renames.enum_column(column);
         if !renamed.is_empty() {
             relabelled.insert(column.name.clone(), renamed);
@@ -3609,6 +4358,262 @@ fn added_column_riders<'a>(
         .collect()
 }
 
+/// Whether a column both sides hold changes its storage type from `old_col`
+/// to `new_col` on `dialect`: an [`MigrationOp::AlterColumnType`].
+fn type_changes(
+    old_col: &ferro_schema_ir::SchemaColumn,
+    new_col: &ferro_schema_ir::SchemaColumn,
+    dialect: Dialect,
+) -> bool {
+    // A column declared with one native enum type on both sides that moved
+    // to another is a type change too: the storage decision reads a live
+    // native-enum column as already at any enum target, and only a
+    // declared `old` names its type. A move of every column of a type is
+    // its rename, applied before this diff runs (ADR-0032). So is a column
+    // that leaves its native type for a scalar storage, which the storage
+    // decision also reads as no change (a native enum's scalar cascade is
+    // the string's).
+    let moved_enum = dialect == Dialect::Postgres
+        && matches!(
+            (enum_type_of(old_col), enum_type_of(new_col)),
+            (Some((a, _)), Some((b, _))) if a != b
+        )
+        || dialect == Dialect::Postgres
+            && enum_type_of(old_col).is_some()
+            && enum_type_of(new_col).is_none();
+    moved_enum || schema_columns_storage_drift(old_col, new_col, dialect)
+}
+
+/// Whether the plan changes a column's type from `old_col` to `new_col` on
+/// `dialect` and the change runs: a type change ([`type_changes`]) but one
+/// Postgres's doors withhold ([`emit::withheld_alter`]: a primary-key
+/// column, an enum type move, a refused conversion). A withheld one leaves
+/// the column as it is, so the checks, policies and generated columns over
+/// it stay standing, held ([`held_of`]): never compared, carried or rebuilt
+/// around an alter that never runs.
+fn type_change_runs(
+    old_col: &ferro_schema_ir::SchemaColumn,
+    new_col: &ferro_schema_ir::SchemaColumn,
+    dialect: Dialect,
+) -> bool {
+    type_changes(old_col, new_col, dialect)
+        && !(dialect == Dialect::Postgres
+            && emit::withheld_alter("", &new_col.name, old_col, new_col).is_some())
+}
+
+/// Whether the plan changes a column's type from `old_col` to `new_col` on
+/// `dialect` but withholds the change ([`type_change_runs`]): the column
+/// keeps its live type, so a check or generated column that reads it is
+/// neither carried, nor compared, nor rebuilt this round. The withheld
+/// alter's refusal or warning names the fix.
+fn type_change_withheld(
+    old_col: &ferro_schema_ir::SchemaColumn,
+    new_col: &ferro_schema_ir::SchemaColumn,
+    dialect: Dialect,
+) -> bool {
+    type_changes(old_col, new_col, dialect) && !type_change_runs(old_col, new_col, dialect)
+}
+
+/// Why the plan drops a stored generated column and adds it back, decided
+/// once ([`replace_of`]) and carried on both ops' verdicts, so every door
+/// says the same of the pair.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Replace {
+    /// The column was plain (or `VIRTUAL`) and is made stored generated: the
+    /// add replaces the values its rows held, so only a destructive plan
+    /// does it.
+    MadeGenerated,
+    /// A column its expression reads changes type, which Postgres refuses to
+    /// alter while an expression reads it. The add computes every row again.
+    InputType,
+    /// Its own type changes, which Postgres refuses to alter on a generated
+    /// column. The add computes every row again.
+    OwnType,
+}
+
+/// Why `column`, a stored generated column of `new_model` (on `new`) that
+/// `old_model` (on `old`) holds too, is dropped and added back, if it is.
+/// Each side answers for its own generation (a live one from its catalog
+/// facts). On SQLite the drop and add fold into the one rebuild the change
+/// needs, so both dialects plan the same ops (and the same index steps).
+fn replace_of(
+    old: &Side,
+    new: &Side,
+    old_model: &SchemaModel,
+    new_model: &SchemaModel,
+    column: &str,
+    dialect: Dialect,
+) -> Option<Replace> {
+    let old_column = |name: &str| old_model.columns.iter().find(|col| col.name == name);
+    let new_column = |name: &str| new_model.columns.iter().find(|col| col.name == name);
+    let (was_col, now_col) = (old_column(column)?, new_column(column)?);
+    let now = new.generation(new_model, column);
+    if !now.is_stored() {
+        return None;
+    }
+    let was = old.generation(old_model, column);
+    if !was.is_stored() {
+        return Some(Replace::MadeGenerated);
+    }
+    if type_change_runs(was_col, now_col, dialect) {
+        return Some(Replace::OwnType);
+    }
+    // The columns it reads, from the side that declares it.
+    let ((Generation::Declared(expr), _) | (_, Generation::Declared(expr))) = (now, was) else {
+        return None;
+    };
+    ferro_ddl_lowering::value_expr_columns(&expr)
+        .iter()
+        .any(|input| match (old_column(input), new_column(input)) {
+            (Some(was), Some(now)) => type_change_runs(was, now, dialect),
+            _ => false,
+        })
+        .then_some(Replace::InputType)
+}
+
+/// The stored generated columns of `new_model` (on `new`) that
+/// `old_model` (on `old`) holds too and the plan drops and adds back
+/// ([`replace_of`]), in `new_model`'s order. One made generated from a plain
+/// column only a `destructive` plan replaces.
+fn replaced_generated_columns(
+    old: &Side,
+    new: &Side,
+    old_model: &SchemaModel,
+    new_model: &SchemaModel,
+    dialect: Dialect,
+    destructive: bool,
+) -> Vec<String> {
+    new_model
+        .columns
+        .iter()
+        .filter(
+            |col| match replace_of(old, new, old_model, new_model, &col.name, dialect) {
+                Some(Replace::MadeGenerated) => destructive,
+                Some(_) => true,
+                None => false,
+            },
+        )
+        .map(|col| col.name.clone())
+        .collect()
+}
+
+/// Whether the plan carries `policy` (as `before` holds it on the table)
+/// around the drop and add back of `column`: drops it before the drop and
+/// adds it back after the add, from `declaration` (the target's). A
+/// shorthand the target declares over `column`; a raw one whose body reads
+/// `column` ([`policy_reads`]) when both of its texts are ferro's own copies
+/// (a declared `before`) or the catalog's (a live `target`). From a live
+/// database toward a declaration a raw body is never rewritten (ADR-0019).
+fn carries_policy(
+    before: &Side,
+    target: &Side,
+    declaration: &SchemaModel,
+    policy: &LiveRowPolicy,
+    column: &str,
+) -> bool {
+    let Some(declared) = declaration
+        .row_security
+        .as_ref()
+        .and_then(|security| security.policies.iter().find(|p| p.name == policy.name))
+    else {
+        return false;
+    };
+    match &declared.expr {
+        ferro_schema_ir::RowPolicyExpr::Setting { column: on, .. } => on == column,
+        ferro_schema_ir::RowPolicyExpr::Raw { .. } => {
+            policy_reads(policy, column)
+                && (before.rebuilds_unverifiable_bodies() || target.reports_conditions())
+        }
+    }
+}
+
+/// Whether `policy`'s body reads `column` ([`body_names_column`]).
+fn policy_reads(policy: &LiveRowPolicy, column: &str) -> bool {
+    [&policy.using, &policy.with_check]
+        .into_iter()
+        .flatten()
+        .any(|body| body_names_column(body, column))
+}
+
+/// Whether the policy body `body` names `column` as a word, its quoted
+/// string literals left out: the conservative read of a body ferro does not
+/// parse (a raw or foreign one), where every word it names may be a column.
+fn body_names_column(body: &str, column: &str) -> bool {
+    let mut quoted = false;
+    let words: String = body
+        .chars()
+        .map(|ch| {
+            // `''` inside a literal closes and reopens it: still quoted.
+            if ch == '\'' {
+                quoted = !quoted;
+                ' '
+            } else if quoted {
+                ' '
+            } else {
+                ch
+            }
+        })
+        .collect();
+    words
+        .split(|ch: char| !(ch.is_alphanumeric() || ch == '_' || ch == '$'))
+        .any(|word| word.eq_ignore_ascii_case(column))
+}
+
+/// The first row policy on `table` that `before` holds whose body reads
+/// `column` ([`policy_reads`]) and that the plan cannot carry around the
+/// column's drop and add ([`carries_policy`]): Postgres refuses to drop a
+/// column a policy reads.
+fn policy_blocking_replace(
+    before: &Side,
+    target: &Side,
+    table: &str,
+    column: &str,
+) -> Option<String> {
+    let was = before.model(table)?;
+    let declaration = target.model(table).map(|model| target.declaration(model));
+    before
+        .table_facts(was)
+        .row_security
+        .policies
+        .iter()
+        .find(|policy| {
+            policy_reads(policy, column)
+                && !declaration.as_ref().is_some_and(|declaration| {
+                    carries_policy(before, target, declaration, policy, column)
+                })
+        })
+        .map(|policy| policy.name.clone())
+}
+
+/// The table checks of `model` whose body reads any of `columns`.
+fn checks_reading(model: &SchemaModel, columns: &[String]) -> Vec<String> {
+    model
+        .table_checks
+        .iter()
+        .filter(|check| {
+            ferro_ddl_lowering::check_expr_columns(&check.predicate)
+                .iter()
+                .any(|column| columns.contains(column))
+        })
+        .map(|check| check.name.clone())
+        .collect()
+}
+
+/// `model` without `columns` and the indexes, uniques, column checks and
+/// foreign keys over any of them: the table once the plan has dropped them.
+fn without_columns(model: &SchemaModel, columns: &[String]) -> SchemaModel {
+    let gone = |name: &String| columns.contains(name);
+    let mut out = model.clone();
+    out.columns.retain(|col| !gone(&col.name));
+    out.indexes.retain(|index| !index.columns.iter().any(gone));
+    out.uniques
+        .retain(|unique| !unique.columns.iter().any(gone));
+    out.checks.retain(|check| !gone(&check.column));
+    out.foreign_keys.retain(|fk| !gone(&fk.column));
+    out
+}
+
 fn diff_model_columns(
     table: &str,
     old_model: &SchemaModel,
@@ -3644,23 +4649,7 @@ fn diff_model_columns(
         let Some(old_col) = old_cols.get(name) else {
             continue;
         };
-        // A column declared with one native enum type on both sides that moved
-        // to another is a type change too: the storage decision reads a live
-        // native-enum column as already at any enum target, and only a
-        // declared `old` names its type. A move of every column of a type is
-        // its rename, applied before this diff runs (ADR-0032). So is a column
-        // that leaves its native type for a scalar storage, which the storage
-        // decision also reads as no change (a native enum's scalar cascade is
-        // the string's).
-        let moved_enum = dialect == Dialect::Postgres
-            && matches!(
-                (enum_type_of(old_col), enum_type_of(new_col)),
-                (Some((a, _)), Some((b, _))) if a != b
-            )
-            || dialect == Dialect::Postgres
-                && enum_type_of(old_col).is_some()
-                && enum_type_of(new_col).is_none();
-        if moved_enum || schema_columns_storage_drift(old_col, new_col, dialect) {
+        if type_changes(old_col, new_col, dialect) {
             ops.push(MigrationOp::AlterColumnType {
                 table: table.to_string(),
                 column: (*name).to_string(),
@@ -3673,6 +4662,647 @@ fn diff_model_columns(
             });
         }
     }
+}
+
+/// `expr` with every column reference renamed by `rename`.
+pub fn renamed_value_expr(
+    expr: &ferro_schema_ir::ValueExpr,
+    rename: &dyn Fn(&str) -> String,
+) -> ferro_schema_ir::ValueExpr {
+    use ferro_schema_ir::ValueExpr;
+    match expr {
+        ValueExpr::Column { name } => ValueExpr::Column { name: rename(name) },
+        ValueExpr::Literal { .. } => expr.clone(),
+        ValueExpr::Binary { op, left, right } => ValueExpr::Binary {
+            op: *op,
+            left: Box::new(renamed_value_expr(left, rename)),
+            right: Box::new(renamed_value_expr(right, rename)),
+        },
+        ValueExpr::Negate { operand } => ValueExpr::Negate {
+            operand: Box::new(renamed_value_expr(operand, rename)),
+        },
+        ValueExpr::Func { name, args } => ValueExpr::Func {
+            name: name.clone(),
+            args: args
+                .iter()
+                .map(|arg| renamed_value_expr(arg, rename))
+                .collect(),
+        },
+    }
+}
+
+/// `text` with every run of whitespace one space, trimmed: how SQLite's
+/// stored text of a generated column is compared with ferro's rendering.
+fn fold_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// How one side holds a column's generation.
+enum Generation {
+    /// Not generated.
+    Plain,
+    /// Declared generated, with its expression.
+    Declared(ferro_schema_ir::ValueExpr),
+    /// Generated on a live database, as the catalog reports it.
+    Live(LiveGeneratedFact),
+}
+
+impl Generation {
+    /// Whether the column is a stored generated one: declared generated
+    /// (ferro declares only `STORED`), or live with `stored` set.
+    fn is_stored(&self) -> bool {
+        match self {
+            Generation::Plain => false,
+            Generation::Declared(_) => true,
+            Generation::Live(fact) => fact.stored,
+        }
+    }
+}
+
+impl Side {
+    /// How the side holds `column` of `model`'s generation: a declaration's
+    /// expression, or a live column's catalog fact.
+    fn generation(&self, model: &SchemaModel, column: &str) -> Generation {
+        match &self.0 {
+            SideKind::Declared(_) => model
+                .columns
+                .iter()
+                .find(|col| col.name == column)
+                .and_then(|col| col.generated.clone())
+                .map_or(Generation::Plain, Generation::Declared),
+            SideKind::Live { .. } => self
+                .table_facts(model)
+                .generated
+                .iter()
+                .find(|fact| fact.column == column)
+                .cloned()
+                .map_or(Generation::Plain, Generation::Live),
+        }
+    }
+
+    /// Whether the side holds `column` of `model` as a stored generated
+    /// column: declared generated, or so in a live catalog.
+    pub(crate) fn holds_generated(&self, model: &SchemaModel, column: &str) -> bool {
+        self.generation(model, column).is_stored()
+    }
+
+    /// The expression `column` of `model` is generated by, as `SET
+    /// EXPRESSION` writes it on `dialect`: a declaration's rendering, or a
+    /// live column's catalog text, put back as the catalog printed it.
+    /// `None` for a plain column.
+    pub(crate) fn generated_body(
+        &self,
+        model: &SchemaModel,
+        column: &str,
+        dialect: Dialect,
+    ) -> Result<Option<String>, String> {
+        match self.generation(model, column) {
+            Generation::Plain => Ok(None),
+            Generation::Declared(expr) => {
+                ferro_ddl_lowering::render_value_expr(&expr, dialect, &model.columns).map(Some)
+            }
+            Generation::Live(fact) => Ok(Some(fact.catalog)),
+        }
+    }
+
+    /// Refuse a live side whose Postgres generated columns lack a printed
+    /// pair the live read owed it (ADR-0060): every live stored generated
+    /// column that [`printed_pair_column`] gives a pair, the one rule the
+    /// live read prints them by. A column whose input is not live yet gets
+    /// none, and the plan adds or changes it instead. A declared side, and
+    /// SQLite, need none.
+    ///
+    /// The declared table is matched to its live table by name first, then
+    /// by its rename hint, as the live read matches them.
+    ///
+    /// # Errors
+    /// [`PlanError::MissingPrintedPair`] naming the first such column.
+    pub fn check_printed_pairs(
+        &self,
+        declared: &IrEnvelope<SchemaIrPayload>,
+        dialect: Dialect,
+    ) -> Result<(), PlanError> {
+        let SideKind::Live { ir, facts } = &self.0 else {
+            return Ok(());
+        };
+        if dialect != Dialect::Postgres {
+            return Ok(());
+        }
+        for model in &declared.payload.models {
+            let live_table = [Some(&model.table_name), model.renamed_from.as_ref()]
+                .into_iter()
+                .flatten()
+                .find(|table| facts.tables.contains_key(*table));
+            let Some(live_table) = live_table else {
+                continue;
+            };
+            let live_columns: &[ferro_schema_ir::SchemaColumn] = ir
+                .payload
+                .models
+                .iter()
+                .find(|live| &live.table_name == live_table)
+                .map_or(&[], |live| live.columns.as_slice());
+            let live = |name: &str| live_columns.iter().find(|col| col.name == name);
+            for col in &model.columns {
+                let Some(live_name) = printed_pair_column(model, col, &live) else {
+                    continue;
+                };
+                let live_name = &live_name;
+                let missing = facts.tables[live_table]
+                    .generated
+                    .iter()
+                    .any(|fact| &fact.column == live_name && fact.stored && fact.printed.is_none());
+                if missing {
+                    return Err(PlanError::MissingPrintedPair {
+                        table: live_table.clone(),
+                        column: live_name.clone(),
+                    });
+                }
+            }
+            let live_checks = &facts.tables[live_table].checks;
+            let live_check = |name: &str| {
+                live_checks
+                    .iter()
+                    .any(|check| check.name == name && check.ferro_owned)
+            };
+            for (name, _) in printed_pair_checks(model, live_table, &live, &live_check) {
+                let missing = live_checks.iter().any(|check| {
+                    check.name == name && check.ferro_owned && check.printed.is_none()
+                });
+                if missing {
+                    return Err(PlanError::MissingCheckPrintedPair {
+                        table: live_table.clone(),
+                        check: name,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The checks of `model` whose bodies the live read prints on Postgres
+/// beside the catalog's (ADR-0060), as `(live name, declared body)`: every
+/// check `model` declares whose every column is live (`live`, by name or
+/// rename hint) and that a live ferro-owned check holds (`live_check`), by
+/// its own name or the name a rename of the same change re-derives it from,
+/// its body rendered for Postgres under the live table `live_table`'s
+/// column names. The live read pairs each with that live check, and
+/// [`Side::check_printed_pairs`] demands a pair by the same rule. A check
+/// reading a column that is not live yet gets none: its live namesake, if
+/// any, reads something else and is rebuilt.
+///
+/// A body that does not render is its `Err`, naming the check.
+pub fn printed_pair_checks<'a>(
+    model: &SchemaModel,
+    live_table: &str,
+    live: &dyn Fn(&str) -> Option<&'a ferro_schema_ir::SchemaColumn>,
+    live_check: &dyn Fn(&str) -> bool,
+) -> Vec<(String, Result<String, String>)> {
+    let present = |name: &str| live(name).is_some();
+    let hints: Vec<Hint> = std::iter::once(Hint::Table {
+        old: model.table_name.clone(),
+        new: live_table.to_string(),
+    })
+    .chain(model.columns.iter().filter_map(|col| {
+        let name = live_column_name(model, &col.name, &present)?;
+        (name != col.name).then(|| Hint::Column {
+            table: live_table.to_string(),
+            old: col.name.clone(),
+            new: name,
+        })
+    }))
+    .collect();
+    let view = renamed_model(model, &Renames { hints: &hints });
+    let table_checks = view.table_checks.iter().map(|check| {
+        (
+            &check.name,
+            ferro_ddl_lowering::check_expr_columns(&check.predicate),
+        )
+    });
+    let column_checks = view
+        .checks
+        .iter()
+        .map(|check| (&check.name, BTreeSet::from([check.column.clone()])));
+    // `renamed_model` keeps the checks in order, one for one.
+    declared_check_names(model)
+        .into_iter()
+        .zip(table_checks.chain(column_checks))
+        // Every column live and stored as declared, under its live name.
+        .filter(|(_, (_, columns))| {
+            columns.iter().all(|column| {
+                live(column).is_some_and(|live_col| {
+                    view.columns
+                        .iter()
+                        .find(|col| &col.name == column)
+                        .is_some_and(|col| stored_as_declared(live_col, col))
+                })
+            })
+        })
+        .filter_map(|(declared, (rederived, _))| {
+            let name = [declared.as_str(), rederived.as_str()]
+                .into_iter()
+                .find(|name| live_check(name))?
+                .to_string();
+            let body = declared_check_body(&view, rederived, Dialect::Postgres).and_then(|body| {
+                body.ok_or_else(|| format!("CHECK constraint '{rederived}' is not declared"))
+            });
+            Some((name, body))
+        })
+        .collect()
+}
+
+/// The live name of the declared column `name` of `model`: its own name
+/// when the live table holds it (`live`), else its rename hint's.
+pub fn live_column_name(
+    model: &SchemaModel,
+    name: &str,
+    live: &dyn Fn(&str) -> bool,
+) -> Option<String> {
+    let col = model.columns.iter().find(|col| col.name == name)?;
+    [Some(&col.name), col.renamed_from.as_ref()]
+        .into_iter()
+        .flatten()
+        .find(|name| live(name))
+        .cloned()
+}
+
+/// Whether the declared column `name` of `model` is live (`live`, the live
+/// column of a live name), by name or rename hint, stored as `model`
+/// declares it: an expression or check over it the live read renders then
+/// reads the live table as the declaration does. One whose type changes may
+/// not type-check against the live table, and Postgres refuses to print it.
+fn live_as_declared<'a>(
+    model: &SchemaModel,
+    name: &str,
+    live: &dyn Fn(&str) -> Option<&'a ferro_schema_ir::SchemaColumn>,
+) -> bool {
+    let Some(declared) = model.columns.iter().find(|col| col.name == name) else {
+        return false;
+    };
+    [Some(&declared.name), declared.renamed_from.as_ref()]
+        .into_iter()
+        .flatten()
+        .find_map(|name| live(name))
+        .is_some_and(|live_col| stored_as_declared(live_col, declared))
+}
+
+/// Whether the live column `live` is stored as `declared` declares it on
+/// Postgres ([`type_changes`]): the one type rule the live read's pairs are
+/// asked by. A column whose type change is withheld ([`type_change_withheld`])
+/// keeps its live type, which a declared body may not type-check against, so
+/// what reads it gets no pair and no body decision until the change runs.
+fn stored_as_declared(
+    live: &ferro_schema_ir::SchemaColumn,
+    declared: &ferro_schema_ir::SchemaColumn,
+) -> bool {
+    !type_changes(live, declared, Dialect::Postgres)
+}
+
+/// The live name of `col` when the live read prints its pair on Postgres
+/// (ADR-0060): `col` is generated, and it and every column its expression
+/// reads are live (`live`, the live column of a live name), by name or
+/// rename hint, each stored as declared ([`live_as_declared`]). The one
+/// rule the live read prints pairs by and [`Side::check_printed_pairs`]
+/// demands them by. A declared column or input absent live, or changing
+/// type, gets no pair: the plan adds the column, changes its expression, or
+/// drops and adds it back, instead.
+pub fn printed_pair_column<'a>(
+    model: &SchemaModel,
+    col: &ferro_schema_ir::SchemaColumn,
+    live: &dyn Fn(&str) -> Option<&'a ferro_schema_ir::SchemaColumn>,
+) -> Option<String> {
+    let expr = col.generated.as_ref()?;
+    let name = live_column_name(model, &col.name, &|name| live(name).is_some())?;
+    (live_as_declared(model, &col.name, live)
+        && ferro_ddl_lowering::value_expr_columns(expr)
+            .iter()
+            .all(|input| live_as_declared(model, input, live)))
+    .then_some(name)
+}
+
+/// Whether `column`'s generation differs between `old_model` on `old` and
+/// `new_model` on `new` (ADR-0060). Two declarations compare their
+/// expressions. A live column compares with a declaration through what the
+/// live read gathered: on Postgres the printed pair (Postgres printed both
+/// expressions, so equal strings are one expression), on SQLite the stored
+/// text against ferro's rendering, guard included, whitespace folded. A live
+/// `VIRTUAL` column, or a plain column on one side and a generated one on
+/// the other, always differs.
+fn generation_differs(
+    old: &Side,
+    new: &Side,
+    old_model: &SchemaModel,
+    new_model: &SchemaModel,
+    column: &str,
+    dialect: Dialect,
+) -> bool {
+    let live_against = |fact: &LiveGeneratedFact, model: &SchemaModel| {
+        if !fact.stored {
+            return true;
+        }
+        match dialect {
+            Dialect::Postgres => fact
+                .printed
+                .as_ref()
+                .is_none_or(|pair| pair.declared != pair.catalog),
+            Dialect::Sqlite => model
+                .columns
+                .iter()
+                .find(|col| col.name == column)
+                .and_then(|col| emit::generated_column_text(model, col, dialect).ok())
+                .flatten()
+                .is_none_or(|text| fold_whitespace(&text) != fold_whitespace(&fact.catalog)),
+        }
+    };
+    match (
+        old.generation(old_model, column),
+        new.generation(new_model, column),
+    ) {
+        (Generation::Plain, Generation::Plain) => false,
+        (Generation::Declared(was), Generation::Declared(now)) => was != now,
+        (Generation::Live(fact), Generation::Declared(_)) => live_against(&fact, new_model),
+        (Generation::Declared(_), Generation::Live(fact)) => live_against(&fact, old_model),
+        (Generation::Live(was), Generation::Live(now)) => {
+            was.stored != now.stored
+                || fold_whitespace(&was.catalog) != fold_whitespace(&now.catalog)
+        }
+        _ => true,
+    }
+}
+
+/// The generation changes of every column both models hold: a generated
+/// column the target holds plain is a
+/// [`MigrationOp::DropGeneratedExpression`]; a stored generated column on
+/// both sides whose expression differs ([`generation_differs`]) a
+/// [`MigrationOp::AlterGeneratedExpression`]. A column generated on the
+/// target only is dropped and added ([`replaced_generated_columns`]).
+fn diff_generated(
+    old: &Side,
+    new: &Side,
+    old_model: &SchemaModel,
+    new_model: &SchemaModel,
+    dialect: Dialect,
+    held: &TableHeld,
+    ops: &mut Vec<MigrationOp>,
+) {
+    for col in &new_model.columns {
+        if !old_model.columns.iter().any(|was| was.name == col.name)
+            || held.holds(HeldKind::GeneratedColumn, &col.name)
+        {
+            continue;
+        }
+        let (table, column) = (new_model.table_name.clone(), col.name.clone());
+        let was = old.generation(old_model, &col.name);
+        let now = new.generation(new_model, &col.name);
+        if matches!(now, Generation::Plain) && !matches!(was, Generation::Plain) {
+            ops.push(MigrationOp::DropGeneratedExpression { table, column });
+        } else if now.is_stored()
+            && was.is_stored()
+            && generation_differs(old, new, old_model, new_model, &col.name, dialect)
+        {
+            ops.push(MigrationOp::AlterGeneratedExpression { table, column });
+        }
+    }
+}
+
+/// The columns a generated column's expression reads, from the side that
+/// declares it (`now` first); none when neither does.
+fn generation_inputs(now: &Generation, was: &Generation) -> BTreeSet<String> {
+    match (now, was) {
+        (Generation::Declared(expr), _) | (_, Generation::Declared(expr)) => {
+            ferro_ddl_lowering::value_expr_columns(expr)
+        }
+        _ => BTreeSet::new(),
+    }
+}
+
+/// One artifact a withheld type change holds, with the columns it reads.
+struct HeldEntry {
+    /// The column whose type change is withheld.
+    withheld: String,
+    /// What makes that change run ([`Held::fix`]).
+    fix: String,
+    artifact: HeldArtifact,
+    /// Every column it reads (a generated column: itself and its inputs).
+    reads: BTreeSet<String>,
+}
+
+/// What one table's withheld type changes hold ([`held_of`]).
+#[derive(Default)]
+pub(crate) struct TableHeld(Vec<HeldEntry>);
+
+impl TableHeld {
+    /// Whether the `kind` artifact `name` is held.
+    fn holds(&self, kind: HeldKind, name: &str) -> bool {
+        self.0
+            .iter()
+            .any(|entry| entry.artifact.kind == kind && entry.artifact.name == name)
+    }
+
+    /// Each withheld change's `AlterColumnType` op on `table`, with what it
+    /// holds, in the order the columns are declared.
+    fn verdicts(&self, table: &str) -> Vec<(MigrationOp, Held)> {
+        let mut out: Vec<(MigrationOp, Held)> = Vec::new();
+        for entry in &self.0 {
+            let op = MigrationOp::AlterColumnType {
+                table: table.to_string(),
+                column: entry.withheld.clone(),
+            };
+            match out.iter_mut().find(|(held, _)| *held == op) {
+                Some((_, held)) => {
+                    if !held.artifacts.contains(&entry.artifact) {
+                        held.artifacts.push(entry.artifact.clone());
+                    }
+                }
+                None => out.push((
+                    op,
+                    Held {
+                        fix: entry.fix.clone(),
+                        artifacts: vec![entry.artifact.clone()],
+                    },
+                )),
+            }
+        }
+        out
+    }
+}
+
+/// What the withheld type changes of `table` hold between `before` and
+/// `target` on Postgres ([`type_change_withheld`]): every check the target
+/// declares that reads such a column, every stored generated column the
+/// target declares that is one or reads one, and every row policy whose live
+/// body reads one or whose declared shorthand is over one. The column keeps
+/// its live type, which their declared bodies may not type-check against, so
+/// none gets a printed pair ([`stored_as_declared`], the same rule), and the
+/// plan never takes one down, puts it back, rebuilds, adds or compares it;
+/// a change that would take one down is refused ([`held_refusal`]). The one
+/// decision every path and the verdict read.
+pub(crate) fn held_of(before: &Side, target: &Side, table: &str, dialect: Dialect) -> TableHeld {
+    let (Some(old_model), Some(new_model)) = (before.model(table), target.model(table)) else {
+        return TableHeld::default();
+    };
+    if dialect != Dialect::Postgres {
+        return TableHeld::default();
+    }
+    let facts = before.table_facts(old_model);
+    let declaration = target.declaration(new_model);
+    let checks: Vec<(String, BTreeSet<String>)> = target
+        .checks(new_model)
+        .into_iter()
+        .map(|(name, _)| {
+            let reads = check_columns(old_model, new_model, &name);
+            (name, reads)
+        })
+        .collect();
+    let generated: Vec<(String, BTreeSet<String>)> = new_model
+        .columns
+        .iter()
+        .filter_map(|col| {
+            let now = target.generation(new_model, &col.name);
+            if !now.is_stored() {
+                return None;
+            }
+            let was = before.generation(old_model, &col.name);
+            let mut reads = generation_inputs(&now, &was);
+            reads.insert(col.name.clone());
+            Some((col.name.clone(), reads))
+        })
+        .collect();
+    let policy_reads_column = |name: &str, column: &str| {
+        facts
+            .row_security
+            .policies
+            .iter()
+            .any(|policy| policy.name == name && policy_reads(policy, column))
+            || declaration.row_security.as_ref().is_some_and(|security| {
+                security.policies.iter().any(|policy| {
+                    policy.name == name
+                        && matches!(&policy.expr,
+                            ferro_schema_ir::RowPolicyExpr::Setting { column: on, .. } if on == column)
+                })
+            })
+    };
+    let policies: BTreeSet<String> = facts
+        .row_security
+        .policies
+        .iter()
+        .map(|policy| policy.name.clone())
+        .chain(
+            declaration
+                .row_security
+                .iter()
+                .flat_map(|security| security.policies.iter().map(|policy| policy.name.clone())),
+        )
+        .collect();
+    let mut entries = Vec::new();
+    for now in &new_model.columns {
+        let Some(was) = old_model.columns.iter().find(|was| was.name == now.name) else {
+            continue;
+        };
+        if !type_change_withheld(was, now, dialect) {
+            continue;
+        }
+        let column = now.name.as_str();
+        let fix = emit::withheld_alter("", column, was, now)
+            .and_then(|withheld| emit::withheld_alter_report(table, column, was, now, &withheld))
+            .map(|report| report.text)
+            .unwrap_or_default();
+        let mut hold = |kind, name: &str, reads: BTreeSet<String>| {
+            entries.push(HeldEntry {
+                withheld: column.to_string(),
+                fix: fix.clone(),
+                artifact: HeldArtifact {
+                    kind,
+                    name: name.to_string(),
+                },
+                reads,
+            });
+        };
+        for (name, reads) in &checks {
+            if reads.contains(column) {
+                hold(HeldKind::Check, name, reads.clone());
+            }
+        }
+        for (name, reads) in &generated {
+            if reads.contains(column) {
+                hold(HeldKind::GeneratedColumn, name, reads.clone());
+            }
+        }
+        for name in &policies {
+            if policy_reads_column(name, column) {
+                let reads = old_model
+                    .columns
+                    .iter()
+                    .chain(&new_model.columns)
+                    .map(|col| col.name.clone())
+                    .filter(|col| policy_reads_column(name, col))
+                    .collect();
+                hold(HeldKind::Policy, name, reads);
+            }
+        }
+    }
+    TableHeld(entries)
+}
+
+/// Why `op` is refused because it would disturb what a withheld type change
+/// holds ([`held_of`]), if it is: a generated column's drop for its add back
+/// under a held check or policy that reads it (the drop takes the check with
+/// it, and Postgres refuses it under the policy), a type change that runs
+/// under a held generated column or policy that reads the column (Postgres
+/// refuses to alter a column an expression or policy reads), or the add of
+/// a held generated column. The refusal names the withheld change's fix.
+pub(crate) fn held_refusal(
+    op: &MigrationOp,
+    before: &Side,
+    target: &Side,
+    dialect: Dialect,
+) -> Option<Refusal> {
+    let in_the_way: &dyn Fn(&HeldEntry, &str) -> bool = match op {
+        MigrationOp::DropColumn { .. } if op_replace(op, before, target, dialect).is_some() => {
+            &|entry, column| {
+                entry.artifact.kind != HeldKind::GeneratedColumn && entry.reads.contains(column)
+            }
+        }
+        MigrationOp::AlterColumnType { table, column } => {
+            let runs = before
+                .model(table)
+                .and_then(|model| model.columns.iter().find(|col| &col.name == column))
+                .zip(
+                    target
+                        .model(table)
+                        .and_then(|model| model.columns.iter().find(|col| &col.name == column)),
+                )
+                .is_some_and(|(was, now)| type_change_runs(was, now, dialect));
+            if !runs {
+                return None;
+            }
+            &|entry, column| {
+                entry.artifact.kind != HeldKind::Check
+                    && entry.withheld != column
+                    && entry.reads.contains(column)
+            }
+        }
+        MigrationOp::AddColumn { .. } => &|entry, column| {
+            entry.artifact.kind == HeldKind::GeneratedColumn && entry.artifact.name == column
+        },
+        _ => return None,
+    };
+    let (MigrationOp::DropColumn { table, column }
+    | MigrationOp::AlterColumnType { table, column }
+    | MigrationOp::AddColumn { table, column }) = op
+    else {
+        return None;
+    };
+    let held = held_of(before, target, table, dialect);
+    let entry = held.0.iter().find(|entry| in_the_way(entry, column))?;
+    Some(Refusal::HeldByWithheldAlter {
+        table: table.clone(),
+        column: column.clone(),
+        artifact: entry.artifact.clone(),
+        withheld: entry.withheld.clone(),
+        fix: entry.fix.clone(),
+    })
 }
 
 fn diff_model_indexes(
@@ -3886,6 +5516,7 @@ mod down_tests {
             default: None,
             default_factory: None,
             retired: false,
+            generated: None,
             format: None,
             enum_values: None,
             enum_type_name: None,
@@ -4104,6 +5735,7 @@ mod down_tests {
                     ferro_owned: true,
                     validated: true,
                     column: None,
+                    printed: None,
                 }],
                 ..LiveTableFacts::default()
             },
@@ -4359,6 +5991,7 @@ mod down_tests {
                     ferro_owned: true,
                     validated: true,
                     column: None,
+                    printed: None,
                 }],
                 ..LiveTableFacts::default()
             },
@@ -4640,6 +6273,7 @@ mod foreign_default_tests {
             default: None,
             default_factory: None,
             retired: false,
+            generated: None,
             format: None,
             enum_values: None,
             enum_type_name: None,

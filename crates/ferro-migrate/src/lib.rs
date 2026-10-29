@@ -44,8 +44,9 @@ pub use generate::{
 };
 pub use order::order_by_dependencies;
 pub use plan::{
-    Execution, Hint, HintError, LiveCheckFact, LiveFacts, LiveTableFacts, OpVerdict, PlanError,
-    PlannedOp, Refusal, Rider, RowRisk, Side, foreign_default, live_hints, plan_down, plan_from_ir,
+    Carry, Execution, Held, HeldArtifact, HeldKind, Hint, HintError, LiveCheckFact, LiveFacts,
+    LiveGeneratedFact, LiveTableFacts, OpVerdict, PlanError, PlannedOp, PrintedPair, Refusal,
+    Replace, Rider, RowRisk, Side, foreign_default, live_hints, plan_down, plan_from_ir,
 };
 pub use render::{RenderedOp, validate_schema_ir};
 pub use revision::{
@@ -254,6 +255,28 @@ pub enum MigrationOp {
         /// Owning table.
         table: String,
         /// Column whose storage type drifted.
+        column: String,
+    },
+    /// A stored generated column's expression differs between the sides
+    /// (ADR-0060). `ALTER TABLE … ALTER COLUMN … SET EXPRESSION AS (…)` on
+    /// Postgres, every row recomputed; a table rebuild on SQLite. Its down
+    /// restores the previous side's expression. A column generated on one
+    /// side only is [`MigrationOp::DropGeneratedExpression`], or a
+    /// [`MigrationOp::DropColumn`] and [`MigrationOp::AddColumn`] of it.
+    AlterGeneratedExpression {
+        /// Owning table.
+        table: String,
+        /// The generated column.
+        column: String,
+    },
+    /// A generated column the target declares plain: `ALTER TABLE … ALTER
+    /// COLUMN … DROP EXPRESSION` on Postgres, the stored values kept; a
+    /// table rebuild on SQLite, which copies them. Its down is the column
+    /// dropped and added generated again.
+    DropGeneratedExpression {
+        /// Owning table.
+        table: String,
+        /// The column made plain.
         column: String,
     },
     /// `nullable` changed for a column that exists in both snapshots.
@@ -480,6 +503,8 @@ impl MigrationOp {
             | MigrationOp::AddColumn { table, .. }
             | MigrationOp::DropColumn { table, .. }
             | MigrationOp::AlterColumnType { table, .. }
+            | MigrationOp::AlterGeneratedExpression { table, .. }
+            | MigrationOp::DropGeneratedExpression { table, .. }
             | MigrationOp::AlterColumnNullability { table, .. }
             | MigrationOp::DropDefault { table, .. }
             | MigrationOp::ChangePrimaryKey { table, .. }
@@ -637,6 +662,13 @@ impl AnsweredBy for Report {
                     Subject::Column { table: subject, column: on },
                 ) if table == subject && column == on)
             }),
+            // The plain column, replaced by the generated one.
+            ReportKind::PlainColumnKept => has(&|op| {
+                matches!((op, &self.subject), (
+                    MigrationOp::AddColumn { table, column },
+                    Subject::Column { table: subject, column: on },
+                ) if table == subject && column == on)
+            }),
             ReportKind::PolicyBodyReplaced { name } => has(&|op| {
                 matches!(op, MigrationOp::RebuildRowPolicy { table, name: rebuilt }
                     if on_table(table) && rebuilt == name)
@@ -682,10 +714,23 @@ impl Plan {
         dialect: Dialect,
         draft: plan::Draft,
     ) -> Self {
+        let carried = draft.carried;
+        let held = draft.held;
         let operations = draft
             .operations
             .into_iter()
-            .map(|op| PlannedOp::of(op, &before, &target, dialect))
+            .map(|op| {
+                let carry = carried
+                    .iter()
+                    .find(|(carried, _)| *carried == op)
+                    .map(|(_, carry)| *carry);
+                let mut planned = PlannedOp::of(op, &before, &target, dialect);
+                planned.verdict.carried = carry;
+                if let Some((_, artifacts)) = held.iter().find(|(held, _)| *held == planned.op) {
+                    planned.verdict.held = Some(artifacts.clone());
+                }
+                planned
+            })
             .collect();
         Self {
             operations,
@@ -715,6 +760,8 @@ impl Plan {
             plan::Draft {
                 operations,
                 reports: Vec::new(),
+                carried: Vec::new(),
+                held: Vec::new(),
             },
         )
     }

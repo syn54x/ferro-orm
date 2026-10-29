@@ -7,6 +7,7 @@ condition.
 
 import difflib
 from collections.abc import Callable, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Generic, NoReturn, TypeAlias, TypeVar, get_origin
@@ -18,6 +19,13 @@ TField = TypeVar("TField")
 """The Python type of the column a `FieldProxy` refers to."""
 TModel = TypeVar("TModel")
 """The model class a `QueryProxy` stands in for."""
+
+value_comparison: ContextVar["Callable[[Any, str, Any], QueryNode] | None"] = (
+    ContextVar("value_comparison", default=None)
+)
+"""Set while a table check's predicate runs: builds the condition a
+comparison of a value expression makes, from `(left, operator, right)`.
+Unset everywhere else, where such a comparison is refused."""
 
 # Aggregate source families (#294, ADR-0009): which column families each
 # aggregate accepts, validated at build time. `None` = any column. Families
@@ -119,6 +127,8 @@ class QueryNode:
             owner: The model whose stand-in built the comparison, used to
                 refuse a condition that mixes two lambdas' parameters.
         """
+        if value_comparison.get() is None:
+            reject_fn_in_query(value, f"a comparison ({operator})")
         self.column = column
         """The compared column, or `None` on a combination."""
         self.operator = operator
@@ -616,6 +626,27 @@ class FieldProxy(Generic[TField]):
         """Subtract a numeric column from a value in an `update()` recipe."""
         return _binary_value("-", other, self)
 
+    def __mul__(self, other: Any) -> "BinaryValueExpr":
+        """Multiply a numeric column in a generated column's expression."""
+        return _binary_value("*", self, other)
+
+    def __rmul__(self, other: Any) -> "BinaryValueExpr":
+        """Multiply a value by a numeric column in a generated column's expression."""
+        return _binary_value("*", other, self)
+
+    def __truediv__(self, other: Any) -> "BinaryValueExpr":
+        """Divide a numeric column in a generated column's expression."""
+        return _binary_value("/", self, other)
+
+    def __rtruediv__(self, other: Any) -> "BinaryValueExpr":
+        """Divide a value by a numeric column in a generated column's expression."""
+        return _binary_value("/", other, self)
+
+    def __neg__(self) -> "NegateValueExpr":
+        """Negate a numeric column in a generated column's expression."""
+        _require_numeric_operand(self, "-")
+        return NegateValueExpr(self)
+
     def merge(self, patch: Any) -> "MergeValueExpr":
         """Merge keys into a JSON object column in an `update()` recipe (Postgres only).
 
@@ -765,7 +796,7 @@ def _numeric_operand_family(value: Any) -> str | None:
         if spec is None:
             return None
         return _aggregate_source_family(spec)
-    if isinstance(value, BinaryValueExpr):
+    if isinstance(value, (BinaryValueExpr, NegateValueExpr, FuncValueExpr)):
         return None
     if isinstance(value, NowExpr):
         return "datetime"
@@ -818,6 +849,36 @@ def _binary_value(op: str, left: Any, right: Any) -> "BinaryValueExpr":
     return BinaryValueExpr(op, left, right)
 
 
+def _holds_fn(value: Any) -> bool:
+    """Whether a value expression calls a `ferro.fn` function anywhere."""
+    if isinstance(value, FuncValueExpr):
+        return True
+    if isinstance(value, BinaryValueExpr):
+        return _holds_fn(value.left) or _holds_fn(value.right)
+    if isinstance(value, NegateValueExpr):
+        return _holds_fn(value.operand)
+    return False
+
+
+def reject_fn_in_query(value: Any, where: str) -> None:
+    """Refuse a `ferro.fn` call outside a generated column's expression.
+
+    Args:
+        value: The value a query, a comparison or an `update()` received.
+        where: What received it, named in the refusal.
+
+    Raises:
+        TypeError: `value` calls a `ferro.fn` function.
+    """
+    if _holds_fn(value):
+        raise TypeError(
+            f"ferro.fn cannot appear in {where}: its functions compute a "
+            "generated column's value. Declare the value as a generated column, "
+            "Field(generated=lambda ...), and query that column; a condition "
+            "on a model's rows is a Check in __ferro_checks__"
+        )
+
+
 class ValueExpr:
     """A new value computed in the database, for an `update()` recipe.
 
@@ -833,13 +894,19 @@ class ValueExpr:
     """
 
     def _reject_clause(self, clause: str) -> NoReturn:
+        reject_fn_in_query(self, f"{clause}()")
         raise TypeError(
             f"value expressions cannot appear in {clause}(); "
             "comparing a value expression to produce a predicate is #327; "
             "projecting or ordering by one is #309."
         )
 
-    def _reject_comparison(self, symbol: str) -> NoReturn:
+    def _compare(self, symbol: str, other: object) -> "QueryNode":
+        # A table check's predicate compares value expressions; nothing else.
+        build = value_comparison.get()
+        if build is not None:
+            return build(self, symbol, other)
+        reject_fn_in_query(self, f"a comparison ({symbol})")
         raise TypeError(
             f"comparing a value expression ({symbol}) is not a where() "
             "predicate (#327). Value expressions are SET sources "
@@ -847,25 +914,26 @@ class ValueExpr:
             "one is #309."
         )
 
-    def __eq__(self, other: object) -> NoReturn:  # type: ignore[override]
-        self._reject_comparison("==")
+    def __eq__(self, other: object) -> "QueryNode":  # type: ignore[override]  # ty: ignore[invalid-method-override]
+        return self._compare("==", other)
 
-    def __ne__(self, other: object) -> NoReturn:  # type: ignore[override]
-        self._reject_comparison("!=")
+    def __ne__(self, other: object) -> "QueryNode":  # type: ignore[override]  # ty: ignore[invalid-method-override]
+        return self._compare("!=", other)
 
-    def __lt__(self, other: object) -> NoReturn:
-        self._reject_comparison("<")
+    def __lt__(self, other: object) -> "QueryNode":
+        return self._compare("<", other)
 
-    def __le__(self, other: object) -> NoReturn:
-        self._reject_comparison("<=")
+    def __le__(self, other: object) -> "QueryNode":
+        return self._compare("<=", other)
 
-    def __gt__(self, other: object) -> NoReturn:
-        self._reject_comparison(">")
+    def __gt__(self, other: object) -> "QueryNode":
+        return self._compare(">", other)
 
-    def __ge__(self, other: object) -> NoReturn:
-        self._reject_comparison(">=")
+    def __ge__(self, other: object) -> "QueryNode":
+        return self._compare(">=", other)
 
     def __bool__(self) -> NoReturn:
+        reject_fn_in_query(self, "a truth test")
         raise TypeError(
             "ValueExpr has no truth value; it is a SET source "
             '(update(lambda t: {"col": ...})), not a predicate. '
@@ -888,25 +956,50 @@ class ValueExpr:
         """Subtract the value from a number."""
         return _binary_value("-", other, self)
 
+    def __mul__(self, other: Any) -> "BinaryValueExpr":
+        """Multiply the value by a number."""
+        return _binary_value("*", self, other)
+
+    def __rmul__(self, other: Any) -> "BinaryValueExpr":
+        """Multiply a number by the value."""
+        return _binary_value("*", other, self)
+
+    def __truediv__(self, other: Any) -> "BinaryValueExpr":
+        """Divide the value by a number."""
+        return _binary_value("/", self, other)
+
+    def __rtruediv__(self, other: Any) -> "BinaryValueExpr":
+        """Divide a number by the value."""
+        return _binary_value("/", other, self)
+
+    def __neg__(self) -> "NegateValueExpr":
+        """Negate the value."""
+        _require_numeric_operand(self, "-")
+        return NegateValueExpr(self)
+
     def __repr__(self) -> str:
         """Show the expression, for debugging."""
         return "ValueExpr()"
 
 
 class BinaryValueExpr(ValueExpr):
-    """A sum or difference in an `update()` recipe, such as `post.views + 1`."""
+    """Arithmetic on a value, such as `post.views + 1`.
+
+    An `update()` recipe takes `+` and `-`; a generated column's expression
+    also takes `*` and `/`.
+    """
 
     def __init__(self, op: str, left: Any, right: Any) -> None:
-        """Build the expression; `+` and `-` on a column build these for you.
+        """Build the expression; arithmetic on a column builds these for you.
 
         Args:
-            op: `"+"` or `"-"`.
+            op: `"+"`, `"-"`, `"*"` or `"/"`.
             left: The left operand: a column, a number or another expression.
             right: The right operand: a column, a number or another
                 expression.
         """
         self.op = op
-        """`"+"` or `"-"`."""
+        """`"+"`, `"-"`, `"*"` or `"/"`."""
         self.left = left
         """The left operand."""
         self.right = right
@@ -914,6 +1007,41 @@ class BinaryValueExpr(ValueExpr):
 
     def __repr__(self) -> str:
         return f"BinaryValueExpr({self.op!r}, {self.left!r}, {self.right!r})"
+
+
+class NegateValueExpr(ValueExpr):
+    """A negated value in a generated column's expression, such as `-line.price`."""
+
+    def __init__(self, operand: Any) -> None:
+        """Build the negation; unary `-` on a column builds these for you.
+
+        Args:
+            operand: The column or expression to negate.
+        """
+        self.operand = operand
+        """The column or expression negated."""
+
+    def __repr__(self) -> str:
+        return f"NegateValueExpr({self.operand!r})"
+
+
+class FuncValueExpr(ValueExpr):
+    """A call of a [`ferro.fn`][ferro.fn] function in a generated column's expression."""
+
+    def __init__(self, name: str, args: tuple[Any, ...]) -> None:
+        """Build the call; the functions in `ferro.fn` build these for you.
+
+        Args:
+            name: The function's name in `ferro.fn`.
+            args: The arguments: columns, numbers or other expressions.
+        """
+        self.name = name
+        """The function's name in `ferro.fn`."""
+        self.args = args
+        """The arguments, in order."""
+
+    def __repr__(self) -> str:
+        return f"FuncValueExpr({self.name!r}, {self.args!r})"
 
 
 class NowExpr(ValueExpr):

@@ -6,9 +6,10 @@ use ferro_ddl_lowering::{
     canonical_from_schema_column, canonical_to_db_type_token, db_check_constraint_name,
     fk_action_from_str, fk_action_sql, fk_name, literal_default_value, pg_alter_type_target,
     quote_ident, refused_conversion_warning, refused_scalar_conversion, render_db_check,
-    render_json_backfill_default, render_pg_enum_create_type, render_sqlite_add_column_references,
-    render_table_check_body, resolve_column_storage, row_security_statements, single_index_name,
-    single_unique_index_name, sqlite_declared_type, sqlite_type_storage_drift,
+    render_generated_clause, render_json_backfill_default, render_pg_enum_create_type,
+    render_sqlite_add_column_references, render_table_check_body, resolve_column_storage,
+    row_security_statements, single_index_name, single_unique_index_name, sqlite_declared_type,
+    sqlite_generated_guard, sqlite_type_storage_drift,
 };
 use ferro_ddl_lowering::{InPlaceChange, Report, Subject, sqlite_in_place_report};
 use ferro_schema_ir::{SchemaColumn, SchemaModel};
@@ -102,6 +103,7 @@ fn name_sqlite_inline_fks(create_sql: String, model: &SchemaModel) -> String {
 fn append_named_table_checks(
     create_sql: String,
     model: &SchemaModel,
+    dialect: Dialect,
 ) -> Result<String, EmissionError> {
     if model.table_checks.is_empty() {
         return Ok(create_sql);
@@ -110,13 +112,18 @@ fn append_named_table_checks(
         .table_checks
         .iter()
         .map(|check| {
-            format!(
-                "CONSTRAINT {} CHECK ({})",
-                quote_ident(&check.name),
-                render_table_check_body(check)
-            )
+            let body =
+                render_table_check_body(check, dialect, &model.columns).map_err(|message| {
+                    EmissionError {
+                        message: format!("{message} on table '{}'", model.table_name),
+                    }
+                })?;
+            Ok(format!(
+                "CONSTRAINT {} CHECK ({body})",
+                quote_ident(&check.name)
+            ))
         })
-        .collect::<Vec<_>>()
+        .collect::<Result<Vec<_>, EmissionError>>()?
         .join(", ");
     // Both builders close the column/constraint list with a literal " )" and
     // emit nothing after it for the table options ferro sets. A sea-query
@@ -244,6 +251,11 @@ pub fn render_create_table_as(
         if !col.nullable {
             col_def.not_null();
         }
+        // A generated column's clause follows its type and nullability, and
+        // the column never carries a DEFAULT (ADR-0058).
+        if let Some(text) = generated_column_text(model, col, dialect)? {
+            col_def.extra(text);
+        }
         // A SQLite db_check rides its column's definition as a named column
         // constraint (#514); Postgres has no inline fragment.
         append_inline_checks(&mut col_def, &check_emissions, table_lower, &col.name);
@@ -271,7 +283,7 @@ pub fn render_create_table_as(
         Dialect::Sqlite => name_sqlite_inline_fks(table_stmt.build(SqliteQueryBuilder), model),
         Dialect::Postgres => table_stmt.build(PostgresQueryBuilder),
     };
-    let create_sql = append_named_table_checks(create_sql, model)?;
+    let create_sql = append_named_table_checks(create_sql, model, dialect)?;
 
     let (post_create_sqls, reports) = post_create_artifacts(model, &check_emissions, dialect)?;
     Ok(CreateTableEmission {
@@ -280,6 +292,45 @@ pub fn render_create_table_as(
         post_create_sqls,
         reports,
     })
+}
+
+/// What a generated column's definition carries after its type and
+/// nullability, as `CREATE TABLE` writes it: the `GENERATED ALWAYS AS (…)
+/// STORED` clause and, on SQLite, its range guard. `None` for a plain
+/// column. The SQLite live read compares this text with what
+/// `sqlite_master` stores (ADR-0060).
+///
+/// # Errors
+/// The expression or the column's storage does not render.
+pub(crate) fn generated_column_text(
+    model: &SchemaModel,
+    col: &ferro_schema_ir::SchemaColumn,
+    dialect: Dialect,
+) -> Result<Option<String>, EmissionError> {
+    let Some(expr) = &col.generated else {
+        return Ok(None);
+    };
+    let mut text = render_generated_clause(expr, dialect, &model.columns).map_err(|message| {
+        EmissionError {
+            message: format!(
+                "Cannot render generated column '{}.{}': {message}",
+                model.table_name, col.name
+            ),
+        }
+    })?;
+    // SQLite has 64-bit integers and stores an overflowing float as inf; the
+    // guard enforces the range Postgres stores, so a value that fails there
+    // fails here (value parity covers failures).
+    if dialect == Dialect::Sqlite
+        && let Some((name, body)) = sqlite_generated_guard(col, &model.columns)
+            .map_err(|message| EmissionError { message })?
+    {
+        text.push_str(&format!(
+            " CONSTRAINT {} CHECK ({body})",
+            quote_ident(&name)
+        ));
+    }
+    Ok(Some(text))
 }
 
 /// `CREATE [UNIQUE] INDEX` for one index: the one renderer of every door's
@@ -498,6 +549,10 @@ pub(crate) fn column_riders<'a>(model: &'a SchemaModel, column: &str) -> Riders<
 /// `constraints` is [`ConstraintMode::Plain`] on every door but the
 /// generator, which adds the column's foreign key and check `NOT VALID` on an
 /// existing Postgres table (ADR-0043).
+///
+/// `live_body` is the expression of a column the target holds generated as a
+/// live catalog printed it (a down toward a live database), which its IR
+/// does not declare.
 pub(crate) fn emit_add_column(
     table: &str,
     column: &str,
@@ -505,8 +560,10 @@ pub(crate) fn emit_add_column(
     dialect: Dialect,
     types_created_by_plan: &BTreeSet<String>,
     constraints: ConstraintMode,
+    live_body: Option<&str>,
 ) -> Result<EmissionResult, EmissionError> {
     let col = find_column(model, column)?;
+    let generated = col.generated.is_some() || live_body.is_some();
     let ld = dialect;
     let storage = resolve_column_storage(col, ld).map_err(|message| EmissionError { message })?;
 
@@ -523,20 +580,21 @@ pub(crate) fn emit_add_column(
 
     // Field defaults are Pydantic/client defaults. ADD COLUMN uses them only
     // as a temporary backfill for NOT NULL; nullable adds stay DEFAULT-free.
-    let json_backfill = if col.nullable {
+    // A generated column needs none: the database computes every row.
+    let json_backfill = if col.nullable || generated {
         None
     } else {
         col.default
             .as_ref()
             .and_then(|d| render_json_backfill_default(d, &storage, dialect))
     };
-    let scalar_backfill = if col.nullable || json_backfill.is_some() {
+    let scalar_backfill = if col.nullable || generated || json_backfill.is_some() {
         None
     } else {
         col.default.as_ref().and_then(literal_default_value)
     };
     let has_backfill = json_backfill.is_some() || scalar_backfill.is_some();
-    if !col.nullable && !has_backfill {
+    if !col.nullable && !has_backfill && !generated {
         return Err(EmissionError {
             message: format!(
                 "Cannot add NOT NULL column '{}.{}' to an existing table: it has no \
@@ -557,6 +615,12 @@ pub(crate) fn emit_add_column(
         col_def.default(Expr::cust(expr.clone()));
     } else if let Some(default_value) = &scalar_backfill {
         col_def.default(default_value.clone());
+    }
+    // The clause `CREATE TABLE` writes, after the type and nullability.
+    if let Some(text) = generated_column_text(model, col, dialect)? {
+        col_def.extra(text);
+    } else if let Some(body) = live_body {
+        col_def.extra(ferro_ddl_lowering::render_stored_generated_clause(body));
     }
 
     let riders = column_riders(model, column);
@@ -725,6 +789,97 @@ pub(crate) fn find_foreign_key<'a>(
         })
 }
 
+/// Why Postgres's in-place type change of `column` on `table` from
+/// `old_col` to `new_col` does not run on any door ([`withheld_alter`]).
+pub(crate) enum WithheldAlter {
+    /// A primary-key column: the change is the primary-key recipe's
+    /// ([`crate::Refusal::PrimaryKeyChange`]).
+    PrimaryKey,
+    /// To, from or between native enum types, which no statement converts
+    /// in place ([`crate::Refusal::EnumTypeMove`]).
+    EnumTypeMove(crate::Refusal),
+    /// A conversion that could reinterpret or destroy stored values, refused
+    /// with a warning, from the live storage it names.
+    Conversion(
+        ferro_ddl_lowering::RefusedConversion,
+        ferro_ddl_lowering::CanonicalType,
+    ),
+}
+
+/// Why Postgres's in-place type change from `old_col` to `new_col` is
+/// withheld, if it is: the one decision the renderer refuses or warns by
+/// and the planner leaves the column's checks, policies and generated
+/// columns standing by, compared against the live table. A live type ferro
+/// cannot read is no conversion it knows to refuse.
+pub(crate) fn withheld_alter(
+    table: &str,
+    column: &str,
+    old_col: &SchemaColumn,
+    new_col: &SchemaColumn,
+) -> Option<WithheldAlter> {
+    if old_col.primary_key || new_col.primary_key {
+        return Some(WithheldAlter::PrimaryKey);
+    }
+    if let Some(refusal) = crate::plan::enum_type_move(table, column, old_col, new_col) {
+        return Some(WithheldAlter::EnumTypeMove(refusal));
+    }
+    let Ok(ResolvedStorage::Scalar(new)) = resolve_column_storage(new_col, Dialect::Postgres)
+    else {
+        return None;
+    };
+    let old = canonical_from_schema_column(old_col, Dialect::Postgres).ok()?;
+    refused_scalar_conversion(old, new).map(|kind| WithheldAlter::Conversion(kind, old))
+}
+
+/// What every door reports of a withheld type change ([`withheld_alter`]),
+/// naming its fix: the primary-key recipe, the enum type move's recipe, or
+/// the refused conversion's warning (#154 generalized: a conversion that
+/// could reinterpret or destroy stored values warns and skips, never a
+/// silent ALTER).
+pub(crate) fn withheld_alter_report(
+    table: &str,
+    column: &str,
+    old_col: &SchemaColumn,
+    new_col: &SchemaColumn,
+    withheld: &WithheldAlter,
+) -> Option<Report> {
+    match withheld {
+        WithheldAlter::PrimaryKey => Some(ferro_ddl_lowering::primary_key_type_kept_warning(
+            table,
+            column,
+            &crate::Refusal::PrimaryKeyChange {
+                table: table.to_string(),
+            }
+            .to_string(),
+        )),
+        WithheldAlter::EnumTypeMove(crate::Refusal::EnumTypeMove {
+            table,
+            column,
+            keep,
+        }) => Some(ferro_ddl_lowering::enum_type_move_report(
+            table,
+            column,
+            keep.as_deref(),
+        )),
+        WithheldAlter::EnumTypeMove(_) => None,
+        WithheldAlter::Conversion(kind, old_canonical) => {
+            let Ok(ResolvedStorage::Scalar(new_canonical)) =
+                resolve_column_storage(new_col, Dialect::Postgres)
+            else {
+                return None;
+            };
+            Some(refused_conversion_warning(
+                *kind,
+                table,
+                column,
+                &old_col.db_type.clone().unwrap_or_default(),
+                &pg_alter_type_target(new_canonical),
+                &canonical_to_db_type_token(*old_canonical, Dialect::Postgres),
+            ))
+        }
+    }
+}
+
 pub(crate) fn emit_alter_column_type(
     table: &str,
     column: &str,
@@ -737,25 +892,12 @@ pub(crate) fn emit_alter_column_type(
 
     match dialect {
         Dialect::Postgres => {
-            if old_col.primary_key || new_col.primary_key {
-                return Ok(result);
-            }
-            // To, from or between native enum types no statement converts the
-            // column in place: no door does, and every door says so in the
-            // generator's words, the recipe a migration follows instead.
-            if let Some(crate::Refusal::EnumTypeMove {
-                table,
-                column,
-                keep,
-            }) = crate::plan::enum_type_move(table, column, old_col, new_col)
-            {
-                result
-                    .reports
-                    .push(ferro_ddl_lowering::enum_type_move_report(
-                        &table,
-                        &column,
-                        keep.as_deref(),
-                    ));
+            // A withheld change runs nowhere, and every door says why in
+            // the words that name its fix.
+            if let Some(withheld) = withheld_alter(table, column, old_col, new_col) {
+                result.reports.extend(withheld_alter_report(
+                    table, column, old_col, new_col, &withheld,
+                ));
                 return Ok(result);
             }
             let cannot = |message: String| EmissionError {
@@ -770,23 +912,6 @@ pub(crate) fn emit_alter_column_type(
                         .to_string(),
                 ));
             };
-            // Refusal rails (#154 generalized): a conversion that could
-            // reinterpret or destroy stored values warns and skips — never a
-            // silent ALTER (FF-B B1/B2). A live type ferro cannot read is no
-            // conversion it knows to refuse.
-            if let Ok(old_canonical) = canonical_from_schema_column(old_col, ld)
-                && let Some(kind) = refused_scalar_conversion(old_canonical, new_canonical)
-            {
-                result.reports.push(refused_conversion_warning(
-                    kind,
-                    table,
-                    column,
-                    &old_col.db_type.clone().unwrap_or_default(),
-                    &pg_alter_type_target(new_canonical),
-                    &canonical_to_db_type_token(old_canonical, ld),
-                ));
-                return Ok(result);
-            }
             let target = pg_alter_type_target(new_canonical);
             result.statements.push(format!(
                 "ALTER TABLE {table} ALTER COLUMN {col} TYPE {target} USING {col}::{target}",

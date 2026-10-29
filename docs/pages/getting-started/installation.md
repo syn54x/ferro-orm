@@ -24,6 +24,7 @@ The install adds Ferro and its two runtime dependencies, Pydantic and pydantic-s
 
 - Python 3.13 or newer. Ferro is tested on 3.13 and 3.14.
 - macOS, Linux or Windows. Wheels are published for all three.
+- PostgreSQL 17 or newer, if you use Postgres. Ferro is tested on 17 and 18, and `connect()` refuses an older server with an `InterfaceError` that names its version. SQLite has no version floor.
 
 ## Extras
 

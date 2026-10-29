@@ -251,6 +251,8 @@ fn kind_class(op: &MigrationOp, target: &IrEnvelope<SchemaIrPayload>) -> StepCla
         // A type change, a removed label, a moved key: the previous
         // release's values may no longer fit.
         | MigrationOp::AlterColumnType { .. }
+        // A new expression replaces what every row holds in the column.
+        | MigrationOp::AlterGeneratedExpression { .. }
         | MigrationOp::RemoveEnumLabel { .. }
         | MigrationOp::ChangePrimaryKey { .. }
         // A constraint added or rebuilt refuses rows it did not refuse.
@@ -280,6 +282,8 @@ fn kind_class(op: &MigrationOp, target: &IrEnvelope<SchemaIrPayload>) -> StepCla
         | MigrationOp::DropTable { .. }
         | MigrationOp::AddColumn { .. }
         | MigrationOp::DropColumn { .. }
+        // The column keeps its values; the previous release never wrote it.
+        | MigrationOp::DropGeneratedExpression { .. }
         | MigrationOp::AlterColumnNullability { .. }
         | MigrationOp::DropIndex { .. }
         | MigrationOp::RenameIndex { .. }
@@ -354,6 +358,7 @@ fn storage_facts(column: &ferro_schema_ir::SchemaColumn) -> ferro_schema_ir::Sch
         enum_values: None,
         enum_retired_labels: None,
         retired: false,
+        generated: None,
         default: None,
         default_factory: None,
         ..column.clone()
@@ -535,6 +540,7 @@ mod tests {
             enum_retired_labels: Default::default(),
             default_factory: None,
             retired: false,
+            generated: None,
         }
     }
 

@@ -282,3 +282,145 @@ async def test_explicit_foreign_key_shadow_id_auto_migrate_roundtrip(db_url):
             lambda s: s.job_role_id == role.id
         ).first()
         assert by_shadow_id is not None and by_shadow_id.id == card.id
+
+
+PRICED = """
+from ferro import Check, Field, Model, fn
+
+
+class Priced(Model):
+    __ferro_checks__ = (
+        Check("capped", lambda priced: fn.least(priced.qty, 10) > 0),
+    )
+    id: int | None = Field(default=None, primary_key=True)
+    qty: int
+    capped_qty: int | None = Field(
+        default=None, generated=lambda priced: fn.least(priced.qty, 10)
+    )
+"""
+
+
+def _priced_project(tmp_path, monkeypatch, dialects: str, source: str = PRICED) -> None:
+    """A configured project with one model whose generated column and check
+    both call `fn.least`, which SQLite spells `min` (or `source`'s models)."""
+    import sys
+
+    monkeypatch.delenv("FERRO_CONFIG", raising=False)
+    package = f"ferro_gm_{tmp_path.name.replace('-', '_').lower()}"
+    (tmp_path / package).mkdir()
+    (tmp_path / package / "__init__.py").write_text("")
+    (tmp_path / package / "models.py").write_text(source)
+    (tmp_path / "ferro.toml").write_text(
+        f'models = ["{package}.models"]\ndialects = {dialects}\n'
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setattr(sys, "modules", dict(sys.modules))
+
+
+@pytest.mark.usefixtures("isolated_imports")
+def test_get_metadata_on_a_sqlite_project_creates_the_sqlite_table(
+    tmp_path, monkeypatch
+):
+    """A SQLite project's metadata compiles the generated expression and
+    the check body SQLite runs, so `create_all` builds a working table."""
+    _priced_project(tmp_path, monkeypatch, '["sqlite"]')
+    metadata = get_metadata()
+    engine = sa.create_engine(f"sqlite:///{tmp_path / 'priced.db'}")
+    metadata.create_all(engine)
+    with engine.begin() as connection:
+        connection.execute(sa.text('INSERT INTO "priced" ("qty") VALUES (25)'))
+        assert (
+            connection.execute(
+                sa.text('SELECT "capped_qty" FROM "priced"')
+            ).scalar_one()
+            == 10
+        )
+
+
+SUMMED = """
+from ferro import Field, Model
+
+
+class Summed(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    a: int
+    b: int
+    total: int = Field(generated=lambda summed: summed.a + summed.b)
+"""
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("isolated_imports")
+async def test_get_metadata_on_sqlite_guards_a_generated_column_as_the_pass_does(
+    tmp_path, monkeypatch
+):
+    """`create_all` on SQLite writes the range guard the pass writes, so a
+    sum past Postgres's `integer` fails here as it fails there, and the
+    table it builds is the pass's: no drift."""
+    from tests.test_alembic_translator import _drift
+
+    _priced_project(tmp_path, monkeypatch, '["sqlite"]', SUMMED)
+    path = tmp_path / "summed.db"
+    engine = sa.create_engine(f"sqlite:///{path}")
+    get_metadata().create_all(engine)
+
+    with engine.begin() as connection:
+        connection.execute(sa.text('INSERT INTO "summed" ("a", "b") VALUES (1, 2)'))
+    with pytest.raises(sa.exc.IntegrityError, match="_ferro_range_total"):
+        with engine.begin() as connection:
+            connection.execute(
+                sa.text('INSERT INTO "summed" ("a", "b") VALUES (2147483647, 1)')
+            )
+    engine.dispose()
+    assert await _drift(f"sqlite:{path}") == []
+
+
+@pytest.mark.usefixtures("isolated_imports")
+def test_get_metadata_on_postgres_writes_no_sqlite_guard(tmp_path, monkeypatch):
+    """The guard is SQLite's: the Postgres `CREATE TABLE` the same metadata
+    compiles carries no `_ferro_range_` constraint."""
+    from sqlalchemy.dialects import postgresql
+    from sqlalchemy.schema import CreateTable
+
+    _priced_project(tmp_path, monkeypatch, '["postgres", "sqlite"]', SUMMED)
+    table = get_metadata().tables["summed"]
+    ddl = str(CreateTable(table).compile(dialect=postgresql.dialect()))
+    assert "GENERATED ALWAYS AS" in ddl, ddl
+    assert "_ferro_range_" not in ddl, ddl
+
+
+@pytest.mark.usefixtures("isolated_imports")
+def test_get_metadata_compiles_each_dialects_own_spelling(tmp_path, monkeypatch):
+    """One metadata, compiled per engine: the core's rendering for that
+    dialect (`min` on SQLite, `least` on Postgres), and a refusal naming
+    both on any other database."""
+    import json
+
+    from sqlalchemy.dialects import mysql, postgresql, sqlite
+    from sqlalchemy.schema import CreateTable
+
+    from ferro._core import _render_generated_expression, _render_table_check_body
+
+    _priced_project(tmp_path, monkeypatch, '["postgres", "sqlite"]')
+    metadata = get_metadata()
+    table = metadata.tables["priced"]
+    [model_ir] = metadata.info["ferro"].envelope["payload"]["models"]
+    [check] = model_ir["table_checks"]
+
+    for ours, sa_dialect, other in [
+        ("sqlite", sqlite.dialect(), "least("),
+        ("postgres", postgresql.dialect(), "min("),
+    ]:
+        ddl = str(CreateTable(table).compile(dialect=sa_dialect))
+        expression = _render_generated_expression(
+            json.dumps(model_ir), "capped_qty", ours
+        )
+        body = _render_table_check_body(
+            json.dumps(check["predicate"]), ours, json.dumps(model_ir["columns"])
+        )
+        assert f"GENERATED ALWAYS AS ({expression}) STORED" in ddl, ddl
+        assert f"CHECK ({body})" in ddl, ddl
+        assert other not in ddl, ddl
+    with pytest.raises(sa.exc.CompileError, match="Postgres and SQLite"):
+        CreateTable(table).compile(dialect=mysql.dialect())

@@ -133,8 +133,19 @@ def _render(
     )
 
 
-def _live_check(name: str, definition: str, *, ferro_owned: bool = True) -> dict:
-    return {"name": name, "definition": definition, "ferro_owned": ferro_owned}
+def _live_check(
+    name: str,
+    definition: str,
+    *,
+    ferro_owned: bool = True,
+    printed: str | None = None,
+) -> dict:
+    """A live check; on Postgres, `printed` is its body as Postgres printed
+    both it and its declaration (ADR-0060)."""
+    check: dict = {"name": name, "definition": definition, "ferro_owned": ferro_owned}
+    if printed is not None:
+        check["printed"] = {"declared": printed, "catalog": printed}
+    return check
 
 
 def _model_ir(table: str) -> dict:
@@ -265,7 +276,13 @@ def test_user_owned_live_check_is_never_warned_or_dropped():
 
 def test_declared_check_is_not_a_leftover():
     _define_orphan(with_check=True)
-    live = [_live_check(SIDE_CHECK_NAME, f"CHECK ({SIDE_CHECK_BODY})")]
+    live = [
+        _live_check(
+            SIDE_CHECK_NAME,
+            f"CHECK ({SIDE_CHECK_BODY})",
+            printed='((orphan."left" IS NULL) OR (orphan."right" IS NULL))',
+        )
+    ]
     for dialect in ("postgres", "sqlite"):
         statements, warnings = _render(
             "orphan", ORPHAN_LIVE_COLUMNS, live, dialect, destructive=True

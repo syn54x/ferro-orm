@@ -40,6 +40,8 @@ from .._annotation_utils import _VARCHAR_RE
 from .._core import (
     _ddl_fk_name,
     _render_check_body,
+    _render_generated_expression,
+    _render_sqlite_generated_guard,
     _render_table_check_body,
     _resolve_storage_type,
 )
@@ -116,6 +118,14 @@ def get_metadata(database: "str | None" = None) -> "sa.MetaData":
     class in lowercase (or after the column when the annotation is not an
     `enum.Enum`), so Postgres autogenerate and DDL compilation succeed.
 
+    A generated column's expression and a table check's body are written
+    for the engine the metadata compiles against: `least(...)` on Postgres
+    and `min(...)` on SQLite, so `metadata.create_all(engine)` builds a
+    table either database runs. On SQLite a generated column also gets the
+    range check Ferro writes there, so a value too large for the Postgres
+    column fails on both. Compiling them for any other database raises
+    `sqlalchemy.exc.CompileError`.
+
     A column's `nullable` follows the `nullable` of its
     [`FerroField`][ferro.FerroField] or [`ForeignKey`][ferro.ForeignKey]
     when that is a boolean. The default, `nullable="infer"`, uses whether
@@ -149,7 +159,75 @@ def get_metadata(database: "str | None" = None) -> "sa.MetaData":
     return metadata
 
 
-def _build_sa_table_from_ir(metadata: "sa.MetaData", model_ir: Dict[str, Any]) -> None:
+#: The SQLAlchemy dialect name of each dialect the core renders for.
+_SA_DIALECT_NAMES = {"postgres": "postgresql", "sqlite": "sqlite"}
+
+
+if sa is not None:
+    from sqlalchemy.ext.compiler import compiles
+
+    class _PerDialectSql(sa.sql.expression.ColumnElement):
+        """DDL text the core rendered for each dialect, picked when
+        SQLAlchemy compiles it for an engine, so one metadata creates the
+        table either database runs."""
+
+        inherit_cache = False
+
+        def __init__(self, texts: Dict[str, str]) -> None:
+            self.texts = texts
+
+    @compiles(_PerDialectSql)
+    def _compile_per_dialect_sql(element: Any, compiler: Any, **_kw: Any) -> str:
+        text = element.texts.get(compiler.dialect.name)
+        if text is None:
+            raise sa.exc.CompileError(
+                "Ferro renders generated columns and checks for Postgres and "
+                f"SQLite, not {compiler.dialect.name}; compile the metadata "
+                "with a Postgres or SQLite engine"
+            )
+        return text
+
+    class _SqliteGuard(sa.CheckConstraint):
+        """A generated column's SQLite range guard, written after the
+        column's ``STORED`` on SQLite and nowhere else: Postgres raises on
+        the overflow itself."""
+
+        inherit_cache = True
+
+    @compiles(_SqliteGuard)
+    def _compile_sqlite_guard(element: Any, compiler: Any, **kw: Any) -> str:
+        if compiler.dialect.name != "sqlite":
+            return ""
+        return compiler.visit_column_check_constraint(element, **kw)
+
+
+def _sqlite_guard(model_ir: Dict[str, Any], column: str) -> list[Any]:
+    """The SQLite range guard of generated column ``column``, as the
+    column constraint every Ferro door writes; none when nothing in the
+    expression can overflow."""
+    guard = _render_sqlite_generated_guard(json.dumps(model_ir), column)
+    if guard is None:
+        return []
+    name, body = guard
+    return [_SqliteGuard(body, name=sa.sql.quoted_name(name, quote=True))]
+
+
+def _ddl_text(render: Callable[[str], str], dialect: "str | None") -> Any:
+    """``render``'s text for ``dialect``, or for whichever of Postgres and
+    SQLite compiles it when ``dialect`` is ``None``."""
+    if dialect is not None:
+        return render(dialect)
+    return _PerDialectSql(
+        {name: render(ours) for ours, name in _SA_DIALECT_NAMES.items()}
+    )
+
+
+def _build_sa_table_from_ir(
+    metadata: "sa.MetaData", model_ir: Dict[str, Any], dialect: "str | None" = None
+) -> None:
+    """Add ``model_ir``'s table to ``metadata``, a generated column's
+    ``sa.Computed`` and a table check's body rendered by the core for
+    ``dialect``, or for the engine that compiles them when it is ``None``."""
     table_name = model_ir.get("table_name")
     if not isinstance(table_name, str) or not table_name:
         return
@@ -166,13 +244,38 @@ def _build_sa_table_from_ir(metadata: "sa.MetaData", model_ir: Dict[str, Any]) -
         # No unique=/index= column flags: single-column uniques and indexes are
         # explicit named artifacts below (the IR `uniques[]`/`indexes[]` carry
         # the shared `uq_`/`idx_` names), matching the Rust emitter's shapes.
-        kwargs = {
-            "primary_key": bool(col.get("primary_key", False)),
-            "nullable": bool(col.get("nullable", True))
-            if not bool(col.get("primary_key", False))
-            else False,
-        }
-        columns.append(sa.Column(col_name, sa_type, **kwargs))
+        primary_key = bool(col.get("primary_key", False))
+        nullable = bool(col.get("nullable", True)) if not primary_key else False
+        # A generated column's expression is the core's one rendering, the
+        # text every door's GENERATED ALWAYS AS (…) STORED writes.
+        computed = (
+            [
+                sa.Computed(
+                    _ddl_text(
+                        lambda ours, col_name=col_name: _render_generated_expression(
+                            json.dumps(model_ir), col_name, ours
+                        ),
+                        dialect,
+                    ),
+                    persisted=True,
+                )
+            ]
+            if col.get("generated")
+            else []
+        )
+        # SQLite's range guard (`CONSTRAINT "_ferro_range_<col>" CHECK
+        # (…)`), so a value Postgres refuses fails there too.
+        if col.get("generated") and dialect != "postgres":
+            computed.extend(_sqlite_guard(model_ir, col_name))
+        columns.append(
+            sa.Column(
+                col_name,
+                sa_type,
+                *computed,
+                primary_key=primary_key,
+                nullable=nullable,
+            )
+        )
         columns_by_name[col_name] = columns[-1]
 
     table_args: list[Any] = list(columns)
@@ -204,7 +307,12 @@ def _build_sa_table_from_ir(metadata: "sa.MetaData", model_ir: Dict[str, Any]) -
             continue
         if not isinstance(predicate, dict) or not predicate:
             continue
-        sqltext = _render_table_check_body(json.dumps(predicate))
+        sqltext = _ddl_text(
+            lambda ours, predicate=predicate: _render_table_check_body(
+                json.dumps(predicate), ours, json.dumps(model_ir.get("columns") or [])
+            ),
+            dialect,
+        )
         table_args.append(sa.CheckConstraint(sqltext, name=name))
 
     # Every `uniques[]` entry — single-column included — is a standalone named
