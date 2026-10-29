@@ -299,6 +299,10 @@ On PostgreSQL the error also sets `exc.constraint` to `ck_payment_at_most_one_me
 - An unknown column, a repeated suffix or an unsupported predicate raises when the class is defined.
 - [Auto-migrate](schema/auto-migrate.md) explains how checks reconcile on a table that already exists, and [SQLite table rebuilds](schema/migrations.md#sqlite-table-rebuilds) how a migration changes one on SQLite.
 
+For a closed set of values in a single column, use `Field(db_check=True)` instead; see [Enums](#enums).
+
+#### Functions in a check
+
 Either side of a comparison can call a function from [`ferro.fn`](../api/fields.md#ferro.fn), the same functions a [generated column](#generated-columns) uses. A refund is held to 500.00 in either direction, with its amount in cents:
 
 === "Assignment"
@@ -338,8 +342,6 @@ Either side of a comparison can call a function from [`ferro.fn`](../api/fields.
     ```
 
 Python's own `abs()` inside a predicate raises when the class is defined; write `fn.abs`. A function call in a check follows the [value parity](#value-parity) rules of a generated column.
-
-For a closed set of values in a single column, use `Field(db_check=True)` instead; see [Enums](#enums).
 
 ## Generated columns
 
