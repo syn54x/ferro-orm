@@ -177,6 +177,9 @@ def test_a_plain_column_where_the_model_declares_a_generated_one_differs(
 def test_a_virtual_column_differs_from_the_stored_one(project, pkg, db, capsys):
     if db.backend != "postgres":
         pytest.skip("SQLite cannot add a stored column in place to compare with")
+    [(version_num,)] = db.rows("SHOW server_version_num")
+    if int(version_num) < 180000:
+        pytest.skip("VIRTUAL generated columns need PostgreSQL 18")
     migrated(project, pkg, db, capsys)
     db.execute('ALTER TABLE "transaction" DROP COLUMN "direction"')
     db.execute(

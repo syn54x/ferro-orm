@@ -49,6 +49,7 @@ from tests.test_migrate_up import (  # noqa: F401 - fixtures
 
 pytestmark = pytest.mark.usefixtures("clean_registry")
 
+
 def generated_sql(backend: str) -> str:
     """The clause per dialect: Postgres computes an `integer` input at 64 bits."""
     operand = (
