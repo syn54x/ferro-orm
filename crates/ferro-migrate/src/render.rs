@@ -371,13 +371,20 @@ pub(crate) fn render_from(
                     )?
                     .is_some() =>
             {
+                let what = if find_model(&old_models, table)
+                    .is_ok_and(|model| find_column(model, column).is_ok())
+                {
+                    "is a plain column in the table and generated in the model"
+                } else {
+                    "is not in the table"
+                };
                 out.reports.push(sqlite_in_place_report(
                     InPlaceChange::AddGeneratedColumn,
                     Subject::column(table, column),
                     format!(
-                        "Generated column '{table}.{column}' is not in the table, and SQLite \
-                         cannot add a stored generated column in place; `ferro migrate new` \
-                         adds it by rebuilding the table."
+                        "Generated column '{table}.{column}' {what}, and SQLite cannot add a \
+                         stored generated column in place; `ferro migrate new` adds it by \
+                         rebuilding the table."
                     ),
                 ));
             }

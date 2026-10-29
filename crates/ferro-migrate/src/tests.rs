@@ -6917,9 +6917,24 @@ fn a_live_plain_or_virtual_column_where_the_model_declares_a_stored_one_is_dropp
             vec![direction_op("drop"), direction_op("add")],
             "{dialect:?}"
         );
+        // Left in place without `migrate_destructive`, and said so.
+        let kept = live(LiveTableFacts::default(), dialect, updates_only());
+        assert_eq!(kept.op_list(), vec![], "{dialect:?}");
         assert_eq!(
-            live(LiveTableFacts::default(), dialect, updates_only()).op_list(),
-            vec![],
+            kept.reports,
+            vec![ferro_ddl_lowering::plain_column_kept_warning(
+                "transaction",
+                "direction",
+                dialect
+            )],
+            "{dialect:?}"
+        );
+        assert!(kept.reports[0].recurs);
+        // A plan that replaces it reports nothing.
+        assert!(
+            live(LiveTableFacts::default(), dialect, destructive())
+                .reports
+                .is_empty(),
             "{dialect:?}"
         );
     }

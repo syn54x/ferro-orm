@@ -134,6 +134,7 @@ A `Report`'s `kind` names the warning, so code can match on it rather than on th
 | `RowSecurityTeardown` | `migrate_destructive` tore down row security on a table, naming the policies dropped. |
 | `ExtraPolicies` | Live ferro-owned policies the model no longer declares; they stay. |
 | `ForeignDefault` | A live server default no model declares; it stays until `migrate_destructive` or a hand rebuild drops it. |
+| `PlainColumnKept` | A live plain column the model declares generated; replacing it drops its values, so it stays until `migrate_destructive` or a migration replaces it. |
 | `RefusedConversion` | A storage conversion that could reinterpret or destroy stored values; it is not executed. |
 | `SqliteInPlace` | A change SQLite cannot make to an existing table in place: it needs the table rebuild only a migration writes. |
 | `PrimaryKeyKept` | The declared primary key differs from the live one; no door changes a primary key in place. |

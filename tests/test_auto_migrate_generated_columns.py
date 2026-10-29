@@ -156,9 +156,21 @@ def test_a_plain_column_becomes_generated_only_under_migrate_destructive(
     built(project, pkg, db, PLAIN)
     declare(project, pkg, INDEXED)
 
+    # Replacing the column drops its values, so `migrate_updates` leaves it
+    # and says so, naming the fix: every insert now leaves it out, which its
+    # NOT NULL refuses.
     kept = reconnect(db)
     assert schema_sql(kept) == []
-    assert list(kept.warnings) == []
+    [warning] = kept.warnings
+    assert warning.kind == "PlainColumnKept"
+    assert (warning.subject.table, warning.subject.column) == (
+        "transaction",
+        "direction",
+    )
+    assert warning.recurs
+    assert "ferro migrate new" in str(warning)
+    if db.backend == "postgres":
+        assert "migrate_destructive=True" in str(warning)
 
     report = reconnect(db, destructive=True)
 

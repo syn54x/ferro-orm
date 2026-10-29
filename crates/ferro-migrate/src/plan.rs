@@ -1395,6 +1395,23 @@ fn plan_existing_table(
         dialect,
         options.destructive,
     );
+    // A plain column the model makes generated, which only a plan that
+    // drops data replaces: left, and said so.
+    if !options.destructive {
+        plan.reports.extend(
+            new_model
+                .columns
+                .iter()
+                .filter(|col| {
+                    new.holds_generated(new_model, &col.name)
+                        && old_view.columns.iter().any(|was| was.name == col.name)
+                        && !old.holds_generated(old_view.as_ref(), &col.name)
+                })
+                .map(|col| {
+                    ferro_ddl_lowering::plain_column_kept_warning(table, &col.name, dialect)
+                }),
+        );
+    }
     let old_view = if replaced.is_empty() {
         old_view
     } else {

@@ -3908,6 +3908,10 @@ pub enum ReportKind {
         /// folded (`''`, `datetime('now')`).
         was: String,
     },
+    /// A live plain (or `VIRTUAL`) column the model declares stored
+    /// generated, left in place by a plan that drops no data: replacing it
+    /// drops the values it holds.
+    PlainColumnKept,
     // -- the renderer's ---------------------------------------------------
     /// A storage conversion that could reinterpret or destroy stored values,
     /// not executed.
@@ -3998,6 +4002,31 @@ pub fn foreign_default_warning(table: &str, column: &str, was: &str, dialect: Di
         format!(
             "{table}.{column} has default {was} in the database, none declared; it is left \
              in place: {fix}."
+        ),
+    )
+}
+
+/// [`ReportKind::PlainColumnKept`]: `table.column` is a plain column in the
+/// database and stored generated in the model, and a plan that drops no data
+/// leaves it. Every insert then leaves the column out, which a `NOT NULL`
+/// column refuses. The sentence names the fix on `dialect`:
+/// `migrate_destructive` or a migration on Postgres; a migration on SQLite,
+/// whose pass never rebuilds. It holds until someone acts, so it recurs.
+pub fn plain_column_kept_warning(table: &str, column: &str, dialect: Dialect) -> Report {
+    let fix = match dialect {
+        Dialect::Postgres => {
+            "connect(..., migrate_destructive=True) replaces it, or `ferro migrate new` \
+             writes the change"
+        }
+        Dialect::Sqlite => "`ferro migrate new` replaces it by rebuilding the table",
+    };
+    Report::recurring(
+        ReportKind::PlainColumnKept,
+        Subject::column(table, column),
+        format!(
+            "{table}.{column} is a plain column in the database and generated in the model; \
+             replacing it drops its values, so it is left in place, and an insert that \
+             leaves it out fails while it is NOT NULL: {fix}."
         ),
     )
 }

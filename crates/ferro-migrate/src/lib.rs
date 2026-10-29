@@ -662,6 +662,13 @@ impl AnsweredBy for Report {
                     Subject::Column { table: subject, column: on },
                 ) if table == subject && column == on)
             }),
+            // The plain column, replaced by the generated one.
+            ReportKind::PlainColumnKept => has(&|op| {
+                matches!((op, &self.subject), (
+                    MigrationOp::AddColumn { table, column },
+                    Subject::Column { table: subject, column: on },
+                ) if table == subject && column == on)
+            }),
             ReportKind::PolicyBodyReplaced { name } => has(&|op| {
                 matches!(op, MigrationOp::RebuildRowPolicy { table, name: rebuilt }
                     if on_table(table) && rebuilt == name)
