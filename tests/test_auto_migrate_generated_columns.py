@@ -31,6 +31,8 @@ from ferro import PassReport
 from tests._pass_harness import schema_sql, warned_auto_migrate
 from tests.test_generate_generated_columns import (
     ABS,
+    CHECKED,
+    CHECKED_WIDE,
     HEAD,
     INDEXED,
     PLAIN,
@@ -195,6 +197,26 @@ def test_migrate_updates_drops_and_adds_back_around_an_input_type_change(
         INDEX_DIRECTION,
     ]
     assert directions(db) == [(-5, -1)]
+    assert schema_sql(reconnect(db)) == []
+
+
+def test_a_table_check_over_the_column_still_refuses_after_an_input_type_change(
+    project, pkg, db
+):
+    if db.backend == "sqlite":
+        pytest.skip("the SQLite pass runs no DDL for the change")
+    built(project, pkg, db, CHECKED)
+    declare(project, pkg, CHECKED_WIDE)
+
+    report = reconnect(db)
+
+    statements = schema_sql(report)
+    assert statements[0] == 'ALTER TABLE "transaction" DROP COLUMN "direction"'
+    assert '"ck_transaction_nonzero"' in statements[-1], statements
+    with pytest.raises(Exception, match="(?i)check"):
+        db.execute(
+            'INSERT INTO "transaction" ("amount_minor", "memo") VALUES (0, \'x\')'
+        )
     assert schema_sql(reconnect(db)) == []
 
 

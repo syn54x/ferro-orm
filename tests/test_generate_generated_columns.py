@@ -101,6 +101,27 @@ WIDE = WIDE_HEAD + direction()
 RENAMED = RENAMED_HEAD + direction(column="amount")
 PLAIN = HEAD + PLAIN_DIRECTION
 
+NONZERO = (
+    "    __ferro_checks__: ClassVar[tuple[Check, ...]] = (\n"
+    '        Check("nonzero", lambda transaction: transaction.direction != 0),\n'
+    "    )\n"
+)
+"""A table check reading the generated column: Postgres drops it with the
+column, so a drop and add of the column must add it back."""
+
+
+def checked(head: str) -> str:
+    return (
+        "from typing import ClassVar\n\nfrom ferro import Check\n"
+        + head
+        + direction()
+        + NONZERO
+    )
+
+
+CHECKED = checked(HEAD)
+CHECKED_WIDE = checked(WIDE_HEAD)
+
 
 # -- helpers --------------------------------------------------------------------------
 
@@ -277,6 +298,40 @@ def test_an_input_type_change_drops_alters_and_adds_back(project, pkg, db):
     assert drift_api(db).lines == []
     assert run("migrate", "down", "--yes", "--url", db.url) == 0
     assert directions(db) == [(-5, -1)]
+    assert drift_api(db).lines == []
+
+
+def refuses_a_zero_direction(db) -> None:
+    """The ``nonzero`` check stands: a row whose ``direction`` is 0 fails."""
+    with pytest.raises(Exception, match="(?i)check|constraint"):
+        db.execute(
+            'INSERT INTO "transaction" ("amount_minor", "memo") VALUES (0, \'x\')'
+        )
+
+
+def test_a_table_check_over_the_column_comes_back_around_an_input_type_change(
+    project, pkg, db
+):
+    start(project, pkg, db, CHECKED)
+    migration = generate(project, pkg, CHECKED_WIDE, "wide_checked")
+
+    if db.backend == "postgres":
+        added = up_statements(migration, "postgres")
+        at = {
+            what: next(i for i, s in enumerate(added) if needle in s)
+            for what, needle in (
+                ("drop", 'DROP COLUMN "direction"'),
+                ("add", 'ADD COLUMN "direction"'),
+                ("check", '"ck_transaction_nonzero"'),
+            )
+        }
+        assert at["drop"] < at["add"] < at["check"], added
+
+    assert run("migrate", "up", "--url", db.url) == 0
+    refuses_a_zero_direction(db)
+    assert drift_api(db).lines == []
+    assert run("migrate", "down", "--yes", "--url", db.url) == 0
+    refuses_a_zero_direction(db)
     assert drift_api(db).lines == []
 
 

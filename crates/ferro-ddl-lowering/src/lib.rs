@@ -7,9 +7,9 @@ mod policy_expr;
 mod value_expr;
 
 pub use value_expr::{
-    NullRule, VALUE_FUNCTIONS, ValueFunction, ValueSignature, ValueType, render_generated_clause,
-    render_sqlite_generated_guard, render_stored_generated_clause, render_value_expr,
-    sqlite_guard_column, sqlite_guard_name, value_expr_columns, value_function,
+    NullRule, VALUE_FUNCTIONS, ValueFunction, ValueSignature, ValueType, check_expr_columns,
+    render_generated_clause, render_sqlite_generated_guard, render_stored_generated_clause,
+    render_value_expr, sqlite_guard_column, sqlite_guard_name, value_expr_columns, value_function,
 };
 
 use std::collections::BTreeMap;

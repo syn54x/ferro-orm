@@ -7064,3 +7064,96 @@ fn a_down_toward_a_live_generated_column_adds_it_back_with_the_catalogs_expressi
         ]
     );
 }
+
+/// [`indexed_direction`] with the table check `direction <> 0`.
+fn checked_direction(input_type: &str) -> SchemaModel {
+    let mut model = indexed_direction(input_type);
+    model.table_checks.push(SchemaTableCheck {
+        name: "ck_transaction_nonzero".to_string(),
+        predicate: ferro_schema_ir::CheckExpr::Cmp {
+            column: "direction".to_string(),
+            op: ferro_schema_ir::CheckCmpOp::Ne,
+            other: ferro_schema_ir::CheckOperand::Literal {
+                token: "0".to_string(),
+            },
+        },
+    });
+    model
+}
+
+#[test]
+fn a_table_check_over_a_re_added_generated_column_is_added_back_after_it() {
+    let before = checked_direction("integer");
+    let after = checked_direction("bigint");
+    let alter = MigrationOp::AlterColumnType {
+        table: "transaction".to_string(),
+        column: "amount_minor".to_string(),
+    };
+    let check = MigrationOp::AddCheck {
+        table: "transaction".to_string(),
+        name: "ck_transaction_nonzero".to_string(),
+    };
+    // Postgres drops the check with the column; the plan puts it back.
+    let up = plan_declared(&before, &after, Dialect::Postgres, updates_only());
+    assert_eq!(
+        up.op_list(),
+        vec![
+            direction_op("drop"),
+            alter.clone(),
+            direction_op("add"),
+            check.clone()
+        ]
+    );
+    let statements = statements_of(&up);
+    assert!(
+        statements
+            .last()
+            .is_some_and(|s| s.contains("\"ck_transaction_nonzero\"") && s.contains("<> 0")),
+        "{statements:?}"
+    );
+    // The down's own drop takes the check again, and it comes back.
+    let down = plan_down(
+        &up.op_list(),
+        &Side::declared(envelope(vec![after.clone()])),
+        &Side::declared(envelope(vec![before.clone()])),
+        Dialect::Postgres,
+    );
+    assert_eq!(
+        down.op_list(),
+        vec![
+            direction_op("drop"),
+            alter.clone(),
+            direction_op("add"),
+            check
+        ]
+    );
+    // SQLite's rebuild writes the table's checks into the table it builds.
+    let sqlite = plan_declared(&before, &after, Dialect::Sqlite, updates_only());
+    assert_eq!(
+        sqlite.op_list(),
+        vec![direction_op("drop"), alter, direction_op("add")]
+    );
+}
+
+#[test]
+fn check_expr_columns_names_every_column_a_check_reads() {
+    use ferro_schema_ir::{CheckCmpOp, CheckExpr, CheckOperand};
+    let expr = CheckExpr::Or {
+        left: Box::new(CheckExpr::Not {
+            child: Box::new(CheckExpr::IsNull {
+                column: "a".to_string(),
+            }),
+        }),
+        right: Box::new(CheckExpr::Cmp {
+            column: "b".to_string(),
+            op: CheckCmpOp::Lt,
+            other: CheckOperand::Column {
+                name: "c".to_string(),
+            },
+        }),
+    };
+    assert_eq!(
+        ferro_ddl_lowering::check_expr_columns(&expr),
+        ["a", "b", "c"].map(String::from).into_iter().collect()
+    );
+}

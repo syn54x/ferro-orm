@@ -283,6 +283,11 @@ CASES: tuple[Case, ...] = (
     Case("G1-add-an-indexed-generated-column", generated.HEAD, generated.INDEXED),
     Case("G2-change-a-generated-expression", generated.INDEXED, generated.ABS),
     Case("G3-change-an-input-column-type", generated.INDEXED, generated.WIDE),
+    Case(
+        "G4-change-the-type-of-an-input-a-checked-column-reads",
+        generated.CHECKED,
+        generated.CHECKED_WIDE,
+    ),
     # -- F: several changes at once -----------------------------------------------
     Case(
         "F1-several-models-at-once",

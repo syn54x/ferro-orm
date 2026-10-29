@@ -1095,6 +1095,7 @@ REBUILD_CASES = (
     "G1-add-an-indexed-generated-column",
     "G2-change-a-generated-expression",
     "G3-change-an-input-column-type",
+    "G4-change-the-type-of-an-input-a-checked-column-reads",
     "F2-a-rename-and-a-type-change",
     "F3-a-type-change-and-a-new-index",
 )
@@ -1107,6 +1108,7 @@ INDEX_STEP_CASES = (
     "A11-redefine-an-index-under-a-joined-name",
     "G1-add-an-indexed-generated-column",
     "G3-change-an-input-column-type",
+    "G4-change-the-type-of-an-input-a-checked-column-reads",
     "F3-a-type-change-and-a-new-index",
 )
 """Postgres index steps (``CONCURRENTLY``, no transaction)."""
@@ -1118,6 +1120,7 @@ VALIDATE_CASES = (
     "A10-change-a-table-check",
     "C1-add-an-optional-foreign-key",
     "C3-retarget-a-foreign-key",
+    "G4-change-the-type-of-an-input-a-checked-column-reads",
 )
 """Postgres ``NOT VALID`` adds and their validate step."""
 
@@ -1691,7 +1694,14 @@ def test_pin_d_the_validate_step_is_the_pass_statement(
             "writes no validate step there and the pass plans none"
         )
     migration = migrate_through(project, CASEBOOK[case_id], db_url, db_backend)
-    assert _cli("migrate", "down", "--yes", "--to", "0002:01", "--url", db_url) == 0
+    # The validate step is the last; every step before it (the schema step,
+    # an index step) stays applied.
+    [validate] = sorted(migration.glob("*_validate.up.postgres.sql"))
+    before = int(validate.name[:2]) - 1
+    assert (
+        _cli("migrate", "down", "--yes", "--to", f"0002:{before:02}", "--url", db_url)
+        == 0
+    )
     target = json.loads((migration / "ir.json").read_text())
 
     live, facts = asyncio.run(_read_live(db_url, target))
@@ -1702,9 +1712,7 @@ def test_pin_d_the_validate_step_is_the_pass_statement(
     )["operations"]
 
     assert {op["kind"] for op in plan} == {"ValidateConstraint"}
-    assert [sql for op in plan for sql in op["statements"]] == statements(
-        migration / "02_validate.up.postgres.sql"
-    )
+    assert [sql for op in plan for sql in op["statements"]] == statements(validate)
 
 
 # -- pin (e): a migrated database is an auto-migrated one -----------------------------

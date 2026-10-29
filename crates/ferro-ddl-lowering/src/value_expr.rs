@@ -428,6 +428,36 @@ pub fn value_expr_columns(expr: &ValueExpr) -> BTreeSet<String> {
     out
 }
 
+/// Every column a table check's body reads: the column each leaf names,
+/// and a comparison's other column.
+pub fn check_expr_columns(expr: &ferro_schema_ir::CheckExpr) -> BTreeSet<String> {
+    use ferro_schema_ir::{CheckExpr, CheckOperand};
+    let mut out = BTreeSet::new();
+    let mut stack = vec![expr];
+    while let Some(expr) = stack.pop() {
+        match expr {
+            CheckExpr::And { left, right } | CheckExpr::Or { left, right } => {
+                stack.push(left);
+                stack.push(right);
+            }
+            CheckExpr::Not { child } => stack.push(child),
+            CheckExpr::Cmp { column, other, .. } => {
+                out.insert(column.clone());
+                if let CheckOperand::Column { name } = other {
+                    out.insert(name.clone());
+                }
+            }
+            CheckExpr::IsNull { column }
+            | CheckExpr::IsNotNull { column }
+            | CheckExpr::In { column, .. }
+            | CheckExpr::Like { column, .. } => {
+                out.insert(column.clone());
+            }
+        }
+    }
+    out
+}
+
 fn collect_columns(expr: &ValueExpr, out: &mut BTreeSet<String>) {
     match expr {
         ValueExpr::Column { name } => {

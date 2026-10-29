@@ -1476,12 +1476,23 @@ fn plan_existing_table(
         .map(|(name, body)| (name, body.text().to_string()))
         .collect();
     let target_names: Vec<String> = target_checks.iter().map(|(name, _)| name.clone()).collect();
+    // Postgres drops every table check reading a column with the column: a
+    // check over a replaced column is gone once its drop runs, so the plan
+    // adds it back after the add (SQLite's rebuild writes the table's checks
+    // into the table it builds).
+    let taken: Vec<String> = if dialect == Dialect::Postgres {
+        checks_reading(new_model, &replaced)
+    } else {
+        Vec::new()
+    };
+    let standing = |name: &String| !taken.contains(name);
     // Check addition (#343; ADR-0013) lands after the column ops, so a CHECK
     // over a newly added column follows its ADD COLUMN.
     let live_check_names: Vec<String> = facts
         .checks
         .iter()
         .map(|check| check.name.clone())
+        .filter(standing)
         .collect();
     ops.extend(missing_checks(
         table,
@@ -1495,7 +1506,7 @@ fn plan_existing_table(
     let live_ferro_owned: Vec<(String, String)> = facts
         .checks
         .iter()
-        .filter(|check| check.ferro_owned)
+        .filter(|check| check.ferro_owned && standing(&check.name))
         .map(|check| (check.name.clone(), check.definition.clone()))
         .collect();
     ops.extend(check_rebuilds(table, &target_checks, &live_ferro_owned));
@@ -1512,6 +1523,7 @@ fn plan_existing_table(
     let check_validity: Vec<LiveCheckValidity> = facts
         .checks
         .iter()
+        .filter(|check| standing(&check.name))
         .map(|check| LiveCheckValidity {
             name: check.name.clone(),
             validated: check.validated,
@@ -2680,7 +2692,13 @@ pub fn plan_down(up: &[MigrationOp], after: &Side, before: &Side, dialect: Diale
         scope.extend(
             riders
                 .check
-                .map(|check| Artifact::Constraint(table.clone(), check.name.clone())),
+                .map(|check| Artifact::Constraint(table.clone(), check.name.clone()))
+                .into_iter()
+                .chain(
+                    checks_reading(model, std::slice::from_ref(&column))
+                        .into_iter()
+                        .map(|name| Artifact::Constraint(table.clone(), name)),
+                ),
         );
         scope.extend(
             riders
@@ -3889,6 +3907,20 @@ fn replaced_generated_columns(
                 })
         })
         .map(|col| col.name.clone())
+        .collect()
+}
+
+/// The table checks of `model` whose body reads any of `columns`.
+fn checks_reading(model: &SchemaModel, columns: &[String]) -> Vec<String> {
+    model
+        .table_checks
+        .iter()
+        .filter(|check| {
+            ferro_ddl_lowering::check_expr_columns(&check.predicate)
+                .iter()
+                .any(|column| columns.contains(column))
+        })
+        .map(|check| check.name.clone())
         .collect()
 }
 
