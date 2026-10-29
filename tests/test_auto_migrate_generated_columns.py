@@ -375,3 +375,39 @@ def test_a_raw_policy_over_a_replaced_generated_column_refuses_naming_the_fix(
     assert 'DROP POLICY "rls_transaction_signed" ON "transaction"' in str(refused.value)
     # Nothing ran: the column and its input stand as they were.
     assert directions(db) == [(-5, -1)]
+
+
+TEAM = """
+from ferro import Check
+
+
+class Team(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    size: int
+    __ferro_checks__ = (Check("size_ok", lambda team: team.size >= 0),)
+"""
+WIDE_TEAM = TEAM.replace(
+    "    size: int\n", '    size: Annotated[int, FerroField(db_type="bigint")]\n'
+)
+
+
+def test_an_input_type_change_under_an_unchanged_check_rebuilds_no_check(
+    project, pkg, db
+):
+    """No printed pair (the column's type differs) is no body decision:
+    the type change runs alone, and Postgres keeps the check through it."""
+    postgres_only(db)
+    declare(project, pkg, TEAM)
+    asyncio.run(ferro.connect(db.url, auto_migrate=True))
+    ferro.reset_engine()
+    db.execute('INSERT INTO "team" ("size") VALUES (3)')
+    declare(project, pkg, WIDE_TEAM)
+
+    statements = schema_sql(reconnect(db))
+
+    assert statements == [
+        'ALTER TABLE "team" ALTER COLUMN "size" TYPE bigint USING "size"::bigint'
+    ]
+    with pytest.raises(Exception, match="(?i)check"):
+        db.execute('INSERT INTO "team" ("size") VALUES (-1)')
+    assert schema_sql(reconnect(db)) == []

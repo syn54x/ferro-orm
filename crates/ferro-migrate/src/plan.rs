@@ -2085,7 +2085,11 @@ fn check_rebuilds(
 /// read gathered, the printed pair: Postgres printed both bodies, so equal
 /// strings are one predicate (ADR-0060). Two declarations, or two catalogs,
 /// compare their texts. A body that does not render, or a live check with no
-/// pair, differs: the rebuild then fails rendering it, naming the check.
+/// pair, differs: the rebuild then fails rendering it, naming the check. One
+/// exception: a live check with no pair because a column it reads changes
+/// type ([`printed_pair_checks`]) is no body decision this round. Postgres
+/// revalidates it itself on the `ALTER COLUMN ... TYPE` (refusing the alter
+/// if a row fails), and the next read, with the type alike, compares it.
 fn check_differs(
     old: &Side,
     new: &Side,
@@ -2123,7 +2127,7 @@ fn check_differs(
             Dialect::Postgres => was != now,
         };
     }
-    [old.table_facts(old_model), new.table_facts(new_model)]
+    let pair = [old.table_facts(old_model), new.table_facts(new_model)]
         .iter()
         .find_map(|facts| {
             facts
@@ -2132,8 +2136,48 @@ fn check_differs(
                 .find(|check| check.name == name)?
                 .printed
                 .clone()
-        })
-        .is_none_or(|pair| pair.declared != pair.catalog)
+        });
+    match pair {
+        Some(pair) => pair.declared != pair.catalog,
+        None => !reads_retyped_column(old_model, new_model, name, dialect),
+    }
+}
+
+/// Whether the check `name`, as whichever of `old_model` and `new_model`
+/// declares it, reads a column both hold whose type changes between them.
+fn reads_retyped_column(
+    old_model: &SchemaModel,
+    new_model: &SchemaModel,
+    name: &str,
+    dialect: Dialect,
+) -> bool {
+    let read = |model: &SchemaModel| -> Option<BTreeSet<String>> {
+        model
+            .table_checks
+            .iter()
+            .find(|check| check.name == name)
+            .map(|check| ferro_ddl_lowering::check_expr_columns(&check.predicate))
+            .or_else(|| {
+                model
+                    .checks
+                    .iter()
+                    .find(|check| check.name == name)
+                    .map(|check| BTreeSet::from([check.column.clone()]))
+            })
+    };
+    let column = |model: &SchemaModel, name: &str| {
+        model.columns.iter().find(|col| col.name == name).cloned()
+    };
+    read(new_model)
+        .or_else(|| read(old_model))
+        .unwrap_or_default()
+        .iter()
+        .any(
+            |input| match (column(old_model, input), column(new_model, input)) {
+                (Some(was), Some(now)) => type_changes(&was, &now, dialect),
+                _ => false,
+            },
+        )
 }
 
 /// Plan the [`MigrationOp::ValidateConstraint`] operations for one table

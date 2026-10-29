@@ -7989,3 +7989,41 @@ fn an_input_whose_live_type_changes_gets_no_printed_pair_and_is_not_refused() {
         ]
     );
 }
+
+#[test]
+fn a_check_over_an_input_whose_type_changes_is_no_body_decision_this_round() {
+    // Live `amount` int under `ck_payment_large`; declared `amount` bigint,
+    // the check's body unchanged. The live read prints no pair (the column's
+    // type differs), and the plan alters the type alone: Postgres revalidates
+    // the check itself, and the next read compares its body.
+    let live_model = payment_with_large_check("1000");
+    let mut declared = payment_with_large_check("1000");
+    declared.columns[1].db_type = Some("bigint".to_string());
+    let mut facts = LiveFacts::default();
+    facts.tables.insert(
+        "payment".to_string(),
+        live_checks(vec![live_check(
+            "ck_payment_large",
+            "CHECK ((abs((amount)::bigint) > 1000))",
+        )]),
+    );
+    let live = Side::live(envelope(vec![live_model]), facts).expect("live side");
+    let declared = envelope(vec![declared]);
+    assert_eq!(
+        live.check_printed_pairs(&declared, Dialect::Postgres),
+        Ok(())
+    );
+    let plan = plan_from_ir(
+        &live,
+        &Side::declared(declared),
+        Dialect::Postgres,
+        destructive(),
+    );
+    assert_eq!(
+        plan.op_list(),
+        vec![MigrationOp::AlterColumnType {
+            table: "payment".to_string(),
+            column: "amount".to_string(),
+        }]
+    );
+}
