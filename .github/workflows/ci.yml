@@ -99,8 +99,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v1
-          shared-key: maturin-develop
-          key: py3.13
+          shared-key: maturin-develop-py3.13
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
 
@@ -184,8 +183,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v1
-          shared-key: maturin-develop
-          key: py3.13
+          shared-key: maturin-develop-py3.13
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
 
@@ -241,8 +239,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v1
-          shared-key: maturin-develop
-          key: py${{ matrix.python-version }}
+          shared-key: maturin-develop-py${{ matrix.python-version }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
 
@@ -323,8 +320,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v1
-          shared-key: maturin-develop
-          key: py3.13
+          shared-key: maturin-develop-py3.13
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
 
