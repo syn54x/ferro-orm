@@ -4268,18 +4268,19 @@ fn type_changes(
 
 /// Whether the plan changes a column's type from `old_col` to `new_col` on
 /// `dialect` and the change runs: a type change ([`type_changes`]) but one
-/// whose conversion every door refuses on Postgres ([`emit::refused_alter`],
-/// a warning and no `ALTER`). A refused one leaves the column as it is, so
-/// the checks and generated columns over it stay standing and compare
-/// against the live table, rather than going down and back up on every
-/// pass around an alter that never runs.
+/// Postgres's doors withhold ([`emit::withheld_alter`]: a primary-key
+/// column, an enum type move, a refused conversion). A withheld one leaves
+/// the column as it is, so the checks, policies and generated columns over
+/// it stay standing and compare against the live table, rather than going
+/// down and back up on every pass around an alter that never runs.
 fn type_change_runs(
     old_col: &ferro_schema_ir::SchemaColumn,
     new_col: &ferro_schema_ir::SchemaColumn,
     dialect: Dialect,
 ) -> bool {
     type_changes(old_col, new_col, dialect)
-        && !(dialect == Dialect::Postgres && emit::refused_alter(old_col, new_col).is_some())
+        && !(dialect == Dialect::Postgres
+            && emit::withheld_alter("", &new_col.name, old_col, new_col).is_some())
 }
 
 /// Why the plan drops a stored generated column and adds it back, decided

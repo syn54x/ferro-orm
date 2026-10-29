@@ -8251,3 +8251,113 @@ fn a_check_over_a_column_whose_type_change_is_refused_is_left_standing() {
         "{rendered:?}"
     );
 }
+
+/// `payment` live as `live`, planned toward `declared`, its one check
+/// printed alike when the live read asks for a pair.
+fn plan_payment_check_over(live: SchemaModel, declared: SchemaModel) -> Plan {
+    let live_columns = live.columns.clone();
+    let live_column = |name: &str| live_columns.iter().find(|col| col.name == name);
+    let asked =
+        !crate::plan::printed_pair_checks(&declared, "payment", &live_column, &|_| true).is_empty();
+    let check = live_check("ck_payment_large", "CHECK ((abs(id) > 1000))");
+    let check = if asked {
+        printed_alike(&check.name, &check.definition, "(abs(payment.id) > 1000)")
+    } else {
+        check
+    };
+    let mut facts = LiveFacts::default();
+    facts
+        .tables
+        .insert("payment".to_string(), live_checks(vec![check]));
+    plan_from_ir(
+        &Side::live(envelope(vec![live]), facts).expect("live side"),
+        &Side::declared(envelope(vec![declared])),
+        Dialect::Postgres,
+        destructive(),
+    )
+}
+
+fn carries_a_check(plan: &Plan) -> bool {
+    plan.op_list().iter().any(|op| {
+        matches!(
+            op,
+            MigrationOp::DropCheck { .. } | MigrationOp::AddCheck { .. }
+        )
+    })
+}
+
+#[test]
+fn a_check_over_a_key_column_whose_type_changes_is_left_standing() {
+    // The primary-key recipe's change: no door alters the key column.
+    let model = |key_type: &str| SchemaModel {
+        table_checks: vec![SchemaTableCheck {
+            name: "ck_payment_large".to_string(),
+            predicate: abs_amount_over("id", "1000"),
+        }],
+        ..schema_model("payment", vec![pk_col("id", key_type)])
+    };
+    let plan = plan_payment_check_over(model("bigint"), model("int"));
+    assert!(
+        plan.op_list()
+            .iter()
+            .any(|op| matches!(op, MigrationOp::AlterColumnType { .. })),
+        "{:?}",
+        plan.op_list()
+    );
+    assert!(!carries_a_check(&plan), "{:?}", plan.op_list());
+}
+
+#[test]
+fn a_check_over_a_column_moving_to_a_native_enum_type_is_left_standing() {
+    // To a native enum type no statement converts the column in place.
+    let model = |native: bool| {
+        let mut mood = col("mood", "text", true);
+        mood.enum_values = Some(vec!["calm".into(), "loud".into()]);
+        mood.enum_type_name = Some("mood".to_string());
+        if native {
+            mood.db_type = None;
+            mood.postgres_native_enum = true;
+        } else {
+            mood.db_type_explicit = Some(true);
+        }
+        SchemaModel {
+            table_checks: vec![SchemaTableCheck {
+                name: "ck_payment_large".to_string(),
+                predicate: ferro_schema_ir::CheckExpr::IsNotNull {
+                    column: "mood".to_string(),
+                },
+            }],
+            ..schema_model("payment", vec![pk_col("id", "bigint"), mood])
+        }
+    };
+    let mut live = model(false);
+    live.columns[1].enum_values = None;
+    live.columns[1].enum_type_name = None;
+    live.columns[1].db_type_explicit = None;
+    let plan = plan_payment_check_over(live, model(true));
+    assert!(
+        plan.operations
+            .iter()
+            .any(|planned| matches!(planned.verdict.execution, Execution::Refused(_))),
+        "{:?}",
+        plan.operations
+    );
+    assert!(!carries_a_check(&plan), "{:?}", plan.op_list());
+}
+
+#[test]
+fn a_generated_column_over_an_input_whose_type_change_is_refused_is_not_replaced() {
+    // `amount_minor` declared text, then `time`: the refused conversion
+    // leaves the input as it is, so `direction` is never dropped and added
+    // back around an alter that never runs.
+    let before = indexed_direction("text");
+    let after = indexed_direction("time");
+    let plan = plan_declared(&before, &after, Dialect::Postgres, updates_only());
+    assert_eq!(
+        plan.op_list(),
+        vec![MigrationOp::AlterColumnType {
+            table: "transaction".to_string(),
+            column: "amount_minor".to_string(),
+        }]
+    );
+}

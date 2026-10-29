@@ -485,3 +485,108 @@ def test_a_check_over_a_column_whose_type_change_is_refused_stays_standing(
             "RefusedConversion",
             "RefusedConversion",
         ], report.warnings
+
+
+ECHOED = """
+from datetime import datetime
+
+from ferro import Field
+
+
+class Event(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    starts: Annotated[datetime, FerroField(db_type="timestamp")]
+    echo: datetime = Field(generated=lambda event: event.starts, db_type="timestamp")
+"""
+ECHOED_TZ = ECHOED.replace(
+    'Annotated[datetime, FerroField(db_type="timestamp")]', "datetime"
+).replace(', db_type="timestamp")', ")")
+"""``ECHOED`` with ``starts`` and its generated ``echo`` plain ``datetime``:
+both conversions are refused, so ``echo`` is never dropped and added back."""
+
+
+def test_a_generated_column_over_an_input_whose_type_change_is_refused_stays(
+    project, pkg, db
+):
+    postgres_only(db)
+    declare(project, pkg, ECHOED)
+    asyncio.run(ferro.connect(db.url, auto_migrate=True))
+    ferro.reset_engine()
+    declare(project, pkg, ECHOED_TZ)
+
+    for _ in range(2):
+        report = reconnect(db, destructive=True)
+
+        assert schema_sql(report) == []
+        assert [warning.kind for warning in report.warnings] == [
+            "RefusedConversion",
+            "RefusedConversion",
+        ], report.warnings
+
+
+DIARY = """
+import enum
+
+from ferro import Check
+
+
+class Mood(str, enum.Enum):
+    calm = "calm"
+    loud = "loud"
+
+
+class Diary(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    mood: Annotated[Mood | None, FerroField(db_type="text")] = None
+    __ferro_checks__ = (Check("felt", lambda diary: diary.mood != None),)
+"""
+NATIVE_DIARY = DIARY.replace(
+    'Annotated[Mood | None, FerroField(db_type="text")]', "Mood | None"
+)
+"""``DIARY`` with ``mood`` moved to a native enum type, which no statement
+converts in place: the pass reports the recipe and runs nothing."""
+
+
+def test_a_check_over_a_column_moving_to_an_enum_type_stays_standing(project, pkg, db):
+    postgres_only(db)
+    declare(project, pkg, DIARY)
+    asyncio.run(ferro.connect(db.url, auto_migrate=True))
+    ferro.reset_engine()
+    declare(project, pkg, NATIVE_DIARY)
+
+    for _ in range(2):
+        report = reconnect(db)
+
+        assert schema_sql(report) == []
+        assert [warning.kind for warning in report.warnings] == ["EnumTypeMove"], (
+            report.warnings
+        )
+
+
+BADGE = """
+from ferro import Check
+
+
+class Badge(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    __ferro_checks__ = (Check("positive", lambda badge: badge.id > 0),)
+"""
+NARROW_BADGE = BADGE.replace(
+    "FerroField(primary_key=True)", 'FerroField(primary_key=True, db_type="int")'
+)
+"""``BADGE`` with its key column's type changed: the primary-key recipe's
+change, which no door runs in place."""
+
+
+def test_a_check_over_a_key_column_whose_type_changes_stays_standing(project, pkg, db):
+    postgres_only(db)
+    declare(project, pkg, BADGE)
+    asyncio.run(ferro.connect(db.url, auto_migrate=True))
+    ferro.reset_engine()
+    declare(project, pkg, NARROW_BADGE)
+
+    for _ in range(2):
+        report = reconnect(db)
+
+        assert schema_sql(report) == []
+        assert report.warnings == [], report.warnings
