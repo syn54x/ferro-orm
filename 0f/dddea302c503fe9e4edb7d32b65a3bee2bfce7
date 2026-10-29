@@ -1,0 +1,1 @@
+verified: maturin develop; cargo test ddl-lowering/migrate/schema-ir ok; introspect 19 ok; pytest PG18 1374 passed, PG17 1373 passed
