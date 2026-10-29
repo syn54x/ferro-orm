@@ -227,7 +227,11 @@ def _build_sa_table_from_ir(
             continue
         if not isinstance(predicate, dict) or not predicate:
             continue
-        sqltext = _render_table_check_body(json.dumps(predicate))
+        sqltext = _render_table_check_body(
+            json.dumps(predicate),
+            dialect,
+            json.dumps(model_ir.get("columns") or []),
+        )
         table_args.append(sa.CheckConstraint(sqltext, name=name))
 
     # Every `uniques[]` entry — single-column included — is a standalone named

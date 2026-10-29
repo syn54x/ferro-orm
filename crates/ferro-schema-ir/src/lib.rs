@@ -888,6 +888,23 @@ mod tests {
     }
 
     #[test]
+    fn schema_check_fn_v4_roundtrip() {
+        let fixture = include_str!("../../../tests/fixtures/ir_vectors/schema_check_fn_v4.json");
+        let parsed: serde_json::Value =
+            serde_json::from_str(fixture).expect("schema fixture must parse");
+        let ir = parsed.get("ir").cloned().expect("fixture must contain ir");
+        let envelope: IrEnvelope<SchemaIrPayload> =
+            serde_json::from_value(ir.clone()).expect("schema IR v4 must deserialize");
+        assert_eq!(envelope.ir_version, 4);
+        assert!(matches!(
+            envelope.payload.models[0].table_checks[0].predicate,
+            CheckExpr::Compare { .. }
+        ));
+        let encoded = serde_json::to_value(&envelope).expect("schema IR must serialize");
+        assert_eq!(encoded, ir, "schema v4 round-trip must not drift");
+    }
+
+    #[test]
     fn value_expr_binary_ops_serialize_as_their_tokens() {
         for (op, token) in [
             (ValueBinaryOp::Add, "add"),

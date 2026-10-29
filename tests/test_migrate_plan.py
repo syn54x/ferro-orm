@@ -846,11 +846,20 @@ class TestValidityFlags:
             fk["validated"] = validated
         return [fk]
 
-    def _live_checks(self, *, validated, definition=None):
+    # `ck_invoice_status`'s declared body as `EXPLAIN (VERBOSE)` prints it.
+    STATUS_CHECK_PRINTED = "(invoice.status = ANY (ARRAY['draft'::text, 'paid'::text]))"
+
+    def _live_checks(self, *, validated, definition=None, printed=None):
+        """The live status check; `printed` is the catalog half of its
+        printed pair (ADR-0060), the declared body's print by default."""
         check = {
             "name": "ck_invoice_status",
             "definition": definition or self.STATUS_CHECK_DEF,
             "ferro_owned": True,
+            "printed": {
+                "declared": self.STATUS_CHECK_PRINTED,
+                "catalog": printed or self.STATUS_CHECK_PRINTED,
+            },
         }
         if validated is not None:
             check["validated"] = validated
@@ -916,7 +925,12 @@ class TestValidityFlags:
     def test_pg_not_valid_check_whose_body_drifted_is_one_rebuild_and_no_validate(self):
         drifted = "CHECK ((status = ANY (ARRAY['draft'::text]))) NOT VALID"
         stmts, warns = self._render(
-            "postgres", checks=self._live_checks(validated=False, definition=drifted)
+            "postgres",
+            checks=self._live_checks(
+                validated=False,
+                definition=drifted,
+                printed="(invoice.status = ANY (ARRAY['draft'::text]))",
+            ),
         )
         assert stmts == [
             'ALTER TABLE "invoice" DROP CONSTRAINT "ck_invoice_status"',

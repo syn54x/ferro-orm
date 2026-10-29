@@ -11,13 +11,15 @@ This module owns the declaration surface and the lowering from the evaluated
 derived by the SchemaIR compiler from the shared Rust builder
 (``_ddl_table_check_constraint_name``), never here.
 
-Supported predicate dialect (ADR-0016): the root-column ``where()`` dialect —
-comparisons (including column-to-column), ``== None`` / ``!= None`` on a
-column or forward-FK relation (or its shadow ``*_id`` column), ``.in_()``,
-``.like()``, enum members as inlined labels, combined with ``&``, ``|``, and
-``~``. Closed-over variables, function calls (other than ``.in_()`` /
-``.like()``), relation traversal, existence tests, and aggregates fail at
-class definition. The lowering below is the single place new arms attach.
+Supported predicate dialect (ADR-0016, ADR-0059): the root-column ``where()``
+dialect — comparisons (including column-to-column), ``== None`` / ``!= None``
+on a column or forward-FK relation (or its shadow ``*_id`` column),
+``.in_()``, ``.like()``, enum members as inlined labels, combined with ``&``,
+``|``, and ``~`` — and comparisons of value expressions: arithmetic and the
+``ferro.fn`` functions, typed under the value parity a generated column's
+expression is. Closed-over variables, other function calls, relation
+traversal, existence tests, and aggregates fail at class definition. The
+lowering below is the single place new arms attach.
 """
 
 from __future__ import annotations
@@ -34,8 +36,16 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from . import fn as _fn
 from .base import ForeignKey
-from .query.nodes import FieldProxy, Predicate, QueryNode, QueryProxy
+from .query.nodes import (
+    FieldProxy,
+    Predicate,
+    QueryNode,
+    QueryProxy,
+    ValueExpr,
+    value_comparison,
+)
 
 FERRO_CHECKS = "__ferro_checks__"
 """The class attribute a model declares its table checks in."""
@@ -415,10 +425,30 @@ _GLOBAL_LOAD_OPS = frozenset({"LOAD_GLOBAL", "LOAD_NAME"})
 
 
 def _is_allowed_captured_value(value: Any) -> bool:
-    """Enum classes (and members) may appear in a check predicate; nothing else."""
-    if isinstance(value, enum.Enum):
+    """Enum classes (and members) and `ferro.fn` may appear in a check
+    predicate; nothing else."""
+    from .generated import _is_value_function
+
+    if isinstance(value, enum.Enum) or _is_value_function(value):
         return True
     return isinstance(value, type) and issubclass(value, enum.Enum)
+
+
+def _calls_fn(call: ast.Call, names: Mapping[str, Any]) -> bool:
+    """Whether `call` is a `ferro.fn` function's call: `fn.abs(...)` with
+    `fn` the module, or a bare name bound to one of its functions. `names`
+    are the lambda's globals and closure cells."""
+    from .generated import _is_value_function
+
+    func = call.func
+    if isinstance(func, ast.Name):
+        value = names.get(func.id)
+        return value is not _fn and _is_value_function(value)
+    return (
+        isinstance(func, ast.Attribute)
+        and isinstance(func.value, ast.Name)
+        and names.get(func.value.id) is _fn
+    )
 
 
 def _iter_code_objects(code: types.CodeType):
@@ -500,8 +530,15 @@ def _validate_predicate_source(
             "check predicates must be lambdas whose body can be validated "
             "(ADR-0016)."
         )
+    names = dict(predicate.__globals__)
+    names.update(
+        (name, cell.cell_contents)
+        for name, cell in zip(
+            code.co_freevars, predicate.__closure__ or (), strict=True
+        )
+    )
     for node in ast.walk(lambda_nodes[-1]):
-        if not isinstance(node, ast.Call):
+        if not isinstance(node, ast.Call) or _calls_fn(node, names):
             continue
         if isinstance(node.func, ast.Attribute):
             attr = node.func.attr
@@ -513,26 +550,86 @@ def _validate_predicate_source(
                 )
         raise TypeError(
             f"{model_name}.{FERRO_CHECKS} check {suffix!r} contains a function "
-            "call: check predicates inline literals and column references only — "
-            "not SQL functions or arbitrary Python calls (ADR-0016)."
+            "call: check predicates inline literals and column references and "
+            "call only the functions in ferro.fn — not other SQL functions or "
+            "arbitrary Python calls (ADR-0016, ADR-0059)."
         )
 
 
-def _lower_node(node: QueryNode, model_name: str, suffix: str) -> dict[str, Any]:
+class _ValueComparison(QueryNode):
+    """A comparison whose left operand is a value expression, such as
+    ``fn.abs(payment.amount) > 1000``: built while a check predicate runs."""
+
+    def __init__(self, left: ValueExpr, operator: str, right: Any) -> None:
+        super().__init__(operator=operator, value=right)
+        self.left_value = left
+        """The value expression on the left."""
+
+
+def _lower_compare(
+    left: Any,
+    operator: str,
+    right: Any,
+    model_name: str,
+    suffix: str,
+    columns: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Lower a comparison of value expressions into ``CheckExpr::Compare``,
+    each operand typed under value parity as a generated column's is."""
+    from .generated import _ANNOTATIONS, _fits, lower_value_expr, value_expr_type
+
+    where = f"{model_name}.{FERRO_CHECKS} check {suffix!r}"
+    if left is None or right is None:
+        raise TypeError(
+            f"{where} compares a value expression with None: a comparison with "
+            "NULL is never true; test a column with == None or != None, which "
+            "renders IS NULL or IS NOT NULL"
+        )
+    cmp_op = _CMP_OPS.get(operator)
+    if cmp_op is None:
+        raise _unsupported(model_name, suffix, f"the operator {operator!r}")
+    owner = f"{FERRO_CHECKS} check {suffix!r}"
+    trees = [
+        lower_value_expr(operand, model_name=model_name, owner=owner)
+        for operand in (left, right)
+    ]
+    try:
+        (left_family, _), (right_family, _) = (
+            value_expr_type(tree, columns) for tree in trees
+        )
+    except TypeError as exc:
+        raise TypeError(f"{where} {exc}") from exc
+    if not (_fits(left_family, right_family) or _fits(right_family, left_family)):
+        raise TypeError(
+            f"{where} compares {left_family} ({_ANNOTATIONS[left_family]}) with "
+            f"{right_family} ({_ANNOTATIONS[right_family]}): SQLite and Postgres "
+            "compare values of different types differently; compare values of "
+            "one type"
+        )
+    return {"kind": "compare", "left": trees[0], "op": cmp_op, "right": trees[1]}
+
+
+def _lower_node(
+    node: QueryNode, model_name: str, suffix: str, columns: Mapping[str, Any]
+) -> dict[str, Any]:
     """Lower one evaluated ``QueryNode`` into the ``CheckExpr`` wire shape."""
+
+    def lower(child: QueryNode) -> dict[str, Any]:
+        return _lower_node(child, model_name, suffix, columns)
+
+    if isinstance(node, _ValueComparison):
+        return _lower_compare(
+            node.left_value, str(node.operator), node.value, model_name, suffix, columns
+        )
     if node.child is not None:
-        return {"kind": "not", "child": _lower_node(node.child, model_name, suffix)}
+        return {"kind": "not", "child": lower(node.child)}
     if node.exists is not None:
         raise _unsupported(model_name, suffix, "an existence test")
     if node.is_compound:
         if node.left is None or node.right is None:
             raise _unsupported(model_name, suffix, "an incomplete compound predicate")
         kind = "and" if node.operator == "AND" else "or"
-        return {
-            "kind": kind,
-            "left": _lower_node(node.left, model_name, suffix),
-            "right": _lower_node(node.right, model_name, suffix),
-        }
+        return {"kind": kind, "left": lower(node.left), "right": lower(node.right)}
     if node.path:
         raise _unsupported(
             model_name,
@@ -543,17 +640,31 @@ def _lower_node(node: QueryNode, model_name: str, suffix: str) -> dict[str, Any]
     if operator == "IN":
         if not isinstance(node.value, list):
             raise _unsupported(model_name, suffix, "a non-literal IN list")
+        if any(isinstance(item, ValueExpr) for item in node.value):
+            raise TypeError(
+                f"{model_name}.{FERRO_CHECKS} check {suffix!r}: .in_() takes "
+                "literals; compare the value expression with == instead"
+            )
         return {
             "kind": "in",
             "column": node.column,
             "values": [_check_literal_token(item) for item in node.value],
         }
     if operator == "LIKE":
+        if isinstance(node.value, ValueExpr):
+            raise TypeError(
+                f"{model_name}.{FERRO_CHECKS} check {suffix!r}: .like() takes a "
+                "literal pattern, not a value expression"
+            )
         return {
             "kind": "like",
             "column": node.column,
             "pattern": _check_literal_token(node.value),
         }
+    if isinstance(node.value, ValueExpr):
+        # A column compared with arithmetic or a `ferro.fn` call.
+        column = FieldProxy(str(node.column), owner=node.owner)
+        return _lower_compare(column, operator, node.value, model_name, suffix, columns)
     null_kind = _NULL_TEST_KINDS.get(operator)
     if null_kind is not None and node.value is None:
         return {"kind": null_kind, "column": node.column}
@@ -590,10 +701,13 @@ def _resolve_check_node(
     )
     prefix = f"{model_name}.{FERRO_CHECKS} check {check.suffix!r}: "
     _validate_predicate_source(check.predicate, model_name, check.suffix)
+    token = value_comparison.set(_ValueComparison)
     try:
         result = check.predicate(proxy)
     except (AttributeError, TypeError, ValueError) as exc:
         raise TypeError(f"{prefix}{exc}") from exc
+    finally:
+        value_comparison.reset(token)
     if isinstance(result, _RelationNullProxy):
         raise TypeError(
             f"{prefix}the predicate returned the bare relation "
@@ -647,7 +761,7 @@ def compile_table_checks(
         specs.append(
             TableCheckSpec(
                 suffix=check.suffix,
-                predicate=_lower_node(node, model_name, check.suffix),
+                predicate=_lower_node(node, model_name, check.suffix, columns),
             )
         )
     return tuple(specs)

@@ -1,0 +1,70 @@
+{
+  "vector_name": "schema_check_fn_v4",
+  "domain": "schema",
+  "expect_valid": true,
+  "fingerprint": "ba1f697037ca8873e2de7351101e416ffde3f64fbb96da09a793b78c9f4d0244",
+  "ir": {
+    "ir_kind": "schema",
+    "ir_version": 4,
+    "payload": {
+      "dialect_agnostic": true,
+      "models": [
+        {
+          "model_name": "tests.test_generate_check_functions.declare_payment.<locals>.Payment",
+          "table_name": "payment",
+          "columns": [
+            {
+              "name": "amount",
+              "logical_type": "integer",
+              "nullable": false,
+              "primary_key": false,
+              "autoincrement": false,
+              "unique": false,
+              "index": false,
+              "default": null,
+              "format": null
+            },
+            {
+              "name": "id",
+              "logical_type": "integer",
+              "nullable": false,
+              "primary_key": true,
+              "autoincrement": true,
+              "unique": false,
+              "index": false,
+              "default": null,
+              "format": null
+            }
+          ],
+          "foreign_keys": [],
+          "indexes": [],
+          "uniques": [],
+          "checks": [],
+          "table_checks": [
+            {
+              "name": "ck_payment_large",
+              "predicate": {
+                "kind": "compare",
+                "left": {
+                  "kind": "func",
+                  "name": "abs",
+                  "args": [
+                    {
+                      "kind": "column",
+                      "name": "amount"
+                    }
+                  ]
+                },
+                "op": "gt",
+                "right": {
+                  "kind": "literal",
+                  "token": "1000"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

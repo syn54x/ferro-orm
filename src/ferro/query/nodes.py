@@ -7,6 +7,7 @@ condition.
 
 import difflib
 from collections.abc import Callable, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Generic, NoReturn, TypeAlias, TypeVar, get_origin
@@ -18,6 +19,13 @@ TField = TypeVar("TField")
 """The Python type of the column a `FieldProxy` refers to."""
 TModel = TypeVar("TModel")
 """The model class a `QueryProxy` stands in for."""
+
+value_comparison: ContextVar["Callable[[Any, str, Any], QueryNode] | None"] = (
+    ContextVar("value_comparison", default=None)
+)
+"""Set while a table check's predicate runs: builds the condition a
+comparison of a value expression makes, from `(left, operator, right)`.
+Unset everywhere else, where such a comparison is refused."""
 
 # Aggregate source families (#294, ADR-0009): which column families each
 # aggregate accepts, validated at build time. `None` = any column. Families
@@ -119,7 +127,8 @@ class QueryNode:
             owner: The model whose stand-in built the comparison, used to
                 refuse a condition that mixes two lambdas' parameters.
         """
-        reject_fn_in_query(value, f"a comparison ({operator})")
+        if value_comparison.get() is None:
+            reject_fn_in_query(value, f"a comparison ({operator})")
         self.column = column
         """The compared column, or `None` on a combination."""
         self.operator = operator
@@ -892,7 +901,11 @@ class ValueExpr:
             "projecting or ordering by one is #309."
         )
 
-    def _reject_comparison(self, symbol: str) -> NoReturn:
+    def _compare(self, symbol: str, other: object) -> "QueryNode":
+        # A table check's predicate compares value expressions; nothing else.
+        build = value_comparison.get()
+        if build is not None:
+            return build(self, symbol, other)
         reject_fn_in_query(self, f"a comparison ({symbol})")
         raise TypeError(
             f"comparing a value expression ({symbol}) is not a where() "
@@ -901,23 +914,23 @@ class ValueExpr:
             "one is #309."
         )
 
-    def __eq__(self, other: object) -> NoReturn:  # type: ignore[override]
-        self._reject_comparison("==")
+    def __eq__(self, other: object) -> "QueryNode":  # type: ignore[override]  # ty: ignore[invalid-method-override]
+        return self._compare("==", other)
 
-    def __ne__(self, other: object) -> NoReturn:  # type: ignore[override]
-        self._reject_comparison("!=")
+    def __ne__(self, other: object) -> "QueryNode":  # type: ignore[override]  # ty: ignore[invalid-method-override]
+        return self._compare("!=", other)
 
-    def __lt__(self, other: object) -> NoReturn:
-        self._reject_comparison("<")
+    def __lt__(self, other: object) -> "QueryNode":
+        return self._compare("<", other)
 
-    def __le__(self, other: object) -> NoReturn:
-        self._reject_comparison("<=")
+    def __le__(self, other: object) -> "QueryNode":
+        return self._compare("<=", other)
 
-    def __gt__(self, other: object) -> NoReturn:
-        self._reject_comparison(">")
+    def __gt__(self, other: object) -> "QueryNode":
+        return self._compare(">", other)
 
-    def __ge__(self, other: object) -> NoReturn:
-        self._reject_comparison(">=")
+    def __ge__(self, other: object) -> "QueryNode":
+        return self._compare(">=", other)
 
     def __bool__(self) -> NoReturn:
         reject_fn_in_query(self, "a truth test")

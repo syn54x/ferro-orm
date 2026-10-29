@@ -1,9 +1,11 @@
 """Check-body rebuild (#344): ``migrate_updates`` rebuilds a same-named CHECK
 whose live catalog body drifted from the model's canonical rendering.
 
-ADR-0015 is one comparison: ferro's rendered CHECK body versus
-``pg_get_constraintdef``, both through one normalizer. Extra wrapping parens,
-identifier quotes, and whitespace are not drift. ADR-0014 makes the pass
+On Postgres the comparison is the printed pair (ADR-0060): the live read asks
+Postgres to print ferro's rendering beside the catalog's body, so extra
+wrapping parens, identifier quotes, and casts are not drift. The render-level
+tests below hand the planner the pair as Postgres prints it. On SQLite one
+normalizer compares the stored text (ADR-0015). ADR-0014 makes the pass
 Postgres-only: SQLite warns with the constraint name and leaves the live body.
 
 Adding a missing name is #343; dropping an orphaned ``ck_*`` is #345. Neither
@@ -42,6 +44,9 @@ SIDE_CHECK_BODY_AND = '("left" IS NULL) AND ("right" IS NULL)'
 SIDE_CHECK_DROP = f'ALTER TABLE "rebuild" DROP CONSTRAINT "{SIDE_CHECK_NAME}"'
 SIDE_CHECK_ADD = f'ALTER TABLE "rebuild" ADD CONSTRAINT "{SIDE_CHECK_NAME}" CHECK ({SIDE_CHECK_BODY})'
 SIDE_CHECK_ADD_AND = f'ALTER TABLE "rebuild" ADD CONSTRAINT "{SIDE_CHECK_NAME}" CHECK ({SIDE_CHECK_BODY_AND})'
+# Each body as `EXPLAIN (VERBOSE)` prints it over the live table.
+SIDE_PRINTED_OR = '((rebuild."left" IS NULL) OR (rebuild."right" IS NULL))'
+SIDE_PRINTED_AND = '((rebuild."left" IS NULL) AND (rebuild."right" IS NULL))'
 
 
 def _rewind_registry() -> None:
@@ -150,8 +155,19 @@ def _render(
     )
 
 
-def _live_check(name: str, definition: str, *, ferro_owned: bool = True) -> dict:
-    return {"name": name, "definition": definition, "ferro_owned": ferro_owned}
+def _live_check(
+    name: str,
+    definition: str,
+    *,
+    ferro_owned: bool = True,
+    printed: tuple[str, str] | None = None,
+) -> dict:
+    """A live check; on Postgres, `printed` is its `(declared, catalog)`
+    bodies as Postgres printed them."""
+    check: dict = {"name": name, "definition": definition, "ferro_owned": ferro_owned}
+    if printed is not None:
+        check["printed"] = {"declared": printed[0], "catalog": printed[1]}
+    return check
 
 
 def _model_ir(table: str) -> dict:
@@ -169,7 +185,13 @@ def _model_ir(table: str) -> dict:
 
 def test_drifted_table_check_renders_drop_then_bare_add_on_postgres():
     _define_rebuild(both=True)
-    live = [_live_check(SIDE_CHECK_NAME, f"CHECK ({SIDE_CHECK_BODY})")]
+    live = [
+        _live_check(
+            SIDE_CHECK_NAME,
+            f"CHECK ({SIDE_CHECK_BODY})",
+            printed=(SIDE_PRINTED_AND, SIDE_PRINTED_OR),
+        )
+    ]
     statements, warnings = _render("rebuild", REBUILD_LIVE_COLUMNS, live, "postgres")
     assert (statements, warnings) == (
         [
@@ -184,12 +206,14 @@ def test_drifted_table_check_renders_drop_then_bare_add_on_postgres():
 
 
 def test_catalog_wrapping_is_not_drift():
-    """pg_get_constraintdef extra parens / unquoted idents are a no-op."""
+    """pg_get_constraintdef extra parens / unquoted idents are a no-op: on
+    Postgres both bodies print alike, on SQLite they normalize alike."""
     _define_rebuild(both=False)
     live = [
         _live_check(
             SIDE_CHECK_NAME,
             "CHECK (((left IS NULL) OR (right IS NULL)))",
+            printed=(SIDE_PRINTED_OR, SIDE_PRINTED_OR),
         )
     ]
     for dialect in ("postgres", "sqlite"):
@@ -201,7 +225,13 @@ def test_catalog_wrapping_is_not_drift():
 
 def test_second_boot_shape_replans_to_nothing():
     _define_rebuild(both=False)
-    live = [_live_check(SIDE_CHECK_NAME, f"CHECK ({SIDE_CHECK_BODY})")]
+    live = [
+        _live_check(
+            SIDE_CHECK_NAME,
+            f"CHECK ({SIDE_CHECK_BODY})",
+            printed=(SIDE_PRINTED_OR, SIDE_PRINTED_OR),
+        )
+    ]
     statements, warnings = _render("rebuild", REBUILD_LIVE_COLUMNS, live, "postgres")
     assert (statements, warnings) == ([], [])
     assert statements == []
@@ -262,7 +292,16 @@ def test_column_check_label_change_renders_drop_then_bare_add():
         },
         {"name": "flavor", "declared_type": "text", "is_nullable": False},
     ]
-    live = [_live_check("ck_cookie_flavor", "CHECK (\"flavor\" IN ('sweet', 'salty'))")]
+    live = [
+        _live_check(
+            "ck_cookie_flavor",
+            "CHECK (\"flavor\" IN ('sweet', 'salty'))",
+            printed=(
+                "(cookie.flavor = ANY (ARRAY['sweet'::text, 'salty'::text, 'umami'::text]))",
+                "(cookie.flavor = ANY (ARRAY['sweet'::text, 'salty'::text]))",
+            ),
+        )
+    ]
     statements, _ = _render("cookie", live_columns, live, "postgres")
     assert (statements, _) == (
         [
@@ -283,7 +322,11 @@ def test_undeclared_live_ck_is_not_a_rebuild():
     """Leftovers are #345 — this ticket does not warn-or-remove them."""
     _define_rebuild(both=False)
     live = [
-        _live_check(SIDE_CHECK_NAME, f"CHECK ({SIDE_CHECK_BODY})"),
+        _live_check(
+            SIDE_CHECK_NAME,
+            f"CHECK ({SIDE_CHECK_BODY})",
+            printed=(SIDE_PRINTED_OR, SIDE_PRINTED_OR),
+        ),
         _live_check("ck_rebuild_orphan", "CHECK (true)"),
     ]
     statements, _ = _render("rebuild", REBUILD_LIVE_COLUMNS, live, "postgres")
@@ -306,7 +349,13 @@ def test_check_rebuild_statement_parity_pin():
     """The planner the Alembic bridge translates renders the same bytes the
     reconciliation pass executes."""
     _define_rebuild(both=True)
-    live = [_live_check(SIDE_CHECK_NAME, f"CHECK ({SIDE_CHECK_BODY})")]
+    live = [
+        _live_check(
+            SIDE_CHECK_NAME,
+            f"CHECK ({SIDE_CHECK_BODY})",
+            printed=(SIDE_PRINTED_AND, SIDE_PRINTED_OR),
+        )
+    ]
     statements = _planner_statements("rebuild", live, destructive=True)
     assert statements == [SIDE_CHECK_DROP, SIDE_CHECK_ADD_AND]
 

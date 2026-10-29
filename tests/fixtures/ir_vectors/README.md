@@ -41,7 +41,12 @@ Rules:
   `add`, `sub`, `mul`, `div`), `negate {operand}` and `func {name, args}`,
   omitted on every other column; v4 is what ferro writes.
   `schema_generated_column_v4` pins it, compiled from
-  `tests.test_generated_columns.declare_transaction`. Every shipped v1 to v3
+  `tests.test_generated_columns.declare_transaction`. A table check's
+  predicate gains the kind `compare {left, op, right}` over two such value
+  expressions (#796, ADR-0059), emitted only when an operand is not a plain
+  column or literal, so a plain check keeps its `cmp` bytes and no version
+  changes; `schema_check_fn_v4` pins it, compiled from
+  `tests.test_generate_check_functions.declare_payment`. Every shipped v1 to v3
   vector stays and keeps loading through `Snapshot::load` (ADR-0023); a v1 or
   v2 envelope carrying `replaces` is refused, and so is a v1 to v3 envelope
   whose column carries `generated`.
