@@ -365,7 +365,10 @@ def test_a_changed_type_and_nullability_name_both_sides(project, pkg, db, capsys
     db.execute('ALTER TABLE "team" ALTER COLUMN "size" TYPE bigint')
     db.execute('ALTER TABLE "team" ALTER COLUMN "name" DROP NOT NULL')
 
+    # `ck_team_size_ok` reads `size`, which the catalog cannot print the
+    # snapshot's body against while its type differs: a possible difference.
     assert sorted(drift_api(db).lines) == [
+        "ck_team_size_ok check not compared while its column changes type",
         "team.name is nullable, snapshot says NOT NULL",
         "team.size has type bigint, snapshot says int",
     ]
