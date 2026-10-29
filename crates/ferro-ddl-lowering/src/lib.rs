@@ -1077,17 +1077,23 @@ fn render_check_predicate(
             format!("{lhs} {} {rhs}", check_cmp_op_sql(*op))
         }
         ferro_schema_ir::CheckExpr::Compare { left, op, right } => {
-            let lookup = |name: &str| schema_value_column(columns, name);
+            // The declaration's typing refuses an operand it cannot type;
+            // one that reaches the renderer untyped never meets a float.
+            let family = |operand: &ValueExpr| {
+                type_value_expr(operand, &|name| schema_value_column(columns, name))
+                    .ok()
+                    .map(|typed| typed.family)
+            };
             let (lhs, rhs) = sqlite_double_operands(
                 dialect,
                 (
                     left,
-                    Some(type_value_expr(left, &lookup)?.family),
+                    family(left),
                     render_value_expr(left, dialect, columns)?,
                 ),
                 (
                     right,
-                    Some(type_value_expr(right, &lookup)?.family),
+                    family(right),
                     render_value_expr(right, dialect, columns)?,
                 ),
             );
