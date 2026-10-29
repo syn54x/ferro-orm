@@ -166,11 +166,11 @@ For a single model, every emitter must agree on:
       once (`render_value_expr` over the closed function table
       `value_function`, which `_core._value_function_table` hands `ferro.fn`;
       the clause is `render_generated_clause`) at the type
-      `type_value_expr` gives it, so Postgres computes at SQLite's width: a
-      `smallint` or `integer` column and a call Postgres returns narrower
-      (`sign`, `length`, the date parts: `postgres_narrows_integer`) are
-      cast to `bigint`, and a float literal to `double precision`; an
-      integer literal stays bare. Its ops and their verdicts: added with the
+      `type_value_expr` gives it, the type SQLite computes it at: on
+      Postgres an integer value computes at 64 bits and a float one as a
+      `double precision`, each operand or call Postgres would type
+      otherwise (a `smallint` or `integer` column, `sign`, `length`, a
+      date part, a literal) cast to that type. Its ops and their verdicts: added with the
       column (`AddColumn`, native on Postgres, a rebuild on SQLite, no
       backfill), a changed expression (`AlterGeneratedExpression`,
       `render_set_generated_expression`, can fail on rows), generated to
@@ -183,10 +183,10 @@ For a single model, every emitter must agree on:
       (`Replace::InputType`) and its own type change (`Replace::OwnType`),
       both of which Postgres refuses to alter under an expression. A row
       policy or table check that reads the column is carried around the
-      pair: dropped before it and put back unchanged after it, ops marked
-      `OpVerdict.carried` that no door reports as a difference. On
-      Postgres a check over any column whose type changes is carried the
-      same way when its body changes too or cannot be compared. A row policy the plan
+      pair. A carried artifact is one taken down and put back unchanged
+      around another change, its ops marked `OpVerdict.carried`, which no
+      door reports as a difference; a changed or uncomparable artifact is
+      a difference drift reports. A row policy the plan
       cannot carry (a raw body it may not rewrite, ADR-0019) refuses the
       drop with `Refusal::PolicyReadsReplacedColumn`, naming the
       `DROP POLICY` recipe. Drift is a printed pair on Postgres
@@ -198,16 +198,17 @@ For a single model, every emitter must agree on:
       SQLite column its guard as a column `CheckConstraint`
       (`_core._render_sqlite_generated_guard`), so `create_all` builds the
       pass's table.
-      The SQLite guard `_ferro_range_<col>` (`render_sqlite_generated_guard`)
+      The SQLite guard `_ferro_range_<col>` (`sqlite_generated_guard`)
       is written inside the column definition and compared with it: never
       a `ck_*` check and never in `__ferro_checks__`. Postgres raises where
       a value does not fit; SQLite would store a `real` or `inf`. So the
       guard holds a `smallint` or `integer` column to its Postgres range
-      and a `bigint` one to staying an integer, and adds one term for each
-      operation under the column that `value_step_can_fail` names: an
-      integer operation must still be an integer, and a float `+` or `-`
-      finite unless an operand already was infinite (Postgres's `float8pl`
-      rule). A `double precision` column gets no storage term, since
+      and a `bigint` one to staying an integer, and every operation under
+      the column that can fail on a value is checked on SQLite the way
+      Postgres evaluates it (a `coalesce` fallback only when the earlier
+      arguments are null): an integer result must still be an integer, a
+      float one finite unless an operand already was infinite. A
+      `double precision` column gets no storage term, since
       Postgres stores the `inf` an input carried. `total: int = a + b`
       carries only the storage term; Postgres needs no guard, since it
       computes at 64 bits and its column type holds the range.
@@ -231,6 +232,8 @@ For a single model, every emitter must agree on:
       take numbers or dates and no nullable operand; `year` / `month` /
       `day` take a `date`; `/` only by a non-zero literal; no float `*` or
       `/` and no Decimal arithmetic; no integer literal past 64 bits; no
+      bounded text storage, which Postgres pads or trims and SQLite does
+      not; no
       other generated column, retired column, relation or closed-over
       variable. A check's SQLite body guards each comparison with a failing
       operation (`render_check_predicate`): `lambda box: box.a * box.b > 0`
