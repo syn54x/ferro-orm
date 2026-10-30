@@ -692,7 +692,7 @@ _SET_BINARY_OPS: dict[str, Literal["add", "sub"]] = {"+": "add", "-": "sub"}
 
 
 def _reject_kwargs_value_expr(value: Any) -> None:
-    """Kwargs stay literals-only; expressions belong on the recipe door."""
+    """Kwargs stay literals-only; expressions belong in the recipe form."""
     reject_fn_in_query(value, "update()")
     if isinstance(
         value,

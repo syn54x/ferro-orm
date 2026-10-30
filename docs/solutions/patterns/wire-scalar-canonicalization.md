@@ -32,7 +32,7 @@ misses the cursor row if the query sends `…+00:00` while `save()` wrote `…Z`
   `src/ferro/query/nodes.py` and `_after_query_values` /
   `to_wire_json` in `src/ferro/query/wire.py`.
 - `update()`: `update_bind_payload` runs the helper, then dict-level
-  `to_json` (enums still stringify on that door).
+  `to_json` (enums still stringify on that path).
 - `save()`: `save_bind_payload` stays `model_dump(mode="json")` plus a
   raw bytes overlay — do not route save through the per-value helper.
 

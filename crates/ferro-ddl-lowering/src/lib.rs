@@ -520,7 +520,7 @@ pub fn resolve_column_storage(
 
 /// The SQLite range guard of generated column `col` of a table with
 /// `columns`, as its constraint name and CHECK body: the one decision every
-/// door's SQLite `CREATE TABLE` frames as `CONSTRAINT "<name>" CHECK
+/// emitter's SQLite `CREATE TABLE` frames as `CONSTRAINT "<name>" CHECK
 /// (<body>)` after the column's `STORED`. `None` for a plain column, a
 /// column whose Postgres storage is no scalar, or an expression nothing in
 /// which can overflow.
@@ -1190,7 +1190,7 @@ pub fn render_check_body(check: &ferro_schema_ir::SchemaCheck) -> String {
 /// NotValid  ALTER TABLE "post" ADD CONSTRAINT "ck_post_title_set" CHECK ("title" <> '') NOT VALID
 /// ```
 ///
-/// `Plain` is every door's statement: the create pass, the reconciliation
+/// `Plain` is every emitter's statement: the create pass, the reconciliation
 /// pass, the Alembic bridge. `NotValid` is the generator's staged constraint
 /// on an existing Postgres table: installed without a scan, refusing every new
 /// violating write at once, and validated by a later step
@@ -1222,7 +1222,7 @@ impl ConstraintMode {
 /// Concurrent  CREATE UNIQUE INDEX CONCURRENTLY "uq_author_email" ON "author" ("email")
 /// ```
 ///
-/// `Plain` is every door's statement, idempotent inside a transaction.
+/// `Plain` is every emitter's statement, idempotent inside a transaction.
 /// `Concurrent` is the generator's index step on an existing Postgres table:
 /// built without blocking writers and outside any transaction, and never
 /// `IF NOT EXISTS`, which would skip over an invalid leftover of a failed
@@ -1335,7 +1335,7 @@ pub fn pg_serial_sequence_name(table: &str, column: &str) -> String {
 /// rename). Another relation already holding the name in the sequence's
 /// schema is a refusal naming it and the fix, never Postgres's bare
 /// `relation already exists` ([`PG_SERIAL_SEQUENCE_NAME_TAKEN`]). The
-/// statement is the same on every door; only its run reads the catalog, as
+/// statement is the same on every emitter; only its run reads the catalog, as
 /// the guarded `CREATE TYPE` does.
 pub fn render_pg_serial_sequence_rename(table: &str, column: &str) -> String {
     let literal = |text: &str| text.replace('\'', "''");
@@ -1529,7 +1529,7 @@ pub fn render_db_check(
 /// then its column checks — [`declared_check_names`]) have no constraint of
 /// that name on the side the plan starts from, in the target's order.
 ///
-/// This is the single decision table for missing CHECKs: every migration door
+/// This is the single decision table for missing CHECKs: every emitter
 /// reads it through the one planner (AGENTS.md § I-1).
 ///
 /// The comparison is by NAME only. A live constraint whose *body* drifted from
@@ -1557,7 +1557,7 @@ pub fn declared_check_names(model: &ferro_schema_ir::SchemaModel) -> Vec<String>
 /// Render the ADD for one declared CHECK constraint, or `None` when `name` is
 /// not declared on `model`.
 ///
-/// The single source both migration doors consume for a missing CHECK
+/// The single source both emitters consume for a missing CHECK
 /// (AGENTS.md § I-1). A **table check** is one plain
 /// `ALTER TABLE … ADD CONSTRAINT … CHECK (…)`: the caller only asks for it when
 /// the name is absent live, so no existence guard is needed. A **column check**
@@ -1565,11 +1565,11 @@ pub fn declared_check_names(model: &ferro_schema_ir::SchemaModel) -> Vec<String>
 /// emits. On SQLite both are skipped with a warning that names the constraint
 /// (ADR-0014): the column already exists, and attaching a constraint to an
 /// existing table or column needs a full table rebuild, which is the
-/// Migrations door (`ferro migrate new`). A column check over a column added
+/// Generator (`ferro migrate new`). A column check over a column added
 /// in the same pass never reaches here: it rides that `ADD COLUMN` inline.
 ///
 /// `mode` appends ` NOT VALID` to the Postgres ADD ([`ConstraintMode`]); every
-/// door but the generator's staged constraint passes `Plain`.
+/// emitter but the generator's staged constraint passes `Plain`.
 ///
 /// # Errors
 /// A table check whose body does not render ([`render_table_check_body`]).
@@ -1889,7 +1889,7 @@ pub fn extra_check_names_warning(table: &str, extra: &[String]) -> Option<Report
 /// Render the DROP for one leftover CHECK constraint (ADR-0013, ADR-0014).
 ///
 /// Postgres: one `ALTER TABLE … DROP CONSTRAINT`. SQLite: no statement, a
-/// warning that names the constraint and points at the Migrations door
+/// warning that names the constraint and points at migrations
 /// (`ferro migrate new`) — SQLite cannot drop a table constraint without a
 /// full table rebuild.
 pub fn render_check_drop(table: &str, name: &str, dialect: Dialect) -> CheckEmission {
@@ -2910,7 +2910,7 @@ pub struct RowSecurityReconcilePlan {
 }
 
 /// The row-security reconciliation decision for ONE live table — the single
-/// seam every migration door reads through the planner (AGENTS.md § I-1).
+/// seam every emitter reads through the planner (AGENTS.md § I-1).
 /// It decides names and flags only; the planner turns them into ops and only
 /// the plan's renderer writes SQL.
 ///
@@ -3916,7 +3916,7 @@ pub fn render_json_backfill_default(
 // ---------------------------------------------------------------------------
 // Plan reports (ADR-0050, ADR-0049): what the planner, the renderer and the
 // reconciliation pass tell their reader that is not a change they make. One
-// vocabulary for every door, so a reader acts on the kind and never on the
+// vocabulary for every emitter, so a reader acts on the kind and never on the
 // sentence. Every `*_warning` builder in this crate returns one; the text is
 // the sentence each has always printed.
 // ---------------------------------------------------------------------------
@@ -3960,7 +3960,7 @@ impl Report {
 
     /// Whether this report stands in for an op that renders no statement: a
     /// rendering that only reports one of these leaves its change undone, so
-    /// a door that writes a reviewed file refuses it rather than leave it
+    /// an emitter that writes a reviewed file refuses it rather than leave it
     /// out. A planner or pass report never blocks, and neither does the
     /// row-security skip on a new SQLite table, whose table is created.
     pub fn blocks(&self) -> bool {
@@ -4121,7 +4121,7 @@ pub enum ReportKind {
         /// The change.
         what: InPlaceChange,
     },
-    /// A table's declared primary key differs from its live one, and no door
+    /// A table's declared primary key differs from its live one, and no emitter
     /// changes a primary key in place.
     PrimaryKeyKept,
     /// A column moves to or from a native Postgres enum type, which no
@@ -4231,7 +4231,7 @@ pub fn plain_column_kept_warning(table: &str, column: &str, dialect: Dialect) ->
 }
 
 /// What drops a column's server default on SQLite, which has no `ALTER
-/// COLUMN … DROP DEFAULT`: a rebuild of its table, which no door plans
+/// COLUMN … DROP DEFAULT`: a rebuild of its table, which no emitter plans
 /// from a declaration (a migration between two snapshots never meets a
 /// default the snapshots do not hold).
 const SQLITE_DROP_DEFAULT_FIX: &str = "SQLite cannot drop a column default in place, so \
@@ -4290,10 +4290,10 @@ pub fn foreign_fk_drift_warning(
 
 /// [`ReportKind::EnumTypeMove`]: `table.column` moves to or from a native
 /// Postgres enum type (`mood: Mood` becomes `mood: str`, or back). No
-/// statement converts it in place, so no door does: the generator refuses
+/// statement converts it in place, so no emitter does: the generator refuses
 /// with this text, and the reconciliation pass and the Alembic bridge report
 /// or refuse with the same words (AGENTS.md § I-6: the refusal names its
-/// recipe). The sentence holds on every door: it says what no statement
+/// recipe). The sentence holds on every emitter: it says what no statement
 /// does, and names the migration that does it.
 ///
 /// `keep` is a `db_type` token on a move *to* a native enum type from a
@@ -4338,7 +4338,7 @@ pub fn primary_key_kept_warning(table: &str, declared: &[String], live: &[String
 }
 
 /// [`ReportKind::PrimaryKeyKept`]: the primary-key column `table.column`
-/// changes type, which no door runs in place, so it keeps its type; `recipe`
+/// changes type, which no strategy runs in place, so it keeps its type; `recipe`
 /// is the primary-key recipe that makes the change.
 pub fn primary_key_type_kept_warning(table: &str, column: &str, recipe: &str) -> Report {
     Report::new(
@@ -4346,7 +4346,7 @@ pub fn primary_key_type_kept_warning(table: &str, column: &str, recipe: &str) ->
         Subject::column(table, column),
         format!(
             "column \"{table}\".\"{column}\" is in the primary key and changes type, which \
-             no door runs in place, so it keeps its type; {recipe}"
+             no strategy runs in place, so it keeps its type; {recipe}"
         ),
     )
 }
@@ -4354,8 +4354,8 @@ pub fn primary_key_type_kept_warning(table: &str, column: &str, recipe: &str) ->
 /// The pass's warning for a live table hint on a pass that does not
 /// reconcile (`connect(auto_migrate=True)`, `create_tables()`): table `new` is
 /// neither renamed nor created beside its old self, nor is any new table in
-/// `waiting` that references it, and the two doors that rename it are named.
-/// It holds until a door renames the table, so it recurs.
+/// `waiting` that references it, and the two strategies that rename it are named.
+/// It holds until one of them renames the table, so it recurs.
 pub fn pending_table_rename_warning(old: &str, new: &str, waiting: &[String]) -> Report {
     let waiting = match waiting {
         [] => String::new(),
@@ -4408,7 +4408,7 @@ pub fn ddl_lock_retry_warning(subject: Subject, attempt: &str) -> Report {
     )
 }
 
-/// The report for a refused rename hint, on every door that plans without
+/// The report for a refused rename hint, on every emitter that plans without
 /// refusing outright (the reconciliation pass, `drift`): the hint renames
 /// nothing, on every run until the declaration changes.
 pub fn hint_refusal_warning(refusal: &HintError) -> Report {
@@ -6832,7 +6832,7 @@ mod tests {
     // -----------------------------------------------------------------------
     // Row security (#409). These pins ARE the cross-emitter contract: the
     // runtime create pass and (from #414) the Alembic operation both render
-    // through these functions, so a change here is a change to both doors.
+    // through these functions, so a change here is a change to both emitters.
     // -----------------------------------------------------------------------
 
     fn rls_model(columns: Vec<SchemaColumn>) -> ferro_schema_ir::SchemaModel {

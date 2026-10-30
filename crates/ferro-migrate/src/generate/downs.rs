@@ -9,7 +9,7 @@
 //! ```
 //!
 //! The down is [`crate::plan_down`]`(step_ops, after, before)`, the one down
-//! every door uses (ADR-0050): the planner run back, keeping only the ops
+//! every emitter uses (ADR-0050): the planner run back, keeping only the ops
 //! whose artifact the step's up touched, every statement from the one
 //! renderer — no statement is built here (AGENTS.md § I-1). The down restores
 //! schema, never data, so a down that recreates a dropped table or `NOT NULL`

@@ -5,7 +5,7 @@
 
 use crate::backend::{EngineHandle, PoolSpec, dialect_from_url};
 use crate::migrate::{
-    AutoMigrateDoor, MigrateOptions, PassReport, internal_migrate, with_pass_report,
+    AutoMigrateCall, MigrateOptions, PassReport, internal_migrate, with_pass_report,
 };
 use crate::session_settings::SettingsDelivery;
 use crate::state::{
@@ -437,7 +437,7 @@ pub fn connect(
                     engine_handle.clone(),
                     opts,
                     &tracking_schemas,
-                    AutoMigrateDoor::Connect,
+                    AutoMigrateCall::Connect,
                     &mut report,
                 ),
             )

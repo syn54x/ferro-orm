@@ -93,7 +93,7 @@ impl Layout {
     /// then drops what the step may read).
     ///
     /// # Errors
-    /// An op no door runs (its refusal), or a report no op answers.
+    /// An op no emitter runs (its refusal), or a report no op answers.
     pub(super) fn plan(
         parent: &IrEnvelope<SchemaIrPayload>,
         before: IrEnvelope<SchemaIrPayload>,

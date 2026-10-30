@@ -406,7 +406,7 @@ def test_ferro_rls_must_be_a_row_security_object():
 
 
 # ---------------------------------------------------------------------------
-# Rendering: one decision seam, two doors (I-1)
+# Rendering: one decision seam, two emitters (I-1)
 # ---------------------------------------------------------------------------
 
 
@@ -451,9 +451,9 @@ def test_a_model_without_a_declaration_keeps_an_unchanged_envelope():
 
 
 def test_row_security_statement_parity_pin():
-    """The one planner's ``AddTable`` (every migration door's table creation)
+    """The one planner's ``AddTable`` (every emitter's table creation)
     carries the same row-security bytes the create pass executes. If either
-    side drifts, the doors would police the same model differently."""
+    side drifts, the emitters would police the same model differently."""
     _define_ledger_row()
     model_ir = _ledgerrow_ir()
     statements, warnings = created_row_security(

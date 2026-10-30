@@ -185,7 +185,7 @@ Defining `User` compiles its schema, but connects to nothing. The schema reaches
 
 That call creates the `user` table, because no table of that name existed. `auto_migrate=True` creates missing tables and leaves existing ones alone; `migrate_updates=True` and `migrate_destructive=True` go further, and [Auto-migrate](../guide/schema/auto-migrate.md) lists what each one changes.
 
-Auto-migrate, [migrations](../guide/schema/migrations.md) (`ferro migrate new`) and the [Alembic bridge](../guide/schema/alembic.md) are three doors to the same planner. Each compares the models' SchemaIR with a database or a saved snapshot, and each renders the change through the same functions. Because they share one planner, they write the same statement for the same change, byte for byte, so switching from one to another never shows a phantom difference. [Schema management](../guide/schema/overview.md) compares the three.
+Auto-migrate, [migrations](../guide/schema/migrations.md) (`ferro migrate new`) and the [Alembic bridge](../guide/schema/alembic.md) are three strategies over the same planner. Each compares the models' SchemaIR with a database or a saved snapshot, and each renders the change through the same functions. Because they share one planner, they write the same statement for the same change, byte for byte, so switching from one to another never shows a phantom difference. [Schema management](../guide/schema/overview.md) compares the three.
 
 ## Async from end to end
 

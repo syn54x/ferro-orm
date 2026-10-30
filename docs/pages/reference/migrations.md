@@ -1,11 +1,11 @@
 ---
-description: "Step-file headers, step classes, what each schema door covers, what auto-migrate does per backend and what a PassReport holds."
+description: "Step-file headers, step classes, what each migration strategy covers, what auto-migrate does per backend and what a PassReport holds."
 status: new
 ---
 
 # Migrations reference
 
-This page lists the facts the schema-management guides link to: the headers a step file can carry, the class of each step, what each door covers, what auto-migrate does on each backend, and what a `PassReport` holds. A generated index step shows a header at work:
+This page lists the facts the schema-management guides link to: the headers a step file can carry, the class of each step, what each strategy covers, what auto-migrate does on each backend, and what a `PassReport` holds. A generated index step shows a header at work:
 
 ```sql
 -- 0002_author_nickname/02_idx_author_nickname.up.postgres.sql
@@ -53,9 +53,9 @@ Each step is *expand* or *contract*, decided from what the step does and recorde
 - A step that runs nothing on a dialect (`not-applicable`) is expand there.
 - A generated step you edit by hand is classed like a hand-written one: contract unless its file says `-- ferro: expand`.
 
-## What each door covers
+## What each strategy covers
 
-The three doors are [auto-migrate](../guide/schema/auto-migrate.md) (here its update rung, `migrate_updates`), [migrations](../guide/schema/migrations.md) and the [Alembic bridge](../guide/schema/alembic.md).
+The three strategies are [auto-migrate](../guide/schema/auto-migrate.md) (here its update rung, `migrate_updates`), [migrations](../guide/schema/migrations.md) and the [Alembic bridge](../guide/schema/alembic.md).
 
 | Change | Auto-update | Migrations | Alembic bridge |
 | :--- | :--- | :--- | :--- |
@@ -106,14 +106,14 @@ What `connect(..., migrate_updates=True)` and `ferro.migrate()` do to an existin
 | Rename an enum label declared with `__ferro_renamed_labels__` | ✅ nothing to do | ✅ `ALTER TYPE ... RENAME VALUE` |
 | Remove an enum label | ✅ nothing to do | ⚠️ `UserWarning`, no DDL. [Migrations](../guide/schema/migrations.md) generate it with its [backfill](../guide/schema/data-steps.md#removing-an-enum-label) |
 | Inline single-column `UNIQUE` on an existing column, index option changes | ❌ never here; [migrations](../guide/schema/migrations.md) generate it | ❌ never here; migrations generate it |
-| Rename a table | ✅ `ALTER TABLE … RENAME TO` under `migrate_updates` when the database holds the old name from `__ferro_renamed_from__` and not the new one; derived index and check names follow. Without `migrate_updates` a `UserWarning` names the table, the hint and both doors, and nothing is created. [Migrations](../guide/schema/renames-and-retirements.md#rename-hints) are the reviewed path | ✅ same |
+| Rename a table | ✅ `ALTER TABLE … RENAME TO` under `migrate_updates` when the database holds the old name from `__ferro_renamed_from__` and not the new one; derived index and check names follow. Without `migrate_updates` a `UserWarning` names the table, the hint and both strategies, and nothing is created. [Migrations](../guide/schema/renames-and-retirements.md#rename-hints) are the reviewed path | ✅ same |
 | Drop a column | ✅ with `migrate_destructive=True` | ✅ with `migrate_destructive=True` |
 | Drop a table | ❌ never here; [migrations](../guide/schema/migrations.md#reading-a-migration) generate it, marked destructive | ❌ same |
 | Add a [generated column](../guide/models-and-fields.md#generated-columns) | ⚠️ `UserWarning`, no DDL; migrations generate the table rebuild | ✅ `ADD COLUMN … GENERATED ALWAYS AS (…) STORED`; no backfill, the database computes every row |
 | Change a generated column's expression | ⚠️ `UserWarning`, no DDL; migrations generate the table rebuild | ✅ `ALTER COLUMN … SET EXPRESSION AS (…)`, which recomputes every row |
 | Make a generated column plain (the model drops `generated=`) | ⚠️ `UserWarning`, no DDL; migrations generate the table rebuild | ✅ `ALTER COLUMN … DROP EXPRESSION`; the stored values stay |
 | Make a plain column generated | ⚠️ `UserWarning` (`PlainColumnKept`, or with `migrate_destructive=True` the rebuild warning), no DDL; migrations generate the table rebuild | ✅ with `migrate_destructive=True`: `DROP COLUMN` + `ADD COLUMN … GENERATED`; without it a `PlainColumnKept` warning and the column stays |
-| Change a primary key | ❌ never; no door generates it. Migrations refuse it with [the recipe](../guide/schema/migrations.md#changing-a-primary-key) | ❌ same |
+| Change a primary key | ❌ never; no strategy generates it. Migrations refuse it with [the recipe](../guide/schema/migrations.md#changing-a-primary-key) | ❌ same |
 
 ## `PassReport` contents
 
@@ -145,7 +145,7 @@ A `Report`'s `kind` names the warning, so code can match on it rather than on th
 | `PlainColumnKept` | A live plain column the model declares generated; replacing it drops its values, so it stays until `migrate_destructive` or a migration replaces it. |
 | `RefusedConversion` | A storage conversion that could reinterpret or destroy stored values; it is not executed. |
 | `SqliteInPlace` | A change SQLite cannot make to an existing table in place: it needs the table rebuild only a migration writes. |
-| `PrimaryKeyKept` | The declared primary key differs from the live one; no door changes a primary key in place. |
+| `PrimaryKeyKept` | The declared primary key differs from the live one; no strategy changes a primary key in place. |
 | `EnumTypeMove` | A column moves to or from a native Postgres enum type, which no statement converts in place. |
 | `RowSecuritySkipped` | Row security a table declares that the database does not apply: SQLite has none, or the create pass met the table already there. |
 | `PendingTableRename` | A table rename hint is live, and a pass without `migrate_updates` holds the table back. |

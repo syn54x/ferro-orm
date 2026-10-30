@@ -140,6 +140,14 @@ _Avoid_: Import-time registration, partial registry
 The registry epoch after relationship resolution completes — join tables exist, shadow FK columns are wired, and the SchemaIR modelset is authoritative for DDL and auto-migrate.
 _Avoid_: Final registration, committed registry
 
+**Migration strategy**:
+The way a database's schema is kept matching the models: *auto-migrate*, which changes it straight from the models when `connect()` runs; ferro's own *migrations*; or Alembic's *generated revisions* through the bridge. A database has one strategy at a time, and all three plan every change through the one planner, so moving a database from one to another shows no *drift*.
+_Avoid_: Door, workflow, way, mode, tool
+
+**Emitter**:
+A code path that writes schema statements from the one planner's plan: the *create pass* and *reconciliation pass*, the migration generator and the Alembic bridge. *Drift* reads the same plan and writes nothing. Every emitter renders a change through the same function, so no two can disagree on a statement.
+_Avoid_: Door, code path, renderer
+
 **Create pass**:
 The auto-migrate step that brings missing tables into existence — the table, its columns, its indexes and constraints, together. A table that already exists is left completely untouched by this pass, whatever its shape. A table a live *rename hint* says already exists under its old name is not missing, so the pass holds it back, and with it every table that depends on it.
 _Avoid_: Bootstrap, ensure-tables, table sync
@@ -299,7 +307,7 @@ A generated DDL step that discards nothing but fails on a database whose rows do
 _Avoid_: Risky step, may-fail step, conditional step
 
 **Op verdict**:
-What the planner says about one change on one dialect: whether it runs natively, needs a *table rebuild*, is refused, or is irreversible (and why), and whether it asks existing rows for values, drops data, or can fail on the rows it meets. Every door reads the same verdict: a *migration* turns it into steps and headers, a *generated revision* into markers and refusals.
+What the planner says about one change on one dialect: whether it runs natively, needs a *table rebuild*, is refused, or is irreversible (and why), and whether it asks existing rows for values, drops data, or can fail on the rows it meets. Every *emitter* reads the same verdict: a *migration* turns it into steps and headers, a *generated revision* into markers and refusals.
 _Avoid_: Assignment, needs, classification
 
 **Plan report**:
@@ -364,11 +372,11 @@ The reconciliation-pass operation appending model-declared labels missing from a
 _Avoid_: Enum sync, label reconciliation, enum evolution
 
 **Type drop**:
-The `DROP TYPE` that follows the removal of the last column or table declaring a ferro-owned native enum type, after the table changes, on every door and in either direction: a migration's step or down, the *reconciliation pass* under `migrate_destructive`, and a generated revision's `upgrade()` or `downgrade()`. One planner decides it.
+The `DROP TYPE` that follows the removal of the last column or table declaring a ferro-owned native enum type, after the table changes, under every *migration strategy* and in either direction: a migration's step or down, the *reconciliation pass* under `migrate_destructive`, and a generated revision's `upgrade()` or `downgrade()`. One planner decides it.
 _Avoid_: Enum cleanup, type teardown, cascade drop
 
 **Type creation**:
-The guarded `CREATE TYPE` that brings a native enum type into being before any table change that uses it, on every door and rendered by one function. A table operation never creates a type, so a generated revision renders every enum column `create_type=False`.
+The guarded `CREATE TYPE` that brings a native enum type into being before any table change that uses it, under every *migration strategy* and rendered by one function. A table operation never creates a type, so a generated revision renders every enum column `create_type=False`.
 _Avoid_: Explicit enum create, inline type creation, pre-create
 
 **Constraint rebuild**:

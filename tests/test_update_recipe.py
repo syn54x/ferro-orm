@@ -1,4 +1,4 @@
-"""Build-time doors for ``update(lambda t: {...})`` (#377 / #378).
+"""Build-time forms for ``update(lambda t: {...})`` (#377 / #378).
 
 Stops at compile / call time — no SQL execution. Backend persistence lives
 in ``test_bulk_update.py``.

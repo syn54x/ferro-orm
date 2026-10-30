@@ -387,7 +387,7 @@ pub fn _rls_command_matrix() -> String {
 /// The IR compiler calls this at class-definition time so an unsupported column
 /// type fails where the model is written, and the emitters call
 /// `row_policy_shorthand_cast` for the same decision at render time — one
-/// function, two doors (AGENTS.md § I-1).
+/// function, two emitters (AGENTS.md § I-1).
 #[pyfunction]
 pub fn _rls_shorthand_cast(column_ir_json: String) -> PyResult<String> {
     let col: ferro_schema_ir::SchemaColumn =

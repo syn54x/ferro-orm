@@ -159,7 +159,7 @@ In-memory SQLite covers most logic. Behaviour that depends on Postgres types, ca
 
 ## Projects with migrations
 
-The fixtures above stay as they are when a project adopts [migrations](../guide/schema/migrations.md). A fresh test database has never run a migration, so `auto_migrate=True` is not refused on it ([one door per database](../guide/schema/overview.md#one-door-per-database)), and it builds the schema the models declare.
+The fixtures above stay as they are when a project adopts [migrations](../guide/schema/migrations.md). A fresh test database has never run a migration, so `auto_migrate=True` is not refused on it ([one strategy per database](../guide/schema/overview.md#one-strategy-per-database)), and it builds the schema the models declare.
 
 That schema is the schema your migrations end at only while the models and the migrations agree, so run `ferro migrate check` in CI beside the tests. `auto_migrate=True` never runs a migration's own SQL, backfill or down step. Test those with the migration test harness, which stands a database at a named migration; see [Testing migrations](../guide/schema/testing.md).
 

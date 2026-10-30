@@ -200,7 +200,7 @@ pub struct SchemaColumn {
     /// Retired column (`Field(retired=True)`, or the shadow column of a
     /// `ForeignKey(retired=True)`; ADR-0053): the model no longer reads or
     /// writes it, so it is nullable and no statement the model issues names
-    /// it, but it stays in the snapshot and every door creates and keeps it
+    /// it, but it stays in the snapshot and every emitter creates and keeps it
     /// as declared. Not a schema change by itself: the planner sees an
     /// ordinary column. Absent when false, so every existing envelope is
     /// byte-identical.

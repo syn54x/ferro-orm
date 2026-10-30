@@ -51,7 +51,7 @@ impl Phase {
 }
 
 /// The phase step `op` lands in, in a migration that has (`data_steps`) or
-/// lacks a data step after its schema step, or `None` for an op no door
+/// lacks a data step after its schema step, or `None` for an op no emitter
 /// runs ([`Execution::Refused`], [`Execution::Irreversible`]), whose verdict
 /// the caller turns into its refusal.
 ///

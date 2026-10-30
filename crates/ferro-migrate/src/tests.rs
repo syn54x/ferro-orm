@@ -791,7 +791,7 @@ fn emit_sql_with_ir_alter_column_type_sqlite_warns_only() {
 
 #[test]
 fn sqlite_warn_skips_name_migrations_not_alembic() {
-    // #514: every SQLite warning the pass still emits points at the door that
+    // #514: every SQLite warning the pass still emits points at the strategy that
     // will work — `ferro migrate new` — never at Alembic.
     let type_old = envelope(vec![schema_model("user", vec![col("name", "text", true)])]);
     let type_new = envelope(vec![schema_model("user", vec![col("name", "int", true)])]);
@@ -4481,7 +4481,7 @@ fn plan_from_ir_plans_a_primary_key_moving_between_columns() {
         );
         assert_eq!(plan.op_list().first(), Some(&change), "{dialect:?}");
         // The pass warns and skips: no statement, one warning naming the
-        // reviewed-migration door.
+        // migrations strategy.
         let rendered = render_plan(&plan, &keyed_on_id, &keyed_on_slug, dialect).expect("render");
         let op = rendered.iter().find(|r| r.op == change).expect("rendered");
         assert!(op.statements.is_empty());
@@ -5170,7 +5170,7 @@ mod renames {
         );
 
         // SQLite has no index rename: the index is dropped and created under
-        // its new name, by the statements every door uses.
+        // its new name, by the statements every emitter uses.
         let index_only = Plan::unplaced(vec![MigrationOp::RenameIndex {
             table: "author".to_string(),
             old: "idx_writer_name".to_string(),
@@ -7834,7 +7834,7 @@ fn a_policy_over_a_re_added_generated_column_is_dropped_before_and_added_after()
     ];
     let up = plan_declared(&before, &after, Dialect::Postgres, updates_only());
     assert_eq!(up.op_list(), expected);
-    // The policy ops carry it unchanged: no door reports them as a difference.
+    // The policy ops carry it unchanged: no emitter reports them as a difference.
     let carried: Vec<Option<Carry>> = up.operations.iter().map(|p| p.verdict.carried).collect();
     let unchanged = Some(Carry::Unchanged);
     assert_eq!(carried, vec![unchanged, None, None, None, unchanged]);
@@ -8625,7 +8625,7 @@ fn carries_a_check(plan: &Plan) -> bool {
 
 #[test]
 fn a_check_over_a_key_column_whose_type_changes_is_left_standing() {
-    // The primary-key recipe's change: no door alters the key column.
+    // The primary-key recipe's change: no emitter alters the key column.
     let model = |key_type: &str| SchemaModel {
         table_checks: vec![SchemaTableCheck {
             name: "ck_payment_large".to_string(),

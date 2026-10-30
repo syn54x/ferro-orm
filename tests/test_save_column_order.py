@@ -213,18 +213,18 @@ def _upgrade_bullet() -> str:
     return bullet
 
 
-def test_the_upgrade_guide_states_each_write_door_s_column_order():
-    """The 0.26 note says what the tests above pin: the save doors and
+def test_the_upgrade_guide_states_each_write_path_s_column_order():
+    """The 0.26 note says what the tests above pin: the save paths and
     ``bulk_create`` write in field order, ``update()`` in the call's order."""
     bullet = _upgrade_bullet()
     field_order, _, rest = bullet.partition("field order")
-    for door in (
+    for method in (
         "`save()`",
         "`save(only=...)`",
         "`save(exclude=...)`",
         "`bulk_create()`",
     ):
-        assert door in field_order, door
+        assert method in field_order, method
     assert "update()" not in field_order
     assert (
         "`update()` is unchanged: it lists the columns in the order the call passes them"

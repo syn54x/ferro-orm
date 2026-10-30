@@ -945,7 +945,7 @@ def test_a_foreign_key_the_snapshot_no_longer_declares_is_drift(
     project, pkg, db, capsys
 ):
     """A ferro-named foreign key on ``team.size``, a column the snapshot
-    keeps without one: was invisible to every door (ADR-0051)."""
+    keeps without one: was invisible to every emitter (ADR-0051)."""
     applied(project, pkg, db, capsys)
     name = add_foreign_key_by_hand(db, "team", "size", "author")
 

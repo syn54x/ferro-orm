@@ -37,7 +37,7 @@ from tests._alembic_harness import (
 DROP_COLOR_SQL = 'DROP TYPE "categorycolor"'
 # The guarded CREATE TYPE the auto-migrate create pass executes for the same
 # model — pinned as a literal here and in ferro-ddl-lowering's unit tests
-# (``render_pg_enum_create_type``), so the two migration doors cannot drift.
+# (``render_pg_enum_create_type``), so the two emitters cannot drift.
 CREATE_COLOR_SQL = (
     "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_type t "
     "JOIN pg_namespace n ON n.oid = t.typnamespace "

@@ -617,7 +617,7 @@ mod tests {
             ),
             (
                 // SQLite would rebuild it, but its verdict is the primary-key
-                // refusal, which no door runs.
+                // refusal, which no emitter runs.
                 MigrationOp::ChangePrimaryKey {
                     table: t(),
                     from: vec!["id".into()],

@@ -2,7 +2,7 @@
 as the secret type (#760).
 
 A secret type only keeps a value out of ``repr``, tracebacks and logs. Every
-write door binds the raw value (one unwrap helper, I-13: a query literal binds
+write path binds the raw value (one unwrap helper, I-13: a query literal binds
 what ``save()`` wrote), hydration wraps the decoded value back in the declared
 secret type through the same per-field conversion enums use (I-2, I-6), and
 ``SecretBytes`` stores as binary, like ``bytes`` (I-1). Each write is checked by
@@ -106,7 +106,7 @@ def _assert_hydrated(account: SFAccount, pk: int, *, optional: bool = True) -> N
 
 
 # ---------------------------------------------------------------------------
-# Happy path: every write door stores the raw value; every read door rewraps.
+# Happy path: every write path stores the raw value; every read path rewraps.
 # ---------------------------------------------------------------------------
 
 
@@ -305,7 +305,7 @@ async def test_enum_rejection_keeps_its_message_through_the_shared_converter(db_
 
 
 # ---------------------------------------------------------------------------
-# Unit pins: one unwrap for every write door (I-13), and no secret in a
+# Unit pins: one unwrap for every write path (I-13), and no secret in a
 # schema artifact.
 # ---------------------------------------------------------------------------
 

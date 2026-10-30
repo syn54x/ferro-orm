@@ -261,7 +261,7 @@ _HELD: dict[str, Callable[[dict[str, Any], str], str]] = {
         f"{name} policy not compared while its column's type change is withheld"
     ),
 }
-"""What a type change no door runs holds (``held``), each left standing and
+"""What a type change no emitter runs holds (``held``), each left standing and
 not compared until the change runs: one line each, after the type line,
 ending with the fix that makes the change run."""
 
@@ -477,7 +477,7 @@ def _lines(operations: list[dict[str, Any]]) -> list[str]:
     puts back around such a change (``carried``) has a line, on its add back,
     only when what it puts back is not what the table holds: its body
     differs, or it could not be compared while its column changes type. A
-    type change no door runs names, after its own line, each check,
+    type change no emitter runs names, after its own line, each check,
     generated column and policy over the column it holds (``held``): none
     can be compared until the change runs."""
     lines = []

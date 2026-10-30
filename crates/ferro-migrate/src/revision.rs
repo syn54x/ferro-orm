@@ -71,7 +71,7 @@ pub struct RevisionOp {
     /// Its statements run committed, outside the revision's transaction
     /// (`op.get_context().autocommit_block()`): an enum label addition, which
     /// Postgres lets no later statement of the same transaction use. The
-    /// generator's `labels` step is the same fact on the other door.
+    /// generator's `labels` step is the same fact on the other emitter.
     pub autocommit: bool,
     /// The foreign key Alembic's `create_foreign_key` writes with the op, read
     /// from the side the revision leads to: an `AddForeignKey`'s, or the one
@@ -143,7 +143,7 @@ pub enum RevisionRefusal {
     /// A rename hint the planner refused (ADR-0052): it renames nothing, so
     /// the revision would be a drop and an add.
     HintRefused(Box<Report>),
-    /// An op no door runs (a primary-key change, a move to or from a native
+    /// An op no emitter runs (a primary-key change, a move to or from a native
     /// enum type), with its recipe.
     Refused(crate::Refusal),
     /// A SQLite column added `NOT NULL` with no value for the rows already
@@ -300,7 +300,7 @@ impl serde::Serialize for RevisionOp {
 ///
 /// The upgrade is the plan from `live` to `declared` with destructive changes
 /// on (a revision is reviewed before it runs); the downgrade is
-/// `plan_down(upgrade, declared, live)`, the one down every door uses. Both
+/// `plan_down(upgrade, declared, live)`, the one down every emitter uses. Both
 /// render through the one renderer, and four rules turn their verdicts into
 /// the revision:
 ///
@@ -364,7 +364,7 @@ pub fn plan_revision(
 }
 
 /// Why the upgrade cannot write `planned` on `dialect`, read off its
-/// verdict before anything renders: an op no door runs, a demanding column
+/// verdict before anything renders: an op no emitter runs, a demanding column
 /// SQLite cannot add in place, a SQLite rebuild, or an op only two declared
 /// snapshots plan, which reaching here from a live database is a bug.
 fn upgrade_refusal(planned: &PlannedOp, dialect: Dialect) -> Option<RevisionRefusal> {
@@ -428,7 +428,7 @@ fn upgrade_op(
 }
 
 /// One op of the downgrade `plan` as the revision writes it. What the live
-/// database cannot express, what no door runs, a SQLite rebuild, a demanding
+/// database cannot express, what no emitter runs, a SQLite rebuild, a demanding
 /// column SQLite cannot add in place and an op whose rendering blocks are
 /// irreversible, with the reason; an op that renders nothing is left out.
 fn downgrade_op(

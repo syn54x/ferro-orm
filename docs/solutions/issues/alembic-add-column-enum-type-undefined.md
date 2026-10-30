@@ -61,7 +61,7 @@ would raise `DuplicateObject`), `Statement` when every column of it is an
 `add_column`. The FFI verdict now carries `create_statement` beside
 `drop_statement`; for a `Statement` type it is the runtime create pass's
 guarded `CREATE TYPE` from `render_pg_enum_create_type` — one renderer,
-so the two migration doors run the same SQL (AGENTS.md I-1 item 17). The
+so both emitters run the same SQL (AGENTS.md I-1 item 17). The
 comparator's existing introduced-side carrier renders `op.execute(...)`
 of it at the front of the ops list, ahead of every table op, and its
 reverse is the unchanged `DROP TYPE`. See ADR-0022.

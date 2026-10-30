@@ -203,7 +203,7 @@ if sa is not None:
 
 def _sqlite_guard(model_ir: Dict[str, Any], column: str) -> list[Any]:
     """The SQLite range guard of generated column ``column``, as the
-    column constraint every Ferro door writes; none when nothing in the
+    column constraint every Ferro emitter writes; none when nothing in the
     expression can overflow."""
     guard = _render_sqlite_generated_guard(json.dumps(model_ir), column)
     if guard is None:
@@ -247,7 +247,7 @@ def _build_sa_table_from_ir(
         primary_key = bool(col.get("primary_key", False))
         nullable = bool(col.get("nullable", True)) if not primary_key else False
         # A generated column's expression is the core's one rendering, the
-        # text every door's GENERATED ALWAYS AS (…) STORED writes.
+        # text every emitter's GENERATED ALWAYS AS (…) STORED writes.
         computed = (
             [
                 sa.Computed(

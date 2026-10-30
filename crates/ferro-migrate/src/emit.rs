@@ -333,11 +333,11 @@ pub(crate) fn generated_column_text(
     Ok(Some(text))
 }
 
-/// `CREATE [UNIQUE] INDEX` for one index: the one renderer of every door's
+/// `CREATE [UNIQUE] INDEX` for one index: the one renderer of every emitter's
 /// index (the create pass, the reconciliation pass, the generator).
 ///
 /// `mode` is the token after `INDEX` ([`IndexMode`]): `IF NOT EXISTS` for
-/// every door's plain statement, `CONCURRENTLY` for the generator's Postgres
+/// every emitter's plain statement, `CONCURRENTLY` for the generator's Postgres
 /// index step (ADR-0044). The two renderings differ by that token only.
 pub(crate) fn render_index_sql(
     table_lower: &str,
@@ -546,7 +546,7 @@ pub(crate) fn column_riders<'a>(model: &'a SchemaModel, column: &str) -> Riders<
 /// `types_created_by_plan` names its type — that plan's `CreateEnumType` op
 /// already created it.
 ///
-/// `constraints` is [`ConstraintMode::Plain`] on every door but the
+/// `constraints` is [`ConstraintMode::Plain`] on every emitter but the
 /// generator, which adds the column's foreign key and check `NOT VALID` on an
 /// existing Postgres table (ADR-0043).
 ///
@@ -790,7 +790,7 @@ pub(crate) fn find_foreign_key<'a>(
 }
 
 /// Why Postgres's in-place type change of `column` on `table` from
-/// `old_col` to `new_col` does not run on any door ([`withheld_alter`]).
+/// `old_col` to `new_col` does not run on any emitter ([`withheld_alter`]).
 pub(crate) enum WithheldAlter {
     /// A primary-key column: the change is the primary-key recipe's
     /// ([`crate::Refusal::PrimaryKeyChange`]).
@@ -831,7 +831,7 @@ pub(crate) fn withheld_alter(
     refused_scalar_conversion(old, new).map(|kind| WithheldAlter::Conversion(kind, old))
 }
 
-/// What every door reports of a withheld type change ([`withheld_alter`]),
+/// What every emitter reports of a withheld type change ([`withheld_alter`]),
 /// naming its fix: the primary-key recipe, the enum type move's recipe, or
 /// the refused conversion's warning (#154 generalized: a conversion that
 /// could reinterpret or destroy stored values warns and skips, never a
@@ -892,7 +892,7 @@ pub(crate) fn emit_alter_column_type(
 
     match dialect {
         Dialect::Postgres => {
-            // A withheld change runs nowhere, and every door says why in
+            // A withheld change runs nowhere, and every emitter says why in
             // the words that name its fix.
             if let Some(withheld) = withheld_alter(table, column, old_col, new_col) {
                 result.reports.extend(withheld_alter_report(

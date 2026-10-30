@@ -22,7 +22,7 @@ The promises the pages make, each checked against the implementation:
   the refusals that need no database;
 - the Migrations API page documents exactly ``ferro.migrations.__all__``, and
   every identifier an API page documents resolves at runtime;
-- no page says "in-house" or "Alembic territory" (the doors are named
+- no page says "in-house", "Alembic territory" or "door" (the strategies are named
   Auto-migrate, Migrations and Alembic).
 """
 
@@ -420,11 +420,11 @@ def test_the_reference_lists_every_executed_statement_role() -> None:
     assert roles == list(get_args(Role))
 
 
-# -- the doors' names ---------------------------------------------------------------
+# -- the strategies' names ---------------------------------------------------------------
 
 
-@pytest.mark.parametrize("phrase", ["in-house", "Alembic territory"])
-def test_no_page_names_a_door_the_old_way(phrase: str) -> None:
+@pytest.mark.parametrize("phrase", ["in-house", "Alembic territory", "door"])
+def test_no_page_names_a_strategy_the_old_way(phrase: str) -> None:
     hits = [
         f"{path.relative_to(DOCS_PAGES)}:{number}"
         for path in sorted(DOCS_PAGES.rglob("*.md"))
@@ -837,7 +837,7 @@ def _adopt_base(project: Path) -> None:
 
 def _adopt_initial(project: Path) -> None:
     """Models described by ``0001_create_author``; the database was built by the
-    old door."""
+    old strategy."""
     _initialised(project)
     _run_ok(project, "migrate", "new", "create_author")
     first = project / "migrations" / "0001_create_author" / "01_schema.up.sqlite.sql"

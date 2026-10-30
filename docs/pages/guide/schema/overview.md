@@ -4,7 +4,7 @@ description: "How a database comes to match your models: auto-migrate for develo
 
 # Overview of schema management
 
-Schema management is how a database comes to match your models, which are the source of truth for its schema. Ferro gives you two doors for it:
+Schema management is how a database comes to match your models, which are the source of truth for its schema. Ferro gives you two strategies for it:
 
 - **Auto-migrate** changes the database straight from the models when you call `connect()`. No files, nothing to review.
 - **Migrations** write each change down as a numbered directory of SQL and Python steps that you review, commit and apply. Ferro writes them for you from the difference between your models and the last migration.
@@ -33,12 +33,12 @@ With auto-migrate, the next `connect(url, migrate_updates=True)` runs `ALTER TAB
 | 2. Auto-update | `connect(url, migrate_updates=True)`, optionally `migrate_destructive=True` | Also alters existing tables to match the models, as far as an in-place statement can. | Development while the schema is still moving |
 | 3. Migrations | `ferro migrate new`, then `ferro migrate up` (`pip install "ferro-orm[cli]"`) | Reviewed, numbered files: schema steps, data steps, and a way back down. Covers every change the models can express, on Postgres and SQLite. | Any database whose data you would mind losing. **Recommended for production.** |
 
-Rungs 1 and 2 are the first door ([Auto-migrate](auto-migrate.md)); each flag implies the ones before it. Rung 3 is the second door ([Migrations](migrations.md)).
+Rungs 1 and 2 are the first strategy ([Auto-migrate](auto-migrate.md)); each flag implies the ones before it. Rung 3 is the second strategy ([Migrations](migrations.md)).
 
 !!! tip "Already on Alembic?"
-    Ferro's [Alembic bridge](alembic.md) is a supported alternative to rung 3 when a project already runs Alembic or keeps SQLAlchemy tables beside its Ferro models. Its revisions come from the same planner auto-migrate uses. It does not write backfills or SQLite table rebuilds; see [what each door covers](#what-each-door-covers).
+    Ferro's [Alembic bridge](alembic.md) is a supported alternative to rung 3 when a project already runs Alembic or keeps SQLAlchemy tables beside its Ferro models. Its revisions come from the same planner auto-migrate uses. It does not write backfills or SQLite table rebuilds; see [what each strategy covers](#what-each-strategy-covers).
 
-## One door per database
+## One strategy per database
 
 A database is managed by auto-migrate **or** by migrations, never both. Once a database has run a migration, it carries the tracking table `_ferro_migrations`, and `connect()` refuses every auto-migrate flag on it before running any DDL:
 
@@ -56,19 +56,19 @@ The rule is per database, not per project. A throwaway test database built with 
 | A database with migrations applied | `connect(..., auto_migrate=True)` (or either stronger flag), `create_tables()`, `migrate()` | Refused before any DDL, text above |
 | A database with migrations applied | `alembic revision --autogenerate` over Ferro models | Refused, naming `ferro migrate new` ([Alembic](alembic.md#what-autogenerate-refuses)) |
 | A database auto-migrate or Alembic built | `ferro migrate up` | Refused, naming `ferro migrate baseline` ([adopting migrations](adopting-migrations.md)) |
-| A database auto-migrate built | `alembic revision --autogenerate` | Works: the first revision is empty when the database matches the models, since both doors plan with the same planner |
+| A database auto-migrate built | `alembic revision --autogenerate` | Works: the first revision is empty when the database matches the models, since both strategies plan with the same planner |
 
-## What each door covers
+## What each strategy covers
 
-The three doors plan with one planner, so a change two of them make leaves the same schema. They differ in which changes they make at all:
+The three strategies plan with one planner, so a change two of them make leaves the same schema. They differ in which changes they make at all:
 
 - **Auto-update** alters a table in place, as far as one statement can. It never drops a table, warns rather than rebuilding a SQLite table, and adds a required column to a table with rows only when the field has a literal default.
 - **Migrations** cover every change the models can express, on Postgres and SQLite: [SQLite table rebuilds](migrations.md#sqlite-table-rebuilds), [backfills](data-steps.md), [renames](renames-and-retirements.md#rename-hints) and label removals. A primary-key change is refused with [the recipe](migrations.md#changing-a-primary-key).
 - **The Alembic bridge** writes the same statements as a revision, refuses at autogenerate a change that needs a SQLite table rebuild, and leaves backfills to you.
 
-The [door coverage table](../../reference/migrations.md#what-each-door-covers) lists every change, door by door.
+The [strategy coverage table](../../reference/migrations.md#what-each-strategy-covers) lists every change, strategy by strategy.
 
-## Choosing a door {#choosing}
+## Choosing a strategy {#choosing}
 
 - **Starting out, or writing tests:** `auto_migrate=True`. Tests keep this posture even in a project with migrations; see [Testing migrations](testing.md).
 - **Developing, the schema still moving, the data disposable:** `migrate_updates=True`.

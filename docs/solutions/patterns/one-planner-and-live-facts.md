@@ -15,7 +15,7 @@ captured: 2026-10-06
 
 ## The shape
 
-Every migration door asks one question: what turns snapshot `old` into
+Every emitter asks one question: what turns snapshot `old` into
 snapshot `new`? `ferro_migrate::plan_from_ir(&old, &new, dialect, options)`
 answers it for the whole modelset as a `Plan`, each op with its `OpVerdict`;
 `Plan::render` turns every op into the exact statements (`Plan::render_ops`

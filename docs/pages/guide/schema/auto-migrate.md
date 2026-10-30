@@ -31,7 +31,7 @@ async with engines.session():
 
 The connect ran `ALTER TABLE "author" ADD COLUMN "nickname" varchar` and created `idx_author_nickname`; Ada's row is still there, with no nickname yet. The ORM calls run inside a [session](../connections.md#sessions), as every block on this page does.
 
-Auto-migrate is rungs 1 and 2 of [the ladder](overview.md#the-ladder). It suits tests, scripts and early development, and does not suit a database whose data matters: use [Migrations](migrations.md) there. A database is managed by auto-migrate or by migrations, never both: on a database that has run a migration, every flag on this page is refused before any DDL ([one door per database](overview.md#one-door-per-database)).
+Auto-migrate is rungs 1 and 2 of [the ladder](overview.md#the-ladder). It suits tests, scripts and early development, and does not suit a database whose data matters: use [Migrations](migrations.md) there. A database is managed by auto-migrate or by migrations, never both: on a database that has run a migration, every flag on this page is refused before any DDL ([one strategy per database](overview.md#one-strategy-per-database)).
 
 ## Creating tables with `auto_migrate=True`
 
@@ -86,14 +86,14 @@ Rules worth knowing:
 
 ### SQLite changes that need a table rebuild
 
-SQLite cannot add, change or drop a constraint, a type or a nullability on a table that exists; the only way is to create the table again in its new shape and copy the rows across (a *table rebuild*). Auto-migrate never rebuilds a table, because a rebuild drops whatever the copy does not carry. It raises a `UserWarning` naming the object and the door that can, and changes nothing. Declare `db_check=True` on an existing column `author.kind`, for example, and the connect warns:
+SQLite cannot add, change or drop a constraint, a type or a nullability on a table that exists; the only way is to create the table again in its new shape and copy the rows across (a *table rebuild*). Auto-migrate never rebuilds a table, because a rebuild drops whatever the copy does not carry. It raises a `UserWarning` naming the object and the strategy that can, and changes nothing. Declare `db_check=True` on an existing column `author.kind`, for example, and the connect warns:
 
 <!-- prints: auto_migrate_errors.py:sqlite-check -->
 ```text
 ferro auto-migrate: Check constraint 'ck_author_kind' on column 'author.kind' is declared but missing from the live table, and SQLite cannot add a constraint to an existing column (it requires a full table rebuild). The invariant is not database-enforced; generate a reviewed migration with `ferro migrate new` to apply it.
 ```
 
-The connect goes on, and the column stays unchecked. [Migrations](migrations.md#sqlite-table-rebuilds) generate the rebuild as a reviewed step. A *foreign default* (a server default on a column that no model declares, [below](#destructive-drops-with-migrate_destructive)) is the one exception: no migration plans it, since the migrations' snapshots never hold it, so the warning names the hand rebuild that drops it, or a hand-written SQL step that does (`ferro migrate new <name> --sql-step drop_default`). Row-level security is Postgres-only on every door: SQLite gets one warning per table and no DDL.
+The connect goes on, and the column stays unchecked. [Migrations](migrations.md#sqlite-table-rebuilds) generate the rebuild as a reviewed step. A *foreign default* (a server default on a column that no model declares, [below](#destructive-drops-with-migrate_destructive)) is the one exception: no migration plans it, since the migrations' snapshots never hold it, so the warning names the hand rebuild that drops it, or a hand-written SQL step that does (`ferro migrate new <name> --sql-step drop_default`). Row-level security is Postgres-only on every strategy: SQLite gets one warning per table and no DDL.
 
 ## Evolving enums: label addition
 
@@ -236,7 +236,7 @@ On Postgres the lock is a session-level advisory lock, so auto-migrate is refuse
 
 ## See also
 
-- [Schema management overview](overview.md): the ladder and one door per database
+- [Schema management overview](overview.md): the ladder and one strategy per database
 - [Connections & Databases](../connections.md): `connect()` options
 - [Adopting migrations on an existing database](adopting-migrations.md): moving a database auto-migrate built onto migrations
 - [Connection API reference](../../api/connection.md#ferro.PassReport): `connect()`, `migrate()`, `create_tables()` and `PassReport`

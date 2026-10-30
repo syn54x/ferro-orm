@@ -474,7 +474,7 @@ def test_what_reads_a_key_column_whose_type_change_is_withheld_is_not_compared(
     """The snapshot keys ``ticket`` by a text ``code``; the database by hand
     holds an integer one, with the check, generated column or policy over it
     written for an integer. The type change is the primary-key recipe's, so
-    no door runs it, and the artifact cannot be compared before it does:
+    no emitter runs it, and the artifact cannot be compared before it does:
     drift names it after the type line, and the read prints no pair for it
     (no ``function length(integer) does not exist``)."""
     if db.backend != "postgres":

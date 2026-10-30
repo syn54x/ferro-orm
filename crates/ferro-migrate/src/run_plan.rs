@@ -77,7 +77,7 @@ impl From<bool> for AllowAhead {
 }
 
 impl AllowAhead {
-    /// The spelling `"expand-only"` takes in every door.
+    /// The spelling `"expand-only"` takes in every emitter.
     pub const EXPAND_ONLY: &'static str = "expand-only";
 }
 
@@ -626,7 +626,7 @@ pub enum RunRefusal {
         on_disk: String,
         /// The rows its committed batches wrote.
         rows_done: i64,
-        /// Whether `--continue` is a door: the cursor records its order keys
+        /// Whether `--continue` is a way out: the cursor records its order keys
         /// and the edited file (when read) pages over the same ones.
         continue_allowed: bool,
         /// The order keys the cursor was committed under (`author.id`);
@@ -960,7 +960,7 @@ fn key_list(keys: &[String]) -> String {
     }
 }
 
-/// Why `--continue` is not a door, given the cursor's keys and the edited
+/// Why `--continue` is not a way out, given the cursor's keys and the edited
 /// file's (`None`: not read).
 fn no_continue_reason(recorded: &[String], on_disk: Option<&[String]>) -> &'static str {
     match on_disk {
@@ -1012,11 +1012,11 @@ impl std::fmt::Display for RunRefusal {
                 ..
             } => {
                 let target = format!("{migration:04}:{step:02}");
-                let continue_door = format!(
+                let continue_line = format!(
                     "  ferro migrate rerecord {target} --continue   keep them, continue from the \
                      cursor"
                 );
-                let restart_door = format!(
+                let restart_line = format!(
                     "  ferro migrate rerecord {target} --restart    run every row again from the \
                      start"
                 );
@@ -1029,18 +1029,18 @@ impl std::fmt::Display for RunRefusal {
                 )?;
                 match (continue_allowed, keys_on_disk) {
                     (true, Some(_)) => {
-                        write!(f, ". Choose one:\n{continue_door}\n{restart_door}\n")?;
+                        write!(f, ". Choose one:\n{continue_line}\n{restart_line}\n")?;
                     }
                     (true, None) => write!(
                         f,
-                        ". Choose one:\n{continue_door}\n    (only while the edited file still \
-                         pages over {})\n{restart_door}\n",
+                        ". Choose one:\n{continue_line}\n    (only while the edited file still \
+                         pages over {})\n{restart_line}\n",
                         key_list(keys_recorded)
                     )?,
                     (false, _) => write!(
                         f,
                         ", and {}:\n  cursor    {}\n  on disk   {}\nso the cursor is no position \
-                         in it. Restart from the first row:\n{restart_door}\n",
+                         in it. Restart from the first row:\n{restart_line}\n",
                         no_continue_reason(keys_recorded, keys_on_disk.as_deref()),
                         key_list(keys_recorded),
                         keys_on_disk
@@ -1980,7 +1980,7 @@ fn has_committed_batches(record: &StepRecord) -> bool {
 
 /// The edited-chunked refusal for `record`, whose step's file on disk is
 /// `file` with checksum `on_disk`; `order_keys` (when read) decides whether
-/// continuing is a door.
+/// continuing is a way out.
 fn edited_chunked(
     record: &StepRecord,
     file: String,
@@ -4235,7 +4235,7 @@ mod tests {
     }
 
     #[test]
-    fn an_edited_chunked_step_with_committed_batches_is_refused_naming_both_doors() {
+    fn an_edited_chunked_step_with_committed_batches_is_refused_naming_both_ways_out() {
         let dir = backfill();
         assert_eq!(
             edited_chunked_text(&dir),
@@ -4532,7 +4532,7 @@ mod tests {
                 // Record: accepted, except a chunked step with committed batches.
                 match plan(Record, &same) {
                     Ok(action) => {
-                        assert!(!open_with_batches, "{cell}: record must name both doors");
+                        assert!(!open_with_batches, "{cell}: record must name both ways out");
                         assert_eq!(action.old_checksum, OTHER, "{cell}");
                         assert_eq!(action.new_checksum, plan_step_checksum(&dir, record.step));
                         assert!(!action.clear_cursor, "{cell}");

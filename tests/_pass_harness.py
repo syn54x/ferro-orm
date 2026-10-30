@@ -2,10 +2,10 @@
 keep its ``PassReport`` (ADR-0049).
 
 ``connect()`` returns nothing, so a test that wants to assert what the pass
-executed opens the connection plainly and runs the same pass through the door
+executed opens the connection plainly and runs the same pass through the public call
 that returns the report: ``create_tables()`` for ``auto_migrate=True``,
 ``migrate(updates=…, destructive=…)`` for the reconciliation flags. Both run
-``connect()``'s own pass (one ``internal_migrate`` behind all three doors);
+``connect()``'s own pass (one ``internal_migrate`` behind all three public calls);
 only the run-lock waiting warning names a different call.
 
 ```python

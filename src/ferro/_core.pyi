@@ -166,7 +166,7 @@ async def _plan_drift(using: str | None, declared_json: str) -> dict[str, Any]:
     ``own_type``) on the two ops of such a pair, ``carried`` on an op that
     takes down or puts back what the plan carries around another change
     (``unchanged``, ``changed`` or ``not_compared``: whether it is put back
-    as it was), ``held`` on a type change no door runs (``{"fix": ...,
+    as it was), ``held`` on a type change no emitter runs (``{"fix": ...,
     "artifacts": [{"kind": "check" | "generated_column" | "policy",
     "name": ...}]}``: what makes the change run, and the checks, generated
     columns and policies over the column, left standing and not compared),
@@ -450,7 +450,7 @@ class RerecordPlan:
 
 class TrackedDatabase:
     """A database's tracking tables and its migrations directory, each read
-    once. Read-only; ``locked(...)`` is the one door to a run's writes."""
+    once. Read-only; ``locked(...)`` is the one entry to a run's writes."""
 
     @property
     def dialect(self) -> str: ...
@@ -881,7 +881,7 @@ def _declared_index(
 ) -> tuple[list[str], bool] | None:
     """The ``(columns, unique)`` of the standalone index ``name`` the schema
     envelope ``ir_json`` holds on ``table`` (``ferro_migrate::declared_index``,
-    the reading every door shares), or ``None``. ``ValueError`` when
+    the reading every emitter shares), or ``None``. ``ValueError`` when
     ``ir_json`` is not a schema envelope."""
     ...
 

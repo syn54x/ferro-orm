@@ -8,7 +8,7 @@ This how-to moves a database that `connect(url, migrate_updates=True)` or an Ale
 
 ## The four steps
 
-1. **Bring the database to the old door's head.** One last start with `migrate_updates=True`, or `alembic upgrade head`, so it matches the models you are about to describe.
+1. **Bring the database to the old strategy's head.** One last start with `migrate_updates=True`, or `alembic upgrade head`, so it matches the models you are about to describe.
 2. **Generate the first migration from the models.** `0001` comes from the models, never from the database:
 
     ```bash
@@ -32,7 +32,7 @@ This how-to moves a database that `connect(url, migrate_updates=True)` or an Ale
         Author
     ```
 
-    Commit it. Run `ferro migrate up` on a fresh database and you get the same schema the old door built.
+    Commit it. Run `ferro migrate up` on a fresh database and you get the same schema the old strategy built.
 
 3. **Baseline each existing database.** Point `DATABASE_URL` at it and record the migrations:
 
@@ -51,7 +51,7 @@ This how-to moves a database that `connect(url, migrate_updates=True)` or an Ale
 
     Without a target it records every migration in the directory; `ferro migrate baseline 0001` stops at `0001`. Data steps are listed and recorded, not run.
 
-4. **Stop using the old door on that database.** Remove the auto-migrate flags (they are now refused on it), or stop generating Alembic revisions for Ferro's tables (autogenerate now refuses them). From here, `ferro migrate new` and `ferro migrate up`.
+4. **Stop using the old strategy on that database.** Remove the auto-migrate flags (they are now refused on it), or stop generating Alembic revisions for Ferro's tables (autogenerate now refuses them). From here, `ferro migrate new` and `ferro migrate up`.
 
 Until it is baselined, `ferro migrate up` refuses to run `0001` over tables that already exist:
 
@@ -90,7 +90,7 @@ Each line is a piece of work, and no flag records past them: a baseline recorded
     nothing was recorded
     ```
 
-    Drop it, then baseline again. Either give the old door one last start that removes what the models never declared, `connect(url, migrate_destructive=True)`, or drop it by hand on Postgres:
+    Drop it, then baseline again. Either give the old strategy one last start that removes what the models never declared, `connect(url, migrate_destructive=True)`, or drop it by hand on Postgres:
 
     ```sql
     ALTER TABLE "author" ALTER COLUMN "slug" DROP DEFAULT;
@@ -139,7 +139,7 @@ The staging copy shows `0001_create_author` as `applied (baseline)` and `0002_au
 
 ## Coming from Alembic
 
-The steps are the same, with Alembic as the old door:
+The steps are the same, with Alembic as the old strategy:
 
 - Step 1 is `alembic upgrade head`.
 - In step 4, remove `get_metadata()` from `env.py`'s `target_metadata` once every database is baselined. Ferro's migrations ignore `alembic_version`; drop it when no database needs the Alembic chain any more.
@@ -183,6 +183,6 @@ In code, `ferro.migrations.baseline()` and `ferro.migrations.remove_baseline()` 
 
 ## See also
 
-- [Schema management overview](overview.md): one door per database
+- [Schema management overview](overview.md): one strategy per database
 - [Deploying migrations](deploying.md): what comes after the baseline
 - [CLI reference](../../reference/cli.md#ferro-migrate-baseline-target) and [Migrations API reference](../../api/migrations.md#ferro.migrations.baseline): every flag and parameter of `baseline`

@@ -6,7 +6,7 @@
 //! [`LiveFacts`] — and decides every change for the whole modelset as one
 //! ordered [`Plan`], which holds the two sides it was planned between.
 //! [`Plan::render`] lowers each op to executable, dialect-specific DDL through
-//! the `ferro_ddl_lowering` functions every migration door shares (AGENTS.md
+//! the `ferro_ddl_lowering` functions every emitter shares (AGENTS.md
 //! § I-1).
 //!
 //! The in-house migration system's offline half lives beside it: the schema
@@ -61,7 +61,7 @@ pub use snapshot::{Snapshot, SnapshotError};
 /// The columns and uniqueness of the standalone index `name` that `ir`
 /// declares on `table` (an `indexes` or a `uniques` entry: a column's `index`
 /// or `unique` flag reaches the IR already placed in those lists), as every
-/// door builds it; `None` when it declares none.
+/// emitter builds it; `None` when it declares none.
 pub fn declared_index(
     ir: &ferro_schema_ir::IrEnvelope<ferro_schema_ir::SchemaIrPayload>,
     table: &str,
@@ -104,7 +104,7 @@ impl std::error::Error for EmissionError {}
 
 /// One change the planner decided. Serializes with its variant name as
 /// `kind` beside its fields (`{"kind": "AddColumn", "table": …, "column": …}`),
-/// the shape the `_core._plan_from_ir` FFI door returns.
+/// the shape the `_core._plan_from_ir` FFI entry point returns.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind")]
 pub enum MigrationOp {
@@ -306,7 +306,7 @@ pub enum MigrationOp {
         was: String,
     },
     /// The table's primary-key columns differ between the snapshots (a key
-    /// moved between columns, gained or lost one). No migration door changes
+    /// moved between columns, gained or lost one). No emitter changes
     /// a primary key in place: the pass warns and skips, the generator
     /// refuses with the recipe.
     ChangePrimaryKey {
@@ -599,7 +599,7 @@ pub struct Plan {
 }
 
 /// Whether a plan's own ops answer a [`Report`]: the change it reports is
-/// one they make. A door that writes a reviewed file refuses every report no
+/// one they make. An emitter that writes a reviewed file refuses every report no
 /// op answers, since writing nothing for it would leave it out silently.
 pub trait AnsweredBy {
     /// `true` when `ops` make the change this report is about.
@@ -788,7 +788,7 @@ impl Plan {
     }
 
     /// Every op rendered for the plan's dialect, in plan order: what every
-    /// migration door executes for it (AGENTS.md § I-1). A native enum type a
+    /// emitter executes for it (AGENTS.md § I-1). A native enum type a
     /// `CreateEnumType` op of this plan creates is created there and only
     /// there; an `AddTable` / `AddColumn` of any other native enum type keeps
     /// its idempotent guard.
@@ -806,7 +806,7 @@ impl Plan {
 
     /// The ops at `ops` (indexes into [`Self::operations`], in the order
     /// given) rendered as [`Self::render`] renders them, as if they were the
-    /// whole plan: a door that writes some ops its own way (the Alembic
+    /// whole plan: an emitter that writes some ops its own way (the Alembic
     /// bridge's demanding column adds) renders the rest.
     ///
     /// # Errors

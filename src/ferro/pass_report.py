@@ -148,7 +148,7 @@ _T = TypeVar("_T")
 
 
 async def _carrying_report(call: Awaitable[_T]) -> _T:
-    """Await a Rust pass door; a pass error leaves with ``.report`` set."""
+    """Await a Rust pass entry point; a pass error leaves with ``.report`` set."""
     try:
         return await call
     except BaseException as error:
@@ -160,5 +160,5 @@ async def _carrying_report(call: Awaitable[_T]) -> _T:
 
 
 async def _run_pass(call: Awaitable[str]) -> PassReport:
-    """Await a Rust pass door that returns the report's JSON."""
+    """Await a Rust pass entry point that returns the report's JSON."""
     return PassReport._from_json(await _carrying_report(call))

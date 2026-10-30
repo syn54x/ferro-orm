@@ -89,7 +89,7 @@ impl RegisteredModel {
     ///
     /// Retired columns (ADR-0053) are left out here, once: the registration
     /// is the model's runtime view, and no statement the model issues names a
-    /// retired column. They stay in the schema modelset the DDL doors read.
+    /// retired column. They stay in the schema modelset the emitters read.
     pub fn new(columns: Vec<SchemaColumn>, table_name: String) -> Result<Arc<Self>, String> {
         Self::new_with_checks(columns, &[], table_name)
     }

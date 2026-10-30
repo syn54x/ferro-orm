@@ -12,10 +12,10 @@
 //! into an IR plus its live facts (`crate::live_ir`), the one planner
 //! (`ferro_migrate::plan_from_ir`) decides every change for the whole
 //! modelset, and the plan renders itself (`Plan::render`) through the same
-//! `ferro_ddl_lowering` functions every migration door uses (AGENTS.md § I-1).
+//! `ferro_ddl_lowering` functions every emitter uses (AGENTS.md § I-1).
 
 use crate::backend::{EngineBindValue, EngineHandle};
-use crate::ddl_exec::{DdlError, DdlExecutor, Door, Executed, Failed, Role, Unit};
+use crate::ddl_exec::{DdlError, DdlExecutor, Executed, Failed, Role, Sender, Unit};
 use crate::introspect::{
     LiveCheck, LiveColumn, LiveForeignKey, LiveIndex, connected_role_bypasses_row_security,
     live_table_checks, live_table_columns, sqlite_indexes_covering_column,
@@ -317,11 +317,11 @@ impl PassReport {
 }
 
 /// The attribute a failed pass's error carries its report on, as JSON; the
-/// Python door reads it into the error's `.report`.
+/// Python entry point reads it into the error's `.report`.
 pub const PASS_REPORT_ATTR: &str = "_ferro_pass_report";
 
 /// `err`, carrying `report` (what committed before the failure) for the
-/// Python door to expose as `.report`.
+/// Python entry point to expose as `.report`.
 pub(crate) fn with_pass_report(err: PyErr, report: &PassReport) -> PyErr {
     let json = match report.to_json() {
         Ok(json) => json,
@@ -451,7 +451,7 @@ async fn execute_sqlite_drop_column(
     for index in &indexes {
         let sql = format!("DROP INDEX IF EXISTS {}", quote_ident(&index.name));
         executed
-            .send_on(engine, Door::Pass(table_lower), Role::Schema, &sql)
+            .send_on(engine, Sender::Pass(table_lower), Role::Schema, &sql)
             .await
             .map_err(|e| {
                 crate::errors::map_db_error(
@@ -466,7 +466,7 @@ async fn execute_sqlite_drop_column(
     }
 
     executed
-        .send_on(engine, Door::Pass(table_lower), Role::Schema, drop_sql)
+        .send_on(engine, Sender::Pass(table_lower), Role::Schema, drop_sql)
         .await
         .map_err(|e| map_drop_column_error(table_lower, col_name, e))?;
     Ok(())
@@ -549,7 +549,7 @@ async fn execute_table_ops(
         .run(
             engine,
             Unit::Transactional,
-            Door::Pass(table),
+            Sender::Pass(table),
             &sqls,
             |attempt| report.warn(pass_attempt_warning(Subject::table(table), &attempt)),
             None,
@@ -601,7 +601,7 @@ async fn execute_sqlite_table_ops(
         }
         for sql in &op.statements {
             if let Err(e) = executed
-                .send_on(engine, Door::Pass(table), Role::Schema, sql)
+                .send_on(engine, Sender::Pass(table), Role::Schema, sql)
                 .await
             {
                 return Err(map_op_statement_error(engine, table, &op.op, declared, sql, e).await);
@@ -631,7 +631,7 @@ pub fn pass_lock_timeout_refusal(call: &str, schema: &str, timeout: Duration) ->
 /// Which public call is running the auto-migrate passes: the waiting
 /// warning names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AutoMigrateDoor {
+pub enum AutoMigrateCall {
     /// `connect()` with an auto-migrate flag.
     Connect,
     /// `ferro.create_tables()`.
@@ -640,12 +640,12 @@ pub enum AutoMigrateDoor {
     Migrate,
 }
 
-impl AutoMigrateDoor {
+impl AutoMigrateCall {
     pub(crate) fn call(self) -> &'static str {
         match self {
-            AutoMigrateDoor::Connect => "connect(auto_migrate=…)",
-            AutoMigrateDoor::CreateTables => "create_tables()",
-            AutoMigrateDoor::Migrate => "migrate()",
+            AutoMigrateCall::Connect => "connect(auto_migrate=…)",
+            AutoMigrateCall::CreateTables => "create_tables()",
+            AutoMigrateCall::Migrate => "migrate()",
         }
     }
 }
@@ -786,7 +786,7 @@ pub async fn guard_tracked_schema(
 /// ones. Two processes booting together serialize here, and the second
 /// sees the first's DDL. The lock is released on every exit path.
 ///
-/// `door` names the public call for the waiting warning
+/// `entry` names the public call for the waiting warning
 /// ([`run_lock_wait_warning`]) and the lock-wait refusal
 /// ([`pass_lock_timeout_refusal`]). What the passes execute and warn goes
 /// into `report`, failure or not.
@@ -799,7 +799,7 @@ pub async fn internal_migrate(
     engine: Arc<EngineHandle>,
     opts: MigrateOptions,
     tracking_schemas: &[String],
-    door: AutoMigrateDoor,
+    entry: AutoMigrateCall,
     report: &mut PassReport,
 ) -> PyResult<()> {
     guard_tracked_schema(&engine, tracking_schemas).await?;
@@ -809,8 +809,8 @@ pub async fn internal_migrate(
         &engine,
         Some(&governed),
         wait,
-        |_| report.warn(run_lock_wait_warning(door.call())),
-        || refused(pass_lock_timeout_refusal(door.call(), &governed, wait)),
+        |_| report.warn(run_lock_wait_warning(entry.call())),
+        || refused(pass_lock_timeout_refusal(entry.call(), &governed, wait)),
     )
     .await?;
     let outcome = async {
@@ -858,7 +858,7 @@ async fn refresh_after_failed_pass(
     }
 }
 
-/// [`internal_migrate`] as a Python door returns it: the report's wire form,
+/// [`internal_migrate`] as a Python entry point returns it: the report's wire form,
 /// or the pass's error carrying what committed before it
 /// ([`with_pass_report`]).
 ///
@@ -868,10 +868,10 @@ pub async fn run_pass_for_python(
     engine: Arc<EngineHandle>,
     opts: MigrateOptions,
     tracking_schemas: &[String],
-    door: AutoMigrateDoor,
+    entry: AutoMigrateCall,
 ) -> PyResult<String> {
     let mut report = PassReport::default();
-    match internal_migrate(engine, opts, tracking_schemas, door, &mut report).await {
+    match internal_migrate(engine, opts, tracking_schemas, entry, &mut report).await {
         Ok(()) => report.to_json(),
         Err(err) => Err(with_pass_report(err, &report)),
     }
@@ -929,7 +929,7 @@ async fn run_passes(
     // (ADR-0032) is read too, so the planner renames it; a refused hint
     // renames nothing, reads nothing more, and leaves every table the create
     // pass held back for it uncreated, the planner's refusal saying why.
-    // Which tables are read is the one rule every door reads by
+    // Which tables are read is the one rule every emitter reads by
     // ([`tables_to_read`], ADR-0047).
     let live_names: BTreeSet<String> = tables_before_create.iter().cloned().collect();
     let (renames, adds_after_renames) = match live_table_renames(&live_names, &modelset.payload) {
@@ -1021,7 +1021,7 @@ async fn run_passes(
                     .run(
                         &engine,
                         Unit::Unwrapped,
-                        Door::Pass(subject),
+                        Sender::Pass(subject),
                         &current.statements,
                         |attempt| {
                             report.warn(pass_attempt_warning(Subject::enum_type(subject), &attempt))
@@ -1169,7 +1169,7 @@ async fn stranded_label_warnings(
                         let probe =
                             ferro_ddl_lowering::render_label_held_probe(table, &col.name, old);
                         !executed
-                            .probe_on(engine, Door::Pass(table), &probe)
+                            .probe_on(engine, Sender::Pass(table), &probe)
                             .await
                             .map_err(|e| {
                                 crate::errors::map_db_error(
@@ -1241,7 +1241,7 @@ pub fn migrate(
             logged.then(|| {
                 crate::sql_log::StatementContext::new(crate::sql_log::MIGRATE, connection)
             }),
-            run_pass_for_python(engine, opts, &tracking_schemas, AutoMigrateDoor::Migrate),
+            run_pass_for_python(engine, opts, &tracking_schemas, AutoMigrateCall::Migrate),
         )
         .await
     })
@@ -1404,7 +1404,7 @@ pub fn _plan_revision(
 /// `own_type`), on the two ops of such a pair only, and `carried` on an op
 /// that takes down or puts back what the plan carries around another change
 /// (`unchanged`, `changed` or `not_compared`: whether it is put back as it
-/// was), and `held` on a type change no door runs: `{"fix": <what makes it
+/// was), and `held` on a type change no emitter runs: `{"fix": <what makes it
 /// run>, "artifacts": [{"kind": "check" | "generated_column" | "policy",
 /// "name": …}]}`, the checks, generated columns and policies over the
 /// column, left standing and not compared; reports are in
@@ -1506,7 +1506,7 @@ fn rendered_op_json(rendered: RenderedOp) -> PyResult<serde_json::Value> {
 
 /// The columns and uniqueness of the standalone index `name` the envelope
 /// `ir_json` (a snapshot or a live read) holds on `table`, or `None`:
-/// `ferro_migrate::declared_index`, the one reading every door shares, for
+/// `ferro_migrate::declared_index`, the one reading every emitter shares, for
 /// `ferro migrate drift`'s description of a redefined index.
 ///
 /// # Errors
@@ -1589,7 +1589,7 @@ pub fn _plan_from_ir(
 
 /// `plan` as the FFI's plan JSON: `{"operations": [{"kind": …, <op fields>,
 /// "verdict": {…}}], "reports": […]}` — each op beside its verdict (the one
-/// every door reads, ADR-0050). With `render`, each op also carries the
+/// every emitter reads, ADR-0050). With `render`, each op also carries the
 /// `statements` and `reports` it renders to (and an `AddTable` its
 /// `row_security_statements`).
 fn plan_json(plan: &Plan, render: bool) -> PyResult<String> {

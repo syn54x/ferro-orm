@@ -248,7 +248,7 @@ pub async fn live_table_columns(
 }
 
 /// The live tables of the connected schema, by name — the one answer to
-/// "which tables does this database hold" on every door (ADR-0047): the
+/// "which tables does this database hold" on every emitter (ADR-0047): the
 /// create pass leaves each to the reconciliation pass (ADR-0010), the live
 /// read covers them ([`crate::live_ir::tables_to_read`]) and the adoption
 /// refusal compares them against the first migration's snapshot. A live

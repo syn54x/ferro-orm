@@ -1,4 +1,4 @@
-"""The statement every door runs on Postgres after a table or serial key
+"""The statement every emitter runs on Postgres after a table or serial key
 rename, written out once for the tests that expect it.
 
 ```python

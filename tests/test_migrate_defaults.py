@@ -1,5 +1,5 @@
 # ruff: noqa: F811 - pytest fixtures imported from a sibling module are redefined as arguments
-"""Foreign defaults on every door (#628, ADR-0027 / ADR-0031 / ADR-0034 as
+"""Foreign defaults on every emitter (#628, ADR-0027 / ADR-0031 / ADR-0034 as
 amended).
 
 Someone sets a server default by hand that no model declares:
@@ -92,8 +92,8 @@ def passed(url: str, *, warned: bool = False, **flags: bool) -> PassReport:
     closed after; ``warned`` captures its warnings (``warned_auto_migrate``)."""
 
     async def run_pass() -> PassReport:
-        door = warned_auto_migrate if warned else auto_migrate
-        report = await door(url, name="pass_628", **flags)
+        migrate_call = warned_auto_migrate if warned else auto_migrate
+        report = await migrate_call(url, name="pass_628", **flags)
         await _core._disconnect("pass_628")
         return report
 
