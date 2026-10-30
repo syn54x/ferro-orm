@@ -20,7 +20,7 @@ pytest-asyncio mode the how-to configures, not this suite's.
 from __future__ import annotations
 
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -54,7 +54,8 @@ def _page_test_modules(page: Path) -> dict[str, str]:
         settings = fence_settings(example)
         if settings.get("test") == "pytest":
             path = settings["path"]
-            if not path.startswith("tests/"):
+            parts = PurePosixPath(path).parts
+            if parts[:1] != ("tests",) or ".." in parts:
                 raise ValueError(
                     f"{example}: path={path} is outside tests/; "
                     'write the fence {test=pytest path="tests/<file>.py"}'
@@ -127,6 +128,7 @@ EXPECTED_MODULES = {
     INSPECTING_SQL: {"tests/test_statement_log.py"},
 }
 EXPECTED_PASSED = {PAGE: 4, INSPECTING_SQL: 1}
+EXPECTED_MODEL = {PAGE: "User", INSPECTING_SQL: "Account"}
 
 
 def test_pages_with_pytest_fences_are_the_known_pages() -> None:
@@ -158,6 +160,9 @@ def test_page_models_import_without_running_the_example(
         "    raise AssertionError('importing myapp.models connected')\n"
         "ferro.connect = refuse\n"
         "import myapp.models\n"
+        "from ferro.registry import REGISTRY\n"
+        "names = [m.__name__ for m in REGISTRY.models().values()]\n"
+        f"assert {EXPECTED_MODEL[page]!r} in names, names\n"
     )
 
     result = run_python(["-c", code], timeout=60, cwd=tmp_path)
@@ -167,9 +172,15 @@ def test_page_models_import_without_running_the_example(
 
 def test_page_without_a_slug_module_names_the_module_to_add(tmp_path: Path) -> None:
     page = tmp_path / "no-such-example.md"
+    page.write_text(
+        '```python {test=pytest path="tests/test_x.py"}\nassert True\n```\n',
+        encoding="utf-8",
+    )
+    project = tmp_path / "project"
+    project.mkdir()
 
     with pytest.raises(FileNotFoundError) as raised:
-        models_module_for(page)
+        _write_project(project, page)
 
     assert str(raised.value) == (
         f"{page}: a test=pytest fence needs docs/examples/no_such_example.py as its "
@@ -177,10 +188,11 @@ def test_page_without_a_slug_module_names_the_module_to_add(tmp_path: Path) -> N
     )
 
 
-def test_pytest_fence_outside_tests_is_refused(tmp_path: Path) -> None:
+@pytest.mark.parametrize("path", ["src/x.py", "tests/../x.py"])
+def test_pytest_fence_outside_tests_is_refused(tmp_path: Path, path: str) -> None:
     page = tmp_path / "stray.md"
     page.write_text(
-        '```python {test=pytest path="src/x.py"}\nassert True\n```\n',
+        f'```python {{test=pytest path="{path}"}}\nassert True\n```\n',
         encoding="utf-8",
     )
 
