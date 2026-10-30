@@ -84,7 +84,7 @@ async def test_structural_types_roundtrip(db_url):
 
 @pytest.mark.asyncio
 async def test_json_column_list_of_nested_pydantic_models_roundtrip(db_url):
-    """list[BaseModel] stores as JSON; accepts models on write; reload yields dicts."""
+    """list[BaseModel] stores as JSON; accepts models on write; reload yields models."""
 
     class JsonListItem(BaseModel):
         field_a: str
@@ -115,10 +115,8 @@ async def test_json_column_list_of_nested_pydantic_models_roundtrip(db_url):
         assert fetched is not None
         assert isinstance(fetched.items, list)
         assert len(fetched.items) == 2
-        assert all(isinstance(it, dict) for it in fetched.items)
-        assert fetched.items == [p.model_dump() for p in payload]
-        revived = [JsonListItem.model_validate(it) for it in fetched.items]
-        assert revived == payload
+        assert all(isinstance(it, JsonListItem) for it in fetched.items)
+        assert fetched.items == payload
 
 
 @pytest.mark.asyncio
@@ -466,9 +464,8 @@ async def test_jsonb_declared_fields_roundtrip(db_url):
         fetched = await JsonbDoc.get(item_id)
         assert fetched is not None
         assert fetched.payload == scrambled
-        # Established json-family contract: reload yields dicts (see
-        # test_json_column_list_of_nested_pydantic_models_roundtrip).
-        assert fetched.entries == [e.model_dump() for e in entries]
+        # A nested model reloads as the model (#737).
+        assert fetched.entries == entries
         assert fetched.plain == {"k": "v"}
 
         # Storage assertion (Postgres only): the live column type is jsonb —

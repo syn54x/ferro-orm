@@ -13,7 +13,14 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Annotated, ClassVar
 
+from pydantic import BaseModel
+
 from ferro import Field, Model, connect, create_tables, engines, varchar
+
+
+class Dimensions(BaseModel):
+    width_mm: int
+    height_mm: int
 
 
 class Status(StrEnum):
@@ -51,6 +58,7 @@ class Product(Model):
     # --8<-- [start:json]
     attributes: dict[str, str] = Field(default_factory=dict)
     tags: list[str] = Field(default_factory=list)
+    dimensions: Dimensions | None = None
     # --8<-- [end:json]
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
@@ -145,10 +153,12 @@ async def tour(lamp: Product) -> None:
         price=Decimal("24.50"),
         attributes={"colour": "oat", "fabric": "linen"},
         tags=["bedroom", "living room"],
+        dimensions=Dimensions(width_mm=300, height_mm=220),
     )
     stored = await Product.where(lambda product: product.sku == "SHD-001").first()
     assert stored.attributes == {"colour": "oat", "fabric": "linen"}
     assert stored.tags == ["bedroom", "living room"]
+    assert stored.dimensions == Dimensions(width_mm=300, height_mm=220)
     # --8<-- [end:json-round-trip]
     assert stored is shade
 
@@ -212,6 +222,7 @@ CREATE TABLE IF NOT EXISTS "product" (
   "attributes" JSON NOT NULL,
   "category" varchar NOT NULL,
   "created_at" DATETIME NOT NULL,
+  "dimensions" JSON,
   "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT,
 # --8<-- [start:name-column]
   "name" varchar(200) NOT NULL,
