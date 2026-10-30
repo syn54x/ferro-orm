@@ -1518,7 +1518,8 @@ class Query(Generic[T]):
         if pk is None:
             raise ValueError(
                 f"{self._m2m_label}.{verb}(): {name} declares no primary-key "
-                "column, so its instances cannot be linked."
+                f"column, so its instances cannot be linked. Declare a "
+                f"primary_key=True field on {name}."
             )
         keys = []
         for inst in instances:
