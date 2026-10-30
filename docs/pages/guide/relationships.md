@@ -514,7 +514,7 @@ The create and the two reads send these statements. Each single-row `INSERT` ask
 
 ## Nullable relations
 
-For an optional relation to another model, put `| None` inside `Annotated` and default the field to `None`. `Tournament.winner` is `Annotated[Team | None, ForeignKey(...)] = None`, so a tournament can exist before anyone wins it:
+For an optional relation to another model, declare it `Annotated[Team | None, ForeignKey(...)] = None` (`Annotated[Team, ForeignKey(...)] | None` and `Optional[...]` mean the same) and default the field to `None`. `Tournament.winner` is the first form, so a tournament can exist before anyone wins it:
 
 ```python
 --8<-- "docs/examples/relationships.py:nullable"
@@ -538,9 +538,6 @@ WHERE "tournament"."winner_id" = ?;
 `save()` wrote `winner_id` with the rest of the row, and `rustaceans.titles` filters on it.
 
 With the default `nullable="infer"`, the column's nullability follows the annotation. `on_delete="SET NULL"` needs a nullable column, so combining it with `nullable=False` raises `ValueError`.
-
-!!! note "Put `| None` inside `Annotated`"
-    Write `Annotated[Team | None, ForeignKey(...)] = None`. In the form `Annotated[Team, ForeignKey(...)] | None`, Ferro does not see the `ForeignKey`: it adds no `winner_id` column and no constraint, and raises no error.
 
 ## Delete behavior
 

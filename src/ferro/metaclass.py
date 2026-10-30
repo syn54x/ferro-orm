@@ -1,6 +1,7 @@
 """The metaclass that turns a model class declaration into a registered table."""
 
 import re
+import sys
 from dataclasses import replace
 from functools import partial
 from enum import Enum
@@ -10,6 +11,7 @@ from typing import (
     Callable,
     ClassVar,
     ForwardRef,
+    Optional,
     get_args,
     get_origin,
     get_type_hints,
@@ -20,6 +22,7 @@ from pydantic import Field as PydanticField
 from pydantic.fields import FieldInfo
 from pydantic_core import PydanticCustomError, PydanticUndefined
 
+from ._annotation_eval import evaluate_foreign_key_annotation
 from ._annotation_utils import (
     _strip_optional_union as _annotation_utils_strip_optional_union,
 )
@@ -260,8 +263,19 @@ class ModelMetaclass(type(BaseModel)):
         annotations = mcs._resolve_deferred_annotations(namespace)
         namespace["__annotations__"] = annotations
 
+        # The scope that runs the class statement: a model defined inside a
+        # function names its sibling targets there, not in the module.
+        caller = sys._getframe(1)
+        frame_ns = (
+            dict(caller.f_locals)
+            if caller.f_globals.get("__name__") == namespace.get("__module__")
+            and caller.f_locals is not caller.f_globals
+            else None
+        )
         local_relations, fields_to_remove, pending_relations, retired_relations = (
-            mcs._scan_relationship_annotations(annotations, namespace, name)
+            mcs._scan_relationship_annotations(
+                annotations, namespace, name, frame_ns=frame_ns
+            )
         )
         mcs._inject_shadow_fields(annotations, namespace, local_relations)
         mcs._prepare_namespace_for_pydantic(namespace, annotations, fields_to_remove)
@@ -577,8 +591,11 @@ class ModelMetaclass(type(BaseModel)):
 
     @staticmethod
     def _scan_relationship_annotations(
-        annotations: dict, namespace: dict, model_name: str
-    ) -> tuple[dict, list, list]:
+        annotations: dict,
+        namespace: dict,
+        model_name: str,
+        frame_ns: dict | None = None,
+    ) -> tuple[dict, list, list, dict]:
         """
         Scan annotations for relationship fields (BackRef, ForeignKey, ManyToMany).
 
@@ -649,12 +666,25 @@ class ModelMetaclass(type(BaseModel)):
                 fields_to_remove.append(field_name)
                 continue
 
-            origin = get_origin(hint)
-            if origin is Annotated:
-                args = get_args(hint)
+            if isinstance(hint, str):
+                hint = evaluate_foreign_key_annotation(
+                    hint,
+                    model=model_name,
+                    field=field_name,
+                    module=namespace.get("__module__", ""),
+                    localns=namespace,
+                    frame_ns=frame_ns,
+                )
+            # `Annotated[T, ForeignKey(...)] | None` is the same relation as
+            # `Annotated[T | None, ForeignKey(...)]`.
+            core = ModelMetaclass._strip_optional_union(hint)
+            if get_origin(core) is Annotated:
+                args = get_args(core)
                 for metadata in args:
                     if isinstance(metadata, ForeignKey):
-                        metadata.relation_annotation = args[0]
+                        metadata.relation_annotation = (
+                            args[0] if core is hint else Optional[args[0]]
+                        )
                         inner = ModelMetaclass._strip_optional_union(args[0])
                         metadata.to = inner
                         if metadata.retired:

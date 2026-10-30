@@ -36,11 +36,12 @@ with `dont_inherit=True`.
   the block became a string, and the metaclass never saw the `ForeignKey`
   inside `Annotated[...]`.
 
-Ferro has the same gap outside the harness: a module with
+Ferro used to have the same gap outside the harness: a module with
 `from __future__ import annotations` that declares
-`author: Annotated[Author, ForeignKey(related_name="posts")]` gets a `JSON`
-column `author` and no error. Until the metaclass resolves string
-annotations, keep that import out of model modules.
+`author: Annotated[Author, ForeignKey(related_name="posts")]` got a `JSON`
+column `author` and no error. The metaclass now evaluates the string in the
+defining module's namespace (#751), so the import is safe in model modules;
+a name it cannot evaluate raises `TypeError` at class definition.
 
 ## How to recognize
 
