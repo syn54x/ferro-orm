@@ -245,14 +245,14 @@ async def test_hydrated_instances_list_fields_in_declaration_order(db_url):
     from ferro import BackRef, ForeignKey, Relation
 
     class OrderAuthor(Model):
-        id: int | None = Field(default=None, primary_key=True)
+        id: int | None = Field(default=None, json_schema_extra={"primary_key": True})
         username: str
         email: str
         age: int
         posts: Relation[list["OrderPost"]] = BackRef()
 
     class OrderPost(Model):
-        id: int | None = Field(default=None, primary_key=True)
+        id: int | None = Field(default=None, json_schema_extra={"primary_key": True})
         title: str
         author: Annotated[OrderAuthor, ForeignKey(related_name="posts")]
         body: str
@@ -295,7 +295,7 @@ async def test_hydrated_instances_list_fields_in_declaration_order(db_url):
 @pytest.mark.asyncio
 async def test_identity_refresh_keeps_field_order(db_url):
     class OrderRefresh(Model):
-        id: int | None = Field(default=None, primary_key=True)
+        id: int | None = Field(default=None, json_schema_extra={"primary_key": True})
         username: str
         age: int
 
