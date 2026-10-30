@@ -248,6 +248,8 @@ A data step never sees the models in your codebase today, which will have moved 
 | `ctx.dialect` | `"postgres"` or `"sqlite"`: the database this run is on. |
 | `ctx.log` | A logger named for the step (`ferro.migrations.0002.02_backfill_author`). |
 
+The `ferro` command line configures logging for itself, so a step's `ctx.log` lines print there. If your application runs the migration API directly, they appear once your application configures `logging`; see [Inspecting SQL](../inspecting-sql.md) for the two lines that turn Ferro's own statement records on as well.
+
 It has no way to open, commit or leave the step's transaction, so a step cannot commit half of its work behind the runner's back. A nested `ferro.transaction()` inside a step is a savepoint, as in application code.
 
 ## Late rows and contract recovery {#when-a-late-row-arrives}

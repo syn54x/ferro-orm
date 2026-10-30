@@ -26,6 +26,7 @@ nav = [
     { "Relationships" = "guide/relationships.md" },
     { "Transactions" = "guide/transactions.md" },
     { "Raw SQL" = "guide/raw-sql.md" },
+    { "Inspecting SQL" = "guide/inspecting-sql.md" },
     { "Connections" = "guide/connections.md" },
     { "Schema management" = [
       { "Overview of schema management" = "guide/schema/overview.md" },
