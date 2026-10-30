@@ -343,7 +343,7 @@ async def test_second_boot_is_a_noop(db_url, clean_registry, recwarn):
 async def test_autogenerate_emits_label_additions_in_autocommit_block(
     db_url, postgres_base_url, db_schema_name, clean_registry
 ):
-    """The reviewed-migration door sees the drift: the generated revision
+    """The bridge sees the drift: the generated revision
     carries the addition inside an autocommit block (runnable on every
     supported PG version) and a comment for the warn-never-act direction."""
     await connect(db_url)

@@ -575,7 +575,7 @@ NARROW_BADGE = BADGE.replace(
     "FerroField(primary_key=True)", 'FerroField(primary_key=True, db_type="int")'
 )
 """``BADGE`` with its key column's type changed: the primary-key recipe's
-change, which no door runs in place."""
+change, which no emitter runs in place."""
 
 
 def test_a_check_over_a_key_column_whose_type_changes_stays_standing(project, pkg, db):
@@ -635,7 +635,7 @@ KEYED_TWINS = {
     ),
 }
 """A primary-key ``code`` moved from ``int`` to ``str``, the primary-key
-recipe's change no door runs in place, with each kind of artifact over it
+recipe's change no emitter runs in place, with each kind of artifact over it
 declared in a body that types only under its own side's ``code``."""
 
 

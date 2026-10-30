@@ -306,7 +306,7 @@ def edited_chunked(project, pkg, db, body: str | None = None) -> tuple[Any, str,
     return probe, recorded, sha384(step)
 
 
-def doors(rows: str = "1,000") -> str:
+def edited_refusal(rows: str = "1,000") -> str:
     return (
         f"ferro migrate: 0002_add_slug/02_backfill_author.py was edited after {rows} "
         f"rows were committed.\nFerro cannot tell whether those rows are right under "
@@ -330,9 +330,9 @@ def test_an_edited_chunked_step_is_refused_until_continued_from_its_cursor(
     }
 
     code, _, err = cli("up", "--url", db.url, capsys=capsys)
-    assert (code, err) == (1, doors())
+    assert (code, err) == (1, edited_refusal())
     code, _, err = cli("rerecord", "0002:02", "--url", db.url, capsys=capsys)
-    assert (code, err) == (1, doors())
+    assert (code, err) == (1, edited_refusal())
     assert record(db) == before and checksum_of(db, 2, 2) == recorded
 
     code, out, err = cli(
@@ -545,7 +545,7 @@ def test_status_shows_the_edited_chunked_refusal_with_its_doors(
 
     assert code == 4
     # The refusal sits under status's needs attention heading, indented.
-    assert "".join(f"  {line}\n" for line in doors().splitlines()) in out
+    assert "".join(f"  {line}\n" for line in edited_refusal().splitlines()) in out
 
 
 def test_the_cursor_names_its_order_keys():

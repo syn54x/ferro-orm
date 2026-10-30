@@ -38,7 +38,7 @@ class Case:
     """``(dialect, statement)`` pairs a pin runs on a database it built at
     ``before``, in order: what someone did by hand that no model declares
     (a foreign default, ADR-0027 as amended). The generated migrations
-    never see it; every door that reads the live database does."""
+    never see it; every emitter that reads the live database does."""
 
     def edit_by_hand(self, dialect: str) -> list[str]:
         """The hand edit's statements on ``dialect``."""

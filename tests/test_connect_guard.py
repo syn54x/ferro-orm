@@ -1,5 +1,5 @@
 # ruff: noqa: F811 - pytest fixtures imported from a sibling module are redefined as arguments
-"""The two doors are exclusive per database (#521, ADR-0038).
+"""The two strategies are exclusive per database (#521, ADR-0038).
 
 A database that ``ferro migrate up`` manages refuses every auto-migrate
 flag before any DDL::
@@ -108,16 +108,18 @@ async def test_a_tracked_database_refuses_auto_migrate_through_the_config(
     assert ferro._core.connection_backend() is None
 
 
-@pytest.mark.parametrize("door", ["create_tables", "migrate"])
-async def test_the_manual_passes_refuse_a_tracked_database_too(project, pkg, db, door):
+@pytest.mark.parametrize("public_call", ["create_tables", "migrate"])
+async def test_the_manual_passes_refuse_a_tracked_database_too(
+    project, pkg, db, public_call
+):
     """``ferro.create_tables()`` and ``ferro.migrate()`` are the passes'
-    public doors: they share the lock and the guard."""
+    public calls: they share the lock and the guard."""
     await track(project, pkg, db)
     await ferro.connect(db.url)
     declare_fresh_model()
 
     with pytest.raises(MigrationRefused) as raised:
-        await getattr(ferro, door)()
+        await getattr(ferro, public_call)()
 
     assert str(raised.value) == guard_text(governed(db), governed(db))
     # Refused before any DDL: the error's report lists nothing.
@@ -353,9 +355,9 @@ async def test_a_tracked_database_refuses_at_once_while_a_run_holds_the_lock(
     assert "guardfresh" not in db.tables()
 
 
-@pytest.mark.parametrize("door", ["connect", "create_tables"])
+@pytest.mark.parametrize("public_call", ["connect", "create_tables"])
 async def test_the_pass_waits_for_the_run_lock_up_to_lock_timeout(
-    project, pkg, db, door
+    project, pkg, db, public_call
 ):
     """The pass's wait for the run lock is bounded by the configured
     ``lock_timeout`` (ADR-0038 as amended), not ``ddl_lock_timeout``, and its
@@ -365,7 +367,7 @@ async def test_the_pass_waits_for_the_run_lock_up_to_lock_timeout(
         project, pkg, db.backend, 'lock_timeout = "1s"\nddl_lock_timeout = "1m"\n'
     )
     declare_fresh_model()
-    if door == "create_tables":
+    if public_call == "create_tables":
         await ferro.connect(db.url)
     call = {"connect": "connect(auto_migrate=…)", "create_tables": "create_tables()"}
 
@@ -377,13 +379,13 @@ async def test_the_pass_waits_for_the_run_lock_up_to_lock_timeout(
             with pytest.raises(MigrationRefused) as raised:
                 pending = (
                     ferro.connect(db.url, migrate_updates=True)
-                    if door == "connect"
+                    if public_call == "connect"
                     else ferro.create_tables()
                 )
                 await asyncio.wait_for(pending, 10)
             waited = loop.time() - began
 
-    assert str(raised.value) == lock_wait_refusal(call[door], governed(db), "1s")
+    assert str(raised.value) == lock_wait_refusal(call[public_call], governed(db), "1s")
     assert 1.0 <= waited < 5.0
     # It said at once that it waits, and the refusal's report carries that.
     assert len([w for w in caught if "is waiting" in str(w.message)]) == 1

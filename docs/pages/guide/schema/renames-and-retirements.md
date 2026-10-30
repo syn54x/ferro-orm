@@ -86,7 +86,7 @@ The table, the column, every index named after them and the label are renamed in
 
 A hint is live only while the previous snapshot still holds the old name and lacks the new one. Once its migration is generated it is inert and may be deleted. A hint whose old name is still declared, or two hints naming one old name, is refused.
 
-Auto-migrate honours every hint under `migrate_updates` (on SQLite a label hint only warns, since the labels live in the rows). Without `migrate_updates`, a table hint makes the create pass hold the table back with a warning rather than create it empty. The [door coverage table](../../reference/migrations.md#what-each-door-covers) lists what each door does with a hint.
+Auto-migrate honours every hint under `migrate_updates` (on SQLite a label hint only warns, since the labels live in the rows). Without `migrate_updates`, a table hint makes the create pass hold the table back with a warning rather than create it empty. The [strategy coverage table](../../reference/migrations.md#what-each-strategy-covers) lists what each strategy does with a hint.
 
 The example `docs/examples/migrations_rename.py` in the repository runs this rename end to end, the revert included.
 
@@ -183,4 +183,4 @@ Each label in `__ferro_retired_labels__` must be a member's value: a set of anyt
 - [Migrations](migrations.md): the loop these changes run through
 - [Data steps and backfills](data-steps.md): the copy step of an online rename, and a label's removal
 - [Deploying migrations](deploying.md#rolling-deploys-and-the-two-release-contract): the two-release contract
-- [Migrations reference](../../reference/migrations.md): step classes and what each door covers
+- [Migrations reference](../../reference/migrations.md): step classes and what each strategy covers

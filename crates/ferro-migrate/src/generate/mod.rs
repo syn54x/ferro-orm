@@ -26,7 +26,7 @@
 //! to an enum type is a first `labels` step whose down reverses nothing, and a
 //! label or type rename is a rename of the `schema` step ([`enums`]).
 //! The phase table in [`columns`] reads each op's step off its verdict; an op
-//! no door runs is refused with its recipe.
+//! no emitter runs is refused with its recipe.
 
 pub(crate) mod backfill;
 mod columns;
@@ -301,7 +301,7 @@ pub enum GenerateError {
         ticket: u32,
     },
     /// The models change a table's primary key (B4: the key moves to other
-    /// columns, gains or loses one, or a key column's type changes). No door
+    /// columns, gains or loses one, or a key column's type changes). No emitter
     /// changes a key in place; the refusal is the restructure recipe, and the
     /// Alembic bridge refuses with this same text.
     PrimaryKeyChange {
@@ -357,7 +357,7 @@ pub enum GenerateError {
     Hint(HintError),
     /// An op the planner refuses for a reason only its recipe answers (a row
     /// policy over a generated column the plan drops and adds back): the
-    /// refusal, in every door's words.
+    /// refusal, in every emitter's words.
     Refused(Refusal),
     /// An op could not render.
     Render(String),
@@ -545,7 +545,7 @@ fn plan(
 }
 
 /// Refuse anything in `plan` this generator does not generate: an op no
-/// door runs (its verdict's refusal), or a report no op of the same plan
+/// emitter runs (its verdict's refusal), or a report no op of the same plan
 /// answers ([`AnsweredBy`]) — a leftover CHECK's report is answered by the
 /// plan's drop of it, a refused rename hint by nothing. Between two declared
 /// snapshots every report is the change's own: a snapshot carries no

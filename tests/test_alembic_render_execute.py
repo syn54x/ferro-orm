@@ -129,7 +129,7 @@ def test_rendered_execute_reaches_postgres_byte_identical(
 
 
 # ---------------------------------------------------------------------------
-# The two enum doors the bug reached, end to end on Postgres
+# The two enum paths the bug reached, end to end on Postgres
 # ---------------------------------------------------------------------------
 
 

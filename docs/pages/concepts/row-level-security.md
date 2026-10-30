@@ -90,7 +90,7 @@ Settings a session declares itself must be honoured, so opening a session with `
 
 ## The pooler constraint
 
-A setting made with plain `SET` stays on the server connection. Behind a pooler in transaction mode (PgBouncer's default, and the front door of most managed Postgres services), that server connection passes to another client between transactions, so two requests can share it seconds apart:
+A setting made with plain `SET` stays on the server connection. Behind a pooler in transaction mode (PgBouncer's default, and what most managed Postgres services put in front of the database), that server connection passes to another client between transactions, so two requests can share it seconds apart:
 
 <!-- shows: a sketch of two tenants sharing one pooled server connection -->
 ```text

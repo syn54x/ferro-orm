@@ -96,7 +96,7 @@ def test_an_unknown_delivery_is_rejected_at_the_call_site():
 
 
 def test_the_core_rejects_an_unknown_delivery_too():
-    """`PoolConfig` is the front door, but the FFI keeps its own gate."""
+    """`PoolConfig` is the public entry, but the FFI keeps its own gate."""
     from ferro._core import connect as _core_connect
 
     with pytest.raises(ValueError, match="Unknown settings_delivery"):

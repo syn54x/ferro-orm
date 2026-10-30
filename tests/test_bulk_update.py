@@ -131,7 +131,7 @@ async def test_bulk_update_rejects_query_ir_model_identity_mismatch(db_url):
 
 @pytest.mark.asyncio
 async def test_recipe_mixed_literal_and_column_copy(db_url):
-    """Recipe door: literal + root column copy persist on both backends (#377)."""
+    """Recipe form: literal + root column copy persist on both backends (#377)."""
 
     class User(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
@@ -166,7 +166,7 @@ async def test_recipe_mixed_literal_and_column_copy(db_url):
 
 @pytest.mark.asyncio
 async def test_recipe_update_evicts_identity_map(db_url):
-    """Recipe-door update reuses update_filtered eviction (#377)."""
+    """Recipe-form update reuses update_filtered eviction (#377)."""
 
     class User(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None

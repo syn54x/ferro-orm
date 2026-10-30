@@ -92,7 +92,7 @@ On SQLite the column is `varchar(n)`, sized to the longest value (`retired`, 7 c
 --8<-- "docs/examples/models_and_fields.py:status-column"
 ```
 
-On PostgreSQL the column uses a native enum type named after the class, `status`, which every schema door creates before the table: [auto-migrate](schema/auto-migrate.md), [migrations](schema/migrations.md) and the [Alembic bridge](schema/alembic.md). Either way the database holds the value, not the member name:
+On PostgreSQL the column uses a native enum type named after the class, `status`, which every migration strategy creates before the table: [auto-migrate](schema/auto-migrate.md), [migrations](schema/migrations.md) and the [Alembic bridge](schema/alembic.md). Either way the database holds the value, not the member name:
 
 ```python
 --8<-- "docs/examples/models_and_fields.py:enum-value"
@@ -584,7 +584,7 @@ The subclass works: its rows go to `review`, and the inherited default fills `cr
 --8<-- "docs/examples/models_and_fields.py:base-class-rows"
 ```
 
-The `timestamped` table is the cost. Every schema door treats `Timestamped` as a model, so auto-migrate, a migration and the Alembic bridge all create its table, though no code stores a row there. To share fields without that table, declare the fields on each model and share behaviour through a plain class that does not subclass `Model`; [Timestamps](../howto/timestamps.md) and [Soft deletes](../howto/soft-deletes.md) show the pattern.
+The `timestamped` table is the cost. Every migration strategy treats `Timestamped` as a model, so auto-migrate, a migration and the Alembic bridge all create its table, though no code stores a row there. To share fields without that table, declare the fields on each model and share behaviour through a plain class that does not subclass `Model`; [Timestamps](../howto/timestamps.md) and [Soft deletes](../howto/soft-deletes.md) show the pattern.
 
 ## Field options
 

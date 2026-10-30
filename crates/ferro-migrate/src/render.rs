@@ -1,5 +1,5 @@
 //! Per-dialect rendering of a [`crate::Plan`]: each op becomes the exact
-//! statements every migration door executes for it, through the
+//! statements every emitter executes for it, through the
 //! `ferro_ddl_lowering` renderers the reconciliation pass has always used.
 
 use crate::emit::{
@@ -318,7 +318,7 @@ pub(crate) fn render_from(
             MigrationOp::RenameIndex { table, old, new } => match dialect {
                 Dialect::Postgres => out.statements.push(render_rename_index(old, new)),
                 // SQLite has no index rename: drop it, then build it under its
-                // new name with the statement every door creates it with.
+                // new name with the statement every emitter creates it with.
                 Dialect::Sqlite => {
                     let (columns, unique) = standalone_indexes(find_model(&new_models, table)?)
                         .into_iter()
@@ -525,7 +525,7 @@ pub(crate) fn render_from(
                     .reports
                     .push(sqlite_drop_default_report(table, column, was)),
             },
-            // No door changes a primary key in place: warn and skip.
+            // No emitter changes a primary key in place: warn and skip.
             MigrationOp::ChangePrimaryKey { table, from, to } => {
                 out.reports.push(primary_key_kept_warning(table, to, from));
             }

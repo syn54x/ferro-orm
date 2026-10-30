@@ -184,16 +184,16 @@ pub enum Unit {
 /// Whose statements a unit runs: the subject of every statement, in the
 /// report and in its statement log record.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Door<'a> {
+pub enum Sender<'a> {
     /// The create or reconciliation pass, on this table or enum type.
     Pass(&'a str),
     /// `ferro migrate`, running this step (`0003_add_slug/01_expand.up.sql`).
     Run(&'a str),
 }
 
-impl Door<'_> {
+impl Sender<'_> {
     fn statement(self, role: Role, sql: &str) -> Statement {
-        let (Door::Pass(subject) | Door::Run(subject)) = self;
+        let (Sender::Pass(subject) | Sender::Run(subject)) = self;
         Statement {
             subject: subject.to_string(),
             sql: sql.to_string(),
@@ -235,19 +235,19 @@ pub struct Executed {
 }
 
 impl Executed {
-    /// Run `sql` unprepared on `conn` as `door`'s, its statement log record
-    /// under `door`'s subject, and record it once it succeeded.
+    /// Run `sql` unprepared on `conn` as `sender`'s, its statement log record
+    /// under `sender`'s subject, and record it once it succeeded.
     ///
     /// # Errors
     /// The database error; nothing is recorded.
     pub async fn send(
         &mut self,
         conn: &mut EngineConnection,
-        door: Door<'_>,
+        sender: Sender<'_>,
         role: Role,
         sql: &str,
     ) -> Result<u64, sqlx::Error> {
-        let statement = door.statement(role, sql);
+        let statement = sender.statement(role, sql);
         let affected =
             crate::sql_log::with_subject(&statement.subject, conn.execute_sql_unprepared(sql))
                 .await?;
@@ -263,11 +263,11 @@ impl Executed {
     pub async fn send_on(
         &mut self,
         engine: &EngineHandle,
-        door: Door<'_>,
+        sender: Sender<'_>,
         role: Role,
         sql: &str,
     ) -> Result<u64, sqlx::Error> {
-        let statement = door.statement(role, sql);
+        let statement = sender.statement(role, sql);
         let affected =
             crate::sql_log::with_subject(&statement.subject, engine.execute_sql_unprepared(sql))
                 .await?;
@@ -275,8 +275,8 @@ impl Executed {
         Ok(affected)
     }
 
-    /// Run the read `sql` unprepared as `door`'s on a connection out of
-    /// `engine`'s pool, its statement log record under `door`'s subject, and
+    /// Run the read `sql` unprepared as `sender`'s on a connection out of
+    /// `engine`'s pool, its statement log record under `sender`'s subject, and
     /// record it as [`Role::Probe`] once it succeeded.
     ///
     /// # Errors
@@ -284,10 +284,10 @@ impl Executed {
     pub async fn probe_on(
         &mut self,
         engine: &EngineHandle,
-        door: Door<'_>,
+        sender: Sender<'_>,
         sql: &str,
     ) -> Result<Vec<crate::backend::EngineRow>, sqlx::Error> {
-        let statement = door.statement(Role::Probe, sql);
+        let statement = sender.statement(Role::Probe, sql);
         let rows =
             crate::sql_log::with_subject(&statement.subject, engine.fetch_all_sql_unprepared(sql))
                 .await?;
@@ -645,12 +645,12 @@ impl DdlExecutor {
         }
     }
 
-    /// Run `statements` as one `unit` of `door`'s, then `settle` on the same
+    /// Run `statements` as one `unit` of `sender`'s, then `settle` on the same
     /// connection, under the lock timeout: on Postgres with a timeout set, a
     /// statement that waits longer than it for a lock fails the attempt, and
     /// the unit runs again from its first statement after the backoff
     /// (`on_attempt` hears each such attempt, before the wait), up to
-    /// `max_attempts`. Each statement is logged as `door`'s before it runs,
+    /// `max_attempts`. Each statement is logged as `sender`'s before it runs,
     /// and runs unprepared.
     ///
     /// A transactional unit commits when every statement and the settle
@@ -667,7 +667,7 @@ impl DdlExecutor {
         &self,
         engine: &EngineHandle,
         unit: Unit,
-        door: Door<'_>,
+        sender: Sender<'_>,
         statements: &[S],
         on_attempt: impl FnMut(Attempt),
         settle: Option<Settle<'_>>,
@@ -676,7 +676,7 @@ impl DdlExecutor {
         let mut live = LiveUnit {
             engine,
             unit,
-            door,
+            sender,
             statements,
             timeout,
             settle,
@@ -772,7 +772,7 @@ trait AttemptUnit {
 struct LiveUnit<'a, 's, S> {
     engine: &'a EngineHandle,
     unit: Unit,
-    door: Door<'a>,
+    sender: Sender<'a>,
     statements: &'a [S],
     timeout: Option<Duration>,
     settle: Option<Settle<'s>>,
@@ -787,7 +787,7 @@ impl<S: AsRef<str>> LiveUnit<'_, '_, S> {
     ) -> Result<(), Failed> {
         for (index, sql) in self.statements.iter().enumerate() {
             executed
-                .send(conn, self.door, Role::Schema, sql.as_ref())
+                .send(conn, self.sender, Role::Schema, sql.as_ref())
                 .await
                 .map_err(|error| Failed::at(index, error))?;
         }
@@ -800,7 +800,7 @@ impl<S: AsRef<str>> LiveUnit<'_, '_, S> {
 
 impl<S: AsRef<str>> AttemptUnit for LiveUnit<'_, '_, S> {
     async fn attempt(&mut self, executed: &mut Executed) -> Result<(), Failed> {
-        let door = self.door;
+        let sender = self.sender;
         match self.unit {
             Unit::Transactional => {
                 let mut conn = self
@@ -811,7 +811,12 @@ impl<S: AsRef<str>> AttemptUnit for LiveUnit<'_, '_, S> {
                 let result = async {
                     if let Some(timeout) = self.timeout {
                         executed
-                            .send(&mut conn, door, Role::LockTimeout, &set_local_sql(timeout))
+                            .send(
+                                &mut conn,
+                                sender,
+                                Role::LockTimeout,
+                                &set_local_sql(timeout),
+                            )
                             .await
                             .map_err(Failed::outside)?;
                     }
@@ -832,7 +837,7 @@ impl<S: AsRef<str>> AttemptUnit for LiveUnit<'_, '_, S> {
                     executed
                         .send(
                             &mut conn,
-                            door,
+                            sender,
                             Role::LockTimeout,
                             &set_session_sql(timeout),
                         )
@@ -842,7 +847,7 @@ impl<S: AsRef<str>> AttemptUnit for LiveUnit<'_, '_, S> {
                 let result = self.body(&mut conn, executed).await;
                 if self.timeout.is_some()
                     && executed
-                        .send(&mut conn, door, Role::LockTimeout, RESET_SQL)
+                        .send(&mut conn, sender, Role::LockTimeout, RESET_SQL)
                         .await
                         .is_err()
                 {
@@ -1101,7 +1106,7 @@ mod tests {
             for sql in &self.statements[..stop] {
                 executed
                     .statements
-                    .push(Door::Pass("author").statement(Role::Schema, sql));
+                    .push(Sender::Pass("author").statement(Role::Schema, sql));
             }
             match failure {
                 Some((index, error)) => Err(Failed::at(index, error)),
@@ -1264,7 +1269,7 @@ mod tests {
                 .run(
                     &engine,
                     Unit::Transactional,
-                    Door::Run("0001_init/01_tables.up.sql"),
+                    Sender::Run("0001_init/01_tables.up.sql"),
                     &statements,
                     |_| {},
                     Some(Settle::new(|| {
@@ -1307,7 +1312,7 @@ mod tests {
                 .run(
                     &engine,
                     Unit::Transactional,
-                    Door::Pass("author"),
+                    Sender::Pass("author"),
                     &statements,
                     |_| {},
                     None,
@@ -1334,7 +1339,7 @@ mod tests {
                 .run(
                     &engine,
                     Unit::Unwrapped,
-                    Door::Pass("author"),
+                    Sender::Pass("author"),
                     &statements,
                     |_| {},
                     None,

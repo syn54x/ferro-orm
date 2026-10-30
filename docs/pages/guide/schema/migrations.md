@@ -4,7 +4,7 @@ description: "Write, review and apply migration files with ferro migrate new, up
 
 # Migrations
 
-A migration is a numbered directory of steps that changes a database from one version of your models to the next. `ferro migrate new` writes it from the difference between your models and the previous migration; you read it, commit it, and `ferro migrate up` applies it. This is rung 3 of [the ladder](overview.md#the-ladder), and the door Ferro recommends for any database whose data you would mind losing.
+A migration is a numbered directory of steps that changes a database from one version of your models to the next. `ferro migrate new` writes it from the difference between your models and the previous migration; you read it, commit it, and `ferro migrate up` applies it. This is rung 3 of [the ladder](overview.md#the-ladder), and the strategy Ferro recommends for any database whose data you would mind losing.
 
 ## Installation and setup {#install-and-set-up}
 
@@ -365,7 +365,7 @@ A feature branch that wrote one migration per task can replace them with the one
 
 ## Changing a primary key
 
-No door changes a primary key in place: the key moved to another column, the key column's type changed, or a key made composite. `new` refuses it before writing anything, on every dialect. Change `Author`'s key and run:
+No strategy changes a primary key in place: the key moved to another column, the key column's type changed, or a key made composite. `new` refuses it before writing anything, on every dialect. Change `Author`'s key and run:
 
 ```bash
 ferro migrate new rekey
@@ -433,5 +433,5 @@ A native enum column moved to another enum type, while other columns stay on the
 - [Squashing a feature branch's migrations](squash.md): one migration in place of a branch's many
 - [Deploying migrations](deploying.md): `up` in a deploy, `require_applied()`, rolling deploys, edited files
 - [Testing migrations](testing.md): prove a migration in your test suite
-- [Migrations reference](../../reference/migrations.md): step file headers, step classes, door coverage
+- [Migrations reference](../../reference/migrations.md): step file headers, step classes, strategy coverage
 - [CLI reference](../../reference/cli.md): every verb, flag and exit code

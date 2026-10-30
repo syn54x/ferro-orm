@@ -4,7 +4,7 @@
 //! emitted from the Python-compiled SchemaIR modelset via `ferro_migrate`.
 
 use crate::backend::EngineHandle;
-use crate::ddl_exec::{DdlError, DdlExecutor, Door, Failed, Unit};
+use crate::ddl_exec::{DdlError, DdlExecutor, Failed, Sender, Unit};
 use crate::migrate::{PassReport, pass_attempt_warning, pass_lock_timeout_error};
 use crate::state::{Dialect, MODEL_REGISTRY};
 use ferro_migrate::Subject;
@@ -31,7 +31,7 @@ use std::sync::Arc;
 /// table is a rename, not a creation (ADR-0032): it is not created, and
 /// neither is a new table that references it, which can only be created once
 /// the rename has run. The reconciliation pass renames it under
-/// `migrate_updates`; a pass that does not reconcile warns, naming both doors,
+/// `migrate_updates`; a pass that does not reconcile warns, naming both strategies,
 /// and leaves the database as it is — never an empty twin beside the old
 /// table.
 ///
@@ -198,7 +198,7 @@ pub async fn internal_create_tables(
             .run(
                 &engine,
                 Unit::Unwrapped,
-                Door::Pass(type_name),
+                Sender::Pass(type_name),
                 &[guard],
                 |attempt| {
                     report.warn(pass_attempt_warning(
@@ -295,7 +295,7 @@ fn tables_awaiting_rename(
 
 /// The create pass's word on the tables it held back when no reconciliation
 /// follows: a refused hint's refusal, once, as the planner words it; else,
-/// per live table hint, which tables wait on it and the two doors that run
+/// per live table hint, which tables wait on it and the two strategies that run
 /// the rename.
 fn warn_pending_renames(
     declared: &SchemaIrPayload,
@@ -363,7 +363,7 @@ async fn create_one_table(
         .run(
             engine,
             unit,
-            Door::Pass(table),
+            Sender::Pass(table),
             &statements,
             |attempt| report.warn(pass_attempt_warning(Subject::table(table), &attempt)),
             None,
@@ -472,7 +472,7 @@ pub fn create_tables(
                 engine,
                 opts,
                 &tracking_schemas,
-                crate::migrate::AutoMigrateDoor::CreateTables,
+                crate::migrate::AutoMigrateCall::CreateTables,
             ),
         )
         .await

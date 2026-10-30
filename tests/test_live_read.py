@@ -1,5 +1,5 @@
 # ruff: noqa: F811 - pytest fixtures imported from a sibling module are redefined as arguments
-"""One live read (ADR-0047 amendment): every door reads the same live tables.
+"""One live read (ADR-0047 amendment): every emitter reads the same live tables.
 
 A database holding a view named ``author`` beside a model ``Author``::
 

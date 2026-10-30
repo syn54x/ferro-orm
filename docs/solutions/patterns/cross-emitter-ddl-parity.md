@@ -19,8 +19,8 @@ captured: 2026-04-28
 
 ## Problem
 
-Ferro emits DDL through three doors: the **reconciliation pass** behind
-`connect(auto_migrate=True)`, the **migrations door** (`ferro migrate new`:
+Ferro emits DDL through three emitters: the **reconciliation pass** behind
+`connect(auto_migrate=True)`, the **generator** (`ferro migrate new`:
 `src/ferro/migrations/` + `crates/ferro-migrate/src/generate/`), and the
 **Alembic autogenerate bridge**, which translates the one planner's ops
 (ADR-0041). Future emitters (`ferro schema dump`, a `Ferro.to_sql()` API, an
@@ -92,7 +92,7 @@ the pass's rendering in `tests/test_cross_emitter_parity.py`, over every
 casebook change in `tests/_casebook.py` (cases A–F, built from the generator
 tests' own models), on both dialects:
 
-| Pin | The migrations door writes | Pinned to the pass's |
+| Pin | The generator writes | Pinned to the pass's |
 | --- | -------------------------- | -------------------- |
 | (a) | every generated DDL step, headers stripped, through `normalize_online_shape` | plan for the same before/after (`_core._plan_from_ir(..., render=True)`, two snapshots) |
 | (b) | a SQLite rebuild's `CREATE TABLE "_ferro_new_<t>"` and the indexes it re-creates | create pass for the shape the step leaves, apart from the name |
@@ -104,7 +104,7 @@ tests' own models), on both dialects:
 | (h) | `ferro migrate squash NAME --from 0001` over a copy of the chain | `ferro migrate new NAME` from the after models alone: the same files byte for byte, bar `ir.json`, whose payload is the same once the witness and the composed rename hints are removed |
 | (i) | a database taken through the originals, then inherited by `ferro migrate up` (it runs nothing) | a database that ran the squash from empty: the same live schema (every fact pin (e) reads, server defaults included), the same tracking rows bar origin and times, no drift, and a `down --all` that empties both |
 
-Pins (h) and (i) hold `ferro migrate squash` to the door it belongs to rather than to the pass: a squash writes what `new` would have written across its ends, and a database that inherits it stands where one that ran it stands.
+Pins (h) and (i) hold `ferro migrate squash` to the emitter it belongs to rather than to the pass: a squash writes what `new` would have written across its ends, and a database that inherits it stands where one that ran it stands.
 
 The plain twins pin (a) compares by: a `NOT VALID` add is the plain add,
 `CONCURRENTLY` is gone (the leading crash-leftover `DROP INDEX CONCURRENTLY`
@@ -123,7 +123,7 @@ the entry.
 
 1. Pick the name format and add it to the table in `AGENTS.md` § I-1.
 2. Decide it in one `ferro_ddl_lowering` function and plan and render it
-   through `plan_from_ir` / `Plan::render`, so every door gets it in the
+   through `plan_from_ir` / `Plan::render`, so every emitter gets it in the
    same PR:
    - Python: extend `_FERRO_NAMING_CONVENTION` with the appropriate
      SQLAlchemy convention key (`ix`, `uq`, `fk`, `pk`, `ck`), and give the
@@ -142,7 +142,7 @@ the entry.
 2. Run all existing parity tests against your emitter.
 3. Add a pin to `tests/test_cross_emitter_parity.py` that compares your
    emitter's output with `_core._plan_from_ir(..., render=True)` for every
-   casebook case on both dialects, as pin (a) does for the migrations door.
+   casebook case on both dialects, as pin (a) does for the generator.
    The casebook covers single-column index, composite index, single-column
    unique, composite unique, FK with shadow column, default values and
    nullability; add a case for anything it lacks.

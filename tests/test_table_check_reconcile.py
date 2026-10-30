@@ -229,13 +229,13 @@ def test_sqlite_warns_with_the_constraint_name_and_emits_no_sql():
     assert statements == []
     assert len(warnings) == 1
     assert SIDE_CHECK_NAME in warnings[0]
-    assert "ferro migrate new" in warnings[0], "the warning names the Migrations door"
+    assert "ferro migrate new" in warnings[0], "the warning names migrations"
     assert "Alembic" not in warnings[0]
 
 
 def test_sqlite_column_check_on_an_existing_column_warns_naming_migrations():
     """The column already exists: SQLite cannot attach a constraint to it
-    without a table rebuild, so the add is a loud skip naming the door."""
+    without a table rebuild, so the add is a loud skip naming the strategy."""
     _define_cookie(db_check=True)
     live_columns = [
         {
@@ -373,7 +373,7 @@ def test_a_new_column_lands_before_the_check_that_references_it():
 def test_check_addition_statement_parity_pin():
     """The planner the Alembic bridge translates renders the same bytes the
     reconciliation pass executes. If either side drifts, the two migration
-    doors would run different SQL for the same model."""
+    emitters would run different SQL for the same model."""
     _define_reconcile_with_check()
     statements = _planner_statements("reconcile", [], destructive=True)
     assert statements == [SIDE_CHECK_ADD]
@@ -679,7 +679,7 @@ async def test_a_table_created_in_this_run_is_not_reconciled_again(db_url, recwa
 
 
 # ---------------------------------------------------------------------------
-# Alembic autogenerate (the reviewed-migration door)
+# Alembic autogenerate (the bridge)
 # ---------------------------------------------------------------------------
 
 
@@ -689,7 +689,7 @@ async def test_a_table_created_in_this_run_is_not_reconciled_again(db_url, recwa
 async def test_autogenerate_proposes_the_same_add_as_the_runtime(
     db_url, postgres_base_url, db_schema_name
 ):
-    """I-1: both migration doors name the constraint the same and render the
+    """I-1: both emitters name the constraint the same and render the
     same body. Autogenerate is not ``migrate_updates``-gated — running it is
     itself the request for a diff."""
     Reconcile = _define_reconcile_without_check()

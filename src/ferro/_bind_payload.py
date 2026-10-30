@@ -32,7 +32,7 @@ _SAVE_COLUMN_USAGE = {
 def unwrap_secret(value: Any) -> Any:
     """Return the value a `SecretStr` / `SecretBytes` hides, or `value` as is.
 
-    The one place every write door (``save``, ``bulk_create``, ``update`` and
+    The one place every write path (``save``, ``bulk_create``, ``update`` and
     query literals) turns a secret into what the database stores: a secret
     type only protects display, so the column holds the real value. An
     unwrapped ``SecretBytes`` is ``bytes`` and takes the bytes path.
@@ -364,7 +364,7 @@ def update_bind_payload(fields: Mapping[str, Any]) -> dict[str, Any]:
 
     Every value goes through ``canonicalize_wire_scalar`` (which unwraps a
     secret as ``save()`` binds it), then dict-level ``to_json`` (enums still
-    stringify on this door). Bytes, an unwrapped ``SecretBytes`` included, are
+    stringify on this path). Bytes, an unwrapped ``SecretBytes`` included, are
     overlaid raw.
     """
     scalars = {key: canonicalize_wire_scalar(value) for key, value in fields.items()}

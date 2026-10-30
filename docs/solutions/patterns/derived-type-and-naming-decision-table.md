@@ -144,7 +144,7 @@ equality).
 
 A column moving to or from a native Postgres enum type (`mood: Mood` ⇄
 `mood: str`) is not a conversion rail: it is the planner's `EnumTypeMove`
-refusal, which every door states in one text (`enum_type_move_report`).
+refusal, which every emitter states in one text (`enum_type_move_report`).
 ADR-0052, amended 2026-10-08.
 
 | Move                                    | Keep recipe                                   | Convert recipe                                                             |

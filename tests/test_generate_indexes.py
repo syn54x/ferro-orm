@@ -191,7 +191,7 @@ def test_a_foreign_key_removed_from_a_kept_column_is_dropped_and_its_down_adds_i
     project, pkg, db
 ):
     """``team: Annotated[Team, ForeignKey(...)]`` becomes ``team_id: int``: the
-    column stays, its constraint goes. No door planned it before (ADR-0051)."""
+    column stays, its constraint goes. No emitter planned it before (ADR-0051)."""
     start(project, pkg, db, LINKED)
 
     migration = generate(project, pkg, UNLINKED, "unlink_team")

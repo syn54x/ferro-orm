@@ -100,7 +100,7 @@ Five changes in `0.26` can reach code that runs today. Two show up in a type che
 
 ## Upgrading to 0.23
 
-`0.23` makes a server default that no model declares count as drift, and makes the migrations door tighter about concurrent deploys. Two things ask something of you:
+`0.23` makes a server default that no model declares count as drift, and makes Ferro's own migrations tighter about concurrent deploys. Two things ask something of you:
 
 - **A hand-set server default is reported on every start.** Ferro keeps no server default of its own, so a column default someone added with raw SQL is now a *foreign default*. Under `migrate_updates` the pass warns and leaves it; under `migrate_destructive` it drops it on Postgres. `ferro migrate drift` lists it and `ferro migrate baseline` refuses it. Say a hand-set default sits on `seen_at`:
 
@@ -132,9 +132,9 @@ Also new, and opt-in: [`Field(retired=True)`](guide/schema/renames-and-retiremen
 
 ## Upgrading to 0.22
 
-`0.22` adds Ferro's own migrations door: the `ferro` command, a project configuration file and numbered migration directories (see [Schema management](guide/schema/overview.md)). Nothing about adopting it is forced, but four things change for code that stays on auto-migrate:
+`0.22` adds Ferro's own migrations, a second migration strategy: the `ferro` command, a project configuration file and numbered migration directories (see [Schema management](guide/schema/overview.md)). Nothing about adopting it is forced, but four things change for code that stays on auto-migrate:
 
-- **A database that has run a migration refuses auto-migrate.** `connect(auto_migrate=…)`, `create_tables()` and `migrate()` raise before any DDL on a database that carries the `_ferro_migrations` tracking table, and the message names the two ways out. A database that never ran a migration, such as a test database, is unaffected. See [One door per database](guide/schema/overview.md#one-door-per-database).
+- **A database that has run a migration refuses auto-migrate.** `connect(auto_migrate=…)`, `create_tables()` and `migrate()` raise before any DDL on a database that carries the `_ferro_migrations` tracking table, and the message names the two ways out. A database that never ran a migration, such as a test database, is unaffected. See [One strategy per database](guide/schema/overview.md#one-strategy-per-database).
 - **Postgres passes wait under timeouts.** Each DDL statement waits up to `ddl_lock_timeout` (default `5s`) for its table lock and is retried up to ten times. A pass waits up to `lock_timeout` (default `30s`) for another pass or run that holds the run lock, then fails. Set both in the [project configuration](reference/configuration.md#ddl_lock_timeout) if your deploys hold locks longer.
 - **`migrate()` and `create_tables()` return a report.** They returned `None`; they now return a `PassReport` of the statements the pass ran. Code that ignored the return value needs no change:
 

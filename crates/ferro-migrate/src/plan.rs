@@ -12,7 +12,7 @@
 //! the up touched — toward a live database for the Alembic bridge.
 //!
 //! Every op leaves with its [`OpVerdict`], computed once here: what is true
-//! of it between the two sides on the dialect, which every door reads.
+//! of it between the two sides on the dialect, which every emitter reads.
 //!
 //! Every decision is the `ferro_ddl_lowering` function the pass consumed
 //! before this module existed (AGENTS.md § I-1 items 11–16); this module only
@@ -2402,7 +2402,7 @@ pub struct PlannedOp {
 }
 
 /// What is true of one op, its two sides and the dialect — never which way
-/// a file goes. Every door reads it and acts on it its own way: a demanding
+/// a file goes. Every emitter reads it and acts on it its own way: a demanding
 /// column is a migration up's backfill, its down's `data-dependent` header,
 /// and the bridge's plain op under a marker.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
@@ -2431,7 +2431,7 @@ pub struct OpVerdict {
     /// [`Carry::Unchanged`] one is no difference.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub carried: Option<Carry>,
-    /// On a type change no door runs ([`type_change_withheld`]): the checks,
+    /// On a type change no emitter runs ([`type_change_withheld`]): the checks,
     /// generated columns and row policies that read the column ([`held_of`]),
     /// which stay standing, never taken down, put back, rebuilt or compared,
     /// until the change runs, and the fix that makes it run. `None` on every
@@ -2443,7 +2443,7 @@ pub struct OpVerdict {
 /// What a withheld type change holds ([`OpVerdict::held`]).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct Held {
-    /// What every door reports of the withheld change, naming its fix: the
+    /// What every emitter reports of the withheld change, naming its fix: the
     /// primary-key recipe, the enum type move's recipe, or the refused
     /// conversion's warning.
     pub fix: String,
@@ -2511,14 +2511,14 @@ pub enum Execution {
     /// A SQLite table rebuild (ADR-0046): only a generated migration writes
     /// it.
     Rebuild,
-    /// No door runs it; the refusal says what to do instead.
+    /// No emitter runs it; the refusal says what to do instead.
     Refused(Refusal),
     /// A live target cannot express it (ADR-0050): the reason a revision's
     /// reader acts on.
     Irreversible(String),
 }
 
-/// Why no door runs an op, with the recipe that does it instead (AGENTS.md
+/// Why no emitter runs an op, with the recipe that does it instead (AGENTS.md
 /// I-6: every refusal names its fix).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
@@ -2708,7 +2708,7 @@ fn find_column<'a>(
 }
 
 /// The verdict of `op` between `before` and `target` on `dialect`: the one
-/// decision every door reads (ADR-0050).
+/// decision every emitter reads (ADR-0050).
 fn verdict(op: &MigrationOp, before: &Side, target: &Side, dialect: Dialect) -> OpVerdict {
     let table = op.table();
     let was = table.and_then(|table| before.model(table));
@@ -3096,7 +3096,7 @@ fn sqlite_rebuilds(
 
 /// The ops that undo the step `up` (planned from `before` to `after`): the
 /// planner run from `after` back to `before` on `dialect`, keeping only the
-/// ops whose artifact the up touched (ADR-0050). Both doors use it: a
+/// ops whose artifact the up touched (ADR-0050). Both emitters use it: a
 /// generated step's down, between the stages on either side of the step,
 /// and the Alembic bridge's `downgrade()`, from the models to the database.
 ///
@@ -3560,7 +3560,7 @@ pub enum Hint {
 
 /// Refuse the rename hints `new` declares that cannot be meant (ADR-0032),
 /// live or inert: an old name `new` still declares, and two declarations on
-/// one old name. Checked over the declarations alone, so every door that
+/// one old name. Checked over the declarations alone, so every emitter that
 /// reads a hint refuses the same hints with the same text.
 ///
 /// # Errors
@@ -4386,7 +4386,7 @@ fn type_changes(
 
 /// Whether the plan changes a column's type from `old_col` to `new_col` on
 /// `dialect` and the change runs: a type change ([`type_changes`]) but one
-/// Postgres's doors withhold ([`emit::withheld_alter`]: a primary-key
+/// Postgres's emitters withhold ([`emit::withheld_alter`]: a primary-key
 /// column, an enum type move, a refused conversion). A withheld one leaves
 /// the column as it is, so the checks, policies and generated columns over
 /// it stay standing, held ([`held_of`]): never compared, carried or rebuilt
@@ -4415,7 +4415,7 @@ fn type_change_withheld(
 }
 
 /// Why the plan drops a stored generated column and adds it back, decided
-/// once ([`replace_of`]) and carried on both ops' verdicts, so every door
+/// once ([`replace_of`]) and carried on both ops' verdicts, so every emitter
 /// says the same of the pair.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -6222,7 +6222,7 @@ mod live_table_hint_tests {
     }
 
     #[test]
-    fn the_pending_warning_names_the_tables_waiting_and_both_doors() {
+    fn the_pending_warning_names_the_tables_waiting_and_both_strategies() {
         assert_eq!(
             pending_table_rename_warning("writer", "author", &["book".into()]),
             crate::Report {
@@ -6243,7 +6243,7 @@ mod live_table_hint_tests {
 mod foreign_default_tests {
     //! Foreign defaults (ADR-0027, ADR-0034 as amended): a live server
     //! default ferro did not leave is a `DropDefault`, whose verdict is
-    //! decided here once for every door.
+    //! decided here once for every emitter.
     use super::*;
     use ferro_schema_ir::SchemaColumn;
 

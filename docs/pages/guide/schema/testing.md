@@ -28,7 +28,7 @@ The test seeds an author through `0001`'s historical models, applies exactly `00
 
 Two kinds of test touch the schema, and they want different things:
 
-- **Application tests** want a database shaped like the models, fast and fresh. Keep `connect(url, auto_migrate=True)` for them, as the [Testing how-to](../../howto/testing.md) sets up. A throwaway database that never ran a migration is not managed by migrations, so the [one-door rule](overview.md#one-door-per-database) does not refuse it.
+- **Application tests** want a database shaped like the models, fast and fresh. Keep `connect(url, auto_migrate=True)` for them, as the [Testing how-to](../../howto/testing.md) sets up. A throwaway database that never ran a migration is not managed by migrations, so the [one-strategy rule](overview.md#one-strategy-per-database) does not refuse it.
 - **Migration tests** want the database at a particular migration. That is `ferro.migrations.testing.harness`.
 
 A schema auto-migrate builds from today's models matches the head of your migrations only while the two agree, which `ferro migrate check` proves in CI. It never runs a migration's own SQL, its backfill or its down; the harness does.

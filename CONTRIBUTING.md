@@ -248,7 +248,7 @@ A maintainer merges the pull request once it is approved.
 - **Never edit `CHANGELOG.md` (I-10).** The release workflow writes it from your conventional commit messages, so describe the change in the pull request title and body instead.
 - **Docs show both field styles (I-7).** An example that declares fields with `Field()` appears twice, as an Assignment tab and an Annotated tab, each backed by a runnable script in `docs/examples/`.
 - **Docs queries use lambda predicates (I-8).** Name the lambda parameter after the model in lowercase singular: `User.where(lambda user: user.age >= 18)`.
-- **Every migration door produces the same DDL (I-1).** A schema change goes through the one planner, so `connect(auto_migrate=True)`, `ferro migrate new` and the Alembic bridge emit the same statements.
+- **Every migration strategy produces the same DDL (I-1).** A schema change goes through the one planner, so `connect(auto_migrate=True)`, `ferro migrate new` and the Alembic bridge emit the same statements.
 - **No `unwrap()` across the FFI boundary (I-3).** A PyO3 function returns a `PyResult` instead of panicking.
 
 ## Release process

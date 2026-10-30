@@ -402,7 +402,7 @@ def test_no_db_type_keeps_default_emitter_behavior():
 
 
 # ---------------------------------------------------------------------------
-# The migrations door (#538): a token through a generated ADD COLUMN.
+# The generator (#538): a token through a generated ADD COLUMN.
 # ---------------------------------------------------------------------------
 
 

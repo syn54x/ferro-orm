@@ -34,7 +34,7 @@ def downgrade() -> None:
 
 The column is Alembic's own `op.add_column`, and its index is the statement auto-migrate runs for the same change, byte for byte.
 
-The bridge is a supported alternative to [Migrations](migrations.md) for a project that already runs Alembic, or keeps its own SQLAlchemy tables beside its Ferro models. Otherwise, use Migrations: the bridge writes no backfills and no SQLite table rebuilds. One database is managed by one door: Alembic's revisions, Ferro's migrations or auto-migrate ([one door per database](overview.md#one-door-per-database)).
+The bridge is a supported alternative to [Migrations](migrations.md) for a project that already runs Alembic, or keeps its own SQLAlchemy tables beside its Ferro models. Otherwise, use Migrations: the bridge writes no backfills and no SQLite table rebuilds. One database is managed by one strategy: Alembic's revisions, Ferro's migrations or auto-migrate ([one strategy per database](overview.md#one-strategy-per-database)).
 
 ## The `alembic` extra {#install}
 
@@ -155,7 +155,7 @@ Every native Postgres enum type a revision needs is created by the planner's own
 
 Enum label changes follow the planner too:
 
-- A label added to a `StrEnum` is `ALTER TYPE ... ADD VALUE IF NOT EXISTS` inside an `autocommit_block()`. Its `downgrade()` raises: rows may hold the label, so labels are append-only on this door.
+- A label added to a `StrEnum` is `ALTER TYPE ... ADD VALUE IF NOT EXISTS` inside an `autocommit_block()`. Its `downgrade()` raises: rows may hold the label, so labels are append-only on this strategy.
 - A label renamed with `__ferro_renamed_labels__` is `ALTER TYPE ... RENAME VALUE`.
 - A label removed is not written: the revision leaves that change out, and the type keeps the label. Existing rows need a new value first, so [Migrations](data-steps.md#removing-an-enum-label) generate its backfill and the swap to a type without it.
 
@@ -167,7 +167,7 @@ The bridge refuses, before writing a revision, what an Alembic revision cannot w
 | :--- | :--- | :--- |
 | `env.py` passes `get_metadata()` without `**ferro_options()` | Alembic would compare Ferro's tables a second way | Add `**ferro_options()` to `context.configure(...)` |
 | The database carries Ferro's `_ferro_migrations` tracking table | The database is managed by Ferro's migrations | `ferro migrate new`. A project whose Alembic chain still manages its own SQLAlchemy tables drops `get_metadata()` from `target_metadata` and keeps `**ferro_options()` |
-| A primary key changes | No door changes a key in place | [Changing a primary key](migrations.md#changing-a-primary-key) |
+| A primary key changes | No strategy changes a key in place | [Changing a primary key](migrations.md#changing-a-primary-key) |
 | A change SQLite can only make by rebuilding the table (a type, a nullability, a constraint on an existing table), or a `NOT NULL` column with no default added to an existing SQLite table | Alembic's batch mode does not handle foreign-key pragmas, so its rebuild cascades into `ON DELETE CASCADE` children | `ferro migrate new`, which writes the [table rebuild](migrations.md#sqlite-table-rebuilds) (and the backfill) |
 
 A rename hint whose old name is still declared is refused with the generator's reason.
@@ -178,5 +178,5 @@ A database Alembic manages can move to Ferro's migrations without running any DD
 
 ## See also
 
-- [Schema management overview](overview.md): which door covers which change
+- [Schema management overview](overview.md): which strategy covers which change
 - [Migrations API reference](../../api/migrations.md): `get_metadata()`, `ferro_options()`, `render_item()`

@@ -14,7 +14,7 @@ covers the invariants that the architecture rests on.
 **Every DDL emission path in Ferro must produce byte-identical schema artifacts
 for the same model definition.**
 
-Take one edit, `bio: str | None = None` added to `Author`. Each door below
+Take one edit, `bio: str | None = None` added to `Author`. Each emitter below
 runs the same statement for it, `ALTER TABLE "author" ADD COLUMN "bio"
 varchar`, because each asks the same planner and renders through the same
 functions. Today Ferro emits DDL through:
@@ -28,7 +28,7 @@ functions. Today Ferro emits DDL through:
   `PassReport` (`ferro.migrate()` / `ferro.create_tables()` return it, built
   from what the DDL executor ran, ADR-0049), pinned against the planner by
   pin **(g)**.
-- The **migrations door** (`src/ferro/migrations/` +
+- The **generator** (`src/ferro/migrations/` +
   `crates/ferro-migrate/src/generate/`): `ferro migrate new`. It plans between
   two schema snapshots with the same planner and renders through the same
   `Plan::render`, once per dialect, into step files. It decides which step an
@@ -94,15 +94,16 @@ For a single model, every emitter must agree on:
     generated column the plan replaces (`replaces`), whether it carries a
     policy or check around another change and puts it back as it was
     (`carried`: `unchanged`, `changed` or `not_compared`; only `unchanged`
-    is no difference, on every door), and, on a type change no door runs,
-    what it leaves standing uncompared (`held`). Every door reads that one
+    is no difference, on every emitter and in drift), and, on a type change
+    no emitter runs, what it leaves standing uncompared (`held`). Every
+    emitter reads that one
     verdict and re-decides none of it. The reconciliation pass runs them directly; the
-    migrations door writes them into step files; the bridge's one comparator
+    generator writes them into step files; the bridge's one comparator
     (`dispatch_for("schema")` in `src/ferro/migrations/alembic.py`) reads the
     live database through `_core._live_schema_ir` and asks the core for the
     whole revision in one call, `_core._plan_revision`
     (`ferro_migrate::plan_revision`): the upgrade planned live → models with
-    destructive changes on, its `downgrade()` the one down every door uses,
+    destructive changes on, its `downgrade()` the one down every emitter uses,
     `ferro_migrate::plan_down`, run from the models back to the live
     database and scoped to the artifacts the upgrade touched (ADR-0050; a
     check or policy put back with the body the catalog printed through
@@ -113,11 +114,11 @@ For a single model, every emitter must agree on:
     `op.execute(sa.DDL(...))` of the pass's statement, byte for byte, where
     it does not. The per-family comparators, their slot registrations and
     the `_plan_check_*` FFI are gone (#533).
-    The families, each one decision consumed by every door:
+    The families, each one decision consumed by every emitter:
     - **Enum labels** — `missing_enum_labels` / `extra_enum_labels` +
       `render_pg_enum_add_value` (ADR-0011: append-only, update-gated; an
       extra live label is a warning on a live database, and between two
-      declared snapshots the migrations door's removal, #536). A label
+      declared snapshots the generator's removal, #536). A label
       rename hint is `render_pg_enum_rename_value` (`render_label_update`
       on SQLite, in a migration only; the pass warns there, ADR-0047); an
       enum class rename `render_pg_enum_rename_type`.
@@ -149,7 +150,7 @@ For a single model, every emitter must agree on:
       name, the cast and the command table over FFI
       (`_core._ddl_row_policy_name`, `_core._rls_shorthand_cast`,
       `_core._rls_command_matrix`). A foreign policy and an unverifiable raw
-      body never become an op on any door (ADR-0019). Postgres-only; SQLite
+      body never become an op on any emitter (ADR-0019). Postgres-only; SQLite
       gets one warning per table and no DDL (ADR-0014).
     - **Enum types** — a type the change introduces is always the pass's
       guarded `CREATE TYPE` (`render_pg_enum_create_type`) ahead of every
@@ -160,7 +161,7 @@ For a single model, every emitter must agree on:
       Postgres-only (SQLite enums store as text).
     - **Generated expressions** — take
       `direction: int = Field(generated=lambda ledger: fn.sign(ledger.amount_minor))`.
-      Every door writes the column as
+      Every emitter writes the column as
       `GENERATED ALWAYS AS (CAST(sign(CAST("amount_minor" AS bigint)) AS bigint)) STORED`
       on Postgres and `GENERATED ALWAYS AS (sign("amount_minor")) STORED
       CONSTRAINT "_ferro_range_direction" CHECK (typeof("direction") IN
@@ -188,11 +189,11 @@ For a single model, every emitter must agree on:
       policy or table check that reads the column is carried around the
       pair. A carried artifact is one taken down and put back around
       another change, its ops marked `OpVerdict.carried` with whether it
-      comes back as it was: `unchanged` is no difference on any door, while
+      comes back as it was: `unchanged` is no difference on any emitter, while
       `changed` (`ck_transaction_nonzero check body differs`) and
       `not_compared` (a live check over a column whose type changes, which
       Postgres cannot print against the old type) are differences drift
-      reports. A type change no door runs (`emit::withheld_alter`: a
+      reports. A type change no emitter runs (`emit::withheld_alter`: a
       primary-key column, an enum type move, a refused scalar conversion)
       carries nothing and replaces nothing. The column keeps its live type,
       so every check, generated column and policy that reads it is held:
@@ -250,7 +251,7 @@ For a single model, every emitter must agree on:
       either side of a check's comparison that calls `fn`) is admitted only
       when SQLite and Postgres store the same value for it on every row,
       and fail on the same rows, decided once when the model is defined
-      (ADR-0059). Two functions decide it, and every door reads them:
+      (ADR-0059). Two functions decide it, and every emitter reads them:
       `ferro_ddl_lowering::type_value_expr` types each node (family and
       nullability, from the columns, `literal_type` and the signatures in
       `VALUE_FUNCTIONS`) and refuses what would store differently, read by
@@ -281,7 +282,7 @@ For a single model, every emitter must agree on:
       `tests/test_value_parity.py`, which runs it on both dialects; a
       divergence is refused, never documented.
 
-    Every artifact above reaches every door through the one planner,
+    Every artifact above reaches every emitter through the one planner,
     `ferro_migrate::plan_from_ir` (`_core._plan_from_ir` over FFI): its
     per-family deciders are private to it and pinned through it, never as a
     second entry point; `_core._plan_enum_type_provenance` remains as a
@@ -290,7 +291,7 @@ For a single model, every emitter must agree on:
 
 ### The nine pins
 
-`tests/test_cross_emitter_parity.py` pins the migrations door, the bridge and
+`tests/test_cross_emitter_parity.py` pins the generator, the bridge and
 the pass itself against the one planner over every casebook change
 (`tests/_casebook.py`, cases A–G, built from the generator tests' own models)
 on both dialects:
@@ -355,7 +356,7 @@ xfail removes it.
 
 ### Why this invariant exists
 
-A user can adopt any migration strategy or switch between them. If two doors
+A user can adopt any migration strategy or switch between them. If two strategies
 disagree on _any_ schema artifact, the second one sees phantom diffs: running
 `alembic revision --autogenerate` or `ferro migrate drift` against a database
 that `connect(auto_migrate=True)` bootstrapped proposes a drop + create of an
@@ -366,7 +367,7 @@ Phantom diffs are the canonical symptom that this invariant has been broken.
 
 ### How this invariant is enforced
 
-- One planner, one renderer: every door plans with
+- One planner, one renderer: every emitter plans with
   `ferro_migrate::plan_from_ir` and renders with `Plan::render`; every
   decision lives in one `ferro_ddl_lowering` function, consumed over FFI by
   the Python side.
@@ -387,7 +388,7 @@ Phantom diffs are the canonical symptom that this invariant has been broken.
   `update` in both forms, `delete`, through `Relation` and `ProjectedQuery`
   too) on both dialects, with a secret column, `await query.<terminal>.sql()`
   equals the `ferro.sql` record the executed call writes in `sql`, `params`
-  (the `REDACTED` sentinel included) and `dialect`. Both doors build the
+  (the `REDACTED` sentinel included) and `dialect`. Both paths build the
   statement through one `build_<terminal>` function in `src/operations.rs`,
   which the executing entry sends and its `render_<terminal>` twin returns.
 
@@ -400,8 +401,8 @@ If you add a new emitter (e.g. `ferro schema dump`):
    helpers — these are the source of truth. Never a second renderer.
 2. Add a pin to `tests/test_cross_emitter_parity.py` that compares your
    emitter's output with `_core._plan_from_ir(..., render=True)` for every
-   casebook case on both dialects, the way pin (a) does for the migrations
-   door; at least single-column index, composite index, single-column
+   casebook case on both dialects, the way pin (a) does for the
+   generator; at least single-column index, composite index, single-column
    unique, composite unique and foreign key with shadow column must be
    among them.
 3. Update this AGENTS.md entry with the new emitter in the bulleted list above.
@@ -413,7 +414,7 @@ If you add a new schema feature (e.g. partial indexes, exclusion constraints):
 1. Pick the canonical name format and document it in this file under the
    numbered list above.
 2. Decide it in one `ferro_ddl_lowering` function, plan it as a
-   `MigrationOp` and render it in `Plan::render`, so every door gets it in the
+   `MigrationOp` and render it in `Plan::render`, so every emitter gets it in the
    same PR; give the bridge's `translate.py` its op (Alembic's own, or the
    pass's statement).
 3. Add a casebook case (`tests/_casebook.py`) so pins (a)–(i) cover it, and a
@@ -513,7 +514,7 @@ What this means in practice:
   Shipping a half-working version of something that is *in* scope is not.
 - **Every refusal names its fix.** A refusal tells the reader what to do
   next: the command, the line or the recipe. This binds every refusal text
-  the migration doors print: the primary-key recipe, the SQLite rebuild
+  the migration strategies print: the primary-key recipe, the SQLite rebuild
   refusals (an undeclared object, a type SQLite cannot check), the
   tracked-database refusal of `connect(auto_migrate=True)` and of Alembic
   autogenerate, and the edited-file refusals (`ferro migrate rerecord`,
@@ -693,13 +694,13 @@ can skip the cursor row.
 Query and `update()` literals for `datetime`, `date`, `time`, UUID, and
 Decimal canonicalize through one function (`canonicalize_wire_scalar`) whose
 output for a given value is pinned against `save_bind_payload`. `save()`
-remains instance `model_dump` (field serializers stay on that door). A
+remains instance `model_dump` (field serializers stay on that path). A
 second datetime/UUID/Decimal cascade — including `datetime.isoformat()` or a
 “mirrors save_bind_payload” comment — is an I-13 violation. Enums on the
 query wire are out of scope for this invariant.
 
 A `SecretStr` / `SecretBytes` is unwrapped first, through `unwrap_secret`,
-on every door: `save()` binds the real value, a query or `update()` literal
+on every path: `save()` binds the real value, a query or `update()` literal
 binds the same value, and the display mask `**********` never becomes a
 bind, a schema default or a hydrated value (#760; review I-38 in #786). A
 second unwrap, a JSON dump of a secret column or a `SecretBytes` column
@@ -792,7 +793,7 @@ print(await User.where(lambda user: user.token == "sk_live").all.sql())
 # SELECT ... WHERE "user"."token" = $1    params=(***,)
 ```
 
-Two doors, one statement, the same stars. A statement the user can see, a
+Two surfaces, one statement, the same stars. A statement the user can see, a
 `ferro.sql` record or a terminal's `RenderedSql`, is built from one
 presentation: the `sql`, the `params` after one `masked_params` in
 `ferro._sql_log`, and the `dialect`. The engine decides which positions are
@@ -807,7 +808,7 @@ leaves the second statement with an empty set and a secret in the log, with
 no error (#774 F13).
 
 A second `(params, mask)` to `REDACTED` zip, or a secret-value iterable a
-second statement can exhaust, is an I-15 violation. A new door (an instance
+second statement can exhaust, is an I-15 violation. A new surface (an instance
 `save().sql()`, a docs capture, a structured handler) calls `masked_params`
 and passes the collector. Review I-37 in #786.
 

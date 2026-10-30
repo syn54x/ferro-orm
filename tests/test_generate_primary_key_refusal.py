@@ -14,7 +14,7 @@ changing the primary key of "pkrauthor" is not generated: write it as a new tabl
 see the Migrations docs § Changing a primary key
 ```
 
-No migration door changes a key in place: the key moved to another column,
+No emitter changes a key in place: the key moved to another column,
 made composite, or its column's type changed are each refused before
 anything is written, on every dialect. Table names start with ``pkr`` so this
 module never shares a name with another suite on the same Postgres server.

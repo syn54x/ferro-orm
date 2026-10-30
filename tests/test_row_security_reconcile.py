@@ -191,7 +191,7 @@ def plan_live_ledgerrow(live_row_security: dict, *, destructive: bool = False) -
     """The one planner's rendered plan (``_plan_from_ir``) for the registry's
     declaration over a live ``ledgerrow`` that already holds its columns, its
     row security as the catalog reads it: what the reconciliation pass
-    executes and the migrations door writes (AGENTS.md § I-1)."""
+    executes and the generator writes (AGENTS.md § I-1)."""
     declared = compile_registry_schema_ir()
     live = copy.deepcopy(declared)
     for model in live["payload"]["models"]:
@@ -384,7 +384,7 @@ def test_policy_ddl_lands_after_the_tables_own_column_and_data_steps():
 
 def test_row_security_reconcile_statement_parity_pin():
     """The one planner renders the same bytes the reconciliation pass
-    executes — one decision, every migration door."""
+    executes — one decision, every emitter."""
     _define_ledger_row()
     live = {"enabled": False, "forced": False, "policies": []}
     plan = plan_live_ledgerrow(live)

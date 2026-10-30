@@ -31,7 +31,7 @@ use crate::backend::{
     EngineBindValue, EngineConnection, EngineHandle, EngineRow, EngineValue, NullKind,
 };
 use crate::ddl_exec::{
-    Attempt, DdlError, DdlExecutor, Door, Executed, Failed, Role, Unit, pool_connection,
+    Attempt, DdlError, DdlExecutor, Executed, Failed, Role, Sender, Unit, pool_connection,
 };
 use crate::state::TransactionConnection;
 use ferro_ddl_lowering::{Dialect, quote_ident};
@@ -693,7 +693,7 @@ impl RunLock {
     }
 
     /// [`RunLock::acquire`], refusing with `timed_out()` once `timeout` has
-    /// passed: a door whose wait is bounded by something other than
+    /// passed: a caller whose wait is bounded by something other than
     /// `--lock-timeout` names its own bound (the auto-migrate pass's
     /// `lock_timeout` setting, ADR-0038).
     ///
@@ -1592,7 +1592,7 @@ async fn run_statements(
 ) -> Result<(), Failed> {
     for (index, statement) in statements.iter().enumerate() {
         executed
-            .send(conn, Door::Run(file), Role::Schema, statement)
+            .send(conn, Sender::Run(file), Role::Schema, statement)
             .await
             .map_err(|error| Failed::at(index, error))?;
     }
@@ -2980,7 +2980,7 @@ impl Locked {
                 ddl.run(
                     engine,
                     Unit::Transactional,
-                    Door::Run(shown),
+                    Sender::Run(shown),
                     statements,
                     &mut on_attempt,
                     Some(checked),
@@ -2993,7 +2993,7 @@ impl Locked {
                 .run(
                     engine,
                     Unit::Unwrapped,
-                    Door::Run(shown),
+                    Sender::Run(shown),
                     statements,
                     &mut on_attempt,
                     Some(record()),

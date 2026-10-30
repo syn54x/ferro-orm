@@ -573,7 +573,7 @@ fn quoted_name(name: &str) -> String {
 /// Type a value expression under value parity (ADR-0059): its family and
 /// whether it can be `NULL`, from the columns `column` describes, the
 /// literal rule ([`literal_type`]) and each call's signature in
-/// [`VALUE_FUNCTIONS`]. Every door that needs an expression's type reads
+/// [`VALUE_FUNCTIONS`]. Every emitter that needs an expression's type reads
 /// this one walk: the class-definition refusals in Python over FFI, the
 /// Postgres renderer and the SQLite guard.
 ///
@@ -983,7 +983,7 @@ fn step_term(step: &ValueExpr, columns: &[SchemaColumn]) -> Result<Option<String
 /// Whether computing this one node of a value expression can fail on a
 /// value: Postgres raises (`bigint out of range`, `value out of range:
 /// overflow`) where SQLite raises or computes a `real` or `inf`. The one
-/// decision every door reads: the SQLite step terms, the refusal of such a
+/// decision every emitter reads: the SQLite step terms, the refusal of such a
 /// step under an `OR`, and which checks compute.
 ///
 /// A node can fail when it is an integer or float `+ - *` (the typing
