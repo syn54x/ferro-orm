@@ -273,6 +273,19 @@ def _table_check_entries(
     return entries
 
 
+def _fk_target_column(to_table: str) -> str:
+    """The primary-key column a foreign key into ``to_table`` references.
+
+    Read from the registered model that owns the table, the source the shadow
+    column's type comes from. A target not yet defined gets ``id`` until the
+    resolved second pass recompiles the envelope.
+    """
+    for model in REGISTRY.models().values():
+        if getattr(model, "__ferro_table__", None) == to_table:
+            return getattr(model, "__ferro_pk__", None) or "id"
+    return "id"
+
+
 def compile_schema_ir_payload(
     model_name: str,
     columns: Sequence[ColumnSpec],
@@ -356,7 +369,7 @@ def compile_schema_ir_payload(
             fk_entry: dict[str, Any] = {
                 "column": spec.name,
                 "to_table": spec.foreign_key.to_table,
-                "to_column": "id",
+                "to_column": _fk_target_column(spec.foreign_key.to_table),
                 "on_delete": spec.foreign_key.on_delete,
                 "name": _fk_name(
                     resolved_table_name, spec.name, spec.foreign_key.to_table

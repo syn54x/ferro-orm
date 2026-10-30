@@ -340,13 +340,16 @@ def _build_sa_table_from_ir(
             continue
         col_name = fk.get("column")
         to_table = fk.get("to_table")
-        to_column = fk.get("to_column") or "id"
+        to_column = fk.get("to_column")
         if not isinstance(col_name, str) or col_name not in columns_by_name:
             continue
         if not isinstance(to_table, str) or not to_table:
             continue
         if not isinstance(to_column, str) or not to_column:
-            continue
+            raise ValueError(
+                f"foreign key {table_name}.{col_name} carries no to_column in "
+                "the schema IR"
+            )
         on_delete = fk.get("on_delete")
         fk_ir_name = fk.get("name")
         constraint_name = (
