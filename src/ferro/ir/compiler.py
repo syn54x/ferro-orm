@@ -278,7 +278,7 @@ def _fk_target_column(model_name: str, column: str, to_table: str) -> str:
 
     Read from the registered model that owns the table, the source the shadow
     column's type comes from. A target not yet defined, or not yet compiled
-    (``__ferro_pk__`` unset), gets ``id`` until the resolved second pass
+    (its columns not yet published), gets ``id`` until the resolved second pass
     recompiles the envelope.
 
     Raises:
@@ -286,14 +286,17 @@ def _fk_target_column(model_name: str, column: str, to_table: str) -> str:
     """
     for model in REGISTRY.models().values():
         if getattr(model, "__ferro_table__", None) == to_table:
-            pk = getattr(model, "__ferro_pk__", "id")
-            if pk is None:
+            pk = getattr(model, "__ferro_pk__", None)
+            # A model's specs and key are published after its first compile
+            # (a self-reference compiles before them); only a published,
+            # keyless target is an error.
+            if pk is None and getattr(model, "__ferro_columns__", None):
                 raise TypeError(
                     f"{model_name}.{column} references {model.__name__}, which "
                     "declares no primary key. Declare a primary_key=True field "
                     f"on {model.__name__}."
                 )
-            return pk
+            return pk or "id"
     return "id"
 
 

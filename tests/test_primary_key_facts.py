@@ -64,14 +64,12 @@ def test_multiple_primary_keys_rejected_at_class_definition():
             code: str = Field(primary_key=True)
 
 
-def test_fk_assignment_to_pkless_target_raises_instead_of_guessing_id():
+def test_fk_to_pkless_target_is_refused_at_declaration_instead_of_guessing_id():
     class PkLessTarget(Model):
         label: str
 
-    class PkGuessReferrer(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        target: Annotated[PkLessTarget, ForeignKey(related_name="referrers")]
+    with pytest.raises(TypeError, match=r"PkLessTarget.*declares no primary key"):
 
-    target = PkLessTarget(label="orphan")
-    with pytest.raises(ValueError, match=r"PkLessTarget.*no primary-key column"):
-        PkGuessReferrer(target=target)
+        class PkGuessReferrer(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            target: Annotated[PkLessTarget, ForeignKey(related_name="referrers")]

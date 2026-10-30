@@ -1125,11 +1125,12 @@ def test_a_foreign_key_across_two_databases_is_refused_naming_both(
         project,
         f"{pkg}.b",
         """
-        from ferro import BackRef, Model
+        from typing import Annotated
+        from ferro import BackRef, FerroField, Model
         from ferro.query import Relation
 
         class SettingsOwner(Model):
-            id: int | None = None
+            id: Annotated[int | None, FerroField(primary_key=True)] = None
             gizmos: Relation[list["SettingsGizmo"]] = BackRef()
         """,
     )
