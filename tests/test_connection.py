@@ -39,7 +39,7 @@ async def test_concurrent_unnamed_connects_one_wins_one_raises(db_url):
     )
     errors = [r for r in results if isinstance(r, Exception)]
     assert len(errors) == 1
-    assert "already registered" in str(errors[0])
+    assert "default connection is already registered" in str(errors[0])
 
 
 @pytest.mark.asyncio
@@ -570,15 +570,6 @@ async def test_postgres_connection(db_url):
 
 
 @pytest.mark.asyncio
-async def test_second_unnamed_connect_raises(db_url):
-    """FF-G G4b: a second bare connect() must not silently replace the
-    default engine."""
-    await ferro.connect(db_url)
-    with pytest.raises(ValueError, match="default connection is already registered"):
-        await ferro.connect(db_url)
-
-
-@pytest.mark.asyncio
 async def test_reset_engine_then_unnamed_connect_succeeds(db_url):
     await ferro.connect(db_url)
     ferro.reset_engine()
@@ -589,3 +580,14 @@ async def test_reset_engine_then_unnamed_connect_succeeds(db_url):
 async def test_named_connect_after_default_still_works(db_url):
     await ferro.connect(db_url)
     await ferro.connect(db_url, name="analytics")  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_a_refused_postgres_port_fails_at_once_with_the_refusal():
+    """Nothing listens on port 1. The error is the refusal itself, not a pool
+    timeout after 30 s of retrying."""
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    with pytest.raises(ferro.FerroError, match="(?i)refused"):
+        await ferro.connect("postgresql://u:p@127.0.0.1:1/db")
+    assert loop.time() - started < 5

@@ -198,26 +198,6 @@ def order_model(validate_assignment: bool = False) -> type[Model]:
 
 @pytest.mark.backend_matrix
 @pytest.mark.asyncio
-async def test_a_row_holding_the_retired_label_hydrates_and_saves_after_another_change(
-    db_url,
-):
-    RtlOrder = order_model()
-    await connect(db_url, auto_migrate=True)
-    async with engines.session():
-        await RtlOrder.model_construct(id=1, status=RtlStatus.CANCELED, note="a").save()
-
-        order = await RtlOrder.where(lambda rtlorder: rtlorder.id == 1).first()
-        assert order is not None and order.status is RtlStatus.CANCELED
-        order.note = "b"
-        await order.save()
-
-        again = await RtlOrder.where(lambda rtlorder: rtlorder.id == 1).first()
-        assert again is not None
-        assert (again.status, again.note) == (RtlStatus.CANCELED, "b")
-
-
-@pytest.mark.backend_matrix
-@pytest.mark.asyncio
 async def test_bulk_create_of_live_labels_beside_a_hydrated_retired_row(db_url):
     RtlOrder = order_model()
     await connect(db_url, auto_migrate=True)

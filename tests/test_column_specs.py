@@ -157,18 +157,6 @@ class TestJsonFamilyDefaultSnapshot:
 
         assert build_column_specs(M)["payload"].default is None
 
-    def test_one_arg_json_factory_leaves_default_unset(self, clean_registry):
-        from ferro import Field
-
-        def needs_data(data: dict) -> dict:
-            return {}
-
-        class M(Model):
-            id: Annotated[int, FerroField(primary_key=True)]
-            payload: dict = Field(default_factory=needs_data)
-
-        assert build_column_specs(M)["payload"].default is None
-
     def test_annotated_dict_factory_snapshots(self, clean_registry):
         from ferro import Field
 

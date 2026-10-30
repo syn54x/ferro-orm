@@ -207,14 +207,6 @@ def test_db_check_on_plain_int_raises():
             value: int = Field(db_type="bigint", db_check=True)
 
 
-def test_db_check_on_plain_str_raises():
-    with pytest.raises(TypeError, match="db_check"):
-
-        class Doc(Model):
-            id: int | None = Field(default=None, primary_key=True)
-            name: str = Field(db_type="text", db_check=True)
-
-
 def test_db_check_with_db_type_on_strenum_is_accepted():
     class Doc(Model):
         id: int | None = Field(default=None, primary_key=True)

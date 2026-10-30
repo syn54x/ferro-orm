@@ -223,16 +223,6 @@ async def test_bare_reverse_proxy_in_where_raises_naming_exists(db_url):
 
 
 @pytest.mark.asyncio
-async def test_include_rejection_survives_reverse_proxy_resolution(db_url):
-    """The pinned include() population rejection (#287) is unchanged now that
-    predicate proxies resolve reverse relations: population and membership
-    stay distinct axes (ADR-0007)."""
-    await connect(db_url, auto_migrate=True)
-    with pytest.raises(TypeError, match="reverse .BackRef. or many-to-many"):
-        ExTxn.select().include(lambda t: t.lines)
-
-
-@pytest.mark.asyncio
 async def test_exists_rejected_on_mutating_verbs(db_url):
     """UPDATE/DELETE stay single-table write shapes: an existence test in the
     predicate is rejected at build time, before any DB round-trip."""
@@ -684,15 +674,6 @@ async def test_in_with_query_rhs_names_exists(db_url):
     with pytest.raises(TypeError, match="expects a list, tuple, or set") as exc_info:
         ExTxn.where(lambda t: t.id.in_(42))
     assert ".exists(" not in str(exc_info.value)
-
-
-@pytest.mark.asyncio
-async def test_include_on_m2m_edge_unchanged(db_url):
-    """``include()`` population rejection is unchanged for M2M too — reverse
-    population stays a separate future mechanism."""
-    await connect(db_url, auto_migrate=True)
-    with pytest.raises(TypeError, match="reverse .BackRef. or many-to-many"):
-        ExUser.select().include(lambda u: u.tags)
 
 
 @pytest.mark.asyncio

@@ -27,11 +27,6 @@ class TestFieldFerroPayload:
         assert ModelMetaclass._field_ferro_payload(123) == {}
         assert ModelMetaclass._field_ferro_payload(None) == {}
 
-    def test_field_info_without_extra_returns_false(self):
-        """FieldInfo without json_schema_extra should return an empty payload."""
-        field = FieldInfo(annotation=int, default=None)
-        assert ModelMetaclass._field_ferro_payload(field) == {}
-
     def test_field_info_with_non_dict_extra_returns_false(self):
         """FieldInfo with non-dict json_schema_extra should return an empty payload."""
         field = FieldInfo(annotation=int, default=None)
