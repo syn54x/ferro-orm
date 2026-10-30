@@ -235,7 +235,8 @@ def _json_needs_validation(hint: Any) -> bool:
     if origin is Union or origin is types.UnionType:
         return any(_json_needs_validation(a) for a in get_args(hint))
     if origin is Literal:
-        return False
+        # An enum member in a Literal comes back as its value, not the member.
+        return any(isinstance(a, Enum) for a in get_args(hint))
     if origin is list:
         return any(_json_needs_validation(a) for a in get_args(hint))
     if origin is dict:

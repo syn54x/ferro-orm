@@ -12,7 +12,7 @@ import warnings
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Annotated
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 import pytest
@@ -39,6 +39,7 @@ class Tone(StrEnum):
 class JShade(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     dimensions: Dimensions | None = None
+    plain: Annotated[Dimensions | None, FerroField(db_type="json")] = None
     items: list[Dimensions] = []
 
 
@@ -57,6 +58,14 @@ class JNative(Model):
     counts: dict[str, int] = {}
     names: list[str] = []
     blob: dict = {}
+    loose: dict[str, Any] = {}
+    seq: list[Any] = []
+    letters: list[Literal["a", "b"]] = []  # a bare ``Any`` is not a column type
+
+
+class JLiteral(Model):
+    id: Annotated[int | None, FerroField(primary_key=True)] = None
+    tones: list[Literal[Tone.WARM]] = []
 
 
 STAMP = datetime(2026, 3, 1, 15, 0, tzinfo=UTC)
@@ -81,7 +90,8 @@ def test_native_json_fields_register_no_converter():
 
 def test_declared_json_fields_register_a_json_converter():
     kinds = {n: kind for n, (kind, _) in JShade._hydration_converters.items()}
-    assert kinds == {"dimensions": "json", "items": "json"}
+    assert kinds == {"dimensions": "json", "plain": "json", "items": "json"}
+    assert set(JLiteral._hydration_converters) == {"tones"}
     assert set(JRich._hydration_converters) == {
         "tags",
         "pair",
@@ -99,6 +109,7 @@ async def test_nested_model_hydrates_as_the_model(db_url):
         await JShade(
             id=1,
             dimensions=Dimensions(width_mm=300, height_mm=220),
+            plain=Dimensions(width_mm=5, height_mm=6),
             items=[Dimensions(width_mm=1, height_mm=1)],
         ).save()
     async with ferro.engines.session():
@@ -107,6 +118,7 @@ async def test_nested_model_hydrates_as_the_model(db_url):
     assert fetched.dimensions == Dimensions(width_mm=300, height_mm=220)
     assert fetched.items == [Dimensions(width_mm=1, height_mm=1)]
     assert isinstance(fetched.items[0], Dimensions)
+    assert fetched.plain == Dimensions(width_mm=5, height_mm=6)
 
 
 @pytest.mark.asyncio
@@ -145,12 +157,23 @@ async def test_null_optional_model_stays_none(db_url):
 async def test_native_json_values_are_unchanged(db_url):
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-        await JNative(id=1, counts={"a": 1}, names=["x"], blob={"k": [1, "v"]}).save()
+        await JNative(
+            id=1,
+            counts={"a": 1},
+            names=["x"],
+            blob={"k": [1, "v"]},
+            loose={"k": [1, None]},
+            seq=[1, "v"],
+            letters=["a"],
+        ).save()
     async with ferro.engines.session():
         fetched = await JNative.get(1)
     assert fetched.counts == {"a": 1}
     assert fetched.names == ["x"]
     assert fetched.blob == {"k": [1, "v"]}
+    assert fetched.loose == {"k": [1, None]}
+    assert fetched.seq == [1, "v"]
+    assert fetched.letters == ["a"]
 
 
 @pytest.mark.asyncio
@@ -194,3 +217,14 @@ async def test_rejected_document_names_json_model_and_field(db_url):
             ValueError, match=r"Failed to hydrate json field JShade\.dimensions"
         ):
             await JShade.get(1)
+
+
+@pytest.mark.asyncio
+async def test_literal_of_an_enum_member_hydrates_as_the_member(db_url):
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        await JLiteral(id=1, tones=[Tone.WARM]).save()
+    async with ferro.engines.session():
+        fetched = await JLiteral.get(1)
+    assert fetched.tones == [Tone.WARM]
+    assert type(fetched.tones[0]) is Tone
