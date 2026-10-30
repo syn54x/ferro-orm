@@ -178,3 +178,15 @@ def test_autogenerate_is_empty_against_the_auto_migrated_database(
     asyncio.run(auto_migrate(db_url))
     upgrade, _ = autogenerate(db_url, postgres_base_url, db_schema_name)
     assert "op." not in upgrade, upgrade
+
+
+def test_a_resolved_target_without_a_primary_key_is_refused():
+    class Ledger(Model):
+        name: str
+        lines: Relation[list["Line"]] = BackRef()
+
+    with pytest.raises(TypeError, match="primary_key=True field on Ledger"):
+
+        class Line(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            ledger: Annotated[Ledger, ForeignKey(related_name="lines")]
