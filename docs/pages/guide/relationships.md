@@ -374,7 +374,7 @@ Each `add()` is one `INSERT` into the join table, and each side reads through it
 --8<-- "docs/examples/relationships.py:m2m-remove"
 ```
 
-`remove()` drops one of Ferris's links and `clear()` drops the rest. The tournaments themselves stay, and so does Gordon's entry. `add()` and `remove()` read each instance's `id` attribute, so they work only when the related model's primary key is named `id`.
+`remove()` drops one of Ferris's links and `clear()` drops the rest. The tournaments themselves stay, and so does Gordon's entry. `add()` and `remove()` identify each instance by its primary key, whatever the field is called, so every instance must be saved first.
 
 The calls send these statements; on PostgreSQL only the placeholders differ:
 

@@ -655,6 +655,7 @@ class Query(Generic[T]):
         self._after: tuple[Any, ...] | None = None
         self._before: tuple[Any, ...] | None = None
         self._m2m_context: M2mContext | None = None
+        self._m2m_label = ""  # "post.tags": names the relation in refusals
         # Relation paths that must render a join, insertion-ordered (full path
         # tuple -> registered join_type). Populated by where()/order_by()
         # traversal ("inner") and by the explicit join()/left_join() chainers
@@ -701,13 +702,19 @@ class Query(Generic[T]):
         return new
 
     def _m2m(
-        self, join_table: str, source_col: str, target_col: str, source_id: Any
+        self,
+        join_table: str,
+        source_col: str,
+        target_col: str,
+        source_id: Any,
+        label: str = "",
     ) -> Self:
         """Store many-to-many linkage context for relationship operations.
 
         A new ``Query`` with the m2m context set; ``self`` is unchanged.
         """
         new = self._clone()
+        new._m2m_label = label
         new._m2m_context = M2mContext(
             join_table=join_table,
             source_col=source_col,
@@ -1499,6 +1506,31 @@ class Query(Generic[T]):
         """
         return await self._count("exists") > 0
 
+    def _m2m_keys(self, verb: str, instances: tuple[Any, ...]) -> list[Any]:
+        """Return the primary keys of related instances, refusing unfit ones.
+
+        Raises:
+            TypeError: An instance is not of the related model.
+            ValueError: An instance has no primary key yet.
+        """
+        pk = self.model_cls.__ferro_pk__
+        name = self.model_cls.__name__
+        keys = []
+        for inst in instances:
+            if not isinstance(inst, self.model_cls):
+                raise TypeError(
+                    f"{self._m2m_label}.{verb}() takes {name} instances, "
+                    f"got {type(inst).__name__}"
+                )
+            key = getattr(inst, pk)
+            if key is None:
+                raise ValueError(
+                    f"{self._m2m_label}.{verb}(): {name}({pk}=None) has no "
+                    "primary key yet; save it first"
+                )
+            keys.append(key)
+        return keys
+
     async def add(self, *instances: Any) -> None:
         """Link instances to the owner of a many-to-many relation.
 
@@ -1507,21 +1539,19 @@ class Query(Generic[T]):
 
         Args:
             *instances: The related instances to link. Each is identified by
-                its `id` field, so the related model's primary key must be
-                named `id`.
+                its primary key and must be saved first.
 
         Raises:
             RuntimeError: The query is not a many-to-many relation.
+            TypeError: An instance is not of the related model.
+            ValueError: An instance has no primary key yet. Save it first.
         """
         if not self._m2m_context:
             raise RuntimeError(
                 "'.add()' can only be used on Many-to-Many relationships"
             )
 
-        ids = []
-        for inst in instances:
-            # Assume 'id' for now
-            ids.append(getattr(inst, "id"))
+        ids = self._m2m_keys("add", instances)
 
         route = await self._transaction_or_using()
         await add_m2m_links(
@@ -1541,20 +1571,19 @@ class Query(Generic[T]):
 
         Args:
             *instances: The related instances to unlink. Each is identified
-                by its `id` field, so the related model's primary key must be
-                named `id`.
+                by its primary key and must be saved first.
 
         Raises:
             RuntimeError: The query is not a many-to-many relation.
+            TypeError: An instance is not of the related model.
+            ValueError: An instance has no primary key yet. Save it first.
         """
         if not self._m2m_context:
             raise RuntimeError(
                 "'.remove()' can only be used on Many-to-Many relationships"
             )
 
-        ids = []
-        for inst in instances:
-            ids.append(getattr(inst, "id"))
+        ids = self._m2m_keys("remove", instances)
 
         route = await self._transaction_or_using()
         await remove_m2m_links(
