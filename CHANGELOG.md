@@ -1,6 +1,51 @@
 # CHANGELOG
 
 
+## v0.27.0 (2026-10-30)
+
+### Bug Fixes
+
+- A refused Postgres connection fails at once; dev builds run tests at release speed; drop six
+  duplicate tests ([#823](https://github.com/syn54x/ferro-orm/pull/823),
+  [`58583d8`](https://github.com/syn54x/ferro-orm/commit/58583d82289e627d4f67e1a06a57ee5a532b5d8f))
+
+### Continuous Integration
+
+- Cache compiled Rust crates with sccache ([#808](https://github.com/syn54x/ferro-orm/pull/808),
+  [`8de5e95`](https://github.com/syn54x/ferro-orm/commit/8de5e9521f0728bacac7849d5d01ddace24ac79f))
+
+- Fail the main test job when the Codecov upload is rejected
+  ([#802](https://github.com/syn54x/ferro-orm/pull/802),
+  [`fde5d9b`](https://github.com/syn54x/ferro-orm/commit/fde5d9bbe24c5d65b37c137b29317f3b554e71e0))
+
+- One dependency cache per Python version, named in the shared key
+  ([#809](https://github.com/syn54x/ferro-orm/pull/809),
+  [`81c5c18`](https://github.com/syn54x/ferro-orm/commit/81c5c18825262d33409fb02231722f3a1f41cf69))
+
+- Pass the repository secrets to the release's CI gate
+  ([`90dd4ba`](https://github.com/syn54x/ferro-orm/commit/90dd4baaa5dd6a0266946640a0c7e413bd826408))
+
+- Run the test suites in parallel and the docs tests once
+  ([#803](https://github.com/syn54x/ferro-orm/pull/803),
+  [`190d325`](https://github.com/syn54x/ferro-orm/commit/190d325566cebb0849e9429ab3c4211f149669b5))
+
+- Upload coverage to Codecov with the org token
+  ([#799](https://github.com/syn54x/ferro-orm/pull/799),
+  [`29b88d3`](https://github.com/syn54x/ferro-orm/commit/29b88d3520e3b07c9e85c5e5918ea4639a34c45a))
+
+### Features
+
+- Generated columns, a field the database computes, through every migration door (#790)
+  ([#814](https://github.com/syn54x/ferro-orm/pull/814),
+  [`f6dfcb6`](https://github.com/syn54x/ferro-orm/commit/f6dfcb68a0beb10b3f720b9acc170b586c66be0f))
+
+### Refactoring
+
+- Say migration strategy and emitter where the code and docs said door
+  ([#824](https://github.com/syn54x/ferro-orm/pull/824),
+  [`55ba42a`](https://github.com/syn54x/ferro-orm/commit/55ba42ac85ba57d77ab51b20bb8dd0609cac06d9))
+
+
 ## v0.26.1 (2026-10-26)
 
 ### Bug Fixes
