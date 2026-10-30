@@ -1513,8 +1513,13 @@ class Query(Generic[T]):
             TypeError: An instance is not of the related model.
             ValueError: An instance has no primary key yet.
         """
-        pk = self.model_cls.__ferro_pk__
         name = self.model_cls.__name__
+        pk = getattr(self.model_cls, "__ferro_pk__", None)
+        if pk is None:
+            raise ValueError(
+                f"{self._m2m_label}.{verb}(): {name} declares no primary-key "
+                "column, so its instances cannot be linked."
+            )
         keys = []
         for inst in instances:
             if not isinstance(inst, self.model_cls):
