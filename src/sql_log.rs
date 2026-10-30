@@ -304,9 +304,9 @@ impl Extend<EngineBindValue> for SecretValues {
 /// The `PyErr` from reading a malformed converter registry.
 pub fn secret_columns_for(py: Python<'_>, cls: &Bound<'_, PyAny>) -> PyResult<HashSet<String>> {
     Ok(crate::hydration::field_converters_for(py, cls)?
-        .into_iter()
+        .iter()
         .filter(|(_, converter)| converter.kind == "secret")
-        .map(|(field, _)| field)
+        .map(|(field, _)| field.clone())
         .collect())
 }
 

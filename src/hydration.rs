@@ -41,14 +41,42 @@ pub struct FieldConverter<'py> {
     pub convert: Bound<'py, PyAny>,
 }
 
-/// Field name → its [`FieldConverter`].
-pub type FieldConverters<'py> = HashMap<String, FieldConverter<'py>>;
+/// Field name → its [`FieldConverter`], plus the model's declaration order.
+///
+/// Dereferences to the converter map. `order` maps a field name to its
+/// position in `cls.model_fields`, so a hydrated `__dict__` lists fields the
+/// way a constructed instance does (I-2) whatever order the columns arrive in.
+/// Empty for a class that is not a Ferro model (a projected `Row`).
+#[derive(Default, Clone)]
+pub struct FieldConverters<'py> {
+    by_field: HashMap<String, FieldConverter<'py>>,
+    order: HashMap<String, usize>,
+}
+
+impl FieldConverters<'_> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl<'py> std::ops::Deref for FieldConverters<'py> {
+    type Target = HashMap<String, FieldConverter<'py>>;
+    fn deref(&self) -> &Self::Target {
+        &self.by_field
+    }
+}
+
+impl std::ops::DerefMut for FieldConverters<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.by_field
+    }
+}
 
 /// Resolve a model's converted fields to their [`FieldConverter`]s.
 ///
 /// Built once per fetch (not per row) from `cls._hydration_converters`
 /// (field → `(kind, convert)`), which the metaclass populates from the
-/// column specs. The model class itself is the registry holding the
+/// column specs, and from `cls.model_fields` for the field order. The model class itself is the registry holding the
 /// converters (FF-C C4), so no Python object ever enters static Rust state.
 ///
 /// # Errors
@@ -59,7 +87,7 @@ pub fn field_converters_for<'py>(
     py: Python<'py>,
     cls: &Bound<'py, PyAny>,
 ) -> PyResult<FieldConverters<'py>> {
-    let mut out = HashMap::new();
+    let mut out = FieldConverters::new();
     let Ok(registry) = cls.getattr(pyo3::intern!(py, "_hydration_converters")) else {
         // A class that is not a Ferro model (a projected `Row`) converts nothing.
         return Ok(out);
@@ -69,6 +97,13 @@ pub fn field_converters_for<'py>(
         let field_name = field_name.extract::<String>()?;
         let (kind, convert) = entry.extract::<(String, Bound<'py, PyAny>)>()?;
         out.insert(field_name, FieldConverter { kind, convert });
+    }
+    for (position, name) in cls
+        .getattr(pyo3::intern!(py, "model_fields"))?
+        .try_iter()?
+        .enumerate()
+    {
+        out.order.insert(name?.extract::<String>()?, position);
     }
     Ok(out)
 }
@@ -128,7 +163,7 @@ fn init_handled_slots<'py>(
 /// * `py` — Active Python interpreter token.
 /// * `cls` — Model class object (e.g. `User`).
 /// * `connection_name` — Registered connection name stored on the instance for routing.
-/// * `fields` — `(column_name, decoded_value)` pairs in query result order.
+/// * `fields` — `(column_name, decoded_value)` pairs; written in `model_fields` order.
 /// * `py_col_names` — Interned `PyString` handles for column names (avoids per-row allocation).
 /// * `converters` — The per-field conversion, from [`field_converters_for`];
 ///   non-null values of enum fields hydrate as enum members (FF-C C4) and of
@@ -144,13 +179,21 @@ pub fn hydrate_model_instance<'py>(
     py: Python<'py>,
     cls: &Bound<'py, PyAny>,
     connection_name: &str,
-    fields: Vec<(String, RustValue)>,
+    mut fields: Vec<(String, RustValue)>,
     py_col_names: &HashMap<String, pyo3::Py<pyo3::types::PyString>>,
     converters: &FieldConverters<'py>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let instance = cls.call_method1(pyo3::intern!(py, "__new__"), (cls,))?;
     let dict_attr = instance.getattr(pyo3::intern!(py, "__dict__"))?;
     let dict = dict_attr.cast::<pyo3::types::PyDict>()?;
+    let fields_set = pyo3::types::PySet::empty(py)?;
+
+    // Declaration order, as a constructed instance has it; the columns arrive
+    // sorted by name. Stable, so a column outside `model_fields` keeps its
+    // place after the declared ones.
+    fields.sort_by_key(|(col, _)| converters.order.get(col).copied().unwrap_or(usize::MAX));
+    apply_decoded_fields(py, cls, dict, &fields_set, fields, py_col_names, converters)?;
+
     dict.set_item(
         pyo3::intern!(py, "__ferro_connection_name"),
         connection_name,
@@ -158,9 +201,6 @@ pub fn hydrate_model_instance<'py>(
     // Hydrated instances are persistent by definition: `Model.save()` reads
     // this marker to choose UPDATE ... WHERE pk = ? over INSERT (FF-A A4).
     dict.set_item(pyo3::intern!(py, "__ferro_persisted"), true)?;
-    let fields_set = pyo3::types::PySet::empty(py)?;
-
-    apply_decoded_fields(py, cls, dict, &fields_set, fields, py_col_names, converters)?;
 
     init_handled_slots(py, cls, &instance, &fields_set)?;
     Ok(instance)
