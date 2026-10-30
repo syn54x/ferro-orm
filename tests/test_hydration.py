@@ -235,3 +235,115 @@ async def test_hydration_holds_the_mapped_columns_only(db_url):
         row_fields = {k: v for k, v in row.__dict__.items() if not k.startswith("__")}
         assert row_fields == built.__dict__ == {"id": 1, "name": "kept"}
         _assert_pydantic_slots(row, expected_fields={"id", "name"}, expected_extra=None)
+
+
+@pytest.mark.asyncio
+async def test_hydrated_instances_list_fields_in_declaration_order(db_url):
+    """A loaded instance lists fields like a built one on every fetch path (I-2)."""
+    from typing import Annotated
+
+    from ferro import BackRef, ForeignKey, Relation
+
+    class OrderAuthor(Model):
+        id: int | None = Field(default=None, json_schema_extra={"primary_key": True})
+        username: str
+        email: str
+        age: int
+        posts: Relation[list["OrderPost"]] = BackRef()
+
+    class OrderPost(Model):
+        id: int | None = Field(default=None, json_schema_extra={"primary_key": True})
+        title: str
+        author: Annotated[OrderAuthor, ForeignKey(related_name="posts")]
+        body: str
+
+    declared = ["id", "username", "email", "age"]
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        built = OrderAuthor(id=1, username="ada", email="a@x", age=30)
+        await built.save()
+        built_keys = list(built.__dict__)
+        await OrderPost(id=1, title="t", author=built, body="b").save()
+
+    async with ferro.engines.session():
+        got = await OrderAuthor.get(1)
+        assert list(got.model_dump()) == declared
+        assert list(got.__dict__) == built_keys
+        assert list(got.__dict__)[-2:] == [
+            "__ferro_connection_name",
+            "__ferro_persisted",
+        ]
+        assert got.__pydantic_fields_set__ == set(declared)
+
+        found = await OrderAuthor.where(lambda author: author.age == 30).all()
+        first = await OrderAuthor.where(lambda author: author.age == 30).first()
+        for author in (*found, first):
+            assert list(author.model_dump()) == declared
+
+        post = (
+            await OrderPost.where(lambda post: post.id == 1)
+            .include(lambda post: post.author)
+            .all()
+        )[0]
+        assert list(post.author.model_dump()) == declared
+        assert list(post.__dict__)[:4] == list(OrderPost.model_fields)[:4]
+
+        for member in await got.posts.all():
+            assert list(member.model_dump()) == list(OrderPost.model_fields)
+
+
+@pytest.mark.asyncio
+async def test_identity_refresh_keeps_field_order(db_url):
+    class OrderRefresh(Model):
+        id: int | None = Field(default=None, json_schema_extra={"primary_key": True})
+        username: str
+        age: int
+
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        await OrderRefresh(id=1, username="u", age=3).save()
+    async with ferro.engines.session():
+        held = await OrderRefresh.get(1)
+        before = list(held.__dict__)
+        again = await OrderRefresh.get(1)
+        assert again is held
+        assert list(held.__dict__) == before
+        assert list(held.model_dump()) == ["id", "username", "age"]
+
+
+@pytest.mark.asyncio
+async def test_hydration_order_with_shadow_column_and_retired_field(db_url):
+    """Dump keys follow model_fields with a shadow FK column and a retired field."""
+    from typing import Annotated
+
+    from ferro import BackRef, ForeignKey, Relation
+    from ferro import Field as FerroFieldOption
+
+    class OrderOwner(Model):
+        id: int | None = Field(default=None, json_schema_extra={"primary_key": True})
+        rows: Relation[list["OrderRetired"]] = BackRef()
+
+    class OrderRetired(Model):
+        id: int | None = Field(default=None, json_schema_extra={"primary_key": True})
+        zeta: str
+        owner: Annotated[OrderOwner, ForeignKey(related_name="rows")]
+        gone: str | None = FerroFieldOption(retired=True)
+        alpha: str
+
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        owner = OrderOwner(id=1)
+        await owner.save()
+        built = OrderRetired(id=1, zeta="z", owner=owner, alpha="a")
+        await built.save()
+        built_dump = list(built.model_dump())
+        built_keys = list(built.__dict__)
+        assert "gone" not in built_dump
+        assert "gone" not in built_keys
+
+    async with ferro.engines.session():
+        got = await OrderRetired.get(1)
+        assert list(got.model_dump()) == built_dump
+        assert list(got.__dict__) == built_keys
+        assert "gone" not in got.model_dump()
+        assert "gone" not in got.__dict__
