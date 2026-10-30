@@ -1,9 +1,9 @@
 """Runnable companion to the Inspecting SQL guide (docs/pages/guide/inspecting-sql.md).
 
 Every block on the page uses the ``Account`` model this script declares. The
-page's output blocks are regenerated from the regions below
-(``tests/test_docs_output.py``), and its SQL blocks from the statements they
-send (``tests/test_docs_sql.py``).
+regions below run in the order the page shows them, and the page's output
+blocks are regenerated from what they print (``tests/test_docs_output.py``).
+The page has no SQL blocks: the statements it shows are what ``.sql()`` prints.
 """
 
 import asyncio
@@ -31,18 +31,6 @@ def untimed(record: logging.LogRecord) -> str:
 
 
 async def main() -> None:
-    # --8<-- [start:statement-log]
-    records: list[logging.LogRecord] = []
-
-    class Collect(logging.Handler):
-        def emit(self, record: logging.LogRecord) -> None:
-            records.append(record)
-
-    logger = logging.getLogger("ferro.sql")
-    logger.addHandler(Collect())
-    logger.setLevel(logging.DEBUG)
-    # --8<-- [end:statement-log]
-
     # --8<-- [start:first]
     from ferro import connect, engines, transaction
 
@@ -53,6 +41,29 @@ async def main() -> None:
         print(rendered.params)
         # --8<-- [end:first]
         assert rendered.params == ("Ada",)
+
+        # --8<-- [start:count-and-update]
+        counted = await Account.select().count.sql()
+        print(counted)
+
+        renamed = await Account.where(
+            lambda account: account.owner == "Ada"
+        ).update.sql(owner="Ada Lovelace")
+        print(renamed)
+        print(renamed.params)
+        # --8<-- [end:count-and-update]
+
+        # --8<-- [start:statement-log]
+        records: list[logging.LogRecord] = []
+
+        class Collect(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record)
+
+        logger = logging.getLogger("ferro.sql")
+        logger.addHandler(Collect())
+        logger.setLevel(logging.DEBUG)
+        # --8<-- [end:statement-log]
 
         # --8<-- [start:a-record]
         await Account(owner="Ada", token=SecretStr("sk_live_ada")).save()
@@ -69,25 +80,12 @@ async def main() -> None:
         # --8<-- [end:attributes]
 
         # --8<-- [start:operations]
-        print(list(dict.fromkeys(record.operation for record in records)))  # type: ignore[attr-defined]
-
         records.clear()
         async with transaction():
             await Account(owner="Grace", token=SecretStr("sk_live_grace")).save()
             await Account.where(lambda account: account.owner == "Grace").all()
         print([record.operation for record in records])  # type: ignore[attr-defined]
         # --8<-- [end:operations]
-
-        # --8<-- [start:count-and-update]
-        counted = await Account.select().count.sql()
-        print(counted)
-
-        renamed = await Account.where(
-            lambda account: account.owner == "Ada"
-        ).update.sql(owner="Ada Lovelace")
-        print(renamed)
-        print(renamed.params)
-        # --8<-- [end:count-and-update]
 
         # --8<-- [start:secrets]
         looked_up = await Account.where(

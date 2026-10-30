@@ -69,7 +69,7 @@ The examples that follow need the records themselves, so this handler keeps them
 --8<-- "docs/examples/inspecting_sql.py:statement-log"
 ```
 
-Every statement from here on, the schema work `connect()` does included, lands in `records`.
+Every statement Ferro sends from here on lands in `records`. The program above had already called `connect()`, so the schema statements it ran are not in the list; put these lines before `connect()` and they are, as `migrate` records.
 
 ## A log record
 
@@ -107,6 +107,23 @@ rows: None
 
 `operation` says which call sent the statement. `rows` is `None` here because the `INSERT` returns the new row's key instead of a count; it holds the rows affected for an `update()` or a `delete()`. Two more attributes, `duration_ms` and `error`, hold the time the database took and its error text when the statement failed. The [Logging](connections.md#logging) section lists every attribute and every `operation`.
 
+## Records you did not ask for
+
+Not every record comes from a line you wrote. Clear the list, run a transaction and print the `operation` of each record it left:
+
+```python
+--8<-- "docs/examples/inspecting_sql.py:operations"
+```
+
+It prints:
+
+<!-- prints: inspecting_sql.py:operations -->
+```text
+['transaction', 'save', 'fetch', 'transaction']
+```
+
+A `transaction()` block logs its own `BEGIN` and `COMMIT` with the operation `"transaction"`, and a session with settings logs a `"settings"` record. On PostgreSQL, the first operation that touches a table also reads the table's columns from the catalog, and that read is a `catalog` record; this program's `.sql()` call touched `Account` before the log was on, so none shows here. To keep the log to the statements your code wrote, skip those operations in your handler or filter.
+
 ## Secret columns
 
 A `SecretStr` or `SecretBytes` column never shows its value in a record or in a rendered statement. Ferro knows which bound parameters are secrets and puts `***` in their place, in the line and in `params` alike. The record above already showed it for the `INSERT`. Filtering on the token does the same:
@@ -124,24 +141,6 @@ SELECT "account"."id", "account"."owner", "account"."token" FROM "account" WHERE
 ```
 
 The first line is `.sql()`'s `params`, the second the record of the query that ran. The database received the real token; only what you see is masked. Each masked value is [`REDACTED`][ferro.REDACTED], an object whose `repr` and `str` are `***`.
-
-## Records you did not ask for
-
-Not every record comes from a line you wrote. Print the `operation` of each record so far, then of the records one transaction leaves:
-
-```python
---8<-- "docs/examples/inspecting_sql.py:operations"
-```
-
-It prints:
-
-<!-- prints: inspecting_sql.py:operations -->
-```text
-['migrate', 'save']
-['transaction', 'save', 'fetch', 'transaction']
-```
-
-The `migrate` record is the table `connect(auto_migrate=True)` created. On PostgreSQL, the first operation that touches a table also reads the table's columns from the catalog, and that read is a `catalog` record between the two, so the first list there is `['migrate', 'catalog', 'save']`. A `transaction()` block logs its own `BEGIN` and `COMMIT` with the operation `"transaction"`, and a session with settings logs a `"settings"` record. To keep the log to the statements your code wrote, skip those operations in your handler or filter.
 
 ## Asserting on records in a test
 
