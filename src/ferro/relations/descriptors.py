@@ -70,7 +70,13 @@ class RelationshipDescriptor(BaseModel):
             return Relation(
                 self._target_model,
                 using=_instance_origin_outside_transaction(instance),
-            )._m2m(self.join_table, self.source_col, self.target_col, pk_val)
+            )._m2m(
+                self.join_table,
+                self.source_col,
+                self.target_col,
+                pk_val,
+                label=f"{type(instance).__name__.lower()}.{self.field_name}",
+            )
 
         fk_field = f"{self.field_name}_id"
         if self.is_one_to_one:
