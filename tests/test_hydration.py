@@ -317,6 +317,7 @@ async def test_hydration_order_with_shadow_column_and_retired_field(db_url):
     from typing import Annotated
 
     from ferro import BackRef, ForeignKey, Relation
+    from ferro import Field as FerroFieldOption
 
     class OrderOwner(Model):
         id: int | None = Field(default=None, json_schema_extra={"primary_key": True})
@@ -326,7 +327,7 @@ async def test_hydration_order_with_shadow_column_and_retired_field(db_url):
         id: int | None = Field(default=None, json_schema_extra={"primary_key": True})
         zeta: str
         owner: Annotated[OrderOwner, ForeignKey(related_name="rows")]
-        gone: str | None = Field(default=None, retired=True)
+        gone: str | None = FerroFieldOption(retired=True)
         alpha: str
 
     await ferro.connect(db_url, auto_migrate=True)
@@ -337,8 +338,12 @@ async def test_hydration_order_with_shadow_column_and_retired_field(db_url):
         await built.save()
         built_dump = list(built.model_dump())
         built_keys = list(built.__dict__)
+        assert "gone" not in built_dump
+        assert "gone" not in built_keys
 
     async with ferro.engines.session():
         got = await OrderRetired.get(1)
         assert list(got.model_dump()) == built_dump
         assert list(got.__dict__) == built_keys
+        assert "gone" not in got.model_dump()
+        assert "gone" not in got.__dict__
