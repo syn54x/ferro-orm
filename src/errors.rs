@@ -100,6 +100,14 @@ fn build_exception(
     Ok(PyErr::from_value(instance))
 }
 
+/// A `DataError` raised by Ferro itself, before any statement is sent.
+pub(crate) fn data_error(message: &str) -> PyErr {
+    Python::attach(|py| {
+        build_exception(py, "DataError", message, None, None, None)
+            .unwrap_or_else(|lookup_err| lookup_err)
+    })
+}
+
 /// Convert a database failure into the matching typed Ferro exception.
 ///
 /// The message is `"{context}: {driver error}"`; the original driver

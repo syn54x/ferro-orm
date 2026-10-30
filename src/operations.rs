@@ -4,7 +4,7 @@
 //! GIL-free parsing and zero-copy Direct Injection into Python objects.
 
 use crate::backend::{
-    EngineBindValue, EngineHandle, EngineRow, EngineValue, NullKind, TableCatalog,
+    EngineBindValue, EngineHandle, EngineRow, EngineValue, NullKind, StorageClass, TableCatalog,
 };
 use crate::query::{JoinPlan, QueryPlan};
 use crate::session_settings::{
@@ -1940,7 +1940,8 @@ async fn postgres_table_catalog(
     let sql = r#"
         SELECT a.attname::text AS column_name,
                t.typname::text AS udt_name,
-               t.typtype::text AS typtype
+               t.typtype::text AS typtype,
+               t.typcategory::text AS typcategory
         FROM pg_attribute a
         JOIN pg_class c ON a.attrelid = c.oid
         JOIN pg_namespace n ON c.relnamespace = n.oid
@@ -1956,8 +1957,22 @@ async fn postgres_table_catalog(
         let column_name = engine_row_string(&row, "column_name").unwrap_or_default();
         let udt_name = engine_row_string(&row, "udt_name").unwrap_or_default();
         let typtype = engine_row_string(&row, "typtype").unwrap_or_default();
+        let typcategory = engine_row_string(&row, "typcategory").unwrap_or_default();
         if column_name.is_empty() || udt_name.is_empty() {
             continue;
+        }
+        let class = if udt_name == "bytea" {
+            StorageClass::Binary
+        } else if typcategory == "S" {
+            StorageClass::Text
+        } else {
+            StorageClass::Other
+        };
+        if class != StorageClass::Other {
+            catalog.storage_class.insert(column_name.clone(), class);
+            catalog
+                .storage_type
+                .insert(column_name.clone(), udt_name.clone());
         }
         if typtype == "e" {
             catalog.enum_udt.insert(column_name, udt_name);
@@ -1971,6 +1986,51 @@ async fn postgres_table_catalog(
     let catalog = Arc::new(catalog);
     engine.store_table_catalog(table_name, catalog.clone());
     Ok(catalog)
+}
+
+/// The live storage class (text or bytes) a declared codec cannot cross.
+///
+/// Postgres coerces a `bytea` bind into a `varchar` column through the type's
+/// I/O functions and stores its hex text, so a column the model declares
+/// binary over a live text column (a 0.25 `SecretBytes` column), or the
+/// reverse, would corrupt the value with no error. The operation refuses
+/// instead, naming the migration that fixes the column.
+///
+/// # Errors
+/// `DataError` for the first of `columns` whose declared and live classes
+/// are the text/bytes pair.
+fn refuse_storage_mismatch<'a>(
+    model: &crate::state::RegisteredModel,
+    catalog: &TableCatalog,
+    columns: impl IntoIterator<Item = &'a str>,
+) -> PyResult<()> {
+    use crate::codec_plan::ColumnCodec;
+    for column in columns {
+        let Some(&live) = catalog.storage_class.get(column) else {
+            continue;
+        };
+        let declared = match model.codec_plan.codec(column) {
+            Some(ColumnCodec::Bytes) => StorageClass::Binary,
+            Some(ColumnCodec::Str) => StorageClass::Text,
+            _ => continue,
+        };
+        if declared == live {
+            continue;
+        }
+        let declared_type = model
+            .codec_plan
+            .entry(column)
+            .map_or("", |entry| entry.db_type.as_str());
+        let live_type = catalog.storage_type.get(column).map_or("", String::as_str);
+        let label = crate::state::model_label_for_table(&model.table_name);
+        return Err(crate::errors::data_error(&format!(
+            "{label}.{column} is declared {declared_type} but the live column is {live_type}; \
+             Ferro will not write bytes into a text column (or read text as bytes). \
+             Change the column's type with a migration (ferro migrate new) or connect with \
+             migrate_updates=True."
+        )));
+    }
+    Ok(())
 }
 
 /// Build a SeaQuery expression for a column value, preserving type information
@@ -3043,7 +3103,13 @@ pub fn save_record<'py>(
                 enum_udt,
                 uuid_columns,
                 ts_cast,
+                ..
             } = &*catalog;
+            refuse_storage_mismatch(
+                &schema,
+                &catalog,
+                bind_inputs.iter().map(|(k, _)| k.as_str()),
+            )?;
             // A save binds plain values, so only its generated columns compute.
             let write = crate::errors::GeneratedWrite {
                 table: &table_name,
@@ -3146,7 +3212,13 @@ pub fn update_record<'py>(
                 enum_udt,
                 uuid_columns,
                 ts_cast,
+                ..
             } = &*catalog;
+            refuse_storage_mismatch(
+                &schema,
+                &catalog,
+                bind_inputs.iter().map(|(k, _)| k.as_str()),
+            )?;
 
             let plan = build_update_by_pk_sql(
                 &schema,
@@ -3323,7 +3395,9 @@ pub fn save_bulk_records<'py>(
                 enum_udt,
                 uuid_columns,
                 ts_cast,
+                ..
             } = &*catalog;
+            refuse_storage_mismatch(&schema, &catalog, column_names.iter().map(String::as_str))?;
 
             let mut statements: Vec<(String, sea_query::Values)> = Vec::new();
             for chunk in record_inputs.chunks(rows_per_stmt) {
@@ -3585,6 +3659,34 @@ async fn build_fetch(
         Some(paths) => resolve_include_hops(paths, &join_plan, plan)?,
         None => Vec::new(),
     };
+    // A fetch reads bytes as text (or text as bytes) just as a write binds
+    // them wrongly, so the columns it selects are held to the same check:
+    // the root's, a projection's own, and every included hop's.
+    match projected {
+        None => refuse_storage_mismatch(
+            &schema,
+            &catalog,
+            schema.column_names.iter().map(String::as_str),
+        )?,
+        Some(fields) => refuse_storage_mismatch(
+            &schema,
+            &catalog,
+            fields.iter().filter_map(|field| match &field.source {
+                ProjectedSource::Column { column, path } if path.is_empty() => {
+                    Some(column.as_str())
+                }
+                _ => None,
+            }),
+        )?,
+    }
+    for hop in &include_hops {
+        let hop_catalog = postgres_table_catalog(&hop.table, engine, exec, backend).await?;
+        refuse_storage_mismatch(
+            &hop.registration,
+            &hop_catalog,
+            hop.registration.column_names.iter().map(String::as_str),
+        )?;
+    }
     let statement = {
         let pk = schema.meta.pk_col.clone();
 
@@ -4474,7 +4576,13 @@ async fn build_update(
         enum_udt,
         uuid_columns,
         ts_cast,
+        ..
     } = &*catalog;
+    refuse_storage_mismatch(
+        &schema,
+        &catalog,
+        plan.set_assignments.iter().map(|a| a.column.as_str()),
+    )?;
     plan.postgres_enum_udt = enum_udt.clone();
     let (sql, values) = {
         // Qualified by the root table alias (#269) — same rationale as

@@ -195,6 +195,21 @@ pub fn registration_for_table(table_name: &str) -> PyResult<Arc<RegisteredModel>
         })
 }
 
+/// The class name of the model that owns `table_name`, for messages: the last
+/// segment of its registry key, or the table name when none is registered.
+pub fn model_label_for_table(table_name: &str) -> String {
+    MODEL_REGISTRY
+        .read()
+        .ok()
+        .and_then(|registry| {
+            registry
+                .iter()
+                .find(|(_, model)| model.table_name == table_name)
+                .map(|(key, _)| key.rsplit('.').next().unwrap_or(key).to_string())
+        })
+        .unwrap_or_else(|| table_name.to_string())
+}
+
 /// Python-compiled SchemaIR modelset pushed by the `connect`/`migrate` wrappers.
 ///
 /// Populated before `internal_migrate` runs so the runtime diff can consume the
