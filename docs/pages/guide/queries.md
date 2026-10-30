@@ -1856,4 +1856,5 @@ These query features are not available yet; the [Roadmap](../roadmap.md) tracks 
 - [Relationships](relationships.md): declaring foreign keys and reverse relations
 - [Typed query predicates](../concepts/query-typing.md): how lambda predicates are type-checked
 - [Raw SQL](raw-sql.md): for queries the query builder cannot express
+- [Inspecting SQL](inspecting-sql.md): `.sql()` renders any terminal's statement without running it
 - [Pagination](../howto/pagination.md): offset and keyset paging in an API

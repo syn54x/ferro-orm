@@ -207,7 +207,7 @@ except ferro.OperationalError as error:
     changed = {s.subject for s in error.report.statements if s.role == "schema"}
 ```
 
-`changed` names every table whose changes committed. On SQLite the pass applies its statements one at a time, so a failure can leave earlier statements of the same table applied; when a change must land whole, make it a [migration](migrations.md) instead. `connect(..., auto_migrate=True)` runs the same pass and returns nothing; its failure carries the same `.report`. Each statement is also a record on the `ferro.sql` logger as it finishes, with its `sql`, `subject` and duration as attributes (see [Logging](../connections.md#logging)); the log is for watching, and the report is still the structured answer.
+`changed` names every table whose changes committed. On SQLite the pass applies its statements one at a time, so a failure can leave earlier statements of the same table applied; when a change must land whole, make it a [migration](migrations.md) instead. `connect(..., auto_migrate=True)` runs the same pass and returns nothing; its failure carries the same `.report`. Each statement is also a record on the `ferro.sql` logger as it finishes, with its `sql`, `subject` and duration as attributes (see [Inspecting SQL](../inspecting-sql.md)); the log is for watching, and the report is still the structured answer.
 
 ## Concurrent passes and the run lock
 

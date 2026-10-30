@@ -167,4 +167,5 @@ The error names the fix: open a session with `async with engines.session():`, or
 - [Transactions](transactions.md): the `Transaction` handle and nesting
 - [Connections and databases](connections.md): named connections and sessions
 - [Queries](queries.md): what the ORM expresses without raw SQL
+- [Inspecting SQL](inspecting-sql.md): the statement log, and `.sql()` to render a query without running it
 - [Raw SQL reference](../api/raw-sql.md): full signatures

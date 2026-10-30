@@ -365,7 +365,7 @@ A statement the database rejects ends its line with `failed: <error>`, and the e
 
 Statements a Postgres pool sends on its own, outside any operation, are not in the log: the `SET search_path` it runs on each new connection, and, with `settings_delivery="connection"`, the check it runs on each returned connection while a session has one pinned.
 
-The logger is the only switch: while `ferro.sql` is not enabled for `DEBUG`, Ferro collects nothing. Ferro installs only a `NullHandler` on its `ferro` logger, which propagates, so your logging configuration (and pytest's `caplog`) decides where the records go. The `ferro` command line installs its own handler, so a data step's `ctx.log.info(...)` lines still print there.
+The logger is the only switch: while `ferro.sql` is not enabled for `DEBUG`, Ferro collects nothing. Ferro installs only a `NullHandler` on its `ferro` logger, which propagates, so your logging configuration (and pytest's `caplog`) decides where the records go. The `ferro` command line installs its own handler, so a data step's `ctx.log.info(...)` lines still print there. [Inspecting SQL](inspecting-sql.md) shows the records, what a secret looks like in one and how to assert on them in a test.
 
 ## See also
 
