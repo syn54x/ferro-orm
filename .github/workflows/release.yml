@@ -72,6 +72,7 @@ jobs:
   ci-gate:
     name: CI Gate
     uses: ./.github/workflows/ci.yml
+    secrets: inherit
 
   packaging-smoke:
     name: Packaging Smoke Gate
