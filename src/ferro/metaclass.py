@@ -892,7 +892,8 @@ class ModelMetaclass(type(BaseModel)):
         through ``__init__``, so a field whose declared type is not what the
         database hands back is converted, value by value, by the one entry
         recorded here: an enum field by its enum class, a secret field by a
-        `SecretHydrator`. Each entry is ``(kind, convert)``; ``kind`` names the
+        `SecretHydrator`, a JSON field the decoder cannot produce by its type
+        adapter. Each entry is ``(kind, convert)``; ``kind`` names the
         field in a rejection (``Failed to hydrate enum field ...``).
         """
         converters: dict[str, tuple[str, Callable[[Any], Any]]] = {}
@@ -901,6 +902,8 @@ class ModelMetaclass(type(BaseModel)):
                 converters[field_name] = ("enum", spec.enum_class)
             elif spec.secret_class is not None:
                 converters[field_name] = ("secret", SecretHydrator(spec.secret_class))
+            elif spec.json_adapter is not None:
+                converters[field_name] = ("json", spec.json_adapter.validate_python)
         cls._hydration_converters = converters
 
     @staticmethod

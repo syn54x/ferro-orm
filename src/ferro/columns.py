@@ -10,12 +10,21 @@ from __future__ import annotations
 
 import json
 import types
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum
-from typing import Any, ForwardRef, Union, get_args, get_origin, get_type_hints
+from typing import (
+    Annotated,
+    Any,
+    ForwardRef,
+    Literal,
+    Union,
+    get_args,
+    get_origin,
+    get_type_hints,
+)
 from uuid import UUID
 
-from pydantic import BaseModel, SecretBytes, SecretStr
+from pydantic import BaseModel, SecretBytes, SecretStr, TypeAdapter
 from pydantic_core import PydanticUndefined, to_json
 
 from ._annotation_utils import (
@@ -189,6 +198,10 @@ class ColumnSpec:
     """An enum column's `Enum` class, or `None`."""
     secret_class: type[SecretStr] | type[SecretBytes] | None = None
     """The `SecretStr` or `SecretBytes` class of a secret column, or `None`: the column stores the raw value and hydrates it wrapped in this class again."""
+    json_adapter: TypeAdapter[Any] | None = field(
+        default=None, compare=False, repr=False
+    )
+    """The Pydantic type adapter a JSON column's decoded value is validated through on hydration, or `None` when the annotation is native to JSON (or the column is not JSON)."""
     db_type: str | None = None
     """The column's SQL type token, or `None` for the derived type."""
     db_type_explicit: bool = False
@@ -203,6 +216,33 @@ class ColumnSpec:
     A retired column stays in the schema snapshot, nullable, and is never in
     `__ferro_columns__`, the mapped columns the model reads and writes.
     """
+
+
+_JSON_NATIVE = (str, int, float, bool, dict, list, type(None), Any, object)
+
+
+def _json_needs_validation(hint: Any) -> bool:
+    """Whether the JSON decoder cannot produce ``hint`` from a stored document.
+
+    Native: ``str``, ``int``, ``float``, ``bool``, ``None``, ``Any``, ``dict``
+    (string keys only, since JSON object keys are strings), ``list``,
+    ``Literal`` and unions and ``Annotated`` of these. Anything else (a model,
+    ``set``, ``tuple``, ``datetime``, ``UUID``, an enum, ...) is validated.
+    """
+    origin = get_origin(hint)
+    if origin is Annotated:
+        return _json_needs_validation(get_args(hint)[0])
+    if origin is Union or origin is types.UnionType:
+        return any(_json_needs_validation(a) for a in get_args(hint))
+    if origin is Literal:
+        # An enum member in a Literal comes back as its value, not the member.
+        return any(isinstance(a, Enum) for a in get_args(hint))
+    if origin is list:
+        return any(_json_needs_validation(a) for a in get_args(hint))
+    if origin is dict:
+        key, value = get_args(hint) or (str, Any)  # a bare ``Dict`` has no args
+        return key not in (str, Any) or _json_needs_validation(value)
+    return hint not in _JSON_NATIVE
 
 
 def _derive_autoincrement(
@@ -551,6 +591,16 @@ def build_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
             fmt = prop.get("format")
         effective_prop = {**prop, "format": fmt} if fmt != prop.get("format") else prop
 
+        json_annotation = field_info.annotation if field_info is not None else ann
+        json_adapter = (
+            TypeAdapter(json_annotation)
+            if _logical_type(effective_prop) == "json"
+            and secret_cls is None
+            and json_annotation is not None
+            and _json_needs_validation(json_annotation)
+            else None
+        )
+
         enum_cls = enum_subclass_from_annotation(ann)
         if enum_cls is not None:
             enum_type_name: str | None = enum_cls.__name__.lower()
@@ -585,6 +635,7 @@ def build_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
             enum_type_name=enum_type_name,
             enum_class=enum_cls,
             secret_class=secret_cls,
+            json_adapter=json_adapter,
             db_type=db_type,
             db_type_explicit=bool(db_type),
             db_check=db_check,

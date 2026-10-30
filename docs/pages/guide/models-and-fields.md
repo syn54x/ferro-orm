@@ -102,7 +102,7 @@ The row reads back `"active"`, the value of `Status.ACTIVE`. To keep a closed se
 
 ### JSON storage: `json` and `jsonb`
 
-A `dict`, a `list` or a nested Pydantic model is stored as one JSON document. `Product` has two:
+A `dict`, a `list` or a nested Pydantic model is stored as one JSON document. `Product` has three: two plain collections and a nested `Dimensions` model, declared in the first example:
 
 === "Assignment"
 
@@ -116,7 +116,7 @@ A `dict`, a `list` or a nested Pydantic model is stored as one JSON document. `P
     --8<-- "docs/examples/models_and_fields_annotated.py:json"
     ```
 
-Both columns are `jsonb` on PostgreSQL and `JSON` on SQLite, and a value reads back equal to the one saved:
+Each column is `jsonb` on PostgreSQL and `JSON` on SQLite, and a value reads back equal to the one saved. A nested model, a `set`, a `tuple`, a `datetime` or a `UUID` inside the document reads back as the type you declared, validated the way the constructor validates it, so `stored.dimensions` is a `Dimensions`, not a `dict`:
 
 ```python
 --8<-- "docs/examples/models_and_fields.py:json-round-trip"
