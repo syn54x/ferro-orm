@@ -397,9 +397,9 @@ def check_fence(
 
     The fence compiles (top-level ``await`` allowed), says how it is tested
     (``fence_mode``), is linted when marked ``lint=check``, and runs when
-    marked ``test=run``. A ``test=pytest`` fence is run by the testing
-    how-to's own test. A ``backend=postgres`` fence runs only when given
-    ``database_url``.
+    marked ``test=run``. A ``test=pytest`` fence is run by
+    ``tests/test_docs_testing_fixtures.py``, in a project per page.
+    A ``backend=postgres`` fence runs only when given ``database_url``.
 
     Args:
         example: The fence, from a docs page or a docstring.

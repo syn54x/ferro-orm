@@ -144,9 +144,9 @@ The first line is `.sql()`'s `params`, the second the record of the query that r
 
 ## Asserting on records in a test
 
-pytest's `caplog` fixture is a handler on the root logger, so it collects the `ferro.sql` records once you set the logger's level. Use it to pin how many statements a call sends, or what it binds:
+pytest's `caplog` fixture is a handler on the root logger, so it collects the `ferro.sql` records once you set the logger's level. Use it to pin how many statements a call sends, or what it binds. This test runs under pytest-asyncio with the `db` fixture from [Testing](../howto/testing.md), against the `Account` model above:
 
-```python {test=compile reason="uses pytest's caplog fixture, which exists only inside a pytest run"}
+```python {test=pytest path="tests/test_statement_log.py"}
 import logging
 
 from pydantic import SecretStr
@@ -164,7 +164,7 @@ async def test_delete_sends_one_statement(db, caplog):
     assert record.params == ("Grace",)
 ```
 
-The test finds the one `delete` record and checks the value it bound. The `db` fixture comes from [Testing](../howto/testing.md).
+The test finds the one `delete` record and checks the value it bound.
 
 ## See also
 

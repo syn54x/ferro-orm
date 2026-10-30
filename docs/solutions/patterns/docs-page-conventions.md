@@ -215,7 +215,9 @@ docstring carries one of three markers; `tests/test_docs_examples.py` and
 | `{test=run prelude=<name>}` | Runs the block after `docs/examples/_preludes/<name>.py`. |
 | `{test=run prelude=<name> backend=postgres}` | Runs it on PostgreSQL under the `postgres_only` marker, every `connect()` in the prelude and the block pointed at the test database whatever URL it names, keeping the PostgreSQL query options that URL carries (a `ferro_search_path` schema is created first); without Postgres the test is skipped and the block only compiles. A `<!-- prints: above -->` block under it is compared on PostgreSQL. |
 | `{test=compile reason="..."}` | Compiles the block; the reason says why it cannot run. |
-| `{test=pytest path="tests/<file>.py"}` | Writes the block at that path in a scratch project and runs pytest there (`tests/test_docs_testing_fixtures.py`, for the testing how-to). |
+| `{test=pytest path="tests/<file>.py"}` | Writes the block at that path in a scratch project and runs pytest there (`tests/test_docs_testing_fixtures.py`). Any page may use it. |
+
+A page with `test=pytest` fences gets its own scratch project. Its `myapp/models.py` is the page's example module by slug, `docs/examples/<page-stem-with-underscores>.py` (`inspecting-sql.md` uses `inspecting_sql.py`); the testing how-to keeps `testing_models.py`. Every project shares the how-to's `tests/conftest.py` and pytest configuration, so a test can take the `db` fixture. The module must import without side effects: guard `main()` with `if __name__ == "__main__":` and call no `connect()` at import. A page whose module is missing fails the harness, naming the file to add.
 
 A block that needs Postgres runs with `backend=postgres`; `test=compile` is for a block that cannot run anywhere the suite can (a web framework the test groups do not install, a generated file). An option the test server cannot honour (`sslmode=require` needs a TLS-enabled server) makes the block compile-only, saying so.
 

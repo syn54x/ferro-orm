@@ -1,22 +1,26 @@
-"""The testing how-to's fixtures, run the way the page tells readers to.
+"""The ``test=pytest`` fences of the docs pages, run the way the pages tell readers to.
 
 ``docs/pages/howto/testing.md`` hands readers a ``tests/conftest.py``
 (``docs/examples/testing_conftest.py``), a pytest configuration and a few
-test modules. Each test here builds that project in a temporary directory:
+test modules; any other page may mark a fence
+``{test=pytest path="tests/<file>.py"}`` too. Each test here builds one
+project per page in a temporary directory:
 
-- ``myapp/models.py`` from ``docs/examples/testing_models.py``,
+- ``myapp/models.py`` from the page's example module by slug,
+  ``docs/examples/<page-stem-with-underscores>.py`` (the how-to's is
+  ``testing_models.py``),
 - ``tests/conftest.py`` from ``docs/examples/testing_conftest.py``,
-- ``pyproject.toml`` from the page's ``[tool.pytest.ini_options]`` block,
-- every page fence marked ``{test=pytest path="tests/<file>.py"}`` at its path,
+- ``pyproject.toml`` from the how-to's ``[tool.pytest.ini_options]`` block,
+- every fence of the page marked ``test=pytest`` at its path,
 
 then runs pytest there in a subprocess, so the fixtures run under the
-pytest-asyncio mode the page configures, not this suite's.
+pytest-asyncio mode the how-to configures, not this suite's.
 """
 
 from __future__ import annotations
 
 import re
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -28,8 +32,13 @@ from tests._docs_harness import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-PAGE = REPO_ROOT / "docs" / "pages" / "howto" / "testing.md"
+PAGES = REPO_ROOT / "docs" / "pages"
+PAGE = PAGES / "howto" / "testing.md"
+INSPECTING_SQL = PAGES / "guide" / "inspecting-sql.md"
 EXAMPLES = REPO_ROOT / "docs" / "examples"
+
+# The how-to's models predate the slug rule and keep their name.
+_MODELS_BY_PAGE = {PAGE: EXAMPLES / "testing_models.py"}
 
 _PYTEST_OUTPUT = re.compile(
     r"^```text\n\$ pytest -q (?P<target>\S+)\n.*?^(?P<passed>\d+) passed",
@@ -37,18 +46,51 @@ _PYTEST_OUTPUT = re.compile(
 )
 
 
-def _page_test_modules() -> dict[str, str]:
+def _page_test_modules(page: Path) -> dict[str, str]:
     """The page's pytest modules: path in the project -> source."""
-    text = PAGE.read_text(encoding="utf-8")
+    text = page.read_text(encoding="utf-8")
     modules = {}
-    for example in fenced_examples(PAGE, text):
+    for example in fenced_examples(page, text):
         settings = fence_settings(example)
         if settings.get("test") == "pytest":
-            modules[settings["path"]] = example.source
+            path = settings["path"]
+            parts = PurePosixPath(path).parts
+            if parts[:1] != ("tests",) or ".." in parts:
+                raise ValueError(
+                    f"{example}: path={path} is outside tests/; "
+                    'write the fence {test=pytest path="tests/<file>.py"}'
+                )
+            modules[path] = example.source
     return modules
 
 
-def _write_project(root: Path, extra: dict[str, str] | None = None) -> None:
+def pages_with_pytest_fences() -> list[Path]:
+    """Every docs page that owns at least one ``test=pytest`` fence."""
+    return [
+        page
+        for page in sorted(PAGES.rglob("*.md"))
+        if "test=pytest" in page.read_text(encoding="utf-8")
+        and _page_test_modules(page)
+    ]
+
+
+def models_module_for(page: Path) -> Path:
+    """The example module that is the page's ``myapp/models.py``, by slug."""
+    if page in _MODELS_BY_PAGE:
+        return _MODELS_BY_PAGE[page]
+    slug = page.stem.replace("-", "_")
+    module = EXAMPLES / f"{slug}.py"
+    if not module.is_file():
+        raise FileNotFoundError(
+            f"{page}: a test=pytest fence needs docs/examples/{slug}.py as its "
+            "myapp/models.py; add it or move the fence to test=compile"
+        )
+    return module
+
+
+def _write_project(
+    root: Path, page: Path = PAGE, extra: dict[str, str] | None = None
+) -> None:
     text = PAGE.read_text(encoding="utf-8")
     [pyproject] = [
         fence.body
@@ -59,13 +101,13 @@ def _write_project(root: Path, extra: dict[str, str] | None = None) -> None:
     (root / "myapp").mkdir()
     (root / "myapp" / "__init__.py").write_text("", encoding="utf-8")
     (root / "myapp" / "models.py").write_text(
-        (EXAMPLES / "testing_models.py").read_text(encoding="utf-8"), encoding="utf-8"
+        models_module_for(page).read_text(encoding="utf-8"), encoding="utf-8"
     )
     (root / "tests").mkdir()
     (root / "tests" / "conftest.py").write_text(
         (EXAMPLES / "testing_conftest.py").read_text(encoding="utf-8"), encoding="utf-8"
     )
-    for path, source in {**_page_test_modules(), **(extra or {})}.items():
+    for path, source in {**_page_test_modules(page), **(extra or {})}.items():
         target = root / path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(source, encoding="utf-8")
@@ -81,20 +123,81 @@ def _pytest(root: Path, *args: str, env: dict[str, str] | None = None) -> str:
     return result.stdout
 
 
-def test_page_has_its_pytest_modules() -> None:
-    assert set(_page_test_modules()) == {
-        "tests/test_users.py",
-        "tests/test_raw_sql.py",
-        "tests/test_posts.py",
-    }
+EXPECTED_MODULES = {
+    PAGE: {"tests/test_users.py", "tests/test_raw_sql.py", "tests/test_posts.py"},
+    INSPECTING_SQL: {"tests/test_statement_log.py"},
+}
+EXPECTED_PASSED = {PAGE: 4, INSPECTING_SQL: 1}
+EXPECTED_MODEL = {PAGE: "User", INSPECTING_SQL: "Account"}
 
 
-def test_page_tests_pass_with_the_page_fixtures(tmp_path: Path) -> None:
-    _write_project(tmp_path)
+def test_pages_with_pytest_fences_are_the_known_pages() -> None:
+    assert set(pages_with_pytest_fences()) == set(EXPECTED_MODULES)
+
+
+@pytest.mark.parametrize("page", EXPECTED_MODULES, ids=lambda page: page.stem)
+def test_page_has_its_pytest_modules(page: Path) -> None:
+    assert set(_page_test_modules(page)) == EXPECTED_MODULES[page]
+
+
+@pytest.mark.parametrize("page", EXPECTED_MODULES, ids=lambda page: page.stem)
+def test_page_tests_pass_with_the_page_fixtures(page: Path, tmp_path: Path) -> None:
+    _write_project(tmp_path, page)
 
     stdout = _pytest(tmp_path)
 
-    assert "4 passed" in stdout, stdout
+    assert f"{EXPECTED_PASSED[page]} passed" in stdout, stdout
+
+
+@pytest.mark.parametrize("page", EXPECTED_MODULES, ids=lambda page: page.stem)
+def test_page_models_import_without_running_the_example(
+    page: Path, tmp_path: Path
+) -> None:
+    _write_project(tmp_path, page)
+    code = (
+        "import ferro\n"
+        "def refuse(*args, **kwargs):\n"
+        "    raise AssertionError('importing myapp.models connected')\n"
+        "ferro.connect = refuse\n"
+        "import myapp.models\n"
+        "from ferro.registry import REGISTRY\n"
+        "names = [m.__name__ for m in REGISTRY.models().values()]\n"
+        f"assert {EXPECTED_MODEL[page]!r} in names, names\n"
+    )
+
+    result = run_python(["-c", code], timeout=60, cwd=tmp_path)
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_page_without_a_slug_module_names_the_module_to_add(tmp_path: Path) -> None:
+    page = tmp_path / "no-such-example.md"
+    page.write_text(
+        '```python {test=pytest path="tests/test_x.py"}\nassert True\n```\n',
+        encoding="utf-8",
+    )
+    project = tmp_path / "project"
+    project.mkdir()
+
+    with pytest.raises(FileNotFoundError) as raised:
+        _write_project(project, page)
+
+    assert str(raised.value) == (
+        f"{page}: a test=pytest fence needs docs/examples/no_such_example.py as its "
+        "myapp/models.py; add it or move the fence to test=compile"
+    )
+
+
+@pytest.mark.parametrize("path", ["src/x.py", "tests/../x.py"])
+def test_pytest_fence_outside_tests_is_refused(tmp_path: Path, path: str) -> None:
+    page = tmp_path / "stray.md"
+    page.write_text(
+        f'```python {{test=pytest path="{path}"}}\nassert True\n```\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="outside tests/"):
+        _page_test_modules(page)
 
 
 def test_page_shows_what_pytest_prints(tmp_path: Path) -> None:
@@ -143,7 +246,7 @@ async def test_second_ada(db):
 
 
 def test_db_transaction_rolls_the_row_back(tmp_path: Path) -> None:
-    _write_project(tmp_path, {"tests/test_rollback_probe.py": ROLLBACK_PROBE})
+    _write_project(tmp_path, extra={"tests/test_rollback_probe.py": ROLLBACK_PROBE})
 
     stdout = _pytest(tmp_path, "tests/test_rollback_probe.py")
 
@@ -151,7 +254,7 @@ def test_db_transaction_rolls_the_row_back(tmp_path: Path) -> None:
 
 
 def test_db_gives_each_test_an_empty_database(tmp_path: Path) -> None:
-    _write_project(tmp_path, {"tests/test_isolation_probe.py": ISOLATION_PROBE})
+    _write_project(tmp_path, extra={"tests/test_isolation_probe.py": ISOLATION_PROBE})
 
     stdout = _pytest(tmp_path, "tests/test_isolation_probe.py")
 
