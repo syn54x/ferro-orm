@@ -52,3 +52,11 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 ferro-schema-ir = { path = "crates/ferro-schema-ir" }
 ferro-ddl-lowering = { path = "crates/ferro-ddl-lowering" }
 ferro-migrate = { path = "crates/ferro-migrate" }
+
+# Dependencies are optimized even in dev builds; Ferro's own crates keep
+# opt-level 0 and full debuginfo. Unoptimized, sqlx's SCRAM-SHA-256
+# handshake alone costs ~25 ms per Postgres connection and every catalog
+# read pays its protocol parsing, which made the test suite ~45% slower.
+[profile.dev.package."*"]
+opt-level = 3
+debug = false
