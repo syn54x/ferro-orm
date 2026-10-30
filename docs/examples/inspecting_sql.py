@@ -45,9 +45,9 @@ async def main() -> None:
         counted = await Account.select().count.sql()
         print(counted)
 
-        renamed = await Account.where(lambda account: account.owner == "Ada").update.sql(
-            owner="Ada Lovelace"
-        )
+        renamed = await Account.where(
+            lambda account: account.owner == "Ada"
+        ).update.sql(owner="Ada Lovelace")
         print(renamed)
         print(renamed.params)
         # --8<-- [end:count-and-update]
