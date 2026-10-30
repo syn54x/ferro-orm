@@ -3668,16 +3668,33 @@ async fn build_fetch(
             &catalog,
             schema.column_names.iter().map(String::as_str),
         )?,
-        Some(fields) => refuse_storage_mismatch(
-            &schema,
-            &catalog,
-            fields.iter().filter_map(|field| match &field.source {
-                ProjectedSource::Column { column, path } if path.is_empty() => {
-                    Some(column.as_str())
+        Some(fields) => {
+            for field in fields {
+                let ProjectedSource::Column { column, path } = &field.source else {
+                    continue;
+                };
+                if path.is_empty() {
+                    refuse_storage_mismatch(&schema, &catalog, [column.as_str()])?;
+                    continue;
                 }
-                _ => None,
-            }),
-        )?,
+                // A column reached through a relation belongs to the hop's
+                // model; its catalog was cached with the hop context.
+                let table = join_plan.prefix_table.get(path).ok_or_else(|| {
+                    pyo3::exceptions::PyValueError::new_err(format!(
+                        "record field {:?} traverses relation path {path:?} but the \
+                         query renders no join for that path",
+                        field.name
+                    ))
+                })?;
+                let registration = plan.hop_registrations.get(table).ok_or_else(|| {
+                    pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "no registration resolved for joined table '{table}'"
+                    ))
+                })?;
+                let hop_catalog = postgres_table_catalog(table, engine, exec, backend).await?;
+                refuse_storage_mismatch(registration, &hop_catalog, [column.as_str()])?;
+            }
+        }
     }
     for hop in &include_hops {
         let hop_catalog = postgres_table_catalog(&hop.table, engine, exec, backend).await?;

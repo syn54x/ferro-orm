@@ -228,3 +228,39 @@ async def test_sqlite_stores_the_bytes_over_a_varchar_column(db_url):
     async with ferro.engines.session():
         await Token(id=1, secret=SecretBytes(RAW)).save()
         assert (await Token.get(1)).secret.get_secret_value() == RAW
+
+
+@pytest.mark.asyncio
+@pytest.mark.postgres_only
+@pytest.mark.parametrize("live", ["varchar", "bytea"])
+async def test_projection_through_a_relation_checks_the_hop_column(db_url, live):
+    class Vault(Model):
+        id: Annotated[int, FerroField(primary_key=True)]
+        secret: SecretBytes
+        keys: Relation[list["Key"]] = BackRef()
+
+    class Key(Model):
+        id: Annotated[int, FerroField(primary_key=True)]
+        vault: Annotated[Vault | None, ForeignKey(related_name="keys")] = None
+
+    await ferro.connect(db_url)
+    async with ferro.engines.session():
+        await execute(
+            f'CREATE TABLE "vault" ("id" integer PRIMARY KEY, "secret" {live} NOT NULL)'
+        )
+        await execute(
+            'CREATE TABLE "key" ("id" integer PRIMARY KEY, '
+            '"vault_id" integer REFERENCES "vault" ("id"))'
+        )
+        await execute(
+            'INSERT INTO "vault" VALUES (1, '
+            + ("'\\xff006b')" if live == "varchar" else "'\\xff006b'::bytea)")
+        )
+        await execute('INSERT INTO "key" VALUES (1, 1)')
+
+        query = Key.select(lambda key: key.vault.secret)
+        if live == "varchar":
+            with pytest.raises(DataError, match="Vault.secret"):
+                await query.all()
+        else:
+            assert len(await query.all()) == 1
