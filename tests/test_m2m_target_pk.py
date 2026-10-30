@@ -86,9 +86,7 @@ async def test_uuid_keyed_target(db_url):
     REGISTRY.reset_for_test()
 
     class Badge(Model):
-        uid: Annotated[UUID, Field(primary_key=True)] = Field(
-            default_factory=uuid4, primary_key=True
-        )
+        uid: Annotated[UUID, Field(primary_key=True)] = Field(default_factory=uuid4)
         label: str = ""
         owners: Relation[list["Member"]] = ManyToMany(related_name="badges")
 
@@ -115,12 +113,13 @@ async def test_unsaved_instance_is_refused(db_url, slug_models, verb):
     await auto_migrate(db_url)
     async with ferro.engines.session():
         post = await Post.create(title="Hello")
+        await post.tags.add(await Tag.create(slug="rust"))
         with pytest.raises(ValueError) as exc:
             await getattr(post.tags, verb)(Tag(label="x"))
         assert str(exc.value) == (
             f"post.tags.{verb}(): Tag(slug=None) has no primary key yet; save it first"
         )
-        assert await _links("tag_posts") == 0
+        assert await _links("tag_posts") == 1
 
 
 @pytest.mark.asyncio
@@ -132,7 +131,8 @@ async def test_foreign_model_instance_is_refused(db_url, slug_models, verb):
     async with ferro.engines.session():
         post = await Post.create(title="Hello")
         author = await Author.create(name="Ada")
+        await post.tags.add(await Tag.create(slug="rust"))
         with pytest.raises(TypeError) as exc:
             await getattr(post.tags, verb)(author)
         assert str(exc.value) == (f"post.tags.{verb}() takes Tag instances, got Author")
-        assert await _links("tag_posts") == 0
+        assert await _links("tag_posts") == 1
