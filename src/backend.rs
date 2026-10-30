@@ -183,6 +183,25 @@ pub struct TableCatalog {
     pub uuid_columns: HashSet<String>,
     /// `CAST` target (`timestamp`, `timestamptz`, `date`) by temporal column.
     pub ts_cast: HashMap<String, String>,
+    /// Live storage class by column, for the text and binary columns only
+    /// (a column absent here is [`StorageClass::Other`]).
+    pub storage_class: HashMap<String, StorageClass>,
+    /// Live type name (`varchar`, `bytea`, ...) of each column in
+    /// `storage_class`, for the refusal message.
+    pub storage_type: HashMap<String, String>,
+}
+
+/// Whether a live Postgres column holds text or bytes. Moving bytes across
+/// that boundary succeeds through the server's I/O coercion and corrupts the
+/// value (`\xff006b` for `b"\xff\x00k"`), so an operation refuses it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StorageClass {
+    /// A string-category type (`varchar`, `text`, `bpchar`, `citext`, ...).
+    Text,
+    /// `bytea`.
+    Binary,
+    /// Everything else.
+    Other,
 }
 
 /// `SHOW server_version_num` on `pool`, over the simple protocol so it never

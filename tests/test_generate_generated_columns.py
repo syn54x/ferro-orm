@@ -550,7 +550,8 @@ def retyped_by_hand(db, *, check: str | None = None, policy: str = "") -> None:
     put back over it."""
     policies = db.rows(
         "SELECT pg_get_expr(polqual, polrelid) FROM pg_policy "
-        "WHERE polname = 'rls_transaction_direction'"
+        "WHERE polrelid = '\"transaction\"'::regclass "
+        "AND polname = 'rls_transaction_direction'"
     )
     [(expression,)] = db.rows(
         "SELECT pg_get_expr(adbin, adrelid) FROM pg_attrdef d JOIN pg_attribute a "
