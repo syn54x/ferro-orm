@@ -258,7 +258,7 @@ def test_unresolvable_name_outside_the_target_is_refused(tmp_path):
     text = str(excinfo.value)
     assert "Post.author" in text
     assert "'posts_name'" in text
-    assert "ForeignKey(...)" in text
+    assert 'Annotated["Author", ForeignKey(...)]' in text
     assert not any(key.endswith(".Post") for key in REGISTRY.models())
 
 
@@ -326,3 +326,17 @@ def test_a_model_defined_in_a_function_finds_its_sibling_target():
 
     assert Pet.ferro_relations["owner"].to is Owner
     assert "owner_id" in Pet.model_fields
+
+
+def test_undefined_module_in_the_target_names_the_written_target(tmp_path):
+    _wipe()
+    body = """
+class Post(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    author: Annotated[models.Author, ForeignKey(related_name="posts")]
+"""
+    with pytest.raises(TypeError) as excinfo:
+        _import(tmp_path, body, future=True)
+    text = str(excinfo.value)
+    assert "'models'" in text
+    assert 'Annotated["models.Author", ForeignKey(...)]' in text

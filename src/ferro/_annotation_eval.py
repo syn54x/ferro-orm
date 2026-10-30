@@ -12,6 +12,7 @@ return the same object.
 
 from __future__ import annotations
 
+import ast
 import builtins
 import sys
 from typing import Annotated, Any, ForwardRef, get_args, get_origin
@@ -50,6 +51,26 @@ def _foreign_key_of(annotation: Any) -> tuple[Any, ForeignKey] | None:
             if isinstance(metadata, ForeignKey):
                 return core, metadata
     return None
+
+
+def _target_text(text: str) -> str:
+    """The source of the first ``Annotated[...]`` argument in ``text`` (the target)."""
+    try:
+        for node in ast.walk(ast.parse(text, mode="eval")):
+            if isinstance(node, ast.Subscript) and "Annotated" in ast.unparse(
+                node.value
+            ):
+                first = (
+                    node.slice.elts[0]
+                    if isinstance(node.slice, ast.Tuple)
+                    else node.slice
+                )
+                if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                    return first.value
+                return ast.unparse(first)
+    except SyntaxError:
+        pass
+    return "Target"
 
 
 def _undefined_name(
@@ -101,7 +122,7 @@ def evaluate_foreign_key_annotation(
             return text
         if names.missing:
             raise _undefined_name(
-                model, field, text, names.missing[0], module, "Target"
+                model, field, text, names.missing[0], module, _target_text(text)
             ) from error
         raise TypeError(
             f"{model}.{field}: could not evaluate the annotation {text!r}: {error}. "
@@ -113,9 +134,10 @@ def evaluate_foreign_key_annotation(
         return text
     core, _ = found
     target = _strip_optional_union(get_args(core)[0])
-    target_name = (
-        target.__forward_arg__ if isinstance(target, ForwardRef) else str(target)
-    )
+    if isinstance(target, ForwardRef):
+        target_name = target.__forward_arg__
+    else:
+        target_name = getattr(target, "__name__", None) or str(target)
     for name in names.missing:
         if name != target_name:
             raise _undefined_name(model, field, text, name, module, target_name)
