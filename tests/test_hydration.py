@@ -309,3 +309,36 @@ async def test_identity_refresh_keeps_field_order(db_url):
         assert again is held
         assert list(held.__dict__) == before
         assert list(held.model_dump()) == ["id", "username", "age"]
+
+
+@pytest.mark.asyncio
+async def test_hydration_order_with_shadow_column_and_retired_field(db_url):
+    """Dump keys follow model_fields with a shadow FK column and a retired field."""
+    from typing import Annotated
+
+    from ferro import BackRef, ForeignKey, Relation
+
+    class OrderOwner(Model):
+        id: int | None = Field(default=None, json_schema_extra={"primary_key": True})
+        rows: Relation[list["OrderRetired"]] = BackRef()
+
+    class OrderRetired(Model):
+        id: int | None = Field(default=None, json_schema_extra={"primary_key": True})
+        zeta: str
+        owner: Annotated[OrderOwner, ForeignKey(related_name="rows")]
+        gone: str | None = Field(default=None, retired=True)
+        alpha: str
+
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        owner = OrderOwner(id=1)
+        await owner.save()
+        built = OrderRetired(id=1, zeta="z", owner=owner, alpha="a")
+        await built.save()
+        built_dump = list(built.model_dump())
+        built_keys = list(built.__dict__)
+
+    async with ferro.engines.session():
+        got = await OrderRetired.get(1)
+        assert list(got.model_dump()) == built_dump
+        assert list(got.__dict__) == built_keys

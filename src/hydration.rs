@@ -57,6 +57,12 @@ impl FieldConverters<'_> {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// Order `fields` as the model declares them. Stable, so a column outside
+    /// `model_fields` keeps its place after the declared ones.
+    fn sort_in_declaration_order(&self, fields: &mut [(String, RustValue)]) {
+        fields.sort_by_key(|(col, _)| self.order.get(col).copied().unwrap_or(usize::MAX));
+    }
 }
 
 impl<'py> std::ops::Deref for FieldConverters<'py> {
@@ -189,9 +195,8 @@ pub fn hydrate_model_instance<'py>(
     let fields_set = pyo3::types::PySet::empty(py)?;
 
     // Declaration order, as a constructed instance has it; the columns arrive
-    // sorted by name. Stable, so a column outside `model_fields` keeps its
-    // place after the declared ones.
-    fields.sort_by_key(|(col, _)| converters.order.get(col).copied().unwrap_or(usize::MAX));
+    // sorted by name.
+    converters.sort_in_declaration_order(&mut fields);
     apply_decoded_fields(py, cls, dict, &fields_set, fields, py_col_names, converters)?;
 
     dict.set_item(
