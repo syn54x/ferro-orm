@@ -9,7 +9,7 @@ from typing import Annotated
 
 import pytest
 
-from ferro import BackRef, ForeignKey, Model, Relation
+from ferro import BackRef, Field, ForeignKey, Model, Relation
 from ferro.relations import resolve_relationships
 
 
@@ -24,7 +24,7 @@ def _isolate_relation_state():
 
 def test_second_pass_rebuild_failure_aborts_with_model_named(monkeypatch):
     class E4Broken(Model):
-        id: int | None = None
+        id: int | None = Field(default=None, primary_key=True)
         name: str
         peers: Relation[list["E4Peer"]] = BackRef()
 
