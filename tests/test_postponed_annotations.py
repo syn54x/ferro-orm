@@ -18,7 +18,15 @@ from typing import Annotated
 import pytest
 
 import ferro
-from ferro import BackRef, ForeignKey, Model, Relation, clear_registry, reset_engine
+from ferro import (
+    BackRef,
+    Field,
+    ForeignKey,
+    Model,
+    Relation,
+    clear_registry,
+    reset_engine,
+)
 from ferro.registry import REGISTRY
 
 _COUNTER = itertools.count()
@@ -317,11 +325,11 @@ class Post(Model):
 
 def test_a_model_defined_in_a_function_finds_its_sibling_target():
     class Owner(Model):
-        id: int | None = None
+        id: int | None = Field(default=None, primary_key=True)
         pets: Relation[list[Pet]] = BackRef()
 
     class Pet(Model):
-        id: int | None = None
+        id: int | None = Field(default=None, primary_key=True)
         owner: Annotated[Owner, ForeignKey(related_name="pets")]
 
     assert Pet.ferro_relations["owner"].to is Owner
