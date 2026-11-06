@@ -72,6 +72,10 @@ _Avoid_: Partial instance, deferred field, lightweight model, .only()
 The result of an explicit projection — a typed record of named values that is not a model instance and cannot be saved, refreshed, or identity-mapped. Column subsets and aggregation results are projected records; complete model rows are not. Realized as `Row`, delivered in the list-like `Rows` container.
 _Avoid_: Partial model, row dict, value tuple
 
+**DTO**:
+A class tied to one model that carries its data across the application's boundary in one of three roles: a *create DTO* holds what a client may send to make a row, an *update DTO* what a client may change, and a *read DTO* what is sent back. A DTO is not a model instance and cannot be saved, refreshed or queried.
+_Avoid_: Shape, schema, API model, serializer
+
 **Include**:
 The explicit request (`.include(lambda t: t.account.owner)`) that a query populate a forward-FK relation path — the data axis of a query, distinct from joins (membership) and projection (shape). Including a path populates every hop along it and never changes which rows come back.
 _Avoid_: Eager load, select_related, prefetch, join-fetch
