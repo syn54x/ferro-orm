@@ -218,3 +218,15 @@ class RelationG(Generic[T]):
 
 
 ModelG = Model
+
+
+# --- Variant E: D's plain read, with the load as a method on the value (Edgy's approach)
+
+
+class ModelE(Model):
+    async def load(self) -> Self:
+        """Make sure this instance's row is loaded, and return the instance."""
+        raise NotImplementedError
+
+
+RelationE = RelationD
