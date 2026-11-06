@@ -1,0 +1,18 @@
+prototype/forward_relation_typing/cases_a.py:53:9: error[type-assertion-failure] Type `Unknown` does not match asserted type `str`
+prototype/forward_relation_typing/cases_a.py:53:21: error[unresolved-attribute] Object of type `Awaitable[Team]` has no attribute `name`
+prototype/forward_relation_typing/cases_a.py:56:13: error[type-assertion-failure] Type `Unknown` does not match asserted type `str`
+prototype/forward_relation_typing/cases_a.py:56:25: error[unresolved-attribute] Object of type `Awaitable[Player | None]` has no attribute `name`
+prototype/forward_relation_typing/cases_b.py:39:5: error[type-assertion-failure] Type `Unknown` does not match asserted type `Player | None`
+prototype/forward_relation_typing/cases_b.py:39:23: error[invalid-await] `Player | None` is not awaitable
+prototype/forward_relation_typing/cases_b.py:44:5: error[type-assertion-failure] Type `Unknown` does not match asserted type `Profile | None`
+prototype/forward_relation_typing/cases_b.py:44:23: error[invalid-await] `Profile | None` is not awaitable
+prototype/forward_relation_typing/cases_b2.py:56:25: error[unresolved-attribute] Attribute `name` is not defined on `Missing` in union `Player | Missing`
+prototype/forward_relation_typing/cases_c.py:53:9: error[type-assertion-failure] Type `Unknown` does not match asserted type `str`
+prototype/forward_relation_typing/cases_c.py:53:21: error[unresolved-attribute] Object of type `Ref[Team]` has no attribute `name`
+prototype/forward_relation_typing/cases_c.py:56:13: error[type-assertion-failure] Type `Unknown` does not match asserted type `str`
+prototype/forward_relation_typing/cases_c.py:56:25: error[unresolved-attribute] Object of type `Ref[Player | None]` has no attribute `name`
+prototype/forward_relation_typing/cases_today.py:21:5: error[type-assertion-failure] Type `Unknown` does not match asserted type `int`
+prototype/forward_relation_typing/cases_today.py:21:17: error[unresolved-attribute] Object of type `Player` has no attribute `team_id`
+prototype/forward_relation_typing/cases_today.py:22:5: error[type-assertion-failure] Type `Unknown` does not match asserted type `Team`
+prototype/forward_relation_typing/cases_today.py:22:23: error[invalid-await] `Team` is not awaitable
+Found 17 diagnostics
