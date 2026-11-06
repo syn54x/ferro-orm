@@ -67,3 +67,9 @@ async def cases(player: Player, team: Team) -> None:
     assert_type(await Player.team.of(player), Team)
     assert_type(await Player.mentor.of(player), Player | None)
     assert_type(await Player.profile.of(player), Profile | None)
+
+    # 2d. Masonite's split: the attribute is the value, `related()` is the query or the load.
+    assert_type(await player.related(Player.team), Team)
+    assert_type(await player.related(Player.mentor), Player | None)
+    assert_type(await player.related(Player.profile), Profile | None)
+    assert_type(await team.related(Team.players).where(lambda player: player.name == "Ferris").all(), list[Player])

@@ -157,6 +157,14 @@ class ModelD(Model):
         """Load one relation: `await player.load(lambda player: player.team)`."""
         raise NotImplementedError
 
+    @overload
+    def related(self, relation: RelationD[list[E]]) -> Query[E]: ...
+    @overload
+    def related(self, relation: RelationD[E]) -> Awaitable[E]: ...
+    def related(self, relation: Any) -> Any:
+        """Masonite's `user.related("phones")`, typed: pass the class attribute, not a string."""
+        raise NotImplementedError
+
 
 # --- Variant F: ty's own intersection type: the target AND an awaitable of it
 
