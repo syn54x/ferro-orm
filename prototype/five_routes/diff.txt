@@ -1,0 +1,428 @@
+/components/schemas/ErrorBody/description
+  fastapi   "The one error body both adapters send."
+  litestar  (absent)
+
+/components/schemas/ErrorBody/properties/code/title
+  fastapi   "Code"
+  litestar  (absent)
+
+/components/schemas/ErrorBody/properties/detail/title
+  fastapi   "Detail"
+  litestar  (absent)
+
+/components/schemas/HTTPValidationError/properties/detail/items/$ref
+  fastapi   "#/components/schemas/ValidationError"
+  litestar  (absent)
+
+/components/schemas/HTTPValidationError/properties/detail/title
+  fastapi   "Detail"
+  litestar  (absent)
+
+/components/schemas/HTTPValidationError/properties/detail/type
+  fastapi   "array"
+  litestar  (absent)
+
+/components/schemas/HTTPValidationError/title
+  fastapi   "HTTPValidationError"
+  litestar  (absent)
+
+/components/schemas/HTTPValidationError/type
+  fastapi   "object"
+  litestar  (absent)
+
+/components/schemas/PlayerCreate/properties/handle/title
+  fastapi   "Handle"
+  litestar  (absent)
+
+/components/schemas/PlayerCreate/properties/rating/title
+  fastapi   "Rating"
+  litestar  (absent)
+
+/components/schemas/PlayerCreate/properties/team/title
+  fastapi   "Team"
+  litestar  (absent)
+
+/components/schemas/PlayerRead/properties/handle/title
+  fastapi   "Handle"
+  litestar  (absent)
+
+/components/schemas/PlayerRead/properties/id/title
+  fastapi   "Id"
+  litestar  (absent)
+
+/components/schemas/PlayerRead/properties/rating/title
+  fastapi   "Rating"
+  litestar  (absent)
+
+/components/schemas/PlayerRead/properties/team/title
+  fastapi   "Team"
+  litestar  (absent)
+
+/components/schemas/PlayerRead/required
+  fastapi   ["id", "handle", "rating", "team"]
+  litestar  ["handle", "id", "rating", "team"]
+
+/components/schemas/PlayerUpdate/properties/handle/anyOf
+  fastapi   [{"maxLength": 40, "minLength": 2, "type": "string"}, {"type": "null"}]
+  litestar  (absent)
+
+/components/schemas/PlayerUpdate/properties/handle/maxLength
+  fastapi   (absent)
+  litestar  40
+
+/components/schemas/PlayerUpdate/properties/handle/minLength
+  fastapi   (absent)
+  litestar  2
+
+/components/schemas/PlayerUpdate/properties/handle/oneOf
+  fastapi   (absent)
+  litestar  [{"type": "string"}, {"type": "null"}]
+
+/components/schemas/PlayerUpdate/properties/handle/title
+  fastapi   "Handle"
+  litestar  (absent)
+
+/components/schemas/PlayerUpdate/properties/rating/anyOf
+  fastapi   [{"minimum": 0.0, "type": "integer"}, {"type": "null"}]
+  litestar  (absent)
+
+/components/schemas/PlayerUpdate/properties/rating/oneOf
+  fastapi   (absent)
+  litestar  [{"type": "integer"}, {"type": "null"}]
+
+/components/schemas/PlayerUpdate/properties/rating/title
+  fastapi   "Rating"
+  litestar  (absent)
+
+/components/schemas/PlayerUpdate/properties/team/anyOf
+  fastapi   [{"type": "string"}, {"type": "null"}]
+  litestar  (absent)
+
+/components/schemas/PlayerUpdate/properties/team/oneOf
+  fastapi   (absent)
+  litestar  [{"type": "string"}, {"type": "null"}]
+
+/components/schemas/PlayerUpdate/properties/team/title
+  fastapi   "Team"
+  litestar  (absent)
+
+/components/schemas/PlayerUpdate/required
+  fastapi   (absent)
+  litestar  []
+
+/components/schemas/ValidationError/properties/ctx/title
+  fastapi   "Context"
+  litestar  (absent)
+
+/components/schemas/ValidationError/properties/ctx/type
+  fastapi   "object"
+  litestar  (absent)
+
+/components/schemas/ValidationError/properties/input/title
+  fastapi   "Input"
+  litestar  (absent)
+
+/components/schemas/ValidationError/properties/loc/items/anyOf
+  fastapi   [{"type": "string"}, {"type": "integer"}]
+  litestar  (absent)
+
+/components/schemas/ValidationError/properties/loc/title
+  fastapi   "Location"
+  litestar  (absent)
+
+/components/schemas/ValidationError/properties/loc/type
+  fastapi   "array"
+  litestar  (absent)
+
+/components/schemas/ValidationError/properties/msg/title
+  fastapi   "Message"
+  litestar  (absent)
+
+/components/schemas/ValidationError/properties/msg/type
+  fastapi   "string"
+  litestar  (absent)
+
+/components/schemas/ValidationError/properties/type/title
+  fastapi   "Error Type"
+  litestar  (absent)
+
+/components/schemas/ValidationError/properties/type/type
+  fastapi   "string"
+  litestar  (absent)
+
+/components/schemas/ValidationError/required
+  fastapi   ["loc", "msg", "type"]
+  litestar  (absent)
+
+/components/schemas/ValidationError/title
+  fastapi   "ValidationError"
+  litestar  (absent)
+
+/components/schemas/ValidationError/type
+  fastapi   "object"
+  litestar  (absent)
+
+/paths/~players/get/deprecated
+  fastapi   (absent)
+  litestar  false
+
+/paths/~players/get/parameters
+  fastapi   [{"description": "Only rows whose team equals this.", "in": "query", "name": "team", "required": false, "schema": {"anyOf": [{"type": "string"}, {"type": "null"}], "description": "Only rows whose team equals this.", "title": "Team"}}, {"description": "Only rows whose rating equals this.", "in": "query", "name": "rating", "required": false, "schema": {"anyOf": [{"type": "integer"}, {"type": "null"}], "description": "Only rows whose rating equals this.", "title": "Rating"}}, {"description": "The most rows to return.", "in": "query", "name": "limit", "required": false, "schema": {"default": 50, "description": "The most rows to return.", "maximum": 100, "minimum": 1, "title": "Limit", "type": "integer"}}]
+  litestar  [{"allowEmptyValue": false, "allowReserved": false, "deprecated": false, "description": "Only rows whose team equals this.", "in": "query", "name": "team", "required": false, "schema": {"description": "Only rows whose team equals this.", "oneOf": [{"type": "string"}, {"type": "null"}]}}, {"allowEmptyValue": false, "allowReserved": false, "deprecated": false, "description": "Only rows whose rating equals this.", "in": "query", "name": "rating", "required": false, "schema": {"description": "Only rows whose rating equals this.", "oneOf": [{"type": "integer"}, {"type": "null"}]}}, {"allowEmptyValue": false, "allowReserved": false, "deprecated": false, "description": "The most rows to return.", "in": "query", "name": "limit", "required": false, "schema": {"default": 50, "description": "The most rows to return.", "maximum": 100.0, "minimum": 1.0, "type": "integer"}}]
+
+/paths/~players/get/responses/200/content/application~json/schema/title
+  fastapi   "Response List Players"
+  litestar  (absent)
+
+/paths/~players/get/responses/200/description
+  fastapi   "Successful Response"
+  litestar  "Request fulfilled, document follows"
+
+/paths/~players/get/responses/400/content/application~json/schema/description
+  fastapi   (absent)
+  litestar  "Validation Exception"
+
+/paths/~players/get/responses/400/content/application~json/schema/examples
+  fastapi   (absent)
+  litestar  [{"detail": "Bad Request", "extra": {}, "status_code": 400}]
+
+/paths/~players/get/responses/400/content/application~json/schema/properties/detail/type
+  fastapi   (absent)
+  litestar  "string"
+
+/paths/~players/get/responses/400/content/application~json/schema/properties/extra/type
+  fastapi   (absent)
+  litestar  ["null", "object", "array"]
+
+/paths/~players/get/responses/400/content/application~json/schema/properties/status_code/type
+  fastapi   (absent)
+  litestar  "integer"
+
+/paths/~players/get/responses/400/content/application~json/schema/required
+  fastapi   (absent)
+  litestar  ["detail", "status_code"]
+
+/paths/~players/get/responses/400/content/application~json/schema/type
+  fastapi   (absent)
+  litestar  "object"
+
+/paths/~players/get/responses/400/description
+  fastapi   (absent)
+  litestar  "Bad request syntax or unsupported method"
+
+/paths/~players/get/responses/422/content/application~json/schema/$ref
+  fastapi   "#/components/schemas/HTTPValidationError"
+  litestar  (absent)
+
+/paths/~players/get/responses/422/description
+  fastapi   "Validation Error"
+  litestar  (absent)
+
+/paths/~players/post/deprecated
+  fastapi   (absent)
+  litestar  false
+
+/paths/~players/post/responses/201/description
+  fastapi   "Successful Response"
+  litestar  "Document created, URL follows"
+
+/paths/~players/post/responses/400/content/application~json/schema/description
+  fastapi   (absent)
+  litestar  "Validation Exception"
+
+/paths/~players/post/responses/400/content/application~json/schema/examples
+  fastapi   (absent)
+  litestar  [{"detail": "Bad Request", "extra": {}, "status_code": 400}]
+
+/paths/~players/post/responses/400/content/application~json/schema/properties/detail/type
+  fastapi   (absent)
+  litestar  "string"
+
+/paths/~players/post/responses/400/content/application~json/schema/properties/extra/type
+  fastapi   (absent)
+  litestar  ["null", "object", "array"]
+
+/paths/~players/post/responses/400/content/application~json/schema/properties/status_code/type
+  fastapi   (absent)
+  litestar  "integer"
+
+/paths/~players/post/responses/400/content/application~json/schema/required
+  fastapi   (absent)
+  litestar  ["detail", "status_code"]
+
+/paths/~players/post/responses/400/content/application~json/schema/type
+  fastapi   (absent)
+  litestar  "object"
+
+/paths/~players/post/responses/400/description
+  fastapi   (absent)
+  litestar  "Bad request syntax or unsupported method"
+
+/paths/~players/post/responses/422/content/application~json/schema/$ref
+  fastapi   "#/components/schemas/HTTPValidationError"
+  litestar  (absent)
+
+/paths/~players/post/responses/422/description
+  fastapi   "Validation Error"
+  litestar  (absent)
+
+/paths/~players~{id}/delete/deprecated
+  fastapi   (absent)
+  litestar  false
+
+/paths/~players~{id}/delete/parameters
+  fastapi   [{"in": "path", "name": "id", "required": true, "schema": {"title": "Id", "type": "integer"}}]
+  litestar  [{"deprecated": false, "in": "path", "name": "id", "required": true, "schema": {"type": "integer"}}]
+
+/paths/~players~{id}/delete/responses/204/description
+  fastapi   "Successful Response"
+  litestar  "Request fulfilled, nothing follows"
+
+/paths/~players~{id}/delete/responses/400/content/application~json/schema/description
+  fastapi   (absent)
+  litestar  "Validation Exception"
+
+/paths/~players~{id}/delete/responses/400/content/application~json/schema/examples
+  fastapi   (absent)
+  litestar  [{"detail": "Bad Request", "extra": {}, "status_code": 400}]
+
+/paths/~players~{id}/delete/responses/400/content/application~json/schema/properties/detail/type
+  fastapi   (absent)
+  litestar  "string"
+
+/paths/~players~{id}/delete/responses/400/content/application~json/schema/properties/extra/type
+  fastapi   (absent)
+  litestar  ["null", "object", "array"]
+
+/paths/~players~{id}/delete/responses/400/content/application~json/schema/properties/status_code/type
+  fastapi   (absent)
+  litestar  "integer"
+
+/paths/~players~{id}/delete/responses/400/content/application~json/schema/required
+  fastapi   (absent)
+  litestar  ["detail", "status_code"]
+
+/paths/~players~{id}/delete/responses/400/content/application~json/schema/type
+  fastapi   (absent)
+  litestar  "object"
+
+/paths/~players~{id}/delete/responses/400/description
+  fastapi   (absent)
+  litestar  "Bad request syntax or unsupported method"
+
+/paths/~players~{id}/delete/responses/422/content/application~json/schema/$ref
+  fastapi   "#/components/schemas/HTTPValidationError"
+  litestar  (absent)
+
+/paths/~players~{id}/delete/responses/422/description
+  fastapi   "Validation Error"
+  litestar  (absent)
+
+/paths/~players~{id}/get/deprecated
+  fastapi   (absent)
+  litestar  false
+
+/paths/~players~{id}/get/parameters
+  fastapi   [{"in": "path", "name": "id", "required": true, "schema": {"title": "Id", "type": "integer"}}]
+  litestar  [{"deprecated": false, "in": "path", "name": "id", "required": true, "schema": {"type": "integer"}}]
+
+/paths/~players~{id}/get/responses/200/description
+  fastapi   "Successful Response"
+  litestar  "Request fulfilled, document follows"
+
+/paths/~players~{id}/get/responses/400/content/application~json/schema/description
+  fastapi   (absent)
+  litestar  "Validation Exception"
+
+/paths/~players~{id}/get/responses/400/content/application~json/schema/examples
+  fastapi   (absent)
+  litestar  [{"detail": "Bad Request", "extra": {}, "status_code": 400}]
+
+/paths/~players~{id}/get/responses/400/content/application~json/schema/properties/detail/type
+  fastapi   (absent)
+  litestar  "string"
+
+/paths/~players~{id}/get/responses/400/content/application~json/schema/properties/extra/type
+  fastapi   (absent)
+  litestar  ["null", "object", "array"]
+
+/paths/~players~{id}/get/responses/400/content/application~json/schema/properties/status_code/type
+  fastapi   (absent)
+  litestar  "integer"
+
+/paths/~players~{id}/get/responses/400/content/application~json/schema/required
+  fastapi   (absent)
+  litestar  ["detail", "status_code"]
+
+/paths/~players~{id}/get/responses/400/content/application~json/schema/type
+  fastapi   (absent)
+  litestar  "object"
+
+/paths/~players~{id}/get/responses/400/description
+  fastapi   (absent)
+  litestar  "Bad request syntax or unsupported method"
+
+/paths/~players~{id}/get/responses/422/content/application~json/schema/$ref
+  fastapi   "#/components/schemas/HTTPValidationError"
+  litestar  (absent)
+
+/paths/~players~{id}/get/responses/422/description
+  fastapi   "Validation Error"
+  litestar  (absent)
+
+/paths/~players~{id}/patch/deprecated
+  fastapi   (absent)
+  litestar  false
+
+/paths/~players~{id}/patch/parameters
+  fastapi   [{"in": "path", "name": "id", "required": true, "schema": {"title": "Id", "type": "integer"}}]
+  litestar  [{"deprecated": false, "in": "path", "name": "id", "required": true, "schema": {"type": "integer"}}]
+
+/paths/~players~{id}/patch/responses/200/description
+  fastapi   "Successful Response"
+  litestar  "Request fulfilled, document follows"
+
+/paths/~players~{id}/patch/responses/400/content/application~json/schema/description
+  fastapi   (absent)
+  litestar  "Validation Exception"
+
+/paths/~players~{id}/patch/responses/400/content/application~json/schema/examples
+  fastapi   (absent)
+  litestar  [{"detail": "Bad Request", "extra": {}, "status_code": 400}]
+
+/paths/~players~{id}/patch/responses/400/content/application~json/schema/properties/detail/type
+  fastapi   (absent)
+  litestar  "string"
+
+/paths/~players~{id}/patch/responses/400/content/application~json/schema/properties/extra/type
+  fastapi   (absent)
+  litestar  ["null", "object", "array"]
+
+/paths/~players~{id}/patch/responses/400/content/application~json/schema/properties/status_code/type
+  fastapi   (absent)
+  litestar  "integer"
+
+/paths/~players~{id}/patch/responses/400/content/application~json/schema/required
+  fastapi   (absent)
+  litestar  ["detail", "status_code"]
+
+/paths/~players~{id}/patch/responses/400/content/application~json/schema/type
+  fastapi   (absent)
+  litestar  "object"
+
+/paths/~players~{id}/patch/responses/400/description
+  fastapi   (absent)
+  litestar  "Bad request syntax or unsupported method"
+
+/paths/~players~{id}/patch/responses/422/content/application~json/schema/$ref
+  fastapi   "#/components/schemas/HTTPValidationError"
+  litestar  (absent)
+
+/paths/~players~{id}/patch/responses/422/description
+  fastapi   "Validation Error"
+  litestar  (absent)
+
+/servers
+  fastapi   (absent)
+  litestar  [{"url": "/"}]
+

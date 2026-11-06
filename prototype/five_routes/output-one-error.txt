@@ -1,0 +1,96 @@
+fastapi 0.162.0  litestar 2.25.0  pydantic 2.12.5
+
+== The same requests, both apps ==
+
+POST /players  [same]
+  both      201 {"id":1,"handle":"ada","rating":7,"team":"reds"}
+
+POST /players  [same]
+  both      201 {"id":2,"handle":"bo","rating":0,"team":"blues"}
+
+GET /players  [same]
+  both      200 [{"id":1,"handle":"ada","rating":7,"team":"reds"},{"id":2,"handle":"bo","rating":0,"team":"blues"}]
+
+GET /players?team=reds&limit=5  [same]
+  both      200 [{"id":1,"handle":"ada","rating":7,"team":"reds"}]
+
+GET /players/{first}  [same]
+  both      200 {"id":1,"handle":"ada","rating":7,"team":"reds"}
+
+PATCH /players/{first}  [same]
+  both      200 {"id":1,"handle":"ada","rating":9,"team":"reds"}
+
+DELETE /players/{first}  [same]
+  both      204 
+
+GET /players/{first}  [same]
+  both      404 {"code":"not_found","detail":"No player has id 1."}
+
+GET /players  [same]
+  both      403 {"code":"forbidden","detail":"Send the x-api-key header."}
+
+POST /players  [same]
+  both      422 {"code":"invalid","detail":"handle: String should have at least 2 characters"}
+
+GET /players?limit=0  [DIFFERENT]
+  fastapi   422 {"code":"invalid","detail":"limit: Input should be greater than or equal to 1"}
+  litestar  422 {"code":"invalid","detail":"limit: Expected `int` >= 1"}
+
+GET /players/abc  [DIFFERENT]
+  fastapi   422 {"code":"invalid","detail":"id: Input should be a valid integer, unable to parse string as an integer"}
+  litestar  404 {"status_code":404,"detail":"Not Found"}
+
+GET /players?nope=1  [same]
+  both      200 [{"id":2,"handle":"bo","rating":0,"team":"blues"}]
+
+PATCH /players/{second}  [same]
+  both      422 {"code":"invalid","detail":"rating: Input should be greater than or equal to 0"}
+
+== The two OpenAPI documents: 77 values agree, 79 differ ==
+
+ 40  Each framework documents its own validation error: 422 on FastAPI, 400 on Litestar
+     e.g. /paths/~players/get/responses/400/content/application~json/schema/description
+       fastapi   (absent)
+       litestar  "Validation Exception"
+
+ 13  FastAPI titles every property and list response, Litestar only the class
+     e.g. /components/schemas/ErrorBody/properties/code/title
+       fastapi   "Code"
+       litestar  (absent)
+
+  8  A nullable field: FastAPI writes anyOf with the limits inside, Litestar oneOf with the limits beside it
+     e.g. /components/schemas/PlayerUpdate/properties/handle/anyOf
+       fastapi   [{"maxLength": 40, "minLength": 2, "type": "string"}, {"type": "null"}]
+       litestar  (absent)
+
+  5  Litestar writes `deprecated: false` on every operation
+     e.g. /paths/~players/get/deprecated
+       fastapi   (absent)
+       litestar  false
+
+  5  Each framework has its own wording for a success response
+     e.g. /paths/~players/get/responses/200/description
+       fastapi   "Successful Response"
+       litestar  "Request fulfilled, document follows"
+
+  4  Parameters are compared whole: titles, anyOf against oneOf, Litestar's extra flags, 1 against 1.0
+     e.g. /paths/~players/get/parameters
+       fastapi   [{"description": "Only rows whose team equals this.", "in": "query", "name": "team", "required": false, "schema": {"anyOf": [{"type": "string"}, {"type": "null"
+       litestar  [{"allowEmptyValue": false, "allowReserved": false, "deprecated": false, "description": "Only rows whose team equals this.", "in": "query", "name": "team", "req
+
+  2  Litestar sorts `required` and writes it when empty
+     e.g. /components/schemas/PlayerRead/required
+       fastapi   ["id", "handle", "rating", "team"]
+       litestar  ["handle", "id", "rating", "team"]
+
+  1  FastAPI copies the class docstring, Litestar does not
+     e.g. /components/schemas/ErrorBody/description
+       fastapi   "The one error body both adapters send."
+       litestar  (absent)
+
+  1  Litestar adds a `servers` entry
+     e.g. /servers
+       fastapi   (absent)
+       litestar  [{"url": "/"}]
+
+Every difference is in diff-one-error.txt, beside the two openapi-*-one-error.json documents.
