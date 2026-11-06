@@ -132,7 +132,9 @@ class RelationB2(Generic[T]):
 
 # --- Variant D: a forward relation reads as the target; loading is spelled elsewhere
 
-from collections.abc import Callable  # noqa: E402
+from collections.abc import Callable, Sequence  # noqa: E402
+
+from ferro.query import QueryProxy  # noqa: E402
 from typing import TYPE_CHECKING  # noqa: E402
 
 R = TypeVar("R")
@@ -155,6 +157,15 @@ class RelationD(Generic[T]):
 class ModelD(Model):
     async def load(self, relation: Callable[[Self], R]) -> R:
         """Load one relation: `await player.load(lambda player: player.team)`."""
+        raise NotImplementedError
+
+    async def populate(self, *paths: Callable[[QueryProxy[Self]], Any]) -> None:
+        """Fill relations in on this instance, with the lambdas a query's include() takes."""
+        raise NotImplementedError
+
+    @classmethod
+    async def populate_all(cls, rows: Sequence[Self], *paths: Callable[[QueryProxy[Self]], Any]) -> None:
+        """Fill the same relations in on many instances with one query per path."""
         raise NotImplementedError
 
     @overload

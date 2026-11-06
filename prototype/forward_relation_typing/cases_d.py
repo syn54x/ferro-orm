@@ -73,3 +73,9 @@ async def cases(player: Player, team: Team) -> None:
     assert_type(await player.related(Player.mentor), Player | None)
     assert_type(await player.related(Player.profile), Profile | None)
     assert_type(await team.related(Team.players).where(lambda player: player.name == "Ferris").all(), list[Player])
+
+    # 2d. Filling relations in after the fact, on one instance or on many.
+    await player.populate(lambda player: player.team)
+    assert_type(player.team.name, str)
+    await Player.populate_all(included, lambda player: player.team, lambda player: player.mentor.team)
+    await player.populate(lambda player: player.name == "x")
