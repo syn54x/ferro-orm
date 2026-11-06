@@ -128,3 +128,74 @@ class RelationB2(Generic[T]):
     @overload
     def __get__(self: RelationB2[E], instance: object, owner: type) -> E: ...
     def __get__(self, instance: Any, owner: Any) -> Any: ...
+
+
+# --- Variant D: a forward relation reads as the target; loading is spelled elsewhere
+
+from collections.abc import Callable  # noqa: E402
+from typing import TYPE_CHECKING  # noqa: E402
+
+R = TypeVar("R")
+
+
+class RelationD(Generic[T]):
+    @overload
+    def __get__(self, instance: None, owner: type) -> Self: ...
+    @overload
+    def __get__(self: RelationD[list[E]], instance: object, owner: type) -> Query[E]: ...
+    @overload
+    def __get__(self: RelationD[E], instance: object, owner: type) -> E: ...
+    def __get__(self, instance: Any, owner: Any) -> Any: ...
+
+    async def of(self: RelationD[E], instance: object) -> E:
+        """Load this relation for one instance: `await Player.team.of(player)`."""
+        raise NotImplementedError
+
+
+class ModelD(Model):
+    async def load(self, relation: Callable[[Self], R]) -> R:
+        """Load one relation: `await player.load(lambda player: player.team)`."""
+        raise NotImplementedError
+
+
+# --- Variant F: ty's own intersection type: the target AND an awaitable of it
+
+if TYPE_CHECKING:
+    from ty_extensions import Intersection
+
+
+class RelationF(Generic[T]):
+    @overload
+    def __get__(self, instance: None, owner: type) -> Self: ...
+    @overload
+    def __get__(self: RelationF[list[E]], instance: object, owner: type) -> Query[E]: ...
+    @overload
+    def __get__(self: RelationF[E], instance: object, owner: type) -> Intersection[E, Awaitable[E]]: ...
+    def __get__(self, instance: Any, owner: Any) -> Any: ...
+
+
+ModelF = Model
+
+
+# --- Variant G: variant A's awaitable, with untyped attribute passthrough
+
+
+class Passthrough(Generic[T]):
+    def __await__(self) -> Generator[Any, None, T]:
+        raise NotImplementedError
+
+    def __getattr__(self, name: str) -> Any:
+        raise NotImplementedError
+
+
+class RelationG(Generic[T]):
+    @overload
+    def __get__(self, instance: None, owner: type) -> Self: ...
+    @overload
+    def __get__(self: RelationG[list[E]], instance: object, owner: type) -> Query[E]: ...
+    @overload
+    def __get__(self: RelationG[E], instance: object, owner: type) -> Passthrough[E]: ...
+    def __get__(self, instance: Any, owner: Any) -> Any: ...
+
+
+ModelG = Model
