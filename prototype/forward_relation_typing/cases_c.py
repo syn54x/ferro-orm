@@ -64,3 +64,20 @@ async def cases(player: Player, team: Team) -> None:
         mentor_c = row.mentor.loaded
         if mentor_c is not None:
             assert_type(mentor_c.name, str)
+
+    # A one-to-one reverse through both doors.
+    assert_type(await player.profile, Profile | None)
+    assert_type(player.profile.loaded, Profile | None)
+    profile_c = player.profile.loaded
+    if profile_c is not None:
+        assert_type(profile_c.bio, str)
+
+
+class Strict(Base):
+    id: int | None = Field(default=None, primary_key=True)
+    # A reverse one-to-one written without `| None`: the checker cannot object.
+    profile: Relation[Profile] = Reverse("player_id")
+
+
+async def strict(row: Strict) -> None:
+    assert_type(await row.profile, Profile)
