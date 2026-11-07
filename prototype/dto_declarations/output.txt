@@ -1,0 +1,61 @@
+
+== variant_a_markers  (83 lines)
+  ArticleCreate: title, slug, summary?, body, status?, reading_minutes?, published_at?, category_id?
+  ArticleUpdate: title?, slug?, summary?, body?, status?, reading_minutes?, published_at?, category_id?
+  ArticleRead: id?, title, slug, summary?, body, status?, word_count?, reading_minutes?, likes?, is_featured?, published_at?, created_at?, updated_at?, version?, author_id?, category_id?
+  create accepts ['api_token', 'body', 'is_featured', 'likes', 'slug', 'title'] -> keeps ['body', 'slug', 'title']
+  create title of 121 chars: refused (string_too_long)
+  create slug with a space: refused (string_pattern_mismatch)
+  create reading_minutes=0: refused (greater_than_equal)
+  update {} -> {}
+
+== variant_b_model_allowlist  (67 lines)
+  ArticleCreate: title, slug, summary?, body, status?, category_id?, reading_minutes?, published_at?
+  ArticleUpdate: title?, slug?, summary?, body?, status?, category_id?, reading_minutes?, published_at?
+  ArticleRead: id?, author_id?, category_id?, title, slug, summary?, body, status?, word_count?, reading_minutes?, likes?, is_featured?, published_at?, created_at?, updated_at?, version?
+  create accepts ['api_token', 'body', 'is_featured', 'likes', 'slug', 'title'] -> keeps ['body', 'slug', 'title']
+  create title of 121 chars: refused (string_too_long)
+  create slug with a space: refused (string_pattern_mismatch)
+  create reading_minutes=0: refused (greater_than_equal)
+  update {} -> {}
+
+== variant_c_resource_allowlist  (57 lines)
+  ArticleCreate: title, slug, summary?, body, status?, category_id?, reading_minutes?, published_at?
+  ArticleUpdate: title?, slug?, summary?, body?, status?, category_id?, reading_minutes?, published_at?
+  ArticleRead: id?, author_id?, category_id?, title, slug, summary?, body, status?, word_count?, reading_minutes?, likes?, is_featured?, published_at?, created_at?, updated_at?, version?
+  create accepts ['api_token', 'body', 'is_featured', 'likes', 'slug', 'title'] -> keeps ['body', 'slug', 'title']
+  create title of 121 chars: refused (string_too_long)
+  create slug with a space: refused (string_pattern_mismatch)
+  create reading_minutes=0: refused (greater_than_equal)
+  update {} -> {}
+
+== variant_d_handwritten  (92 lines)
+  ArticleCreate: title, slug, summary?, body, status?, category_id?, reading_minutes?, published_at?
+  ArticleUpdate: title?, slug?, summary?, body?, status?, category_id?, reading_minutes?, published_at?
+  ArticleRead: id?, author_id?, category_id?, title, slug, summary?, body, status?, word_count?, reading_minutes?, likes?, is_featured?, published_at?, created_at?, updated_at?, version?
+  create accepts ['api_token', 'body', 'is_featured', 'likes', 'slug', 'title'] -> keeps ['body', 'slug', 'title']
+  create title of 121 chars: refused (string_too_long)
+  create slug with a space: refused (string_pattern_mismatch)
+  create reading_minutes=0: refused (greater_than_equal)
+  update {} -> {}
+
+== variant D refuses a class that disagrees with the model
+  Bad.headline: Article has no column 'headline'
+  Bad.title is <class 'int'>; Article.title is <class 'str'>. Write `title: <class 'str'>`.
+
+all four variants produce the same field lists: {'ArticleCreate': True, 'ArticleUpdate': True, 'ArticleRead': True}
+
+== ty check (reveal_type of payload.title and payload.api_token in each handle())
+  prototype/dto_declarations/variant_a_markers.py:80:21: error[invalid-type-form] Variable of type `type[BaseModel]` is not allowed in a parameter annotation
+  prototype/dto_declarations/variant_a_markers.py:81:17: info[revealed-type] Revealed type: `Unknown`
+  prototype/dto_declarations/variant_a_markers.py:82:17: info[revealed-type] Revealed type: `Unknown`
+  prototype/dto_declarations/variant_b_model_allowlist.py:64:21: error[invalid-type-form] Variable of type `type[BaseModel]` is not allowed in a parameter annotation
+  prototype/dto_declarations/variant_b_model_allowlist.py:65:17: info[revealed-type] Revealed type: `Unknown`
+  prototype/dto_declarations/variant_b_model_allowlist.py:66:17: info[revealed-type] Revealed type: `Unknown`
+  prototype/dto_declarations/variant_c_resource_allowlist.py:54:21: error[invalid-type-form] Variable of type `type[BaseModel]` is not allowed in a parameter annotation
+  prototype/dto_declarations/variant_c_resource_allowlist.py:55:17: info[revealed-type] Revealed type: `Unknown`
+  prototype/dto_declarations/variant_c_resource_allowlist.py:56:17: info[revealed-type] Revealed type: `Unknown`
+  prototype/dto_declarations/variant_d_handwritten.py:90:17: info[revealed-type] Revealed type: `str`
+  prototype/dto_declarations/variant_d_handwritten.py:91:17: error[unresolved-attribute] Object of type `ArticleCreate` has no attribute `api_token`
+  prototype/dto_declarations/variant_d_handwritten.py:91:17: info[revealed-type] Revealed type: `Unknown`
+  Found 13 diagnostics
