@@ -39,6 +39,15 @@
   create reading_minutes=0: refused (greater_than_equal)
   update {} -> {}
 
+== variant_e_composed  (74 lines)
+  ArticleCreate: title, slug, summary?, body, status?, category_id?, reading_minutes?, published_at?
+  ArticleUpdate: (none; E has no typed all-optional twin without writing it)
+  ArticleRead: id?, author_id, word_count?, likes?, is_featured?, created_at?, updated_at?, version?, title, slug, summary?, body, status?, category_id?, reading_minutes?, published_at?
+  create accepts ['api_token', 'body', 'is_featured', 'likes', 'slug', 'title'] -> keeps ['body', 'slug', 'title']
+  create title of 121 chars: refused (string_too_long)
+  create slug with a space: refused (string_pattern_mismatch)
+  create reading_minutes=0: refused (greater_than_equal)
+
 == variant D refuses a class that disagrees with the model
   Bad.headline: Article has no column 'headline'
   Bad.title is <class 'int'>; Article.title is <class 'str'>. Write `title: <class 'str'>`.
@@ -58,4 +67,7 @@ all four variants produce the same field lists: {'ArticleCreate': True, 'Article
   prototype/dto_declarations/variant_d_handwritten.py:90:17: info[revealed-type] Revealed type: `str`
   prototype/dto_declarations/variant_d_handwritten.py:91:17: error[unresolved-attribute] Object of type `ArticleCreate` has no attribute `api_token`
   prototype/dto_declarations/variant_d_handwritten.py:91:17: info[revealed-type] Revealed type: `Unknown`
-  Found 13 diagnostics
+  prototype/dto_declarations/variant_e_composed.py:72:17: info[revealed-type] Revealed type: `str`
+  prototype/dto_declarations/variant_e_composed.py:73:17: error[unresolved-attribute] Object of type `ArticleWritable` has no attribute `api_token`
+  prototype/dto_declarations/variant_e_composed.py:73:17: info[revealed-type] Revealed type: `Unknown`
+  Found 16 diagnostics

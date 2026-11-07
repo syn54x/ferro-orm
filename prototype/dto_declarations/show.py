@@ -13,7 +13,7 @@ from pydantic import ValidationError
 HERE = Path(__file__).parent
 sys.path.insert(0, str(HERE))
 
-VARIANTS = ["variant_a_markers", "variant_b_model_allowlist", "variant_c_resource_allowlist", "variant_d_handwritten"]
+VARIANTS = ["variant_a_markers", "variant_b_model_allowlist", "variant_c_resource_allowlist", "variant_d_handwritten", "variant_e_composed"]
 SAMPLE = {"title": "Hello", "slug": "hello", "body": "Some words.", "is_featured": True, "api_token": "sk_live", "likes": 99}
 
 
@@ -29,8 +29,11 @@ def main() -> None:
         lines = sum(1 for _ in open(HERE / f"{name}.py"))
         print(f"\n== {name}  ({lines} lines)")
         for role in ("ArticleCreate", "ArticleUpdate", "ArticleRead"):
-            print(f"  {role}: {fields(getattr(module, role))}")
-        create, update = module.ArticleCreate, module.ArticleUpdate
+            if hasattr(module, role):
+                print(f"  {role}: {fields(getattr(module, role))}")
+            else:
+                print(f"  {role}: (none; E has no typed all-optional twin without writing it)")
+        create, update = module.ArticleCreate, getattr(module, "ArticleUpdate", None)
         made = create.model_validate(SAMPLE)
         print(f"  create accepts {sorted(SAMPLE)} -> keeps {sorted(made.model_dump(exclude_unset=True))}")
         for label, payload in (("title of 121 chars", {**SAMPLE, "title": "x" * 121}), ("slug with a space", {**SAMPLE, "slug": "a b"}), ("reading_minutes=0", {**SAMPLE, "reading_minutes": 0})):
@@ -39,8 +42,9 @@ def main() -> None:
                 print(f"  create {label}: ACCEPTED (constraint lost)")
             except ValidationError as error:
                 print(f"  create {label}: refused ({error.errors()[0]['type']})")
-        print(f"  update {{}} -> {update.model_validate({}).model_dump(exclude_unset=True)}")
-    a, b, c, d = (results[v] for v in VARIANTS)
+        if update is not None:
+            print(f"  update {{}} -> {update.model_validate({}).model_dump(exclude_unset=True)}")
+    a, b, c, d, _e = (results[v] for v in VARIANTS)
     print("\n== variant D refuses a class that disagrees with the model")
     from pydantic import BaseModel
     from model import Article
