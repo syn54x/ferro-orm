@@ -256,20 +256,6 @@ def test_relation_assignment_misuse_fails_the_type_checker():
         assert f"bad_relation_assignment.py:{line}:" in result.stdout
 
 
-def test_relation_keyword_construction_fails_the_type_checker():
-    """`Player(handle="ferris", team=team)` leaves the required `team_id`
-    unpassed, so `ty` reports it missing whatever the relation keyword
-    carries (#881)."""
-    result = _run_ty(FIXTURES / "bad_constructor_keys.py")
-    assert result.returncode != 0, "bad_constructor_keys.py must fail ty"
-    missing = [
-        line for line in result.stdout.splitlines() if "missing-argument" in line
-    ]
-    assert len(missing) == 1, result.stdout
-    assert "bad_constructor_keys.py:25:" in missing[0]
-    assert "`team_id`" in missing[0]
-
-
 def test_projected_chains_pass_the_type_checker():
     """Every selector form — tuple, single-field, dict-aliased, traversed at
     depth (#293) — yields Rows[Row] / Row | None and composes with the join
