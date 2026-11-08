@@ -12,6 +12,10 @@ Relationships are declared with annotations: `Annotated[Other, ForeignKey(...)]`
 
 ::: ferro.ManyToMany
 
+::: ferro.Forward
+
+::: ferro.Reverse
+
 ::: ferro.Relation
     options:
       inherited_members: [add, remove, clear]
