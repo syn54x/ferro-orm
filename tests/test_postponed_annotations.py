@@ -148,7 +148,7 @@ class Post(Model):
         await mod.Author(name="Ada").save()
         await mod.Post(title="Notes", author_id=1).save()
         post = await mod.Post.get(1)
-        assert (await post.author).name == "Ada"
+        assert (await post.author.load()).name == "Ada"
 
 
 @pytest.mark.asyncio

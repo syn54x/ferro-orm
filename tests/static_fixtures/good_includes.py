@@ -6,7 +6,7 @@ distinct loaded type, ADR-0008), and populated access types as the field's
 declared annotation.
 """
 
-from typing import Annotated
+from typing import Annotated, assert_type
 
 from ferro import FerroField, ForeignKey, Model
 
@@ -40,5 +40,8 @@ async def _include_chain_stays_query_shaped() -> None:
     label: str = txns[0].account.label
 
     n: int = await GITxn.select().include(lambda t: t.account).count()
+
+    # A relation nothing loaded is filled in place by .load(), typed as itself.
+    assert_type(await txns[0].account.load(), GIAccount)
 
     del one, label, n
