@@ -1,8 +1,8 @@
 import pytest
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict
 
 import ferro
-from ferro import Model
+from ferro import Field, Model
 
 pytestmark = pytest.mark.backend_matrix
 
@@ -29,7 +29,7 @@ async def test_direct_injection_bypasses_init(db_url):
 
     # Use a unique class name for this test to avoid registry issues
     class HydrationTestUser(Model):
-        id: int = Field(default=None, json_schema_extra={"primary_key": True})
+        id: int = Field(default=None, primary_key=True)
         name: str
 
         def __init__(self, **data):
@@ -67,7 +67,7 @@ async def test_hydrated_row_initializes_pydantic_slots(db_url):
     """Rust-hydrated instances must match __init__ for Pydantic slot attributes."""
 
     class SlotCheckUser(Model):
-        id: int = Field(default=None, json_schema_extra={"primary_key": True})
+        id: int = Field(default=None, primary_key=True)
         name: str
 
     await ferro.connect(db_url, auto_migrate=True)
@@ -98,7 +98,7 @@ async def test_hydrated_extra_allow_starts_with_empty_extra_dict(db_url):
     class ExtraAllowUser(Model):
         model_config = ConfigDict(extra="allow")
 
-        id: int = Field(default=None, json_schema_extra={"primary_key": True})
+        id: int = Field(default=None, primary_key=True)
         name: str
 
     await ferro.connect(db_url, auto_migrate=True)
@@ -122,7 +122,7 @@ async def test_hydrated_extra_allow_starts_with_empty_extra_dict(db_url):
 @pytest.mark.asyncio
 async def test_hydration_slots_match_across_get_all_and_first(db_url):
     class SlotPathUser(Model):
-        id: int = Field(default=None, json_schema_extra={"primary_key": True})
+        id: int = Field(default=None, primary_key=True)
         name: str
 
     await ferro.connect(db_url, auto_migrate=True)
@@ -152,7 +152,7 @@ async def test_hydrated_extra_forbid_initializes_slots(db_url):
     class ExtraForbidUser(Model):
         model_config = ConfigDict(extra="forbid")
 
-        id: int = Field(default=None, json_schema_extra={"primary_key": True})
+        id: int = Field(default=None, primary_key=True)
         name: str
 
     await ferro.connect(db_url, auto_migrate=True)
@@ -208,7 +208,7 @@ async def test_hydration_holds_the_mapped_columns_only(db_url):
     from ferro.raw import execute
 
     class RetiredHydrationUser(Model):
-        id: int = Field(default=None, json_schema_extra={"primary_key": True})
+        id: int = Field(default=None, primary_key=True)
         name: str
         bio: str | None = FerroFieldOption(retired=True)
 
@@ -245,14 +245,14 @@ async def test_hydrated_instances_list_fields_in_declaration_order(db_url):
     from ferro import BackRef, ForeignKey, Relation
 
     class OrderAuthor(Model):
-        id: int | None = Field(default=None, json_schema_extra={"primary_key": True})
+        id: int | None = Field(default=None, primary_key=True)
         username: str
         email: str
         age: int
         posts: Relation[list["OrderPost"]] = BackRef()
 
     class OrderPost(Model):
-        id: int | None = Field(default=None, json_schema_extra={"primary_key": True})
+        id: int | None = Field(default=None, primary_key=True)
         title: str
         author: Annotated[OrderAuthor, ForeignKey(related_name="posts")]
         body: str
@@ -295,7 +295,7 @@ async def test_hydrated_instances_list_fields_in_declaration_order(db_url):
 @pytest.mark.asyncio
 async def test_identity_refresh_keeps_field_order(db_url):
     class OrderRefresh(Model):
-        id: int | None = Field(default=None, json_schema_extra={"primary_key": True})
+        id: int | None = Field(default=None, primary_key=True)
         username: str
         age: int
 
@@ -320,11 +320,11 @@ async def test_hydration_order_with_shadow_column_and_retired_field(db_url):
     from ferro import Field as FerroFieldOption
 
     class OrderOwner(Model):
-        id: int | None = Field(default=None, json_schema_extra={"primary_key": True})
+        id: int | None = Field(default=None, primary_key=True)
         rows: Relation[list["OrderRetired"]] = BackRef()
 
     class OrderRetired(Model):
-        id: int | None = Field(default=None, json_schema_extra={"primary_key": True})
+        id: int | None = Field(default=None, primary_key=True)
         zeta: str
         owner: Annotated[OrderOwner, ForeignKey(related_name="rows")]
         gone: str | None = FerroFieldOption(retired=True)

@@ -12,9 +12,8 @@ from unittest.mock import Mock
 import pytest
 from pydantic.fields import FieldInfo
 
-from ferro import BackRef, Model, Relation
+from ferro import BackRef, Field, Model, Relation
 from ferro.base import FerroField, ForeignKey, ManyToManyRelation
-from ferro.fields import FERRO_FIELD_EXTRA_KEY
 from ferro.metaclass import ModelMetaclass
 
 
@@ -27,34 +26,27 @@ class TestFieldFerroPayload:
         assert ModelMetaclass._field_ferro_payload(123) == {}
         assert ModelMetaclass._field_ferro_payload(None) == {}
 
-    def test_field_info_with_non_dict_extra_returns_false(self):
-        """FieldInfo with non-dict json_schema_extra should return an empty payload."""
-        field = FieldInfo(annotation=int, default=None)
-        field.json_schema_extra = "not a dict"
-        assert ModelMetaclass._field_ferro_payload(field) == {}
+    def test_field_info_without_relation_keywords_returns_empty(self):
+        """A FieldInfo with column options only carries no relation payload."""
+        assert ModelMetaclass._field_ferro_payload(Field(index=True)) == {}
 
     def test_field_info_with_back_ref_true_returns_payload(self):
-        """FieldInfo with Ferro extra should return that payload."""
-        field = FieldInfo(
-            annotation=int,
-            default=None,
-            json_schema_extra={FERRO_FIELD_EXTRA_KEY: {"back_ref": True}},
-        )
+        """Field(back_ref=True) leaves its relation keywords in the metadata."""
+        field = Field(back_ref=True)
         assert ModelMetaclass._field_ferro_payload(field) == {"back_ref": True}
 
     def test_field_info_with_many_to_many_returns_payload(self):
         """FieldInfo with many_to_many metadata should return that payload."""
-        field = FieldInfo(
-            annotation=int,
-            default=None,
-            json_schema_extra={
-                FERRO_FIELD_EXTRA_KEY: {
-                    "many_to_many": True,
-                    "related_name": "users",
-                }
-            },
-        )
+        field = Field(many_to_many=True, related_name="users")
         assert ModelMetaclass._field_ferro_payload(field)["related_name"] == "users"
+
+    def test_retired_relation_field_reports_retired(self):
+        """A retired BackRef carries retired=True so the scan can refuse it."""
+        field = Field(back_ref=True, retired=True)
+        assert ModelMetaclass._field_ferro_payload(field) == {
+            "back_ref": True,
+            "retired": True,
+        }
 
 
 class TestRelationshipFieldPayload:
@@ -80,22 +72,14 @@ class TestRelationshipFieldPayload:
     def test_field_with_back_ref_true(self):
         """Field(back_ref=True) in namespace should be returned as payload."""
         hint = Relation[list[int]]
-        field = FieldInfo(
-            annotation=int,
-            default=None,
-            json_schema_extra={FERRO_FIELD_EXTRA_KEY: {"back_ref": True}},
-        )
+        field = Field(back_ref=True)
         namespace = {"field": field}
         payload = ModelMetaclass._relationship_field_payload("field", hint, namespace)
         assert payload == {"back_ref": True}
 
     def test_annotated_with_field_back_ref(self):
         """Annotated[..., Field(back_ref=True)] should be returned as payload."""
-        field_info = FieldInfo(
-            annotation=int,
-            default=None,
-            json_schema_extra={FERRO_FIELD_EXTRA_KEY: {"back_ref": True}},
-        )
+        field_info = Field(back_ref=True)
         hint = Annotated[Relation[list[int]], field_info]
         namespace = {}
         payload = ModelMetaclass._relationship_field_payload("field", hint, namespace)
@@ -330,7 +314,7 @@ class TestParseFerroFieldMetadata:
 
     def test_no_ferro_fields_returns_empty(self):
         """Model without FerroField metadata should return empty dict."""
-        mock_cls = Mock()
+        mock_cls = Mock(__name__="Mocked")
         mock_cls.model_fields = {"name": FieldInfo(annotation=str, default=None)}
 
         result = ModelMetaclass._parse_ferro_field_metadata(mock_cls)
@@ -340,7 +324,7 @@ class TestParseFerroFieldMetadata:
     def test_annotated_ferro_field(self):
         """FerroField in Annotated metadata should be detected."""
         ferro_meta = FerroField(primary_key=True)
-        mock_cls = Mock()
+        mock_cls = Mock(__name__="Mocked")
         field_info = FieldInfo(annotation=int, default=None)
         # Simulate Pydantic's metadata field
         field_info.metadata = [ferro_meta]
@@ -352,12 +336,9 @@ class TestParseFerroFieldMetadata:
         assert result["id"] is ferro_meta
 
     def test_wrapped_ferro_field(self):
-        """FerroField in json_schema_extra should be detected."""
-        mock_cls = Mock()
-        field_info = FieldInfo(annotation=int, default=None)
-        field_info.json_schema_extra = {
-            FERRO_FIELD_EXTRA_KEY: {"primary_key": True, "autoincrement": True}
-        }
+        """The FerroField a Field(...) leaves in its metadata should be detected."""
+        mock_cls = Mock(__name__="Mocked")
+        field_info = Field(default=None, primary_key=True, autoincrement=True)
         mock_cls.model_fields = {"id": field_info}
 
         result = ModelMetaclass._parse_ferro_field_metadata(mock_cls)
@@ -365,14 +346,13 @@ class TestParseFerroFieldMetadata:
         assert "id" in result
         assert isinstance(result["id"], FerroField)
         assert result["id"].primary_key is True
+        assert result["id"].autoincrement is True
 
     def test_dual_declaration_raises_error(self):
         """FerroField declared twice should raise TypeError."""
-        ferro_meta = FerroField(primary_key=True)
-        mock_cls = Mock()
-        field_info = FieldInfo(annotation=int, default=None)
-        field_info.metadata = [ferro_meta]
-        field_info.json_schema_extra = {FERRO_FIELD_EXTRA_KEY: {"primary_key": True}}
+        mock_cls = Mock(__name__="Mocked")
+        field_info = Field(default=None, primary_key=True)
+        field_info.metadata.append(FerroField(primary_key=True))
         mock_cls.model_fields = {"id": field_info}
 
         with pytest.raises(

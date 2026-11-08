@@ -3,9 +3,7 @@
 from typing import Annotated
 from uuid import UUID
 
-from pydantic import Field as PydanticField
-
-from ferro import Model
+from ferro import Field, Model
 from ferro.base import FerroField
 from ferro.columns import build_column_specs, fk_shadow_spec, pk_spec
 
@@ -25,20 +23,16 @@ class TestAutoincrementDerivation:
 
         assert build_column_specs(M)["id"].autoincrement is False
 
-    def test_raw_path_integer_pk_defaults_true(self, clean_registry):
+    def test_field_integer_pk_defaults_true(self, clean_registry):
         class M(Model):
-            id: int = PydanticField(
-                default=None, json_schema_extra={"primary_key": True}
-            )
+            id: int = Field(default=None, primary_key=True)
 
         assert build_column_specs(M)["id"].autoincrement is True
 
-    def test_raw_path_str_pk_defaults_false_unified(self, clean_registry):
-        # ADR-0002: one rule for both paths - explicit, else (pk AND integer).
+    def test_field_str_pk_defaults_false_unified(self, clean_registry):
+        # ADR-0002: one rule for both spellings - explicit, else (pk AND integer).
         class M(Model):
-            id: str = PydanticField(
-                default=None, json_schema_extra={"primary_key": True}
-            )
+            id: str = Field(default=None, primary_key=True)
 
         assert build_column_specs(M)["id"].autoincrement is False
 

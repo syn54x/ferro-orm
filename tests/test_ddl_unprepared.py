@@ -27,10 +27,9 @@ from __future__ import annotations
 import enum
 
 import pytest
-from pydantic import Field
 
 import ferro
-from ferro import Model, PoolConfig
+from ferro import Field, Model, PoolConfig
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.postgres_only]
 
@@ -43,8 +42,8 @@ class Shade(enum.Enum):
 @pytest.fixture
 def widget():
     class Widget(Model):
-        id: int | None = Field(default=None, json_schema_extra={"primary_key": True})
-        name: str = Field(json_schema_extra={"index": True})
+        id: int | None = Field(default=None, primary_key=True)
+        name: str = Field(index=True)
         shade: Shade = Shade.LIGHT
 
     return Widget

@@ -187,7 +187,7 @@ def test_nullable_fk_annotation_does_not_crash():
         ] = None
 
     resolve_relationships()
-    assert NullableFkChild.ferro_relations["parent"].to is NullableFkParent
+    assert NullableFkChild.__ferro_relations__["parent"].to is NullableFkParent
 
 
 @pytest.mark.asyncio

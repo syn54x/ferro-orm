@@ -48,6 +48,10 @@ _Avoid_: Object field, blob field, document column
 The single authoritative record of one column's facts — identity, type, and constraints — derived exactly once from the field declaration. Provisional at class-body time; authoritative once relationship resolution completes.
 _Avoid_: Column metadata, enriched schema property, field dict
 
+**Field option**:
+A database setting declared on one model field (`primary_key`, `unique`, `index`, `db_type`, `foreign_key`, `on_delete`, `renamed_from`, `retired`, `generated`), stored on the field and never printed in its JSON schema.
+_Avoid_: `ferro_field`, raw path, column option
+
 **Relation traversal**:
 Attribute access on a declared forward-FK field inside a query lambda (`lambda t: t.account.ledger_id`), reaching a related model's columns from the root. Traversal narrows the result to rows where the relation exists; keeping rows without the relation requires an explicit left join.
 _Avoid_: Join inference, nested filter, path lookup, string path

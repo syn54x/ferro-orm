@@ -28,9 +28,9 @@ from ._annotation_utils import (
 )
 from ._annotation_utils import annotation_allows_none, is_closed_domain_annotation
 from ._shadow_fk_types import shadow_annotation_for_foreign_key
-from .base import FerroField, ForeignKey, GeneratedExpression, ManyToManyRelation
+from .base import FerroField, ForeignKey, ManyToManyRelation
 from .columns import build_column_specs, refuse_back_ref_over_retired_relation
-from .fields import FERRO_FIELD_EXTRA_KEY
+from .fields import _RelationOptions
 from .ir import compile_model_schema_ir
 from .ir.compiler import declared_retired_labels
 from .query import Relation
@@ -105,6 +105,52 @@ def _reverse_relation_retired(model: str, field_name: str, m2m: bool) -> TypeErr
         f"{model}.{field_name}: a BackRef cannot be retired; it is not a column. "
         "Delete the BackRef"
     )
+
+
+# Each field option a `json_schema_extra` key once declared, and the `Field()`
+# argument that declares it now.
+_SCHEMA_EXTRA_OPTIONS = {
+    "primary_key": "primary_key",
+    "unique": "unique",
+    "index": "index",
+    "autoincrement": "autoincrement",
+    "db_type": "db_type",
+    "db_check": "db_check",
+    "ferro_nullable": "nullable",
+}
+
+# The key the old `Field()` wrote its options under: a dict keyed by the
+# `Field()` arguments themselves.
+_OLD_FIELD_OPTIONS_KEY = "ferro_field"
+
+
+def _refuse_options_in_schema_extra(
+    model: str, field_name: str, field_info: FieldInfo
+) -> None:
+    """Refuse a field option given through ``json_schema_extra``.
+
+    The options live in the field's metadata, so a key there would be printed
+    into the JSON schema and read by nothing.
+    """
+    extra = field_info.json_schema_extra
+    if not isinstance(extra, dict):
+        return
+    for key, value in extra.items():
+        if key == _OLD_FIELD_OPTIONS_KEY:
+            arguments = (
+                ", ".join(f"{option}={given!r}" for option, given in value.items())
+                if isinstance(value, dict) and value
+                else "its options"
+            )
+        elif key in _SCHEMA_EXTRA_OPTIONS:
+            arguments = f"{_SCHEMA_EXTRA_OPTIONS[key]}={value!r}"
+        else:
+            continue
+        raise TypeError(
+            f"{model}.{field_name} declares {key!r} in json_schema_extra, "
+            f"which Ferro does not read. Pass {arguments} to Field() "
+            "instead of json_schema_extra"
+        )
 
 
 class SecretHydrator:
@@ -310,10 +356,10 @@ class ModelMetaclass(type(BaseModel)):
                 REGISTRY.defer_relation(cls.__ferro_identity__, field_name, metadata)
 
             mcs._register_model(cls, cls.__ferro_identity__, local_relations)
-            ferro_fields = mcs._parse_ferro_field_metadata(cls)
-            cls.ferro_fields = ferro_fields
-            mcs._validate_db_type_options(cls, ferro_fields)
-            mcs._validate_generated_options(cls, ferro_fields)
+            declared_fields = mcs._parse_ferro_field_metadata(cls)
+            cls.__ferro_fields__ = declared_fields
+            mcs._validate_db_type_options(cls, declared_fields)
+            mcs._validate_generated_options(cls, declared_fields)
             mcs._retire_fields(cls, retired_relations)
             mcs._inject_relation_descriptors(cls, local_relations)
             mcs._generate_and_register_schema(cls, cls.__ferro_identity__)
@@ -340,7 +386,7 @@ class ModelMetaclass(type(BaseModel)):
         and enum read the one way every column's are); then the field leaves
         the Pydantic model, so the model has no attribute, keyword or dump key
         for it. A retired relation never became a field: the class-body scan
-        kept it out of ``ferro_relations`` and gave it no shadow column.
+        kept it out of ``__ferro_relations__`` and gave it no shadow column.
 
         Raises:
             TypeError: a retired primary key, a retired field that also
@@ -350,7 +396,7 @@ class ModelMetaclass(type(BaseModel)):
         model = cls.__name__
         retired = {
             field_name: meta
-            for field_name, meta in cls.ferro_fields.items()
+            for field_name, meta in cls.__ferro_fields__.items()
             if getattr(meta, "retired", False)
         }
         for field_name, meta in retired.items():
@@ -373,7 +419,7 @@ class ModelMetaclass(type(BaseModel)):
             }
             for field_name in retired:
                 del cls.__pydantic_fields__[field_name]
-                del cls.ferro_fields[field_name]
+                del cls.__ferro_fields__[field_name]
             annotations = dict(cls.__dict__.get("__annotations__", {}))
             for field_name in retired:
                 annotations.pop(field_name, None)
@@ -442,14 +488,20 @@ class ModelMetaclass(type(BaseModel)):
 
     @staticmethod
     def _field_ferro_payload(obj: Any) -> dict[str, Any]:
-        """Return Ferro metadata payload from a wrapped FieldInfo."""
+        """Return the relation keywords a ``Field()`` left in its metadata.
+
+        The payload also carries ``retired`` when the field's ``FerroField``
+        sets it, since a retired reverse relation is refused.
+        """
         if not isinstance(obj, FieldInfo):
             return {}
-        extra = getattr(obj, "json_schema_extra", None)
-        if not isinstance(extra, dict):
-            return {}
-        payload = extra.get(FERRO_FIELD_EXTRA_KEY, {})
-        return payload if isinstance(payload, dict) else {}
+        payload: dict[str, Any] = {}
+        for metadata in obj.metadata:
+            if isinstance(metadata, _RelationOptions):
+                payload.update(metadata.options)
+            elif isinstance(metadata, FerroField) and metadata.retired:
+                payload["retired"] = True
+        return payload
 
     @staticmethod
     def _strip_optional_union(hint: Any) -> Any:
@@ -790,83 +842,44 @@ class ModelMetaclass(type(BaseModel)):
                     "them to give it a distinct table name."
                 )
         REGISTRY.register(cls)
-        cls.ferro_relations = local_relations
+        cls.__ferro_relations__ = local_relations
 
     @staticmethod
     def _parse_ferro_field_metadata(cls) -> dict[str, FerroField]:
         """
-        Parse Ferro column metadata from model fields.
+        Collect each field's database options from its metadata.
 
-        Sources: ``Annotated[..., FerroField(...)]``, assignment ``Field(...)``
-        (Ferro kwargs live under ``json_schema_extra["ferro_field"]``), and
-        ``Annotated[..., Field(...)]`` (Pydantic merges that ``Field`` into the
-        same ``FieldInfo`` shape as assignment).
+        ``Field(...)`` and ``FerroField(...)`` each leave one ``FerroField``
+        in the field's ``FieldInfo.metadata``, whether assigned or given inside
+        ``Annotated[...]`` (Pydantic merges both into the same ``FieldInfo``).
+        The options never live in ``json_schema_extra``: a key there that
+        names an option is refused, naming the ``Field()`` argument to use.
 
         Returns:
             Dictionary mapping field names to FerroField metadata
 
         Raises:
-            TypeError: If FerroField is declared twice for the same field
+            TypeError: A field declares its options twice, or its
+                ``json_schema_extra`` carries an option key.
         """
-        ferro_fields = {}
+        declared_fields = {}
         for f_name, field_info in cls.model_fields.items():
-            annotated_metadata: FerroField | None = None
-            for metadata in field_info.metadata:
-                if isinstance(metadata, FerroField):
-                    annotated_metadata = metadata
-                    break
-            wrapped_metadata = None
-            extra = getattr(field_info, "json_schema_extra", None)
-            if isinstance(extra, dict):
-                wrapped_payload = extra.get(FERRO_FIELD_EXTRA_KEY)
-                if wrapped_payload:
-                    field_payload = {
-                        key: wrapped_payload[key]
-                        for key in (
-                            "primary_key",
-                            "autoincrement",
-                            "unique",
-                            "index",
-                            "nullable",
-                            "db_type",
-                            "db_check",
-                            "renamed_from",
-                            "retired",
-                        )
-                        if key in wrapped_payload
-                    }
-                    if field_payload:
-                        wrapped_metadata = FerroField(**field_payload)
-            generated = next(
-                (
-                    metadata.func
-                    for metadata in field_info.metadata
-                    if isinstance(metadata, GeneratedExpression)
-                ),
-                None,
-            )
-            if generated is not None:
-                if annotated_metadata:
-                    raise TypeError(
-                        f"Field '{f_name}' cannot declare Ferro field metadata twice "
-                        "(Annotated[..., FerroField(...)] + ferro.Field(generated=...)); "
-                        "pass generated= to the one FerroField."
-                    )
-                wrapped_metadata = wrapped_metadata or FerroField()
-                wrapped_metadata.generated = generated
-
-            if annotated_metadata and wrapped_metadata:
+            _refuse_options_in_schema_extra(cls.__name__, f_name, field_info)
+            declared = [
+                metadata
+                for metadata in field_info.metadata
+                if isinstance(metadata, FerroField)
+            ]
+            if len(declared) > 1:
                 raise TypeError(
                     f"Field '{f_name}' cannot declare Ferro field metadata twice "
-                    "(Annotated[...] + ferro.Field(...))."
+                    "(Annotated[..., FerroField(...)] + ferro.Field(...)); give "
+                    "every option to one of them."
                 )
+            if declared:
+                declared_fields[f_name] = declared[0]
 
-            if annotated_metadata:
-                ferro_fields[f_name] = annotated_metadata
-            elif wrapped_metadata:
-                ferro_fields[f_name] = wrapped_metadata
-
-        return ferro_fields
+        return declared_fields
 
     @staticmethod
     def _register_enum_fields(cls) -> None:
@@ -930,7 +943,7 @@ class ModelMetaclass(type(BaseModel)):
             )
 
     @staticmethod
-    def _validate_db_type_options(cls, ferro_fields: dict) -> None:
+    def _validate_db_type_options(cls, declared_fields: dict) -> None:
         """Strict validation of ``Field(db_type=..., db_check=...)`` combinations.
 
         Runs at class-definition time (Phase 3) so incoherent combinations
@@ -945,7 +958,7 @@ class ModelMetaclass(type(BaseModel)):
 
         model_fields = getattr(cls, "model_fields", {})
 
-        for field_name, metadata in ferro_fields.items():
+        for field_name, metadata in declared_fields.items():
             db_type = getattr(metadata, "db_type", None)
             db_check = getattr(metadata, "db_check", False)
             if db_type is None and not db_check:
@@ -977,13 +990,13 @@ class ModelMetaclass(type(BaseModel)):
                     )
 
     @staticmethod
-    def _validate_generated_options(cls, ferro_fields: dict) -> None:
+    def _validate_generated_options(cls, declared_fields: dict) -> None:
         """Refuse `generated=` beside an option the database cannot honour.
 
         A generated column's value comes only from its expression, so it has
         no key, sequence, default or enum check of its own.
         """
-        for field_name, metadata in ferro_fields.items():
+        for field_name, metadata in declared_fields.items():
             if getattr(metadata, "generated", None) is None:
                 continue
             field_info = cls.model_fields[field_name]

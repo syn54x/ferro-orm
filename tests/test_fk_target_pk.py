@@ -1,6 +1,6 @@
 """FF-D D5: relationship inputs must read the *target* model's PK field.
 
-Today `Model.__init__` scans the source class's ferro_fields for the PK name
+Today `Model.__init__` scans the source class's __ferro_fields__ for the PK name
 and reads that name off the target instance — correct only while every PK is
 named `id`.
 """

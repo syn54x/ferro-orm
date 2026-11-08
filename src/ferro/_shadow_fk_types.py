@@ -15,7 +15,7 @@ def is_concrete_ferro_model(obj: Any) -> bool:
     return (
         isinstance(obj, type)
         and issubclass(obj, BaseModel)
-        and hasattr(obj, "ferro_fields")
+        and hasattr(obj, "__ferro_fields__")
     )
 
 
@@ -88,7 +88,7 @@ def reconcile_shadow_fk_types(registry: dict[str, type[Any]]) -> list[type[Any]]
     for model_name, model_cls in registry.items():
         if model_name == "Model":
             continue
-        relations = getattr(model_cls, "ferro_relations", None)
+        relations = getattr(model_cls, "__ferro_relations__", None)
         if not relations:
             continue
         id_fields_updated: list[str] = []

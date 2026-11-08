@@ -1,5 +1,7 @@
 # Path-blind db_type validation at spec compilation
 
+> **Superseded in part by ADR-0061 (2026-11-08, #874)**: the raw path is gone. `json_schema_extra={"db_type": ...}` is refused at class definition with `Pass db_type=... to Field() instead of json_schema_extra`, so the two paths this record reconciles are now `Field(db_type=...)` and `Annotated[T, FerroField(db_type=...)]`, both read from the field's metadata. Token and compatibility validation still runs once, at spec compilation, for both.
+
 `db_type` validation historically ran only on the ferro declaration path
 (`metaclass._validate_db_type_options` iterates `ferro_fields`), while the raw
 path (`json_schema_extra={"db_type": ...}`) flowed into `ColumnSpec` unchecked —

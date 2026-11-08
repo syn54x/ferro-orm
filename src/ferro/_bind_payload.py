@@ -234,7 +234,7 @@ def _relation_shadows(model_cls: type) -> dict[str, str | None]:
     """Relation field name → shadow column, if this table stores one."""
     shadows: dict[str, str | None] = {}
     for source in (
-        getattr(model_cls, "ferro_relations", None),
+        getattr(model_cls, "__ferro_relations__", None),
         getattr(model_cls, "__ferro_relation_specs__", None),
         getattr(model_cls, "__ferro_reverse_specs__", None),
     ):

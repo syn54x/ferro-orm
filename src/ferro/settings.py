@@ -958,7 +958,7 @@ def _check_references(
     if len(databases) == 1:
         return
 
-    relations = getattr(model, "ferro_relations", None) or {}
+    relations = getattr(model, "__ferro_relations__", None) or {}
     for field_name, relation in relations.items():
         if not isinstance(relation, (ForeignKey, ManyToManyRelation)):
             continue

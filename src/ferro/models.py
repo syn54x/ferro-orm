@@ -379,7 +379,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                 f"{generated_refusal(self.__class__, name)}; drop {name}= from the call"
             )
         # 1. Handle relationship inputs (e.g. Product(category=my_cat))
-        relations = getattr(self.__class__, "ferro_relations", {})
+        relations = getattr(self.__class__, "__ferro_relations__", {})
         for field_name, metadata in relations.items():
             if isinstance(metadata, ForeignKey) and field_name in data:
                 val = data.pop(field_name)
@@ -421,7 +421,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
     @model_validator(mode="after")
     def _validate_required_foreign_keys(self) -> Self:
         """Keep Python model validation aligned with required FK nullability."""
-        relations = getattr(self.__class__, "ferro_relations", {})
+        relations = getattr(self.__class__, "__ferro_relations__", {})
         for field_name, metadata in relations.items():
             if not isinstance(metadata, ForeignKey):
                 continue

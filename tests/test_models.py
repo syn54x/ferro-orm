@@ -1,13 +1,11 @@
-from pydantic import Field
-
-from ferro import Model
+from ferro import Field, Model
 
 
 def test_model_registration():
     """Test that defining a model registers it with the Rust engine."""
 
     class TestUser(Model):
-        id: int = Field(json_schema_extra={"primary_key": True})
+        id: int = Field(primary_key=True)
         username: str
         email: str | None = None
 
