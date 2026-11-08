@@ -604,7 +604,8 @@ def test_a_reverse_with_no_key_pointing_back_names_the_column_to_add():
 
     assert _refused(define) == (
         "Team.players: Player.mentor_id points at Player, not Team. "
-        "Write: team_id: int = Field(foreign_key=Team) on Player"
+        "Write: team_id: int = Field(foreign_key=Team) on Player and "
+        'players: Relation[list["Player"]] = Reverse("team_id")'
     )
 
 

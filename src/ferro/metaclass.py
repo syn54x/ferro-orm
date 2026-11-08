@@ -55,9 +55,10 @@ from .query import Relation
 from .registry import REGISTRY
 from .relations import (
     check_declared_foreign_keys,
-    many_to_many_line,
+    key_column_line,
     relation_line,
     relation_refusal,
+    written_type,
 )
 from .relations.descriptors import ForwardDescriptor
 
@@ -512,11 +513,12 @@ def _declared_many_to_many(
     """The record of a ``ManyToMany(through=...)`` declaration.
 
     A declaration that is not ``Relation[list[...]]`` assigned the marker,
-    or names no join table, is refused with the line to write; a missing
-    ``through=`` is written as the name the old form derived,
-    ``<table>_<field>``, so a conversion keeps its table. When the class
-    body cannot name the target that line needs (a bare ``Relation``), the
-    record carries the refusal and relation resolution raises it.
+    or names no join table, carries why as its refusal; a missing
+    ``through=`` is recorded as the name the old form derived,
+    ``<table>_<field>``, so a conversion keeps its table. The refusal is
+    raised once the class exists, by `many_to_many_refusal`, which also
+    refuses a target naming the model itself; a bare ``Relation`` names no
+    target, and relation resolution raises it.
 
     Args:
         model: The model's name.
@@ -529,8 +531,8 @@ def _declared_many_to_many(
         scope: The names defined where the class statement runs, or ``None``
             when the module postpones its annotations.
 
-    Raises:
-        TypeError: The declaration is refused, naming the line to write.
+    Returns:
+        The relation, its ``refusal`` set when the declaration is refused.
     """
     core, wrapped, _ = _layers(annotation)
     view = _relation_view(core)
@@ -558,76 +560,38 @@ def _declared_many_to_many(
         target = _relation_argument(core)[1]
     else:
         target = None
-    bound = None if scope is None else scope | frozenset(namespace)
-    relation = ManyToManyRelation(through=through, reverse_index=reverse_index)
-    relation.to = target
-    if reason is None:
-        return relation
-    if target is None:
-        relation.refusal, relation.bound = reason, bound
-        return relation
-    line = many_to_many_line(
-        field_name, annotation_text(target), through, reverse_index, bound
+    relation = ManyToManyRelation(
+        through=through,
+        reverse_index=reverse_index,
+        refusal=reason,
+        bound=None if scope is None else scope | frozenset(namespace),
     )
-    raise TypeError(f"{model}.{field_name}: {reason}. Write: {line}")
-
-
-def _without_none(annotation: Any) -> str:
-    """``annotation`` as source text, with ``| None`` set aside."""
-    if get_origin(annotation) in (Union, UnionType):
-        members = [arg for arg in get_args(annotation) if arg is not type(None)]
-        return " | ".join(annotation_text(member) for member in members)
-    return annotation_text(annotation)
+    relation.to = target
+    return relation
 
 
 def _refuse_foreign_key_options(cls: type, declared_fields: dict) -> None:
-    """Refuse a foreign-key option the column cannot take, naming the fix.
+    """Refuse ``on_delete`` on a column with no ``foreign_key``, naming the fix.
+
+    A foreign-key column's own refusals (the primary key, generated,
+    ``on_delete="SET NULL"`` on a required column) are `check_key_column`'s,
+    which writes its fix from the target key.
 
     Raises:
-        TypeError: ``on_delete`` without ``foreign_key``; a foreign-key
-            column that is the primary key or generated; or
-            ``on_delete="SET NULL"`` on an annotation that does not allow
-            ``None``.
+        TypeError: ``on_delete`` without ``foreign_key``.
     """
-    model = cls.__name__
     for name, meta in declared_fields.items():
-        info = cls.model_fields[name]
-        written = annotation_text(info.annotation)
-        if meta.foreign_key is None:
-            if meta.on_delete is not None:
-                line = field_line(
-                    name, written, field_options(meta, on_delete=None), info.default
-                )
-                raise TypeError(
-                    f"{model}.{name}: on_delete is a foreign-key option and this "
-                    f"column has no foreign_key. Write: {line}"
-                )
-            continue
-        if meta.primary_key:
+        if meta.foreign_key is None and meta.on_delete is not None:
+            info = cls.model_fields[name]
             line = field_line(
                 name,
-                _without_none(info.annotation),
-                field_options(meta, primary_key=False, autoincrement=None, unique=True),
+                annotation_text(info.annotation),
+                field_options(meta, on_delete=None),
+                info.default,
             )
             raise TypeError(
-                f"{model}.{name}: a foreign-key column cannot be the primary key. "
-                "Write: id: int | None = Field(default=None, primary_key=True) "
-                f"and {line}"
-            )
-        if meta.generated is not None:
-            # `generated=` gave the field its `None` default; the fix drops both.
-            line = field_line(name, written, field_options(meta, generated=None))
-            raise TypeError(
-                f"{model}.{name}: a foreign-key column cannot be generated. "
-                f"Write: {line}"
-            )
-        if meta.on_delete == "SET NULL" and not annotation_allows_none(info.annotation):
-            line = field_line(
-                name, f"{written} | None", field_options(meta), default=None
-            )
-            raise TypeError(
-                f'{model}.{name}: on_delete="SET NULL" needs a nullable column. '
-                f"Write: {line}"
+                f"{cls.__name__}.{name}: on_delete is a foreign-key option and "
+                f"this column has no foreign_key. Write: {line}"
             )
 
 
@@ -829,12 +793,13 @@ def _none_refusal(model_cls: type, name: str, spec: Any) -> TypeError:
     declared = model_cls.__ferro_relations__[name]
     if isinstance(declared, ForwardRelation):
         info = model_cls.model_fields[spec.fk_column]
-        column = field_line(
+        column = key_column_line(
+            model_cls,
             spec.fk_column,
-            f"{_without_none(info.annotation)} | None",
-            # An explicit `nullable=False` would keep the column required.
-            field_options(model_cls.__ferro_fields__[spec.fk_column], nullable="infer"),
-            default=None,
+            spec.target,
+            nullable=True,
+            meta=model_cls.__ferro_fields__[spec.fk_column],
+            annotation=written_type(info.annotation),
         )
         relation = relation_line(
             name, "Forward", target, True, spec.fk_column, declared.bound

@@ -128,8 +128,86 @@ def _target_key(model_cls: Any, name: str, target: Any) -> tuple[str, Any]:
     return pk, python_type
 
 
+def written_type(annotation: Any) -> str:
+    """``annotation`` as source text, with ``| None`` set aside."""
+    if get_origin(annotation) in (Union, UnionType):
+        members = [arg for arg in get_args(annotation) if arg is not type(None)]
+        return " | ".join(annotation_text(member) for member in members)
+    return annotation_text(annotation)
+
+
+# Options a foreign-key column cannot take, at the value that leaves them out.
+_NOT_ON_A_KEY = {
+    option: getattr(FerroField(), option)
+    for option in ("primary_key", "autoincrement", "generated", "nullable")
+}
+
+
+def key_column_line(
+    model_cls: Any,
+    column: str,
+    target: Any,
+    *,
+    nullable: bool,
+    meta: FerroField | None = None,
+    annotation: str | None = None,
+    foreign_key: Any = None,
+    bound: frozenset[str] | None = None,
+    **changes: Any,
+) -> str:
+    """Write a foreign-key column to ``target`` that the key checks accept.
+
+    Every line a refusal writes for a foreign-key column comes from here, so
+    the rules `check_key_column` applies decide it: the type is the target
+    key's, the storage is the `db_type` the target key declares (none when
+    it declares none), nullability comes from the annotation alone, with
+    ``on_delete="SET NULL"`` making it nullable, and the options a key
+    column cannot take are left out. Every other option ``meta`` declares
+    is kept.
+
+    Args:
+        model_cls: The model declaring the column.
+        column: The column's name.
+        target: The model the column points at, resolved.
+        nullable: Whether the column allows `None`.
+        meta: The column's declared options, if it has any. Defaults to `None`.
+        annotation: The column's type as written, `| None` set aside, when a
+            check already found it equal to the target key's; otherwise the
+            target key's type is written. Defaults to `None`.
+        foreign_key: How `foreign_key=` is written. Defaults to the column's
+            own, or the target by class (by name where it is not defined yet).
+        bound: The names defined where the column is declared, or `None`.
+        **changes: Further options to set, as `field_options` takes them.
+
+    Returns:
+        The declaration, as one line of source.
+    """
+    pk, key_type = _target_key(model_cls, column, target)
+    key = target.__ferro_columns__[pk]
+    if foreign_key is None:
+        foreign_key = (
+            meta.foreign_key
+            if meta is not None and meta.foreign_key is not None
+            else _foreign_key_option(model_cls, target, bound)
+        )
+    options = field_options(
+        meta,
+        **{
+            **_NOT_ON_A_KEY,
+            "foreign_key": foreign_key,
+            "db_type": key.db_type if key.db_type_explicit else None,
+            **changes,
+        },
+    )
+    nullable = nullable or options.get("on_delete") == "SET NULL"
+    written = (annotation or annotation_text(key_type)) + (
+        " | None" if nullable else ""
+    )
+    return field_line(column, written, options, None if nullable else PydanticUndefined)
+
+
 def check_key_column(model_cls: Any, name: str, meta: FerroField, target: Any) -> None:
-    """Refuse a foreign-key column whose type or storage is not its target key's.
+    """Refuse a foreign-key column its target key does not back.
 
     Args:
         model_cls: The model declaring the column.
@@ -138,10 +216,11 @@ def check_key_column(model_cls: Any, name: str, meta: FerroField, target: Any) -
         target: The model the column points at.
 
     Raises:
-        TypeError: The column's type, with `| None` set aside and a
-            `NewType` read as its supertype, is not the target key's type;
-            or the column stores differently from the target key, naming
-            the `db_type` to add.
+        TypeError: The column is the primary key or generated; it takes
+            `on_delete="SET NULL"` without allowing `None`; its type, with
+            `| None` set aside and a `NewType` read as its supertype, is not
+            the target key's type; or it stores differently from the target
+            key. Each names the line `key_column_line` writes.
     """
     info = model_cls.model_fields.get(name)
     if info is None:
@@ -149,14 +228,29 @@ def check_key_column(model_cls: Any, name: str, meta: FerroField, target: Any) -
     model = model_cls.__name__
     pk, key_type = _target_key(model_cls, name, target)
     nullable = annotation_allows_none(info.annotation)
+    if meta.primary_key:
+        line = key_column_line(
+            model_cls, name, target, nullable=False, meta=meta, unique=True
+        )
+        raise TypeError(
+            f"{model}.{name}: a foreign-key column cannot be the primary key. "
+            "Write: id: int | None = Field(default=None, primary_key=True) "
+            f"and {line}"
+        )
+    if meta.generated is not None:
+        line = key_column_line(model_cls, name, target, nullable=nullable, meta=meta)
+        raise TypeError(
+            f"{model}.{name}: a foreign-key column cannot be generated. Write: {line}"
+        )
+    if meta.on_delete == "SET NULL" and not nullable:
+        line = key_column_line(model_cls, name, target, nullable=True, meta=meta)
+        raise TypeError(
+            f'{model}.{name}: on_delete="SET NULL" needs a nullable column. '
+            f"Write: {line}"
+        )
     if _scalar(info.annotation) != _scalar(key_type):
         key_text = annotation_text(key_type)
-        line = field_line(
-            name,
-            key_text + (" | None" if nullable else ""),
-            field_options(meta),
-            info.default,
-        )
+        line = key_column_line(model_cls, name, target, nullable=nullable, meta=meta)
         raise TypeError(
             f"{model}.{name}: {target.__name__}.{pk} is {key_text}, so its "
             f"foreign-key column is {key_text} too. Write: {line}"
@@ -165,11 +259,13 @@ def check_key_column(model_cls: Any, name: str, meta: FerroField, target: Any) -
     key = _storage(target.__ferro_columns__[pk])
     for dialect in key:
         if column[dialect] != key[dialect]:
-            line = field_line(
+            line = key_column_line(
+                model_cls,
                 name,
-                annotation_text(info.annotation),
-                field_options(meta, db_type=key[dialect]),
-                info.default,
+                target,
+                nullable=nullable,
+                meta=meta,
+                annotation=written_type(info.annotation),
             )
             raise TypeError(
                 f"{model}.{name}: {target.__name__}.{pk} is stored as "
@@ -194,23 +290,6 @@ def _foreign_key_option(
     defined yet where it is declared (a self reference among them)."""
     later = bound is not None and target.__name__ not in bound
     return target.__name__ if target is model_cls or later else target
-
-
-def _new_key_line(
-    model_cls: Any,
-    column: str,
-    target: Any,
-    nullable: bool,
-    bound: frozenset[str] | None = None,
-) -> str:
-    """The declaration of a foreign-key column ``column`` to ``target``."""
-    _, key_type = _target_key(model_cls, column, target)
-    return field_line(
-        column,
-        annotation_text(key_type) + (" | None" if nullable else ""),
-        field_options(None, foreign_key=_foreign_key_option(model_cls, target, bound)),
-        None if nullable else PydanticUndefined,
-    )
 
 
 def relation_line(
@@ -250,45 +329,77 @@ def relation_line(
     return f'{field_name}: Relation[{shown}] = {spelling}("{column}")'
 
 
-def many_to_many_line(
+SELF_MANY_TO_MANY = "a self-referential many-to-many is not supported"
+
+
+def many_to_many_refusal(
+    owner: Any,
     field_name: str,
-    target: str,
+    reason: str,
+    targets: list[str],
     through: str,
     reverse_index: bool,
     bound: frozenset[str] | None,
-) -> str:
-    """Write a many-to-many's declaration: ``tags: Relation[list[Tag]] = ManyToMany(through="post_tags")``.
+) -> TypeError:
+    """The refusal whose fix is a many-to-many on ``owner`` linking one of ``targets``.
+
+    Every refusal that writes a many-to-many builds it here, so the rules a
+    many-to-many is checked by decide the fix. A target that names
+    ``owner`` itself is checked first, whatever else is wrong: both
+    join-table columns would be ``<table>_id``, so no ``ManyToMany`` line
+    works, and the fix is a join model of its own, with two foreign-key
+    columns written by `key_column_line`. Any other target gets the line
+    ``tags: Relation[list[Tag]] = ManyToMany(through="post_tags")``.
 
     Args:
+        owner: The model the many-to-many would be declared on.
         field_name: The relation's field name.
-        target: The model the relation links, by name.
+        reason: What is wrong with the declaration as written.
+        targets: The models the many-to-many could link, by name; each one
+            is a fix of its own.
         through: The join table's name.
         reverse_index: Whether the join table keeps its reverse index.
         bound: The names defined where the relation is declared, or ``None``
             under postponed annotations; a target outside them is quoted.
 
     Returns:
-        The declaration, as one line of source.
+        The error, its message ending with the fix.
     """
-    shown = f'"{target}"' if bound is not None and target not in bound else target
+    model = owner.__name__
+    if model in targets:
+        column = _join_column(owner.__ferro_table__)
+        keys = "; ".join(
+            key_column_line(
+                owner, name, owner, nullable=False, foreign_key=model, bound=bound
+            )
+            for name in (column, f"other_{column}")
+        )
+        join_model = "".join(part.capitalize() for part in through.split("_"))
+        # A Reverse reading the many-to-many reads the join model instead.
+        readers = "".join(
+            f"; and in place of {model}.{reader}, which reads it: "
+            + relation_line(reader, "Reverse", join_model, False, column, frozenset())
+            for reader, relation in (
+                owner.__dict__.get("__ferro_relations__") or {}
+            ).items()
+            if isinstance(relation, ReverseRelation)
+            and relation.attribute == field_name
+        )
+        return TypeError(
+            f"{model}.{field_name}: {SELF_MANY_TO_MANY}, since both join-table "
+            f"columns would be {column}. Declare the join table as a model of "
+            f"its own, beside {model}: class {join_model}(Model): "
+            f"__ferro_table__ = {json.dumps(through)}; "
+            f"id: int | None = Field(default=None, primary_key=True); {keys}{readers}"
+        )
     options = f"through={json.dumps(through)}"
     if not reverse_index:
         options += ", reverse_index=False"
-    return f"{field_name}: Relation[list[{shown}]] = ManyToMany({options})"
-
-
-def _self_many_to_many(model_cls: Any) -> str:
-    """Why a many-to-many cannot link its own model, and what to declare instead."""
-    model, column = model_cls.__name__, _join_column(model_cls.__ferro_table__)
-    _, key_type = _target_key(model_cls, column, model_cls)
-    key = annotation_text(key_type)
-    return (
-        "a self-referential many-to-many is not supported, since both join-table "
-        f"columns would be {column}. Declare the join table as a model of its "
-        f"own, with two foreign-key columns pointing at {model}: "
-        f'{column}: {key} = Field(foreign_key="{model}") and '
-        f'other_{column}: {key} = Field(foreign_key="{model}")'
-    )
+    lines = []
+    for target in targets:
+        shown = f'"{target}"' if bound is not None and target not in bound else target
+        lines.append(f"{field_name}: Relation[list[{shown}]] = ManyToMany({options})")
+    return TypeError(f"{model}.{field_name}: {reason}. Write: {' or '.join(lines)}")
 
 
 def _many_to_many_to(model_cls: Any, target: Any) -> list[str]:
@@ -316,24 +427,21 @@ def _refuse_unnamed_many_to_many(
         other.__name__
         for other in REGISTRY.models().values()
         for reverse in (other.__dict__.get("__ferro_relations__") or {}).values()
-        if other is not model_cls  # a self-referential many-to-many is refused
-        and isinstance(reverse, ReverseRelation)
+        if isinstance(reverse, ReverseRelation)
         and reverse.attribute == name
         and reverse.refusal is None
         and _resolve_target(reverse.to, final=False) is model_cls
     ]
     if naming:
-        lines = " or ".join(
-            many_to_many_line(
-                name,
-                other,
-                relation.through or "",
-                relation.reverse_index,
-                relation.bound,
-            )
-            for other in naming
+        raise many_to_many_refusal(
+            model_cls,
+            name,
+            relation.refusal or "",
+            naming,
+            relation.through or "",
+            relation.reverse_index,
+            relation.bound,
         )
-        raise TypeError(f"{model}.{name}: {relation.refusal}. Write: {lines}")
     # No line can be written: nothing names the model the relation links.
     raise TypeError(
         f"{model}.{name}: {relation.refusal}, and nothing names the model it "
@@ -444,8 +552,9 @@ def _refuse_unnamed_reverse(
             f"{model}.{name}: {relation.refusal}, and {declaring} each declare "
             f"{column} pointing at {model}. Write: {lines}"
         )
-    _, key_type = _target_key(model_cls, name, model_cls)
-    key = field_line(column, annotation_text(key_type), {"foreign_key": model_cls})
+    key = key_column_line(
+        model_cls, column, model_cls, nullable=False, foreign_key=model_cls
+    )
     # No line can be written: no model is the one the relation reads.
     raise TypeError(
         f"{model}.{name}: {relation.refusal}, and no model declares a "
@@ -505,19 +614,23 @@ def check_forward_relation(
                 name, "Forward", target.__name__, nullable, keys[0], relation.bound
             )
         else:
-            fix = _new_key_line(
-                model_cls, column, target, relation.nullable, relation.bound
+            fix = key_column_line(
+                model_cls,
+                column,
+                target,
+                nullable=relation.nullable,
+                bound=relation.bound,
             )
         raise TypeError(f"{model}.{name}: {model} has no column {column}. Write: {fix}")
     if meta is None or meta.foreign_key is None:
-        line = field_line(
+        # The column takes the relation's nullability, so both lines agree.
+        line = key_column_line(
+            model_cls,
             column,
-            annotation_text(info.annotation),
-            field_options(
-                meta,
-                foreign_key=_foreign_key_option(model_cls, target, relation.bound),
-            ),
-            info.default,
+            target,
+            nullable=relation.nullable,
+            meta=meta,
+            foreign_key=_foreign_key_option(model_cls, target, relation.bound),
         )
         raise TypeError(f"{model}.{name}: {column} has no foreign_key. Write: {line}")
     points_at = _resolve_target(meta.foreign_key, final=final)
@@ -589,25 +702,36 @@ def check_reverse_relation(
             )
         )
     keys = _key_columns_to(other, model_cls)
+    info = other.model_fields.get(column)
+    meta = other.__ferro_fields__.get(column)
     if len(keys) == 1:
         fix = relation_line(
             name, "Reverse", other.__name__, False, keys[0], relation.bound
         )
-    else:
-        added = _new_key_line(other, f"{_snake(model)}_id", model_cls, False)
+    elif info is None:
+        # Declaring the column the relation names makes the relation work.
+        added = key_column_line(other, column, model_cls, nullable=False)
         fix = f"{added} on {other.__name__}"
-    info = other.model_fields.get(column)
-    meta = other.__ferro_fields__.get(column)
+    else:
+        # The named column points elsewhere: a new one, and the relation over it.
+        added_column = f"{_snake(model)}_id"
+        added = key_column_line(other, added_column, model_cls, nullable=False)
+        reverse = relation_line(
+            name, "Reverse", other.__name__, False, added_column, relation.bound
+        )
+        fix = f"{added} on {other.__name__} and {reverse}"
     if info is None:
         raise TypeError(
             f"{model}.{name}: {other.__name__} has no column {column}. Write: {fix}"
         )
     if meta is None or meta.foreign_key is None:
-        line = field_line(
+        line = key_column_line(
+            other,
             column,
-            annotation_text(info.annotation),
-            field_options(meta, foreign_key=_foreign_key_option(other, model_cls)),
-            info.default,
+            model_cls,
+            nullable=annotation_allows_none(info.annotation),
+            meta=meta,
+            foreign_key=_foreign_key_option(other, model_cls),
         )
         raise TypeError(
             f"{model}.{name}: {other.__name__}.{column} has no foreign_key. "
@@ -647,8 +771,8 @@ def _check_reverse_many_to_many(
     if points_at is None or points_at is model_cls:
         return
     refused = (
-        f"{model_cls.__name__}.{name}: {other.__name__}.{relation.attribute} "
-        f"points at {points_at.__name__}, not {model_cls.__name__}"
+        f"{other.__name__}.{relation.attribute} points at {points_at.__name__}, "
+        f"not {model_cls.__name__}"
     )
     candidates = _key_columns_to(other, model_cls) + _many_to_many_to(other, model_cls)
     if other is model_cls:
@@ -659,12 +783,15 @@ def _check_reverse_many_to_many(
                 )
                 for key in candidates
             )
-            raise TypeError(f"{refused}. Write: {lines}")
+            raise TypeError(f"{model_cls.__name__}.{name}: {refused}. Write: {lines}")
         # No line on this model works; the fix moves the relation, so its
-        # target is quoted to hold wherever the line lands.
-        moved = f'{name}: Relation[list["{other.__name__}"]] = Reverse("{relation.attribute}")'
+        # target is quoted (no names bound) to hold wherever the line lands.
+        moved = relation_line(
+            name, "Reverse", other.__name__, False, relation.attribute, frozenset()
+        )
         raise TypeError(
-            f"{refused}, and no foreign-key column of {other.__name__} points at "
+            f"{model_cls.__name__}.{name}: {refused}, and no foreign-key column "
+            f"of {other.__name__} points at "
             f"{other.__name__} for it to read, since a self-referential "
             f"many-to-many is not supported. Declare {name} on "
             f"{points_at.__name__}, which {other.__name__}.{relation.attribute} "
@@ -674,15 +801,16 @@ def _check_reverse_many_to_many(
         fix = relation_line(
             name, "Reverse", other.__name__, False, candidates[0], relation.bound
         )
-    else:
-        fix = many_to_many_line(
-            name,
-            other.__name__,
-            f"{model_cls.__ferro_table__}_{name}",
-            True,
-            relation.bound,
-        )
-    raise TypeError(f"{refused}. Write: {fix}")
+        raise TypeError(f"{model_cls.__name__}.{name}: {refused}. Write: {fix}")
+    raise many_to_many_refusal(
+        model_cls,
+        name,
+        refused,
+        [other.__name__],
+        f"{model_cls.__ferro_table__}_{name}",
+        True,
+        relation.bound,
+    )
 
 
 def check_declared_foreign_keys(model_cls: Any) -> None:
@@ -695,9 +823,29 @@ def check_declared_foreign_keys(model_cls: Any) -> None:
         model_cls: The class being defined, its schema compiled.
 
     Raises:
-        TypeError: A check refuses a declaration; see `check_key_column`,
-            `check_forward_relation` and `check_reverse_relation`.
+        TypeError: A check refuses a declaration; see `many_to_many_refusal`,
+            `check_key_column`, `check_forward_relation` and
+            `check_reverse_relation`.
     """
+    for name, relation in model_cls.__ferro_relations__.items():
+        # A many-to-many the class body refused, or one naming this model,
+        # whose target the class body names; a bare one waits for resolution.
+        if (
+            isinstance(relation, ManyToManyRelation)
+            and relation.related_name is None
+            and relation.to is not None
+        ):
+            target = annotation_text(relation.to)
+            if relation.refusal is not None or target == model_cls.__name__:
+                raise many_to_many_refusal(
+                    model_cls,
+                    name,
+                    relation.refusal or SELF_MANY_TO_MANY,
+                    [target],
+                    relation.through or "",
+                    relation.reverse_index,
+                    relation.bound,
+                )
     for name, meta in model_cls.__ferro_fields__.items():
         if meta.foreign_key is None:
             continue
@@ -797,9 +945,16 @@ def resolve_relationships():
             and rel.related_name is None
             and target_model is REGISTRY.models()[model_name]
         ):
-            raise TypeError(
-                f"{target_model.__name__}.{field_name}: "
-                + _self_many_to_many(target_model)
+            # A name only resolution could bind: the same check as at
+            # class definition, through the same builder.
+            raise many_to_many_refusal(
+                target_model,
+                field_name,
+                SELF_MANY_TO_MANY,
+                [target_model.__name__],
+                rel.through or "",
+                rel.reverse_index,
+                rel.bound,
             )
         recompile_targets.add(target_model.__ferro_identity__)
         # A many-to-many declared with `through=` alone has no BackRef: a
