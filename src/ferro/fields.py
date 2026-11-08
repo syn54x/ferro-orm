@@ -1,11 +1,23 @@
-"""`Field`, `BackRef` and `ManyToMany`: Pydantic's `Field` with Ferro's database options."""
+"""`Field`, `Forward`, `Reverse`, `BackRef` and `ManyToMany`: Pydantic's `Field` with Ferro's database options."""
 
 from __future__ import annotations
 
 import difflib
 import inspect
+import types
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Literal, TypeVar, overload
+from typing import (
+    TYPE_CHECKING,
+    Annotated,
+    Any,
+    ForwardRef,
+    Literal,
+    TypeVar,
+    Union,
+    get_args,
+    get_origin,
+    overload,
+)
 
 from pydantic.fields import Field as PydanticField
 from pydantic.fields import _Unset
@@ -15,7 +27,10 @@ from .base import (
     DbType,
     FerroField,
     FerroNullable,
+    OnDelete,
+    _validate_foreign_key,
     _validate_nullable_option,
+    _validate_on_delete,
     _validate_renamed_from,
     _validate_generated,
     _validate_retired,
@@ -77,6 +92,8 @@ def _unknown_keyword(name: str) -> TypeError:
 def Field(
     default: Literal[Ellipsis],
     *,
+    foreign_key: type[Any] | str | None = ...,
+    on_delete: OnDelete = ...,
     primary_key: bool = ...,
     autoincrement: bool | None = ...,
     unique: bool = ...,
@@ -132,6 +149,8 @@ def Field(
 def Field(
     default: Any,
     *,
+    foreign_key: type[Any] | str | None = ...,
+    on_delete: OnDelete = ...,
     primary_key: bool = ...,
     autoincrement: bool | None = ...,
     unique: bool = ...,
@@ -187,6 +206,8 @@ def Field(
 def Field(
     default: _T,
     *,
+    foreign_key: type[Any] | str | None = ...,
+    on_delete: OnDelete = ...,
     primary_key: bool = ...,
     autoincrement: bool | None = ...,
     unique: bool = ...,
@@ -241,6 +262,8 @@ def Field(
 @overload
 def Field(
     *,
+    foreign_key: type[Any] | str | None = ...,
+    on_delete: OnDelete = ...,
     primary_key: bool = ...,
     autoincrement: bool | None = ...,
     unique: bool = ...,
@@ -296,6 +319,8 @@ def Field(
 @overload
 def Field(
     *,
+    foreign_key: type[Any] | str | None = ...,
+    on_delete: OnDelete = ...,
     primary_key: bool = ...,
     autoincrement: bool | None = ...,
     unique: bool = ...,
@@ -351,6 +376,8 @@ def Field(
 @overload
 def Field(
     *,
+    foreign_key: type[Any] | str | None = ...,
+    on_delete: OnDelete = ...,
     primary_key: bool = ...,
     autoincrement: bool | None = ...,
     unique: bool = ...,
@@ -405,6 +432,8 @@ def Field(
 def Field(
     default: Any = PydanticUndefined,
     *,
+    foreign_key: type[Any] | str | None | Any = _Unset,
+    on_delete: OnDelete | Any = _Unset,
     primary_key: bool | Any = _Unset,
     autoincrement: bool | None | Any = _Unset,
     unique: bool | Any = _Unset,
@@ -470,6 +499,17 @@ def Field(
 
     Args:
         default: The value the field takes when it is not set.
+        foreign_key: Make the column a foreign key to this model's primary
+            key: the class, or its class name for a self reference or a
+            model defined later. The column's type must be the target key's
+            type, and a type that stores differently needs the target's
+            `db_type`. See
+            [Relationships](../guide/relationships.md).
+        on_delete: What the database does to this row when the row the key
+            points at is deleted: `"CASCADE"` (the default), `"RESTRICT"`,
+            `"SET NULL"`, `"SET DEFAULT"` or `"NO ACTION"`. Needs
+            `foreign_key`, and `"SET NULL"` needs an annotation that allows
+            `None`.
         primary_key: Make the column the table's primary key.
         autoincrement: Whether the database generates the key. When not
             given, an integer primary key auto-increments.
@@ -572,8 +612,8 @@ def Field(
 
     Raises:
         TypeError: A keyword `Field` does not take, or `nullable`,
-            `renamed_from`, `retired` or `generated` has a value of the
-            wrong type.
+            `renamed_from`, `retired`, `generated`, `foreign_key` or
+            `on_delete` has a value of the wrong type.
 
     Examples:
         ```python {test=run prelude=reference}
@@ -616,6 +656,10 @@ def Field(
         _validate_retired(retired, "Field")
     if generated is not _Unset:
         _validate_generated(generated, "Field")
+    if foreign_key is not _Unset:
+        _validate_foreign_key(foreign_key, "Field")
+    if on_delete is not _Unset:
+        _validate_on_delete(on_delete, "Field")
     if generated is None:
         # `generated=None` is a plain column, the same as leaving it out.
         generated = _Unset
@@ -634,6 +678,8 @@ def Field(
             ("renamed_from", renamed_from),
             ("retired", retired),
             ("generated", generated),
+            ("foreign_key", foreign_key),
+            ("on_delete", on_delete),
         )
         if value is not _Unset
     }
@@ -795,4 +841,190 @@ def ManyToMany(
     )
 
 
-__all__ = ["Field", "BackRef", "ManyToMany"]
+def Forward(column: str) -> Any:
+    """Declare a forward relation over a foreign-key column of this model.
+
+    Assign it to a field annotated `Relation[Target]`, or
+    `Relation[Target | None]` when the column allows `None`. The relation
+    reads the row the column points at: awaiting it loads the target, and a
+    query's `include()` fills it in. It adds no column; the foreign-key
+    column is the field declared with `Field(foreign_key=Target)`. See
+    [Relationships](../guide/relationships.md).
+
+    Args:
+        column: The name of the foreign-key column on this model.
+
+    Returns:
+        The field's metadata, as [`Field`][ferro.Field] returns it.
+
+    Raises:
+        TypeError: `column` is not a non-empty string.
+
+    Examples:
+        ```python {test=run prelude=reference}
+        from ferro import Field, Forward, Model, Relation, create_tables
+
+
+        class Shelf(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            label: str
+
+
+        class Book(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            title: str
+            shelf_id: int = Field(foreign_key=Shelf, index=True)
+            shelf: Relation[Shelf] = Forward("shelf_id")
+
+
+        await create_tables()
+        history = await Shelf.create(label="History")
+        await Book.create(title="SPQR", shelf_id=history.id)
+        book = await Book.select().include(lambda book: book.shelf).first()
+        assert book.shelf.label == "History"
+        ```
+    """
+    return _relation_field("Forward", "forward", column)
+
+
+def Reverse(attribute: str) -> Any:
+    """Declare a reverse relation over a foreign-key column of another model.
+
+    Assign it to a field annotated `Relation[list[Other]]`, where `Other`
+    declares the foreign-key column with `Field(foreign_key=ThisModel)`. On
+    an instance the relation is a query over the rows whose column holds
+    this instance's primary key. Neither side names the other: a
+    [`Forward`][ferro.Forward] needs no `Reverse`. See
+    [Relationships](../guide/relationships.md).
+
+    Args:
+        attribute: The name of the foreign-key column on the other model.
+
+    Returns:
+        The field's metadata, as [`Field`][ferro.Field] returns it.
+
+    Raises:
+        TypeError: `attribute` is not a non-empty string.
+
+    Examples:
+        ```python {test=run prelude=reference}
+        from ferro import Field, Model, Relation, Reverse, create_tables
+
+
+        class Shelf(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            label: str
+            books: Relation[list["Book"]] = Reverse("shelf_id")
+
+
+        class Book(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            title: str
+            shelf_id: int = Field(foreign_key=Shelf)
+
+
+        await create_tables()
+        history = await Shelf.create(label="History")
+        await Book.create(title="SPQR", shelf_id=history.id)
+        titles = [book.title for book in await history.books.all()]
+        assert titles == ["SPQR"]
+        ```
+    """
+    return _relation_field("Reverse", "reverse", attribute)
+
+
+def _relation_field(spelling: str, kind: str, name: Any) -> Any:
+    """A `FieldInfo` whose metadata names the column a relation reads."""
+    if not isinstance(name, str) or not name:
+        raise TypeError(
+            f"{spelling}() takes the foreign-key column's name as a string, "
+            f'such as {spelling}("team_id"), not {name!r}'
+        )
+    info = PydanticField()
+    info.metadata.append(_RelationOptions({kind: name}))
+    return info
+
+
+# -- declaration lines, as a refusal writes them -------------------------------------
+
+
+def annotation_text(annotation: Any) -> str:
+    """Write an annotation as it reads in source: `int | None`, `list[Player]`.
+
+    A string or forward reference loses its quotes, since a refusal prints
+    the line with the target named.
+    """
+    if isinstance(annotation, str):
+        return annotation.replace('"', "").replace("'", "")
+    if isinstance(annotation, ForwardRef):
+        return annotation_text(annotation.__forward_arg__)
+    if annotation is None or annotation is type(None):
+        return "None"
+    origin = get_origin(annotation)
+    if origin is Annotated:
+        return annotation_text(get_args(annotation)[0])
+    if origin is Union or origin is types.UnionType:
+        return " | ".join(annotation_text(arg) for arg in get_args(annotation))
+    if origin is not None:
+        name = getattr(origin, "__name__", None) or repr(origin)
+        arguments = ", ".join(annotation_text(arg) for arg in get_args(annotation))
+        return f"{name}[{arguments}]"
+    return getattr(annotation, "__name__", None) or repr(annotation)
+
+
+def _option_text(value: Any) -> str:
+    if isinstance(value, type):
+        return value.__name__
+    if isinstance(value, str):
+        return f'"{value}"'
+    return repr(value)
+
+
+_NO_OPTIONS = FerroField()
+
+
+def field_options(meta: FerroField | None, **changes: Any) -> dict[str, Any]:
+    """The options `meta` declares, `changes` applied, in `Field()`'s order.
+
+    An option left at its default is left out, `on_delete="CASCADE"` (a
+    foreign-key column's default) included, so a change back to the default
+    drops the option.
+    """
+    options: dict[str, Any] = {}
+    for name in inspect.signature(Field).parameters:
+        if not hasattr(_NO_OPTIONS, name):
+            continue
+        value = changes[name] if name in changes else getattr(meta or _NO_OPTIONS, name)
+        if value == getattr(_NO_OPTIONS, name) or (
+            name == "on_delete" and value == "CASCADE"
+        ):
+            continue
+        options[name] = value
+    return options
+
+
+def field_line(
+    name: str,
+    annotation: str,
+    options: dict[str, Any],
+    default: Any = PydanticUndefined,
+) -> str:
+    """Write one field declaration: `team_id: int = Field(foreign_key=Team)`.
+
+    Args:
+        name: The field's name.
+        annotation: The annotation, as source text.
+        options: The `Field()` database options, in the order written.
+        default: The field's default, or `PydanticUndefined` for none.
+
+    Returns:
+        The declaration, as one line of source.
+    """
+    arguments = [] if default is PydanticUndefined else [f"default={default!r}"]
+    arguments += [
+        f"{option}={_option_text(value)}" for option, value in options.items()
+    ]
+    return f"{name}: {annotation} = Field({', '.join(arguments)})"
+
+
+__all__ = ["Field", "BackRef", "ManyToMany", "Forward", "Reverse"]

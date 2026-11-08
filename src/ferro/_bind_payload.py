@@ -243,7 +243,7 @@ def _relation_shadows(model_cls: type) -> dict[str, str | None]:
         for name, meta in source.items():
             if name in shadows and shadows[name] is not None:
                 continue
-            shadow = getattr(meta, "shadow_column", None)
+            shadow = getattr(meta, "fk_column", None)
             if not isinstance(shadow, str) and isinstance(meta, ForeignKey):
                 shadow = f"{name}_id"
             if isinstance(shadow, str):

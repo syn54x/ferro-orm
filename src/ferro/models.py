@@ -43,7 +43,7 @@ from ._core import (
 from ._core import (
     evict_instance as _core_evict_instance,
 )
-from .base import ForeignKey, foreign_key_allows_none
+from .base import ForeignKey, ForwardRelation, foreign_key_allows_none
 from .exceptions import ModelDoesNotExist
 from .metaclass import ModelMetaclass, generated_refusal
 from .query import Predicate, Query
@@ -381,7 +381,15 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         # 1. Handle relationship inputs (e.g. Product(category=my_cat))
         relations = getattr(self.__class__, "__ferro_relations__", {})
         for field_name, metadata in relations.items():
-            if isinstance(metadata, ForeignKey) and field_name in data:
+            if (
+                isinstance(metadata, (ForeignKey, ForwardRelation))
+                and field_name in data
+            ):
+                fk_column = (
+                    metadata.fk_column
+                    if isinstance(metadata, ForwardRelation)
+                    else f"{field_name}_id"
+                )
                 val = data.pop(field_name)
                 # If it's a Model instance, extract the ID
                 if isinstance(val, Model):
@@ -394,13 +402,13 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                             f"to relationship field {field_name!r}: "
                             f"{val.__class__.__name__} declares no primary-key "
                             "column, so there is no value to store in "
-                            f"{field_name!r}_id. Pass the scalar value directly "
+                            f"{fk_column!r}. Pass the scalar value directly "
                             "or declare a primary_key=True column."
                         )
-                    data[f"{field_name}_id"] = getattr(val, pk_field, None)
+                    data[fk_column] = getattr(val, pk_field, None)
                 else:
                     # It's already an ID or something else
-                    data[f"{field_name}_id"] = val
+                    data[fk_column] = val
 
         super().__init__(**data)
 

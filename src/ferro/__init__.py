@@ -37,7 +37,7 @@ from .exceptions import (
     OperationalError,
     UniqueViolationError,
 )
-from .fields import BackRef, Field, ManyToMany
+from .fields import BackRef, Field, Forward, ManyToMany, Reverse
 from .models import Model, evict_instance, transaction
 from .pass_report import (
     ExecutedStatement,
@@ -612,6 +612,8 @@ __all__ = [
     "ForeignKey",
     "BackRef",
     "ManyToMany",
+    "Forward",
+    "Reverse",
     "Relation",
     "Row",
     "Rows",

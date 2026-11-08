@@ -29,7 +29,7 @@ class TestRelationSpecBasics:
         spec = specs["account"]
         assert spec.field_name == "account"
         assert spec.target is Account
-        assert spec.shadow_column == "account_id"
+        assert spec.fk_column == "account_id"
         assert isinstance(spec, RelationSpec)
 
     def test_model_with_no_relations_has_empty_dict(self, clean_registry):
@@ -83,7 +83,7 @@ class TestNullability:
             org: Annotated[Org | None, ForeignKey(related_name="projects")] = None
 
         rel_spec = Project.__ferro_relation_specs__["org"]
-        col_spec = Project.__ferro_columns__[rel_spec.shadow_column]
+        col_spec = Project.__ferro_columns__[rel_spec.fk_column]
         assert rel_spec.nullable == col_spec.nullable
 
 
@@ -99,8 +99,8 @@ class TestMultipleAndSelfReferentialFKs:
 
         specs = Transfer.__ferro_relation_specs__
         assert set(specs) == {"from_account", "to_account"}
-        assert specs["from_account"].shadow_column == "from_account_id"
-        assert specs["to_account"].shadow_column == "to_account_id"
+        assert specs["from_account"].fk_column == "from_account_id"
+        assert specs["to_account"].fk_column == "to_account_id"
         assert specs["from_account"].target is Account
         assert specs["to_account"].target is Account
         assert specs["from_account"] != specs["to_account"]
@@ -122,7 +122,7 @@ class TestMultipleAndSelfReferentialFKs:
         assert set(specs) == {"manager"}
         spec = specs["manager"]
         assert spec.target is Employee
-        assert spec.shadow_column == "manager_id"
+        assert spec.fk_column == "manager_id"
         assert spec.nullable is False
 
 
@@ -172,4 +172,25 @@ class TestProvisionalVsResolved:
         specs = FwdChild.__ferro_relation_specs__
         assert set(specs) == {"parent"}
         assert specs["parent"].target is FwdParent
-        assert specs["parent"].shadow_column == "parent_id"
+        assert specs["parent"].fk_column == "parent_id"
+
+
+def test_a_relation_spec_names_its_declared_key_column(clean_registry):
+    from ferro import Field, Forward
+
+    class Owner(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+
+    class Pet(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        keeper_owner_id: int = Field(foreign_key=Owner)
+        keeper: Relation[Owner] = Forward("keeper_owner_id")
+
+    spec = Pet.__ferro_relation_specs__["keeper"]
+
+    assert (spec.target, spec.fk_column, spec.nullable) == (
+        Owner,
+        "keeper_owner_id",
+        False,
+    )
+    assert not hasattr(spec, "shadow_column")

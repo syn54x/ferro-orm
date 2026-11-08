@@ -5,6 +5,7 @@ import sys
 from dataclasses import replace
 from functools import partial
 from enum import Enum
+from types import UnionType
 from typing import (
     Annotated,
     Any,
@@ -12,6 +13,7 @@ from typing import (
     ClassVar,
     ForwardRef,
     Optional,
+    Union,
     get_args,
     get_origin,
     get_type_hints,
@@ -28,13 +30,20 @@ from ._annotation_utils import (
 )
 from ._annotation_utils import annotation_allows_none, is_closed_domain_annotation
 from ._shadow_fk_types import shadow_annotation_for_foreign_key
-from .base import FerroField, ForeignKey, ManyToManyRelation
+from .base import (
+    FerroField,
+    ForeignKey,
+    ForwardRelation,
+    ManyToManyRelation,
+    ReverseRelation,
+)
 from .columns import build_column_specs, refuse_back_ref_over_retired_relation
-from .fields import _RelationOptions
+from .fields import _RelationOptions, annotation_text, field_line, field_options
 from .ir import compile_model_schema_ir
 from .ir.compiler import declared_retired_labels
 from .query import Relation
 from .registry import REGISTRY
+from .relations import check_declared_foreign_keys
 from .relations.descriptors import ForwardDescriptor
 
 _TABLE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
@@ -151,6 +160,143 @@ def _refuse_options_in_schema_extra(
             f"which Ferro does not read. Pass {arguments} to Field() "
             "instead of json_schema_extra"
         )
+
+
+def _plain_text(text: str) -> str:
+    return text.replace(" ", "").replace('"', "").replace("'", "")
+
+
+def _relation_view(hint: Any) -> tuple[bool, Any, bool] | None:
+    """What a `Relation[...]` annotation declares: ``(is_list, target, nullable)``.
+
+    The target is a class, or its name when the annotation writes it as a
+    string. ``None`` when the annotation is not ``Relation[...]``.
+    """
+    if isinstance(hint, ForwardRef):
+        hint = hint.__forward_arg__
+    if isinstance(hint, str):
+        text = _plain_text(hint)
+        head, _, rest = text.partition("[")
+        if head.rsplit(".", 1)[-1] != "Relation" or not rest.endswith("]"):
+            return None
+        return _relation_argument(rest[:-1])
+    if get_origin(hint) is not Relation or not get_args(hint):
+        return None
+    return _relation_argument(get_args(hint)[0])
+
+
+def _relation_argument(argument: Any) -> tuple[bool, Any, bool]:
+    if isinstance(argument, ForwardRef):
+        argument = argument.__forward_arg__
+    if isinstance(argument, str):
+        text = _plain_text(argument)
+        if text.startswith("list[") and text.endswith("]"):
+            return True, text[len("list[") : -1], False
+        names = text.split("|")
+        members = [name for name in names if name != "None"]
+        return False, members[0] if members else text, len(members) != len(names)
+    if get_origin(argument) is list:
+        inner = get_args(argument)
+        _, target, _ = _relation_argument(inner[0] if inner else "")
+        return True, target, False
+    if get_origin(argument) in (Union, UnionType):
+        members = [arg for arg in get_args(argument) if arg is not type(None)]
+        _, target, _ = _relation_argument(members[0])
+        return False, target, len(members) != len(get_args(argument))
+    return False, argument, False
+
+
+def _declared_relation(
+    model: str, field_name: str, hint: Any, spelling: str, column: str
+) -> ForwardRelation | ReverseRelation:
+    """The record of a ``Forward`` or ``Reverse`` declaration over ``column``.
+
+    Raises:
+        TypeError: The annotation is not ``Relation[...]``, or not the shape
+            the relation reads (one row forward, a list in reverse).
+    """
+    view = _relation_view(hint)
+    if view is None:
+        raise TypeError(
+            f"{model}.{field_name}: a relation is annotated Relation[...]. Write: "
+            f'{field_name}: Relation[{annotation_text(hint)}] = {spelling}("{column}")'
+        )
+    is_list, target, nullable = view
+    target_text = annotation_text(target)
+    if spelling == "Forward" and is_list:
+        raise TypeError(
+            f"{model}.{field_name}: a forward relation reads one row, so it is "
+            f"annotated Relation[{target_text}]. Write: {field_name}: "
+            f'Relation[{target_text}] = Forward("{column}")'
+        )
+    if spelling == "Reverse" and not is_list:
+        raise TypeError(
+            f"{model}.{field_name}: a reverse relation reads every row pointing "
+            f"back, so it is annotated Relation[list[{target_text}]]. Write: "
+            f'{field_name}: Relation[list[{target_text}]] = Reverse("{column}")'
+        )
+    if spelling == "Forward":
+        return ForwardRelation(column, target, nullable)
+    return ReverseRelation(column, target)
+
+
+def _without_none(annotation: Any) -> str:
+    """``annotation`` as source text, with ``| None`` set aside."""
+    if get_origin(annotation) in (Union, UnionType):
+        members = [arg for arg in get_args(annotation) if arg is not type(None)]
+        return " | ".join(annotation_text(member) for member in members)
+    return annotation_text(annotation)
+
+
+def _refuse_foreign_key_options(cls: type, declared_fields: dict) -> None:
+    """Refuse a foreign-key option the column cannot take, naming the fix.
+
+    Raises:
+        TypeError: ``on_delete`` without ``foreign_key``; a foreign-key
+            column that is the primary key or generated; or
+            ``on_delete="SET NULL"`` on an annotation that does not allow
+            ``None``.
+    """
+    model = cls.__name__
+    for name, meta in declared_fields.items():
+        info = cls.model_fields[name]
+        written = annotation_text(info.annotation)
+        if meta.foreign_key is None:
+            if meta.on_delete is not None:
+                line = field_line(
+                    name, written, field_options(meta, on_delete=None), info.default
+                )
+                raise TypeError(
+                    f"{model}.{name}: on_delete is a foreign-key option and this "
+                    f"column has no foreign_key. Write: {line}"
+                )
+            continue
+        if meta.primary_key:
+            line = field_line(
+                name,
+                _without_none(info.annotation),
+                field_options(meta, primary_key=False, autoincrement=None, unique=True),
+            )
+            raise TypeError(
+                f"{model}.{name}: a foreign-key column cannot be the primary key. "
+                "Write: id: int | None = Field(default=None, primary_key=True) "
+                f"and {line}"
+            )
+        if meta.generated is not None:
+            # `generated=` gave the field its `None` default; the fix drops both.
+            line = field_line(name, written, field_options(meta, generated=None))
+            raise TypeError(
+                f"{model}.{name}: a foreign-key column cannot be generated. "
+                f"Write: {line}"
+            )
+        if meta.on_delete == "SET NULL" and not annotation_allows_none(info.annotation):
+            line = field_line(
+                name, f"{written} | None", field_options(meta), default=None
+            )
+            raise TypeError(
+                f'{model}.{name}: on_delete="SET NULL" needs a nullable column. '
+                f"Write: {line}"
+            )
 
 
 class SecretHydrator:
@@ -358,11 +504,13 @@ class ModelMetaclass(type(BaseModel)):
             mcs._register_model(cls, cls.__ferro_identity__, local_relations)
             declared_fields = mcs._parse_ferro_field_metadata(cls)
             cls.__ferro_fields__ = declared_fields
+            _refuse_foreign_key_options(cls, declared_fields)
             mcs._validate_db_type_options(cls, declared_fields)
             mcs._validate_generated_options(cls, declared_fields)
             mcs._retire_fields(cls, retired_relations)
             mcs._inject_relation_descriptors(cls, local_relations)
             mcs._generate_and_register_schema(cls, cls.__ferro_identity__)
+            check_declared_foreign_keys(cls)
 
             # Spec-derived runtime attributes (read specs at use time everywhere
             # else; these two bake *names only*, which are stable across epochs).
@@ -672,6 +820,18 @@ class ModelMetaclass(type(BaseModel)):
             relationship_payload = ModelMetaclass._relationship_field_payload(
                 field_name, hint, namespace
             )
+            for spelling in ("Forward", "Reverse"):
+                column = relationship_payload.get(spelling.lower())
+                if column is not None:
+                    break
+            if column is not None:
+                relation = _declared_relation(
+                    model_name, field_name, hint, spelling, column
+                )
+                local_relations[field_name] = relation
+                pending_relations.append((field_name, relation))
+                fields_to_remove.append(field_name)
+                continue
             is_back_field = relationship_payload.get("back_ref") is True
             is_m2m_field = relationship_payload.get("many_to_many") is True
             if relationship_payload.get("retired") is True and (
@@ -1031,7 +1191,18 @@ class ModelMetaclass(type(BaseModel)):
         Mutates cls in place.
         """
         for field_name, metadata in local_relations.items():
-            if isinstance(metadata, ForeignKey):
+            if isinstance(metadata, ForwardRelation):
+                target = metadata.to
+                setattr(
+                    cls,
+                    field_name,
+                    ForwardDescriptor(
+                        target_model_name=getattr(target, "__ferro_identity__", target),
+                        field_name=field_name,
+                        fk_column=metadata.fk_column,
+                    ),
+                )
+            elif isinstance(metadata, ForeignKey):
                 target_name = (
                     metadata.to
                     if isinstance(metadata.to, str)
@@ -1055,6 +1226,7 @@ class ModelMetaclass(type(BaseModel)):
                     ForwardDescriptor(
                         target_model_name=target_name,
                         field_name=field_name,
+                        fk_column=f"{field_name}_id",
                     ),
                 )
             else:

@@ -1312,7 +1312,7 @@ class RelationProxy:
             declaring = current
             current = spec.target
         assert spec is not None  # a RelationProxy always has ≥ 1 hop
-        return spec.shadow_column, declaring
+        return spec.fk_column, declaring
 
     def _instance_comparison(self, other: object, operator: str) -> QueryNode:
         """Desugar ``== instance`` / ``== None`` to a shadow-FK leaf (#273).

@@ -570,7 +570,7 @@ def resolve_join_hops(
         hops.append(
             QueryJoinHop(
                 relation=relation,
-                from_column=spec.shadow_column,
+                from_column=spec.fk_column,
                 to_table=target.__ferro_table__,
                 to_column=_target_pk_column(target),
                 target=target,

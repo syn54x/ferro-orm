@@ -33,7 +33,11 @@ class RelationshipDescriptor(BaseModel):
     target_model_name: str
     """The related model's name."""
     field_name: str
-    """The name of the related model's foreign key field that points back."""
+    """The relation's name: a `BackRef`'s forward relation on the related
+    model, or this relation's own field."""
+    fk_column: str | None = None
+    """The related model's foreign-key column that points back; `None` for
+    a many-to-many relation."""
     is_one_to_one: bool = False
     """Whether at most one related row exists."""
     is_m2m: bool = False
@@ -78,7 +82,7 @@ class RelationshipDescriptor(BaseModel):
                 label=f"{type(instance).__name__.lower()}.{self.field_name}",
             )
 
-        fk_field = f"{self.field_name}_id"
+        fk_field = self.fk_column
         if self.is_one_to_one:
             return self._target_model.where(
                 lambda related, f=fk_field, v=pk_val: getattr(related, f) == v
@@ -103,7 +107,9 @@ class ForwardDescriptor(BaseModel):
     target_model_name: str
     """The related model's name."""
     field_name: str
-    """The relation's field name; its foreign key column is `<field_name>_id`."""
+    """The relation's field name."""
+    fk_column: str
+    """The foreign-key column the relation reads."""
     _target_model: Model | None = None
 
     def __get__(self, instance, owner):
@@ -114,7 +120,7 @@ class ForwardDescriptor(BaseModel):
             self._target_model = REGISTRY.resolve_reference(self.target_model_name)
 
         async def _fetch():
-            id_val = getattr(instance, f"{self.field_name}_id")
+            id_val = getattr(instance, self.fk_column)
             if id_val is None:
                 return None
 

@@ -314,7 +314,7 @@ class Post(Model):
     )
     await ferro.connect(db_url, auto_migrate=True)
     assert mod.Post.__ferro_relations__["author"].to is mod.Author
-    assert mod.Post.__ferro_relation_specs__["author"].shadow_column == "author_id"
+    assert mod.Post.__ferro_relation_specs__["author"].fk_column == "author_id"
     assert "author_id" in mod.Post.__ferro_columns__
     assert "BackRef" in mod.Author.__ferro_relations__.values()
     assert mod.Tag.__ferro_relations__["posts"].related_name == "tags"
@@ -348,3 +348,36 @@ class Post(Model):
     text = str(excinfo.value)
     assert "'models'" in text
     assert 'Annotated["models.Author", ForeignKey(...)]' in text
+
+
+def test_explicit_foreign_keys_resolve_under_postponed_annotations(tmp_path):
+    _wipe()
+    mod = _import(
+        tmp_path,
+        """
+from ferro import Forward, Reverse
+
+class Team(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    players: Relation[list["Player"]] = Reverse("team_id")
+
+class Player(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    team_id: int = Field(foreign_key=Team, index=True)
+    team: Relation[Team] = Forward("team_id")
+    mentor_id: int | None = Field(default=None, foreign_key="Player", on_delete="SET NULL")
+    mentor: Relation[Player | None] = Forward("mentor_id")
+""",
+        future=True,
+    )
+    ferro.ensure_resolved_modelset()
+
+    team = mod.Player.__ferro_relation_specs__["team"]
+    mentor = mod.Player.__ferro_relation_specs__["mentor"]
+    assert (team.target, team.fk_column, team.nullable) == (mod.Team, "team_id", False)
+    assert (mentor.target, mentor.fk_column, mentor.nullable) == (
+        mod.Player,
+        "mentor_id",
+        True,
+    )
+    assert mod.Team.__ferro_reverse_specs__["players"].child_fk_column == "team_id"

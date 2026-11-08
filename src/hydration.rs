@@ -385,8 +385,8 @@ fn prune_stale_populations<'py>(
         let Some(population) = dict.get_item(&relation)? else {
             continue; // unpopulated: nothing to check
         };
-        let shadow_column = spec.getattr(pyo3::intern!(py, "shadow_column"))?;
-        let new_fk = dict.get_item(&shadow_column)?;
+        let fk_column = spec.getattr(pyo3::intern!(py, "fk_column"))?;
+        let new_fk = dict.get_item(&fk_column)?;
         let keep = match (&new_fk, population.is_none()) {
             // Populated `None` stays truthful while the FK stays NULL.
             (Some(fk), true) => fk.is_none(),
