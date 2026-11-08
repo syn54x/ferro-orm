@@ -285,10 +285,6 @@ def test_callable_json_schema_extra_combines_with_field_options():
 
 
 def test_schema_extra_without_an_option_key_still_passes_through():
-    class CategoryColor(StrEnum):
-        RED = "red"
-        BLUE = "blue"
-
     class Swatch(Model):
         id: int | None = Field(default=None, primary_key=True)
         color: str | None = pydantic.Field(
