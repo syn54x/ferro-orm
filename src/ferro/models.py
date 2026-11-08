@@ -466,11 +466,39 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             super().__setattr__(name, value)
 
         def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            """Dump the instance's fields to a dict, as Pydantic's `model_dump` does.
+
+            Args:
+                *args: Pydantic's positional `model_dump` options.
+                **kwargs: Pydantic's keyword `model_dump` options, such as
+                    `mode="json"` or `exclude`.
+
+            Returns:
+                The field values by name.
+
+            Raises:
+                InstanceNotLoaded: The instance is unloaded; load it with
+                    `.load()` first.
+            """
             if _FERRO_UNLOADED_ATTR in self.__dict__:
                 raise _not_loaded(self)
             return super().model_dump(*args, **kwargs)
 
         def model_dump_json(self, *args: Any, **kwargs: Any) -> str:
+            """Dump the instance's fields to JSON, as Pydantic's `model_dump_json` does.
+
+            Args:
+                *args: Pydantic's positional `model_dump_json` options.
+                **kwargs: Pydantic's keyword `model_dump_json` options, such
+                    as `indent` or `exclude`.
+
+            Returns:
+                The JSON text.
+
+            Raises:
+                InstanceNotLoaded: The instance is unloaded; load it with
+                    `.load()` first.
+            """
             if _FERRO_UNLOADED_ATTR in self.__dict__:
                 raise _not_loaded(self)
             return super().model_dump_json(*args, **kwargs)
