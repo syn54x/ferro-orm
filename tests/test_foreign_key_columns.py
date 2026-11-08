@@ -953,15 +953,24 @@ async def test_a_lambda_traverses_a_forward_relation(db_url):
 
 @pytest.mark.backend_matrix
 @pytest.mark.asyncio
-async def test_a_relation_keyword_stores_the_declared_key_column(db_url):
+async def test_a_relation_keyword_is_refused_naming_the_declared_key_column(db_url):
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
         owls, _, _ = await _seed()
+        coach = await FKCPlayer.create(name="Ada", team_id=owls.id)
 
-        await FKCPlayer(team=owls, name="Linus").save()
+        with pytest.raises(TypeError) as refused:
+            FKCPlayer(name="Linus", team_id=owls.id, coach=coach)
+        assert str(refused.value) == (
+            "FKCPlayer.coach is a relation. Pass the foreign-key column's value, "
+            "coach_player_id=coach.id, or set f_k_c_player.coach = coach on the "
+            "instance"
+        )
+
+        await FKCPlayer(name="Linus", team_id=owls.id, coach_player_id=coach.id).save()
         saved = await FKCPlayer.where(lambda player: player.name == "Linus").first()
 
-        assert saved.team_id == owls.id
+        assert saved.coach_player_id == coach.id
 
 
 @pytest.mark.backend_matrix

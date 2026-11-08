@@ -101,7 +101,7 @@ async def test_uuid_fk_create_get_dump(db_url):
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
         parent = await UuidIssueParent.create(name="p")
-        child = await UuidIssueChild.create(parent=parent)
+        child = await UuidIssueChild.create(parent_id=parent.id)
 
         fetched = await UuidIssueChild.get(child.id)
         assert fetched.parent_id == parent.id
@@ -142,7 +142,7 @@ async def test_uuid_fk_forward_ref_child_declared_first(db_url):
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
         parent = await UuidFrwParent.create(name="p")
-        child = await UuidFrwChild.create(parent=parent)
+        child = await UuidFrwChild.create(parent_id=parent.id)
         fetched = await UuidFrwChild.get(child.id)
         assert fetched.parent_id == parent.id
 
@@ -210,7 +210,7 @@ async def test_uuid_fk_save_after_reparenting(db_url):
     async with ferro.engines.session():
         parent_a = await UuidMutParent.create(name="a")
         parent_b = await UuidMutParent.create(name="b")
-        child = await UuidMutChild.create(label="row", parent=parent_a)
+        child = await UuidMutChild.create(label="row", parent_id=parent_a.id)
         assert child.parent_id == parent_a.id
 
         child.parent_id = parent_b.id

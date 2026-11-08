@@ -197,8 +197,8 @@ async def _seed_typed_bind_matrix():
     )
     for row in (p1, p2):
         await row.save()
-    await QJTBUser(id=1, tag=QJTBTier.PRO, profile=p1).save()
-    await QJTBUser(id=2, tag=QJTBTier.FREE, profile=p2).save()
+    await QJTBUser(id=1, tag=QJTBTier.PRO, profile_id=p1.id).save()
+    await QJTBUser(id=2, tag=QJTBTier.FREE, profile_id=p2.id).save()
     return {"p1": p1, "p2": p2}
 
 
@@ -213,20 +213,20 @@ async def _seed_core():
     for row in (la, lb, o1, o2):
         await row.save()
 
-    a1 = QJAccount(id=1, label="a1", ledger=la, owner=o1)
-    a2 = QJAccount(id=2, label="a2", ledger=la, owner=o2)
-    b1 = QJAccount(id=3, label="b1", ledger=lb, owner=o1)
+    a1 = QJAccount(id=1, label="a1", ledger_id=la.id, owner_id=o1.id)
+    a2 = QJAccount(id=2, label="a2", ledger_id=la.id, owner_id=o2.id)
+    b1 = QJAccount(id=3, label="b1", ledger_id=lb.id, owner_id=o1.id)
     for row in (a1, a2, b1):
         await row.save()
 
     # Ledger A: 4 transactions (a1 x3, a2 x1); Ledger B: 2 transactions (b1).
     for txn in (
-        QJTransaction(id=1, amount=10, account=a1),
-        QJTransaction(id=2, amount=20, account=a1),
-        QJTransaction(id=3, amount=30, account=a1),
-        QJTransaction(id=4, amount=40, account=a2),
-        QJTransaction(id=5, amount=50, account=b1),
-        QJTransaction(id=6, amount=60, account=b1),
+        QJTransaction(id=1, amount=10, account_id=a1.id),
+        QJTransaction(id=2, amount=20, account_id=a1.id),
+        QJTransaction(id=3, amount=30, account_id=a1.id),
+        QJTransaction(id=4, amount=40, account_id=a2.id),
+        QJTransaction(id=5, amount=50, account_id=b1.id),
+        QJTransaction(id=6, amount=60, account_id=b1.id),
     ):
         await txn.save()
     return {"la": la, "lb": lb, "o1": o1, "o2": o2, "a1": a1, "a2": a2, "b1": b1}
@@ -307,8 +307,8 @@ async def test_inner_join_drops_null_fk_rows(db_url):
     async with ferro.engines.session():
         core = await _seed_core()
         # One note with an account, one without (nullable FK left NULL).
-        await QJNote(id=1, body="attached", account=core["a1"]).save()
-        await QJNote(id=2, body="orphan", account=None).save()
+        await QJNote(id=1, body="attached", account_id=core["a1"].id).save()
+        await QJNote(id=2, body="orphan", account_id=None).save()
 
         rows = await QJNote.where(lambda n: n.account.ledger_id == 1).all()
         assert {r.id for r in rows} == {1}
@@ -354,8 +354,8 @@ async def test_or_composition_still_renders_inner_join_narrowing_query_wide(db_u
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
         core = await _seed_core()
-        await QJNote(id=1, body="attached", account=core["a1"]).save()
-        await QJNote(id=2, body="orphan", account=None).save()
+        await QJNote(id=1, body="attached", account_id=core["a1"].id).save()
+        await QJNote(id=2, body="orphan", account_id=None).save()
 
         rows = await QJNote.where(
             lambda n: (n.account.ledger_id == 1) | (n.body == "orphan")
@@ -381,8 +381,12 @@ async def test_two_fks_to_one_target(db_url):
     async with ferro.engines.session():
         core = await _seed_core()
         # a1 -> ledger A, b1 -> ledger B.
-        await QJTransfer(id=1, from_account=core["a1"], to_account=core["b1"]).save()
-        await QJTransfer(id=2, from_account=core["b1"], to_account=core["a1"]).save()
+        await QJTransfer(
+            id=1, from_account_id=core["a1"].id, to_account_id=core["b1"].id
+        ).save()
+        await QJTransfer(
+            id=2, from_account_id=core["b1"].id, to_account_id=core["a1"].id
+        ).save()
 
         out_of_a = await QJTransfer.where(
             lambda tr: tr.from_account.ledger_id == 1
@@ -402,12 +406,12 @@ async def test_two_fks_to_one_target(db_url):
 async def test_self_fk_traversal(db_url):
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-        boss = QJEmployee(id=1, name="boss", manager=None)
+        boss = QJEmployee(id=1, name="boss", manager_id=None)
         await boss.save()
-        alice = QJEmployee(id=2, name="alice", manager=boss)
+        alice = QJEmployee(id=2, name="alice", manager_id=boss.id)
         await alice.save()
-        await QJEmployee(id=3, name="bob", manager=boss).save()
-        await QJEmployee(id=4, name="carol", manager=alice).save()
+        await QJEmployee(id=3, name="bob", manager_id=boss.id).save()
+        await QJEmployee(id=4, name="carol", manager_id=alice.id).save()
 
         managed_by_boss = await QJEmployee.where(
             lambda e: e.manager.name == "boss"
@@ -559,8 +563,8 @@ async def test_order_by_related_column_drops_null_fk_rows(db_url):
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
         core = await _seed_core()
-        await QJNote(id=1, body="attached", account=core["a1"]).save()
-        await QJNote(id=2, body="orphan", account=None).save()
+        await QJNote(id=1, body="attached", account_id=core["a1"].id).save()
+        await QJNote(id=2, body="orphan", account_id=None).save()
 
         rows = await QJNote.select().order_by(lambda n: n.account.label).all()
         assert [r.id for r in rows] == [1]
@@ -592,7 +596,9 @@ def test_bare_relation_proxy_predicate_is_rejected():
 
 
 def _persisted_account(pk: int = 7) -> QJAccount:
-    return QJAccount(id=pk, label="x", ledger=QJLedger(id=1), owner=QJOwner(id=1))
+    return QJAccount(
+        id=pk, label="x", ledger_id=QJLedger(id=1).id, owner_id=QJOwner(id=1).id
+    )
 
 
 class TestRelationProxySugar:
@@ -637,7 +643,9 @@ class TestRelationProxySugar:
         assert node.path == ()
 
     def test_unpersisted_instance_raises_value_error_naming_model(self):
-        unsaved = QJAccount(label="x", ledger=QJLedger(id=1), owner=QJOwner(id=1))
+        unsaved = QJAccount(
+            label="x", ledger_id=QJLedger(id=1).id, owner_id=QJOwner(id=1).id
+        )
         with pytest.raises(
             ValueError, match="unpersisted QJAccount instance .primary key not set"
         ):
@@ -847,8 +855,8 @@ class TestExplicitJoinChainers:
 
 async def _seed_notes(core):
     """One note attached to a1, one orphan (nullable FK left NULL)."""
-    await QJNote(id=1, body="attached", account=core["a1"]).save()
-    await QJNote(id=2, body="orphan", account=None).save()
+    await QJNote(id=1, body="attached", account_id=core["a1"].id).save()
+    await QJNote(id=2, body="orphan", account_id=None).save()
 
 
 @pytest.mark.asyncio
@@ -890,9 +898,9 @@ async def test_left_join_null_retention_in_ordered_results(db_url):
     async with ferro.engines.session():
         core = await _seed_core()
         # Two attached notes (a1 "a1", a2 "a2") + one orphan → non-NULL order a1,a2.
-        await QJNote(id=1, body="attached-a1", account=core["a1"]).save()
-        await QJNote(id=2, body="attached-a2", account=core["a2"]).save()
-        await QJNote(id=3, body="orphan", account=None).save()
+        await QJNote(id=1, body="attached-a1", account_id=core["a1"].id).save()
+        await QJNote(id=2, body="attached-a2", account_id=core["a2"].id).save()
+        await QJNote(id=3, body="orphan", account_id=None).save()
 
         rows = await (
             QJNote.select()
@@ -932,13 +940,13 @@ async def _seed_docs():
     """
     ow = QJFolderOwner(id=1, name="ow")
     await ow.save()
-    f1 = QJFolder(id=1, label="owned", owner=ow)
-    f2 = QJFolder(id=2, label="ownerless", owner=None)
+    f1 = QJFolder(id=1, label="owned", owner_id=ow.id)
+    f2 = QJFolder(id=2, label="ownerless", owner_id=None)
     await f1.save()
     await f2.save()
-    await QJDoc(id=1, title="both-hops", folder=f1).save()
-    await QJDoc(id=2, title="no-folder", folder=None).save()
-    await QJDoc(id=3, title="folder-no-owner", folder=f2).save()
+    await QJDoc(id=1, title="both-hops", folder_id=f1.id).save()
+    await QJDoc(id=2, title="no-folder", folder_id=None).save()
+    await QJDoc(id=3, title="folder-no-owner", folder_id=f2.id).save()
 
 
 @pytest.mark.asyncio
@@ -1060,8 +1068,8 @@ async def test_m2m_context_composes_with_forward_fk_traversal(db_url):
     async with ferro.engines.session():
         admin = await QJMAuthor.create(id=1, role="admin")
         member = await QJMAuthor.create(id=2, role="member")
-        tag_admin = await QJMTag.create(id=1, name="urgent", created_by=admin)
-        tag_member = await QJMTag.create(id=2, name="chill", created_by=member)
+        tag_admin = await QJMTag.create(id=1, name="urgent", created_by_id=admin.id)
+        tag_member = await QJMTag.create(id=2, name="chill", created_by_id=member.id)
         post = await QJMPost.create(id=1, title="p1")
         await post.tags.add(tag_admin, tag_member)
 

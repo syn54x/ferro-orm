@@ -13,9 +13,12 @@ import ferro
 from ferro import (
     BackRef,
     FerroField,
+    Field,
     ForeignKey,
+    Forward,
     Model,
     Relation,
+    Reverse,
     clear_registry,
     reset_engine,
 )
@@ -130,20 +133,26 @@ class TestRelationLambda:
         class RelAuthor(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
             name: str
-            posts: Relation[list["RelPost"]] = BackRef()
+            posts: Relation[list["RelPost"]] = Reverse("author_id")
 
         class RelPost(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
             title: str
             published: bool = False
-            author: Annotated[RelAuthor, ForeignKey(related_name="posts")]
+            author_id: int = Field(foreign_key=RelAuthor)
+            author: Relation[RelAuthor] = Forward("author_id")
 
         await ferro.connect(db_url, auto_migrate=True)
         async with ferro.engines.session():
             author = RelAuthor(id=1, name="taylor")
             await author.save()
-            await RelPost(id=10, title="draft", published=False, author=author).save()
-            await RelPost(id=11, title="live", published=True, author=author).save()
+            assert author.id is not None
+            await RelPost(
+                id=10, title="draft", published=False, author_id=author.id
+            ).save()
+            await RelPost(
+                id=11, title="live", published=True, author_id=author.id
+            ).save()
 
             published = await author.posts.where(lambda t: t.published == True).all()  # noqa: E712
             assert {p.title for p in published} == {"live"}

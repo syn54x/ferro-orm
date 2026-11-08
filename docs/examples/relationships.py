@@ -67,7 +67,7 @@ async def main() -> None:
 
     async with engines.session():
         rustaceans = await Team.create(name="Rustaceans")
-        ferris = await Player.create(name="Ferris", team=rustaceans)
+        ferris = await Player.create(name="Ferris", team_id=rustaceans.id)
 
         team = await ferris.team.load()  # forward: the Team this session holds
         roster = await rustaceans.players.all()  # reverse: a query you run
@@ -79,9 +79,9 @@ async def main() -> None:
         )
 
         # --8<-- [start:one-to-many]
-        corro = await Player.create(name="Corro", team=rustaceans)
+        corro = await Player.create(name="Corro", team_id=rustaceans.id)
         gophers = await Team.create(name="Gophers")
-        gordon = await Player.create(name="Gordon", team=gophers)
+        gordon = await Player.create(name="Gordon", team_id=gophers.id)
 
         roster = await rustaceans.players.order_by(lambda player: player.name).all()
         assert [player.name for player in roster] == ["Corro", "Ferris"]
@@ -125,7 +125,7 @@ async def main() -> None:
         ]
 
         # --8<-- [start:one-to-one]
-        await Profile.create(bio="Plays in the front row", player=ferris)
+        await Profile.create(bio="Plays in the front row", player_id=ferris.id)
 
         profile = await ferris.profile.first()  # one instance, not a list
         assert profile.bio == "Plays in the front row"
@@ -177,7 +177,9 @@ async def main() -> None:
         assert '"uq_player_tournaments_player_id_tournament_id"' in link_ddl
 
         # --8<-- [start:self-referential]
-        crabby = await Player.create(name="Crabby", team=rustaceans, mentor=ferris)
+        crabby = await Player.create(
+            name="Crabby", team_id=rustaceans.id, mentor_id=ferris.id
+        )
 
         assert (await crabby.mentor.load()).name == "Ferris"
         mentees = await ferris.mentees.all()

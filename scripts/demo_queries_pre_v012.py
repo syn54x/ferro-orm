@@ -112,7 +112,7 @@ async def run_demo():
 
     for name, price, cat, stock, sku in data:
         await Product(
-            name=name, price=price, category=cat, in_stock=stock, sku=sku
+            name=name, price=price, category_id=cat.id, in_stock=stock, sku=sku
         ).save()
 
     console.print("\n[bold yellow]--- 🔍 Running Fluent Queries ---[/bold yellow]")
@@ -210,7 +210,7 @@ async def run_demo():
         "Atomic Transaction",
         "async with transaction():\n"
         '    new_cat = await Category.create(name="Gaming")\n'
-        '    await Product.create(name="RTX 5090", category=new_cat, ...)',
+        '    await Product.create(name="RTX 5090", category_id=new_cat.id, ...)',
     )
 
     async with transaction():
@@ -218,7 +218,7 @@ async def run_demo():
         await Product.create(
             name="RTX 5090",
             price=1999.99,
-            category=new_cat,
+            category_id=new_cat.id,
             in_stock=True,
             sku="GPU-5090",
         )

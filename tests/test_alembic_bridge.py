@@ -275,7 +275,7 @@ async def test_explicit_foreign_key_shadow_id_auto_migrate_roundtrip(db_url):
     await connect(db_url, auto_migrate=True)
     async with engines.session():
         role = await TyRoundJobRole.create(name="ic")
-        card = await TyRoundScorecard.create(title="card-a", job_role=role)
+        card = await TyRoundScorecard.create(title="card-a", job_role_id=role.id)
         assert card.job_role_id == role.id
 
         by_shadow_id = await TyRoundScorecard.where(

@@ -173,7 +173,7 @@ def test_required_fk_shadow_rejects_missing_value():
         ChildReqValidation(id=1)
 
     with pytest.raises(ValidationError):
-        ChildReqValidation(id=1, parent=None)
+        ChildReqValidation(id=1, parent_id=None)
 
     with pytest.raises(ValidationError):
         ChildReqValidation(id=1, parent_id=None)

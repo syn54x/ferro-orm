@@ -77,8 +77,8 @@ async def _seed_transfers() -> dict[str, ExTxn]:
     inn = await ExTxn.create(amount=100)
     plain_a = await ExTxn.create(amount=-20)
     plain_b = await ExTxn.create(amount=-30)
-    await ExTransfer.create(outflow_transaction=out)
-    await ExTransfer.create(inflow_transaction=inn)
+    await ExTransfer.create(outflow_transaction_id=out.id)
+    await ExTransfer.create(inflow_transaction_id=inn.id)
     return {"out": out, "in": inn, "plain_a": plain_a, "plain_b": plain_b}
 
 
@@ -134,7 +134,7 @@ async def test_to_many_exists_returns_each_root_once(db_url):
     async with engines.session():
         split = await ExTxn.create(amount=-70)
         for _ in range(3):
-            await ExLine.create(txn=split)
+            await ExLine.create(txn_id=split.id)
         await ExTxn.create(amount=-10)
 
         results = await ExTxn.where(lambda t: t.lines.exists()).all()
@@ -149,7 +149,7 @@ async def test_exists_composes_with_root_predicates_order_and_limit(db_url):
     async with engines.session():
         for amount in (-40, -50, -60):
             txn = await ExTxn.create(amount=amount)
-            await ExLine.create(txn=txn)
+            await ExLine.create(txn_id=txn.id)
         await ExTxn.create(amount=-80)  # child-less
 
         results = (
@@ -250,9 +250,9 @@ async def _seed_categories() -> dict[str, object]:
     travel = await ExCat.create(name="Travel")
     split = await ExTxn.create(amount=-7000)  # category vacated while split
     for amount in (-3000, -2000, -2000):
-        await ExLine.create(txn=split, category=groceries, amount=amount)
-    plain = await ExTxn.create(amount=-1000, category=groceries)
-    other = await ExTxn.create(amount=-500, category=travel)
+        await ExLine.create(txn_id=split.id, category_id=groceries.id, amount=amount)
+    plain = await ExTxn.create(amount=-1000, category_id=groceries.id)
+    other = await ExTxn.create(amount=-500, category_id=travel.id)
     return {
         "groceries": groceries,
         "travel": travel,
@@ -320,10 +320,10 @@ async def test_inner_lambda_supports_full_operator_set(db_url):
     await connect(db_url, auto_migrate=True)
     async with engines.session():
         txn = await ExTxn.create(amount=-70)
-        await ExLine.create(txn=txn, amount=-30, memo="grocery run")
-        await ExLine.create(txn=txn, amount=-40, memo="fuel")
+        await ExLine.create(txn_id=txn.id, amount=-30, memo="grocery run")
+        await ExLine.create(txn_id=txn.id, amount=-40, memo="fuel")
         bare = await ExTxn.create(amount=-10)
-        await ExLine.create(txn=bare, amount=5, memo="refund")
+        await ExLine.create(txn_id=bare.id, amount=5, memo="refund")
 
         assert await _amounts(
             ExTxn.where(lambda t: t.lines.exists(lambda line: line.memo.like("%fuel%")))
@@ -363,7 +363,7 @@ async def test_forward_traversal_inside_subquery(db_url):
         # INNER semantics: a line with no category can never match a
         # traversed inner predicate.
         uncategorized = await ExTxn.create(amount=-42)
-        await ExLine.create(txn=uncategorized, amount=-42)
+        await ExLine.create(txn_id=uncategorized.id, amount=-42)
         rows = await _amounts(
             ExTxn.where(
                 lambda t: t.lines.exists(lambda line: line.category.name != "nope")
@@ -381,10 +381,10 @@ async def test_nested_exists_depth_two(db_url):
     async with engines.session():
         cat = await ExCat.create(name="Active")
         idle = await ExCat.create(name="Idle")
-        txn = await ExTxn.create(amount=-100, category=cat)
-        await ExLine.create(txn=txn, amount=-60)
-        pos = await ExTxn.create(amount=200, category=idle)
-        await ExLine.create(txn=pos, amount=200)
+        txn = await ExTxn.create(amount=-100, category_id=cat.id)
+        await ExLine.create(txn_id=txn.id, amount=-60)
+        pos = await ExTxn.create(amount=200, category_id=idle.id)
+        await ExLine.create(txn_id=pos.id, amount=200)
 
         results = await ExCat.where(
             lambda c: c.txns.exists(
@@ -403,10 +403,10 @@ async def test_explicit_grouping_contrast(db_url):
     await connect(db_url, auto_migrate=True)
     async with engines.session():
         both_in_one = await ExTxn.create(amount=-10)
-        await ExLine.create(txn=both_in_one, amount=-50, memo="fuel")
+        await ExLine.create(txn_id=both_in_one.id, amount=-50, memo="fuel")
         spread = await ExTxn.create(amount=-20)
-        await ExLine.create(txn=spread, amount=-50, memo="snacks")
-        await ExLine.create(txn=spread, amount=-5, memo="fuel")
+        await ExLine.create(txn_id=spread.id, amount=-50, memo="snacks")
+        await ExLine.create(txn_id=spread.id, amount=-5, memo="fuel")
 
         one_row_matches_both = await _amounts(
             ExTxn.where(

@@ -38,12 +38,12 @@ async def opened() -> AsyncIterator[None]:
             title="Notes on the Analytical Engine",
             published=True,
             views=1843,
-            author=ada,
+            author_id=ada.id,
         )
         await Post.create(
             title="The Education of a Computer",
             published=True,
             views=952,
-            author=grace,
+            author_id=grace.id,
         )
         yield

@@ -1485,7 +1485,7 @@ async def test_migrate_updates_rebuilds_fk_on_delete_drift(db_url, clean_registr
     assert warning_texts(report) == []
     async with ferro.engines.session():
         parent = await FkDriftConn.create(name="c1")
-        await FkDriftAccount.create(connection=parent)
+        await FkDriftAccount.create(connection_id=parent.id)
     ferro.reset_engine()
 
     from ferro import clear_registry
@@ -1562,7 +1562,7 @@ async def test_sqlite_fk_on_delete_drift_warns_loudly(db_url, clean_registry):
     assert warning_texts(report) == []
     async with ferro.engines.session():
         parent = await FkWarnConn.create(name="c1")
-        await FkWarnAccount.create(connection=parent)
+        await FkWarnAccount.create(connection_id=parent.id)
     ferro.reset_engine()
 
     from ferro import clear_registry
@@ -2347,8 +2347,8 @@ async def test_self_fk_does_not_evict_component_from_create_order(
     assert warning_texts(report) == []
     async with ferro.engines.session():
         root = await ZOrderedNode.create()
-        child = await ZOrderedNode.create(parent=root)
-        ref = await AOrderedRef.create(node=child)
+        child = await ZOrderedNode.create(parent_id=root.id)
+        ref = await AOrderedRef.create(node_id=child.id)
 
         fetched = await AOrderedRef.get(ref.id)
         assert fetched.node_id == child.id
@@ -2568,7 +2568,7 @@ async def test_sqlite_migrate_updates_adds_a_nullable_fk_column_with_references(
 
     async with ferro.engines.session():
         author = await Author.create(name="Ursula")
-        tethered = await Book.create(title="tethered", author=author)
+        tethered = await Book.create(title="tethered", author_id=author.id)
         await execute('DELETE FROM "author"')
         assert await Book.where(lambda book: book.id == tethered.id).first() is None
 

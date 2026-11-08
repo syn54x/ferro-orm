@@ -1117,8 +1117,9 @@ def validate_query_column(model_cls: type, name: str) -> str:
         `name`, unchanged.
 
     Raises:
-        AttributeError: The model has no such column. The message suggests
-            the closest column or relation name and lists the valid ones.
+        AttributeError: The model has no such column. A forward relation's
+            name gets its foreign-key column; any other name gets the
+            closest column or relation name and the list of valid ones.
         TypeError: `model_cls` is not a Ferro model.
     """
     valid = getattr(model_cls, "__ferro_query_columns__", None)
@@ -1129,10 +1130,16 @@ def validate_query_column(model_cls: type, name: str) -> str:
         )
     if name in valid:
         return name
-    # A valid relation name never reaches here (proxies resolve relations
-    # before column validation), but relation field names still enrich the
-    # did-you-mean pool so a typo close to a relation gets the right hint.
     relations = getattr(model_cls, "__ferro_relation_specs__", None) or {}
+    if name in relations:
+        raise AttributeError(
+            f"{model_cls.__name__} has no queryable column {name!r}: it is a "
+            f"relation. Its foreign-key column is {relations[name].fk_column!r}.",
+            name=name,
+            obj=model_cls,
+        )
+    # Relation names enrich the did-you-mean pool so a typo close to a
+    # relation gets the right hint.
     suggestions = sorted(set(valid) | set(relations))
     close = difflib.get_close_matches(name, suggestions, n=1)
     hint = f" Did you mean {close[0]!r}?" if close else ""

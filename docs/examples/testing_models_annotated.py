@@ -36,7 +36,9 @@ async def main() -> None:
     await connect("sqlite::memory:", auto_migrate=True)
     async with engines.session():
         ada = await User.create(username="ada", email="ada@example.com")
-        post = await Post.create(title="Notes", content="On the engine", author=ada)
+        post = await Post.create(
+            title="Notes", content="On the engine", author_id=ada.id
+        )
         assert (await post.author.load()).username == "ada"
 
     print("testing_models example ran successfully")

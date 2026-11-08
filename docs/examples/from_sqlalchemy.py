@@ -78,8 +78,8 @@ async def main() -> None:
         # --8<-- [end:upserts]
 
         # --8<-- [start:relationships]
-        post = await Post.create(title="Notes on the engine", author=ada)
-        await Post.create(title="Poetical science", author=ada)
+        post = await Post.create(title="Notes on the engine", author_id=ada.id)
+        await Post.create(title="Poetical science", author_id=ada.id)
 
         author = await post.author.load()
         assert author.username == "ada"

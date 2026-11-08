@@ -384,9 +384,9 @@ async def test_backref_query_inherits_source_instance_origin(tmp_path):
         id=1, label="service-parent"
     )
     async with ferro.engines.session():
-        await RouteChild.create(id=1, label="app-child", parent=app_parent)
+        await RouteChild.create(id=1, label="app-child", parent_id=app_parent.id)
     await RouteChild.using("service").create(
-        id=1, label="service-child", parent=service_parent
+        id=1, label="service-child", parent_id=service_parent.id
     )
 
     loaded_service_parent = await RouteParent.using("service").get(1)
@@ -426,9 +426,9 @@ async def test_forward_fk_load_inherits_source_instance_origin(tmp_path):
         id=1, label="service-parent"
     )
     async with ferro.engines.session():
-        await RouteForwardChild.create(id=1, label="app-child", parent=app_parent)
+        await RouteForwardChild.create(id=1, label="app-child", parent_id=app_parent.id)
     await RouteForwardChild.using("service").create(
-        id=1, label="service-child", parent=service_parent
+        id=1, label="service-child", parent_id=service_parent.id
     )
 
     service_child = await RouteForwardChild.using("service").get(1)

@@ -740,6 +740,7 @@ def _literal_set(
     """
     compiled: list[SetAssignment] = []
     for column, value in (assignments or {}).items():
+        _reject_relation(model_cls, column, role="target")
         validate_query_column(model_cls, column)
         _refuse_generated_target(model_cls, column)
         _reject_kwargs_value_expr(value)
@@ -765,6 +766,12 @@ def _refuse_generated_target(model_cls: type, column: str) -> None:
 
 
 def _reject_relation(model_cls: type, name: str, *, role: str) -> None:
+    forward = getattr(model_cls, "__ferro_relation_specs__", None) or {}
+    if role == "target" and name in forward:
+        raise TypeError(
+            f"update() cannot write {model_cls.__name__}.{name}, a relation. "
+            f"Name its foreign-key column, {forward[name].fk_column}, instead."
+        )
     if name in _relation_names(model_cls):
         raise TypeError(
             f"update() cannot assign a relation {name!r} as a SET {role}; "

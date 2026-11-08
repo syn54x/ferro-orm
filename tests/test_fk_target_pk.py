@@ -1,8 +1,7 @@
-"""FF-D D5: relationship inputs must read the *target* model's PK field.
+"""FF-D D5: a relation keyword's refusal names the *target* model's PK field.
 
-Today `Model.__init__` scans the source class's __ferro_fields__ for the PK name
-and reads that name off the target instance — correct only while every PK is
-named `id`.
+The constructor takes the foreign-key column only; refusing `warehouse=` names
+`warehouse_id=warehouse.code`, the target's own key, not the source's `id`.
 """
 
 from typing import Annotated
@@ -37,7 +36,7 @@ def _isolate_relation_state():
     REGISTRY.restore(snapshot)
 
 
-def test_fk_extraction_uses_target_pk_name():
+def test_relation_keyword_refusal_names_the_target_pk():
     class D5Warehouse(Model):
         code: int | None = Field(default=None, primary_key=True)
         city: str
@@ -47,11 +46,17 @@ def test_fk_extraction_uses_target_pk_name():
         warehouse: Annotated[D5Warehouse, ForeignKey(related_name="shipments")]
 
     wh = D5Warehouse(code=7, city="Reno")
-    shipment = D5Shipment(warehouse=wh)
-    assert shipment.warehouse_id == 7
+    with pytest.raises(TypeError) as refused:
+        D5Shipment(warehouse=wh)
+    assert str(refused.value) == (
+        "D5Shipment.warehouse is a relation. Pass the foreign-key column's "
+        "value, warehouse_id=warehouse.code"
+    )
+    # The fix the refusal names stores the target's key.
+    assert D5Shipment(warehouse_id=wh.code).warehouse_id == 7
 
 
-def test_fk_extraction_with_target_pk_named_id_still_works():
+def test_relation_keyword_refusal_with_target_pk_named_id():
     class D5Author(Model):
         id: int | None = Field(default=None, primary_key=True)
         name: str
@@ -61,5 +66,6 @@ def test_fk_extraction_with_target_pk_named_id_still_works():
         author: Annotated[D5Author, ForeignKey(related_name="books")]
 
     a = D5Author(id=3, name="x")
-    b = D5Book(author=a)
-    assert b.author_id == 3
+    with pytest.raises(TypeError, match=r"author_id=author\.id$"):
+        D5Book(author=a)
+    assert D5Book(author_id=a.id).author_id == 3

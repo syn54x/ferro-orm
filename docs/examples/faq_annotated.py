@@ -30,7 +30,7 @@ async def main() -> None:
     await connect("sqlite::memory:", auto_migrate=True)
     async with engines.session():
         ada = await Author.create(name="Ada Lovelace", email="ada@example.com")
-        await Post.create(title="Notes", published=True, views=10, author=ada)
+        await Post.create(title="Notes", published=True, views=10, author_id=ada.id)
         authors = await Author.where(lambda author: author.name == "Ada Lovelace").all()
         assert [author.email for author in authors] == ["ada@example.com"]
         posts = await Post.where(lambda post: post.views == 10).all()

@@ -61,9 +61,9 @@ async def _seed_board_cards() -> None:
     alpha = ObnBoard(id=2, title="alpha")
     await zeta.save()
     await alpha.save()
-    await ObnBoardCard(id=1, label="on-zeta", board=zeta).save()
-    await ObnBoardCard(id=2, label="on-alpha", board=alpha).save()
-    await ObnBoardCard(id=3, label="orphan", board=None).save()
+    await ObnBoardCard(id=1, label="on-zeta", board_id=zeta.id).save()
+    await ObnBoardCard(id=2, label="on-alpha", board_id=alpha.id).save()
+    await ObnBoardCard(id=3, label="orphan", board_id=None).save()
 
 
 # ---------------------------------------------------------------------------

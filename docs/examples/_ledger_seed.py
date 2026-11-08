@@ -38,14 +38,14 @@ async def seed(models: Mapping[str, Any]) -> None:
     ada = await Owner.create(name="Ada Lovelace", email="ada@example.com")
     grace = await Owner.create(name="Grace Hopper", email="grace@example.com")
 
-    checking = await Account.create(label="Checking", owner=ada)
-    savings = await Account.create(label="Savings", owner=ada)
-    travel = await Account.create(label="Travel", owner=grace)
+    checking = await Account.create(label="Checking", owner_id=ada.id)
+    savings = await Account.create(label="Savings", owner_id=ada.id)
+    travel = await Account.create(label="Travel", owner_id=grace.id)
     petty_cash = await Account.create(label="Petty cash")
 
     food = await Category.create(name="Food")
-    groceries = await Category.create(name="Groceries", parent=food)
-    dining = await Category.create(name="Dining", parent=food)
+    groceries = await Category.create(name="Groceries", parent_id=food.id)
+    dining = await Category.create(name="Dining", parent_id=food.id)
     housing = await Category.create(name="Housing")
 
     async def add(
@@ -61,8 +61,8 @@ async def seed(models: Mapping[str, Any]) -> None:
             amount=Decimal(amount),
             posted_on=posted_on,
             cleared_on=cleared_on,
-            account=account,
-            category=category,
+            account_id=account.id,
+            category_id=category.id if category is not None else None,
         )
 
     await add("Salary", "3200.00", date(2026, 3, 1), date(2026, 3, 2), checking)
@@ -93,13 +93,15 @@ async def seed(models: Mapping[str, Any]) -> None:
     weekly_shop = await add("Weekly shop", "-95.00", date(2026, 3, 12), None, checking)
 
     await SplitLine.create(
-        amount=Decimal("-72.00"), transaction=weekly_shop, category=groceries
+        amount=Decimal("-72.00"),
+        transaction_id=weekly_shop.id,
+        category_id=groceries.id,
     )
     await SplitLine.create(
-        amount=Decimal("-23.00"), transaction=weekly_shop, category=dining
+        amount=Decimal("-23.00"), transaction_id=weekly_shop.id, category_id=dining.id
     )
 
-    await Transfer.create(outflow=to_savings, inflow=from_checking)
+    await Transfer.create(outflow_id=to_savings.id, inflow_id=from_checking.id)
 
     reimbursable = await Tag.create(name="reimbursable")
     tax = await Tag.create(name="tax")

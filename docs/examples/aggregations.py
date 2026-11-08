@@ -36,13 +36,13 @@ async def seed() -> None:
     checking = await Account.create(id=1, label="Checking")
     savings = await Account.create(id=2, label="Savings")
     await Transaction.create(
-        id=1, amount=10, price=Decimal("1.25"), memo="coffee", account=checking
+        id=1, amount=10, price=Decimal("1.25"), memo="coffee", account_id=checking.id
     )
     await Transaction.create(
-        id=2, amount=20, price=Decimal("2.75"), memo="lunch", account=checking
+        id=2, amount=20, price=Decimal("2.75"), memo="lunch", account_id=checking.id
     )
     await Transaction.create(
-        id=3, amount=45, price=Decimal("5.00"), memo="dinner", account=savings
+        id=3, amount=45, price=Decimal("5.00"), memo="dinner", account_id=savings.id
     )
     await Transaction.create(id=4, amount=40, memo="orphan")  # no account, no price
 
