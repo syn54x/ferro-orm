@@ -711,7 +711,9 @@ def _assign_relation(self: BaseModel, name: str, value: Any, relations: Any) -> 
                 f"{spec.fk_column}'s annotation"
             )
         key = None
-    elif not isinstance(value, spec.target):
+    # The exact class: a subclass model has a table of its own, so its key
+    # would name another table's row.
+    elif type(value) is not spec.target:
         raise TypeError(
             f"{model}.{name}: expected a {target}, got {type(value).__name__}. "
             f"Assign a saved {target} instance, or set {spec.fk_column} directly"

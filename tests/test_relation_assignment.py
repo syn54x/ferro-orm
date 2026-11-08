@@ -46,12 +46,16 @@ def _empty_registry():
 
 
 def _declare() -> SimpleNamespace:
-    """Team, Coach and Player (a required team and a nullable mentor)."""
+    """Team, ProTeam (a model of its own, with its own table), Coach and
+    Player (a required team and a nullable mentor)."""
 
     class Team(Model):
         id: int | None = Field(default=None, primary_key=True)
         name: str
         players: Relation[list["Player"]] = Reverse("team_id")
+
+    class ProTeam(Team):
+        pass
 
     class Coach(Model):
         id: int | None = Field(default=None, primary_key=True)
@@ -67,18 +71,20 @@ def _declare() -> SimpleNamespace:
         )
         mentor: Relation["Player | None"] = Forward("mentor_id")
 
-    return SimpleNamespace(Team=Team, Coach=Coach, Player=Player)
+    return SimpleNamespace(Team=Team, ProTeam=ProTeam, Coach=Coach, Player=Player)
 
 
 async def _seed(db_url: str) -> SimpleNamespace:
-    """Teams "Rustaceans" (1) and "Crabs" (2), coach Pat (1), Ferris (player 1,
-    team 1) and Corro (player 2, team 1, mentored by Ferris)."""
+    """Teams "Rustaceans" (1) and "Crabs" (2), pro team "Krakens" (1), coach
+    Pat (1), Ferris (player 1, team 1) and Corro (player 2, team 1, mentored
+    by Ferris)."""
     m = _declare()
     await ferro.connect(db_url, auto_migrate=True)
     async with engines.session():
         # No explicit ids, so each table's sequence hands out the next one.
         await m.Team.create(name="Rustaceans")
         await m.Team.create(name="Crabs")
+        await m.ProTeam.create(name="Krakens")
         await m.Coach.create(name="Pat")
         await m.Player.create(name="Ferris", team_id=1)
         await m.Player.create(name="Corro", team_id=1, mentor_id=1)
@@ -158,6 +164,18 @@ async def test_another_models_instance_is_refused_and_the_fix_it_names_works(db_
 
         assert str(refused.value) == (
             "Player.team: expected a Team, got Coach. Assign a saved Team "
+            "instance, or set team_id directly"
+        )
+        assert player.team_id == 1
+        assert player.team is loaded
+
+        # A subclass model has a table of its own, so its key names no Team.
+        krakens = await m.ProTeam.get(1)
+        with pytest.raises(TypeError) as refused:
+            player.team = krakens
+
+        assert str(refused.value) == (
+            "Player.team: expected a Team, got ProTeam. Assign a saved Team "
             "instance, or set team_id directly"
         )
         assert player.team_id == 1
