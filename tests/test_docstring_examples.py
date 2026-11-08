@@ -243,7 +243,7 @@ def test_docstring_example_can_declare_related_models(tmp_path: Path) -> None:
 
             await create_tables()
             shelf = await Shelf.create(label="History")
-            await Book.create(title="Middlemarch", shelf=shelf)
+            await Book.create(title="Middlemarch", shelf_id=shelf.id)
             print([book.title for book in await shelf.books.all()])
             ```
             """

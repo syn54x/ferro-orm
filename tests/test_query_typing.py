@@ -142,8 +142,12 @@ class TestRelationLambda:
         async with ferro.engines.session():
             author = RelAuthor(id=1, name="taylor")
             await author.save()
-            await RelPost(id=10, title="draft", published=False, author=author).save()
-            await RelPost(id=11, title="live", published=True, author=author).save()
+            await RelPost(
+                id=10, title="draft", published=False, author_id=author.id
+            ).save()
+            await RelPost(
+                id=11, title="live", published=True, author_id=author.id
+            ).save()
 
             published = await author.posts.where(lambda t: t.published == True).all()  # noqa: E712
             assert {p.title for p in published} == {"live"}

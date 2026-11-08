@@ -105,7 +105,7 @@ def test_create_and_traverse_on_a_code_keyed_target(db_url):
         assert any('REFERENCES "account" ("code")' in s for s in schema_sql(report))
         async with ferro.engines.session():
             account = await Account.create(code="A1")
-            entry = await Entry.create(account=account)
+            entry = await Entry.create(account_id=account.code)
             assert entry.account_id == "A1"
             rows = await Entry.where(lambda entry: entry.account.code == "A1").all()
             assert [r.account_id for r in rows] == ["A1"]

@@ -475,23 +475,27 @@ async def test_transfer_checks_are_enforced_live(db_url, db_backend):
         activity = await _Activity.create(label="opposite")
 
         # Legal: a transaction on each side.
-        await Transfer.create(outflow_transaction=out_txn, inflow_transaction=in_txn)
+        await Transfer.create(
+            outflow_transaction_id=out_txn.id, inflow_transaction_id=in_txn.id
+        )
         # Legal: a transaction plus an opposite-side activity.
-        await Transfer.create(outflow_transaction=out_txn, inflow_activity=activity)
+        await Transfer.create(
+            outflow_transaction_id=out_txn.id, inflow_activity_id=activity.id
+        )
 
         # Illegal: both outflow spellings set.
         with pytest.raises(CheckViolationError) as excinfo:
             await Transfer.create(
-                outflow_transaction=out_txn,
-                outflow_activity=activity,
-                inflow_transaction=in_txn,
+                outflow_transaction_id=out_txn.id,
+                outflow_activity_id=activity.id,
+                inflow_transaction_id=in_txn.id,
             )
         if db_backend == "postgres":
             assert excinfo.value.constraint == OUTFLOW_CHECK_NAME
 
         # Illegal: no inflow at all.
         with pytest.raises(CheckViolationError):
-            await Transfer.create(outflow_transaction=out_txn)
+            await Transfer.create(outflow_transaction_id=out_txn.id)
 
 
 @pytest.mark.backend_matrix

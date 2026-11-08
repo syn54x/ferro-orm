@@ -78,7 +78,7 @@ async def _seed():
         price=Decimal("1.25"),
         note="x",
         happened_at=_T1,
-        account=a1,
+        account_id=a1.id,
     ).save()
     await GATransaction(
         id=2,
@@ -87,7 +87,7 @@ async def _seed():
         price=Decimal("2.75"),
         note=None,
         happened_at=_T2,
-        account=a1,
+        account_id=a1.id,
     ).save()
     await GATransaction(
         id=3,
@@ -95,9 +95,9 @@ async def _seed():
         rate=2.0,
         price=Decimal("6.00"),
         note="z",
-        account=a1,
+        account_id=a1.id,
     ).save()
-    await GATransaction(id=4, amount=40, rate=4.0, account=a2).save()
+    await GATransaction(id=4, amount=40, rate=4.0, account_id=a2.id).save()
 
 
 # ---------------------------------------------------------------------------

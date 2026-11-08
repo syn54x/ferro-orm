@@ -80,14 +80,14 @@ async def _seed():
     bob = TPOwner(id=2, email="bob@x.io", tier=TPTier.FREE)
     await alice.save()
     await bob.save()
-    a1 = TPAccount(id=1, name="a1", balance=Decimal("12.50"), owner=alice)
-    a2 = TPAccount(id=2, name="a2", owner=bob)
+    a1 = TPAccount(id=1, name="a1", balance=Decimal("12.50"), owner_id=alice.id)
+    a2 = TPAccount(id=2, name="a2", owner_id=bob.id)
     await a1.save()
     await a2.save()
-    await TPTransaction(id=1, amount=10, account=a1).save()
-    await TPTransaction(id=2, amount=20, account=a1).save()
+    await TPTransaction(id=1, amount=10, account_id=a1.id).save()
+    await TPTransaction(id=2, amount=20, account_id=a1.id).save()
     await TPTransaction(id=3, amount=30).save()
-    await TPTransaction(id=4, amount=40, account=a2).save()
+    await TPTransaction(id=4, amount=40, account_id=a2.id).save()
 
 
 # ---------------------------------------------------------------------------

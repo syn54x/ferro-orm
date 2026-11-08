@@ -185,10 +185,10 @@ def test_expression_order_key_remains_a_build_time_error():
 async def _seed_transactions() -> None:
     a1 = await PosTravAccount.create(id=1, label="a1")
     a2 = await PosTravAccount.create(id=2, label="b1")
-    await PosTravTransaction.create(id=1, amount=10, account=a1)
-    await PosTravTransaction.create(id=2, amount=20, account=a1)
-    await PosTravTransaction.create(id=3, amount=30, account=a2)
-    await PosTravTransaction.create(id=4, amount=40, account=a2)
+    await PosTravTransaction.create(id=1, amount=10, account_id=a1.id)
+    await PosTravTransaction.create(id=2, amount=20, account_id=a1.id)
+    await PosTravTransaction.create(id=3, amount=30, account_id=a2.id)
+    await PosTravTransaction.create(id=4, amount=40, account_id=a2.id)
 
 
 @pytest.mark.backend_matrix
@@ -243,7 +243,7 @@ async def test_left_join_none_related_slot_pages(db_url):
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
         a1 = await PosTravAccount.create(id=1, label="a1")
-        await PosTravNote.create(id=1, body="on-a1", account=a1)
+        await PosTravNote.create(id=1, body="on-a1", account_id=a1.id)
         await PosTravNote.create(id=2, body="orphan")
 
         query = (

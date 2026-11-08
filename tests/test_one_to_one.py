@@ -43,7 +43,7 @@ async def test_one_to_one_relationship(db_url):
     async with engines.session():
         # 1. Create User and Profile
         alice = await User.create(username="alice")
-        p1 = await Profile.create(bio="Alice's Bio", user=alice)
+        p1 = await Profile.create(bio="Alice's Bio", user_id=alice.id)
 
         # 2. Verify reverse lookup: a one-to-one reverse relation is a
         # query read with .first()
@@ -60,7 +60,7 @@ async def test_one_to_one_relationship(db_url):
         # 4. Verify Uniqueness Enforcement
         with pytest.raises(Exception):
             # Should fail because alice already has a profile
-            await Profile.create(bio="Another bio", user=alice)
+            await Profile.create(bio="Another bio", user_id=alice.id)
 
 
 @pytest.mark.asyncio

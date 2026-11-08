@@ -47,7 +47,7 @@ async def main() -> None:
             title="Why Ferro is fast",
             body="Ferro hands SQL generation and row hydration to a Rust engine.",
             published=True,
-            author=alice,
+            author_id=alice.id,
         )
         assert post.id == 1  # the database assigned it
 
@@ -57,12 +57,12 @@ async def main() -> None:
                     title="Async patterns",
                     body="One event loop, many queries.",
                     published=True,
-                    author=alice,
+                    author_id=alice.id,
                 ),
                 Post(
                     title="Unfinished draft",
                     body="Still to write.",
-                    author=alice,
+                    author_id=alice.id,
                 ),
             ]
         )
@@ -122,7 +122,7 @@ async def main() -> None:
         # --8<-- [start:transaction]
         async with transaction():
             bob = await Author.create(name="Bob", email="bob@example.com")
-            await Post.create(title="Hello", body="First post.", author=bob)
+            await Post.create(title="Hello", body="First post.", author_id=bob.id)
         assert await Author.select().count() == 2  # both writes committed
         # --8<-- [end:transaction]
 

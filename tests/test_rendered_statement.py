@@ -60,7 +60,7 @@ async def _seeded(db_url: str) -> RsAccount:
             id=1, email="ada@example.com", token=SecretStr("sk_live_1"), visits=3
         )
         await ada.save()
-        await RsNote(id=1, label="hello", account=ada).save()
+        await RsNote(id=1, label="hello", account_id=ada.id).save()
     return ada
 
 

@@ -72,7 +72,7 @@ async def test_relationships_loaded_inside_transaction_inherit_transaction(db_ur
     await connect(db_url, auto_migrate=True)
     async with engines.session():
         parent = await TxRelationParent.create(id=1, label="parent")
-        await TxRelationChild.create(id=1, label="child", parent=parent)
+        await TxRelationChild.create(id=1, label="child", parent_id=parent.id)
         student = await TxRelationStudent.create(id=1, label="student")
         course_a = await TxRelationCourse.create(id=1, label="course-a")
         course_b = await TxRelationCourse.create(id=2, label="course-b")

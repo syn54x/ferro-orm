@@ -127,18 +127,18 @@ async def _seed_core():
     additionally categorized (the second FK, for accumulation pins)."""
     o1 = INOwner(id=1, name="o1")
     await o1.save()
-    a1 = INAccount(id=1, label="a1", owner=o1)
-    a2 = INAccount(id=2, label="a2", owner=o1)
-    b1 = INAccount(id=3, label="b1", owner=None)
+    a1 = INAccount(id=1, label="a1", owner_id=o1.id)
+    a2 = INAccount(id=2, label="a2", owner_id=o1.id)
+    b1 = INAccount(id=3, label="b1", owner_id=None)
     c1 = INCategory(id=1, name="groceries")
     for row in (a1, a2, b1, c1):
         await row.save()
     for txn in (
-        INTransaction(id=1, amount=10, note="n1", account=a1, category=c1),
-        INTransaction(id=2, amount=20, note="n2", account=a1),
-        INTransaction(id=3, amount=30, note="n3", account=a2),
-        INTransaction(id=4, amount=40, note="n4", account=b1),
-        INTransaction(id=5, amount=50, note="n5", account=None),
+        INTransaction(id=1, amount=10, note="n1", account_id=a1.id, category_id=c1.id),
+        INTransaction(id=2, amount=20, note="n2", account_id=a1.id),
+        INTransaction(id=3, amount=30, note="n3", account_id=a2.id),
+        INTransaction(id=4, amount=40, note="n4", account_id=b1.id),
+        INTransaction(id=5, amount=50, note="n5", account_id=None),
     ):
         await txn.save()
     return {"o1": o1, "a1": a1, "a2": a2, "b1": b1, "c1": c1}
@@ -154,7 +154,7 @@ async def _seed_typed():
         tag="vip",
     )
     await profile.save()
-    await INTyUser(id=1, tag=INTier.PRO, profile=profile).save()
+    await INTyUser(id=1, tag=INTier.PRO, profile_id=profile.id).save()
 
 
 def _ph(db_url: str, n: int = 1) -> str:
@@ -777,8 +777,8 @@ async def test_m2m_association_query_composes_with_include(db_url):
     async with ferro.engines.session():
         author = INMAuthor(id=1, role="editor")
         await author.save()
-        t1 = INMTag(id=1, name="rust", created_by=author)
-        t2 = INMTag(id=2, name="python", created_by=author)
+        t1 = INMTag(id=1, name="rust", created_by_id=author.id)
+        t2 = INMTag(id=2, name="python", created_by_id=author.id)
         for tag in (t1, t2):
             await tag.save()
         post = INMPost(id=1, title="ferro")

@@ -61,7 +61,7 @@ def _account(
 ) -> SFAccount:
     return SFAccount(
         id=pk,
-        keyring=keyring,
+        keyring_id=keyring.id if keyring is not None else None,
         token=SecretStr(f"hunter{pk}"),
         blob=SecretBytes(b"k\x00\xff" + bytes([pk])),
         maybe_token=SecretStr(f"maybe{pk}") if optional else None,

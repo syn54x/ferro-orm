@@ -462,7 +462,7 @@ async def test_save_only_rejects_relation_name(db_url):
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
         author = await SaveOnlyAuthor.create(id=1, name="ada")
-        post = await SaveOnlyPost.create(id=1, title="first", author=author)
+        post = await SaveOnlyPost.create(id=1, title="first", author_id=author.id)
         post.title = "second"
         with pytest.raises(ValueError, match="author_id") as excinfo:
             await post.save(only={"author"})
@@ -794,7 +794,7 @@ async def test_save_exclude_rejects_relation_name(db_url):
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
         author = await SaveExcludeAuthor.create(id=1, name="ada")
-        post = await SaveExcludePost.create(id=1, title="first", author=author)
+        post = await SaveExcludePost.create(id=1, title="first", author_id=author.id)
         post.title = "second"
         with pytest.raises(ValueError, match="author_id") as excinfo:
             await post.save(exclude={"author"})

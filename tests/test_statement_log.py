@@ -444,7 +444,7 @@ async def test_a_fetch_is_one_fetch_record(db_url, db_backend, statement_records
     async with engines.session():
         ada = _ada()
         await ada.save()
-        await SlogNote(id=1, label="hello", account=ada).save()
+        await SlogNote(id=1, label="hello", account_id=ada.id).save()
         statement_records.clear()
 
         notes = await (
@@ -833,7 +833,7 @@ async def test_a_plain_position_on_a_secret_order_key_is_redacted(
     async with engines.session():
         ada = _ada()
         await ada.save()
-        await SlogNote(id=1, label="hello", account=ada).save()
+        await SlogNote(id=1, label="hello", account_id=ada.id).save()
         statement_records.clear()
 
         by_token = (

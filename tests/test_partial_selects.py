@@ -67,7 +67,9 @@ async def _seed_transactions():
     acct = PSAccount(id=1, label="a1")
     await acct.save()
     for i, amount in enumerate((10, 20, 30), start=1):
-        await PSTransaction(id=i, amount=amount, note=f"n{i}", account=acct).save()
+        await PSTransaction(
+            id=i, amount=amount, note=f"n{i}", account_id=acct.id
+        ).save()
     return acct
 
 
@@ -363,7 +365,7 @@ async def test_projection_composes_with_relation_traversal_predicate(db_url):
         acct = await _seed_transactions()
         other = PSAccount(id=2, label="b1")
         await other.save()
-        await PSTransaction(id=9, amount=99, note="other", account=other).save()
+        await PSTransaction(id=9, amount=99, note="other", account_id=other.id).save()
 
         rows = await (
             PSTransaction.select(lambda t: (t.id, t.amount))

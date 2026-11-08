@@ -263,7 +263,7 @@ async def test_hydrated_instances_list_fields_in_declaration_order(db_url):
         built = OrderAuthor(id=1, username="ada", email="a@x", age=30)
         await built.save()
         built_keys = list(built.__dict__)
-        await OrderPost(id=1, title="t", author=built, body="b").save()
+        await OrderPost(id=1, title="t", author_id=built.id, body="b").save()
 
     async with ferro.engines.session():
         got = await OrderAuthor.get(1)
@@ -334,7 +334,7 @@ async def test_hydration_order_with_shadow_column_and_retired_field(db_url):
     async with ferro.engines.session():
         owner = OrderOwner(id=1)
         await owner.save()
-        built = OrderRetired(id=1, zeta="z", owner=owner, alpha="a")
+        built = OrderRetired(id=1, zeta="z", owner_id=owner.id, alpha="a")
         await built.save()
         built_dump = list(built.model_dump())
         built_keys = list(built.__dict__)

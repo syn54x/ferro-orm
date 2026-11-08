@@ -212,8 +212,8 @@ async def test_not_over_traversed_leaf(db_url):
         await checking.save()
         savings = NegAccount(label="savings")
         await savings.save()
-        await NegTxn(amount=5.0, account=checking).save()
-        await NegTxn(amount=7.0, account=savings).save()
+        await NegTxn(amount=5.0, account_id=checking.id).save()
+        await NegTxn(amount=7.0, account_id=savings.id).save()
 
         rows = await NegTxn.where(lambda t: ~(t.account.label == "checking")).all()
         assert [r.amount for r in rows] == [7.0]
