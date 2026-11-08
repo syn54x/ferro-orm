@@ -4372,10 +4372,10 @@ pub fn register_instance(
 /// the row fills the same object in place. Without a session (or with the
 /// identity map off) the built instance is returned unregistered.
 ///
-/// An include that found no row (`origin.found_no_row`) never takes a held
-/// complete instance, which would claim a row the query could not see: it
-/// marks a held unloaded instance as not found, or builds a fresh one that
-/// stays out of the map.
+/// An include that found no row (`origin.found_no_row`) takes the held
+/// instance too, so the session keeps one object per row; it marks the
+/// instance as not found only when it is unloaded (a held complete instance
+/// keeps the row the session last read).
 #[allow(clippy::too_many_arguments)]
 fn unloaded_for_key<'py>(
     py: Python<'py>,
@@ -4395,24 +4395,18 @@ fn unloaded_for_key<'py>(
         )),
         _ => None,
     };
-    let mut register = key.is_some();
     if let Some(key) = &key
         && let Some(held) = identity_map_get(py, session_id, key)?
     {
         let held = held.into_bound(py);
-        let held_unloaded = crate::hydration::is_unloaded(py, &held)?;
-        if !origin.found_no_row {
-            return Ok(held);
-        }
-        if held_unloaded {
+        if origin.found_no_row && crate::hydration::is_unloaded(py, &held)? {
             crate::hydration::mark_unloaded(py, &held, origin)?;
-            return Ok(held);
         }
-        register = false;
+        return Ok(held);
     }
     let instance =
         crate::hydration::hydrate_unloaded_instance(py, cls, connection_name, pk, origin)?;
-    if register && let Some(key) = key {
+    if let Some(key) = key {
         identity_map_insert(py, session_id, key, &instance)?;
     }
     Ok(instance)

@@ -499,6 +499,38 @@ async def test_an_include_that_finds_no_row_leaves_the_relation_unloaded(db_url)
             await gordon.team.load()
 
 
+def _raw_sqlite(db_url: str, statement: str) -> None:
+    """Run one statement on a plain sqlite3 connection, where foreign keys are
+    unenforced and the session's identity map is never told."""
+    database = db_url.removeprefix("sqlite:").split("?")[0]
+    with closing(sqlite3.connect(database)) as raw, raw:
+        raw.execute(statement)
+
+
+@pytest.mark.sqlite_only
+@pytest.mark.asyncio
+async def test_an_include_that_misses_a_row_the_session_holds_keeps_one_object(
+    db_url,
+):
+    m = await _seed(db_url)
+    async with engines.session():
+        held = await m.Team.create(id=99, name="Gophers")
+        await m.Player.create(id=3, name="Gordon", team_id=99)
+        _raw_sqlite(db_url, "DELETE FROM team WHERE id = 99")
+
+        gordon = await (
+            m.Player.select()
+            .include(lambda player: player.team)
+            .where(lambda player: player.id == 3)
+            .first()
+        )
+        assert gordon.team is held
+
+        _raw_sqlite(db_url, "INSERT INTO team (id, name) VALUES (99, 'Gophers II')")
+        assert await m.Team.get(99) is held is gordon.team
+        assert held.name == "Gophers II"
+
+
 @pytest.mark.postgres_only
 @pytest.mark.asyncio
 async def test_an_include_whose_row_row_security_hides_leaves_the_relation_unloaded(
