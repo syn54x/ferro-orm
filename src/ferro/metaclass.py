@@ -1,5 +1,6 @@
 """The metaclass that turns a model class declaration into a registered table."""
 
+import ast
 import re
 import sys
 from dataclasses import replace
@@ -162,24 +163,72 @@ def _refuse_options_in_schema_extra(
         )
 
 
-def _plain_text(text: str) -> str:
-    return text.replace(" ", "").replace('"', "").replace("'", "")
+def _parsed(text: str) -> ast.expr | None:
+    """``text`` as an expression node, or ``None`` when it does not parse."""
+    try:
+        return ast.parse(text, mode="eval").body
+    except SyntaxError:
+        return None
+
+
+def _head(node: ast.expr) -> str | None:
+    """The name a node spells: ``Team`` for ``Team`` or ``models.Team``."""
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return None
+
+
+def _is_none(node: ast.expr) -> bool:
+    return (isinstance(node, ast.Constant) and node.value is None) or _head(
+        node
+    ) == "None"
+
+
+def _union_members(node: ast.expr) -> list[ast.expr] | None:
+    """The members of ``A | B``, ``Optional[A]`` or ``Union[A, B]``, else ``None``."""
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+        return [*(_union_members(node.left) or [node.left]), node.right]
+    if isinstance(node, ast.Subscript) and _head(node.value) == "Optional":
+        return [node.slice, ast.Constant(None)]
+    if isinstance(node, ast.Subscript) and _head(node.value) == "Union":
+        inner = node.slice
+        return list(inner.elts) if isinstance(inner, ast.Tuple) else [inner]
+    return None
+
+
+def _node_view(node: ast.expr | None) -> tuple[bool, Any, bool]:
+    """``(is_list, target name, nullable)`` of a relation argument written as text."""
+    if node is None:
+        return False, "", False
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return _node_view(_parsed(node.value))
+    if isinstance(node, ast.Subscript) and _head(node.value) in ("list", "List"):
+        _, target, _ = _node_view(node.slice)
+        return True, target, False
+    members = _union_members(node)
+    if members is not None:
+        kept = [member for member in members if not _is_none(member)]
+        _, target, _ = _node_view(kept[0] if kept else None)
+        return False, target, len(kept) != len(members)
+    return False, _head(node) or ast.unparse(node), False
 
 
 def _relation_view(hint: Any) -> tuple[bool, Any, bool] | None:
     """What a `Relation[...]` annotation declares: ``(is_list, target, nullable)``.
 
     The target is a class, or its name when the annotation writes it as a
-    string. ``None`` when the annotation is not ``Relation[...]``.
+    string (as every annotation is under ``from __future__ import
+    annotations``). ``None`` when the annotation is not ``Relation[...]``.
     """
     if isinstance(hint, ForwardRef):
         hint = hint.__forward_arg__
     if isinstance(hint, str):
-        text = _plain_text(hint)
-        head, _, rest = text.partition("[")
-        if head.rsplit(".", 1)[-1] != "Relation" or not rest.endswith("]"):
+        node = _parsed(hint)
+        if not isinstance(node, ast.Subscript) or _head(node.value) != "Relation":
             return None
-        return _relation_argument(rest[:-1])
+        return _node_view(node.slice)
     if get_origin(hint) is not Relation or not get_args(hint):
         return None
     return _relation_argument(get_args(hint)[0])
@@ -189,12 +238,7 @@ def _relation_argument(argument: Any) -> tuple[bool, Any, bool]:
     if isinstance(argument, ForwardRef):
         argument = argument.__forward_arg__
     if isinstance(argument, str):
-        text = _plain_text(argument)
-        if text.startswith("list[") and text.endswith("]"):
-            return True, text[len("list[") : -1], False
-        names = text.split("|")
-        members = [name for name in names if name != "None"]
-        return False, members[0] if members else text, len(members) != len(names)
+        return _node_view(_parsed(argument))
     if get_origin(argument) is list:
         inner = get_args(argument)
         _, target, _ = _relation_argument(inner[0] if inner else "")
@@ -206,20 +250,139 @@ def _relation_argument(argument: Any) -> tuple[bool, Any, bool]:
     return False, argument, False
 
 
+def _annotated_core(hint: Any) -> tuple[Any, bool]:
+    """The annotation under ``Annotated[...]``, and whether there was one."""
+    if get_origin(hint) is Annotated:
+        return get_args(hint)[0], True
+    if isinstance(hint, str):
+        node = _parsed(hint)
+        if isinstance(node, ast.Subscript) and _head(node.value) == "Annotated":
+            inner = node.slice
+            core = inner.elts[0] if isinstance(inner, ast.Tuple) else inner
+            return ast.unparse(core), True
+    return hint, False
+
+
+def _relation_call_in_text(hint: Any) -> tuple[str, str] | None:
+    """The ``Forward("...")`` or ``Reverse("...")`` inside a string ``Annotated[...]``.
+
+    Under ``from __future__ import annotations`` the metadata is never
+    evaluated, so it is read from the text: ``(spelling, column)``.
+    """
+    if not isinstance(hint, str):
+        return None
+    node = _parsed(hint)
+    if not isinstance(node, ast.Subscript) or _head(node.value) != "Annotated":
+        return None
+    for call in ast.walk(node.slice):
+        if (
+            isinstance(call, ast.Call)
+            and _head(call.func) in ("Forward", "Reverse")
+            and call.args
+            and isinstance(call.args[0], ast.Constant)
+            and isinstance(call.args[0].value, str)
+        ):
+            return _head(call.func) or "", call.args[0].value
+    return None
+
+
+def _is_bare_relation(core: Any) -> bool:
+    if core is Relation:
+        return True
+    return isinstance(core, str) and _head(_parsed(core) or ast.Constant(0)) == (
+        "Relation"
+    )
+
+
+def _foreign_key_name(foreign_key: Any) -> str:
+    if isinstance(foreign_key, type):
+        return foreign_key.__name__
+    return str(foreign_key).rsplit(".", 1)[-1]
+
+
+def _declared_target(
+    column: str, namespace: dict, annotations: dict
+) -> tuple[str, bool] | None:
+    """The target and nullability a column of the class body declares, if any."""
+    annotation = annotations.get(column)
+    options = []
+    value = namespace.get(column)
+    if isinstance(value, FieldInfo):
+        options += value.metadata
+    if get_origin(annotation) is Annotated:
+        for metadata in get_args(annotation)[1:]:
+            options += (
+                metadata.metadata if isinstance(metadata, FieldInfo) else [metadata]
+            )
+    for option in options:
+        if isinstance(option, FerroField) and option.foreign_key is not None:
+            if isinstance(annotation, str):
+                core, _ = _annotated_core(annotation)
+                members = _union_members(_parsed(core) or ast.Constant(0)) or []
+                nullable = any(_is_none(member) for member in members)
+            else:
+                nullable = annotation_allows_none(annotation)
+            return _foreign_key_name(option.foreign_key), nullable
+    return None
+
+
+def _model_pointing_back(model: str, column: str) -> str | None:
+    """The one registered model whose ``column`` points at ``model``, by name."""
+    found = [
+        other.__name__
+        for other in REGISTRY.models().values()
+        if (meta := (other.__dict__.get("__ferro_fields__") or {}).get(column))
+        is not None
+        and meta.foreign_key is not None
+        and _foreign_key_name(meta.foreign_key) == model
+    ]
+    return found[0] if len(found) == 1 else None
+
+
 def _declared_relation(
-    model: str, field_name: str, hint: Any, spelling: str, column: str
+    model: str,
+    field_name: str,
+    hint: Any,
+    spelling: str,
+    column: str,
+    namespace: dict,
+    annotations: dict,
 ) -> ForwardRelation | ReverseRelation:
     """The record of a ``Forward`` or ``Reverse`` declaration over ``column``.
 
     Raises:
-        TypeError: The annotation is not ``Relation[...]``, or not the shape
-            the relation reads (one row forward, a list in reverse).
+        TypeError: The relation is ``Annotated`` metadata instead of an
+            assignment, the annotation is not ``Relation[...]``, or it is not
+            the shape the relation reads (one row forward, a list in reverse).
     """
-    view = _relation_view(hint)
-    if view is None:
+    core, in_annotated = _annotated_core(hint)
+    view = _relation_view(core)
+    if in_annotated or view is None:
+        if view is not None:
+            _, target, nullable = view
+            target_text = annotation_text(target)
+        elif _is_bare_relation(core) and spelling == "Forward":
+            target_text, nullable = _declared_target(
+                column, namespace, annotations
+            ) or ("Target", False)
+        elif _is_bare_relation(core):
+            target_text, nullable = (
+                _model_pointing_back(model, column) or "Other",
+                False,
+            )
+        else:
+            target_text, nullable = annotation_text(core), False
+        if spelling == "Reverse" and not target_text.startswith("list["):
+            target_text = f"list[{target_text}]"
+        shown = target_text + (" | None" if nullable else "")
+        reason = (
+            "a relation is an assignment, not Annotated metadata"
+            if in_annotated
+            else "a relation is annotated Relation[...]"
+        )
         raise TypeError(
-            f"{model}.{field_name}: a relation is annotated Relation[...]. Write: "
-            f'{field_name}: Relation[{annotation_text(hint)}] = {spelling}("{column}")'
+            f"{model}.{field_name}: {reason}. Write: "
+            f'{field_name}: Relation[{shown}] = {spelling}("{column}")'
         )
     is_list, target, nullable = view
     target_text = annotation_text(target)
@@ -820,13 +983,21 @@ class ModelMetaclass(type(BaseModel)):
             relationship_payload = ModelMetaclass._relationship_field_payload(
                 field_name, hint, namespace
             )
+            declared = _relation_call_in_text(hint)
             for spelling in ("Forward", "Reverse"):
                 column = relationship_payload.get(spelling.lower())
                 if column is not None:
-                    break
-            if column is not None:
+                    declared = (spelling, column)
+            if declared is not None:
+                spelling, column = declared
                 relation = _declared_relation(
-                    model_name, field_name, hint, spelling, column
+                    model_name,
+                    field_name,
+                    hint,
+                    spelling,
+                    column,
+                    namespace,
+                    annotations,
                 )
                 local_relations[field_name] = relation
                 pending_relations.append((field_name, relation))

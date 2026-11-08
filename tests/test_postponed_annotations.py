@@ -381,3 +381,60 @@ class Player(Model):
         True,
     )
     assert mod.Team.__ferro_reverse_specs__["players"].child_fk_column == "team_id"
+
+
+def test_typing_spellings_of_a_relation_resolve_under_postponed_annotations(
+    tmp_path,
+):
+    _wipe()
+    mod = _import(
+        tmp_path,
+        """
+from typing import List, Union
+
+from ferro import Forward, Reverse
+
+class Team(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    players: Relation[List["Player"]] = Reverse("team_id")
+
+class Player(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    team_id: Optional[int] = Field(default=None, foreign_key=Team)
+    team: Relation[Optional[Team]] = Forward("team_id")
+    mentor_id: Optional[int] = Field(default=None, foreign_key="Player")
+    mentor: Relation[Union["Player", None]] = Forward("mentor_id")
+""",
+        future=True,
+    )
+    ferro.ensure_resolved_modelset()
+
+    team = mod.Player.__ferro_relation_specs__["team"]
+    mentor = mod.Player.__ferro_relation_specs__["mentor"]
+    assert (team.target, team.nullable) == (mod.Team, True)
+    assert (mentor.target, mentor.nullable) == (mod.Player, True)
+    assert mod.Team.__ferro_reverse_specs__["players"].child_fk_column == "team_id"
+
+
+def test_a_relation_in_annotated_metadata_is_refused_under_postponed_annotations(
+    tmp_path,
+):
+    _wipe()
+    body = """
+from ferro import Forward
+
+class Team(Model):
+    id: int | None = Field(default=None, primary_key=True)
+
+class Player(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    team_id: int = Field(foreign_key=Team)
+    team: Annotated[Relation[Team], Forward("team_id")]
+"""
+    with pytest.raises(TypeError) as refusal:
+        _import(tmp_path, body, future=True)
+
+    assert str(refusal.value) == (
+        "Player.team: a relation is an assignment, not Annotated metadata. "
+        'Write: team: Relation[Team] = Forward("team_id")'
+    )
