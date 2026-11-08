@@ -468,9 +468,10 @@ pub fn refresh_model_instance<'py>(
 /// freshly decoded shadow FK: the population survives iff the FK still
 /// equals the populated instance's primary key (a populated `None` survives
 /// iff the FK is still NULL) — so populations accumulate across a session's
-/// queries. An FK that changed or went NULL drops the entry: access reverts
-/// to the awaitable — never silently wrong, and never "repaired" from
-/// whatever the identity map happens to hold.
+/// queries. An unloaded instance cached under the relation follows the same
+/// rule. An FK that changed or went NULL drops the entry: the next read
+/// finds or builds the instance the new key names (ADR-0063) — never
+/// silently wrong.
 fn prune_stale_populations<'py>(
     py: Python<'py>,
     cls: &Bound<'py, PyAny>,
@@ -526,9 +527,9 @@ fn prune_stale_populations<'py>(
 /// `__dict__`, shadowing the class-level non-data `ForwardDescriptor`, so
 /// access is a plain attribute returning the complete related instance —
 /// no await, no query. `value: None` is a *populated* `None` (a nullable FK
-/// with no target): the key is present, so access returns `None` instead of
-/// the awaitable. An instance with no entry under the relation name keeps
-/// today's awaitable contract untouched.
+/// with no target). `value` may also be an unloaded instance, for an include
+/// whose key matched no row (ADR-0063). An instance with no entry under the
+/// relation name reads the relation through the descriptor on first access.
 pub fn set_populated_relation<'py>(
     py: Python<'py>,
     instance: &Bound<'py, PyAny>,

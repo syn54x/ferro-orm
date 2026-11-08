@@ -1130,7 +1130,8 @@ fn apply_include_select_list(select: &mut SelectStatement, hops: &[IncludeHop]) 
 /// Returns one `(root, hop_rows)` pair per input row; `hop_rows` aligns with
 /// `hops` by index. A hop whose row the LEFT join did not match decodes to a
 /// `(None, all-NULL fields)` parsed row — the graph hydrator turns that into
-/// a populated `None` (the hop PK is NULL exactly when the FK is NULL).
+/// a populated `None` when the FK is NULL, and an unloaded instance holding
+/// the key when it is not (the row is gone or row security hides it).
 fn instances_rows_to_parsed_data(
     rows: Vec<EngineRow>,
     root: &crate::state::RegisteredModel,

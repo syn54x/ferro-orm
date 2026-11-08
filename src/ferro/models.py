@@ -443,7 +443,10 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             # Only a miss reaches here: a column an unloaded instance does not
             # hold (ADR-0063), or a retired field (ADR-0053), which is no
             # attribute, and the error says it is gone on purpose.
-            if _FERRO_UNLOADED_ATTR in self.__dict__ and item in type(self).model_fields:
+            if (
+                _FERRO_UNLOADED_ATTR in self.__dict__
+                and item in type(self).model_fields
+            ):
                 raise _not_loaded(self)
             if item in type(self).__ferro_retired_names__:
                 raise AttributeError(
@@ -455,7 +458,10 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             return super().__getattr__(item)
 
         def __setattr__(self, name: str, value: Any) -> None:
-            if _FERRO_UNLOADED_ATTR in self.__dict__ and name in type(self).model_fields:
+            if (
+                _FERRO_UNLOADED_ATTR in self.__dict__
+                and name in type(self).model_fields
+            ):
                 raise _not_loaded(self)
             super().__setattr__(name, value)
 
