@@ -3974,6 +3974,8 @@ pub fn fetch_filtered<'py>(
                         }
                     }
                     let converters = crate::hydration::field_converters_for(py, cls)?;
+                    let root_model_name: String =
+                        cls.getattr(pyo3::intern!(py, "__name__"))?.extract()?;
 
                     for ((root_pk, root_fields), hop_rows) in parsed_data {
                         let root_obj = materialize_model_row(
@@ -4008,14 +4010,36 @@ pub fn fetch_filtered<'py>(
                             };
                             let Some(parent) = parent else { continue };
                             if hop_pk.is_none() {
-                                // The LEFT join matched no row ⟺ the FK is NULL:
-                                // populate `None` (truthful to the declared
-                                // `| None` type), root row retained.
+                                // The LEFT join matched no row. A NULL key
+                                // populates `None` (truthful to the declared
+                                // `| None` type). A key whose row is gone, or
+                                // hidden by row security, leaves the relation
+                                // unloaded, holding the key (ADR-0063). Either
+                                // way the root row is retained and the chain
+                                // ends here.
+                                let key = foreign_key_of(py, &parent, &hop.relation)?;
+                                let unloaded = match key {
+                                    Some(key) => Some(unloaded_for_key(
+                                        py,
+                                        &ctx.cls,
+                                        &ctx.identity,
+                                        Some(&connection_name),
+                                        session_id.as_deref(),
+                                        use_identity_map,
+                                        &key,
+                                        &crate::hydration::UnloadedOrigin {
+                                            model: &root_model_name,
+                                            path: &hop.path.join("."),
+                                            found_no_row: true,
+                                        },
+                                    )?),
+                                    None => None,
+                                };
                                 crate::hydration::set_populated_relation(
                                     py,
                                     &parent,
                                     &hop.relation,
-                                    None,
+                                    unloaded.as_ref(),
                                 )?;
                                 populated.insert(hop.path.as_slice(), None);
                                 continue;
@@ -4391,6 +4415,26 @@ fn unloaded_for_key<'py>(
         identity_map_insert(py, session_id, key, &instance)?;
     }
     Ok(instance)
+}
+
+/// The value a parent's forward relation key column holds, or `None` when it
+/// is NULL. The column comes from the relation's spec, so both declaration
+/// forms read it the same way.
+///
+/// # Errors
+/// Any `PyErr` reading the spec or the column.
+fn foreign_key_of<'py>(
+    py: Python<'py>,
+    parent: &Bound<'py, PyAny>,
+    relation: &str,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let spec = parent
+        .get_type()
+        .getattr(pyo3::intern!(py, "__ferro_relation_specs__"))?
+        .get_item(relation)?;
+    let fk_column = spec.getattr(pyo3::intern!(py, "fk_column"))?;
+    let key = parent.getattr(fk_column.cast::<pyo3::types::PyString>()?)?;
+    Ok((!key.is_none()).then_some(key))
 }
 
 /// Read a forward relation for the first time: the session's instance for

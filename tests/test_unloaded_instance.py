@@ -13,6 +13,7 @@ refusals (`Team`, `lambda player: player.team`) read as a user's would.
 """
 
 import re
+import sqlite3
 from types import SimpleNamespace
 from typing import Annotated
 
@@ -425,3 +426,74 @@ async def test_a_two_word_model_names_its_lambda_parameter_in_snake_case(db_url)
     async with engines.session():
         included = await SquadMember.select().include(eval(selector)).first()
         assert included.squad_league.title == "Premier"
+
+
+@pytest.mark.asyncio
+async def test_load_on_a_gone_row_raises_model_does_not_exist(db_url):
+    m = await _seed(db_url)
+    async with engines.session():
+        player = await m.Player.get(1)
+        team = player.team
+        await m.Team.where(lambda team: team.id == 1).delete()
+
+        with pytest.raises(ModelDoesNotExist) as missing:
+            await team.load()
+
+        assert (missing.value.model, missing.value.pk) == (m.Team, 1)
+
+
+@pytest.mark.asyncio
+async def test_refresh_on_a_gone_row_raises_model_does_not_exist(db_url):
+    m = await _seed(db_url)
+    async with engines.session():
+        team = await m.Team.get(1)
+        await m.Team.where(lambda team: team.id == 1).delete()
+
+        with pytest.raises(ModelDoesNotExist):
+            await team.refresh()
+
+
+@pytest.mark.asyncio
+async def test_awaiting_a_relation_raises_type_error(db_url):
+    m = await _seed(db_url)
+    async with engines.session():
+        player = await m.Player.get(1)
+
+        with pytest.raises(TypeError):
+            await player.team
+
+
+_FOUND_NO_ROW = (
+    "Team(id=99) is not loaded: the query that included player.team found no "
+    "row with that key"
+)
+
+
+@pytest.mark.sqlite_only
+@pytest.mark.asyncio
+async def test_an_include_that_finds_no_row_leaves_the_relation_unloaded(db_url):
+    m = await _seed(db_url)
+    # Foreign keys are unenforced on a plain sqlite3 connection, so the key can
+    # point at no row, as it can after a delete with enforcement off.
+    database = db_url.removeprefix("sqlite:").split("?")[0]
+    with sqlite3.connect(database) as raw:
+        raw.execute(
+            "INSERT INTO player (id, name, team_id) VALUES (3, 'Gordon', 99)"
+        )
+    async with engines.session():
+        players = await (
+            m.Player.select()
+            .include(lambda player: player.team)
+            .order_by(lambda player: player.id)
+            .all()
+        )
+
+        assert [player.id for player in players] == [1, 2, 3]
+        gordon = players[2]
+        assert gordon.team.id == 99
+        assert repr(gordon.team) == "Team(id=99, unloaded)"
+        with pytest.raises(InstanceNotLoaded) as refusal:
+            gordon.team.name
+        assert str(refusal.value).startswith(_FOUND_NO_ROW)
+        with pytest.raises(ModelDoesNotExist):
+            await gordon.team.load()

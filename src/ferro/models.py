@@ -90,8 +90,8 @@ def _not_loaded(instance: object) -> InstanceNotLoaded:
     if found_no_row:
         return InstanceNotLoaded(
             f"{held}: the query that included {relation} found no row with that "
-            "key. The row was deleted, or row security hides it from this "
-            f"connection; point {relation} at a row that exists"
+            "key, so the row was deleted or row security hides it from this "
+            "connection"
         )
     return InstanceNotLoaded(
         f"{held}. Read it after include(lambda {parameter}: {relation}) or "
