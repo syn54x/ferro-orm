@@ -250,6 +250,89 @@ def relation_line(
     return f'{field_name}: Relation[{shown}] = {spelling}("{column}")'
 
 
+def many_to_many_line(
+    field_name: str,
+    target: str,
+    through: str,
+    reverse_index: bool,
+    bound: frozenset[str] | None,
+) -> str:
+    """Write a many-to-many's declaration: ``tags: Relation[list[Tag]] = ManyToMany(through="post_tags")``.
+
+    Args:
+        field_name: The relation's field name.
+        target: The model the relation links, by name.
+        through: The join table's name.
+        reverse_index: Whether the join table keeps its reverse index.
+        bound: The names defined where the relation is declared, or ``None``
+            under postponed annotations; a target outside them is quoted.
+
+    Returns:
+        The declaration, as one line of source.
+    """
+    shown = f'"{target}"' if bound is not None and target not in bound else target
+    options = f"through={json.dumps(through)}"
+    if not reverse_index:
+        options += ", reverse_index=False"
+    return f"{field_name}: Relation[list[{shown}]] = ManyToMany({options})"
+
+
+def _target_name(target: Any) -> str | None:
+    """The class name a relation's target is written as, or ``None``."""
+    if isinstance(target, ForwardRef):
+        target = target.__forward_arg__
+    if isinstance(target, type):
+        return target.__name__
+    return None if target is None else str(target).rsplit(".", 1)[-1]
+
+
+def _many_to_many_to(model_cls: Any, target: Any) -> list[str]:
+    """``model_cls``'s many-to-many relations that link ``target``."""
+    return [
+        name
+        for name, relation in (
+            model_cls.__dict__.get("__ferro_relations__") or {}
+        ).items()
+        if isinstance(relation, ManyToManyRelation)
+        and relation.refusal is None
+        and _resolve_target(relation.to, final=False) is target
+    ]
+
+
+def _refuse_unnamed_many_to_many(
+    model_cls: Any, name: str, relation: ManyToManyRelation
+) -> None:
+    """Raise a bare ``Relation`` refusal, naming the model a ``Reverse`` reads it from."""
+    model = model_cls.__name__
+    naming = [
+        other.__name__
+        for other in REGISTRY.models().values()
+        for reverse in (other.__dict__.get("__ferro_relations__") or {}).values()
+        if isinstance(reverse, ReverseRelation)
+        and reverse.attribute == name
+        and reverse.refusal is None
+        and _resolve_target(reverse.to, final=False) is model_cls
+    ]
+    if naming:
+        lines = " or ".join(
+            many_to_many_line(
+                name,
+                other,
+                relation.through or "",
+                relation.reverse_index,
+                relation.bound,
+            )
+            for other in naming
+        )
+        raise TypeError(f"{model}.{name}: {relation.refusal}. Write: {lines}")
+    # No line can be written: nothing names the model the relation links.
+    raise TypeError(
+        f"{model}.{name}: {relation.refusal}, and nothing names the model it "
+        f"links. Annotate {name} as Relation[list[...]] of that model, keeping "
+        f'ManyToMany(through="{relation.through}")'
+    )
+
+
 def relation_refusal(
     model: str,
     field_name: str,
@@ -322,10 +405,13 @@ def _refuse_unnamed_reverse(
     pointing_back = [
         other
         for other in REGISTRY.models().values()
-        if (meta := (other.__dict__.get("__ferro_fields__") or {}).get(column))
-        is not None
-        and meta.foreign_key is not None
-        and _resolve_target(meta.foreign_key, final=False) is model_cls
+        if (
+            (meta := (other.__dict__.get("__ferro_fields__") or {}).get(column))
+            is not None
+            and meta.foreign_key is not None
+            and _resolve_target(meta.foreign_key, final=False) is model_cls
+        )
+        or column in _many_to_many_to(other, model_cls)
     ]
     if len(pointing_back) == 1:
         raise relation_refusal(
@@ -481,6 +567,10 @@ def check_reverse_relation(
     relation.to = other
     model = model_cls.__name__
     column = relation.attribute
+    linked = (other.__dict__.get("__ferro_relations__") or {}).get(column)
+    if isinstance(linked, ManyToManyRelation):
+        _check_reverse_many_to_many(model_cls, name, relation, linked, final=final)
+        return
     if column in _retired_fields(other):
         raise TypeError(
             f"{model}.{name}: {other.__name__}.{column} is retired, so the relation "
@@ -522,6 +612,45 @@ def check_reverse_relation(
             f"{model}.{name}: {other.__name__}.{column} points at "
             f"{points_at.__name__}, not {model}. Write: {fix}"
         )
+
+
+def _check_reverse_many_to_many(
+    model_cls: Any,
+    name: str,
+    relation: ReverseRelation,
+    linked: ManyToManyRelation,
+    *,
+    final: bool,
+) -> None:
+    """Refuse a reverse relation naming a many-to-many that links another model.
+
+    The fix reads back the one relation of the other model that does link
+    this one; with none, or several, it declares this side's own
+    many-to-many, whose join table is named the way a conversion names it.
+    """
+    if linked.refusal is not None:
+        return  # the many-to-many's own refusal raises at resolution
+    other = relation.to
+    points_at = _resolve_target(linked.to, final=final)
+    if points_at is None or points_at is model_cls:
+        return
+    candidates = _key_columns_to(other, model_cls) + _many_to_many_to(other, model_cls)
+    if len(candidates) == 1:
+        fix = relation_line(
+            name, "Reverse", other.__name__, False, candidates[0], relation.bound
+        )
+    else:
+        fix = many_to_many_line(
+            name,
+            other.__name__,
+            f"{model_cls.__ferro_table__}_{name}",
+            True,
+            relation.bound,
+        )
+    raise TypeError(
+        f"{model_cls.__name__}.{name}: {other.__name__}.{relation.attribute} "
+        f"points at {points_at.__name__}, not {model_cls.__name__}. Write: {fix}"
+    )
 
 
 def check_declared_foreign_keys(model_cls: Any) -> None:
@@ -566,16 +695,25 @@ def _resolve_declared_foreign_key(
     else:
         check_reverse_relation(model_cls, field_name, declared, final=True)
         other = declared.to
-        setattr(
-            model_cls,
-            field_name,
-            RelationshipDescriptor(
+        linked = getattr(other, declared.attribute, None)
+        if isinstance(linked, RelationshipDescriptor) and linked.is_m2m:
+            # The many-to-many's own join table, read from the other end.
+            descriptor = RelationshipDescriptor(
+                target_model_name=other.__ferro_identity__,
+                field_name=field_name,
+                is_m2m=True,
+                join_table=linked.join_table,
+                source_col=linked.target_col,
+                target_col=linked.source_col,
+            )
+        else:
+            descriptor = RelationshipDescriptor(
                 target_model_name=other.__ferro_identity__,
                 field_name=field_name,
                 fk_column=declared.attribute,
                 is_one_to_one=other.__ferro_columns__[declared.attribute].unique,
-            ),
-        )
+            )
+        setattr(model_cls, field_name, descriptor)
 
 
 _DECLARED_ORDER = {FerroField: 0, ForwardRelation: 1, ReverseRelation: 2}
@@ -608,6 +746,8 @@ def resolve_relationships():
         if type(rel) in _DECLARED_ORDER:
             declared.append((model_name, field_name, rel))
             continue
+        if isinstance(rel, ManyToManyRelation) and rel.refusal is not None:
+            _refuse_unnamed_many_to_many(REGISTRY.models()[model_name], field_name, rel)
         # 1. Resolve 'to' model
         if isinstance(rel.to, (str, ForwardRef)):
             to_name = rel.to if isinstance(rel.to, str) else rel.to.__forward_arg__
@@ -621,7 +761,9 @@ def resolve_relationships():
         # 2. Cross-validate with declared reverse relation field.
         target_model = rel.to
         recompile_targets.add(target_model.__ferro_identity__)
-        if not hasattr(target_model, rel.related_name):
+        # A many-to-many declared with `through=` alone has no BackRef: a
+        # `Reverse` on the target, if any, reads it back.
+        if rel.related_name is not None and not hasattr(target_model, rel.related_name):
             raise RuntimeError(
                 f"Model '{model_name}' defines a relationship to '{target_model.__name__}' "
                 f"with related_name='{rel.related_name}', but '{target_model.__name__}' "
@@ -682,18 +824,19 @@ def resolve_relationships():
                 ),
             )
             # Target -> Source
-            setattr(
-                target_model,
-                rel.related_name,
-                RelationshipDescriptor(
-                    target_model_name=model_name,
-                    field_name=rel.related_name,
-                    is_m2m=True,
-                    join_table=join_table,
-                    source_col=target_col,  # Reversed for the back side
-                    target_col=source_col,
-                ),
-            )
+            if rel.related_name is not None:
+                setattr(
+                    target_model,
+                    rel.related_name,
+                    RelationshipDescriptor(
+                        target_model_name=model_name,
+                        field_name=rel.related_name,
+                        is_m2m=True,
+                        join_table=join_table,
+                        source_col=target_col,  # Reversed for the back side
+                        target_col=source_col,
+                    ),
+                )
 
             # 4. Register Join Table schema with Rust
             join_columns = (

@@ -53,7 +53,13 @@ from .ir import compile_model_schema_ir
 from .ir.compiler import declared_retired_labels
 from .query import Relation
 from .registry import REGISTRY
-from .relations import check_declared_foreign_keys, relation_line, relation_refusal
+from .relations import (
+    _target_name,
+    check_declared_foreign_keys,
+    many_to_many_line,
+    relation_line,
+    relation_refusal,
+)
 from .relations.descriptors import ForwardDescriptor
 
 _TABLE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
@@ -359,14 +365,24 @@ def _declared_target(
 
 
 def _model_pointing_back(model: str, column: str) -> str | None:
-    """The one registered model whose ``column`` points at ``model``, by name."""
+    """The one registered model whose ``column``, a foreign-key column or a
+    many-to-many, points at ``model``, by name."""
     found = [
         other.__name__
         for other in REGISTRY.models().values()
-        if (meta := (other.__dict__.get("__ferro_fields__") or {}).get(column))
-        is not None
-        and meta.foreign_key is not None
-        and _foreign_key_name(meta.foreign_key) == model
+        if (
+            (meta := (other.__dict__.get("__ferro_fields__") or {}).get(column))
+            is not None
+            and meta.foreign_key is not None
+            and _foreign_key_name(meta.foreign_key) == model
+        )
+        or (
+            isinstance(
+                linked := (other.__dict__.get("__ferro_relations__") or {}).get(column),
+                ManyToManyRelation,
+            )
+            and _target_name(linked.to) == model
+        )
     ]
     return found[0] if len(found) == 1 else None
 
@@ -469,6 +485,84 @@ def _declared_relation(
     if spelling == "Forward":
         return ForwardRelation(column, target, nullable, bound=bound)
     return ReverseRelation(column, target, bound=bound)
+
+
+_NOT_LIST = (
+    "a many-to-many reads a list of linked rows, so it is annotated Relation[list[...]]"
+)
+_NO_THROUGH = "a many-to-many needs through=, the name of its join table"
+
+
+def _declared_many_to_many(
+    model: str,
+    field_name: str,
+    annotation: Any,
+    options: dict[str, Any],
+    *,
+    in_metadata: bool,
+    table: str,
+    namespace: dict,
+    scope: frozenset[str] | None,
+) -> ManyToManyRelation:
+    """The record of a ``ManyToMany(through=...)`` declaration.
+
+    A declaration that is not ``Relation[list[...]]`` assigned the marker,
+    or names no join table, is refused with the line to write; a missing
+    ``through=`` is written as the name the old form derived,
+    ``<table>_<field>``, so a conversion keeps its table. When the class
+    body cannot name the target that line needs (a bare ``Relation``), the
+    record carries the refusal and relation resolution raises it.
+
+    Args:
+        model: The model's name.
+        field_name: The relation's field name.
+        annotation: The field's annotation, evaluated where it could be.
+        options: The relation keywords the marker carries.
+        in_metadata: Whether the marker sits in ``Annotated`` metadata.
+        table: The model's table name.
+        namespace: The class body.
+        scope: The names defined where the class statement runs, or ``None``
+            when the module postpones its annotations.
+
+    Raises:
+        TypeError: The declaration is refused, naming the line to write.
+    """
+    core, wrapped, _ = _layers(annotation)
+    view = _relation_view(core)
+    through = options.get("through")
+    reverse_index = options.get("reverse_index", True)
+    if in_metadata:
+        reason = _IN_METADATA
+    elif wrapped:
+        reason = _NONE_OUTSIDE
+    elif view is None:
+        reason = _NOT_RELATION
+    elif not view[0]:
+        reason = _NOT_LIST
+    elif not isinstance(through, str) or not through:
+        reason = _NO_THROUGH
+    else:
+        reason = None
+    if not isinstance(through, str) or not through:
+        through = f"{table}_{field_name}"
+    if view is not None:
+        target = view[1]
+    elif not _is_bare_relation(core):
+        target = _relation_argument(core)[1]
+    else:
+        target = None
+    bound = None if scope is None else scope | frozenset(namespace)
+    relation = ManyToManyRelation(through=through, reverse_index=reverse_index)
+    relation.to = target
+    if reason is None:
+        return relation
+    if target is None:
+        relation.refusal, relation.bound = reason, bound
+        return relation
+    line = many_to_many_line(
+        field_name, annotation_text(target), through, reverse_index, bound
+    )
+    raise TypeError(f"{model}.{field_name}: {reason}. Write: {line}")
 
 
 def _without_none(annotation: Any) -> str:
@@ -1255,6 +1349,22 @@ class ModelMetaclass(type(BaseModel)):
                         "Relation[list[T]] = BackRef() for collection back-references."
                     )
                 local_relations[field_name] = "BackRef"
+                fields_to_remove.append(field_name)
+                continue
+
+            if is_m2m_field and relationship_payload.get("related_name") is None:
+                relation = _declared_many_to_many(
+                    model_name,
+                    field_name,
+                    evaluated,
+                    relationship_payload,
+                    in_metadata=assigned.get("many_to_many") is not True,
+                    table=ModelMetaclass._resolve_table_name(model_name, namespace),
+                    namespace=namespace,
+                    scope=scope,
+                )
+                local_relations[field_name] = relation
+                pending_relations.append((field_name, relation))
                 fields_to_remove.append(field_name)
                 continue
 
