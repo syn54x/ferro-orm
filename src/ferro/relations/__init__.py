@@ -280,12 +280,14 @@ def many_to_many_line(
 def _self_many_to_many(model_cls: Any) -> str:
     """Why a many-to-many cannot link its own model, and what to declare instead."""
     model, column = model_cls.__name__, _join_column(model_cls.__ferro_table__)
+    _, key_type = _target_key(model_cls, column, model_cls)
+    key = annotation_text(key_type)
     return (
         "a self-referential many-to-many is not supported, since both join-table "
         f"columns would be {column}. Declare the join table as a model of its "
         f"own, with two foreign-key columns pointing at {model}: "
-        f'{column}: int = Field(foreign_key="{model}") and '
-        f'other_{column}: int = Field(foreign_key="{model}")'
+        f'{column}: {key} = Field(foreign_key="{model}") and '
+        f'other_{column}: {key} = Field(foreign_key="{model}")'
     )
 
 
