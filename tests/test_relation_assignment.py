@@ -10,6 +10,11 @@ Each test declares its own models in an empty registry, so the names in the
 refusals (`Player.team`, `team_id`) read as a user's would.
 """
 
+import importlib
+import itertools
+import sys
+import textwrap
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Annotated
 
@@ -491,3 +496,60 @@ def test_a_refusal_writes_the_article_the_target_name_takes():
         note.user = 5
     with pytest.raises(TypeError, match="^Note.upload: expected an Upload, got"):
         note.upload = 5
+
+
+_MODULES = itertools.count()
+
+
+def _import_models(tmp_path: Path, body: str, *, future: bool):
+    """Write `body` as a model module, with or without the __future__ import,
+    and import it."""
+    name = f"relation_assignment_mod_{next(_MODULES)}"
+    header = "from __future__ import annotations\n" if future else ""
+    header += "from ferro import Field, Forward, Model, Relation\n"
+    (tmp_path / f"{name}.py").write_text(header + textwrap.dedent(body))
+    sys.path.insert(0, str(tmp_path))
+    try:
+        return importlib.import_module(name)
+    finally:
+        sys.path.remove(str(tmp_path))
+        sys.modules.pop(name, None)
+
+
+_TEAM = """
+class Team(Model):
+    id: int | None = Field(default=None, primary_key=True)
+"""
+
+
+@pytest.mark.parametrize("future", [False, True], ids=["eager", "postponed"])
+def test_the_none_refusal_drops_an_explicit_nullable_false(tmp_path, future):
+    refused_models = _import_models(
+        tmp_path,
+        _TEAM
+        + """
+class Player(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    team_id: int = Field(foreign_key=Team, nullable=False)
+    team: Relation[Team] = Forward("team_id")
+""",
+        future=future,
+    )
+    message = _refused_none(refused_models.Player, "team", team_id=1)
+    column, relation = message.split("Write: ", 1)[1].rsplit(" and ", 1)
+    assert column == "team_id: int | None = Field(default=None, foreign_key=Team)"
+
+    clear_registry()
+    REGISTRY.reset_for_test()
+    pasted = _import_models(
+        tmp_path,
+        _TEAM
+        + f"""
+class Player(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    {column}
+    {relation}
+""",
+        future=future,
+    )
+    _assigns_none(pasted.Player, "team", "team_id", team_id=1)

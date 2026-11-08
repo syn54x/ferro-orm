@@ -731,7 +731,8 @@ def _none_refusal(model_cls: type, name: str, spec: Any) -> TypeError:
         column = field_line(
             spec.fk_column,
             f"{_without_none(info.annotation)} | None",
-            field_options(model_cls.__ferro_fields__[spec.fk_column]),
+            # An explicit `nullable=False` would keep the column required.
+            field_options(model_cls.__ferro_fields__[spec.fk_column], nullable="infer"),
             default=None,
         )
         relation = relation_line(
