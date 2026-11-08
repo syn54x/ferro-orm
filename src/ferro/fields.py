@@ -616,6 +616,9 @@ def Field(
         _validate_retired(retired, "Field")
     if generated is not _Unset:
         _validate_generated(generated, "Field")
+    if generated is None:
+        # `generated=None` is a plain column, the same as leaving it out.
+        generated = _Unset
     # The options ride the field's metadata, never `json_schema_extra`, which
     # Pydantic prints into the JSON schema.
     column_options = {
@@ -646,7 +649,7 @@ def Field(
         if value is not _Unset
     }
     if (
-        column_options.get("generated") is not None
+        "generated" in column_options
         and default is PydanticUndefined
         and default_factory is _Unset
     ):
