@@ -13,9 +13,11 @@ refusals (`Team`, `lambda player: player.team`) read as a user's would.
 """
 
 import re
+from contextlib import closing
 import sqlite3
 from types import SimpleNamespace
-from typing import Annotated
+from typing import Annotated, ClassVar
+from uuid import UUID
 
 import pytest
 
@@ -476,10 +478,8 @@ async def test_an_include_that_finds_no_row_leaves_the_relation_unloaded(db_url)
     # Foreign keys are unenforced on a plain sqlite3 connection, so the key can
     # point at no row, as it can after a delete with enforcement off.
     database = db_url.removeprefix("sqlite:").split("?")[0]
-    with sqlite3.connect(database) as raw:
-        raw.execute(
-            "INSERT INTO player (id, name, team_id) VALUES (3, 'Gordon', 99)"
-        )
+    with closing(sqlite3.connect(database)) as raw, raw:
+        raw.execute("INSERT INTO player (id, name, team_id) VALUES (3, 'Gordon', 99)")
     async with engines.session():
         players = await (
             m.Player.select()
@@ -497,3 +497,71 @@ async def test_an_include_that_finds_no_row_leaves_the_relation_unloaded(db_url)
         assert str(refusal.value).startswith(_FOUND_NO_ROW)
         with pytest.raises(ModelDoesNotExist):
             await gordon.team.load()
+
+
+@pytest.mark.postgres_only
+@pytest.mark.asyncio
+async def test_an_include_whose_row_row_security_hides_leaves_the_relation_unloaded(
+    db_url, pg_role
+):
+    from ferro import PoolConfig, RowPolicy, RowSecurity
+
+    from tests.test_rls_end_to_end import (
+        LEDGER_A,
+        LEDGER_B,
+        LEDGER_KEY,
+        _drop_tenant_role,
+        _grant_tenant_role,
+        _tenant_url,
+    )
+
+    class Team(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        name: str
+        ledger_id: UUID
+
+        __ferro_rls__: ClassVar = RowSecurity(
+            RowPolicy(column="ledger_id", setting=LEDGER_KEY)
+        )
+
+    class Player(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        name: str
+        team_id: int = Field(foreign_key=Team)
+        team: Relation[Team] = Forward("team_id")
+
+    role = pg_role("unloaded")
+    await ferro.connect(db_url, auto_migrate=True)
+    async with engines.session():
+        await Team.create(id=1, name="Rustaceans", ledger_id=LEDGER_A)
+        await Team.create(id=99, name="Gophers", ledger_id=LEDGER_B)
+        await Player.create(id=1, name="Ferris", team_id=1)
+        await Player.create(id=2, name="Gordon", team_id=99)
+    try:
+        async with engines.session():
+            await _grant_tenant_role(role, ("team", "player"))
+        await ferro.connect(
+            _tenant_url(db_url, role),
+            name="tenant",
+            pool=PoolConfig(max_connections=1, settings_delivery="transaction"),
+        )
+        async with engines.session("tenant", settings={LEDGER_KEY: str(LEDGER_A)}):
+            players = await (
+                Player.select()
+                .include(lambda player: player.team)
+                .order_by(lambda player: player.id)
+                .all()
+            )
+
+            assert [player.id for player in players] == [1, 2]
+            assert players[0].team.name == "Rustaceans"
+            gordon = players[1]
+            assert gordon.team.id == 99
+            with pytest.raises(InstanceNotLoaded) as refusal:
+                gordon.team.name
+            assert str(refusal.value).startswith(_FOUND_NO_ROW)
+            with pytest.raises(ModelDoesNotExist):
+                await gordon.team.load()
+    finally:
+        async with engines.session():
+            await _drop_tenant_role(role)
