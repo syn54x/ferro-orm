@@ -246,13 +246,14 @@ def test_relation_assignment_passes_the_type_checker():
 
 
 def test_relation_assignment_misuse_fails_the_type_checker():
-    """`player.team = 5` and `player.team = None` on a required relation are
-    each a static error (#880)."""
+    """`player.team = 5`, `player.team = None` on a required relation and
+    `team.players = [player]` on a reverse relation are each a static error
+    (#880)."""
     result = _run_ty(FIXTURES / "bad_relation_assignment.py")
     assert result.returncode != 0, "bad_relation_assignment.py must fail ty"
-    assert result.stdout.count("invalid-assignment") == 2, result.stdout
-    assert "bad_relation_assignment.py:23:" in result.stdout
-    assert "bad_relation_assignment.py:24:" in result.stdout
+    assert result.stdout.count("invalid-assignment") == 3, result.stdout
+    for line in (24, 25, 26):
+        assert f"bad_relation_assignment.py:{line}:" in result.stdout
 
 
 def test_projected_chains_pass_the_type_checker():
