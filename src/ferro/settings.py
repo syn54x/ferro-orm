@@ -959,10 +959,20 @@ def _check_references(
         return
 
     relations = getattr(model, "__ferro_relations__", None) or {}
-    for field_name, relation in relations.items():
-        if not isinstance(relation, (ForeignKey, ManyToManyRelation)):
-            continue
-        target = relation.to
+    references = [
+        (field_name, relation.to)
+        for field_name, relation in relations.items()
+        if isinstance(relation, (ForeignKey, ManyToManyRelation))
+    ]
+    # A foreign-key column declared with `Field(foreign_key=...)`.
+    references += [
+        (field_name, options.foreign_key)
+        for field_name, options in (
+            getattr(model, "__ferro_fields__", None) or {}
+        ).items()
+        if options.foreign_key is not None
+    ]
+    for field_name, target in references:
         if isinstance(target, (str, ForwardRef)):
             reference = target if isinstance(target, str) else target.__forward_arg__
             target = _resolve_target(project, reference)
