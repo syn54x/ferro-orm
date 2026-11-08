@@ -196,21 +196,23 @@ def _option_tuple(options: FerroField) -> tuple:
 
 def test_annotated_field_options_equal_the_assignment_ones():
     class AssignedRoster(Model):
-        id: int | None = Field(default=None, primary_key=True)
+        id: int | None = Field(default=None, primary_key=True, autoincrement=True)
         handle: str = Field(unique=True, min_length=2)
         rank: int = Field(index=True)
         nickname: str | None = Field(default=None, nullable=True)
         mood: _Mood = Field(db_type="text", db_check=True)
         score: int = Field(renamed_from="points")
+        legacy: str | None = Field(default=None, retired=True)
         doubled: int = Field(generated=lambda assigned_roster: assigned_roster.rank * 2)
 
     class AnnotatedRoster(Model):
-        id: Annotated[int | None, Field(primary_key=True)] = None
+        id: Annotated[int | None, Field(primary_key=True, autoincrement=True)] = None
         handle: Annotated[str, Field(unique=True, min_length=2)]
         rank: Annotated[int, Field(index=True)]
         nickname: Annotated[str | None, Field(nullable=True)] = None
         mood: Annotated[_Mood, Field(db_type="text", db_check=True)]
         score: Annotated[int, Field(renamed_from="points")]
+        legacy: Annotated[str | None, Field(retired=True)] = None
         doubled: Annotated[
             int,
             Field(generated=lambda annotated_roster: annotated_roster.rank * 2),
@@ -233,6 +235,8 @@ def test_annotated_field_options_equal_the_assignment_ones():
     )
     for name in assigned:
         assert _option_tuple(assigned[name]) == _option_tuple(annotated[name]), name
+    assert set(AssignedRoster.__ferro_retired_fields__) == {"legacy"}
+    assert set(AnnotatedRoster.__ferro_retired_fields__) == {"legacy"}
     assert _schema_option_names(AnnotatedRoster) == set()
 
 
