@@ -33,6 +33,7 @@ from ._core import (
     begin_transaction,
     commit_transaction,
     fetch_all,
+    prune_stale_relations,
     register_instance,
     rollback_transaction,
     save_bulk_records,
@@ -842,7 +843,10 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         name = self.__class__.__ferro_identity__
         route, identity_using = await _instance_transaction_route(self, using, session)
 
-        _core_evict_instance(name, str(pk_val), route)
+        # The session's object for this key is this instance, so the fetch
+        # refreshes it in place, applying the refresh rule a fetch applies; a
+        # row that is gone leaves it registered.
+        register_instance(name, str(pk_val), self, route)
         query = Query(self.__class__, using=route.connection_name).where(
             _field_eq(pk_field_name, pk_val)
         )
@@ -851,12 +855,16 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         if fresh_instance is None:
             raise ModelDoesNotExist(self.__class__, pk_val)
 
-        self.__dict__.update(fresh_instance.__dict__)
-        self.__dict__.pop(_FERRO_UNLOADED_ATTR, None)
-        object.__setattr__(
-            self, "__pydantic_fields_set__", set(fresh_instance.__pydantic_fields_set__)
-        )
-        register_instance(name, str(pk_val), self, route)
+        if fresh_instance is not self:
+            # No identity map: copy the row in, then apply the same rule.
+            self.__dict__.update(fresh_instance.__dict__)
+            self.__dict__.pop(_FERRO_UNLOADED_ATTR, None)
+            object.__setattr__(
+                self,
+                "__pydantic_fields_set__",
+                set(fresh_instance.__pydantic_fields_set__),
+            )
+            prune_stale_relations(self)
         _set_instance_origin(self, identity_using)
         _set_persisted(self, True)
 

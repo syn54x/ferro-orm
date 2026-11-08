@@ -521,6 +521,22 @@ fn prune_stale_populations<'py>(
     Ok(())
 }
 
+/// Apply the refresh rule to an instance whose columns Python just replaced.
+///
+/// `Model.refresh()` without an identity map copies a fetched row into the
+/// instance it holds; this runs [`prune_stale_populations`] on it, the rule a
+/// fetch applies when it refreshes an instance in place, so the two agree.
+///
+/// # Errors
+/// Any `PyErr` reading the instance, its class's relation specs or a
+/// relation target's registration.
+#[pyfunction]
+pub fn prune_stale_relations(py: Python<'_>, instance: Bound<'_, PyAny>) -> PyResult<()> {
+    let dict_attr = instance.getattr(pyo3::intern!(py, "__dict__"))?;
+    let dict = dict_attr.cast::<pyo3::types::PyDict>()?;
+    prune_stale_populations(py, &instance.get_type().into_any(), dict)
+}
+
 /// Populate a forward-FK relation on a hydrated instance (#286, ADR-0008).
 ///
 /// The population contract: the relation field name enters the instance's

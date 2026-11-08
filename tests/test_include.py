@@ -12,6 +12,7 @@ semantics (dedup, refresh-attach), sessionless freshness, typed-column parity
 vs a direct query, verb composition, and the include-vs-joins wire split.
 """
 
+import contextlib
 import json
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -690,6 +691,34 @@ async def test_refresh_drops_population_when_the_fk_changed(db_url):
         # reads as the account the new key names, and loads the CURRENT row.
         current = txn.account
         assert isinstance(current, INAccount) and current.id == 2
+        assert (await txn.account.load()).label == "a2"
+
+
+@pytest.mark.parametrize("session", [True, False], ids=["session", "sessionless"])
+@pytest.mark.asyncio
+async def test_model_refresh_drops_a_relation_whose_fk_changed(db_url, session):
+    """`refresh()` applies the same rule as a refetch: a relation read under
+    the old key is dropped, so the relation reads the account the key names."""
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        await _seed_core()
+    scope = ferro.engines.session() if session else contextlib.nullcontext()
+    async with scope:
+        query = INTransaction.select() if session else INTransaction.using("default")
+        txn = await query.where(lambda t: t.id == 1).first()
+        assert txn.account.id == 1  # read, and cached, under the old key
+
+        await execute(
+            f"UPDATE intransaction SET account_id = {_ph(db_url, 1)} "
+            f"WHERE id = {_ph(db_url, 2)}",
+            2,
+            1,
+            using="default",
+        )
+        await txn.refresh()
+
+        assert txn.account_id == 2
+        assert txn.account.id == 2
         assert (await txn.account.load()).label == "a2"
 
 

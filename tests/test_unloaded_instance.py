@@ -495,8 +495,18 @@ async def test_an_include_that_finds_no_row_leaves_the_relation_unloaded(db_url)
         with pytest.raises(InstanceNotLoaded) as refusal:
             gordon.team.name
         assert str(refusal.value).startswith(_FOUND_NO_ROW)
+        team = gordon.team
         with pytest.raises(ModelDoesNotExist):
-            await gordon.team.load()
+            await team.load()
+
+        # The failed load leaves the instance the session's object for its key.
+        again = await (
+            m.Player.select()
+            .include(lambda player: player.team)
+            .where(lambda player: player.id == 3)
+            .first()
+        )
+        assert again.team is team
 
 
 def _raw_sqlite(db_url: str, statement: str) -> None:
