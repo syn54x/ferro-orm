@@ -81,8 +81,8 @@ def _set_persisted(instance: object, value: bool) -> None:
 def _refuse_relation_keywords(model_cls: type, names: Any) -> None:
     """Refuse a forward relation among constructor keywords `names`, naming its key column.
 
-    The constructor takes the foreign-key column only, so `team_id` stays a
-    required argument a type checker can see.
+    The constructor takes the foreign-key column only: `team=` never fills
+    or overrides `team_id`.
     """
     forward = {
         name
