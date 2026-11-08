@@ -46,7 +46,7 @@ from ._core import (
 )
 from .base import ForeignKey, ForwardRelation, foreign_key_allows_none
 from .exceptions import InstanceNotLoaded, ModelDoesNotExist
-from .metaclass import ModelMetaclass, generated_refusal
+from .metaclass import ModelMetaclass, _resolved_relation_specs, generated_refusal
 from .query import Predicate, Query
 from .state import (
     _CURRENT_TRANSACTION,
@@ -76,6 +76,31 @@ def _is_persisted(instance: object) -> bool:
 
 def _set_persisted(instance: object, value: bool) -> None:
     object.__setattr__(instance, _FERRO_PERSISTED_ATTR, value)
+
+
+def _refuse_relation_keywords(model_cls: type, names: Any) -> None:
+    """Refuse a forward relation among constructor keywords `names`, naming its key column.
+
+    The constructor takes the foreign-key column only, so `team_id` stays a
+    required argument a type checker can see.
+    """
+    forward = {
+        name
+        for name, declared in model_cls.__ferro_relations__.items()
+        if isinstance(declared, (ForeignKey, ForwardRelation))
+    }
+    passed = forward.intersection(names)
+    if not passed:
+        return
+    from .relations import _snake
+
+    name = min(passed)
+    spec = _resolved_relation_specs(model_cls, forward)[name]
+    raise TypeError(
+        f"{model_cls.__name__}.{name} is a relation. Pass the foreign-key "
+        f"column's value, {spec.fk_column}={name}.{spec.target.__ferro_pk__}, "
+        f"or set {_snake(model_cls.__name__)}.{name} = {name} on the instance"
+    )
 
 
 def _not_loaded(instance: object) -> InstanceNotLoaded:
@@ -377,6 +402,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         from_attributes=True,
         use_attribute_docstrings=True,
         arbitrary_types_allowed=True,
+        extra="forbid",
     )
     """Pydantic settings shared by every model; a subclass may extend them."""
 
@@ -384,12 +410,14 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         """Build an instance in memory, without saving it.
 
         Args:
-            **data: The field values. A relation field takes the related
-                instance or its primary key.
+            **data: The field values. A forward relation is set through its
+                foreign-key column, `team_id=team.id`, never by its own name.
 
         Raises:
-            TypeError: A value names a retired field or a generated one.
-            ValueError: A related instance's model has no primary key.
+            TypeError: A keyword names a retired field, a generated one or a
+                forward relation.
+            ValidationError: A keyword names no field, or a value does not
+                validate.
         """
         retired = self.__class__.__ferro_retired_names__
         if retired and not retired.isdisjoint(data):
@@ -405,38 +433,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             raise TypeError(
                 f"{generated_refusal(self.__class__, name)}; drop {name}= from the call"
             )
-        # 1. Handle relationship inputs (e.g. Product(category=my_cat))
-        relations = getattr(self.__class__, "__ferro_relations__", {})
-        for field_name, metadata in relations.items():
-            if (
-                isinstance(metadata, (ForeignKey, ForwardRelation))
-                and field_name in data
-            ):
-                fk_column = (
-                    metadata.fk_column
-                    if isinstance(metadata, ForwardRelation)
-                    else f"{field_name}_id"
-                )
-                val = data.pop(field_name)
-                # If it's a Model instance, extract the ID
-                if isinstance(val, Model):
-                    # Read the *target* model's PK (FF-D D5) — the source
-                    # model's PK name is irrelevant to the related instance.
-                    pk_field = val.__class__.__ferro_pk__
-                    if pk_field is None:
-                        raise ValueError(
-                            f"Cannot assign a {val.__class__.__name__} instance "
-                            f"to relationship field {field_name!r}: "
-                            f"{val.__class__.__name__} declares no primary-key "
-                            "column, so there is no value to store in "
-                            f"{fk_column!r}. Pass the scalar value directly "
-                            "or declare a primary_key=True column."
-                        )
-                    data[fk_column] = getattr(val, pk_field, None)
-                else:
-                    # It's already an ID or something else
-                    data[fk_column] = val
-
+        _refuse_relation_keywords(self.__class__, data)
         super().__init__(**data)
 
     if not TYPE_CHECKING:
@@ -1017,13 +1014,17 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         Args:
             session: The session to run in. Defaults to `None`, the session
                 opened by the enclosing `async with engines.session():`.
-            **fields: The field values. A relation field takes the related
-                instance or its primary key.
+            **fields: The field values. A forward relation is set through its
+                foreign-key column, `team_id=team.id`, never by its own name.
 
         Returns:
             The saved instance, with a generated primary key filled in.
 
         Raises:
+            TypeError: A keyword names a forward relation, or a retired or
+                generated field.
+            ValidationError: A keyword names no field, or a value does not
+                validate.
             UniqueViolationError: A row with the same primary key or unique
                 value exists.
 
@@ -1142,6 +1143,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             assert again is author
             ```
         """
+        _refuse_relation_keywords(cls, fields.keys() | (defaults or {}).keys())
         query = Query(cls, session=session)
         for key, val in fields.items():
             query = query.where(_field_eq(key, val))
@@ -1183,6 +1185,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             assert author.name == "Ada King"
             ```
         """
+        _refuse_relation_keywords(cls, fields.keys() | (defaults or {}).keys())
         query = Query(cls, session=session)
         for key, val in fields.items():
             query = query.where(_field_eq(key, val))
@@ -1336,6 +1339,9 @@ class ModelConnection[M: Model]:
         Returns:
             The record, and whether it was created.
         """
+        _refuse_relation_keywords(
+            self.model_cls, fields.keys() | (defaults or {}).keys()
+        )
         query = Query(self.model_cls, using=self._connection_name)
         for key, val in fields.items():
             query = query.where(_field_eq(key, val))
@@ -1360,6 +1366,9 @@ class ModelConnection[M: Model]:
         Returns:
             The record, and whether it was created.
         """
+        _refuse_relation_keywords(
+            self.model_cls, fields.keys() | (defaults or {}).keys()
+        )
         query = Query(self.model_cls, using=self._connection_name)
         for key, val in fields.items():
             query = query.where(_field_eq(key, val))
