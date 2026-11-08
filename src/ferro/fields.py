@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import ast
 import difflib
 import inspect
 import types
 from collections.abc import Callable
+from enum import Enum
 from typing import (
     TYPE_CHECKING,
     Annotated,
@@ -951,11 +953,11 @@ def _relation_field(spelling: str, kind: str, name: Any) -> Any:
 def annotation_text(annotation: Any) -> str:
     """Write an annotation as it reads in source: `int | None`, `list[Player]`.
 
-    A string or forward reference loses its quotes, since a refusal prints
-    the line with the target named.
+    A forward reference loses its quotes, since a refusal prints the line
+    with the target named; a `Literal`'s values keep theirs.
     """
     if isinstance(annotation, str):
-        return annotation.replace('"', "").replace("'", "")
+        return _unquoted(annotation)
     if isinstance(annotation, ForwardRef):
         return annotation_text(annotation.__forward_arg__)
     if annotation is None or annotation is type(None):
@@ -965,11 +967,50 @@ def annotation_text(annotation: Any) -> str:
         return annotation_text(get_args(annotation)[0])
     if origin is Union or origin is types.UnionType:
         return " | ".join(annotation_text(arg) for arg in get_args(annotation))
+    if origin is Literal:
+        values = ", ".join(_literal_text(value) for value in get_args(annotation))
+        return f"Literal[{values}]"
     if origin is not None:
         name = getattr(origin, "__name__", None) or repr(origin)
         arguments = ", ".join(annotation_text(arg) for arg in get_args(annotation))
         return f"{name}[{arguments}]"
     return getattr(annotation, "__name__", None) or repr(annotation)
+
+
+def _literal_text(value: Any) -> str:
+    if isinstance(value, Enum):
+        return f"{type(value).__name__}.{value.name}"
+    return f'"{value}"' if isinstance(value, str) else repr(value)
+
+
+class _Unquote(ast.NodeTransformer):
+    """Write each quoted forward reference as the name it holds."""
+
+    def visit_Subscript(self, node: ast.Subscript) -> ast.AST:
+        if (
+            isinstance(node.value, (ast.Name, ast.Attribute))
+            and (getattr(node.value, "id", None) or getattr(node.value, "attr", None))
+            == "Literal"
+        ):
+            return node  # its values are strings, not references
+        return self.generic_visit(node)
+
+    def visit_Constant(self, node: ast.Constant) -> ast.AST:
+        if isinstance(node.value, str):
+            try:
+                return self.visit(ast.parse(node.value, mode="eval").body)
+            except SyntaxError:
+                return node
+        return node
+
+
+def _unquoted(text: str) -> str:
+    """``text`` with its forward references unquoted: ``list["Player"]`` reads ``list[Player]``."""
+    try:
+        tree = ast.parse(text, mode="eval").body
+    except SyntaxError:
+        return text
+    return ast.unparse(_Unquote().visit(tree)).replace("'", '"')
 
 
 def _option_text(value: Any) -> str:

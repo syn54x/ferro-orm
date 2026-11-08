@@ -17,7 +17,7 @@ the same table, constraint and snapshot.
 """
 
 import json
-from typing import Annotated, NewType
+from typing import Annotated, Literal, NewType
 
 import pytest
 
@@ -633,6 +633,101 @@ def test_a_reverse_relation_annotated_without_relation_is_refused():
     assert _refused(define) == (
         "Team.players: a relation is annotated Relation[...]. "
         'Write: players: Relation[list[Player]] = Reverse("team_id")'
+    )
+
+
+def test_a_relation_in_annotated_metadata_is_refused_as_an_assignment():
+    class Team(Model):
+        id: int | None = Field(default=None, primary_key=True)
+
+    def define():
+        class Player(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            team_id: int = Field(foreign_key=Team)
+            team: Annotated[Relation[Team], Forward("team_id")]
+
+    assert _refused(define) == (
+        "Player.team: a relation is an assignment, not Annotated metadata. "
+        'Write: team: Relation[Team] = Forward("team_id")'
+    )
+
+
+def test_a_bare_relation_annotation_names_its_columns_target():
+    class Team(Model):
+        id: int | None = Field(default=None, primary_key=True)
+
+    def define():
+        class Player(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            team_id: int | None = Field(default=None, foreign_key=Team)
+            team: Relation = Forward("team_id")
+
+    assert _refused(define) == (
+        "Player.team: a relation is annotated Relation[...]. "
+        'Write: team: Relation[Team | None] = Forward("team_id")'
+    )
+
+
+def test_a_bare_reverse_relation_annotation_names_the_model_pointing_back():
+    class Player(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        team_id: int = Field(foreign_key="Team")
+
+    def define():
+        class Team(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            players: Relation = Reverse("team_id")
+
+    assert _refused(define) == (
+        "Team.players: a relation is annotated Relation[...]. "
+        'Write: players: Relation[list[Player]] = Reverse("team_id")'
+    )
+
+
+def test_a_forward_relation_over_a_retired_column_goes_with_it():
+    class Team(Model):
+        id: int | None = Field(default=None, primary_key=True)
+
+    def define():
+        class Player(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            team_id: int | None = Field(default=None, foreign_key=Team, retired=True)
+            team: Relation[Team | None] = Forward("team_id")
+
+    assert _refused(define) == (
+        "Player.team: team_id is retired, so the relation is retired with it. "
+        'Delete: team: Relation[Team | None] = Forward("team_id")'
+    )
+
+
+def test_a_reverse_relation_over_a_retired_column_goes_with_it():
+    def define():
+        class Team(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            players: Relation[list["Player"]] = Reverse("team_id")
+
+        class Player(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            team_id: int | None = Field(default=None, foreign_key=Team, retired=True)
+
+    assert _refused(define) == (
+        "Team.players: Player.team_id is retired, so the relation is retired "
+        'with it. Delete: players: Relation[list[Player]] = Reverse("team_id")'
+    )
+
+
+def test_a_literal_column_keeps_its_quotes_in_the_fix():
+    def define():
+        class Player(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            side: Literal["home", "away"] | None = Field(
+                default=None, on_delete="CASCADE"
+            )
+
+    assert _refused(define) == (
+        "Player.side: on_delete is a foreign-key option and this column has no "
+        'foreign_key. Write: side: Literal["home", "away"] | None = '
+        "Field(default=None)"
     )
 
 

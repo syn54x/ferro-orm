@@ -231,6 +231,11 @@ def check_forward_relation(
     column = relation.fk_column
     info = model_cls.model_fields.get(column)
     meta = model_cls.__ferro_fields__.get(column)
+    if column in _retired_fields(model_cls):
+        raise TypeError(
+            f"{model}.{name}: {column} is retired, so the relation is retired "
+            f"with it. Delete: {_forward_line(name, target, relation.nullable, column)}"
+        )
     if info is None:
         keys = _key_columns_to(model_cls, target)
         if len(keys) == 1:
@@ -267,6 +272,11 @@ def check_forward_relation(
         )
 
 
+def _retired_fields(model_cls: Any) -> dict:
+    """The model's retired columns, which a relation can no longer read."""
+    return model_cls.__dict__.get("__ferro_retired_fields__") or {}
+
+
 def _snake(name: str) -> str:
     return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
 
@@ -292,6 +302,12 @@ def check_reverse_relation(
     relation.to = other
     model = model_cls.__name__
     column = relation.attribute
+    if column in _retired_fields(other):
+        raise TypeError(
+            f"{model}.{name}: {other.__name__}.{column} is retired, so the relation "
+            f"is retired with it. Delete: {name}: "
+            f'Relation[list[{other.__name__}]] = Reverse("{column}")'
+        )
     keys = _key_columns_to(other, model_cls)
     if len(keys) == 1:
         fix = f'{name}: Relation[list[{other.__name__}]] = Reverse("{keys[0]}")'
