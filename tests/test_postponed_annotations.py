@@ -457,6 +457,12 @@ def _modelset(order: str, team: str, player: str) -> str:
     return imports + (team + player if order == "first" else player + team)
 
 
+def _written(name: str, future: bool, later: bool) -> str:
+    """How a Write line names a target: quoted when it is declared later in a
+    module that evaluates its annotations."""
+    return f'"{name}"' if later and not future else name
+
+
 def _refusal(tmp_path, body: str, future: bool) -> str:
     """The refusal ``body`` meets, at class definition or when relations resolve."""
     _wipe()
@@ -481,7 +487,8 @@ class Player(Model):
 """
     assert _refusal(tmp_path, _modelset(order, team, player), future) == (
         "Team.players: a relation is annotated Relation[...]. "
-        'Write: players: Relation[list[Player]] = Reverse("team_id")'
+        f"Write: players: Relation[list[{_written('Player', future, order == 'first')}]] = "
+        'Reverse("team_id")'
     )
 
 
@@ -498,7 +505,8 @@ class Player(Model):
 """
     assert _refusal(tmp_path, _modelset(order, _TEAM, player), future) == (
         "Player.team: a relation is annotated Relation[...]. "
-        'Write: team: Relation[Team | None] = Forward("team_id")'
+        f"Write: team: Relation[{_written('Team | None', future, order == 'second')}] = "
+        'Forward("team_id")'
     )
 
 
@@ -518,7 +526,8 @@ class Player(Model):
 """
     assert _refusal(tmp_path, _modelset(order, _TEAM, player), future) == (
         "Player.team: a relation is an assignment, not Annotated metadata. "
-        'Write: team: Relation[Team] = Forward("team_id")'
+        f"Write: team: Relation[{_written('Team', future, order == 'second')}] = "
+        'Forward("team_id")'
     )
 
 
@@ -577,7 +586,8 @@ class Player(Model):
 """
     assert _refusal(tmp_path, _modelset(order, _TEAM, player), future) == (
         "Player.team: a relation is an assignment, not Annotated metadata. "
-        'Write: team: Relation[Team | None] = Forward("team_id")'
+        f"Write: team: Relation[{_written('Team | None', future, order == 'second')}] = "
+        'Forward("team_id")'
     )
 
 
@@ -600,8 +610,8 @@ class Coach(Model):
     assert _refusal(tmp_path, body, future=False) == (
         "Team.players: a relation is annotated Relation[...], and Player and "
         "Coach each declare team_id pointing at Team. Write: players: "
-        'Relation[list[Player]] = Reverse("team_id") or players: '
-        'Relation[list[Coach]] = Reverse("team_id")'
+        'Relation[list["Player"]] = Reverse("team_id") or players: '
+        'Relation[list["Coach"]] = Reverse("team_id")'
     )
 
 
@@ -665,33 +675,27 @@ class Player(Model):
 #
 # Every relation form under every placement of its annotation, with and without
 # postponed annotations, the target written as a class or a string and declared
-# before or after the model that names it. Each outcome is a working relation or
-# a refusal whose Write line compiles.
+# before or after the model that names it, over a required or a nullable key
+# column, with the marker's column positional or by keyword. Each outcome is a
+# working relation, or a refusal whose every Write line, pasted in place of the
+# refused one, defines a working relation.
 
 _SPELLINGS = {
-    "assigned": ("{relation} = {marker}", "works"),
+    "assigned": "{relation} = {marker}",
     "assigned with Annotated documentation": (
-        'Annotated[{relation}, "documentation"] = {marker}',
-        "works",
+        'Annotated[{relation}, "documentation"] = {marker}'
     ),
-    "Annotated metadata": ("Annotated[{relation}, {marker}]", "refused"),
-    "Annotated metadata | None": (
-        "Annotated[{relation}, {marker}] | None = None",
-        "refused",
-    ),
-    "Optional Annotated metadata": (
-        "Optional[Annotated[{relation}, {marker}]] = None",
-        "refused",
-    ),
-    "Union Annotated metadata": (
-        "Union[Annotated[{relation}, {marker}], None] = None",
-        "refused",
-    ),
-    "aliased Annotated metadata": ("A[{relation}, {marker}]", "refused"),
-    "assigned under | None": ("{relation} | None = {marker}", "refused"),
-    "bare Relation": ("Relation = {marker}", "refused"),
-    "bare Relation | None": ("Relation | None = {marker}", "refused"),
+    "Annotated metadata": "Annotated[{relation}, {marker}]",
+    "Annotated metadata | None": "Annotated[{relation}, {marker}] | None = None",
+    "Optional Annotated metadata": ("Optional[Annotated[{relation}, {marker}]] = None"),
+    "Union Annotated metadata": ("Union[Annotated[{relation}, {marker}], None] = None"),
+    "aliased Annotated metadata": "A[{relation}, {marker}]",
+    "assigned under | None": "{relation} | None = {marker}",
+    "bare Relation": "Relation = {marker}",
+    "bare Relation | None": "Relation | None = {marker}",
 }
+
+_ASSIGNED = ("assigned", "assigned with Annotated documentation")
 
 # ManyToMany keeps its old-form declaration in this slice, which reads the
 # marker from Annotated metadata too (as BackRef always has), so every
@@ -703,41 +707,50 @@ _M2M_SPELLINGS = [
     if "bare" not in name and name != "assigned under | None"
 ]
 
+_FIELD = {"Forward": "team", "Reverse": "players", "ManyToMany": "tags"}
 
-def _sweep_body(form: str, spelling: str, quoted: bool, order: str) -> str:
-    written, _ = _SPELLINGS[spelling]
+_MARKERS = {
+    ("Forward", "positional"): 'Forward("team_id")',
+    ("Forward", "keyword"): 'Forward(column="team_id")',
+    ("Reverse", "positional"): 'Reverse("team_id")',
+    ("Reverse", "keyword"): 'Reverse(attribute="team_id")',
+    ("ManyToMany", "positional"): 'ManyToMany(related_name="posts")',
+}
+
+
+def _key(target: str, nullable: bool) -> str:
+    if nullable:
+        return f"team_id: int | None = Field(default=None, foreign_key={target})"
+    return f"team_id: int = Field(foreign_key={target})"
+
+
+def _sweep_body(form: str, field_line: str, nullable: bool, order: str) -> str:
+    """The modelset whose relation field is declared by ``field_line``."""
     late = order == "after"
     if form == "Forward":
-        target = '"Team"' if quoted else "Team"
-        key = '"Team"' if late else "Team"
         owner = f"""
 class Player(Model):
     id: int | None = Field(default=None, primary_key=True)
-    team_id: int = Field(foreign_key={key})
-    team: {written.format(relation=f"Relation[{target}]", marker='Forward("team_id")')}
+    {_key('"Team"' if late else "Team", nullable)}
+    {field_line}
 """
         other = _TEAM
     elif form == "Reverse":
-        target = '"Player"' if quoted else "Player"
-        relation = f"Relation[list[{target}]]"
         owner = f"""
 class Team(Model):
     id: int | None = Field(default=None, primary_key=True)
-    players: {written.format(relation=relation, marker='Reverse("team_id")')}
+    {field_line}
 """
-        other = """
+        other = f"""
 class Player(Model):
     id: int | None = Field(default=None, primary_key=True)
-    team_id: int = Field(foreign_key="Team")
+    {_key('"Team"', nullable)}
 """
     else:
-        target = '"Tag"' if quoted else "Tag"
-        relation = f"Relation[list[{target}]]"
-        marker = 'ManyToMany(related_name="posts")'
         owner = f"""
 class Post(Model):
     id: int | None = Field(default=None, primary_key=True)
-    tags: {written.format(relation=relation, marker=marker)}
+    {field_line}
 """
         other = """
 class Tag(Model):
@@ -751,39 +764,77 @@ class Tag(Model):
     return imports + (owner + other if late else other + owner)
 
 
-_SWEEP = [
-    (form, spelling, future, quoted, order)
-    for form in ("Forward", "Reverse", "ManyToMany")
-    for spelling in (_M2M_SPELLINGS if form == "ManyToMany" else _SPELLINGS)
-    for future in (False, True)
-    for quoted in (False, True)
-    for order in ("before", "after")
-    # Without postponed annotations an unquoted later class is a NameError.
-    if future or quoted or order == "before"
-]
+def _declared_field(form: str, spelling: str, quoted: bool, marker: str) -> str:
+    target = {"Forward": "Team", "Reverse": "Player", "ManyToMany": "Tag"}[form]
+    written = f'"{target}"' if quoted else target
+    relation = (
+        f"Relation[{written}]" if form == "Forward" else f"Relation[list[{written}]]"
+    )
+    annotation = _SPELLINGS[spelling].format(
+        relation=relation, marker=_MARKERS[(form, marker)]
+    )
+    return f"{_FIELD[form]}: {annotation}"
 
 
-@pytest.mark.parametrize(("form", "spelling", "future", "quoted", "order"), _SWEEP)
-def test_every_spelling_is_a_relation_or_a_refusal_whose_fix_compiles(
-    tmp_path, form, spelling, future, quoted, order
-):
+def _defines_the_relation(tmp_path, form: str, body: str, future: bool) -> None:
+    """Import ``body`` and resolve it; the relation must work."""
     _wipe()
-    body = _sweep_body(form, spelling, quoted, order)
-    expected = "works" if form == "ManyToMany" else _SPELLINGS[spelling][1]
-    try:
-        mod = _import(tmp_path, body, future=future)
-        ferro.ensure_resolved_modelset()
-    except TypeError as refusal:
-        assert expected == "refused", f"{body}\nrefused: {refusal}"
-        message = str(refusal)
-        assert "Write: " in message, message
-        for line in message.split("Write: ", 1)[1].split(" or "):
-            compile(line, "<refusal>", "exec")
-        return
-    assert expected == "works", f"{body}\nwas accepted"
+    mod = _import(tmp_path, body, future=future)
+    ferro.ensure_resolved_modelset()
     if form == "Forward":
         assert mod.Player.__ferro_relation_specs__["team"].target is mod.Team
     elif form == "Reverse":
         assert mod.Team.__ferro_reverse_specs__["players"].target is mod.Player
     else:
         assert mod.Post.__ferro_reverse_specs__["tags"].is_m2m
+
+
+_SWEEP = [
+    (form, spelling, future, quoted, order, nullable, marker)
+    for form in ("Forward", "Reverse", "ManyToMany")
+    for spelling in (_M2M_SPELLINGS if form == "ManyToMany" else _SPELLINGS)
+    for future in (False, True)
+    for quoted in (False, True)
+    for order in ("before", "after")
+    for nullable in ((False,) if form == "ManyToMany" else (False, True))
+    for marker in (
+        ("positional",) if form == "ManyToMany" else ("positional", "keyword")
+    )
+    # Without postponed annotations an unquoted later class is a NameError.
+    if future or quoted or order == "before"
+]
+
+
+@pytest.mark.parametrize(
+    ("form", "spelling", "future", "quoted", "order", "nullable", "marker"), _SWEEP
+)
+def test_every_spelling_is_a_relation_or_a_refusal_whose_fix_works(
+    tmp_path, form, spelling, future, quoted, order, nullable, marker
+):
+    field = _declared_field(form, spelling, quoted, marker)
+    body = _sweep_body(form, field, nullable, order)
+    # Only a Relation[...] assigned its marker is a relation, and a forward
+    # one over a nullable column must say `| None`; a ManyToMany keeps the
+    # old form's reading of Annotated metadata.
+    works = form == "ManyToMany" or (
+        spelling in _ASSIGNED and not (form == "Forward" and nullable)
+    )
+    _wipe()
+    try:
+        _import(tmp_path, body, future=future)
+        ferro.ensure_resolved_modelset()
+    except TypeError as refusal:
+        assert not works, f"{body}\nrefused: {refusal}"
+        message = str(refusal)
+        assert "Write: " in message, message
+        for line in message.split("Write: ", 1)[1].split(" or "):
+            fixed = _sweep_body(form, line, nullable, order)
+            try:
+                _defines_the_relation(tmp_path, form, fixed, future)
+            except Exception as error:
+                raise AssertionError(
+                    f"the fix {line!r} for\n{body}\ndoes not work: {error}"
+                ) from error
+        return
+    assert works, f"{body}\nwas accepted"
+    _defines_the_relation(tmp_path, form, body, future)

@@ -555,7 +555,7 @@ def test_a_required_relation_over_a_nullable_column_is_refused():
 
     assert _refused(define) == (
         "Player.mentor: mentor_id is nullable, so the relation is too. "
-        'Write: mentor: Relation[Player | None] = Forward("mentor_id")'
+        'Write: mentor: Relation["Player | None"] = Forward("mentor_id")'
     )
 
 
@@ -588,7 +588,7 @@ def test_a_reverse_over_a_key_that_does_not_point_back_names_the_one_that_does()
 
     assert _refused(define) == (
         "Team.players: Player.mentor_id points at Player, not Team. "
-        'Write: players: Relation[list[Player]] = Reverse("team_id")'
+        'Write: players: Relation[list["Player"]] = Reverse("team_id")'
     )
 
 
@@ -632,7 +632,7 @@ def test_a_reverse_relation_annotated_without_relation_is_refused():
 
     assert _refused(define) == (
         "Team.players: a relation is annotated Relation[...]. "
-        'Write: players: Relation[list[Player]] = Reverse("team_id")'
+        'Write: players: Relation[list["Player"]] = Reverse("team_id")'
     )
 
 
@@ -680,7 +680,7 @@ def test_a_bare_reverse_relation_annotation_names_the_model_pointing_back():
 
     assert _refused(define) == (
         "Team.players: a relation is annotated Relation[...]. "
-        'Write: players: Relation[list[Player]] = Reverse("team_id")'
+        'Write: players: Relation[list["Player"]] = Reverse("team_id")'
     )
 
 
@@ -712,7 +712,76 @@ def test_a_reverse_relation_over_a_retired_column_goes_with_it():
 
     assert _refused(define) == (
         "Team.players: Player.team_id is retired, so the relation is retired "
-        'with it. Delete: players: Relation[list[Player]] = Reverse("team_id")'
+        'with it. Delete: players: Relation[list["Player"]] = Reverse("team_id")'
+    )
+
+
+@pytest.mark.parametrize(
+    ("column", "written"),
+    [
+        ("team_id: int = Field(foreign_key=Team)", "Team"),
+        ("team_id: int | None = Field(default=None, foreign_key=Team)", "Team | None"),
+    ],
+)
+def test_a_none_wrapped_relation_takes_its_nullability_from_the_column(column, written):
+    class Team(Model):
+        id: int | None = Field(default=None, primary_key=True)
+
+    namespace = {
+        "Field": Field,
+        "Forward": Forward,
+        "Model": Model,
+        "Relation": Relation,
+    }
+    namespace["Team"] = Team
+
+    def define():
+        exec(
+            "class Player(Model):\n"
+            "    id: int | None = Field(default=None, primary_key=True)\n"
+            f"    {column}\n"
+            '    team: Relation[Team] | None = Forward("team_id")\n',
+            namespace,
+        )
+
+    assert _refused(define) == (
+        "Player.team: a relation is annotated Relation[...], with no | None "
+        f'around it. Write: team: Relation[{written}] = Forward("team_id")'
+    )
+
+
+@pytest.mark.parametrize(
+    ("column", "written"),
+    [
+        ("team_id: int = Field(foreign_key=Team)", "Team"),
+        ("team_id: int | None = Field(default=None, foreign_key=Team)", "Team | None"),
+    ],
+)
+def test_annotated_metadata_takes_its_nullability_from_the_column(column, written):
+    class Team(Model):
+        id: int | None = Field(default=None, primary_key=True)
+
+    namespace = {
+        "Annotated": Annotated,
+        "Field": Field,
+        "Forward": Forward,
+        "Model": Model,
+        "Relation": Relation,
+        "Team": Team,
+    }
+
+    def define():
+        exec(
+            "class Player(Model):\n"
+            "    id: int | None = Field(default=None, primary_key=True)\n"
+            f"    {column}\n"
+            '    team: Annotated[Relation[Team], Forward("team_id")] | None = None\n',
+            namespace,
+        )
+
+    assert _refused(define) == (
+        "Player.team: a relation is an assignment, not Annotated metadata. "
+        f'Write: team: Relation[{written}] = Forward("team_id")'
     )
 
 

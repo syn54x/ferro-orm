@@ -187,25 +187,67 @@ def _key_columns_to(model_cls: Any, target: Any) -> list[str]:
     ]
 
 
-def _foreign_key_option(model_cls: Any, target: Any) -> Any:
-    """How ``model_cls`` writes ``foreign_key=``: by name for a self reference."""
-    return target.__name__ if target is model_cls else target
+def _foreign_key_option(
+    model_cls: Any, target: Any, bound: frozenset[str] | None = None
+) -> Any:
+    """How ``model_cls`` writes ``foreign_key=``: by name for a target not
+    defined yet where it is declared (a self reference among them)."""
+    later = bound is not None and target.__name__ not in bound
+    return target.__name__ if target is model_cls or later else target
 
 
-def _new_key_line(model_cls: Any, column: str, target: Any, nullable: bool) -> str:
+def _new_key_line(
+    model_cls: Any,
+    column: str,
+    target: Any,
+    nullable: bool,
+    bound: frozenset[str] | None = None,
+) -> str:
     """The declaration of a foreign-key column ``column`` to ``target``."""
     _, key_type = _target_key(model_cls, column, target)
     return field_line(
         column,
         annotation_text(key_type) + (" | None" if nullable else ""),
-        field_options(None, foreign_key=_foreign_key_option(model_cls, target)),
+        field_options(None, foreign_key=_foreign_key_option(model_cls, target, bound)),
         None if nullable else PydanticUndefined,
     )
 
 
-def _forward_line(name: str, target: Any, nullable: bool, column: str) -> str:
-    shown = target.__name__ + (" | None" if nullable else "")
-    return f'{name}: Relation[{shown}] = Forward("{column}")'
+def relation_line(
+    field_name: str,
+    spelling: str,
+    target: str,
+    nullable: bool,
+    column: str,
+    bound: frozenset[str] | None,
+) -> str:
+    """Write a relation's declaration: ``team: Relation[Team] = Forward("team_id")``.
+
+    A target that was not defined yet where the relation is declared, in a
+    module that evaluates its annotations, is written as a string, so the
+    line works pasted where the refused one stood.
+
+    Args:
+        field_name: The relation's field name.
+        spelling: ``"Forward"`` or ``"Reverse"``.
+        target: The model the relation reads, by name.
+        nullable: Whether a forward relation's column allows ``None``.
+        column: The column the relation names.
+        bound: The names defined where the relation is declared, or ``None``
+            under postponed annotations.
+
+    Returns:
+        The declaration, as one line of source.
+    """
+    if target.startswith("list[") and target.endswith("]"):
+        target = target[len("list[") : -1]
+    quoted = bound is not None and target not in bound
+    if spelling == "Reverse":
+        shown = f'list["{target}"]' if quoted else f"list[{target}]"
+    else:
+        shown = target + (" | None" if nullable else "")
+        shown = f'"{shown}"' if quoted else shown
+    return f'{field_name}: Relation[{shown}] = {spelling}("{column}")'
 
 
 def relation_refusal(
@@ -216,6 +258,7 @@ def relation_refusal(
     column: str,
     target: str,
     nullable: bool,
+    bound: frozenset[str] | None = None,
 ) -> TypeError:
     """The refusal of a relation not declared ``name: Relation[...] = Forward(...)``.
 
@@ -225,20 +268,16 @@ def relation_refusal(
         reason: What is wrong with the declaration.
         spelling: ``"Forward"`` or ``"Reverse"``.
         column: The column the relation names.
-        target: The model the relation reads, by name (a ``list[...]`` is
-            added for a reverse relation).
+        target: The model the relation reads, by name.
         nullable: Whether a forward relation's column allows ``None``.
+        bound: The names defined where the relation is declared, or ``None``
+            under postponed annotations. Defaults to ``None``.
 
     Returns:
         The error, its message ending with the line to write.
     """
-    if spelling == "Reverse" and not target.startswith("list["):
-        target = f"list[{target}]"
-    shown = target + (" | None" if nullable and spelling == "Forward" else "")
-    return TypeError(
-        f"{model}.{field_name}: {reason}. Write: "
-        f'{field_name}: Relation[{shown}] = {spelling}("{column}")'
-    )
+    line = relation_line(field_name, spelling, target, nullable, column, bound)
+    return TypeError(f"{model}.{field_name}: {reason}. Write: {line}")
 
 
 def _refuse_unnamed_forward(
@@ -259,6 +298,7 @@ def _refuse_unnamed_forward(
             column,
             target.__name__,
             annotation_allows_none(info.annotation),
+            relation.bound,
         )
     missing = (
         f"{column} has no foreign_key"
@@ -296,12 +336,14 @@ def _refuse_unnamed_reverse(
             column,
             pointing_back[0].__name__,
             False,
+            relation.bound,
         )
     if pointing_back:
         names = [other.__name__ for other in pointing_back]
         declaring = ", ".join(names[:-1]) + f" and {names[-1]}"
         lines = " or ".join(
-            f'{name}: Relation[list[{other}]] = Reverse("{column}")' for other in names
+            relation_line(name, "Reverse", other, False, column, relation.bound)
+            for other in names
         )
         raise TypeError(
             f"{model}.{name}: {relation.refusal}, and {declaring} each declare "
@@ -348,7 +390,15 @@ def check_forward_relation(
     if column in _retired_fields(model_cls):
         raise TypeError(
             f"{model}.{name}: {column} is retired, so the relation is retired "
-            f"with it. Delete: {_forward_line(name, target, relation.nullable, column)}"
+            "with it. Delete: "
+            + relation_line(
+                name,
+                "Forward",
+                target.__name__,
+                relation.nullable,
+                column,
+                relation.bound,
+            )
         )
     if info is None:
         keys = _key_columns_to(model_cls, target)
@@ -356,15 +406,22 @@ def check_forward_relation(
             nullable = annotation_allows_none(
                 model_cls.model_fields[keys[0]].annotation
             )
-            fix = _forward_line(name, target, nullable, keys[0])
+            fix = relation_line(
+                name, "Forward", target.__name__, nullable, keys[0], relation.bound
+            )
         else:
-            fix = _new_key_line(model_cls, column, target, relation.nullable)
+            fix = _new_key_line(
+                model_cls, column, target, relation.nullable, relation.bound
+            )
         raise TypeError(f"{model}.{name}: {model} has no column {column}. Write: {fix}")
     if meta is None or meta.foreign_key is None:
         line = field_line(
             column,
             annotation_text(info.annotation),
-            field_options(meta, foreign_key=_foreign_key_option(model_cls, target)),
+            field_options(
+                meta,
+                foreign_key=_foreign_key_option(model_cls, target, relation.bound),
+            ),
             info.default,
         )
         raise TypeError(f"{model}.{name}: {column} has no foreign_key. Write: {line}")
@@ -376,13 +433,17 @@ def check_forward_relation(
         raise TypeError(
             f"{model}.{name}: {column} points at {points_at.__name__}, not "
             f"{target.__name__}. Write: "
-            f"{_forward_line(name, points_at, nullable, column)}"
+            + relation_line(
+                name, "Forward", points_at.__name__, nullable, column, relation.bound
+            )
         )
     if nullable != relation.nullable:
         raise TypeError(
             f"{model}.{name}: {column} is {'nullable' if nullable else 'required'}, "
             "so the relation is too. Write: "
-            f"{_forward_line(name, target, nullable, column)}"
+            + relation_line(
+                name, "Forward", target.__name__, nullable, column, relation.bound
+            )
         )
 
 
@@ -423,12 +484,16 @@ def check_reverse_relation(
     if column in _retired_fields(other):
         raise TypeError(
             f"{model}.{name}: {other.__name__}.{column} is retired, so the relation "
-            f"is retired with it. Delete: {name}: "
-            f'Relation[list[{other.__name__}]] = Reverse("{column}")'
+            "is retired with it. Delete: "
+            + relation_line(
+                name, "Reverse", other.__name__, False, column, relation.bound
+            )
         )
     keys = _key_columns_to(other, model_cls)
     if len(keys) == 1:
-        fix = f'{name}: Relation[list[{other.__name__}]] = Reverse("{keys[0]}")'
+        fix = relation_line(
+            name, "Reverse", other.__name__, False, keys[0], relation.bound
+        )
     else:
         added = _new_key_line(other, f"{_snake(model)}_id", model_cls, False)
         fix = f"{added} on {other.__name__}"

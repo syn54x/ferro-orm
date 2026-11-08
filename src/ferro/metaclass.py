@@ -45,7 +45,7 @@ from .ir import compile_model_schema_ir
 from .ir.compiler import declared_retired_labels
 from .query import Relation
 from .registry import REGISTRY
-from .relations import check_declared_foreign_keys, relation_refusal
+from .relations import check_declared_foreign_keys, relation_line, relation_refusal
 from .relations.descriptors import ForwardDescriptor
 
 _TABLE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
@@ -361,8 +361,7 @@ def _model_pointing_back(model: str, column: str) -> str | None:
 
 _NOT_RELATION = "a relation is annotated Relation[...]"
 _IN_METADATA = "a relation is an assignment, not Annotated metadata"
-_NONE_OUTSIDE = "a forward relation's | None goes inside Relation[...]"
-_REVERSE_NONE = "a reverse relation is a query, never None"
+_NONE_OUTSIDE = "a relation is annotated Relation[...], with no | None around it"
 
 
 def _declared_relation(
@@ -373,9 +372,11 @@ def _declared_relation(
     column: str,
     *,
     in_metadata: bool,
+    postponed: bool,
     namespace: dict,
     annotations: dict,
     frame_ns: dict | None,
+    scope: frozenset[str],
 ) -> ForwardRelation | ReverseRelation:
     """The record of a ``Forward`` or ``Reverse`` declaration over ``column``.
 
@@ -392,9 +393,13 @@ def _declared_relation(
         spelling: ``"Forward"`` or ``"Reverse"``.
         column: The column the relation names.
         in_metadata: Whether the marker sits in ``Annotated`` metadata.
+        postponed: Whether the annotation was written under postponed
+            annotations, so a target declared later needs no quotes.
         namespace: The class body.
         annotations: The class body's annotations.
         frame_ns: The scope running the class statement, if a function.
+        scope: The names defined where the class statement runs, so a fix
+            line quotes a target defined later.
 
     Raises:
         TypeError: The relation is ``Annotated`` metadata, the annotation is
@@ -403,50 +408,57 @@ def _declared_relation(
     """
     core, wrapped, _ = _layers(annotation)
     view = _relation_view(core)
+    bound = None if postponed else scope | frozenset(namespace)
+    # The column the relation reads decides its target and nullability.
+    declared = (
+        _declared_target(column, namespace, annotations, frame_ns)
+        if spelling == "Forward"
+        else None
+    )
     if in_metadata or wrapped or view is None:
         if in_metadata:
             reason = _IN_METADATA
         elif view is None:
             reason = _NOT_RELATION
         else:
-            reason = _NONE_OUTSIDE if spelling == "Forward" else _REVERSE_NONE
-        if view is not None:
+            reason = _NONE_OUTSIDE
+        if declared is not None:
+            named: tuple[str, bool] | None = declared
+        elif view is not None:
             _, target, nullable = view
-            named: tuple[str, bool] | None = (
-                annotation_text(target),
-                nullable or wrapped,
-            )
+            named = (annotation_text(target), nullable or wrapped)
         elif not _is_bare_relation(core):
             named = (annotation_text(core), wrapped)
-        elif spelling == "Forward":
-            named = _declared_target(column, namespace, annotations, frame_ns)
-        else:
+        elif spelling == "Reverse":
             pointing_back = _model_pointing_back(model, column)
             named = (pointing_back, False) if pointing_back else None
+        else:
+            named = None
         if named is not None:
             raise relation_refusal(
-                model, field_name, reason, spelling, column, named[0], named[1]
+                model, field_name, reason, spelling, column, named[0], named[1], bound
             )
         if spelling == "Forward":
-            return ForwardRelation(column, None, False, refusal=reason)
-        return ReverseRelation(column, None, refusal=reason)
+            return ForwardRelation(column, None, False, refusal=reason, bound=bound)
+        return ReverseRelation(column, None, refusal=reason, bound=bound)
     is_list, target, nullable = view
-    target_text = annotation_text(target)
     if spelling == "Forward" and is_list:
+        target_text, nullable = declared or (annotation_text(target), False)
         raise TypeError(
             f"{model}.{field_name}: a forward relation reads one row, so it is "
-            f"annotated Relation[{target_text}]. Write: {field_name}: "
-            f'Relation[{target_text}] = Forward("{column}")'
+            "annotated Relation[...] of its target. Write: "
+            + relation_line(field_name, "Forward", target_text, nullable, column, bound)
         )
     if spelling == "Reverse" and not is_list:
+        target_text = annotation_text(target)
         raise TypeError(
             f"{model}.{field_name}: a reverse relation reads every row pointing "
-            f"back, so it is annotated Relation[list[{target_text}]]. Write: "
-            f'{field_name}: Relation[list[{target_text}]] = Reverse("{column}")'
+            f"back, so it is annotated Relation[list[...]]. Write: "
+            + relation_line(field_name, "Reverse", target_text, False, column, bound)
         )
     if spelling == "Forward":
-        return ForwardRelation(column, target, nullable)
-    return ReverseRelation(column, target)
+        return ForwardRelation(column, target, nullable, bound=bound)
+    return ReverseRelation(column, target, bound=bound)
 
 
 def _without_none(annotation: Any) -> str:
@@ -675,7 +687,11 @@ class ModelMetaclass(type(BaseModel)):
         )
         local_relations, fields_to_remove, pending_relations, retired_relations = (
             mcs._scan_relationship_annotations(
-                annotations, namespace, name, frame_ns=frame_ns
+                annotations,
+                namespace,
+                name,
+                frame_ns=frame_ns,
+                scope=frozenset(caller.f_globals) | frozenset(caller.f_locals),
             )
         )
         mcs._inject_shadow_fields(annotations, namespace, local_relations)
@@ -1006,6 +1022,7 @@ class ModelMetaclass(type(BaseModel)):
         namespace: dict,
         model_name: str,
         frame_ns: dict | None = None,
+        scope: frozenset[str] = frozenset(),
     ) -> tuple[dict, list, list, dict]:
         """
         Scan annotations for relationship fields (BackRef, ForeignKey, ManyToMany).
@@ -1052,9 +1069,11 @@ class ModelMetaclass(type(BaseModel)):
                     spelling,
                     column,
                     in_metadata=in_metadata,
+                    postponed=isinstance(hint, str),
                     namespace=namespace,
                     annotations=annotations,
                     frame_ns=frame_ns,
+                    scope=scope,
                 )
                 local_relations[field_name] = relation
                 pending_relations.append((field_name, relation))
