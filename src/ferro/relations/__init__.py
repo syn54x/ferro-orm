@@ -277,17 +277,23 @@ def many_to_many_line(
     return f"{field_name}: Relation[list[{shown}]] = ManyToMany({options})"
 
 
-def _target_name(target: Any) -> str | None:
-    """The class name a relation's target is written as, or ``None``."""
-    if isinstance(target, ForwardRef):
-        target = target.__forward_arg__
-    if isinstance(target, type):
-        return target.__name__
-    return None if target is None else str(target).rsplit(".", 1)[-1]
+def _self_many_to_many(model_cls: Any) -> str:
+    """Why a many-to-many cannot link its own model, and what to declare instead."""
+    model, column = model_cls.__name__, _join_column(model_cls.__ferro_table__)
+    return (
+        "a self-referential many-to-many is not supported, since both join-table "
+        f"columns would be {column}. Declare the join table as a model of its "
+        f"own, with two foreign-key columns pointing at {model}: "
+        f'{column}: int = Field(foreign_key="{model}") and '
+        f'other_{column}: int = Field(foreign_key="{model}")'
+    )
 
 
 def _many_to_many_to(model_cls: Any, target: Any) -> list[str]:
-    """``model_cls``'s many-to-many relations that link ``target``."""
+    """``model_cls``'s many-to-many relations that link ``target``; never its own
+    model, which a many-to-many cannot link."""
+    if model_cls is target:
+        return []
     return [
         name
         for name, relation in (
@@ -308,7 +314,8 @@ def _refuse_unnamed_many_to_many(
         other.__name__
         for other in REGISTRY.models().values()
         for reverse in (other.__dict__.get("__ferro_relations__") or {}).values()
-        if isinstance(reverse, ReverseRelation)
+        if other is not model_cls  # a self-referential many-to-many is refused
+        and isinstance(reverse, ReverseRelation)
         and reverse.attribute == name
         and reverse.refusal is None
         and _resolve_target(reverse.to, final=False) is model_cls
@@ -627,6 +634,9 @@ def _check_reverse_many_to_many(
     The fix reads back the one relation of the other model that does link
     this one; with none, or several, it declares this side's own
     many-to-many, whose join table is named the way a conversion names it.
+    On the many-to-many's own model, which no many-to-many can link, it
+    reads back a self-referencing foreign-key column instead, or moves the
+    relation to the model the many-to-many links.
     """
     if linked.refusal is not None:
         return  # the many-to-many's own refusal raises at resolution
@@ -634,7 +644,30 @@ def _check_reverse_many_to_many(
     points_at = _resolve_target(linked.to, final=final)
     if points_at is None or points_at is model_cls:
         return
+    refused = (
+        f"{model_cls.__name__}.{name}: {other.__name__}.{relation.attribute} "
+        f"points at {points_at.__name__}, not {model_cls.__name__}"
+    )
     candidates = _key_columns_to(other, model_cls) + _many_to_many_to(other, model_cls)
+    if other is model_cls:
+        if candidates:
+            lines = " or ".join(
+                relation_line(
+                    name, "Reverse", other.__name__, False, key, relation.bound
+                )
+                for key in candidates
+            )
+            raise TypeError(f"{refused}. Write: {lines}")
+        # No line on this model works; the fix moves the relation, so its
+        # target is quoted to hold wherever the line lands.
+        moved = f'{name}: Relation[list["{other.__name__}"]] = Reverse("{relation.attribute}")'
+        raise TypeError(
+            f"{refused}, and no foreign-key column of {other.__name__} points at "
+            f"{other.__name__} for it to read, since a self-referential "
+            f"many-to-many is not supported. Declare {name} on "
+            f"{points_at.__name__}, which {other.__name__}.{relation.attribute} "
+            f"links: {moved}"
+        )
     if len(candidates) == 1:
         fix = relation_line(
             name, "Reverse", other.__name__, False, candidates[0], relation.bound
@@ -647,10 +680,7 @@ def _check_reverse_many_to_many(
             True,
             relation.bound,
         )
-    raise TypeError(
-        f"{model_cls.__name__}.{name}: {other.__name__}.{relation.attribute} "
-        f"points at {points_at.__name__}, not {model_cls.__name__}. Write: {fix}"
-    )
+    raise TypeError(f"{refused}. Write: {fix}")
 
 
 def check_declared_foreign_keys(model_cls: Any) -> None:
@@ -760,6 +790,15 @@ def resolve_relationships():
 
         # 2. Cross-validate with declared reverse relation field.
         target_model = rel.to
+        if (
+            isinstance(rel, ManyToManyRelation)
+            and rel.related_name is None
+            and target_model is REGISTRY.models()[model_name]
+        ):
+            raise TypeError(
+                f"{target_model.__name__}.{field_name}: "
+                + _self_many_to_many(target_model)
+            )
         recompile_targets.add(target_model.__ferro_identity__)
         # A many-to-many declared with `through=` alone has no BackRef: a
         # `Reverse` on the target, if any, reads it back.

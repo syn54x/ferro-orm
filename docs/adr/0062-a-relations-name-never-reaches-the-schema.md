@@ -35,5 +35,5 @@ Decided in Epic #874 (2026-11-07), built in #876 for foreign-key columns and #87
 
 - A model converted from the old form keeps its join table and its key columns, and `ferro migrate new` over a snapshot recorded from the old form prints `no schema change: nothing written`. The pin is `tests/test_many_to_many_through.py`, against the snapshot in `tests/fixtures/many_to_many_pre_conversion/`.
 - A table rename on the owning model (ADR-0032) still renames the join table's `<table>_id` column, which is derived from the table, but no longer the join table itself, since its name is declared. The table keeps the name `through=` gives it.
-- The join table's two columns are still named after the two tables. A self-referential many-to-many, whose two columns would share a name, stays out of scope.
+- The join table's two columns are still named after the two tables. A self-referential many-to-many, whose two columns would share a name, stays out of scope: `ManyToMany(through=...)` aimed at its own model is refused when relations resolve, naming a join model with two foreign-key columns as the way to declare one.
 - `related_name` and `BackRef` leave the API with the old form; the other side of a many-to-many is a `Reverse` naming the owning attribute, and it may be left out.

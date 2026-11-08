@@ -451,3 +451,107 @@ def test_a_reverse_naming_a_many_to_many_aimed_elsewhere_names_a_fix_that_works(
     mod = _import(tmp_path, _elsewhere_body(line, player_line), future=future)
     ferro.ensure_resolved_modelset()
     assert mod.Team.__ferro_reverse_specs__["players"].target is mod.Player
+
+
+# -- a many-to-many never links its own model -----------------------------------------
+#
+# Both join-table columns of a self-referential many-to-many would be
+# `<table>_id`, so it is refused, and no fix ever writes one.
+
+_SELF_RECIPE = (
+    "a self-referential many-to-many is not supported, since both join-table "
+    "columns would be player_id. Declare the join table as a model of its own, "
+    'with two foreign-key columns pointing at Player: player_id: int = Field(foreign_key="Player") '
+    'and other_player_id: int = Field(foreign_key="Player")'
+)
+
+
+@pytest.mark.parametrize("future", [False, True])
+def test_a_self_referential_many_to_many_is_refused(tmp_path, future):
+    body = """
+class Player(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    friends: Relation[list["Player"]] = ManyToMany(through="player_friends")
+"""
+
+    assert _refusal(tmp_path, body, future) == f"Player.friends: {_SELF_RECIPE}"
+
+
+def _own_model_body(player_lines: str) -> str:
+    return f"""
+from ferro import Reverse
+
+class Player(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    tournaments: Relation[list["Tournament"]] = ManyToMany(through="player_tournaments")
+    {player_lines}
+
+class Tournament(Model):
+    id: int | None = Field(default=None, primary_key=True)
+"""
+
+
+_MENTOR = 'mentor_id: int | None = Field(default=None, foreign_key="Player")'
+
+
+@pytest.mark.parametrize("future", [False, True])
+def test_a_reverse_on_the_many_to_manys_own_model_names_its_self_key(tmp_path, future):
+    refused = 'others: Relation[list["Player"]] = Reverse("tournaments")'
+    message = _refusal(tmp_path, _own_model_body(f"{_MENTOR}\n    {refused}"), future)
+    line = 'others: Relation[list["Player"]] = Reverse("mentor_id")'
+    if future:
+        line = line.replace('"Player"', "Player")
+
+    assert message == (
+        "Player.others: Player.tournaments points at Tournament, not Player. "
+        f"Write: {line}"
+    )
+    _wipe()
+    mod = _import(tmp_path, _own_model_body(f"{_MENTOR}\n    {line}"), future=future)
+    ferro.ensure_resolved_modelset()
+    others = mod.Player.__ferro_reverse_specs__["others"]
+    assert (others.target, others.child_fk_column) == (mod.Player, "mentor_id")
+
+
+@pytest.mark.parametrize("future", [False, True])
+def test_a_reverse_on_the_many_to_manys_own_model_writes_no_self_many_to_many(
+    tmp_path, future
+):
+    refused = 'others: Relation[list["Player"]] = Reverse("tournaments")'
+
+    message = _refusal(tmp_path, _own_model_body(refused), future)
+
+    assert message == (
+        "Player.others: Player.tournaments points at Tournament, not Player, and "
+        "no foreign-key column of Player points at Player for it to read, since "
+        "a self-referential many-to-many is not supported. Declare others on "
+        "Tournament, which Player.tournaments links: "
+        'others: Relation[list["Player"]] = Reverse("tournaments")'
+    )
+    # The recipe works: the line moves to Tournament.
+    _wipe()
+    mod = _import(
+        tmp_path,
+        _own_model_body("")
+        + '    others: Relation[list["Player"]] = Reverse("tournaments")\n',
+        future=future,
+    )
+    ferro.ensure_resolved_modelset()
+    others = mod.Tournament.__ferro_reverse_specs__["others"]
+    assert (others.target, others.join_table) == (mod.Player, "player_tournaments")
+
+
+def test_a_many_to_many_annotated_without_relation_says_so(tmp_path):
+    body = """
+class Tag(Model):
+    id: int | None = Field(default=None, primary_key=True)
+
+class Post(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    tags: Tag | None = ManyToMany(through="post_tags")
+"""
+
+    assert _refusal(tmp_path, body, future=False) == (
+        "Post.tags: a relation is annotated Relation[...]. "
+        'Write: tags: Relation[list[Tag]] = ManyToMany(through="post_tags")'
+    )

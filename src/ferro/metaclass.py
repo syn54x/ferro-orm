@@ -54,7 +54,6 @@ from .ir.compiler import declared_retired_labels
 from .query import Relation
 from .registry import REGISTRY
 from .relations import (
-    _target_name,
     check_declared_foreign_keys,
     many_to_many_line,
     relation_line,
@@ -338,6 +337,9 @@ def _is_bare_relation(core: Any) -> bool:
 
 
 def _foreign_key_name(foreign_key: Any) -> str:
+    """The class name a foreign key or relation target is written as."""
+    if isinstance(foreign_key, ForwardRef):
+        foreign_key = foreign_key.__forward_arg__
     if isinstance(foreign_key, type):
         return foreign_key.__name__
     return str(foreign_key).rsplit(".", 1)[-1]
@@ -377,11 +379,14 @@ def _model_pointing_back(model: str, column: str) -> str | None:
             and _foreign_key_name(meta.foreign_key) == model
         )
         or (
-            isinstance(
+            # A many-to-many never links its own model.
+            other.__name__ != model
+            and isinstance(
                 linked := (other.__dict__.get("__ferro_relations__") or {}).get(column),
                 ManyToManyRelation,
             )
-            and _target_name(linked.to) == model
+            and linked.to is not None
+            and _foreign_key_name(linked.to) == model
         )
     ]
     return found[0] if len(found) == 1 else None
@@ -531,12 +536,14 @@ def _declared_many_to_many(
     view = _relation_view(core)
     through = options.get("through")
     reverse_index = options.get("reverse_index", True)
+    # The order of `_declared_relation`: a missing `Relation[...]` is named
+    # before the `| None` around it.
     if in_metadata:
         reason = _IN_METADATA
-    elif wrapped:
-        reason = _NONE_OUTSIDE
     elif view is None:
         reason = _NOT_RELATION
+    elif wrapped:
+        reason = _NONE_OUTSIDE
     elif not view[0]:
         reason = _NOT_LIST
     elif not isinstance(through, str) or not through:
