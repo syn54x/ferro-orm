@@ -42,7 +42,13 @@ from .base import (
     ReverseRelation,
 )
 from .columns import build_column_specs, refuse_back_ref_over_retired_relation
-from .fields import _RelationOptions, annotation_text, field_line, field_options
+from .fields import (
+    _option_text,
+    _RelationOptions,
+    annotation_text,
+    field_line,
+    field_options,
+)
 from .ir import compile_model_schema_ir
 from .ir.compiler import declared_retired_labels
 from .query import Relation
@@ -695,6 +701,61 @@ def _resolved_relation_specs(model_cls: type, relations: Any) -> dict:
     return specs
 
 
+def _a(name: str) -> str:
+    """`name` after its indefinite article: "a Team", "an Author", "a User"."""
+    first, rest = name[:1].upper(), name[1:3].lower()
+    vowel = first in "AEIO" or (
+        first == "U" and not (rest[:1] not in "aeiou" and rest[1:2] in "aeiou")
+    )
+    return f"{'an' if vowel else 'a'} {name}"
+
+
+def _foreign_key_text(declared: ForeignKey) -> str:
+    """A `ForeignKey(...)` as written, its default options left out."""
+    defaults = {"on_delete": "CASCADE", "unique": False, "index": False}
+    options = [
+        f"{option}={_option_text(getattr(declared, option))}"
+        for option in ("related_name", "on_delete", "unique", "index", "renamed_from")
+        if getattr(declared, option) not in (None, defaults.get(option))
+    ]
+    return f"ForeignKey({', '.join(options)})"
+
+
+def _none_refusal(model_cls: type, name: str, spec: Any) -> TypeError:
+    """The refusal of `None` on a relation over a required key column, with the lines to write."""
+    model = model_cls.__name__
+    target = spec.target.__name__
+    declared = model_cls.__ferro_relations__[name]
+    if isinstance(declared, ForwardRelation):
+        info = model_cls.model_fields[spec.fk_column]
+        column = field_line(
+            spec.fk_column,
+            f"{_without_none(info.annotation)} | None",
+            field_options(model_cls.__ferro_fields__[spec.fk_column]),
+            default=None,
+        )
+        relation = relation_line(
+            name, "Forward", target, True, spec.fk_column, declared.bound
+        )
+        fix = (
+            f"add | None to {spec.fk_column}'s annotation. Write: {column} "
+            f"and {relation}"
+        )
+    else:
+        # The old form has no key column to edit: the relation's own
+        # annotation decides whether the column allows NULL.
+        written = declared.relation_annotation
+        shown = f'"{target}"' if isinstance(written, (str, ForwardRef)) else target
+        fix = (
+            f"add | None to {name}'s annotation. Write: {name}: "
+            f"Annotated[{shown}, {_foreign_key_text(declared)}] | None = None"
+        )
+    return TypeError(
+        f"{model}.{name}: {spec.fk_column} is not nullable, so the relation "
+        f"cannot be None. Assign {_a(target)}, or {fix}"
+    )
+
+
 def _assign_relation(self: BaseModel, name: str, value: Any, relations: Any) -> None:
     """Set the foreign-key column behind a forward relation and cache `value` as loaded.
 
@@ -705,17 +766,13 @@ def _assign_relation(self: BaseModel, name: str, value: Any, relations: Any) -> 
     target = spec.target.__name__
     if value is None:
         if not spec.nullable:
-            raise TypeError(
-                f"{model}.{name}: {spec.fk_column} is not nullable, so the relation "
-                f"cannot be None. Assign a {target}, or add | None to "
-                f"{spec.fk_column}'s annotation"
-            )
+            raise _none_refusal(type(self), name, spec)
         key = None
     # The exact class: a subclass model has a table of its own, so its key
     # would name another table's row.
     elif type(value) is not spec.target:
         raise TypeError(
-            f"{model}.{name}: expected a {target}, got {type(value).__name__}. "
+            f"{model}.{name}: expected {_a(target)}, got {type(value).__name__}. "
             f"Assign a saved {target} instance, or set {spec.fk_column} directly"
         )
     else:

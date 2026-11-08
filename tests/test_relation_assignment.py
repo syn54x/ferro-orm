@@ -246,7 +246,9 @@ async def test_none_on_a_required_relation_is_refused(db_url):
 
         assert str(refused.value) == (
             "Player.team: team_id is not nullable, so the relation cannot be "
-            "None. Assign a Team, or add | None to team_id's annotation"
+            "None. Assign a Team, or add | None to team_id's annotation. Write: "
+            "team_id: int | None = Field(default=None, foreign_key=Team) and "
+            'team: Relation[Team | None] = Forward("team_id")'
         )
         assert player.team_id == 1
         assert player.team is loaded
@@ -259,55 +261,105 @@ def _team() -> type[Model]:
     return Team
 
 
-def test_adding_none_to_the_key_annotation_makes_none_assignable():
-    """The refusal's fix, in the assignment spelling. The class definition
-    then names the relation's line, and with both None is assigned."""
-    Team = _team()
+def _refused_none(model: type[Model], relation: str, **keys) -> str:
+    """The `None` refusal's message for `relation` on a new `model`."""
     with pytest.raises(TypeError) as refused:
+        setattr(model(**keys), relation, None)
+    return str(refused.value)
 
-        class Player(Model):
-            id: int | None = Field(default=None, primary_key=True)
-            team_id: int | None = Field(default=None, foreign_key=Team)
-            team: Relation[Team] = Forward("team_id")
 
-    assert str(refused.value).endswith(
-        'Write: team: Relation[Team | None] = Forward("team_id")'
-    )
+def _assigns_none(model: type[Model], relation: str, column: str, **keys) -> None:
+    instance = model(**keys)
+    setattr(instance, relation, None)
+    assert getattr(instance, column) is None
+    assert getattr(instance, relation) is None
+
+
+def test_the_none_refusal_writes_lines_that_make_none_assignable():
+    Team = _team()
 
     class Player(Model):
         id: int | None = Field(default=None, primary_key=True)
-        team_id: int | None = Field(default=None, foreign_key=Team)
+        team_id: int = Field(foreign_key=Team, index=True)
+        team: Relation[Team] = Forward("team_id")
+
+    assert _refused_none(Player, "team", team_id=1).endswith(
+        "Write: team_id: int | None = Field(default=None, foreign_key=Team, "
+        'index=True) and team: Relation[Team | None] = Forward("team_id")'
+    )
+
+    # The two lines, pasted in place of the two refused ones.
+    class Player(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        team_id: int | None = Field(default=None, foreign_key=Team, index=True)
         team: Relation[Team | None] = Forward("team_id")
 
-    player = Player(team_id=1)
-    player.team = None
-    assert player.team_id is None
-    assert player.team is None
+    _assigns_none(Player, "team", "team_id", team_id=1)
 
 
-def test_adding_none_to_an_annotated_key_makes_none_assignable():
-    """The refusal's fix, in the `Annotated` spelling."""
+def test_the_none_refusal_writes_lines_for_an_annotated_key_column():
     Team = _team()
-    with pytest.raises(TypeError) as refused:
 
-        class Player(Model):
-            id: Annotated[int | None, Field(primary_key=True)] = None
-            team_id: Annotated[int | None, Field(foreign_key=Team)] = None
-            team: Relation[Team] = Forward("team_id")
+    class Player(Model):
+        id: Annotated[int | None, Field(primary_key=True)] = None
+        team_id: Annotated[int, Field(foreign_key=Team, index=True)]
+        team: Relation[Team] = Forward("team_id")
 
-    assert str(refused.value).endswith(
-        'Write: team: Relation[Team | None] = Forward("team_id")'
+    assert _refused_none(Player, "team", team_id=1).endswith(
+        "Write: team_id: int | None = Field(default=None, foreign_key=Team, "
+        'index=True) and team: Relation[Team | None] = Forward("team_id")'
     )
 
     class Player(Model):
         id: Annotated[int | None, Field(primary_key=True)] = None
-        team_id: Annotated[int | None, Field(foreign_key=Team)] = None
+        team_id: int | None = Field(default=None, foreign_key=Team, index=True)
         team: Relation[Team | None] = Forward("team_id")
 
-    player = Player(team_id=1)
-    player.team = None
-    assert player.team_id is None
-    assert player.team is None
+    _assigns_none(Player, "team", "team_id", team_id=1)
+
+
+def test_the_none_refusal_quotes_a_self_reference():
+    class Player(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        mentor_id: int = Field(foreign_key="Player")
+        mentor: Relation["Player"] = Forward("mentor_id")
+
+    assert _refused_none(Player, "mentor", mentor_id=1).endswith(
+        'Write: mentor_id: int | None = Field(default=None, foreign_key="Player") '
+        'and mentor: Relation["Player | None"] = Forward("mentor_id")'
+    )
+
+    class Player(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        mentor_id: int | None = Field(default=None, foreign_key="Player")
+        mentor: Relation["Player | None"] = Forward("mentor_id")
+
+    _assigns_none(Player, "mentor", "mentor_id", mentor_id=1)
+
+
+def test_the_none_refusal_on_a_foreign_key_relation_writes_its_annotation():
+    class Author(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        posts: Relation[list["Post"]] = BackRef()
+
+    class Post(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        author: Annotated[Author, ForeignKey(related_name="posts", index=True)]
+
+    assert _refused_none(Post, "author", author_id=1) == (
+        "Post.author: author_id is not nullable, so the relation cannot be "
+        "None. Assign an Author, or add | None to author's annotation. Write: "
+        'author: Annotated[Author, ForeignKey(related_name="posts", index=True)] '
+        "| None = None"
+    )
+
+    class Post(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        author: (
+            Annotated[Author, ForeignKey(related_name="posts", index=True)] | None
+        ) = None
+
+    _assigns_none(Post, "author", "author_id", author_id=1)
 
 
 def test_assigning_another_key_reads_as_an_unloaded_instance_with_that_key():
@@ -366,3 +418,76 @@ def test_a_foreign_key_relation_is_assigned_through_its_key_column():
 
     assert post.author_id == bob.id == 4
     assert post.author is bob
+
+
+def _declare_foreign_key() -> SimpleNamespace:
+    """Author and Post in the old `ForeignKey` form."""
+
+    class Author(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+        posts: Relation[list["Post"]] = BackRef()
+
+    class Post(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        title: str
+        author: Annotated[Author, ForeignKey(related_name="posts")]
+
+    return SimpleNamespace(Author=Author, Post=Post)
+
+
+@pytest.mark.asyncio
+async def test_the_refusals_on_a_foreign_key_relation_name_fixes_that_work(db_url):
+    m = _declare_foreign_key()
+    await ferro.connect(db_url, auto_migrate=True)
+    async with engines.session():
+        ada = await m.Author.create(name="Ada")
+        post = await m.Post.create(title="Notes", author_id=ada.id)
+
+        with pytest.raises(TypeError) as refused:
+            post.author = 5
+        assert str(refused.value) == (
+            "Post.author: expected an Author, got int. Assign a saved Author "
+            "instance, or set author_id directly"
+        )
+        assert post.author_id == ada.id
+
+        new = m.Author(name="Grace")
+        with pytest.raises(ValueError) as refused:
+            post.author = new
+        assert str(refused.value) == (
+            "Post.author: the Author has no id yet. Save it first, then assign it"
+        )
+        assert post.author_id == ada.id
+
+        # The fixes: a saved instance, the key column set directly, and the
+        # unsaved one once it is saved.
+        post.author = ada
+        assert post.author is ada
+        post.author_id = ada.id
+        assert post.author is ada
+        await new.save()
+        post.author = new
+        assert post.author_id == new.id
+        assert post.author is new
+
+
+def test_a_refusal_writes_the_article_the_target_name_takes():
+    class User(Model):
+        id: int | None = Field(default=None, primary_key=True)
+
+    class Upload(Model):
+        id: int | None = Field(default=None, primary_key=True)
+
+    class Note(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        user_id: int = Field(foreign_key=User)
+        user: Relation[User] = Forward("user_id")
+        upload_id: int = Field(foreign_key=Upload)
+        upload: Relation[Upload] = Forward("upload_id")
+
+    note = Note(user_id=1, upload_id=1)
+    with pytest.raises(TypeError, match="^Note.user: expected a User, got int"):
+        note.user = 5
+    with pytest.raises(TypeError, match="^Note.upload: expected an Upload, got"):
+        note.upload = 5
