@@ -19,9 +19,9 @@ It prints:
 Rustaceans ['Ferris']
 ```
 
-`await ferris.team` runs one query and returns the `Team`. `rustaceans.players` is a query that runs when you call a terminal such as `.all()`. Every example on this page runs inside the session this program opens; see [Sessions](connections.md#sessions) for why and how to open one.
+`ferris.team` is the `Team` this session already holds, so `await ferris.team.load()` returns it without a query. `rustaceans.players` is a query that runs when you call a terminal such as `.all()`. Every example on this page runs inside the session this program opens; see [Sessions](connections.md#sessions) for why and how to open one.
 
-Every example on this page is followed by the SQL it sends, captured from Ferro when the example runs. The two creates and the two reads send these statements. Each single-row `INSERT` asks for the new `id` with `RETURNING`:
+Every example on this page is followed by the SQL it sends, captured from Ferro when the example runs. The two creates and the roster read send these statements. Each single-row `INSERT` asks for the new `id` with `RETURNING`:
 
 === "SQLite"
 
@@ -34,11 +34,6 @@ Every example on this page is followed by the SQL it sends, captured from Ferro 
     INSERT INTO "player" ("name", "team_id", "mentor_id")
     VALUES (?, ?, ?)
     RETURNING "id";
-
-    SELECT "team"."id", "team"."name"
-    FROM "team"
-    WHERE "team"."id" = ?
-    LIMIT ?;
 
     SELECT "player"."id", "player"."mentor_id", "player"."name", "player"."team_id"
     FROM "player"
@@ -57,17 +52,12 @@ Every example on this page is followed by the SQL it sends, captured from Ferro 
     VALUES ($1, $2, $3)
     RETURNING "id";
 
-    SELECT "team"."id", "team"."name"
-    FROM "team"
-    WHERE "team"."id" = $1
-    LIMIT $2;
-
     SELECT "player"."id", "player"."mentor_id", "player"."name", "player"."team_id"
     FROM "player"
     WHERE "player"."team_id" = $1;
     ```
 
-`await ferris.team` is a `SELECT` on `team` by primary key; `rustaceans.players.all()` is a `SELECT` on `player` filtered by `team_id`.
+`rustaceans.players.all()` is a `SELECT` on `player` filtered by `team_id`; reading `ferris.team` sent nothing.
 
 ## The roster
 
@@ -472,7 +462,7 @@ A model can point at itself, for mentors, org charts, threads or category trees.
 
 Crabby's mentor is Ferris, and Ferris's mentees are Crabby. Ferris has no mentor, which the `mentor_id` column allows only because of `nullable=True`. Writing `"Player | None"` instead fails at `connect()` with `RuntimeError: Relationship resolution failed: 'Player | None' not found`.
 
-The create and the two reads send these statements. Each single-row `INSERT` asks for the new `id` with `RETURNING`:
+The create and the mentees read send these statements. Each single-row `INSERT` asks for the new `id` with `RETURNING`:
 
 === "SQLite"
 
@@ -481,11 +471,6 @@ The create and the two reads send these statements. Each single-row `INSERT` ask
     INSERT INTO "player" ("name", "team_id", "mentor_id")
     VALUES (?, ?, ?)
     RETURNING "id";
-
-    SELECT "player"."id", "player"."mentor_id", "player"."name", "player"."team_id"
-    FROM "player"
-    WHERE "player"."id" = ?
-    LIMIT ?;
 
     SELECT "player"."id", "player"."mentor_id", "player"."name", "player"."team_id"
     FROM "player"
@@ -502,15 +487,10 @@ The create and the two reads send these statements. Each single-row `INSERT` ask
 
     SELECT "player"."id", "player"."mentor_id", "player"."name", "player"."team_id"
     FROM "player"
-    WHERE "player"."id" = $1
-    LIMIT $2;
-
-    SELECT "player"."id", "player"."mentor_id", "player"."name", "player"."team_id"
-    FROM "player"
     WHERE "player"."mentor_id" = $1;
     ```
 
-`await crabby.mentor` reads `player` by primary key, and `ferris.mentees` filters `player` on `mentor_id`.
+`crabby.mentor` is the `ferris` this session holds, so `await crabby.mentor.load()` sends nothing, and `ferris.mentees` filters `player` on `mentor_id`.
 
 ## Nullable relations
 
