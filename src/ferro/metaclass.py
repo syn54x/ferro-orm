@@ -28,6 +28,7 @@ from pydantic.fields import FieldInfo
 from pydantic_core import PydanticCustomError, PydanticUndefined
 
 from ._annotation_eval import DeferredNames, evaluate_foreign_key_annotation
+from ._core import prune_stale_relations
 from ._annotation_utils import (
     _strip_optional_union as _annotation_utils_strip_optional_union,
 )
@@ -679,6 +680,75 @@ def _generated_setattr(inherited: Any):
     return __setattr__
 
 
+def _resolved_relation_specs(model_cls: type, relations: Any) -> dict:
+    """The model's relation specs, once every forward relation in `relations` has one.
+
+    A relation whose target is a class-name string gets its spec when the
+    modelset resolves, so the first assignment before `connect()` resolves it.
+    """
+    specs = model_cls.__ferro_relation_specs__
+    if not specs.keys() >= relations:
+        from . import ensure_resolved_modelset
+
+        ensure_resolved_modelset()
+        specs = model_cls.__ferro_relation_specs__
+    return specs
+
+
+def _assign_relation(self: BaseModel, name: str, value: Any, relations: Any) -> None:
+    """Set the foreign-key column behind a forward relation and cache `value` as loaded.
+
+    Every refusal raises before the key column or the cache changes.
+    """
+    model = type(self).__name__
+    spec = _resolved_relation_specs(type(self), relations)[name]
+    target = spec.target.__name__
+    if value is None:
+        if not spec.nullable:
+            raise TypeError(
+                f"{model}.{name}: {spec.fk_column} is not nullable, so the relation "
+                f"cannot be None. Assign a {target}, or add | None to "
+                f"{spec.fk_column}'s annotation"
+            )
+        key = None
+    elif not isinstance(value, spec.target):
+        raise TypeError(
+            f"{model}.{name}: expected a {target}, got {type(value).__name__}. "
+            f"Assign a saved {target} instance, or set {spec.fk_column} directly"
+        )
+    else:
+        pk = spec.target.__ferro_pk__
+        key = getattr(value, pk)
+        if key is None:
+            raise ValueError(
+                f"{model}.{name}: the {target} has no {pk} yet. Save it first, "
+                "then assign it"
+            )
+    setattr(self, spec.fk_column, key)
+    self.__dict__[name] = value
+
+
+def _relation_setattr(key_columns: dict[str, str], inherited: Any):
+    """Assign a forward relation through its key column; drop a stale one when the key changes.
+
+    `key_columns` maps each forward relation to its foreign-key column.
+    Assigning the column keeps a loaded relation only while the key still
+    points at it, the refresh rule of ADR-0008.
+    """
+    keys = frozenset(key_columns.values())
+
+    def __setattr__(self: BaseModel, name: str, value: Any) -> None:
+        if name in key_columns:
+            _assign_relation(self, name, value, key_columns.keys())
+            return
+        inherited(self, name, value)
+        if name in keys:
+            _resolved_relation_specs(type(self), key_columns.keys())
+            prune_stale_relations(self)
+
+    return __setattr__
+
+
 class ModelMetaclass(type(BaseModel)):
     """The metaclass of [`Model`][ferro.Model], which records each model's schema when the class is defined.
 
@@ -763,6 +833,15 @@ class ModelMetaclass(type(BaseModel)):
             raise
         if cls.__ferro_generated__:
             cls.__setattr__ = _generated_setattr(cls.__setattr__)
+        key_columns = {
+            field_name: meta.fk_column
+            if isinstance(meta, ForwardRelation)
+            else f"{field_name}_id"
+            for field_name, meta in local_relations.items()
+            if isinstance(meta, (ForwardRelation, ForeignKey))
+        }
+        if key_columns:
+            cls.__setattr__ = _relation_setattr(key_columns, cls.__setattr__)
 
         return cls
 
