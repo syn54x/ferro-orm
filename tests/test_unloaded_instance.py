@@ -508,6 +508,13 @@ async def test_an_include_that_finds_no_row_leaves_the_relation_unloaded(db_url)
         )
         assert again.team is team
 
+        # The refusal's step works once the row is back.
+        found = re.search(r"then (await \S+\.load\(\))$", str(refusal.value))
+        assert found, str(refusal.value)
+        _raw_sqlite(db_url, "INSERT INTO team (id, name) VALUES (99, 'Gophers')")
+        loaded = await eval(found.group(1).removeprefix("await "), {"player": gordon})
+        assert loaded is team and team.name == "Gophers"
+
 
 def _raw_sqlite(db_url: str, statement: str) -> None:
     """Run one statement on a plain sqlite3 connection, where foreign keys are
@@ -602,8 +609,26 @@ async def test_an_include_whose_row_row_security_hides_leaves_the_relation_unloa
             with pytest.raises(InstanceNotLoaded) as refusal:
                 gordon.team.name
             assert str(refusal.value).startswith(_FOUND_NO_ROW)
+            team = gordon.team
             with pytest.raises(ModelDoesNotExist):
-                await gordon.team.load()
+                await team.load()
+            again = await (
+                Player.select()
+                .include(lambda player: player.team)
+                .where(lambda player: player.id == 2)
+                .first()
+            )
+            assert again.team is team
+
+            # Restore this connection's access, then paste the refusal's step.
+            async with engines.session():
+                await Team.where(lambda team: team.id == 99).update(ledger_id=LEDGER_A)
+            found = re.search(r"then (await \S+\.load\(\))$", str(refusal.value))
+            assert found, str(refusal.value)
+            loaded = await eval(
+                found.group(1).removeprefix("await "), {"player": gordon}
+            )
+            assert loaded is team and team.name == "Gophers"
     finally:
         async with engines.session():
             await _drop_tenant_role(role)
