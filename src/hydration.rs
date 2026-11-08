@@ -493,20 +493,19 @@ fn prune_stale_populations<'py>(
             // Populated `None` stays truthful while the FK stays NULL.
             (Some(fk), true) => fk.is_none(),
             // A live population survives iff the fresh FK equals its PK.
+            // The target class's own primary-key field, not the engine's
+            // registration: a key assigned before `connect()` runs this too.
             (Some(fk), false) if !fk.is_none() => {
                 let target = spec.getattr(pyo3::intern!(py, "target"))?;
-                let identity = crate::state::model_identity(&target)?;
-                let pk_col = crate::state::registered_model(&identity)?
-                    .meta
-                    .pk_col
-                    .clone()
-                    .ok_or_else(|| {
-                        pyo3::exceptions::PyRuntimeError::new_err(format!(
-                            "populated relation target '{identity}' has no \
-                             primary key; cannot evaluate the refresh rule"
-                        ))
-                    })?;
-                let pk_val = population.getattr(pk_col.as_str())?;
+                let pk_field = target.getattr(pyo3::intern!(py, "__ferro_pk__"))?;
+                if pk_field.is_none() {
+                    return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                        "loaded relation target '{}' has no primary key; cannot \
+                         evaluate the refresh rule",
+                        crate::state::model_identity(&target)?
+                    )));
+                }
+                let pk_val = population.getattr(pk_field.cast::<pyo3::types::PyString>()?)?;
                 fk.eq(pk_val)?
             }
             // FK went NULL under a live population, or the shadow column is

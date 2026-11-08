@@ -28,6 +28,7 @@ from pydantic.fields import FieldInfo
 from pydantic_core import PydanticCustomError, PydanticUndefined
 
 from ._annotation_eval import DeferredNames, evaluate_foreign_key_annotation
+from ._core import prune_stale_relations
 from ._annotation_utils import (
     _strip_optional_union as _annotation_utils_strip_optional_union,
 )
@@ -41,7 +42,13 @@ from .base import (
     ReverseRelation,
 )
 from .columns import build_column_specs, refuse_back_ref_over_retired_relation
-from .fields import _RelationOptions, annotation_text, field_line, field_options
+from .fields import (
+    _option_text,
+    _RelationOptions,
+    annotation_text,
+    field_line,
+    field_options,
+)
 from .ir import compile_model_schema_ir
 from .ir.compiler import declared_retired_labels
 from .query import Relation
@@ -679,6 +686,129 @@ def _generated_setattr(inherited: Any):
     return __setattr__
 
 
+def _resolved_relation_specs(model_cls: type, relations: Any) -> dict:
+    """The model's relation specs, once every forward relation in `relations` has one.
+
+    A relation whose target is a class-name string gets its spec when the
+    modelset resolves, so the first assignment before `connect()` resolves it.
+    """
+    specs = model_cls.__ferro_relation_specs__
+    if not specs.keys() >= relations:
+        from . import ensure_resolved_modelset
+
+        ensure_resolved_modelset()
+        specs = model_cls.__ferro_relation_specs__
+    return specs
+
+
+def _a(name: str) -> str:
+    """`name` after its indefinite article: "a Team", "an Author", "a User"."""
+    first, rest = name[:1].upper(), name[1:3].lower()
+    vowel = first in "AEIO" or (
+        first == "U" and not (rest[:1] not in "aeiou" and rest[1:2] in "aeiou")
+    )
+    return f"{'an' if vowel else 'a'} {name}"
+
+
+def _foreign_key_text(declared: ForeignKey) -> str:
+    """A `ForeignKey(...)` as written, its default options left out."""
+    defaults = {"on_delete": "CASCADE", "unique": False, "index": False}
+    options = [
+        f"{option}={_option_text(getattr(declared, option))}"
+        for option in ("related_name", "on_delete", "unique", "index", "renamed_from")
+        if getattr(declared, option) not in (None, defaults.get(option))
+    ]
+    return f"ForeignKey({', '.join(options)})"
+
+
+def _none_refusal(model_cls: type, name: str, spec: Any) -> TypeError:
+    """The refusal of `None` on a relation over a required key column, with the lines to write."""
+    model = model_cls.__name__
+    target = spec.target.__name__
+    declared = model_cls.__ferro_relations__[name]
+    if isinstance(declared, ForwardRelation):
+        info = model_cls.model_fields[spec.fk_column]
+        column = field_line(
+            spec.fk_column,
+            f"{_without_none(info.annotation)} | None",
+            # An explicit `nullable=False` would keep the column required.
+            field_options(model_cls.__ferro_fields__[spec.fk_column], nullable="infer"),
+            default=None,
+        )
+        relation = relation_line(
+            name, "Forward", target, True, spec.fk_column, declared.bound
+        )
+        fix = (
+            f"add | None to {spec.fk_column}'s annotation. Write: {column} "
+            f"and {relation}"
+        )
+    else:
+        # The old form has no key column to edit: the relation's own
+        # annotation decides whether the column allows NULL.
+        written = declared.relation_annotation
+        shown = f'"{target}"' if isinstance(written, (str, ForwardRef)) else target
+        fix = (
+            f"add | None to {name}'s annotation. Write: {name}: "
+            f"Annotated[{shown}, {_foreign_key_text(declared)}] | None = None"
+        )
+    return TypeError(
+        f"{model}.{name}: {spec.fk_column} is not nullable, so the relation "
+        f"cannot be None. Assign {_a(target)}, or {fix}"
+    )
+
+
+def _assign_relation(self: BaseModel, name: str, value: Any, relations: Any) -> None:
+    """Set the foreign-key column behind a forward relation and cache `value` as loaded.
+
+    Every refusal raises before the key column or the cache changes.
+    """
+    model = type(self).__name__
+    spec = _resolved_relation_specs(type(self), relations)[name]
+    target = spec.target.__name__
+    if value is None:
+        if not spec.nullable:
+            raise _none_refusal(type(self), name, spec)
+        key = None
+    # The exact class: a subclass model has a table of its own, so its key
+    # would name another table's row.
+    elif type(value) is not spec.target:
+        raise TypeError(
+            f"{model}.{name}: expected {_a(target)}, got {type(value).__name__}. "
+            f"Assign a saved {target} instance, or set {spec.fk_column} directly"
+        )
+    else:
+        pk = spec.target.__ferro_pk__
+        key = getattr(value, pk)
+        if key is None:
+            raise ValueError(
+                f"{model}.{name}: the {target} has no {pk} yet. Save it first, "
+                "then assign it"
+            )
+    setattr(self, spec.fk_column, key)
+    self.__dict__[name] = value
+
+
+def _relation_setattr(key_columns: dict[str, str], inherited: Any):
+    """Assign a forward relation through its key column; drop a stale one when the key changes.
+
+    `key_columns` maps each forward relation to its foreign-key column.
+    Assigning the column keeps a loaded relation only while the key still
+    points at it, the refresh rule of ADR-0008.
+    """
+    keys = frozenset(key_columns.values())
+
+    def __setattr__(self: BaseModel, name: str, value: Any) -> None:
+        if name in key_columns:
+            _assign_relation(self, name, value, key_columns.keys())
+            return
+        inherited(self, name, value)
+        if name in keys:
+            _resolved_relation_specs(type(self), key_columns.keys())
+            prune_stale_relations(self)
+
+    return __setattr__
+
+
 class ModelMetaclass(type(BaseModel)):
     """The metaclass of [`Model`][ferro.Model], which records each model's schema when the class is defined.
 
@@ -763,6 +893,15 @@ class ModelMetaclass(type(BaseModel)):
             raise
         if cls.__ferro_generated__:
             cls.__setattr__ = _generated_setattr(cls.__setattr__)
+        key_columns = {
+            field_name: meta.fk_column
+            if isinstance(meta, ForwardRelation)
+            else f"{field_name}_id"
+            for field_name, meta in local_relations.items()
+            if isinstance(meta, (ForwardRelation, ForeignKey))
+        }
+        if key_columns:
+            cls.__setattr__ = _relation_setattr(key_columns, cls.__setattr__)
 
         return cls
 

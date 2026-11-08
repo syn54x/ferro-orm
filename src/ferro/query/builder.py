@@ -65,11 +65,14 @@ from .wire import (
 
 if TYPE_CHECKING:
     from .._core import RouteHandle
+    from ..models import Model
 
 T = TypeVar("T")
 """The model class a query returns."""
 E = TypeVar("E")
 """The element type of a relation collection."""
+_Target = TypeVar("_Target", bound="Model | None")
+"""A forward relation's target: a model, or a model or `None`, never a list."""
 
 # The concrete container type a projected query delivers (parameterized once
 # at import; `into=` record types would parameterize per call). Construction
@@ -2195,6 +2198,15 @@ class Relation(Query[T]):
         @overload
         def __get__(self: "Relation[E]", instance: object, owner: Any) -> E: ...
         def __get__(self, instance: Any, owner: Any) -> Any: ...
+
+        # How assigning a relation reads: a forward one takes its target
+        # (`None` only under `Relation[Team | None]`); a reverse one
+        # (`Relation[list[E]]`) binds no `_Target`, so assigning it is an
+        # error. The model's `__setattr__` sets the foreign-key column at
+        # runtime.
+        def __set__(
+            self: "Relation[_Target]", instance: object, value: _Target
+        ) -> None: ...
 
     else:
 
