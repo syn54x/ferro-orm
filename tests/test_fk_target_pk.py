@@ -50,8 +50,7 @@ def test_relation_keyword_refusal_names_the_target_pk():
         D5Shipment(warehouse=wh)
     assert str(refused.value) == (
         "D5Shipment.warehouse is a relation. Pass the foreign-key column's "
-        "value, warehouse_id=warehouse.code, or set d5_shipment.warehouse = "
-        "warehouse on the instance"
+        "value, warehouse_id=warehouse.code"
     )
     # The fix the refusal names stores the target's key.
     assert D5Shipment(warehouse_id=wh.code).warehouse_id == 7
@@ -67,6 +66,6 @@ def test_relation_keyword_refusal_with_target_pk_named_id():
         author: Annotated[D5Author, ForeignKey(related_name="books")]
 
     a = D5Author(id=3, name="x")
-    with pytest.raises(TypeError, match=r"author_id=author\.id, or set d5_book"):
+    with pytest.raises(TypeError, match=r"author_id=author\.id$"):
         D5Book(author=a)
     assert D5Book(author_id=a.id).author_id == 3

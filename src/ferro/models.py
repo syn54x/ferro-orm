@@ -96,11 +96,21 @@ def _refuse_relation_keywords(model_cls: type, names: Any) -> None:
 
     name = min(passed)
     spec = _resolved_relation_specs(model_cls, forward)[name]
-    raise TypeError(
+    refusal = (
         f"{model_cls.__name__}.{name} is a relation. Pass the foreign-key "
-        f"column's value, {spec.fk_column}={name}.{spec.target.__ferro_pk__}, "
-        f"or set {_snake(model_cls.__name__)}.{name} = {name} on the instance"
+        f"column's value, {spec.fk_column}={name}.{spec.target.__ferro_pk__}"
     )
+    # Assigning on the instance is a fix only when the constructor can leave
+    # the key out; the old form checks its required key after validation.
+    optional = not model_cls.model_fields[spec.fk_column].is_required() and (
+        isinstance(model_cls.__ferro_relations__[name], ForwardRelation)
+        or spec.nullable
+    )
+    if optional:
+        refusal += (
+            f", or set {_snake(model_cls.__name__)}.{name} = {name} on the instance"
+        )
+    raise TypeError(refusal)
 
 
 def _not_loaded(instance: object) -> InstanceNotLoaded:

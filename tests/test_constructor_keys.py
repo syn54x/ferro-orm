@@ -36,9 +36,10 @@ from ferro.registry import REGISTRY
 
 pytestmark = pytest.mark.backend_matrix
 
+# `team_id` is required, so the refusal names the one fix a constructor can
+# take; a nullable key also names the assignment (I-6).
 REFUSAL = (
-    "Player.team is a relation. Pass the foreign-key column's value, "
-    "team_id=team.id, or set player.team = team on the instance"
+    "Player.team is a relation. Pass the foreign-key column's value, team_id=team.id"
 )
 UPDATE_REFUSAL = (
     "update() cannot write Player.team, a relation. Name its foreign-key "
@@ -68,6 +69,10 @@ def _declare() -> SimpleNamespace:
         handle: str
         team_id: int = Field(foreign_key=Team)
         team: Relation[Team] = Forward("team_id")
+        mentor_id: int | None = Field(
+            default=None, foreign_key="Player", on_delete="SET NULL"
+        )
+        mentor: Relation["Player | None"] = Forward("mentor_id")
 
     return SimpleNamespace(Team=Team, Player=Player)
 
@@ -91,7 +96,7 @@ async def test_create_saves_the_foreign_key_column(db_url):
         assert row.team_id == m.rustaceans.id
 
 
-def test_a_relation_keyword_is_refused_naming_the_key_and_the_assignment():
+def test_a_relation_keyword_on_a_required_key_names_the_key_column():
     m = _declare()
     team = m.Team(id=1, name="Rustaceans")
 
@@ -112,20 +117,32 @@ def test_the_relation_no_longer_wins_over_the_key():
 
 
 @pytest.mark.asyncio
-async def test_both_fixes_the_refusal_names_work(db_url):
-    """I-6: the call rewritten each way the refusal says builds the player."""
+async def test_the_fix_named_for_a_required_key_builds_the_player(db_url):
+    """I-6: the call rewritten as the refusal says saves the player's team."""
     m = await _seed(db_url)
     team = m.crabs
     async with engines.session():
-        keyed = await m.Player.create(handle="corro", team_id=team.id)
+        player = await m.Player.create(handle="corro", team_id=team.id)
 
-        player = m.Player(handle="ferrous", team_id=m.rustaceans.id)
-        player.team = team
-        await player.save()
+        assert (await m.Player.get(player.id)).team_id == team.id
 
-        for saved in (keyed, player):
-            row = await m.Player.get(saved.id)
-            assert row.team_id == team.id
+
+def test_a_nullable_key_names_both_fixes_and_each_builds_the_player():
+    """I-6: a key the constructor can leave out also offers the assignment."""
+    m = _declare()
+    mentor = m.Player(id=7, handle="ferris", team_id=1)
+
+    with pytest.raises(TypeError) as refused:
+        m.Player(handle="corro", team_id=1, mentor=mentor)
+
+    assert str(refused.value) == (
+        "Player.mentor is a relation. Pass the foreign-key column's value, "
+        "mentor_id=mentor.id, or set player.mentor = mentor on the instance"
+    )
+    assert m.Player(handle="corro", team_id=1, mentor_id=mentor.id).mentor_id == 7
+    player = m.Player(handle="corro", team_id=1)
+    player.mentor = mentor
+    assert player.mentor_id == 7
 
 
 @pytest.mark.asyncio
@@ -206,8 +223,8 @@ def test_the_refusal_names_the_target_primary_key_and_a_snake_case_instance():
 
     class LineItem(Model):
         id: int | None = Field(default=None, primary_key=True)
-        order_id: str = Field(foreign_key=Order)
-        order: Relation[Order] = Forward("order_id")
+        order_id: str | None = Field(default=None, foreign_key=Order)
+        order: Relation[Order | None] = Forward("order_id")
 
     order = Order(code="A-1")
     with pytest.raises(TypeError) as refused:
@@ -219,7 +236,7 @@ def test_the_refusal_names_the_target_primary_key_and_a_snake_case_instance():
     )
     # Both fixes build the item.
     assert LineItem(order_id=order.code).order_id == "A-1"
-    item = LineItem(order_id="B-2")
+    item = LineItem()
     item.order = order
     assert item.order_id == "A-1"
 
@@ -239,11 +256,37 @@ def test_a_foreign_key_relation_keyword_is_refused_the_same_way():
     with pytest.raises(TypeError) as refused:
         Book(title="x", author=author)
 
+    # The old form's required key is checked after validation, so the
+    # assignment is no fix here either.
     assert str(refused.value) == (
         "Book.author is a relation. Pass the foreign-key column's value, "
-        "author_id=author.id, or set book.author = author on the instance"
+        "author_id=author.id"
     )
     assert Book(title="x", author_id=author.id).author_id == 4
+
+
+def test_a_nullable_foreign_key_relation_names_both_fixes():
+    class Author(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        name: str
+        reviews: Relation[list["Review"]] = BackRef()
+
+    class Review(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
+        author: Annotated[Author, ForeignKey(related_name="reviews")] | None = None
+
+    author = Author(id=4, name="Ada")
+    with pytest.raises(TypeError) as refused:
+        Review(author=author)
+
+    assert str(refused.value) == (
+        "Review.author is a relation. Pass the foreign-key column's value, "
+        "author_id=author.id, or set review.author = author on the instance"
+    )
+    assert Review(author_id=author.id).author_id == 4
+    review = Review()
+    review.author = author
+    assert review.author_id == 4
 
 
 def test_an_unknown_keyword_is_refused():
