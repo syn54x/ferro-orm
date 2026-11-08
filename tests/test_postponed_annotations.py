@@ -674,11 +674,13 @@ class Player(Model):
 # -- the spelling sweep ---------------------------------------------------------
 #
 # Every relation form under every placement of its annotation, with and without
-# postponed annotations, the target written as a class or a string and declared
-# before or after the model that names it, over a required or a nullable key
-# column, with the marker's column positional or by keyword. Each outcome is a
-# working relation, or a refusal whose every Write line, pasted in place of the
-# refused one, defines a working relation.
+# postponed annotations, the target written as a class or a string (or the
+# whole annotation quoted) and declared before or after the model that names
+# it or the model itself, over a required or a nullable key column beside a
+# second key to the same target, with the marker's column positional or by
+# keyword. Each outcome is a working relation over the named column, or a
+# refusal whose every Write line, pasted in place of the refused one, defines
+# one.
 
 _SPELLINGS = {
     "assigned": "{relation} = {marker}",
@@ -693,9 +695,15 @@ _SPELLINGS = {
     "assigned under | None": "{relation} | None = {marker}",
     "bare Relation": "Relation = {marker}",
     "bare Relation | None": "Relation | None = {marker}",
+    "whole annotation quoted": '"{plain}" = {marker}',
+    "whole annotation quoted under | None": '"{plain} | None" = {marker}',
 }
 
-_ASSIGNED = ("assigned", "assigned with Annotated documentation")
+_ASSIGNED = (
+    "assigned",
+    "assigned with Annotated documentation",
+    "whole annotation quoted",
+)
 
 # ManyToMany keeps its old-form declaration in this slice, which reads the
 # marker from Annotated metadata too (as BackRef always has), so every
@@ -704,10 +712,22 @@ _ASSIGNED = ("assigned", "assigned with Annotated documentation")
 _M2M_SPELLINGS = [
     name
     for name in _SPELLINGS
-    if "bare" not in name and name != "assigned under | None"
+    if "bare" not in name and "| None" not in name.replace("metadata | None", "")
 ]
 
-_FIELD = {"Forward": "team", "Reverse": "players", "ManyToMany": "tags"}
+_FIELD = {
+    "Forward": "team",
+    "Reverse": "players",
+    "ManyToMany": "tags",
+    "self-referencing": "parent",
+}
+
+_TARGET = {
+    "Forward": "Team",
+    "Reverse": "Player",
+    "ManyToMany": "Tag",
+    "self-referencing": "Node",
+}
 
 _MARKERS = {
     ("Forward", "positional"): 'Forward("team_id")',
@@ -715,13 +735,20 @@ _MARKERS = {
     ("Reverse", "positional"): 'Reverse("team_id")',
     ("Reverse", "keyword"): 'Reverse(attribute="team_id")',
     ("ManyToMany", "positional"): 'ManyToMany(related_name="posts")',
+    ("self-referencing", "positional"): 'Forward("parent_id")',
+    ("self-referencing", "keyword"): 'Forward(column="parent_id")',
 }
 
 
-def _key(target: str, nullable: bool) -> str:
+def _key(target: str, nullable: bool, column: str = "team_id") -> str:
+    """The key column, beside a second key to the same target the relation
+    must not read."""
     if nullable:
-        return f"team_id: int | None = Field(default=None, foreign_key={target})"
-    return f"team_id: int = Field(foreign_key={target})"
+        key = f"{column}: int | None = Field(default=None, foreign_key={target})"
+    else:
+        key = f"{column}: int = Field(foreign_key={target})"
+    rival = f"rival_{column}: int | None = Field(default=None, foreign_key={target})"
+    return f"{key}\n    {rival}"
 
 
 def _sweep_body(form: str, field_line: str, nullable: bool, order: str) -> str:
@@ -746,6 +773,17 @@ class Player(Model):
     id: int | None = Field(default=None, primary_key=True)
     {_key('"Team"', nullable)}
 """
+    elif form == "self-referencing":
+        return f"""
+from typing import Annotated as A, Union
+
+from ferro import Forward
+
+class Node(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    {_key('"Node"', nullable, "parent_id")}
+    {field_line}
+"""
     else:
         owner = f"""
 class Post(Model):
@@ -765,13 +803,13 @@ class Tag(Model):
 
 
 def _declared_field(form: str, spelling: str, quoted: bool, marker: str) -> str:
-    target = {"Forward": "Team", "Reverse": "Player", "ManyToMany": "Tag"}[form]
+    target = _TARGET[form]
     written = f'"{target}"' if quoted else target
-    relation = (
-        f"Relation[{written}]" if form == "Forward" else f"Relation[list[{written}]]"
-    )
+    one = form in ("Forward", "self-referencing")
+    relation = f"Relation[{written}]" if one else f"Relation[list[{written}]]"
+    plain = f"Relation[{target}]" if one else f"Relation[list[{target}]]"
     annotation = _SPELLINGS[spelling].format(
-        relation=relation, marker=_MARKERS[(form, marker)]
+        relation=relation, plain=plain, marker=_MARKERS[(form, marker)]
     )
     return f"{_FIELD[form]}: {annotation}"
 
@@ -782,26 +820,33 @@ def _defines_the_relation(tmp_path, form: str, body: str, future: bool) -> None:
     mod = _import(tmp_path, body, future=future)
     ferro.ensure_resolved_modelset()
     if form == "Forward":
-        assert mod.Player.__ferro_relation_specs__["team"].target is mod.Team
+        spec = mod.Player.__ferro_relation_specs__["team"]
+        assert (spec.target, spec.fk_column) == (mod.Team, "team_id")
+    elif form == "self-referencing":
+        spec = mod.Node.__ferro_relation_specs__["parent"]
+        assert (spec.target, spec.fk_column) == (mod.Node, "parent_id")
     elif form == "Reverse":
-        assert mod.Team.__ferro_reverse_specs__["players"].target is mod.Player
+        reverse = mod.Team.__ferro_reverse_specs__["players"]
+        assert (reverse.target, reverse.child_fk_column) == (mod.Player, "team_id")
     else:
         assert mod.Post.__ferro_reverse_specs__["tags"].is_m2m
 
 
 _SWEEP = [
     (form, spelling, future, quoted, order, nullable, marker)
-    for form in ("Forward", "Reverse", "ManyToMany")
+    for form in ("Forward", "Reverse", "ManyToMany", "self-referencing")
     for spelling in (_M2M_SPELLINGS if form == "ManyToMany" else _SPELLINGS)
     for future in (False, True)
-    for quoted in (False, True)
-    for order in ("before", "after")
+    # A whole quoted annotation quotes nothing inside it.
+    for quoted in ((False,) if "whole" in spelling else (False, True))
+    # A model naming itself is declared once, so its order is its own.
+    for order in (("itself",) if form == "self-referencing" else ("before", "after"))
     for nullable in ((False,) if form == "ManyToMany" else (False, True))
     for marker in (
         ("positional",) if form == "ManyToMany" else ("positional", "keyword")
     )
     # Without postponed annotations an unquoted later class is a NameError.
-    if future or quoted or order == "before"
+    if future or quoted or "whole" in spelling or order == "before"
 ]
 
 
@@ -817,7 +862,8 @@ def test_every_spelling_is_a_relation_or_a_refusal_whose_fix_works(
     # one over a nullable column must say `| None`; a ManyToMany keeps the
     # old form's reading of Annotated metadata.
     works = form == "ManyToMany" or (
-        spelling in _ASSIGNED and not (form == "Forward" and nullable)
+        spelling in _ASSIGNED
+        and not (form in ("Forward", "self-referencing") and nullable)
     )
     _wipe()
     try:

@@ -1,5 +1,6 @@
 """The metaclass that turns a model class declaration into a registered table."""
 
+import __future__
 import ast
 import re
 import sys
@@ -256,21 +257,25 @@ def _evaluated(hint: Any, namespace: dict, frame_ns: dict | None) -> Any:
 
     A name not defined yet becomes a ``ForwardRef``, so a target declared
     later still evaluates, and an alias (``Annotated as A``) is the object it
-    names. ``hint`` itself when it is not a string or does not evaluate.
+    names. A quoted annotation in a postponed module is text twice over, so
+    text is evaluated until it is not. ``hint`` itself when it is not a string
+    or does not evaluate.
     """
-    if not isinstance(hint, str):
-        return hint
     module_ns = getattr(
         sys.modules.get(namespace.get("__module__", "")), "__dict__", {}
     )
     names = DeferredNames({**(frame_ns or {}), **namespace}, module_ns)
-    try:
-        # Read for its markers only: the class's own evaluation reports.
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            return eval(hint, module_ns, names)
-    except Exception:
-        return hint
+    for _ in range(2):
+        if not isinstance(hint, str):
+            break
+        try:
+            # Read for its markers only: the class's own evaluation reports.
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                hint = eval(hint, module_ns, names)
+        except Exception:
+            break
+    return hint
 
 
 def _layers(annotation: Any) -> tuple[Any, bool, list[Any]]:
@@ -372,11 +377,10 @@ def _declared_relation(
     column: str,
     *,
     in_metadata: bool,
-    postponed: bool,
     namespace: dict,
     annotations: dict,
     frame_ns: dict | None,
-    scope: frozenset[str],
+    scope: frozenset[str] | None,
 ) -> ForwardRelation | ReverseRelation:
     """The record of a ``Forward`` or ``Reverse`` declaration over ``column``.
 
@@ -393,13 +397,12 @@ def _declared_relation(
         spelling: ``"Forward"`` or ``"Reverse"``.
         column: The column the relation names.
         in_metadata: Whether the marker sits in ``Annotated`` metadata.
-        postponed: Whether the annotation was written under postponed
-            annotations, so a target declared later needs no quotes.
         namespace: The class body.
         annotations: The class body's annotations.
         frame_ns: The scope running the class statement, if a function.
         scope: The names defined where the class statement runs, so a fix
-            line quotes a target defined later.
+            line quotes a target defined later; ``None`` when the module
+            postpones its annotations and no name needs quotes.
 
     Raises:
         TypeError: The relation is ``Annotated`` metadata, the annotation is
@@ -408,7 +411,7 @@ def _declared_relation(
     """
     core, wrapped, _ = _layers(annotation)
     view = _relation_view(core)
-    bound = None if postponed else scope | frozenset(namespace)
+    bound = None if scope is None else scope | frozenset(namespace)
     # The column the relation reads decides its target and nullability.
     declared = (
         _declared_target(column, namespace, annotations, frame_ns)
@@ -518,6 +521,19 @@ def _refuse_foreign_key_options(cls: type, declared_fields: dict) -> None:
                 f'{model}.{name}: on_delete="SET NULL" needs a nullable column. '
                 f"Write: {line}"
             )
+
+
+def _defined_names(frame: Any) -> frozenset[str] | None:
+    """The names defined where a class statement runs, read from its frame.
+
+    ``None`` when the module postpones its annotations
+    (``from __future__ import annotations``): every annotation stays text
+    there, so a fix line never needs to quote a target. A whole annotation
+    quoted in a module without the import is evaluated, and gets quotes.
+    """
+    if frame.f_code.co_flags & __future__.annotations.compiler_flag:
+        return None
+    return frozenset(frame.f_globals) | frozenset(frame.f_locals)
 
 
 class SecretHydrator:
@@ -691,7 +707,7 @@ class ModelMetaclass(type(BaseModel)):
                 namespace,
                 name,
                 frame_ns=frame_ns,
-                scope=frozenset(caller.f_globals) | frozenset(caller.f_locals),
+                scope=_defined_names(caller),
             )
         )
         mcs._inject_shadow_fields(annotations, namespace, local_relations)
@@ -1022,7 +1038,7 @@ class ModelMetaclass(type(BaseModel)):
         namespace: dict,
         model_name: str,
         frame_ns: dict | None = None,
-        scope: frozenset[str] = frozenset(),
+        scope: frozenset[str] | None = None,
     ) -> tuple[dict, list, list, dict]:
         """
         Scan annotations for relationship fields (BackRef, ForeignKey, ManyToMany).
@@ -1069,7 +1085,6 @@ class ModelMetaclass(type(BaseModel)):
                     spelling,
                     column,
                     in_metadata=in_metadata,
-                    postponed=isinstance(hint, str),
                     namespace=namespace,
                     annotations=annotations,
                     frame_ns=frame_ns,
