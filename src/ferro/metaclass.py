@@ -2,7 +2,6 @@
 
 import __future__
 import ast
-import re
 import sys
 import warnings
 from dataclasses import replace
@@ -55,14 +54,13 @@ from .query import Relation
 from .registry import REGISTRY
 from .relations import (
     check_declared_foreign_keys,
+    is_table_name,
     key_column_line,
     relation_line,
     relation_refusal,
     written_type,
 )
 from .relations.descriptors import ForwardDescriptor
-
-_TABLE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
 
 
 def _assert_weakref_support(cls: type) -> None:
@@ -1048,7 +1046,7 @@ class ModelMetaclass(type(BaseModel)):
                 f"__ferro_table__ on model '{name}' must be a str, "
                 f"got {type(configured).__name__}"
             )
-        if len(configured) > 63 or not _TABLE_NAME_RE.match(configured):
+        if not is_table_name(configured):
             raise ValueError(
                 f"__ferro_table__ {configured!r} on model '{name}' is not a "
                 "valid table name: expected a 1-63 character identifier "
@@ -1072,7 +1070,7 @@ class ModelMetaclass(type(BaseModel)):
                 f"__ferro_renamed_from__ on model '{name}' must be a str, "
                 f"got {type(declared).__name__}"
             )
-        if len(declared) > 63 or not _TABLE_NAME_RE.match(declared):
+        if not is_table_name(declared):
             raise ValueError(
                 f"__ferro_renamed_from__ {declared!r} on model '{name}' is not a "
                 "valid table name: expected a 1-63 character identifier "

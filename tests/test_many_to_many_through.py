@@ -603,6 +603,22 @@ def _cases(storage: str) -> dict[str, dict]:
                 {t: ['linked: Relation[list["Player"]] = Reverse("links")']},
             ),
         )
+    # A join table name `__ferro_table__` does not accept as a model's table.
+    for through in ("player-links", "2way_links"):
+        cases[f"many-to-many to Player through {through}"] = _case(
+            "many-to-many",
+            "links",
+            Player=[
+                f'links: Relation[list["Player"]] = ManyToMany(through="{through}")'
+            ],
+        )
+    # A one-to-one sharing its key: the key column is the primary key `id`.
+    cases["key shared with the primary key"] = _case(
+        "shared key",
+        "id",
+        no_pk=("Player",),
+        Player=[f'id: {key} = Field(primary_key=True, foreign_key="Team"{stored})'],
+    )
     if storage == "int":
         cases["generated key"] = _case(
             "key",
@@ -618,6 +634,15 @@ def _cases(storage: str) -> dict[str, dict]:
             no_pk=("Player",),
             Player=['team_id: int = Field(primary_key=True, foreign_key="Team")'],
         )
+        cases["primary-key key beside a plain id"] = _case(
+            "key",
+            "team_id",
+            no_pk=("Player",),
+            Player=[
+                "id: int = 0",
+                'team_id: int = Field(primary_key=True, foreign_key="Team")',
+            ],
+        )
     return cases
 
 
@@ -630,11 +655,17 @@ def _merge(first: dict, second: dict) -> dict:
 
 _MODELS = ("Team", "Tag", "Tournament", "Player")
 
+# Each modelset is defined in both orders, so every model a fix names is
+# sometimes defined before the line that names it and sometimes after.
+_ORDERS = {"Player last": _MODELS, "Player first": tuple(reversed(_MODELS))}
 
-def _source(case: dict, models: dict, storage: str, module_lines: list[str]) -> str:
+
+def _source(
+    case: dict, models: dict, storage: str, module_lines: list[str], order: str
+) -> str:
     pk = _KEYS[storage][0]
     classes = []
-    for model in _MODELS:
+    for model in _ORDERS[order]:
         body = [] if model in case["no_pk"] else [pk]
         body += models.get(model, [])
         classes.append(
@@ -702,6 +733,13 @@ async def _works(mod, case: dict, module_lines: list[str]) -> None:
         column = mod.Player.__ferro_columns__[field]
         assert column.foreign_key is not None, column
         return
+    if case["kind"] == "shared key":
+        columns = mod.Player.__ferro_columns__
+        assert mod.Player.__ferro_pk__ == "id"
+        assert columns["id"].foreign_key is None
+        (key,) = [column for column in columns.values() if column.foreign_key]
+        assert (key.foreign_key.to_table, key.unique) == ("team", True)
+        return
     if case["kind"] == "forward":
         assert field in mod.Player.__ferro_relation_specs__
         return
@@ -739,21 +777,23 @@ async def _works(mod, case: dict, module_lines: list[str]) -> None:
 
 
 _SWEEP_CASES = [
-    (storage, name, future)
+    (storage, name, order, future)
     for storage in _KEYS
     for name in _cases(storage)
+    for order in _ORDERS
     for future in (False, True)
 ]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("storage", "name", "future"), _SWEEP_CASES)
-async def test_every_fix_passes_every_check(tmp_path, storage, name, future):
+@pytest.mark.parametrize(("storage", "name", "order", "future"), _SWEEP_CASES)
+async def test_every_fix_passes_every_check(tmp_path, storage, name, order, future):
     case = _cases(storage)[name]
-    message = _refusal(tmp_path, _source(case, case["models"], storage, []), future)
+    refused = _source(case, case["models"], storage, [], order)
+    message = _refusal(tmp_path, refused, future)
     assert message.startswith(f"{case['owner']}.{case['field']}: "), message
     for models, module_lines in _fixes(message, case):
-        fixed = _source(case, models, storage, module_lines)
+        fixed = _source(case, models, storage, module_lines, order)
         _wipe()
         try:
             mod = _import(tmp_path, fixed, future=future)
