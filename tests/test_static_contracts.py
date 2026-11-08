@@ -213,6 +213,28 @@ def test_include_chains_pass_the_type_checker():
     )
 
 
+def test_explicit_foreign_key_reads_pass_the_type_checker():
+    """A foreign-key column reads as its annotation, `Relation[Team]` as
+    `Team`, `Relation[Player | None]` as `Player | None`, and a reverse
+    relation's `.all()` as `list[Player]`, with no ignore comment (#876)."""
+    fixture = FIXTURES / "good_explicit_fk.py"
+    source = fixture.read_text(encoding="utf-8")
+    for read in (
+        "assert_type(player.team_id, int)",
+        "assert_type(player.team, Team)",
+        "assert_type(player.mentor, Player | None)",
+        "assert_type(await team.players.all(), list[Player])",
+    ):
+        assert read in source
+    assert "ignore" not in source
+
+    result = _run_ty(fixture)
+    assert result.returncode == 0, (
+        f"explicit foreign-key reads must type-check cleanly:\n{result.stdout}\n"
+        f"{result.stderr}"
+    )
+
+
 def test_projected_chains_pass_the_type_checker():
     """Every selector form — tuple, single-field, dict-aliased, traversed at
     depth (#293) — yields Rows[Row] / Row | None and composes with the join

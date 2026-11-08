@@ -2176,6 +2176,21 @@ class Relation(Query[T]):
     if TYPE_CHECKING:
         all: ClassVar["_RelationAll"]  # type: ignore[assignment]
         first: ClassVar["_RelationFirst"]  # type: ignore[assignment]
+
+        # How a model field annotated `Relation[...]` reads, for a type
+        # checker only: on the class it is the relation itself; on an
+        # instance a reverse relation (`Relation[list[E]]`) is this query and
+        # a forward one (`Relation[E]`) reads as `E`.
+        @overload
+        def __get__(self, instance: None, owner: Any) -> Self: ...
+        @overload
+        def __get__(
+            self: "Relation[list[E]]", instance: object, owner: Any
+        ) -> "Relation[list[E]]": ...
+        @overload
+        def __get__(self: "Relation[E]", instance: object, owner: Any) -> E: ...
+        def __get__(self, instance: Any, owner: Any) -> Any: ...
+
     else:
 
         @terminal
