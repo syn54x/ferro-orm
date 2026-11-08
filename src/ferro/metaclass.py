@@ -53,9 +53,11 @@ from .ir.compiler import declared_retired_labels
 from .query import Relation
 from .registry import REGISTRY
 from .relations import (
+    BAD_THROUGH,
     check_declared_foreign_keys,
     is_table_name,
     key_column_line,
+    recipe,
     relation_line,
     relation_refusal,
     written_type,
@@ -548,9 +550,12 @@ def _declared_many_to_many(
         reason = _NOT_LIST
     elif not isinstance(through, str) or not through:
         reason = _NO_THROUGH
+    elif not is_table_name(through):
+        reason = BAD_THROUGH
     else:
         reason = None
-    if not isinstance(through, str) or not through:
+    if not isinstance(through, str) or not is_table_name(through):
+        # The name the old form derived; the refusal checks it in turn.
         through = f"{table}_{field_name}"
     if view is not None:
         target = view[1]
@@ -802,9 +807,16 @@ def _none_refusal(model_cls: type, name: str, spec: Any) -> TypeError:
         relation = relation_line(
             name, "Forward", target, True, spec.fk_column, declared.bound
         )
-        fix = (
-            f"add | None to {spec.fk_column}'s annotation. Write: {column} "
-            f"and {relation}"
+        # Two declarations change, so the fix is a recipe, not a Write line.
+        return recipe(
+            model,
+            name,
+            f"{spec.fk_column} is not nullable, so the relation cannot be None. "
+            f"Assign {_a(target)}, or make both nullable",
+            [
+                f"add | None to {model}.{spec.fk_column}: {column}",
+                f"add | None to {model}.{name}: {relation}",
+            ],
         )
     else:
         # The old form has no key column to edit: the relation's own

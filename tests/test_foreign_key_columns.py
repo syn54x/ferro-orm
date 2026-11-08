@@ -457,8 +457,10 @@ def test_a_key_column_that_is_the_primary_key_is_refused():
 
     assert _refused(define) == (
         "Profile.user_id: a foreign-key column cannot be the primary key. "
-        "Write: id: int | None = Field(default=None, primary_key=True) and "
-        "user_id: int = Field(foreign_key=User, unique=True)"
+        "Fix it by hand: (1) add id: int | None = Field(default=None, "
+        "primary_key=True) to Profile (or another primary key of your "
+        "choosing); (2) take primary_key=True off Profile.user_id and add "
+        "unique=True"
     )
 
 
@@ -491,8 +493,8 @@ def test_a_relation_over_a_column_without_a_foreign_key_is_refused():
             team: Relation[Team] = Forward("team_id")
 
     assert _refused(define) == (
-        "Player.team: team_id has no foreign_key. "
-        "Write: team_id: int = Field(foreign_key=Team)"
+        "Player.team: team_id has no foreign_key. Fix it by hand: "
+        '(1) give Player.team_id its foreign key: team_id: int = Field(foreign_key="Team")'
     )
 
 
@@ -603,8 +605,9 @@ def test_a_reverse_with_no_key_pointing_back_names_the_column_to_add():
             mentor_id: int | None = Field(default=None, foreign_key="Player")
 
     assert _refused(define) == (
-        "Team.players: Player.mentor_id points at Player, not Team. "
-        'Write: team_id: int = Field(foreign_key="Team") on Player and '
+        "Team.players: Player.mentor_id points at Player, not Team. Fix it by "
+        'hand: (1) add team_id: int = Field(foreign_key="Team") to Player; '
+        "(2) point Team.players at it: "
         'players: Relation[list["Player"]] = Reverse("team_id")'
     )
 
