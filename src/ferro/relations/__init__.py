@@ -234,7 +234,7 @@ def relation_refusal(
     """
     if spelling == "Reverse" and not target.startswith("list["):
         target = f"list[{target}]"
-    shown = target + (" | None" if nullable else "")
+    shown = target + (" | None" if nullable and spelling == "Forward" else "")
     return TypeError(
         f"{model}.{field_name}: {reason}. Write: "
         f'{field_name}: Relation[{shown}] = {spelling}("{column}")'
@@ -260,10 +260,16 @@ def _refuse_unnamed_forward(
             target.__name__,
             annotation_allows_none(info.annotation),
         )
+    missing = (
+        f"{column} has no foreign_key"
+        if info is not None
+        else f"{model} has no column {column}"
+    )
+    # No line can be written: nothing names the model the relation reads.
     raise TypeError(
-        f"{model}.{name}: {relation.refusal}, and nothing names the model "
-        f"{column} points at: declare {column} with Field(foreign_key=<model>), "
-        f'then write {name}: Relation[<model>] = Forward("{column}")'
+        f"{model}.{name}: {relation.refusal}, and {missing} to name the model "
+        f"it reads. Declare {column} with Field(foreign_key=...) naming that "
+        f"model, and annotate {name} as Relation[...] of the same model"
     )
 
 
@@ -291,12 +297,24 @@ def _refuse_unnamed_reverse(
             pointing_back[0].__name__,
             False,
         )
+    if pointing_back:
+        names = [other.__name__ for other in pointing_back]
+        declaring = ", ".join(names[:-1]) + f" and {names[-1]}"
+        lines = " or ".join(
+            f'{name}: Relation[list[{other}]] = Reverse("{column}")' for other in names
+        )
+        raise TypeError(
+            f"{model}.{name}: {relation.refusal}, and {declaring} each declare "
+            f"{column} pointing at {model}. Write: {lines}"
+        )
+    _, key_type = _target_key(model_cls, name, model_cls)
+    key = field_line(column, annotation_text(key_type), {"foreign_key": model_cls})
+    # No line can be written: no model is the one the relation reads.
     raise TypeError(
-        f"{model}.{name}: {relation.refusal}, and "
-        f"{'no model declares' if not pointing_back else 'several models declare'} "
-        f"a foreign-key column {column} pointing at {model}: write "
-        f'{name}: Relation[list[<model>]] = Reverse("{column}") with the model '
-        "the relation reads"
+        f"{model}.{name}: {relation.refusal}, and no model declares a "
+        f"foreign-key column {column} pointing at {model}. Declare {key} on the "
+        f"model the relation reads, and annotate {name} as Relation[list[...]] "
+        "of that model"
     )
 
 

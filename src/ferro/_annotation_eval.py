@@ -21,7 +21,7 @@ from ._annotation_utils import _strip_optional_union
 from .base import ForeignKey
 
 
-class _Names(dict):
+class DeferredNames(dict):
     """Eval locals: the class body first, then the module, then builtins.
 
     A name found nowhere is recorded and answered with a ``ForwardRef`` so the
@@ -114,7 +114,7 @@ def evaluate_foreign_key_annotation(
             something undefined other than the target.
     """
     module_ns = getattr(sys.modules.get(module), "__dict__", {})
-    names = _Names({**(frame_ns or {}), **localns}, module_ns)
+    names = DeferredNames({**(frame_ns or {}), **localns}, module_ns)
     try:
         value = eval(text, module_ns, names)
     except Exception as error:
