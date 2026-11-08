@@ -140,7 +140,7 @@ class PostFactory:
 async def test_post_gets_an_author(db):
     post = await PostFactory.create(title="Custom title")
 
-    author = await post.author
+    author = await post.author.load()
     assert post.title == "Custom title"
     assert author.username.startswith("user")
 ```

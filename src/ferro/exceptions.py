@@ -16,6 +16,8 @@ instead of string-matching driver messages:
         - `CheckViolationError`
     - `ModelDoesNotExist`: no row matched the primary key (also a
       `LookupError`).
+    - `InstanceNotLoaded`: an unloaded instance was asked for a column
+      (also an `AttributeError`).
 
 Exceptions raised from the Rust core keep the driver's message and, where
 the backend reports them, the SQLSTATE code and the violated constraint's
@@ -192,15 +194,16 @@ class InstanceNotLoaded(FerroError, AttributeError):
         ```python {test=run prelude=reference}
         from ferro import InstanceNotLoaded
 
-        post = await Post.get(1)
-        try:
-            post.author.name
-        except InstanceNotLoaded as error:
-            assert "await post.author.load()" in str(error)
-        else:
-            raise AssertionError("expected InstanceNotLoaded")
+        async with engines.session():  # a session that holds no author yet
+            post = await Post.get(1)
+            try:
+                post.author.name
+            except InstanceNotLoaded as error:
+                assert "await post.author.load()" in str(error)
+            else:
+                raise AssertionError("expected InstanceNotLoaded")
 
-        author = await post.author.load()
-        assert author.name == "Ada Lovelace"
+            author = await post.author.load()
+            assert author.name == "Ada Lovelace"
         ```
     """

@@ -37,7 +37,7 @@ async def main() -> None:
     async with engines.session():
         ada = await User.create(username="ada", email="ada@example.com")
         post = await Post.create(title="Notes", content="On the engine", author=ada)
-        assert (await post.author).username == "ada"
+        assert (await post.author.load()).username == "ada"
 
     print("testing_models example ran successfully")
 

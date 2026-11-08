@@ -81,7 +81,7 @@ async def main() -> None:
         post = await Post.create(title="Notes on the engine", author=ada)
         await Post.create(title="Poetical science", author=ada)
 
-        author = await post.author
+        author = await post.author.load()
         assert author.username == "ada"
 
         recent = await ada.posts.order_by(lambda post: post.id, "desc").limit(5).all()

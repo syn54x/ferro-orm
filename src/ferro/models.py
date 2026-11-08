@@ -518,6 +518,8 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                 `None`; `exclude=set()` writes every column.
 
         Raises:
+            InstanceNotLoaded: The instance is unloaded; load it with
+                `.load()` first.
             UniqueViolationError: An insert repeats a primary key or unique
                 value.
             ModelDoesNotExist: The row behind a saved instance no longer
@@ -842,7 +844,7 @@ class Model(BaseModel, metaclass=ModelMetaclass):
 
         Examples:
             ```python {test=run prelude=reference}
-            async with engines.session():
+            async with engines.session():  # a session that holds no author yet
                 post = await Post.get(1)
                 author = await post.author.load()
                 assert author is post.author

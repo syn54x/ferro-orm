@@ -94,7 +94,7 @@ async def main() -> None:
         # --8<-- [end:aggregate]
 
         # --8<-- [start:relationships]
-        author = await post.author
+        author = await post.author.load()
         assert author.name == "Alice"
 
         alice_posts = await author.posts.where(

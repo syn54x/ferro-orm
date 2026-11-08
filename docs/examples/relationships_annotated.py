@@ -69,7 +69,7 @@ async def main() -> None:
         rustaceans = await Team.create(name="Rustaceans")
         ferris = await Player.create(name="Ferris", team=rustaceans)
 
-        team = await ferris.team  # forward: runs one query
+        team = await ferris.team.load()  # forward: the Team this session holds
         roster = await rustaceans.players.all()  # reverse: a query you run
         print(team.name, [player.name for player in roster])
         # --8<-- [end:first]
@@ -127,9 +127,9 @@ async def main() -> None:
         # --8<-- [start:one-to-one]
         await Profile.create(bio="Plays in the front row", player=ferris)
 
-        profile = await ferris.profile  # one instance, not a list
+        profile = await ferris.profile.first()  # one instance, not a list
         assert profile.bio == "Plays in the front row"
-        assert await corro.profile is None  # Corro has no profile
+        assert await corro.profile.first() is None  # Corro has no profile
         # --8<-- [end:one-to-one]
         # unique=True gives the shadow column a unique index.
         assert (
@@ -179,7 +179,7 @@ async def main() -> None:
         # --8<-- [start:self-referential]
         crabby = await Player.create(name="Crabby", team=rustaceans, mentor=ferris)
 
-        assert (await crabby.mentor).name == "Ferris"
+        assert (await crabby.mentor.load()).name == "Ferris"
         mentees = await ferris.mentees.all()
         assert [player.name for player in mentees] == ["Crabby"]
         assert ferris.mentor_id is None  # Ferris has no mentor
