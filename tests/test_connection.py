@@ -434,9 +434,9 @@ async def test_forward_fk_load_inherits_source_instance_origin(tmp_path):
     service_child = await RouteForwardChild.using("service").get(1)
     assert service_child is not None
 
-    parent = await service_child.parent
+    parent = await service_child.parent.load()
 
-    assert parent is not None
+    assert parent is service_child.parent
     assert parent.label == "service-parent"
 
 

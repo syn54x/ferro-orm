@@ -16,6 +16,8 @@ instead of string-matching driver messages:
         - `CheckViolationError`
     - `ModelDoesNotExist`: no row matched the primary key (also a
       `LookupError`).
+    - `InstanceNotLoaded`: an unloaded instance was asked for a column
+      (also an `AttributeError`).
 
 Exceptions raised from the Rust core keep the driver's message and, where
 the backend reports them, the SQLSTATE code and the violated constraint's
@@ -174,3 +176,34 @@ class ModelDoesNotExist(FerroError, LookupError):
 
     def __reduce__(self):
         return (self.__class__, (self.model, self.pk))
+
+
+class InstanceNotLoaded(FerroError, AttributeError):
+    """An unloaded instance was asked for more than its primary key.
+
+    A forward relation nothing loaded reads as an unloaded instance of its
+    model, holding only its primary key. Reading another column, assigning
+    one, `save()`, `model_dump()` and `model_dump_json()` raise this error,
+    whose message names the fix: load the relation with `include()` on the
+    query, or call `.load()` on the instance. It is also an
+    `AttributeError`, so `hasattr()` returns `False` and `getattr()` with a
+    default returns the default. See
+    [Loaded relations](../guide/queries.md#populating-relations-with-include).
+
+    Examples:
+        ```python {test=run prelude=reference}
+        from ferro import InstanceNotLoaded
+
+        async with engines.session():  # a session that holds no author yet
+            post = await Post.get(1)
+            try:
+                post.author.name
+            except InstanceNotLoaded as error:
+                assert "await post.author.load()" in str(error)
+            else:
+                raise AssertionError("expected InstanceNotLoaded")
+
+            author = await post.author.load()
+            assert author.name == "Ada Lovelace"
+        ```
+    """

@@ -1,5 +1,7 @@
 # Populated relations: include() is the data axis; populated access is plain attribute access
 
+> **Superseded in part by ADR-0063 (2026-11-08, #874)**: an unpopulated relation no longer keeps the awaitable contract. It reads as the session's instance for its key, or an unloaded instance holding the key, which `await player.team.load()` fills in place; `await player.team` raises `TypeError`. An include whose key matches no row leaves the relation unloaded instead of `None`. `include()`, the population contract and the refresh rule below stand.
+
 A query opts into joined-row hydration with an explicit `.include(lambda t:
 t.account.owner)` (`GLOSSARY.md`: Include, Populated relation). A populated
 forward-FK relation is accessed as a plain attribute — `txn.account` *is* the

@@ -290,7 +290,7 @@ class ForeignKey:
     Examples:
         ```python {test=run prelude=reference}
         post = await Post.where(lambda post: post.views > 1000).first()
-        author = await post.author
+        author = await post.author.load()
         assert author.name == "Ada Lovelace"
         ```
     """

@@ -1356,7 +1356,7 @@ A relation on an instance is either populated or not:
 --8<-- "docs/examples/populated_relations.py:awaitable"
 ```
 
-`await transaction.account` fetched the Travel account with a second query.
+`await transaction.account.load()` fetched the Travel account with a second query.
 
 The fetch and the await send these statements; on PostgreSQL only the placeholders differ:
 
@@ -1518,15 +1518,15 @@ Neither later query names `market_run`; the session matched its row by primary k
 
 ### Population after a refresh
 
-Every fetch refreshes the instances a session already holds. A refresh keeps a population only while the row's foreign key still points at it; if the foreign key changed, the population is dropped and the relation is awaitable again:
+Every fetch refreshes the instances a session already holds. A refresh keeps a population only while the row's foreign key still points at it; if the foreign key changed, the population is dropped and the relation reads as the account the new key names:
 
 ```python
 --8<-- "docs/examples/populated_relations.py:refresh-rule"
 ```
 
-After the row moved to Checking, `from_checking.account` no longer claims Savings; awaiting it fetches Checking.
+After the row moved to Checking, `from_checking.account` no longer claims Savings; it is the Checking account this session already holds, so `.load()` sends nothing.
 
-The four statements are the same on PostgreSQL, apart from the placeholders Ferro writes:
+The three statements are the same on PostgreSQL, apart from the placeholders Ferro writes:
 
 ```sql
 -- populated_relations.py:refresh-rule (sqlite)
@@ -1544,14 +1544,9 @@ SELECT "transaction"."account_id", "transaction"."amount", "transaction"."catego
 FROM "transaction"
 WHERE "transaction"."id" = ?
 LIMIT ?;
-
-SELECT "account"."id", "account"."label", "account"."owner_id"
-FROM "account"
-WHERE "account"."id" = ?
-LIMIT ?;
 ```
 
-Ferro sends the raw `UPDATE` as written. The last `SELECT` is the await, fetching Checking.
+Ferro sends the raw `UPDATE` as written.
 
 ### Unsupported `include()` forms
 

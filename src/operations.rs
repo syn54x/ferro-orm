@@ -1130,7 +1130,8 @@ fn apply_include_select_list(select: &mut SelectStatement, hops: &[IncludeHop]) 
 /// Returns one `(root, hop_rows)` pair per input row; `hop_rows` aligns with
 /// `hops` by index. A hop whose row the LEFT join did not match decodes to a
 /// `(None, all-NULL fields)` parsed row — the graph hydrator turns that into
-/// a populated `None` (the hop PK is NULL exactly when the FK is NULL).
+/// a populated `None` when the FK is NULL, and an unloaded instance holding
+/// the key when it is not (the row is gone or row security hides it).
 fn instances_rows_to_parsed_data(
     rows: Vec<EngineRow>,
     root: &crate::state::RegisteredModel,
@@ -3974,6 +3975,8 @@ pub fn fetch_filtered<'py>(
                         }
                     }
                     let converters = crate::hydration::field_converters_for(py, cls)?;
+                    let root_model_name: String =
+                        cls.getattr(pyo3::intern!(py, "__name__"))?.extract()?;
 
                     for ((root_pk, root_fields), hop_rows) in parsed_data {
                         let root_obj = materialize_model_row(
@@ -4008,14 +4011,36 @@ pub fn fetch_filtered<'py>(
                             };
                             let Some(parent) = parent else { continue };
                             if hop_pk.is_none() {
-                                // The LEFT join matched no row ⟺ the FK is NULL:
-                                // populate `None` (truthful to the declared
-                                // `| None` type), root row retained.
+                                // The LEFT join matched no row. A NULL key
+                                // populates `None` (truthful to the declared
+                                // `| None` type). A key whose row is gone, or
+                                // hidden by row security, leaves the relation
+                                // unloaded, holding the key (ADR-0063). Either
+                                // way the root row is retained and the chain
+                                // ends here.
+                                let key = foreign_key_of(py, &parent, &hop.relation)?;
+                                let unloaded = match key {
+                                    Some(key) => Some(unloaded_for_key(
+                                        py,
+                                        &ctx.cls,
+                                        &ctx.identity,
+                                        Some(&connection_name),
+                                        session_id.as_deref(),
+                                        use_identity_map,
+                                        &key,
+                                        &crate::hydration::UnloadedOrigin {
+                                            model: &root_model_name,
+                                            path: &hop.path.join("."),
+                                            found_no_row: true,
+                                        },
+                                    )?),
+                                    None => None,
+                                };
                                 crate::hydration::set_populated_relation(
                                     py,
                                     &parent,
                                     &hop.relation,
-                                    None,
+                                    unloaded.as_ref(),
                                 )?;
                                 populated.insert(hop.path.as_slice(), None);
                                 continue;
@@ -4337,6 +4362,120 @@ pub fn register_instance(
         )?;
     }
     Ok(())
+}
+
+/// The instance a forward relation reads as for one key (ADR-0063).
+///
+/// Looks the key up in the session's identity map: a held instance comes
+/// back as that object, complete or not. Otherwise an unloaded instance is
+/// built by the hydrator and registered under the key, so a later fetch of
+/// the row fills the same object in place. Without a session (or with the
+/// identity map off) the built instance is returned unregistered.
+///
+/// An include that found no row (`origin.found_no_row`) takes the held
+/// instance too, so the session keeps one object per row; it marks the
+/// instance as not found only when it is unloaded (a held complete instance
+/// keeps the row the session last read).
+#[allow(clippy::too_many_arguments)]
+fn unloaded_for_key<'py>(
+    py: Python<'py>,
+    cls: &Bound<'py, PyAny>,
+    identity: &str,
+    connection_name: Option<&str>,
+    session_id: Option<&str>,
+    use_identity_map: bool,
+    pk: &Bound<'py, PyAny>,
+    origin: &crate::hydration::UnloadedOrigin<'_>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let key = match connection_name {
+        Some(connection_name) if use_identity_map && session_id.is_some() => Some((
+            connection_name.to_string(),
+            identity.to_string(),
+            pk.str()?.to_string(),
+        )),
+        _ => None,
+    };
+    if let Some(key) = &key
+        && let Some(held) = identity_map_get(py, session_id, key)?
+    {
+        let held = held.into_bound(py);
+        if origin.found_no_row && crate::hydration::is_unloaded(py, &held)? {
+            crate::hydration::mark_unloaded(py, &held, origin)?;
+        }
+        return Ok(held);
+    }
+    let instance =
+        crate::hydration::hydrate_unloaded_instance(py, cls, connection_name, pk, origin)?;
+    if let Some(key) = key {
+        identity_map_insert(py, session_id, key, &instance)?;
+    }
+    Ok(instance)
+}
+
+/// The value a parent's forward relation key column holds, or `None` when it
+/// is NULL. The column comes from the relation's spec, so both declaration
+/// forms read it the same way.
+///
+/// # Errors
+/// Any `PyErr` reading the spec or the column.
+fn foreign_key_of<'py>(
+    py: Python<'py>,
+    parent: &Bound<'py, PyAny>,
+    relation: &str,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let spec = parent
+        .get_type()
+        .getattr(pyo3::intern!(py, "__ferro_relation_specs__"))?
+        .get_item(relation)?;
+    let fk_column = spec.getattr(pyo3::intern!(py, "fk_column"))?;
+    let key = parent.getattr(fk_column.cast::<pyo3::types::PyString>()?)?;
+    Ok((!key.is_none()).then_some(key))
+}
+
+/// Read a forward relation for the first time: the session's instance for
+/// `pk`, or an unloaded instance of `cls` holding it (ADR-0063).
+///
+/// Args:
+///     cls (type): The relation's target model.
+///     pk (Any): The key the parent's foreign-key column holds (not `None`).
+///     relation (tuple[str, str]): The parent model's name and the relation
+///         read, `("Player", "team")`, for the refusal message.
+///     route (RouteHandle | None): The parent's route; `None` when no session
+///         and no connection give one, and the instance is shared with nothing.
+///
+/// # Errors
+/// `PyRuntimeError` when the target has no primary key or the route names an
+/// unknown connection.
+#[pyfunction]
+#[pyo3(signature = (cls, pk, relation, route=None))]
+pub fn unloaded_instance<'py>(
+    py: Python<'py>,
+    cls: Bound<'py, PyAny>,
+    pk: Bound<'py, PyAny>,
+    relation: (String, String),
+    route: Option<Py<crate::state::RouteHandle>>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let identity = crate::state::model_identity(&cls)?;
+    let origin = crate::hydration::UnloadedOrigin {
+        model: &relation.0,
+        path: &relation.1,
+        found_no_row: false,
+    };
+    let Some(route) = route else {
+        return unloaded_for_key(py, &cls, &identity, None, None, false, &pk, &origin);
+    };
+    let r = route.get();
+    let (connection_name, engine, _, _) = route_engine(r)?;
+    unloaded_for_key(
+        py,
+        &cls,
+        &identity,
+        Some(&connection_name),
+        r.session_id.as_deref(),
+        engine.is_identity_map_enabled(),
+        &pk,
+        &origin,
+    )
 }
 
 /// Remove one instance from the identity map.

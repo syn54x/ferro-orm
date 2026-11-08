@@ -45,15 +45,16 @@ async def test_one_to_one_relationship(db_url):
         alice = await User.create(username="alice")
         p1 = await Profile.create(bio="Alice's Bio", user=alice)
 
-        # 2. Verify reverse lookup (1:1 should return object directly)
-        # Note: RelationshipDescriptor returns query.first() which is a coroutine
-        alice_profile = await alice.profile
+        # 2. Verify reverse lookup: a one-to-one reverse relation is a
+        # query read with .first()
+        alice_profile = await alice.profile.first()
         assert alice_profile is not None
         assert alice_profile.bio == "Alice's Bio"
         assert alice_profile.id == p1.id
 
-        # 3. Verify forward lookup (already working)
-        p1_user = await p1.user
+        # 3. Verify forward lookup: the session's alice, with no query
+        p1_user = p1.user
+        assert p1_user is alice
         assert p1_user.username == "alice"
 
         # 4. Verify Uniqueness Enforcement

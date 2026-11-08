@@ -150,10 +150,10 @@ async def run_demo():
     show_step(
         "Lazy Loading (Forward)",
         'laptop = await Product.where(Product.name == "Laptop").first()\n'
-        "category = await laptop.category  # Fetched on demand",
+        "category = await laptop.category.load()  # Fetched on demand",
     )
     laptop = await Product.where(Product.name == "Laptop").first()
-    category = await laptop.category
+    category = await laptop.category.load()
     console.print(f"💻 Laptop Category: [bold green]{category.name}[/bold green]")
 
     show_step(
@@ -224,7 +224,7 @@ async def run_demo():
         )
 
     gpu = await Product.where(Product.name == "RTX 5090").first()
-    gpu_cat = await gpu.category
+    gpu_cat = await gpu.category.load()
     console.print(
         f"✅ Transaction Committed: [bold green]{gpu.name}[/bold green] in "
         f"[bold green]{gpu_cat.name}[/bold green]"

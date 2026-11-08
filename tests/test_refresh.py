@@ -1,6 +1,6 @@
 import pytest
 from typing import Annotated
-from ferro import Model, connect, FerroField, engines
+from ferro import Model, ModelDoesNotExist, connect, FerroField, engines
 
 pytestmark = pytest.mark.backend_matrix
 
@@ -36,7 +36,7 @@ async def test_instance_refresh(db_url):
 
 @pytest.mark.asyncio
 async def test_refresh_not_found(db_url):
-    """Test that .refresh() raises an error if the record is gone."""
+    """.refresh() on a row that no longer exists raises ModelDoesNotExist."""
 
     class RefreshUser(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
@@ -49,5 +49,6 @@ async def test_refresh_not_found(db_url):
         # Delete it from DB
         await RefreshUser.where(lambda u: u.id == user.id).delete()
 
-        with pytest.raises(RuntimeError, match="Instance not found in database"):
+        with pytest.raises(ModelDoesNotExist) as missing:
             await user.refresh()
+        assert (missing.value.model, missing.value.pk) == (RefreshUser, user.id)

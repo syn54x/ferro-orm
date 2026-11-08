@@ -90,7 +90,7 @@ async def test_relationships_loaded_inside_transaction_inherit_transaction(db_ur
 
             loaded_child = await TxRelationChild.get(1)
             assert loaded_child is not None
-            loaded_child_parent = await loaded_child.parent
+            loaded_child_parent = await loaded_child.parent.load()
             assert loaded_child_parent.label == "parent"
 
             loaded_student = await TxRelationStudent.get(1)

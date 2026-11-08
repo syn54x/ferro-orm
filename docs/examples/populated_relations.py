@@ -10,7 +10,6 @@ so the accumulation example needs instances no earlier include has touched.
 """
 
 import asyncio
-import inspect
 
 import predicates
 from _ledger_seed import seed
@@ -28,7 +27,7 @@ async def main() -> None:
         # --8<-- [start:awaitable]
         transaction = await Transaction.get(6)
 
-        account = await transaction.account  # runs its own query
+        account = await transaction.account.load()  # runs its own query
         assert account.label == "Travel"
         # --8<-- [end:awaitable]
 
@@ -144,9 +143,8 @@ async def main() -> None:
         await execute('UPDATE "transaction" SET account_id = $1 WHERE id = $2', 1, 5)
         await Transaction.get(5)  # refreshes the instance in place
 
-        pending = from_checking.account  # awaitable again
-        assert inspect.isawaitable(pending)
-        assert (await pending).label == "Checking"
+        current = await from_checking.account.load()  # the account the key names now
+        assert current.label == "Checking"
         # --8<-- [end:refresh-rule]
 
         # --8<-- [start:limits]

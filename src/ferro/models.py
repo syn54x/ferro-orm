@@ -33,6 +33,7 @@ from ._core import (
     begin_transaction,
     commit_transaction,
     fetch_all,
+    prune_stale_relations,
     register_instance,
     rollback_transaction,
     save_bulk_records,
@@ -44,7 +45,7 @@ from ._core import (
     evict_instance as _core_evict_instance,
 )
 from .base import ForeignKey, ForwardRelation, foreign_key_allows_none
-from .exceptions import ModelDoesNotExist
+from .exceptions import InstanceNotLoaded, ModelDoesNotExist
 from .metaclass import ModelMetaclass, generated_refusal
 from .query import Predicate, Query
 from .state import (
@@ -59,6 +60,9 @@ from .state import (
 
 _FERRO_CONNECTION_ATTR = "__ferro_connection_name"
 _FERRO_PERSISTED_ATTR = "__ferro_persisted"
+#: Marks an unloaded instance (ADR-0063); set by the Rust hydrator, cleared
+#: when a fetched row fills the instance. Holds ``(model, path, found_no_row)``.
+_FERRO_UNLOADED_ATTR = "__ferro_unloaded"
 
 
 def _is_persisted(instance: object) -> bool:
@@ -72,6 +76,29 @@ def _is_persisted(instance: object) -> bool:
 
 def _set_persisted(instance: object, value: bool) -> None:
     object.__setattr__(instance, _FERRO_PERSISTED_ATTR, value)
+
+
+def _not_loaded(instance: object) -> InstanceNotLoaded:
+    """The refusal of an unloaded instance, naming how to load it."""
+    from .relations import _snake
+
+    model, path, found_no_row = instance.__dict__[_FERRO_UNLOADED_ATTR]
+    cls = type(instance)
+    pk = cls.__ferro_pk__
+    held = f"{cls.__name__}({pk}={instance.__dict__[pk]!r}) is not loaded"
+    parameter = _snake(model)
+    relation = f"{parameter}.{path}"
+    if found_no_row:
+        return InstanceNotLoaded(
+            f"{held}: the query that included {relation} found no row with that "
+            "key, so the row was deleted or row security hides it from this "
+            "connection; restore the row or this connection's access to it, "
+            f"then await {relation}.load()"
+        )
+    return InstanceNotLoaded(
+        f"{held}. Read it after include(lambda {parameter}: {relation}) or "
+        f"await {relation}.load()"
+    )
 
 
 def _field_eq(field_name: str, value: Any) -> Predicate[Any]:
@@ -415,8 +442,14 @@ class Model(BaseModel, metaclass=ModelMetaclass):
     if not TYPE_CHECKING:
 
         def __getattr__(self, item: str) -> Any:
-            # Only a miss reaches here: a retired field (ADR-0053) is no
+            # Only a miss reaches here: a column an unloaded instance does not
+            # hold (ADR-0063), or a retired field (ADR-0053), which is no
             # attribute, and the error says it is gone on purpose.
+            if (
+                _FERRO_UNLOADED_ATTR in self.__dict__
+                and item in type(self).model_fields
+            ):
+                raise _not_loaded(self)
             if item in type(self).__ferro_retired_names__:
                 raise AttributeError(
                     f"{type(self).__name__}.{item} is retired in this release: the "
@@ -425,6 +458,58 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                     obj=self,
                 )
             return super().__getattr__(item)
+
+        def __setattr__(self, name: str, value: Any) -> None:
+            if (
+                _FERRO_UNLOADED_ATTR in self.__dict__
+                and name in type(self).model_fields
+            ):
+                raise _not_loaded(self)
+            super().__setattr__(name, value)
+
+        def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            """Dump the instance's fields to a dict, as Pydantic's `model_dump` does.
+
+            Args:
+                *args: Pydantic's positional `model_dump` options.
+                **kwargs: Pydantic's keyword `model_dump` options, such as
+                    `mode="json"` or `exclude`.
+
+            Returns:
+                The field values by name.
+
+            Raises:
+                InstanceNotLoaded: The instance is unloaded; load it with
+                    `.load()` first.
+            """
+            if _FERRO_UNLOADED_ATTR in self.__dict__:
+                raise _not_loaded(self)
+            return super().model_dump(*args, **kwargs)
+
+        def model_dump_json(self, *args: Any, **kwargs: Any) -> str:
+            """Dump the instance's fields to JSON, as Pydantic's `model_dump_json` does.
+
+            Args:
+                *args: Pydantic's positional `model_dump_json` options.
+                **kwargs: Pydantic's keyword `model_dump_json` options, such
+                    as `indent` or `exclude`.
+
+            Returns:
+                The JSON text.
+
+            Raises:
+                InstanceNotLoaded: The instance is unloaded; load it with
+                    `.load()` first.
+            """
+            if _FERRO_UNLOADED_ATTR in self.__dict__:
+                raise _not_loaded(self)
+            return super().model_dump_json(*args, **kwargs)
+
+    def __repr__(self) -> str:
+        if _FERRO_UNLOADED_ATTR in self.__dict__:
+            pk = type(self).__ferro_pk__
+            return f"{type(self).__name__}({pk}={self.__dict__[pk]!r}, unloaded)"
+        return super().__repr__()
 
     @model_validator(mode="after")
     def _validate_required_foreign_keys(self) -> Self:
@@ -469,6 +554,8 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                 `None`; `exclude=set()` writes every column.
 
         Raises:
+            InstanceNotLoaded: The instance is unloaded; load it with
+                `.load()` first.
             UniqueViolationError: An insert repeats a primary key or unique
                 value.
             ModelDoesNotExist: The row behind a saved instance no longer
@@ -509,6 +596,8 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             assert rows[0].views == 1000
             ```
         """
+        if _FERRO_UNLOADED_ATTR in self.__dict__:
+            raise _not_loaded(self)
         if on_conflict not in (None, "update"):
             raise ValueError(
                 f'on_conflict must be None or "update", got {on_conflict!r}'
@@ -735,8 +824,8 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                 opened by the enclosing `async with engines.session():`.
 
         Raises:
-            RuntimeError: The instance has no primary key value, or its row no
-                longer exists.
+            ModelDoesNotExist: The row no longer exists.
+            RuntimeError: The instance has no primary key value.
 
         Examples:
             ```python {test=run prelude=reference}
@@ -755,19 +844,59 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         name = self.__class__.__ferro_identity__
         route, identity_using = await _instance_transaction_route(self, using, session)
 
-        _core_evict_instance(name, str(pk_val), route)
+        # The session's object for this key is this instance, so the fetch
+        # refreshes it in place, applying the refresh rule a fetch applies; a
+        # row that is gone leaves it registered.
+        register_instance(name, str(pk_val), self, route)
         query = Query(self.__class__, using=route.connection_name).where(
             _field_eq(pk_field_name, pk_val)
         )
         fresh_instance = await query.first()
 
         if fresh_instance is None:
-            raise RuntimeError(f"Instance not found in database: {name}({pk_val})")
+            raise ModelDoesNotExist(self.__class__, pk_val)
 
-        self.__dict__.update(fresh_instance.__dict__)
-        register_instance(name, str(pk_val), self, route)
+        if fresh_instance is not self:
+            # No identity map: copy the row in, then apply the same rule.
+            self.__dict__.update(fresh_instance.__dict__)
+            self.__dict__.pop(_FERRO_UNLOADED_ATTR, None)
+            object.__setattr__(
+                self,
+                "__pydantic_fields_set__",
+                set(fresh_instance.__pydantic_fields_set__),
+            )
+            prune_stale_relations(self)
         _set_instance_origin(self, identity_using)
         _set_persisted(self, True)
+
+    async def load(self) -> Self:
+        """Fill an unloaded instance from its row, in place, and return it.
+
+        A forward relation nothing loaded reads as an unloaded instance that
+        holds only its primary key. `load()` reads the row through the
+        connection the instance came from and fills the same object, so every
+        reference to it sees the row. On a complete instance it sends no
+        statement. See
+        [Loaded relations](../guide/queries.md#populating-relations-with-include).
+
+        Returns:
+            The instance itself, now complete.
+
+        Raises:
+            ModelDoesNotExist: The row no longer exists.
+
+        Examples:
+            ```python {test=run prelude=reference}
+            async with engines.session():  # a session that holds no author yet
+                post = await Post.get(1)
+                author = await post.author.load()
+                assert author is post.author
+                assert author.name == "Ada Lovelace"
+            ```
+        """
+        if _FERRO_UNLOADED_ATTR in self.__dict__:
+            await self.refresh()
+        return self
 
     @classmethod
     def where(

@@ -199,16 +199,113 @@ pub fn hydrate_model_instance<'py>(
     converters.sort_in_declaration_order(&mut fields);
     apply_decoded_fields(py, cls, dict, &fields_set, fields, py_col_names, converters)?;
 
-    dict.set_item(
-        pyo3::intern!(py, "__ferro_connection_name"),
-        connection_name,
-    )?;
+    finish_persisted_instance(py, cls, &instance, dict, &fields_set, Some(connection_name))?;
+    Ok(instance)
+}
+
+/// Mark a freshly allocated instance as a row's and set its Pydantic slots:
+/// the tail every instance the hydrator builds shares, complete or unloaded.
+fn finish_persisted_instance<'py>(
+    py: Python<'py>,
+    cls: &Bound<'py, PyAny>,
+    instance: &Bound<'py, PyAny>,
+    dict: &Bound<'py, pyo3::types::PyDict>,
+    fields_set: &Bound<'py, pyo3::types::PySet>,
+    connection_name: Option<&str>,
+) -> PyResult<()> {
+    if let Some(connection_name) = connection_name {
+        dict.set_item(
+            pyo3::intern!(py, "__ferro_connection_name"),
+            connection_name,
+        )?;
+    }
     // Hydrated instances are persistent by definition: `Model.save()` reads
     // this marker to choose UPDATE ... WHERE pk = ? over INSERT (FF-A A4).
     dict.set_item(pyo3::intern!(py, "__ferro_persisted"), true)?;
+    init_handled_slots(py, cls, instance, fields_set)
+}
 
-    init_handled_slots(py, cls, &instance, &fields_set)?;
+/// The `__dict__` key marking an unloaded instance (ADR-0063). Its value is
+/// `(model, path, found_no_row)`: the model and relation path it was first
+/// read through (`("Player", "team")`), and whether an include looked for
+/// its row and found none. The refusals in `Model` read it; a refresh of the
+/// instance from a fetched row removes it.
+pub const UNLOADED_MARKER: &str = "__ferro_unloaded";
+
+/// Where an unloaded instance was first read, for its refusal message.
+pub struct UnloadedOrigin<'a> {
+    /// The model whose relation was read (`"Player"`).
+    pub model: &'a str,
+    /// The relation path from that model (`"team"`, `"account.owner"`).
+    pub path: &'a str,
+    /// Whether an include looked for the row and found none.
+    pub found_no_row: bool,
+}
+
+/// Build an unloaded instance: a real instance of `cls` holding only its
+/// primary key (ADR-0063, I-2).
+///
+/// Built as every hydrated instance is (`cls.__new__`, the key written into
+/// `__dict__`, the Pydantic slots set, the connection and persisted markers,
+/// since the key vouches for the row) plus [`UNLOADED_MARKER`].
+///
+/// # Errors
+/// `PyRuntimeError` when `cls` declares no primary key; any `PyErr` from
+/// allocation or slot assignment.
+pub fn hydrate_unloaded_instance<'py>(
+    py: Python<'py>,
+    cls: &Bound<'py, PyAny>,
+    connection_name: Option<&str>,
+    pk: &Bound<'py, PyAny>,
+    origin: &UnloadedOrigin<'_>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let pk_col: String = cls
+        .getattr(pyo3::intern!(py, "__ferro_pk__"))?
+        .extract::<Option<String>>()?
+        .ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "{}.{} points at a model with no primary key, so the relation \
+                 has no key to hold",
+                origin.model, origin.path
+            ))
+        })?;
+    let instance = cls.call_method1(pyo3::intern!(py, "__new__"), (cls,))?;
+    let dict_attr = instance.getattr(pyo3::intern!(py, "__dict__"))?;
+    let dict = dict_attr.cast::<pyo3::types::PyDict>()?;
+    let fields_set = pyo3::types::PySet::empty(py)?;
+    let pk_name = pyo3::types::PyString::new(py, &pk_col);
+    dict.set_item(&pk_name, pk)?;
+    fields_set.add(&pk_name)?;
+    finish_persisted_instance(py, cls, &instance, dict, &fields_set, connection_name)?;
+    mark_unloaded(py, &instance, origin)?;
     Ok(instance)
+}
+
+/// Whether `instance` is unloaded (carries [`UNLOADED_MARKER`]).
+///
+/// # Errors
+/// Any `PyErr` reading the instance's `__dict__`.
+pub fn is_unloaded(py: Python<'_>, instance: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let dict_attr = instance.getattr(pyo3::intern!(py, "__dict__"))?;
+    dict_attr
+        .cast::<pyo3::types::PyDict>()?
+        .contains(UNLOADED_MARKER)
+}
+
+/// Set or replace [`UNLOADED_MARKER`] on an unloaded instance.
+///
+/// # Errors
+/// Any `PyErr` writing the instance's `__dict__`.
+pub fn mark_unloaded(
+    py: Python<'_>,
+    instance: &Bound<'_, PyAny>,
+    origin: &UnloadedOrigin<'_>,
+) -> PyResult<()> {
+    let dict_attr = instance.getattr(pyo3::intern!(py, "__dict__"))?;
+    dict_attr.cast::<pyo3::types::PyDict>()?.set_item(
+        UNLOADED_MARKER,
+        (origin.model, origin.path, origin.found_no_row),
+    )
 }
 
 /// Hydrate a projected record (`Row`) from pre-decoded column values (#279).
@@ -355,6 +452,10 @@ pub fn refresh_model_instance<'py>(
     let fields_set = pyo3::types::PySet::empty(py)?;
     apply_decoded_fields(py, cls, dict, &fields_set, fields, py_col_names, converters)?;
     instance.setattr(pyo3::intern!(py, "__pydantic_fields_set__"), fields_set)?;
+    // A full row fills an unloaded instance in place: it is complete now.
+    if dict.contains(UNLOADED_MARKER)? {
+        dict.del_item(UNLOADED_MARKER)?;
+    }
     prune_stale_populations(py, cls, dict)?;
     Ok(())
 }
@@ -367,9 +468,10 @@ pub fn refresh_model_instance<'py>(
 /// freshly decoded shadow FK: the population survives iff the FK still
 /// equals the populated instance's primary key (a populated `None` survives
 /// iff the FK is still NULL) — so populations accumulate across a session's
-/// queries. An FK that changed or went NULL drops the entry: access reverts
-/// to the awaitable — never silently wrong, and never "repaired" from
-/// whatever the identity map happens to hold.
+/// queries. An unloaded instance cached under the relation follows the same
+/// rule. An FK that changed or went NULL drops the entry: the next read
+/// finds or builds the instance the new key names (ADR-0063) — never
+/// silently wrong.
 fn prune_stale_populations<'py>(
     py: Python<'py>,
     cls: &Bound<'py, PyAny>,
@@ -419,15 +521,31 @@ fn prune_stale_populations<'py>(
     Ok(())
 }
 
+/// Apply the refresh rule to an instance whose columns Python just replaced.
+///
+/// `Model.refresh()` without an identity map copies a fetched row into the
+/// instance it holds; this runs [`prune_stale_populations`] on it, the rule a
+/// fetch applies when it refreshes an instance in place, so the two agree.
+///
+/// # Errors
+/// Any `PyErr` reading the instance, its class's relation specs or a
+/// relation target's registration.
+#[pyfunction]
+pub fn prune_stale_relations(py: Python<'_>, instance: Bound<'_, PyAny>) -> PyResult<()> {
+    let dict_attr = instance.getattr(pyo3::intern!(py, "__dict__"))?;
+    let dict = dict_attr.cast::<pyo3::types::PyDict>()?;
+    prune_stale_populations(py, &instance.get_type().into_any(), dict)
+}
+
 /// Populate a forward-FK relation on a hydrated instance (#286, ADR-0008).
 ///
 /// The population contract: the relation field name enters the instance's
 /// `__dict__`, shadowing the class-level non-data `ForwardDescriptor`, so
 /// access is a plain attribute returning the complete related instance —
 /// no await, no query. `value: None` is a *populated* `None` (a nullable FK
-/// with no target): the key is present, so access returns `None` instead of
-/// the awaitable. An instance with no entry under the relation name keeps
-/// today's awaitable contract untouched.
+/// with no target). `value` may also be an unloaded instance, for an include
+/// whose key matched no row (ADR-0063). An instance with no entry under the
+/// relation name reads the relation through the descriptor on first access.
 pub fn set_populated_relation<'py>(
     py: Python<'py>,
     instance: &Bound<'py, PyAny>,

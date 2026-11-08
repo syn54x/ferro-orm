@@ -4,15 +4,15 @@
 materialization plan renders the include-only LEFT join and the widened,
 aliased SELECT, decodes every hop against the hop model's own codec plan, and
 populates the relation per the population contract — plain attribute access
-returning the complete instance, no await, no query — while unpopulated
-relations keep the awaitable contract unchanged. No SQL-string snapshots at
+returning the complete instance, no await, no query — while an unpopulated
+relation reads as an unloaded instance holding its key. No SQL-string snapshots at
 this layer (the rendered SELECT/edge-union pins live in the Rust walker unit
 tests). Covers membership preservation, the population contract, identity-map
 semantics (dedup, refresh-attach), sessionless freshness, typed-column parity
 vs a direct query, verb composition, and the include-vs-joins wire split.
 """
 
-import inspect
+import contextlib
 import json
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -207,18 +207,19 @@ async def test_include_preserves_membership_and_populates_null_fk_as_none(db_url
 
 
 @pytest.mark.asyncio
-async def test_unpopulated_relations_keep_the_awaitable_contract(db_url):
+async def test_an_unpopulated_relation_reads_as_an_unloaded_instance(db_url):
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
-        await _seed_core()
+        seeded = await _seed_core()
+        del seeded  # the session holds no account: the first read builds one
 
         txn = await INTransaction.select().where(lambda t: t.id == 1).first()
         assert txn is not None
 
-        pending = txn.account
-        assert inspect.iscoroutine(pending), "unpopulated access stays awaitable"
-        account = await pending
-        assert isinstance(account, INAccount) and account.label == "a1"
+        account = txn.account
+        assert isinstance(account, INAccount) and account.id == txn.account_id
+        assert repr(account) == "INAccount(id=1, unloaded)"
+        assert await account.load() is account and account.label == "a1"
 
 
 # ---------------------------------------------------------------------------
@@ -686,12 +687,39 @@ async def test_refresh_drops_population_when_the_fk_changed(db_url):
         again = await INTransaction.get(1)
         assert again is txn
 
-        # The population would lie now — it was dropped, so access reverts
-        # to the awaitable and resolves to the CURRENT row.
-        pending = txn.account
-        assert inspect.iscoroutine(pending)
-        fresh = await pending
-        assert fresh.id == 2
+        # The population would lie now — it was dropped, so the relation
+        # reads as the account the new key names, and loads the CURRENT row.
+        current = txn.account
+        assert isinstance(current, INAccount) and current.id == 2
+        assert (await txn.account.load()).label == "a2"
+
+
+@pytest.mark.parametrize("session", [True, False], ids=["session", "sessionless"])
+@pytest.mark.asyncio
+async def test_model_refresh_drops_a_relation_whose_fk_changed(db_url, session):
+    """`refresh()` applies the same rule as a refetch: a relation read under
+    the old key is dropped, so the relation reads the account the key names."""
+    await ferro.connect(db_url, auto_migrate=True)
+    async with ferro.engines.session():
+        await _seed_core()
+    scope = ferro.engines.session() if session else contextlib.nullcontext()
+    async with scope:
+        query = INTransaction.select() if session else INTransaction.using("default")
+        txn = await query.where(lambda t: t.id == 1).first()
+        assert txn.account.id == 1  # read, and cached, under the old key
+
+        await execute(
+            f"UPDATE intransaction SET account_id = {_ph(db_url, 1)} "
+            f"WHERE id = {_ph(db_url, 2)}",
+            2,
+            1,
+            using="default",
+        )
+        await txn.refresh()
+
+        assert txn.account_id == 2
+        assert txn.account.id == 2
+        assert (await txn.account.load()).label == "a2"
 
 
 @pytest.mark.asyncio
@@ -715,9 +743,8 @@ async def test_refresh_drops_population_when_the_fk_went_null(db_url):
         again = await INTransaction.get(1)
         assert again is txn
 
-        pending = txn.account
-        assert inspect.iscoroutine(pending), "population dropped on NULLed FK"
-        assert await pending is None
+        assert "account" not in vars(txn), "population dropped on NULLed FK"
+        assert txn.account is None
 
 
 @pytest.mark.asyncio
