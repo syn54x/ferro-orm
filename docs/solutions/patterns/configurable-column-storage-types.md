@@ -57,9 +57,11 @@ class Doc(Model):
   path already enforces values, so `db_check=True` without `db_type` is a
   `TypeError`).
 
-Both kwargs flow through the same `FERRO_FIELD_EXTRA_KEY` plumbing as
-`primary_key` / `unique` / `index` and land on `properties[col]` in
-`__ferro_schema__`. Both emitters read them from the same JSON.
+Both options ride in the field's `FerroField`, beside `primary_key`,
+`unique` and `index`: `Field()` appends it to the field's metadata, never
+its JSON schema (ADR-0061), and the metaclass collects it into
+`Model.__ferro_fields__`. The column compiler reads them from there into the
+column spec, and both emitters read the same SchemaIR column.
 
 ## Canonical vocabulary
 
