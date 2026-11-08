@@ -210,7 +210,7 @@ async def run_demo():
         "Atomic Transaction",
         "async with transaction():\n"
         '    new_cat = await Category.create(name="Gaming")\n'
-        '    await Product.create(name="RTX 5090", category=new_cat, ...)',
+        '    await Product.create(name="RTX 5090", category_id=new_cat.id, ...)',
     )
 
     async with transaction():
