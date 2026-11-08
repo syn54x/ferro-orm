@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import fn as _fn
-from .base import ForeignKey
+from .base import ForeignKey, ForwardRelation
 from .query.nodes import (
     FieldProxy,
     Predicate,
@@ -361,9 +361,12 @@ def _relation_shadow_columns(
     for field_name, meta in (
         getattr(model_cls, "__ferro_relations__", {}) or {}
     ).items():
-        if not isinstance(meta, ForeignKey):
+        if isinstance(meta, ForwardRelation):
+            shadow = meta.fk_column
+        elif isinstance(meta, ForeignKey):
+            shadow = f"{field_name}_id"
+        else:
             continue
-        shadow = f"{field_name}_id"
         if shadow in columns:
             relations[field_name] = shadow
     return relations
@@ -376,7 +379,7 @@ def _reverse_relation_names(model_cls: type[Any]) -> frozenset[str]:
         for field_name, meta in (
             getattr(model_cls, "__ferro_relations__", {}) or {}
         ).items()
-        if not isinstance(meta, ForeignKey)
+        if not isinstance(meta, (ForeignKey, ForwardRelation))
     )
 
 

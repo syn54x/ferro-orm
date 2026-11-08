@@ -36,7 +36,7 @@ from ._annotation_utils import (
     _strip_optional_and_annotated,
 )
 from ._shadow_fk_types import _scalar_part_of_annotation
-from .base import FerroField, ForeignKey, foreign_key_allows_none
+from .base import FerroField, ForeignKey, ForwardRelation, foreign_key_allows_none
 
 __all__ = [
     "ColumnSpec",
@@ -109,17 +109,18 @@ class RelationSpec:
     (`compile_model_schema_ir`) and exposed as
     `cls.__ferro_relation_specs__`. Relation-traversal query planning
     resolves an attribute access like `post.author` to its target model and
-    shadow foreign-key column through this lookup, hop by hop.
+    foreign-key column through this lookup, hop by hop.
     """
 
     field_name: str
     """The relation field's name on the declaring model."""
     target: type
     """The model the relation points at."""
-    shadow_column: str
-    """The `<field>_id` column holding the target's primary key."""
+    fk_column: str
+    """The foreign-key column holding the target's primary key: the one
+    `Forward` names, or `<field>_id` for a `ForeignKey`."""
     nullable: bool
-    """Whether the shadow column is nullable."""
+    """Whether the foreign-key column is nullable."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -529,7 +530,14 @@ def build_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
         else:
             unique = bool(declared.unique)
             index = bool(declared.index)
-            fk_ref = None
+            fk_ref = (
+                ForeignKeyRef(
+                    to_table=_target_table_name(declared.foreign_key),
+                    on_delete=declared.on_delete,
+                )
+                if declared.foreign_key is not None
+                else None
+            )
             fk_nullable = None
 
         explicit_nullable = (
@@ -652,20 +660,23 @@ def build_relation_specs(
     declared_relations = getattr(model_cls, "__ferro_relations__", {}) or {}
     specs: dict[str, RelationSpec] = {}
     for field_name, meta in declared_relations.items():
-        if not isinstance(meta, ForeignKey):
+        if isinstance(meta, ForwardRelation):
+            fk_column = meta.fk_column
+        elif isinstance(meta, ForeignKey):
+            fk_column = f"{field_name}_id"
+        else:
             continue
         target = meta.to
         if not isinstance(target, type):
             continue
-        shadow_column = f"{field_name}_id"
-        shadow_spec = columns.get(shadow_column)
-        if shadow_spec is None:
+        fk_spec = columns.get(fk_column)
+        if fk_spec is None:
             continue
         specs[field_name] = RelationSpec(
             field_name=field_name,
             target=target,
-            shadow_column=shadow_column,
-            nullable=shadow_spec.nullable,
+            fk_column=fk_column,
+            nullable=fk_spec.nullable,
         )
     return specs
 
@@ -723,10 +734,7 @@ def build_reverse_specs(model_cls: type[Any]) -> dict[str, ReverseSpec]:
             specs[name] = ReverseSpec(
                 field_name=name,
                 target=target,
-                # The child FK field is the descriptor's `field_name`; its
-                # shadow column follows the single `{field}_id` convention
-                # (same derivation as build_relation_specs).
-                child_fk_column=f"{attr.field_name}_id",
+                child_fk_column=attr.fk_column,
                 is_one_to_one=attr.is_one_to_one,
             )
     return specs

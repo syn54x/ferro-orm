@@ -1,7 +1,9 @@
 """Field and relation options that model annotations carry.
 
-[`FerroField`][ferro.FerroField] holds a column's database options and
-[`ForeignKey`][ferro.ForeignKey] the owning side of a relation.
+[`FerroField`][ferro.FerroField] holds a column's database options,
+[`ForeignKey`][ferro.ForeignKey] the owning side of a relation, and
+`ForwardRelation` and `ReverseRelation` what
+[`Forward`][ferro.Forward] and [`Reverse`][ferro.Reverse] declare.
 """
 
 import warnings
@@ -48,6 +50,12 @@ DbType = DbTypeToken | str
 
 Build the `varchar(N)` form with [`varchar`][ferro.varchar].
 """
+
+
+OnDelete = Literal["CASCADE", "RESTRICT", "SET NULL", "SET DEFAULT", "NO ACTION"]
+"""What the database does to a row when the row its foreign key points at is deleted."""
+
+_ON_DELETE_ACTIONS = ("CASCADE", "RESTRICT", "SET NULL", "SET DEFAULT", "NO ACTION")
 
 
 def varchar(length: int) -> str:
@@ -112,6 +120,28 @@ def _validate_generated(generated: Any, owner: str) -> Any:
     )
 
 
+def _validate_foreign_key(foreign_key: Any, owner: str) -> Any:
+    """Validate ``foreign_key``: a model class, its class name, or ``None``."""
+    if foreign_key is None or isinstance(foreign_key, type):
+        return foreign_key
+    if isinstance(foreign_key, str) and foreign_key:
+        return foreign_key
+    raise TypeError(
+        f"{owner} foreign_key must be a model class or its class name, not "
+        f"{type(foreign_key).__name__}"
+    )
+
+
+def _validate_on_delete(on_delete: Any, owner: str) -> Any:
+    """Validate ``on_delete``: one of the five referential actions, or ``None``."""
+    if on_delete is None or on_delete in _ON_DELETE_ACTIONS:
+        return on_delete
+    raise TypeError(
+        f"{owner} on_delete must be one of "
+        f"{', '.join(repr(action) for action in _ON_DELETE_ACTIONS)}, not {on_delete!r}"
+    )
+
+
 class FerroField:
     """Database options for one model field, given inside `Annotated[...]`.
 
@@ -153,6 +183,8 @@ class FerroField:
         renamed_from: str | None = None,
         retired: bool = False,
         generated: Any = None,
+        foreign_key: "type | str | None" = None,
+        on_delete: OnDelete | None = None,
     ):
         """Declare the database options for a field.
 
@@ -188,10 +220,17 @@ class FerroField:
                 database computes the column on every write. Defaults to
                 `None`, a plain column. Give the field a `None` default
                 beside it, as [`Field`][ferro.Field] does for you.
+            foreign_key: The model whose primary key the column holds: the
+                class, or its class name for a self reference or a model
+                defined later. Defaults to `None`, a plain column.
+            on_delete: What the database does to this row when the row the
+                key points at is deleted: `"CASCADE"`, `"RESTRICT"`,
+                `"SET NULL"`, `"SET DEFAULT"` or `"NO ACTION"`. Defaults to
+                `None`, which is `"CASCADE"` on a foreign-key column.
 
         Raises:
-            TypeError: `nullable`, `renamed_from`, `retired` or `generated`
-                has a value of the wrong type.
+            TypeError: `nullable`, `renamed_from`, `retired`, `generated`,
+                `foreign_key` or `on_delete` has a value of the wrong type.
         """
         self.primary_key = primary_key
         """Whether the column is the table's primary key."""
@@ -213,6 +252,16 @@ class FerroField:
         """Whether the column is retired from the model."""
         self.generated = _validate_generated(generated, "FerroField")
         """The lambda the database computes the column from, or `None`."""
+        self.foreign_key = _validate_foreign_key(foreign_key, "FerroField")
+        """The model the column's key points at, its class name, or `None`."""
+        on_delete = _validate_on_delete(on_delete, "FerroField")
+        self.on_delete: str | None = (
+            "CASCADE" if on_delete is None and foreign_key is not None else on_delete
+        )
+        """The referential action on a foreign-key column, or `None` when unset.
+
+        A foreign-key column declared without one holds `"CASCADE"`.
+        """
 
 
 class ForeignKey:
@@ -350,6 +399,84 @@ def foreign_key_allows_none(metadata: "ForeignKey") -> bool | None:
     if relation_annotation is None:
         return None
     return annotation_allows_none(relation_annotation)
+
+
+class ForwardRelation:
+    """A forward relation over a foreign-key column of its own model.
+
+    [`Forward`][ferro.Forward] declares it; the class keeps it in
+    `__ferro_relations__`.
+    """
+
+    def __init__(
+        self,
+        fk_column: str,
+        to: Any,
+        nullable: bool,
+        refusal: str | None = None,
+        bound: frozenset[str] | None = None,
+    ) -> None:
+        """Store what the declaration says.
+
+        Args:
+            fk_column: The foreign-key column the relation reads.
+            to: The model in the relation's annotation, or its name until
+                Ferro resolves it; `None` when the annotation names none.
+            nullable: Whether the annotation allows `None`.
+            refusal: Why the declaration is refused, when the class body
+                cannot name the target its fix writes; relation resolution
+                raises it with the target named. Defaults to `None`.
+            bound: The names defined where the relation was declared, so a
+                refusal quotes a target declared later; `None` under
+                postponed annotations, where no target needs quotes.
+        """
+        self.fk_column = fk_column
+        """The foreign-key column the relation reads."""
+        self.to = to
+        """The target model class, or its name until Ferro resolves it."""
+        self.nullable = nullable
+        """Whether the relation's annotation allows `None`."""
+        self.refusal = refusal
+        """A refusal waiting for resolution to name its target, or `None`."""
+        self.bound = bound
+        """The names defined where the relation was declared, or `None`."""
+
+
+class ReverseRelation:
+    """A reverse relation over a foreign-key column of another model.
+
+    [`Reverse`][ferro.Reverse] declares it; the class keeps it in
+    `__ferro_relations__`.
+    """
+
+    def __init__(
+        self,
+        attribute: str,
+        to: Any,
+        refusal: str | None = None,
+        bound: frozenset[str] | None = None,
+    ) -> None:
+        """Store what the declaration says.
+
+        Args:
+            attribute: The foreign-key column on the model `to`.
+            to: The model in the relation's annotation, or its name until
+                Ferro resolves it; `None` when the annotation names none.
+            refusal: Why the declaration is refused, when the class body
+                cannot name the model its fix writes; relation resolution
+                raises it with the model named. Defaults to `None`.
+            bound: The names defined where the relation was declared, so a
+                refusal quotes a model declared later; `None` under
+                postponed annotations, where no model needs quotes.
+        """
+        self.attribute = attribute
+        """The foreign-key column on the other model that points back."""
+        self.to = to
+        """The other model's class, or its name until Ferro resolves it."""
+        self.refusal = refusal
+        """A refusal waiting for resolution to name its model, or `None`."""
+        self.bound = bound
+        """The names defined where the relation was declared, or `None`."""
 
 
 class ManyToManyRelation:

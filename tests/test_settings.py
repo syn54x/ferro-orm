@@ -1163,6 +1163,49 @@ def test_a_foreign_key_across_two_databases_is_refused_naming_both(
         settings.database_for(gizmo)
 
 
+@pytest.mark.parametrize("target", ["SettingsTeam", '"SettingsTeam"'])
+def test_a_foreign_key_column_across_two_databases_is_refused_naming_both(
+    project: Path, pkg: str, isolated_imports, clean_registry, target
+):
+    # The column names its target as the class or, never importing `b`, by name.
+    _package(
+        project,
+        f"{pkg}.b",
+        """
+        from ferro import Field, Model
+
+        class SettingsTeam(Model):
+            id: int | None = Field(default=None, primary_key=True)
+        """,
+    )
+    _package(
+        project,
+        f"{pkg}.a",
+        f"""
+        from ferro import Field, Forward, Model, Relation
+        {f"from {pkg}.b import SettingsTeam" if target == "SettingsTeam" else ""}
+
+        class SettingsPlayer(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            team_id: int = Field(foreign_key={target})
+            team: Relation["SettingsTeam"] = Forward("team_id")
+        """,
+    )
+    _two_databases(project, pkg)
+    settings = FerroSettings()
+
+    with pytest.raises(SettingsError) as exc:
+        settings.database("a").import_models()
+
+    message = str(exc.value)
+    assert f"{pkg}.a.SettingsPlayer.team_id in database `a` is a foreign key" in message
+    assert "`b`" in message and "SettingsTeam" in message
+
+    player = sys.modules[f"{pkg}.a"].SettingsPlayer
+    with pytest.raises(SettingsError):
+        settings.database_for(player)
+
+
 def test_a_forward_reference_foreign_key_across_two_databases_is_refused_naming_both(
     project: Path, pkg: str, isolated_imports, clean_registry
 ):

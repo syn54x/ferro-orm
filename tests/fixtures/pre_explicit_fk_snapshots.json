@@ -1,0 +1,1656 @@
+{
+  "B2-drop-a-model/before": {
+    "dialect_agnostic": true,
+    "models": [
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "string",
+            "name": "name",
+            "nullable": false,
+            "primary_key": false,
+            "unique": true
+          },
+          {
+            "autoincrement": false,
+            "default": "draft",
+            "enum_type_name": "status",
+            "enum_values": [
+              "draft",
+              "live"
+            ],
+            "format": null,
+            "index": false,
+            "logical_type": "string",
+            "name": "status",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [],
+        "indexes": [],
+        "model_name": "ferro_p876_0.models.Author",
+        "table_name": "author",
+        "uniques": [
+          {
+            "columns": [
+              "name"
+            ],
+            "name": "uq_author_name"
+          }
+        ]
+      },
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "author_id",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          },
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": "note",
+            "enum_type_name": "kind",
+            "enum_values": [
+              "note",
+              "essay"
+            ],
+            "format": null,
+            "index": false,
+            "logical_type": "string",
+            "name": "kind",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": true,
+            "logical_type": "string",
+            "name": "title",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [
+          {
+            "column": "author_id",
+            "name": "fk_post_author_id_author",
+            "on_delete": "CASCADE",
+            "to_column": "id",
+            "to_table": "author"
+          }
+        ],
+        "indexes": [
+          {
+            "columns": [
+              "title"
+            ],
+            "name": "idx_post_title",
+            "unique": false
+          }
+        ],
+        "model_name": "ferro_p876_0.models.Post",
+        "table_name": "post",
+        "uniques": []
+      }
+    ]
+  },
+  "B3-rename-a-model/after": {
+    "dialect_agnostic": true,
+    "models": [
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "string",
+            "name": "name",
+            "nullable": false,
+            "primary_key": false,
+            "unique": true
+          }
+        ],
+        "foreign_keys": [],
+        "indexes": [],
+        "model_name": "ferro_p876_0.models.Author",
+        "renamed_from": "writer",
+        "row_security": {
+          "force": true,
+          "policies": [
+            {
+              "command": "all",
+              "expr": {
+                "column": "id",
+                "kind": "setting",
+                "setting": "app.writer_id"
+              },
+              "name": "rls_author_id",
+              "restrictive": false
+            }
+          ]
+        },
+        "table_checks": [
+          {
+            "name": "ck_author_named",
+            "predicate": {
+              "column": "name",
+              "kind": "is_not_null"
+            }
+          }
+        ],
+        "table_name": "author",
+        "uniques": [
+          {
+            "columns": [
+              "name"
+            ],
+            "name": "uq_author_name"
+          }
+        ]
+      },
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "string",
+            "name": "title",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "writer_id",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [
+          {
+            "column": "writer_id",
+            "name": "fk_book_writer_id_author",
+            "on_delete": "CASCADE",
+            "to_column": "id",
+            "to_table": "author"
+          }
+        ],
+        "indexes": [],
+        "model_name": "ferro_p876_0.models.Book",
+        "table_name": "book",
+        "uniques": []
+      },
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "string",
+            "name": "label",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [],
+        "indexes": [],
+        "model_name": "ferro_p876_0.models.Tag",
+        "table_name": "tag",
+        "uniques": []
+      },
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "author_id",
+            "nullable": false,
+            "primary_key": false,
+            "renamed_from": "writer_id",
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "tag_id",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [
+          {
+            "column": "author_id",
+            "name": "fk_author_tags_author_id_author",
+            "on_delete": "CASCADE",
+            "to_column": "id",
+            "to_table": "author"
+          },
+          {
+            "column": "tag_id",
+            "name": "fk_author_tags_tag_id_tag",
+            "on_delete": "CASCADE",
+            "to_column": "id",
+            "to_table": "tag"
+          }
+        ],
+        "indexes": [
+          {
+            "columns": [
+              "tag_id",
+              "author_id"
+            ],
+            "name": "idx_author_tags_tag_id_author_id",
+            "unique": false
+          }
+        ],
+        "model_name": "author_tags",
+        "renamed_from": "writer_tags",
+        "table_name": "author_tags",
+        "uniques": [
+          {
+            "columns": [
+              "author_id",
+              "tag_id"
+            ],
+            "name": "uq_author_tags_author_id_tag_id"
+          }
+        ]
+      }
+    ]
+  },
+  "B3-rename-a-model/before": {
+    "dialect_agnostic": true,
+    "models": [
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "string",
+            "name": "title",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "writer_id",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [
+          {
+            "column": "writer_id",
+            "name": "fk_book_writer_id_writer",
+            "on_delete": "CASCADE",
+            "to_column": "id",
+            "to_table": "writer"
+          }
+        ],
+        "indexes": [],
+        "model_name": "ferro_p876_0.models.Book",
+        "table_name": "book",
+        "uniques": []
+      },
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "string",
+            "name": "label",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [],
+        "indexes": [],
+        "model_name": "ferro_p876_0.models.Tag",
+        "table_name": "tag",
+        "uniques": []
+      },
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "string",
+            "name": "name",
+            "nullable": false,
+            "primary_key": false,
+            "unique": true
+          }
+        ],
+        "foreign_keys": [],
+        "indexes": [],
+        "model_name": "ferro_p876_0.models.Writer",
+        "row_security": {
+          "force": true,
+          "policies": [
+            {
+              "command": "all",
+              "expr": {
+                "column": "id",
+                "kind": "setting",
+                "setting": "app.writer_id"
+              },
+              "name": "rls_writer_id",
+              "restrictive": false
+            }
+          ]
+        },
+        "table_checks": [
+          {
+            "name": "ck_writer_named",
+            "predicate": {
+              "column": "name",
+              "kind": "is_not_null"
+            }
+          }
+        ],
+        "table_name": "writer",
+        "uniques": [
+          {
+            "columns": [
+              "name"
+            ],
+            "name": "uq_writer_name"
+          }
+        ]
+      },
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "tag_id",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "writer_id",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [
+          {
+            "column": "tag_id",
+            "name": "fk_writer_tags_tag_id_tag",
+            "on_delete": "CASCADE",
+            "to_column": "id",
+            "to_table": "tag"
+          },
+          {
+            "column": "writer_id",
+            "name": "fk_writer_tags_writer_id_writer",
+            "on_delete": "CASCADE",
+            "to_column": "id",
+            "to_table": "writer"
+          }
+        ],
+        "indexes": [
+          {
+            "columns": [
+              "tag_id",
+              "writer_id"
+            ],
+            "name": "idx_writer_tags_tag_id_writer_id",
+            "unique": false
+          }
+        ],
+        "model_name": "writer_tags",
+        "table_name": "writer_tags",
+        "uniques": [
+          {
+            "columns": [
+              "writer_id",
+              "tag_id"
+            ],
+            "name": "uq_writer_tags_writer_id_tag_id"
+          }
+        ]
+      }
+    ]
+  },
+  "C1-add-a-required-foreign-key/after": {
+    "dialect_agnostic": true,
+    "models": [
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "string",
+            "name": "name",
+            "nullable": false,
+            "primary_key": false,
+            "unique": true
+          },
+          {
+            "autoincrement": false,
+            "default": "draft",
+            "enum_type_name": "status",
+            "enum_values": [
+              "draft",
+              "live"
+            ],
+            "format": null,
+            "index": false,
+            "logical_type": "string",
+            "name": "status",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "team_id",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [
+          {
+            "column": "team_id",
+            "name": "fk_author_team_id_team",
+            "on_delete": "CASCADE",
+            "to_column": "id",
+            "to_table": "team"
+          }
+        ],
+        "indexes": [],
+        "model_name": "ferro_p876_0.models.Author",
+        "table_name": "author",
+        "uniques": [
+          {
+            "columns": [
+              "name"
+            ],
+            "name": "uq_author_name"
+          }
+        ]
+      },
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "string",
+            "name": "label",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [],
+        "indexes": [],
+        "model_name": "ferro_p876_0.models.Team",
+        "table_name": "team",
+        "uniques": []
+      }
+    ]
+  },
+  "C1-add-an-optional-foreign-key/after": {
+    "dialect_agnostic": true,
+    "models": [
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "string",
+            "name": "name",
+            "nullable": false,
+            "primary_key": false,
+            "unique": true
+          },
+          {
+            "autoincrement": false,
+            "default": "draft",
+            "enum_type_name": "status",
+            "enum_values": [
+              "draft",
+              "live"
+            ],
+            "format": null,
+            "index": false,
+            "logical_type": "string",
+            "name": "status",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "team_id",
+            "nullable": true,
+            "primary_key": false,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [
+          {
+            "column": "team_id",
+            "name": "fk_author_team_id_team",
+            "on_delete": "SET NULL",
+            "to_column": "id",
+            "to_table": "team"
+          }
+        ],
+        "indexes": [],
+        "model_name": "ferro_p876_0.models.Author",
+        "table_name": "author",
+        "uniques": [
+          {
+            "columns": [
+              "name"
+            ],
+            "name": "uq_author_name"
+          }
+        ]
+      },
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "string",
+            "name": "label",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [],
+        "indexes": [],
+        "model_name": "ferro_p876_0.models.Team",
+        "table_name": "team",
+        "uniques": []
+      }
+    ]
+  },
+  "C2-drop-a-foreign-key-column/before": {
+    "dialect_agnostic": true,
+    "models": [
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "string",
+            "name": "name",
+            "nullable": false,
+            "primary_key": false,
+            "unique": true
+          },
+          {
+            "autoincrement": false,
+            "default": "draft",
+            "enum_type_name": "status",
+            "enum_values": [
+              "draft",
+              "live"
+            ],
+            "format": null,
+            "index": false,
+            "logical_type": "string",
+            "name": "status",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "team_id",
+            "nullable": true,
+            "primary_key": false,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [
+          {
+            "column": "team_id",
+            "name": "fk_author_team_id_team",
+            "on_delete": "SET NULL",
+            "to_column": "id",
+            "to_table": "team"
+          }
+        ],
+        "indexes": [],
+        "model_name": "ferro_p876_0.models.Author",
+        "table_name": "author",
+        "uniques": [
+          {
+            "columns": [
+              "name"
+            ],
+            "name": "uq_author_name"
+          }
+        ]
+      },
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "string",
+            "name": "label",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [],
+        "indexes": [],
+        "model_name": "ferro_p876_0.models.Club",
+        "table_name": "club",
+        "uniques": []
+      },
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "string",
+            "name": "label",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [],
+        "indexes": [],
+        "model_name": "ferro_p876_0.models.Team",
+        "table_name": "team",
+        "uniques": []
+      }
+    ]
+  },
+  "C3-retarget-a-foreign-key/after": {
+    "dialect_agnostic": true,
+    "models": [
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "string",
+            "name": "name",
+            "nullable": false,
+            "primary_key": false,
+            "unique": true
+          },
+          {
+            "autoincrement": false,
+            "default": "draft",
+            "enum_type_name": "status",
+            "enum_values": [
+              "draft",
+              "live"
+            ],
+            "format": null,
+            "index": false,
+            "logical_type": "string",
+            "name": "status",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "team_id",
+            "nullable": true,
+            "primary_key": false,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [
+          {
+            "column": "team_id",
+            "name": "fk_author_team_id_club",
+            "on_delete": "SET NULL",
+            "to_column": "id",
+            "to_table": "club"
+          }
+        ],
+        "indexes": [],
+        "model_name": "ferro_p876_0.models.Author",
+        "table_name": "author",
+        "uniques": [
+          {
+            "columns": [
+              "name"
+            ],
+            "name": "uq_author_name"
+          }
+        ]
+      },
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "string",
+            "name": "label",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [],
+        "indexes": [],
+        "model_name": "ferro_p876_0.models.Club",
+        "table_name": "club",
+        "uniques": []
+      },
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "string",
+            "name": "label",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [],
+        "indexes": [],
+        "model_name": "ferro_p876_0.models.Team",
+        "table_name": "team",
+        "uniques": []
+      }
+    ]
+  },
+  "C3-retarget-a-foreign-key/before": {
+    "dialect_agnostic": true,
+    "models": [
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "string",
+            "name": "name",
+            "nullable": false,
+            "primary_key": false,
+            "unique": true
+          },
+          {
+            "autoincrement": false,
+            "default": "draft",
+            "enum_type_name": "status",
+            "enum_values": [
+              "draft",
+              "live"
+            ],
+            "format": null,
+            "index": false,
+            "logical_type": "string",
+            "name": "status",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "team_id",
+            "nullable": true,
+            "primary_key": false,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [
+          {
+            "column": "team_id",
+            "name": "fk_author_team_id_team",
+            "on_delete": "SET NULL",
+            "to_column": "id",
+            "to_table": "team"
+          }
+        ],
+        "indexes": [],
+        "model_name": "ferro_p876_0.models.Author",
+        "table_name": "author",
+        "uniques": [
+          {
+            "columns": [
+              "name"
+            ],
+            "name": "uq_author_name"
+          }
+        ]
+      },
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "string",
+            "name": "label",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [],
+        "indexes": [],
+        "model_name": "ferro_p876_0.models.Club",
+        "table_name": "club",
+        "uniques": []
+      },
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "string",
+            "name": "label",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [],
+        "indexes": [],
+        "model_name": "ferro_p876_0.models.Team",
+        "table_name": "team",
+        "uniques": []
+      }
+    ]
+  },
+  "C4-drop-a-foreign-key-keep-its-column/before": {
+    "dialect_agnostic": true,
+    "models": [
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "string",
+            "name": "name",
+            "nullable": false,
+            "primary_key": false,
+            "unique": true
+          },
+          {
+            "autoincrement": false,
+            "default": "draft",
+            "enum_type_name": "status",
+            "enum_values": [
+              "draft",
+              "live"
+            ],
+            "format": null,
+            "index": false,
+            "logical_type": "string",
+            "name": "status",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "team_id",
+            "nullable": true,
+            "primary_key": false,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [
+          {
+            "column": "team_id",
+            "name": "fk_author_team_id_team",
+            "on_delete": "SET NULL",
+            "to_column": "id",
+            "to_table": "team"
+          }
+        ],
+        "indexes": [],
+        "model_name": "ferro_p876_0.models.Author",
+        "table_name": "author",
+        "uniques": [
+          {
+            "columns": [
+              "name"
+            ],
+            "name": "uq_author_name"
+          }
+        ]
+      },
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "string",
+            "name": "label",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [],
+        "indexes": [],
+        "model_name": "ferro_p876_0.models.Club",
+        "table_name": "club",
+        "uniques": []
+      },
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "string",
+            "name": "label",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [],
+        "indexes": [],
+        "model_name": "ferro_p876_0.models.Team",
+        "table_name": "team",
+        "uniques": []
+      }
+    ]
+  },
+  "F1-several-models-at-once/after": {
+    "dialect_agnostic": true,
+    "models": [
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "string",
+            "name": "bio",
+            "nullable": true,
+            "primary_key": false,
+            "unique": false
+          },
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "string",
+            "name": "name",
+            "nullable": false,
+            "primary_key": false,
+            "unique": true
+          },
+          {
+            "autoincrement": false,
+            "default": "draft",
+            "enum_type_name": "status",
+            "enum_values": [
+              "draft",
+              "live"
+            ],
+            "format": null,
+            "index": false,
+            "logical_type": "string",
+            "name": "status",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [],
+        "indexes": [],
+        "model_name": "ferro_p876_0.models.Author",
+        "table_name": "author",
+        "uniques": [
+          {
+            "columns": [
+              "name"
+            ],
+            "name": "uq_author_name"
+          }
+        ]
+      },
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "author_id",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          },
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": "note",
+            "enum_type_name": "kind",
+            "enum_values": [
+              "note",
+              "essay"
+            ],
+            "format": null,
+            "index": false,
+            "logical_type": "string",
+            "name": "kind",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "string",
+            "name": "subtitle",
+            "nullable": true,
+            "primary_key": false,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": true,
+            "logical_type": "string",
+            "name": "title",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [
+          {
+            "column": "author_id",
+            "name": "fk_post_author_id_author",
+            "on_delete": "CASCADE",
+            "to_column": "id",
+            "to_table": "author"
+          }
+        ],
+        "indexes": [
+          {
+            "columns": [
+              "title"
+            ],
+            "name": "idx_post_title",
+            "unique": false
+          }
+        ],
+        "model_name": "ferro_p876_0.models.Post",
+        "table_name": "post",
+        "uniques": []
+      }
+    ]
+  },
+  "F1-several-models-at-once/before": {
+    "dialect_agnostic": true,
+    "models": [
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "string",
+            "name": "name",
+            "nullable": false,
+            "primary_key": false,
+            "unique": true
+          },
+          {
+            "autoincrement": false,
+            "default": "draft",
+            "enum_type_name": "status",
+            "enum_values": [
+              "draft",
+              "live"
+            ],
+            "format": null,
+            "index": false,
+            "logical_type": "string",
+            "name": "status",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [],
+        "indexes": [],
+        "model_name": "ferro_p876_0.models.Author",
+        "table_name": "author",
+        "uniques": [
+          {
+            "columns": [
+              "name"
+            ],
+            "name": "uq_author_name"
+          }
+        ]
+      },
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "author_id",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          },
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": "note",
+            "enum_type_name": "kind",
+            "enum_values": [
+              "note",
+              "essay"
+            ],
+            "format": null,
+            "index": false,
+            "logical_type": "string",
+            "name": "kind",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": true,
+            "logical_type": "string",
+            "name": "title",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [
+          {
+            "column": "author_id",
+            "name": "fk_post_author_id_author",
+            "on_delete": "CASCADE",
+            "to_column": "id",
+            "to_table": "author"
+          }
+        ],
+        "indexes": [
+          {
+            "columns": [
+              "title"
+            ],
+            "name": "idx_post_title",
+            "unique": false
+          }
+        ],
+        "model_name": "ferro_p876_0.models.Post",
+        "table_name": "post",
+        "uniques": []
+      }
+    ]
+  }
+}
