@@ -69,8 +69,12 @@ The invariant that filtering and ordering never change what a query returns — 
 _Avoid_: Implicit projection, row narrowing
 
 **Complete-instance invariant**:
-A model instance always carries a complete row — there is no such thing as a partial or deferred-field model instance, anywhere. Anything narrower than a full row (a column subset, an aggregate) comes back as a projected record, never as the model type.
+A model instance is complete or unloaded, never anything between. A complete instance carries its whole row. An unloaded instance stands behind a forward relation nothing has loaded, holds only its primary key, and refuses every other column until `include()` or `.load()` fills it in place. Anything narrower than a row (a column subset, an aggregate) is a projected record, never the model type.
 _Avoid_: Partial instance, deferred field, lightweight model, .only()
+
+**Unloaded instance**:
+The instance a forward relation reads as before anything loads it: a real instance of the target model holding only its primary key, shared with the session's identity map, filled in place by `include()`, `.load()` or any later fetch of its row. An include that finds no row leaves it unloaded. Reading another column, assigning one, saving or dumping it is refused with the fix.
+_Avoid_: Stub, proxy, placeholder, lazy reference, partial instance
 
 **Projected record**:
 The result of an explicit projection — a typed record of named values that is not a model instance and cannot be saved, refreshed, or identity-mapped. Column subsets and aggregation results are projected records; complete model rows are not. Realized as `Row`, delivered in the list-like `Rows` container.
