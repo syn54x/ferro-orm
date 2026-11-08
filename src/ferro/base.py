@@ -408,14 +408,23 @@ class ForwardRelation:
     `__ferro_relations__`.
     """
 
-    def __init__(self, fk_column: str, to: Any, nullable: bool) -> None:
+    def __init__(
+        self,
+        fk_column: str,
+        to: Any,
+        nullable: bool,
+        refusal: str | None = None,
+    ) -> None:
         """Store what the declaration says.
 
         Args:
             fk_column: The foreign-key column the relation reads.
             to: The model in the relation's annotation, or its name until
-                Ferro resolves it.
+                Ferro resolves it; `None` when the annotation names none.
             nullable: Whether the annotation allows `None`.
+            refusal: Why the declaration is refused, when the class body
+                cannot name the target its fix writes; relation resolution
+                raises it with the target named. Defaults to `None`.
         """
         self.fk_column = fk_column
         """The foreign-key column the relation reads."""
@@ -423,6 +432,8 @@ class ForwardRelation:
         """The target model class, or its name until Ferro resolves it."""
         self.nullable = nullable
         """Whether the relation's annotation allows `None`."""
+        self.refusal = refusal
+        """A refusal waiting for resolution to name its target, or `None`."""
 
 
 class ReverseRelation:
@@ -432,18 +443,23 @@ class ReverseRelation:
     `__ferro_relations__`.
     """
 
-    def __init__(self, attribute: str, to: Any) -> None:
+    def __init__(self, attribute: str, to: Any, refusal: str | None = None) -> None:
         """Store what the declaration says.
 
         Args:
             attribute: The foreign-key column on the model `to`.
             to: The model in the relation's annotation, or its name until
-                Ferro resolves it.
+                Ferro resolves it; `None` when the annotation names none.
+            refusal: Why the declaration is refused, when the class body
+                cannot name the model its fix writes; relation resolution
+                raises it with the model named. Defaults to `None`.
         """
         self.attribute = attribute
         """The foreign-key column on the other model that points back."""
         self.to = to
         """The other model's class, or its name until Ferro resolves it."""
+        self.refusal = refusal
+        """A refusal waiting for resolution to name its model, or `None`."""
 
 
 class ManyToManyRelation:

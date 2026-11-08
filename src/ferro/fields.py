@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import difflib
 import inspect
+import json
 import types
 from collections.abc import Callable
 from enum import Enum
@@ -980,7 +981,9 @@ def annotation_text(annotation: Any) -> str:
 def _literal_text(value: Any) -> str:
     if isinstance(value, Enum):
         return f"{type(value).__name__}.{value.name}"
-    return f'"{value}"' if isinstance(value, str) else repr(value)
+    return (
+        json.dumps(value, ensure_ascii=False) if isinstance(value, str) else repr(value)
+    )
 
 
 class _Unquote(ast.NodeTransformer):
@@ -1010,14 +1013,14 @@ def _unquoted(text: str) -> str:
         tree = ast.parse(text, mode="eval").body
     except SyntaxError:
         return text
-    return ast.unparse(_Unquote().visit(tree)).replace("'", '"')
+    return ast.unparse(_Unquote().visit(tree))
 
 
 def _option_text(value: Any) -> str:
     if isinstance(value, type):
         return value.__name__
     if isinstance(value, str):
-        return f'"{value}"'
+        return json.dumps(value, ensure_ascii=False)
     return repr(value)
 
 

@@ -438,3 +438,120 @@ class Player(Model):
         "Player.team: a relation is an assignment, not Annotated metadata. "
         'Write: team: Relation[Team] = Forward("team_id")'
     )
+
+
+# Each case below runs with and without the __future__ import, and with the
+# target declared before the model that names it ("first") or after it
+# ("second"), where the target is a name until relations resolve.
+
+_TEAM = """
+class Team(Model):
+    id: int | None = Field(default=None, primary_key=True)
+"""
+
+_CASES = [(future, order) for future in (False, True) for order in ("first", "second")]
+
+
+def _modelset(order: str, team: str, player: str) -> str:
+    imports = "from typing import Literal\n\nfrom ferro import Forward, Reverse\n"
+    return imports + (team + player if order == "first" else player + team)
+
+
+def _refusal(tmp_path, body: str, future: bool) -> str:
+    """The refusal ``body`` meets, at class definition or when relations resolve."""
+    _wipe()
+    with pytest.raises(TypeError) as refusal:
+        _import(tmp_path, body, future=future)
+        ferro.ensure_resolved_modelset()
+    return str(refusal.value)
+
+
+@pytest.mark.parametrize(("future", "order"), _CASES)
+def test_a_bare_reverse_relation_names_the_model_pointing_back(tmp_path, future, order):
+    team = """
+class Team(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    players: Relation = Reverse("team_id")
+"""
+    target = "Team" if order == "first" else '"Team"'
+    player = f"""
+class Player(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    team_id: int = Field(foreign_key={target})
+"""
+    assert _refusal(tmp_path, _modelset(order, team, player), future) == (
+        "Team.players: a relation is annotated Relation[...]. "
+        'Write: players: Relation[list[Player]] = Reverse("team_id")'
+    )
+
+
+@pytest.mark.parametrize(("future", "order"), _CASES)
+def test_a_bare_forward_relation_names_its_annotated_columns_target(
+    tmp_path, future, order
+):
+    target = "Team" if order == "first" else '"Team"'
+    player = f"""
+class Player(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    team_id: Annotated[int | None, Field(foreign_key={target})] = None
+    team: Relation = Forward("team_id")
+"""
+    assert _refusal(tmp_path, _modelset(order, _TEAM, player), future) == (
+        "Player.team: a relation is annotated Relation[...]. "
+        'Write: team: Relation[Team | None] = Forward("team_id")'
+    )
+
+
+@pytest.mark.parametrize(("future", "order"), _CASES)
+@pytest.mark.parametrize("call", ['Forward(column="team_id")', "Forward(TEAM_COLUMN)"])
+def test_a_relation_in_annotated_metadata_is_refused_however_it_is_spelled(
+    tmp_path, future, order, call
+):
+    target = "Team" if order == "first" else '"Team"'
+    player = f"""
+TEAM_COLUMN = "team_id"
+
+class Player(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    team_id: int = Field(foreign_key={target})
+    team: Annotated[Relation[{target}], {call}]
+"""
+    assert _refusal(tmp_path, _modelset(order, _TEAM, player), future) == (
+        "Player.team: a relation is an assignment, not Annotated metadata. "
+        'Write: team: Relation[Team] = Forward("team_id")'
+    )
+
+
+@pytest.mark.parametrize(("future", "order"), _CASES)
+def test_an_annotated_relation_assigned_its_marker_is_a_relation(
+    tmp_path, future, order
+):
+    _wipe()
+    target = "Team" if order == "first" else '"Team"'
+    player = f"""
+class Player(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    team_id: int = Field(foreign_key={target})
+    team: Annotated[Relation[{target}], "the player's team"] = Forward("team_id")
+"""
+    mod = _import(tmp_path, _modelset(order, _TEAM, player), future=future)
+    ferro.ensure_resolved_modelset()
+
+    spec = mod.Player.__ferro_relation_specs__["team"]
+    assert (spec.target, spec.fk_column) == (mod.Team, "team_id")
+
+
+@pytest.mark.parametrize("future", [False, True])
+def test_a_literal_value_with_a_quote_prints_as_it_compiles(tmp_path, future):
+    player = """
+class Player(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    side: Literal["it's", 'say "hi"'] | None = Field(default=None, on_delete="CASCADE")
+"""
+    message = _refusal(tmp_path, _modelset("first", "", player), future)
+
+    line = message.split("Write: ", 1)[1]
+    assert line == (
+        """side: Literal["it's", "say \\"hi\\""] | None = Field(default=None)"""
+    )
+    compile(line, "<refusal>", "exec")

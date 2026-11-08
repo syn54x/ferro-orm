@@ -25,7 +25,7 @@ from pydantic import Field as PydanticField
 from pydantic.fields import FieldInfo
 from pydantic_core import PydanticCustomError, PydanticUndefined
 
-from ._annotation_eval import evaluate_foreign_key_annotation
+from ._annotation_eval import _Names, evaluate_foreign_key_annotation
 from ._annotation_utils import (
     _strip_optional_union as _annotation_utils_strip_optional_union,
 )
@@ -44,7 +44,7 @@ from .ir import compile_model_schema_ir
 from .ir.compiler import declared_retired_labels
 from .query import Relation
 from .registry import REGISTRY
-from .relations import check_declared_foreign_keys
+from .relations import check_declared_foreign_keys, relation_refusal
 from .relations.descriptors import ForwardDescriptor
 
 _TABLE_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\Z")
@@ -250,39 +250,48 @@ def _relation_argument(argument: Any) -> tuple[bool, Any, bool]:
     return False, argument, False
 
 
-def _annotated_core(hint: Any) -> tuple[Any, bool]:
-    """The annotation under ``Annotated[...]``, and whether there was one."""
+def _annotated_core(hint: Any) -> Any:
+    """The annotation under ``Annotated[...]``, or ``hint`` itself."""
     if get_origin(hint) is Annotated:
-        return get_args(hint)[0], True
+        return get_args(hint)[0]
     if isinstance(hint, str):
         node = _parsed(hint)
         if isinstance(node, ast.Subscript) and _head(node.value) == "Annotated":
             inner = node.slice
-            core = inner.elts[0] if isinstance(inner, ast.Tuple) else inner
-            return ast.unparse(core), True
-    return hint, False
+            return ast.unparse(inner.elts[0] if isinstance(inner, ast.Tuple) else inner)
+    return hint
 
 
-def _relation_call_in_text(hint: Any) -> tuple[str, str] | None:
-    """The ``Forward("...")`` or ``Reverse("...")`` inside a string ``Annotated[...]``.
+def _evaluated(hint: Any, namespace: dict, frame_ns: dict | None) -> Any:
+    """``hint`` as Python evaluates it: a string annotation in the class's scope.
 
-    Under ``from __future__ import annotations`` the metadata is never
-    evaluated, so it is read from the text: ``(spelling, column)``.
+    A name not defined yet becomes a ``ForwardRef``, so a target declared
+    later still evaluates. ``None`` when the text does not evaluate.
     """
     if not isinstance(hint, str):
+        return hint
+    module_ns = getattr(
+        sys.modules.get(namespace.get("__module__", "")), "__dict__", {}
+    )
+    names = _Names({**(frame_ns or {}), **namespace}, module_ns)
+    try:
+        return eval(hint, module_ns, names)
+    except Exception:
         return None
-    node = _parsed(hint)
-    if not isinstance(node, ast.Subscript) or _head(node.value) != "Annotated":
+
+
+def _relation_in_metadata(annotation: Any) -> tuple[str, str] | None:
+    """The ``(spelling, column)`` of a ``Forward``/``Reverse`` in ``Annotated`` metadata."""
+    if get_origin(annotation) is not Annotated:
         return None
-    for call in ast.walk(node.slice):
-        if (
-            isinstance(call, ast.Call)
-            and _head(call.func) in ("Forward", "Reverse")
-            and call.args
-            and isinstance(call.args[0], ast.Constant)
-            and isinstance(call.args[0].value, str)
-        ):
-            return _head(call.func) or "", call.args[0].value
+    for metadata in get_args(annotation)[1:]:
+        if not isinstance(metadata, FieldInfo):
+            continue
+        for option in metadata.metadata:
+            if isinstance(option, _RelationOptions):
+                for spelling in ("Forward", "Reverse"):
+                    if spelling.lower() in option.options:
+                        return spelling, option.options[spelling.lower()]
     return None
 
 
@@ -301,10 +310,10 @@ def _foreign_key_name(foreign_key: Any) -> str:
 
 
 def _declared_target(
-    column: str, namespace: dict, annotations: dict
+    column: str, namespace: dict, annotations: dict, frame_ns: dict | None
 ) -> tuple[str, bool] | None:
     """The target and nullability a column of the class body declares, if any."""
-    annotation = annotations.get(column)
+    annotation = _evaluated(annotations.get(column), namespace, frame_ns)
     options = []
     value = namespace.get(column)
     if isinstance(value, FieldInfo):
@@ -316,13 +325,9 @@ def _declared_target(
             )
     for option in options:
         if isinstance(option, FerroField) and option.foreign_key is not None:
-            if isinstance(annotation, str):
-                core, _ = _annotated_core(annotation)
-                members = _union_members(_parsed(core) or ast.Constant(0)) or []
-                nullable = any(_is_none(member) for member in members)
-            else:
-                nullable = annotation_allows_none(annotation)
-            return _foreign_key_name(option.foreign_key), nullable
+            return _foreign_key_name(option.foreign_key), annotation_allows_none(
+                annotation
+            )
     return None
 
 
@@ -339,51 +344,56 @@ def _model_pointing_back(model: str, column: str) -> str | None:
     return found[0] if len(found) == 1 else None
 
 
+_NOT_RELATION = "a relation is annotated Relation[...]"
+_IN_METADATA = "a relation is an assignment, not Annotated metadata"
+
+
 def _declared_relation(
     model: str,
     field_name: str,
     hint: Any,
     spelling: str,
     column: str,
+    *,
+    in_metadata: bool,
     namespace: dict,
     annotations: dict,
+    frame_ns: dict | None,
 ) -> ForwardRelation | ReverseRelation:
     """The record of a ``Forward`` or ``Reverse`` declaration over ``column``.
 
+    A declaration that is not ``Relation[...]`` assigned the marker is
+    refused with the line to write. When the class body cannot name the
+    target that line needs (a bare ``Relation`` whose target is declared
+    later), the record carries the refusal and relation resolution raises
+    it with the target named.
+
     Raises:
-        TypeError: The relation is ``Annotated`` metadata instead of an
-            assignment, the annotation is not ``Relation[...]``, or it is not
-            the shape the relation reads (one row forward, a list in reverse).
+        TypeError: The relation is ``Annotated`` metadata, the annotation is
+            not ``Relation[...]``, or it is not the shape the relation reads
+            (one row forward, a list in reverse).
     """
-    core, in_annotated = _annotated_core(hint)
+    core = _annotated_core(hint)
     view = _relation_view(core)
-    if in_annotated or view is None:
+    if in_metadata or view is None:
+        reason = _IN_METADATA if in_metadata else _NOT_RELATION
         if view is not None:
             _, target, nullable = view
-            target_text = annotation_text(target)
-        elif _is_bare_relation(core) and spelling == "Forward":
-            target_text, nullable = _declared_target(
-                column, namespace, annotations
-            ) or ("Target", False)
-        elif _is_bare_relation(core):
-            target_text, nullable = (
-                _model_pointing_back(model, column) or "Other",
-                False,
-            )
+            named: tuple[str, bool] | None = (annotation_text(target), nullable)
+        elif not _is_bare_relation(core):
+            named = (annotation_text(core), False)
+        elif spelling == "Forward":
+            named = _declared_target(column, namespace, annotations, frame_ns)
         else:
-            target_text, nullable = annotation_text(core), False
-        if spelling == "Reverse" and not target_text.startswith("list["):
-            target_text = f"list[{target_text}]"
-        shown = target_text + (" | None" if nullable else "")
-        reason = (
-            "a relation is an assignment, not Annotated metadata"
-            if in_annotated
-            else "a relation is annotated Relation[...]"
-        )
-        raise TypeError(
-            f"{model}.{field_name}: {reason}. Write: "
-            f'{field_name}: Relation[{shown}] = {spelling}("{column}")'
-        )
+            pointing_back = _model_pointing_back(model, column)
+            named = (pointing_back, False) if pointing_back else None
+        if named is not None:
+            raise relation_refusal(
+                model, field_name, reason, spelling, column, named[0], named[1]
+            )
+        if spelling == "Forward":
+            return ForwardRelation(column, None, False, refusal=reason)
+        return ReverseRelation(column, None, refusal=reason)
     is_list, target, nullable = view
     target_text = annotation_text(target)
     if spelling == "Forward" and is_list:
@@ -983,10 +993,20 @@ class ModelMetaclass(type(BaseModel)):
             relationship_payload = ModelMetaclass._relationship_field_payload(
                 field_name, hint, namespace
             )
-            declared = _relation_call_in_text(hint)
+            # A marker in `Annotated` metadata is read from the evaluated
+            # annotation, so any spelling of the call is seen, with or without
+            # postponed annotations.
+            declared = (
+                _relation_in_metadata(_evaluated(hint, namespace, frame_ns))
+                if get_origin(hint) is Annotated
+                or (isinstance(hint, str) and "Annotated" in hint)
+                else None
+            )
+            in_metadata = declared is not None
+            assigned = ModelMetaclass._field_ferro_payload(namespace.get(field_name))
             for spelling in ("Forward", "Reverse"):
-                column = relationship_payload.get(spelling.lower())
-                if column is not None:
+                column = assigned.get(spelling.lower())
+                if column is not None and declared is None:
                     declared = (spelling, column)
             if declared is not None:
                 spelling, column = declared
@@ -996,8 +1016,10 @@ class ModelMetaclass(type(BaseModel)):
                     hint,
                     spelling,
                     column,
-                    namespace,
-                    annotations,
+                    in_metadata=in_metadata,
+                    namespace=namespace,
+                    annotations=annotations,
+                    frame_ns=frame_ns,
                 )
                 local_relations[field_name] = relation
                 pending_relations.append((field_name, relation))
@@ -1368,7 +1390,8 @@ class ModelMetaclass(type(BaseModel)):
                     cls,
                     field_name,
                     ForwardDescriptor(
-                        target_model_name=getattr(target, "__ferro_identity__", target),
+                        target_model_name=getattr(target, "__ferro_identity__", target)
+                        or "",
                         field_name=field_name,
                         fk_column=metadata.fk_column,
                     ),

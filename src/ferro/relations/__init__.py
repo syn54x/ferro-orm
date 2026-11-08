@@ -208,6 +208,98 @@ def _forward_line(name: str, target: Any, nullable: bool, column: str) -> str:
     return f'{name}: Relation[{shown}] = Forward("{column}")'
 
 
+def relation_refusal(
+    model: str,
+    field_name: str,
+    reason: str,
+    spelling: str,
+    column: str,
+    target: str,
+    nullable: bool,
+) -> TypeError:
+    """The refusal of a relation not declared ``name: Relation[...] = Forward(...)``.
+
+    Args:
+        model: The model's name.
+        field_name: The relation's field name.
+        reason: What is wrong with the declaration.
+        spelling: ``"Forward"`` or ``"Reverse"``.
+        column: The column the relation names.
+        target: The model the relation reads, by name (a ``list[...]`` is
+            added for a reverse relation).
+        nullable: Whether a forward relation's column allows ``None``.
+
+    Returns:
+        The error, its message ending with the line to write.
+    """
+    if spelling == "Reverse" and not target.startswith("list["):
+        target = f"list[{target}]"
+    shown = target + (" | None" if nullable else "")
+    return TypeError(
+        f"{model}.{field_name}: {reason}. Write: "
+        f'{field_name}: Relation[{shown}] = {spelling}("{column}")'
+    )
+
+
+def _refuse_unnamed_forward(
+    model_cls: Any, name: str, relation: ForwardRelation
+) -> None:
+    """Raise a bare ``Relation`` refusal the class body could not name a target for."""
+    model = model_cls.__name__
+    column = relation.fk_column
+    meta = model_cls.__ferro_fields__.get(column)
+    info = model_cls.model_fields.get(column)
+    if meta is not None and meta.foreign_key is not None and info is not None:
+        target = _resolve_target(meta.foreign_key, final=True)
+        raise relation_refusal(
+            model,
+            name,
+            relation.refusal or "",
+            "Forward",
+            column,
+            target.__name__,
+            annotation_allows_none(info.annotation),
+        )
+    raise TypeError(
+        f"{model}.{name}: {relation.refusal}, and nothing names the model "
+        f"{column} points at: declare {column} with Field(foreign_key=<model>), "
+        f'then write {name}: Relation[<model>] = Forward("{column}")'
+    )
+
+
+def _refuse_unnamed_reverse(
+    model_cls: Any, name: str, relation: ReverseRelation
+) -> None:
+    """Raise a bare ``Relation`` refusal the class body could not name a model for."""
+    model = model_cls.__name__
+    column = relation.attribute
+    pointing_back = [
+        other
+        for other in REGISTRY.models().values()
+        if (meta := (other.__dict__.get("__ferro_fields__") or {}).get(column))
+        is not None
+        and meta.foreign_key is not None
+        and _resolve_target(meta.foreign_key, final=False) is model_cls
+    ]
+    if len(pointing_back) == 1:
+        raise relation_refusal(
+            model,
+            name,
+            relation.refusal or "",
+            "Reverse",
+            column,
+            pointing_back[0].__name__,
+            False,
+        )
+    raise TypeError(
+        f"{model}.{name}: {relation.refusal}, and "
+        f"{'no model declares' if not pointing_back else 'several models declare'} "
+        f"a foreign-key column {column} pointing at {model}: write "
+        f'{name}: Relation[list[<model>]] = Reverse("{column}") with the model '
+        "the relation reads"
+    )
+
+
 def check_forward_relation(
     model_cls: Any, name: str, relation: ForwardRelation, *, final: bool
 ) -> None:
@@ -223,6 +315,10 @@ def check_forward_relation(
         TypeError: The column is missing or has no `foreign_key`, points at
             another model, or disagrees with the relation on `| None`.
     """
+    if relation.refusal is not None:
+        if final:
+            _refuse_unnamed_forward(model_cls, name, relation)
+        return
     target = _resolve_target(relation.to, final=final)
     if target is None:
         return
@@ -296,6 +392,10 @@ def check_reverse_relation(
         TypeError: The other model has no such column, the column has no
             `foreign_key`, or it points at another model.
     """
+    if relation.refusal is not None:
+        if final:
+            _refuse_unnamed_reverse(model_cls, name, relation)
+        return
     other = _resolve_target(relation.to, final=final)
     if other is None:
         return
