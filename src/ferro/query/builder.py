@@ -2196,6 +2196,11 @@ class Relation(Query[T]):
         def __get__(self: "Relation[E]", instance: object, owner: Any) -> E: ...
         def __get__(self, instance: Any, owner: Any) -> Any: ...
 
+        # How assigning a forward relation reads: `player.team = team` takes
+        # the target (`None` only under `Relation[Team | None]`). The model's
+        # `__setattr__` sets the foreign-key column at runtime.
+        def __set__(self, instance: object, value: T) -> None: ...
+
     else:
 
         @terminal

@@ -235,6 +235,26 @@ def test_explicit_foreign_key_reads_pass_the_type_checker():
     )
 
 
+def test_relation_assignment_passes_the_type_checker():
+    """A forward relation takes its target, an unloaded relation read from
+    another instance, and `None` when its key column is nullable (#880)."""
+    result = _run_ty(FIXTURES / "good_relation_assignment.py")
+    assert result.returncode == 0, (
+        f"relation assignment must type-check cleanly:\n{result.stdout}\n"
+        f"{result.stderr}"
+    )
+
+
+def test_relation_assignment_misuse_fails_the_type_checker():
+    """`player.team = 5` and `player.team = None` on a required relation are
+    each a static error (#880)."""
+    result = _run_ty(FIXTURES / "bad_relation_assignment.py")
+    assert result.returncode != 0, "bad_relation_assignment.py must fail ty"
+    assert result.stdout.count("invalid-assignment") == 2, result.stdout
+    assert "bad_relation_assignment.py:23:" in result.stdout
+    assert "bad_relation_assignment.py:24:" in result.stdout
+
+
 def test_projected_chains_pass_the_type_checker():
     """Every selector form — tuple, single-field, dict-aliased, traversed at
     depth (#293) — yields Rows[Row] / Row | None and composes with the join
