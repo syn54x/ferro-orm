@@ -313,11 +313,11 @@ class Post(Model):
         future=True,
     )
     await ferro.connect(db_url, auto_migrate=True)
-    assert mod.Post.ferro_relations["author"].to is mod.Author
+    assert mod.Post.__ferro_relations__["author"].to is mod.Author
     assert mod.Post.__ferro_relation_specs__["author"].shadow_column == "author_id"
     assert "author_id" in mod.Post.__ferro_columns__
-    assert "BackRef" in mod.Author.ferro_relations.values()
-    assert mod.Tag.ferro_relations["posts"].related_name == "tags"
+    assert "BackRef" in mod.Author.__ferro_relations__.values()
+    assert mod.Tag.__ferro_relations__["posts"].related_name == "tags"
     assert any(
         "post_tag" in name or "tag_post" in name for name in REGISTRY.join_tables()
     )
@@ -332,7 +332,7 @@ def test_a_model_defined_in_a_function_finds_its_sibling_target():
         id: int | None = Field(default=None, primary_key=True)
         owner: Annotated[Owner, ForeignKey(related_name="pets")]
 
-    assert Pet.ferro_relations["owner"].to is Owner
+    assert Pet.__ferro_relations__["owner"].to is Owner
     assert "owner_id" in Pet.model_fields
 
 

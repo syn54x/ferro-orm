@@ -3,16 +3,15 @@ from enum import StrEnum
 from typing import Annotated, Dict, List
 
 import pytest
-from pydantic import Field
 
 import ferro
-from ferro import FerroField, Model
+from ferro import FerroField, Field, Model
 
 pytestmark = pytest.mark.backend_matrix
 
 
 class SchemaProduct(Model):
-    id: int = Field(json_schema_extra={"primary_key": True})
+    id: int = Field(primary_key=True)
     name: str
     price: float
     is_active: bool = True

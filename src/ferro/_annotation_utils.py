@@ -215,11 +215,11 @@ def validate_db_type_declaration(
     *,
     check_compatibility: bool = True,
 ) -> str | None:
-    """Validate a ``db_type`` declaration from either declaration path (ADR-0003).
+    """Validate a ``db_type`` declaration from either spelling (ADR-0003).
 
-    Runs at spec compilation — the single site where the ferro path
-    (``Field``/``FerroField``) and the raw path (``json_schema_extra``)
-    converge — so incoherent declarations raise ``TypeError`` at
+    Runs at spec compilation — the single site where ``Field(db_type=...)``
+    and ``Annotated[..., FerroField(db_type=...)]`` converge, both read from
+    the field's metadata — so incoherent declarations raise ``TypeError`` at
     class-definition time regardless of declaration syntax.
 
     Returns the normalized token, or ``None`` when the declaration is absent.

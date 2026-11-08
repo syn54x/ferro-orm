@@ -300,7 +300,9 @@ def _refuse_unequal_family(
 def _declared_generated(model_cls: type[Any]) -> dict[str, Callable[..., Any]]:
     return {
         field_name: meta.generated
-        for field_name, meta in (getattr(model_cls, "ferro_fields", {}) or {}).items()
+        for field_name, meta in (
+            getattr(model_cls, "__ferro_fields__", {}) or {}
+        ).items()
         if getattr(meta, "generated", None) is not None
     }
 

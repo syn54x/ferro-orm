@@ -66,7 +66,7 @@ def test_relation_back_ref_helper_declares_reverse_relation():
         name: str
         role: Annotated[Role, ForeignKey(related_name="candidates")]
 
-    assert Role.ferro_relations["candidates"] == "BackRef"
+    assert Role.__ferro_relations__["candidates"] == "BackRef"
     assert "candidates" not in Role.model_fields
     role = Role(name="Engineering")
     assert role.name == "Engineering"
@@ -91,7 +91,7 @@ def test_relation_back_ref_field_equivalent_declares_reverse_relation():
         name: str
         role: Annotated[RoleViaField, ForeignKey(related_name="candidates")]
 
-    assert RoleViaField.ferro_relations["candidates"] == "BackRef"
+    assert RoleViaField.__ferro_relations__["candidates"] == "BackRef"
     assert "candidates" not in RoleViaField.model_fields
 
     from ferro.relations import resolve_relationships
@@ -113,7 +113,7 @@ def test_relation_many_to_many_helper_declares_collection_relation():
         title: str
         students: Relation[list["Student"]] = BackRef()
 
-    rel = Student.ferro_relations["courses"]
+    rel = Student.__ferro_relations__["courses"]
     assert rel.related_name == "students"
     assert rel.through is None
     assert rel.to == "Course"
@@ -141,7 +141,7 @@ def test_relation_many_to_many_field_equivalent_declares_collection_relation():
         title: str
         students: Relation[list["StudentViaField"]] = BackRef()
 
-    rel = StudentViaField.ferro_relations["courses"]
+    rel = StudentViaField.__ferro_relations__["courses"]
     assert rel.related_name == "students"
     assert rel.through == "enrollments"
     assert rel.to == "CourseViaField"
@@ -178,7 +178,7 @@ def test_many_to_many_field_import_removed_from_public_api():
 def test_metadata_discovery():
     """Verify that the Metaclass finds ForeignKey and BackRef annotations."""
     # Before resolution
-    assert "author" in Post.ferro_relations
+    assert "author" in Post.__ferro_relations__
     assert "author_id" in Post.__ferro_query_columns__  # shadow FK column
 
     # After resolution
@@ -186,15 +186,15 @@ def test_metadata_discovery():
 
     resolve_relationships()
 
-    assert isinstance(Post.ferro_relations["author"], ForeignKey)
-    assert Post.ferro_relations["author"].related_name == "posts"
+    assert isinstance(Post.__ferro_relations__["author"], ForeignKey)
+    assert Post.__ferro_relations__["author"].related_name == "posts"
 
     # Verify shadow field generation
     assert "author_id" in Post.model_fields
 
     # Verify discovery on User
-    assert "posts" in User.ferro_relations
-    assert User.ferro_relations["posts"] == "BackRef"
+    assert "posts" in User.__ferro_relations__
+    assert User.__ferro_relations__["posts"] == "BackRef"
     # Check if it's a descriptor
     assert hasattr(User, "posts")
 
@@ -222,7 +222,7 @@ async def test_forward_ref_resolution():
         posts: Relation[list[Post]] = BackRef()
 
     # Initially it's a string/ForwardRef
-    raw_to = Post.ferro_relations["author"].to
+    raw_to = Post.__ferro_relations__["author"].to
     assert isinstance(raw_to, (str, ForwardRef))
 
     # 3. Simulate connect() / resolution
@@ -231,7 +231,7 @@ async def test_forward_ref_resolution():
     resolve_relationships()
 
     # Now it should be the class
-    assert Post.ferro_relations["author"].to is Author
+    assert Post.__ferro_relations__["author"].to is Author
     assert Post.__annotations__["author_id"] == (int | None)
     assert Post.model_fields["author_id"].annotation == (int | None)
 
@@ -270,8 +270,8 @@ def test_back_ref_via_field_default():
         title: str
         author: Annotated[UserViaField, ForeignKey(related_name="posts")]
 
-    assert "posts" in UserViaField.ferro_relations
-    assert UserViaField.ferro_relations["posts"] == "BackRef"
+    assert "posts" in UserViaField.__ferro_relations__
+    assert UserViaField.__ferro_relations__["posts"] == "BackRef"
 
     from ferro.relations import resolve_relationships
 
@@ -292,8 +292,8 @@ def test_back_ref_via_annotated_field():
         title: str
         author: Annotated[UserAnnotated, ForeignKey(related_name="posts")]
 
-    assert "posts" in UserAnnotated.ferro_relations
-    assert UserAnnotated.ferro_relations["posts"] == "BackRef"
+    assert "posts" in UserAnnotated.__ferro_relations__
+    assert UserAnnotated.__ferro_relations__["posts"] == "BackRef"
 
     from ferro.relations import resolve_relationships
 

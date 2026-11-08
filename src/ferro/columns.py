@@ -36,7 +36,7 @@ from ._annotation_utils import (
     _strip_optional_and_annotated,
 )
 from ._shadow_fk_types import _scalar_part_of_annotation
-from .base import ForeignKey, foreign_key_allows_none
+from .base import FerroField, ForeignKey, foreign_key_allows_none
 
 __all__ = [
     "ColumnSpec",
@@ -53,6 +53,9 @@ __all__ = [
     "retired_clause",
     "retired_column_specs",
 ]
+
+# The options of a field that declares none; shared, never mutated.
+_NO_FIELD_OPTIONS = FerroField()
 
 
 def primary_key_field_name(model_name: str, specs: dict[str, ColumnSpec]) -> str | None:
@@ -479,8 +482,8 @@ def build_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
     required_raw = schema.get("required", [])
     required = set(required_raw) if isinstance(required_raw, list) else set()
     model_fields = getattr(model_cls, "model_fields", {})
-    ferro_fields = getattr(model_cls, "ferro_fields", {}) or {}
-    ferro_relations = getattr(model_cls, "ferro_relations", {}) or {}
+    declared_fields = getattr(model_cls, "__ferro_fields__", {}) or {}
+    declared_relations = getattr(model_cls, "__ferro_relations__", {}) or {}
     try:
         resolved_annotations = get_type_hints(model_cls, include_extras=True)
     except Exception:
@@ -488,7 +491,7 @@ def build_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
 
     fk_by_shadow = {
         f"{fname}_id": meta
-        for fname, meta in ferro_relations.items()
+        for fname, meta in declared_relations.items()
         if isinstance(meta, ForeignKey)
     }
 
@@ -506,22 +509,13 @@ def build_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
             ann = field_info.annotation if field_info is not None else None
         python_type = _scalar_part_of_annotation(ann) if ann is not None else None
 
-        declared = ferro_fields.get(field_name)
+        # The field options come from the field alone, never the JSON schema.
+        declared = declared_fields.get(field_name, _NO_FIELD_OPTIONS)
         fk_meta = fk_by_shadow.get(field_name)
 
-        is_pk = (
-            declared.primary_key
-            if declared is not None
-            else bool(prop.get("primary_key", False))
-        )
-        raw_autoincrement = prop.get("autoincrement")
-        explicit_autoincrement = (
-            declared.autoincrement
-            if declared is not None
-            else (raw_autoincrement if isinstance(raw_autoincrement, bool) else None)
-        )
+        is_pk = bool(declared.primary_key)
         autoincrement = _derive_autoincrement(
-            explicit_autoincrement, is_pk, _property_is_integer(prop)
+            declared.autoincrement, is_pk, _property_is_integer(prop)
         )
 
         if fk_meta is not None:
@@ -533,24 +527,14 @@ def build_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
             )
             fk_nullable = foreign_key_allows_none(fk_meta)
         else:
-            unique = (
-                bool(declared.unique)
-                if declared is not None
-                else bool(prop.get("unique", False))
-            )
-            index = (
-                bool(declared.index)
-                if declared is not None
-                else bool(prop.get("index", False))
-            )
+            unique = bool(declared.unique)
+            index = bool(declared.index)
             fk_ref = None
             fk_nullable = None
 
-        if declared is not None and isinstance(declared.nullable, bool):
-            explicit_nullable: bool | None = declared.nullable
-        else:
-            raw_nullable = prop.get("ferro_nullable")
-            explicit_nullable = raw_nullable if isinstance(raw_nullable, bool) else None
+        explicit_nullable = (
+            declared.nullable if isinstance(declared.nullable, bool) else None
+        )
         allows_none = (
             annotation_allows_none(field_info.annotation)
             if field_info is not None
@@ -563,22 +547,16 @@ def build_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
             allows_none=allows_none,
         )
 
-        # Path-blind db_type validation (ADR-0003): both declaration paths
-        # converge here, so token validity and annotation compatibility are
-        # checked once, syntax-blind, at class-definition time.
+        # Path-blind db_type validation (ADR-0003): `Field()` and
+        # `FerroField()` converge here, so token validity and annotation
+        # compatibility are checked once, syntax-blind, at class definition.
         # A class derived from an IR snapshot (``__ferro_historical__``) skips
         # the author-facing compatibility half only; the token half still runs.
         compat = not model_cls.__dict__.get("__ferro_historical__", False)
-        if declared is not None:
-            db_type = validate_db_type_declaration(
-                field_name, declared.db_type, ann, check_compatibility=compat
-            )
-            db_check = bool(declared.db_check)
-        else:
-            db_type = validate_db_type_declaration(
-                field_name, prop.get("db_type"), ann, check_compatibility=compat
-            )
-            db_check = prop.get("db_check") is True
+        db_type = validate_db_type_declaration(
+            field_name, declared.db_type, ann, check_compatibility=compat
+        )
+        db_check = bool(declared.db_check)
 
         secret_cls = secret_class_from_annotation(ann)
         if annotation_is_decimal(ann):
@@ -649,12 +627,12 @@ def build_relation_specs(
 ) -> dict[str, RelationSpec]:
     """Build one `RelationSpec` per declared forward foreign-key relation.
 
-    Reads ``ferro_relations`` (the same class-body-registered relation
+    Reads ``__ferro_relations__`` (the same class-body-registered relation
     metadata ``build_column_specs`` reads via ``fk_by_shadow``) and pairs each
     entry with its already-compiled shadow ``{field}_id`` ColumnSpec — the
     single-source nullability derivation lives there, not here (design pin:
     do not re-derive). ``ManyToManyRelation`` and BackRef entries in
-    ``ferro_relations`` are not ``ForeignKey`` instances and are skipped.
+    ``__ferro_relations__`` are not ``ForeignKey`` instances and are skipped.
 
     A relation whose target hasn't been resolved to a concrete class yet
     (provisional, class-body time, before ``resolve_relationships()``) is
@@ -671,9 +649,9 @@ def build_relation_specs(
     Returns:
         One spec per resolved forward relation, keyed by field name.
     """
-    ferro_relations = getattr(model_cls, "ferro_relations", {}) or {}
+    declared_relations = getattr(model_cls, "__ferro_relations__", {}) or {}
     specs: dict[str, RelationSpec] = {}
-    for field_name, meta in ferro_relations.items():
+    for field_name, meta in declared_relations.items():
         if not isinstance(meta, ForeignKey):
             continue
         target = meta.to
@@ -922,7 +900,7 @@ def refuse_back_ref_over_retired_relation(
     target = meta.to
     if meta.related_name is None or not isinstance(target, type):
         return
-    relations = getattr(target, "ferro_relations", None) or {}
+    relations = getattr(target, "__ferro_relations__", None) or {}
     if relations.get(meta.related_name) == "BackRef":
         raise TypeError(
             f"{target.__name__}.{meta.related_name} is a BackRef over the retired "

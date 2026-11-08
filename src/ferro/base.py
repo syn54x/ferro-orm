@@ -101,24 +101,6 @@ def _validate_retired(retired: bool, owner: str) -> bool:
     raise TypeError(f"{owner} retired must be True or False")
 
 
-class GeneratedExpression:
-    """The `generated=` lambda of a `Field`, carried in the field's metadata.
-
-    Pydantic serializes `json_schema_extra` into the model's JSON schema, and
-    a lambda has no JSON form, so the lambda rides the field's metadata
-    instead, where the metaclass reads it.
-    """
-
-    __slots__ = ("func",)
-
-    def __init__(self, func: Any) -> None:
-        self.func = func
-        """The lambda the database computes the column from."""
-
-    def __repr__(self) -> str:
-        return "GeneratedExpression(...)"
-
-
 def _validate_generated(generated: Any, owner: str) -> Any:
     """Validate the ``generated`` option (ADR-0058): a lambda, or ``None``."""
     if generated is None or callable(generated):
@@ -133,9 +115,11 @@ def _validate_generated(generated: Any, owner: str) -> Any:
 class FerroField:
     """Database options for one model field, given inside `Annotated[...]`.
 
-    [`Field`][ferro.Field] takes the same options and is the usual spelling.
-    `FerroField` carries only the database options, for an `Annotated`
-    declaration that keeps them apart from Pydantic's own `Field`. See
+    [`Field`][ferro.Field] takes the same options and is the usual spelling:
+    it stores them as one `FerroField` in the field's metadata, never in its
+    JSON schema. `FerroField` carries only the database options, for an
+    `Annotated` declaration that keeps them apart from Pydantic's own
+    `Field`. See
     [Field options](../guide/models-and-fields.md#field-options) for each
     option at work.
 

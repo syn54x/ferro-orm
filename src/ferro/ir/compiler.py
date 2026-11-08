@@ -63,11 +63,13 @@ def declared_rename_hints(model_cls: type[Any]) -> RenameHints:
     """Collect ``model_cls``'s rename hints from its declarations."""
     columns: dict[str, str] = {}
     foreign_keys: dict[str, str] = {}
-    for field_name, meta in (getattr(model_cls, "ferro_fields", {}) or {}).items():
+    for field_name, meta in (getattr(model_cls, "__ferro_fields__", {}) or {}).items():
         previous = getattr(meta, "renamed_from", None)
         if previous is not None:
             columns[field_name] = previous
-    for field_name, meta in (getattr(model_cls, "ferro_relations", {}) or {}).items():
+    for field_name, meta in (
+        getattr(model_cls, "__ferro_relations__", {}) or {}
+    ).items():
         previous = getattr(meta, "renamed_from", None)
         if isinstance(meta, ForeignKey) and previous is not None:
             columns[f"{field_name}_id"] = f"{previous}_id"

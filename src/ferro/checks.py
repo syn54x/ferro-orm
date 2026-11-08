@@ -353,12 +353,14 @@ def _relation_shadow_columns(
 ) -> dict[str, str]:
     """Map each forward-FK relation field to its shadow ``{field}_id`` column.
 
-    Read from the class-body-registered ``ferro_relations`` (not from resolved
+    Read from the class-body-registered ``__ferro_relations__`` (not from resolved
     relation specs) so the mapping is complete at class definition, before
     ``resolve_relationships`` has a target class to offer.
     """
     relations: dict[str, str] = {}
-    for field_name, meta in (getattr(model_cls, "ferro_relations", {}) or {}).items():
+    for field_name, meta in (
+        getattr(model_cls, "__ferro_relations__", {}) or {}
+    ).items():
         if not isinstance(meta, ForeignKey):
             continue
         shadow = f"{field_name}_id"
@@ -372,7 +374,7 @@ def _reverse_relation_names(model_cls: type[Any]) -> frozenset[str]:
     return frozenset(
         field_name
         for field_name, meta in (
-            getattr(model_cls, "ferro_relations", {}) or {}
+            getattr(model_cls, "__ferro_relations__", {}) or {}
         ).items()
         if not isinstance(meta, ForeignKey)
     )

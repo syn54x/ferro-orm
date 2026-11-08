@@ -141,7 +141,7 @@ def test_historical_classes_carry_columns_only_and_never_touch_todays_registry()
 
     post = models.Post
     assert fields(post) == {"id": int | None, "author_id": int}
-    assert post.ferro_relations == {}
+    assert post.__ferro_relations__ == {}
     assert post.model_config.get("use_attribute_docstrings") is False
     assert REGISTRY.models() == today
 

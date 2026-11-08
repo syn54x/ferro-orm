@@ -306,7 +306,7 @@ def test_forward_declared_fk_to_custom_table_model_resolves_configured_table():
     # Pre-resolution: metadata.to is still the string/ForwardRef, but the
     # target IS registered — _target_table_name's string branch must resolve
     # it through REGISTRY.resolve_reference, not lowercase the class name.
-    raw_to = FwdArticle.ferro_relations["author"].to
+    raw_to = FwdArticle.__ferro_relations__["author"].to
     assert isinstance(raw_to, (str, ForwardRef))
     fk = _article_fk()
     assert fk["to_table"] == "staff_writers"

@@ -1,7 +1,6 @@
 import pytest
-from pydantic import Field
 import ferro
-from ferro import Model, ModelDoesNotExist
+from ferro import Field, Model, ModelDoesNotExist
 
 pytestmark = pytest.mark.backend_matrix
 
@@ -11,7 +10,7 @@ async def test_model_save_new_record(db_url):
     """Test that calling .save() on a new model instance persists it to the database."""
 
     class CrudUser(Model):
-        id: int = Field(default=None, json_schema_extra={"primary_key": True})
+        id: int = Field(default=None, primary_key=True)
         username: str
         email: str
 
@@ -27,7 +26,7 @@ async def test_model_save_update_record(db_url):
     """Test that calling .save() on an existing model instance updates it."""
 
     class CrudUser(Model):
-        id: int = Field(default=None, json_schema_extra={"primary_key": True})
+        id: int = Field(default=None, primary_key=True)
         username: str
         email: str
 
@@ -48,7 +47,7 @@ async def test_model_all_fetching(db_url):
     """Test that Model.all() retrieves all records from the database."""
 
     class CrudUser(Model):
-        id: int = Field(default=None, json_schema_extra={"primary_key": True})
+        id: int = Field(default=None, primary_key=True)
         username: str
         email: str
 
@@ -69,7 +68,7 @@ async def test_upsert_updates_existing_row_without_duplicate(db_url):
     """Plain save() of a duplicate PK raises; the explicit upsert() updates (FF-A A3/A4)."""
 
     class CrudUser(Model):
-        id: int = Field(default=None, json_schema_extra={"primary_key": True})
+        id: int = Field(default=None, primary_key=True)
         username: str
         email: str
 
@@ -100,7 +99,7 @@ async def test_identity_map_consistency(db_url):
     """Test that fetching the same record twice returns the same Python object instance."""
 
     class CrudUser(Model):
-        id: int = Field(default=None, json_schema_extra={"primary_key": True})
+        id: int = Field(default=None, primary_key=True)
         username: str
         email: str
 
@@ -121,7 +120,7 @@ async def test_identity_map_disabled_returns_distinct_instances(db_url):
     """With identity_map=False, repeated loads are distinct objects (same field values)."""
 
     class CrudUser(Model):
-        id: int = Field(default=None, json_schema_extra={"primary_key": True})
+        id: int = Field(default=None, primary_key=True)
         username: str
         email: str
 
@@ -143,7 +142,7 @@ async def test_model_get_operation(db_url):
     """Test fetching a single record by primary key."""
 
     class CrudUser(Model):
-        id: int = Field(default=None, json_schema_extra={"primary_key": True})
+        id: int = Field(default=None, primary_key=True)
         username: str
         email: str
 
@@ -162,7 +161,7 @@ async def test_model_get_invalid_usage(db_url):
     """Test that get() raises error with invalid arguments."""
 
     class CrudUser(Model):
-        id: int = Field(default=None, json_schema_extra={"primary_key": True})
+        id: int = Field(default=None, primary_key=True)
         username: str
         email: str
 
@@ -179,7 +178,7 @@ async def test_model_get_not_found(db_url):
     """Test that get() raises when the record does not exist."""
 
     class CrudUser(Model):
-        id: int = Field(default=None, json_schema_extra={"primary_key": True})
+        id: int = Field(default=None, primary_key=True)
         username: str
         email: str
 

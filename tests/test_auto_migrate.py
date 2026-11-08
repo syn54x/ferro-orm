@@ -3,10 +3,9 @@ from typing import Annotated
 from uuid import UUID, uuid4
 
 import pytest
-from pydantic import Field
 
 import ferro
-from ferro import BackRef, ManyToMany, Model, PassReport, Relation
+from ferro import BackRef, Field, ManyToMany, Model, PassReport, Relation
 from ferro.base import FerroField
 from tests._pg_sequence import pg_sequence_rename
 from tests._pass_harness import (
@@ -21,7 +20,7 @@ pytestmark = pytest.mark.backend_matrix
 
 
 class AutoMigratedUser(Model):
-    id: int = Field(json_schema_extra={"primary_key": True})
+    id: int = Field(primary_key=True)
     username: str
 
 
@@ -1998,7 +1997,7 @@ async def test_create_tables_pushes_modelset_for_model_defined_after_connect(
     async with ferro.engines.session():
         # Now define a model AFTER connect().
         class LateModel(Model):
-            id: int = Field(json_schema_extra={"primary_key": True})
+            id: int = Field(primary_key=True)
             label: str
 
         # create_tables() must compile + push the up-to-date registry IR before the
@@ -2040,7 +2039,7 @@ async def test_create_tables_fails_loud_when_modelset_cleared(db_url, clean_regi
     )
 
     class GuardModel(Model):
-        id: int = Field(json_schema_extra={"primary_key": True})
+        id: int = Field(primary_key=True)
         name: str
 
     await ferro.connect(db_url, auto_migrate=False)

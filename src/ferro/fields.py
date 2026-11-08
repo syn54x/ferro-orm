@@ -2,19 +2,21 @@
 
 from __future__ import annotations
 
+import difflib
+import inspect
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, Literal, TypeVar, Unpack, overload
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, overload
 
 from pydantic.fields import Field as PydanticField
-from pydantic.fields import _EmptyKwargs, _Unset
+from pydantic.fields import _Unset
 from pydantic_core import PydanticUndefined
 
 from .base import (
     DbType,
+    FerroField,
     FerroNullable,
     _validate_nullable_option,
     _validate_renamed_from,
-    GeneratedExpression,
     _validate_generated,
     _validate_retired,
 )
@@ -28,9 +30,47 @@ if TYPE_CHECKING:
     from pydantic.config import JsonDict
     from pydantic.fields import Deprecated, FieldInfo
 
-FERRO_FIELD_EXTRA_KEY = "ferro_field"
-"""The `json_schema_extra` key under which `Field` stores its database options."""
 _T = TypeVar("_T")
+
+
+class _RelationOptions:
+    """The relation keywords of one `Field()` call, carried in the field's metadata.
+
+    The metaclass reads them from there, so they never reach the field's JSON
+    schema the way `json_schema_extra` would.
+    """
+
+    __slots__ = ("options",)
+
+    def __init__(self, options: dict[str, Any]) -> None:
+        self.options = options
+
+    def __repr__(self) -> str:
+        return f"_RelationOptions({self.options!r})"
+
+
+def _unknown_keyword(name: str) -> TypeError:
+    """Refuse a keyword `Field()` does not take, naming the closest one it does.
+
+    The known names come from `Field`'s own signature, so an option added as
+    a parameter is known here with no second list.
+    """
+    parameters = inspect.signature(Field).parameters
+    known = [
+        parameter
+        for parameter, spec in parameters.items()
+        if spec.kind is not inspect.Parameter.VAR_KEYWORD
+    ]
+    close = difflib.get_close_matches(name, known, n=1)
+    if close:
+        hint = f"Did you mean {close[0]!r}?"
+    else:
+        pydantic_names = inspect.signature(PydanticField).parameters
+        options = ", ".join(
+            parameter for parameter in known if parameter not in pydantic_names
+        )
+        hint = f"Ferro's field options are: {options}."
+    return TypeError(f"Field() got an unknown keyword {name!r}. {hint}")
 
 
 @overload
@@ -85,7 +125,6 @@ def Field(
     max_length: int | None = ...,
     union_mode: Literal["smart", "left_to_right"] = ...,
     fail_fast: bool | None = ...,
-    **extra: Any,
 ) -> Any: ...
 
 
@@ -141,7 +180,6 @@ def Field(
     max_length: int | None = ...,
     union_mode: Literal["smart", "left_to_right"] = ...,
     fail_fast: bool | None = ...,
-    **extra: Any,
 ) -> Any: ...
 
 
@@ -197,7 +235,6 @@ def Field(
     max_length: int | None = ...,
     union_mode: Literal["smart", "left_to_right"] = ...,
     fail_fast: bool | None = ...,
-    **extra: Any,
 ) -> _T: ...
 
 
@@ -253,7 +290,6 @@ def Field(
     max_length: int | None = ...,
     union_mode: Literal["smart", "left_to_right"] = ...,
     fail_fast: bool | None = ...,
-    **extra: Any,
 ) -> Any: ...
 
 
@@ -309,7 +345,6 @@ def Field(
     max_length: int | None = ...,
     union_mode: Literal["smart", "left_to_right"] = ...,
     fail_fast: bool | None = ...,
-    **extra: Any,
 ) -> _T: ...
 
 
@@ -364,7 +399,6 @@ def Field(
     max_length: int | None = ...,
     union_mode: Literal["smart", "left_to_right"] = ...,
     fail_fast: bool | None = ...,
-    **extra: Any,
 ) -> Any: ...
 
 
@@ -423,7 +457,7 @@ def Field(
     max_length: int | None = _Unset,
     union_mode: Literal["smart", "left_to_right"] = _Unset,
     fail_fast: bool | None = _Unset,
-    **extra: Unpack[_EmptyKwargs],
+    **unknown: Any,
 ) -> Any:
     """Declare a model field with Pydantic's options and Ferro's database options.
 
@@ -526,17 +560,20 @@ def Field(
             See [Union Mode](https://docs.pydantic.dev/latest/concepts/unions/#union-modes).
         fail_fast: If `True`, validation will stop on the first error. If `False`, all validation errors will be collected.
             This option can be applied only to iterable types (list, tuple, set, and frozenset).
-        **extra: Deprecated: extra fields to include in the JSON schema. Use
-            `json_schema_extra` instead.
+        **unknown: Refused: a keyword not listed here raises `TypeError`
+            naming the closest one that is.
 
     Returns:
-        A new [`FieldInfo`][pydantic.fields.FieldInfo]. The return annotation
-            is `Any` so that `Field` type-checks as any field's default.
+        A new [`FieldInfo`][pydantic.fields.FieldInfo] that carries the
+            database options in its `metadata`, as one
+            [`FerroField`][ferro.FerroField], and never in its JSON schema.
+            The return annotation is `Any` so that `Field` type-checks as any
+            field's default.
 
     Raises:
-        TypeError: A database option is given together with a callable
-            `json_schema_extra`, or `nullable`, `renamed_from` or `retired`
-            has a value of the wrong type.
+        TypeError: A keyword `Field` does not take, or `nullable`,
+            `renamed_from`, `retired` or `generated` has a value of the
+            wrong type.
 
     Examples:
         ```python {test=run prelude=reference}
@@ -568,60 +605,53 @@ def Field(
             nickname: Annotated[str | None, Field(index=True)] = None
         ```
     """
-    ferro_kwargs: dict[str, Any] = {}
-    if primary_key is not _Unset:
-        ferro_kwargs["primary_key"] = primary_key
-    if autoincrement is not _Unset:
-        ferro_kwargs["autoincrement"] = autoincrement
-    if unique is not _Unset:
-        ferro_kwargs["unique"] = unique
-    if index is not _Unset:
-        ferro_kwargs["index"] = index
-    if back_ref is not _Unset:
-        ferro_kwargs["back_ref"] = back_ref
-    if many_to_many is not _Unset:
-        ferro_kwargs["many_to_many"] = many_to_many
-    if related_name is not _Unset:
-        ferro_kwargs["related_name"] = related_name
-    if through is not _Unset:
-        ferro_kwargs["through"] = through
-    if reverse_index is not _Unset:
-        ferro_kwargs["reverse_index"] = reverse_index
+    for name in unknown:
+        raise _unknown_keyword(name)
+
     if nullable is not _Unset:
         _validate_nullable_option(nullable, "Field")
-        ferro_kwargs["nullable"] = nullable
-    if db_type is not _Unset:
-        ferro_kwargs["db_type"] = db_type
-    if db_check is not _Unset:
-        ferro_kwargs["db_check"] = db_check
     if renamed_from is not _Unset:
-        ferro_kwargs["renamed_from"] = _validate_renamed_from(renamed_from, "Field")
+        _validate_renamed_from(renamed_from, "Field")
     if retired is not _Unset:
-        ferro_kwargs["retired"] = _validate_retired(retired, "Field")
-    expression = None
-    if generated is not _Unset and generated is not None:
-        # The lambda has no JSON form, so it rides the field's metadata, never
-        # `json_schema_extra`, which Pydantic writes into the JSON schema.
-        expression = GeneratedExpression(_validate_generated(generated, "Field"))
+        _validate_retired(retired, "Field")
+    if generated is not _Unset:
+        _validate_generated(generated, "Field")
+    # The options ride the field's metadata, never `json_schema_extra`, which
+    # Pydantic prints into the JSON schema.
+    column_options = {
+        option: value
+        for option, value in (
+            ("primary_key", primary_key),
+            ("autoincrement", autoincrement),
+            ("unique", unique),
+            ("index", index),
+            ("nullable", nullable),
+            ("db_type", db_type),
+            ("db_check", db_check),
+            ("renamed_from", renamed_from),
+            ("retired", retired),
+            ("generated", generated),
+        )
+        if value is not _Unset
+    }
+    relation_options = {
+        option: value
+        for option, value in (
+            ("back_ref", back_ref),
+            ("many_to_many", many_to_many),
+            ("related_name", related_name),
+            ("through", through),
+            ("reverse_index", reverse_index),
+        )
+        if value is not _Unset
+    }
+    if (
+        column_options.get("generated") is not None
+        and default is PydanticUndefined
+        and default_factory is _Unset
+    ):
         # The database fills the value; the instance holds None until then.
-        if default is PydanticUndefined and default_factory is _Unset:
-            default = None
-
-    schema_extra = json_schema_extra
-    if ferro_kwargs:
-        if callable(schema_extra):
-            raise TypeError(
-                "ferro.Field(..., primary_key=...) cannot be combined with callable "
-                "json_schema_extra"
-            )
-        base_extra: dict[str, Any]
-        if schema_extra is _Unset or schema_extra is None:
-            base_extra = {}
-        else:
-            base_extra = dict(schema_extra)
-        merged_extra: dict[str, Any] = base_extra
-        merged_extra[FERRO_FIELD_EXTRA_KEY] = ferro_kwargs
-        schema_extra = merged_extra
+        default = None
 
     info = PydanticField(
         default=default,
@@ -638,7 +668,7 @@ def Field(
         exclude_if=exclude_if,
         discriminator=discriminator,
         deprecated=deprecated,
-        json_schema_extra=schema_extra,
+        json_schema_extra=json_schema_extra,
         frozen=frozen,
         validate_default=validate_default,
         repr=repr,
@@ -660,10 +690,11 @@ def Field(
         max_length=max_length,
         union_mode=union_mode,
         fail_fast=fail_fast,
-        **extra,
     )
-    if expression is not None:
-        info.metadata.append(expression)
+    if column_options:
+        info.metadata.append(FerroField(**column_options))
+    if relation_options:
+        info.metadata.append(_RelationOptions(relation_options))
     return info
 
 
@@ -761,4 +792,4 @@ def ManyToMany(
     )
 
 
-__all__ = ["Field", "BackRef", "ManyToMany", "FERRO_FIELD_EXTRA_KEY"]
+__all__ = ["Field", "BackRef", "ManyToMany"]

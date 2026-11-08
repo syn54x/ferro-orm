@@ -777,7 +777,7 @@ def test_primary_key_autoincrements_by_default(clean_model_registry: None) -> No
     from ferro.ir.compiler import compile_schema_ir_payload
 
     class IntPk(Model):
-        id: int = Field(json_schema_extra={"primary_key": True})
+        id: int = Field(primary_key=True)
         name: str
 
     cols = {
@@ -790,19 +790,20 @@ def test_primary_key_autoincrements_by_default(clean_model_registry: None) -> No
     assert cols["id"]["autoincrement"] is True, cols["id"]
 
 
-def test_raw_path_non_integer_pk_autoincrement_false_unified(
+def test_field_non_integer_pk_autoincrement_false_unified(
     clean_model_registry: None,
 ) -> None:
-    """ADR-0002: a raw-declared (json_schema_extra) non-integer PK without an
-    explicit autoincrement is False under the unified rule — the raw path no
-    longer diverges from the FerroField path (was True, #153). Pins the golden
+    """ADR-0002: a `Field()`-declared non-integer PK without an explicit
+    autoincrement is False under the unified rule (was True on the retired
+    `json_schema_extra` declaration, #153). The model keeps the name the
+    golden vector recorded. Pins the golden
     vector ``schema_raw_str_pk_autoincrement_v1``.
     """
     from ferro.columns import build_column_specs
     from ferro.ir.compiler import compile_schema_ir_payload, wrap_schema_ir
 
     class RawStrPk(Model):
-        id: str = Field(json_schema_extra={"primary_key": True})
+        id: str = Field(primary_key=True)
         label: str
 
     cols = list(build_column_specs(RawStrPk).values())

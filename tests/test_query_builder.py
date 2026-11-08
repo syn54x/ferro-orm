@@ -7,7 +7,7 @@ from enum import Enum
 import pytest
 
 import ferro
-from ferro import Model, connect
+from ferro import Field, Model, connect
 from ferro._bind_payload import (
     canonicalize_wire_scalar,
     save_bind_payload,
@@ -16,7 +16,6 @@ from ferro._bind_payload import (
 from ferro.query import Query, QueryNode
 from ferro.query.nodes import FieldProxy
 from ferro.query.wire import compile_query
-from pydantic import Field
 from pydantic_core import to_json
 
 pytestmark = pytest.mark.backend_matrix
@@ -75,7 +74,7 @@ def test_canonicalize_wire_scalar_matches_save_bind_payload():
     uid = uuid.uuid4()
 
     class WireScalarRow(Model):
-        id: int | None = Field(default=None, json_schema_extra={"primary_key": True})
+        id: int | None = Field(default=None, primary_key=True)
         happened_at: datetime
         day: date
         clock: time
@@ -112,7 +111,7 @@ def test_canonicalize_wire_scalar_matches_save_bind_payload():
 
 def test_to_wire_json_serializes_m2m_context_without_mutating_query_state():
     class WireM2mPost(Model):
-        id: int | None = Field(default=None, json_schema_extra={"primary_key": True})
+        id: int | None = Field(default=None, primary_key=True)
 
     source_id = uuid.uuid4()
     query = Query(WireM2mPost)._m2m(
@@ -137,7 +136,7 @@ def test_query_carries_root_instances_materialization_by_default():
     (ADR-0007): the v3 plan is explicit data on the wire, never inferred."""
 
     class WirePlainRow(Model):
-        id: int | None = Field(default=None, json_schema_extra={"primary_key": True})
+        id: int | None = Field(default=None, primary_key=True)
 
     payload = compile_query(Query(WirePlainRow), "fetch").payload.to_ir_dict()
     assert payload["materialization"] == {"kind": "root_instances"}
@@ -202,7 +201,7 @@ def test_model_where_clause():
     """
 
     class QueryUser(Model):
-        id: int = Field(json_schema_extra={"primary_key": True})
+        id: int = Field(primary_key=True)
         age: int
 
     query = QueryUser.where(lambda u: u.age >= 21)
@@ -220,7 +219,7 @@ def test_query_chaining_placeholders():
     """
 
     class QueryUser(Model):
-        id: int = Field(json_schema_extra={"primary_key": True})
+        id: int = Field(primary_key=True)
         age: int
 
     query = QueryUser.where(lambda u: u.age >= 18).limit(10).offset(5)
@@ -256,7 +255,7 @@ async def test_query_execution(db_url):
     """
 
     class FilterUser(Model):
-        id: int = Field(json_schema_extra={"primary_key": True})
+        id: int = Field(primary_key=True)
         username: str
         age: int
 
@@ -298,7 +297,7 @@ async def test_query_first(db_url):
     """
 
     class FirstUser(Model):
-        id: int = Field(json_schema_extra={"primary_key": True})
+        id: int = Field(primary_key=True)
         username: str
 
     await connect(db_url, auto_migrate=True)
@@ -322,7 +321,7 @@ async def test_sql_injection_protection(db_url):
     """
 
     class SafeUser(Model):
-        id: int = Field(json_schema_extra={"primary_key": True})
+        id: int = Field(primary_key=True)
         username: str
 
     await connect(db_url, auto_migrate=True)
@@ -346,7 +345,7 @@ async def test_query_bitwise_logic(db_url):
     """
 
     class LogicUser(Model):
-        id: int = Field(json_schema_extra={"primary_key": True})
+        id: int = Field(primary_key=True)
         username: str
         age: int
 
@@ -389,7 +388,7 @@ async def test_query_bitwise_multiple_where(db_url):
     """
 
     class LogicUser(Model):
-        id: int = Field(json_schema_extra={"primary_key": True})
+        id: int = Field(primary_key=True)
         username: str
         age: int
 

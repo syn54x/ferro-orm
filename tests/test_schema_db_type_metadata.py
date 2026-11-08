@@ -17,14 +17,14 @@ class FileFormat(StrEnum):
     JSON = "json"
 
 
-def test_db_type_propagates_to_ferro_fields_and_schema():
-    """Field(db_type="text") flows to ferro_fields and the enriched JSON schema."""
+def test_db_type_propagates_to_field_options_and_column_spec():
+    """Field(db_type="text") flows to __ferro_fields__ and the column spec."""
 
     class Doc(Model):
         id: int | None = Field(default=None, primary_key=True)
         format: FileFormat = Field(db_type="text")
 
-    metadata = Doc.ferro_fields["format"]
+    metadata = Doc.__ferro_fields__["format"]
     assert metadata.db_type == "text"
     assert metadata.db_check is False
 
@@ -33,14 +33,14 @@ def test_db_type_propagates_to_ferro_fields_and_schema():
     assert spec.db_check is False
 
 
-def test_db_check_propagates_to_ferro_fields_and_schema():
-    """Field(db_type="text", db_check=True) flows both keys through to the schema."""
+def test_db_check_propagates_to_field_options_and_column_spec():
+    """Field(db_type="text", db_check=True) flows both options to the column spec."""
 
     class Doc(Model):
         id: int | None = Field(default=None, primary_key=True)
         format: FileFormat = Field(db_type="text", db_check=True)
 
-    metadata = Doc.ferro_fields["format"]
+    metadata = Doc.__ferro_fields__["format"]
     assert metadata.db_type == "text"
     assert metadata.db_check is True
 
@@ -59,7 +59,7 @@ def test_default_field_has_no_db_type_or_db_check():
         id: int | None = Field(default=None, primary_key=True)
         email: str = Field(unique=True)
 
-    metadata = User.ferro_fields["email"]
+    metadata = User.__ferro_fields__["email"]
     assert metadata.db_type is None
     assert metadata.db_check is False
 
@@ -75,7 +75,7 @@ def test_annotated_ferro_field_supports_db_type_and_db_check():
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         format: Annotated[FileFormat, FerroField(db_type="text", db_check=True)]
 
-    metadata = Doc.ferro_fields["format"]
+    metadata = Doc.__ferro_fields__["format"]
     assert metadata.db_type == "text"
     assert metadata.db_check is True
 
