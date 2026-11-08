@@ -90,8 +90,8 @@ def _declare(form: str = "forward") -> SimpleNamespace:
             name: str
             team: Annotated[Team, ForeignKey(related_name="players")]
             mentor: Annotated[
-                "Player | None",
-                ForeignKey(related_name="mentees", on_delete="SET NULL"),
+                "Player",
+                ForeignKey(related_name="mentees", nullable=True, on_delete="SET NULL"),
             ] = None
             mentees: Relation[list["Player"]] = BackRef()
             profile: "Profile" = BackRef()
@@ -133,3 +133,99 @@ async def test_a_relation_nothing_included_reads_as_an_unloaded_instance_without
         assert isinstance(team, m.Team)
         assert team.id == player.team_id == 1
         assert _statements(statement_records) == []
+
+
+@pytest.mark.asyncio
+async def test_a_later_fetch_of_the_row_fills_the_unloaded_instance_in_place(db_url):
+    m = await _seed(db_url)
+    async with engines.session():
+        player = await m.Player.get(1)
+        team = player.team
+
+        fetched = await m.Team.get(1)
+
+        assert fetched is team is player.team
+        assert team.name == "Rustaceans"
+
+
+@pytest.mark.asyncio
+async def test_an_include_over_the_same_row_fills_the_instance_read_before(db_url):
+    m = await _seed(db_url)
+    async with engines.session():
+        ferris = await m.Player.get(1)
+        team = ferris.team
+
+        corro = await (
+            m.Player.select()
+            .include(lambda player: player.team)
+            .where(lambda player: player.id == 2)
+            .first()
+        )
+
+        assert corro.team is team
+        assert team.name == "Rustaceans"
+
+
+@pytest.mark.asyncio
+async def test_load_fills_the_unloaded_instance_in_place_with_one_select(
+    db_url, statement_records
+):
+    m = await _seed(db_url)
+    async with engines.session():
+        player = await m.Player.get(1)
+        team = player.team
+        statement_records.clear()
+
+        loaded = await player.team.load()
+
+        assert loaded is team is player.team
+        assert loaded.name == "Rustaceans"
+        statements = _statements(statement_records)
+        assert len(statements) == 1 and statements[0].startswith("SELECT")
+
+
+@pytest.mark.asyncio
+async def test_a_team_created_in_the_session_is_the_relation_with_no_statement(
+    db_url, statement_records
+):
+    m = _declare()
+    await ferro.connect(db_url, auto_migrate=True)
+    async with engines.session():
+        team = await m.Team.create(name="Rustaceans")
+        player = await m.Player.create(name="Ferris", team_id=team.id)
+        statement_records.clear()
+
+        assert player.team is team
+        assert player.team.name == "Rustaceans"
+        assert _statements(statement_records) == []
+
+
+@pytest.mark.asyncio
+async def test_an_included_relation_reads_with_no_statement(db_url, statement_records):
+    m = await _seed(db_url)
+    async with engines.session():
+        player = await (
+            m.Player.select()
+            .include(lambda player: player.team)
+            .where(lambda player: player.id == 1)
+            .first()
+        )
+        statement_records.clear()
+
+        assert player.team.name == "Rustaceans"
+        assert _statements(statement_records) == []
+
+
+@pytest.mark.parametrize("form", ["forward", "foreign_key"])
+@pytest.mark.asyncio
+async def test_a_one_to_one_reverse_relation_reads_with_first(db_url, form):
+    m = await _seed(db_url, form)
+    async with engines.session():
+        ferris = await m.Player.get(1)
+        corro = await m.Player.get(2)
+        await m.Profile.create(bio="Rust's mascot", player_id=1)
+
+        profile = await ferris.profile.first()
+
+        assert isinstance(profile, m.Profile) and profile.bio == "Rust's mascot"
+        assert await corro.profile.first() is None

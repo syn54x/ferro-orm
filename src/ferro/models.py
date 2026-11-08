@@ -59,6 +59,9 @@ from .state import (
 
 _FERRO_CONNECTION_ATTR = "__ferro_connection_name"
 _FERRO_PERSISTED_ATTR = "__ferro_persisted"
+#: Marks an unloaded instance (ADR-0063); set by the Rust hydrator, cleared
+#: when a fetched row fills the instance. Holds ``(model, path, found_no_row)``.
+_FERRO_UNLOADED_ATTR = "__ferro_unloaded"
 
 
 def _is_persisted(instance: object) -> bool:
@@ -735,8 +738,8 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                 opened by the enclosing `async with engines.session():`.
 
         Raises:
-            RuntimeError: The instance has no primary key value, or its row no
-                longer exists.
+            ModelDoesNotExist: The row no longer exists.
+            RuntimeError: The instance has no primary key value.
 
         Examples:
             ```python {test=run prelude=reference}
@@ -762,12 +765,45 @@ class Model(BaseModel, metaclass=ModelMetaclass):
         fresh_instance = await query.first()
 
         if fresh_instance is None:
-            raise RuntimeError(f"Instance not found in database: {name}({pk_val})")
+            raise ModelDoesNotExist(self.__class__, pk_val)
 
         self.__dict__.update(fresh_instance.__dict__)
+        self.__dict__.pop(_FERRO_UNLOADED_ATTR, None)
+        object.__setattr__(
+            self, "__pydantic_fields_set__", set(fresh_instance.__pydantic_fields_set__)
+        )
         register_instance(name, str(pk_val), self, route)
         _set_instance_origin(self, identity_using)
         _set_persisted(self, True)
+
+    async def load(self) -> Self:
+        """Fill an unloaded instance from its row, in place, and return it.
+
+        A forward relation nothing loaded reads as an unloaded instance that
+        holds only its primary key. `load()` reads the row through the
+        connection the instance came from and fills the same object, so every
+        reference to it sees the row. On a complete instance it sends no
+        statement. See
+        [Loaded relations](../guide/queries.md#populating-relations-with-include).
+
+        Returns:
+            The instance itself, now complete.
+
+        Raises:
+            ModelDoesNotExist: The row no longer exists.
+
+        Examples:
+            ```python {test=run prelude=reference}
+            async with engines.session():
+                post = await Post.get(1)
+                author = await post.author.load()
+                assert author is post.author
+                assert author.name == "Ada Lovelace"
+            ```
+        """
+        if _FERRO_UNLOADED_ATTR in self.__dict__:
+            await self.refresh()
+        return self
 
     @classmethod
     def where(

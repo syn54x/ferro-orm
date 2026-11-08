@@ -45,10 +45,10 @@ def _first_read_route(instance: object) -> "RouteHandle | None":
 class RelationshipDescriptor(BaseModel):
     """The attribute behind a reverse (`BackRef`) or many-to-many relation.
 
-    On an instance, a to-many relation reads as a
-    [`Relation`][ferro.Relation] query over the related rows, and a
-    one-to-one reverse relation as an awaitable of the related instance or
-    `None`. See [Relationships](../guide/relationships.md).
+    On an instance, the relation reads as a [`Relation`][ferro.Relation]
+    query over the related rows at every cardinality; a one-to-one reverse
+    relation reads its instance, or `None`, with `.first()`. See
+    [Relationships](../guide/relationships.md).
     """
 
     target_model_name: str
@@ -104,11 +104,6 @@ class RelationshipDescriptor(BaseModel):
             )
 
         fk_field = self.fk_column
-        if self.is_one_to_one:
-            return self._target_model.where(
-                lambda related, f=fk_field, v=pk_val: getattr(related, f) == v
-            ).first()
-
         from ..query.builder import Relation
 
         return Relation(
