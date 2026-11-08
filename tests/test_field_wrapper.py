@@ -335,8 +335,36 @@ def test_primary_key_in_json_schema_extra_is_refused():
             lambda: Field(json_schema_extra={"primary_key": True}),
             r"Pass primary_key=True to Field\(\)",
         ),
+        (
+            lambda: pydantic.Field(
+                default=0, json_schema_extra={"ferro_field": {"unique": True}}
+            ),
+            r"Pass unique=True to Field\(\) instead of json_schema_extra",
+        ),
+        (
+            lambda: pydantic.Field(
+                default=0,
+                json_schema_extra={
+                    "ferro_field": {
+                        "index": True,
+                        "db_type": "bigint",
+                        "nullable": True,
+                    }
+                },
+            ),
+            r"Pass index=True, db_type='bigint', nullable=True to Field\(\)",
+        ),
     ],
-    ids=["unique", "index", "autoincrement", "db_type", "db_check", "ferro-field"],
+    ids=[
+        "unique",
+        "index",
+        "autoincrement",
+        "db_type",
+        "db_check",
+        "through-ferro-Field",
+        "old-ferro_field-key",
+        "old-ferro_field-key-several-options",
+    ],
 )
 def test_every_option_key_in_json_schema_extra_is_refused(declare, message):
     with pytest.raises(TypeError, match=message):
@@ -367,6 +395,20 @@ def test_field_refuses_an_unknown_keyword_listing_the_options():
 def test_back_ref_refuses_a_misspelled_option():
     with pytest.raises(TypeError, match=r"Did you mean 'index'"):
         BackRef(indx=True)
+
+
+def test_generated_none_is_no_field_option():
+    info = Field(generated=None, default=None)
+    assert not [item for item in info.metadata if isinstance(item, FerroField)]
+
+    class PlainScore(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        score: Annotated[int | None, FerroField(index=True)] = Field(
+            generated=None, default=None
+        )
+
+    assert PlainScore.__ferro_fields__["score"].index is True
+    assert PlainScore.__ferro_fields__["score"].generated is None
 
 
 def test_field_still_accepts_the_relation_keywords():

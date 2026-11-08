@@ -119,6 +119,10 @@ _SCHEMA_EXTRA_OPTIONS = {
     "ferro_nullable": "nullable",
 }
 
+# The key the old `Field()` wrote its options under: a dict keyed by the
+# `Field()` arguments themselves.
+_OLD_FIELD_OPTIONS_KEY = "ferro_field"
+
 
 def _refuse_options_in_schema_extra(
     model: str, field_name: str, field_info: FieldInfo
@@ -132,13 +136,21 @@ def _refuse_options_in_schema_extra(
     if not isinstance(extra, dict):
         return
     for key, value in extra.items():
-        argument = _SCHEMA_EXTRA_OPTIONS.get(key)
-        if argument is not None:
-            raise TypeError(
-                f"{model}.{field_name} declares {key!r} in json_schema_extra, "
-                f"which Ferro does not read. Pass {argument}={value!r} to Field() "
-                "instead of json_schema_extra"
+        if key == _OLD_FIELD_OPTIONS_KEY:
+            arguments = (
+                ", ".join(f"{option}={given!r}" for option, given in value.items())
+                if isinstance(value, dict) and value
+                else "its options"
             )
+        elif key in _SCHEMA_EXTRA_OPTIONS:
+            arguments = f"{_SCHEMA_EXTRA_OPTIONS[key]}={value!r}"
+        else:
+            continue
+        raise TypeError(
+            f"{model}.{field_name} declares {key!r} in json_schema_extra, "
+            f"which Ferro does not read. Pass {arguments} to Field() "
+            "instead of json_schema_extra"
+        )
 
 
 class SecretHydrator:
