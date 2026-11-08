@@ -894,12 +894,12 @@ async def _seed():
 
 @pytest.mark.backend_matrix
 @pytest.mark.asyncio
-async def test_awaiting_a_forward_relation_loads_the_target(db_url):
+async def test_loading_a_forward_relation_gives_the_target(db_url):
     await ferro.connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
         _, _, ada = await _seed()
 
-        team = await ada.team
+        team = await ada.team.load()
 
         assert isinstance(team, FKCTeam)
         assert team.name == "Owls"
