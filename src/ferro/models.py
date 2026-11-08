@@ -44,7 +44,7 @@ from ._core import (
     evict_instance as _core_evict_instance,
 )
 from .base import ForeignKey, ForwardRelation, foreign_key_allows_none
-from .exceptions import ModelDoesNotExist
+from .exceptions import InstanceNotLoaded, ModelDoesNotExist
 from .metaclass import ModelMetaclass, generated_refusal
 from .query import Predicate, Query
 from .state import (
@@ -75,6 +75,28 @@ def _is_persisted(instance: object) -> bool:
 
 def _set_persisted(instance: object, value: bool) -> None:
     object.__setattr__(instance, _FERRO_PERSISTED_ATTR, value)
+
+
+def _not_loaded(instance: object) -> InstanceNotLoaded:
+    """The refusal of an unloaded instance, naming how to load it."""
+    from .relations import _snake
+
+    model, path, found_no_row = instance.__dict__[_FERRO_UNLOADED_ATTR]
+    cls = type(instance)
+    pk = cls.__ferro_pk__
+    held = f"{cls.__name__}({pk}={instance.__dict__[pk]!r}) is not loaded"
+    parameter = _snake(model)
+    relation = f"{parameter}.{path}"
+    if found_no_row:
+        return InstanceNotLoaded(
+            f"{held}: the query that included {relation} found no row with that "
+            "key. The row was deleted, or row security hides it from this "
+            f"connection; point {relation} at a row that exists"
+        )
+    return InstanceNotLoaded(
+        f"{held}. Read it after include(lambda {parameter}: {relation}) or "
+        f"await {relation}.load()"
+    )
 
 
 def _field_eq(field_name: str, value: Any) -> Predicate[Any]:
@@ -418,8 +440,11 @@ class Model(BaseModel, metaclass=ModelMetaclass):
     if not TYPE_CHECKING:
 
         def __getattr__(self, item: str) -> Any:
-            # Only a miss reaches here: a retired field (ADR-0053) is no
+            # Only a miss reaches here: a column an unloaded instance does not
+            # hold (ADR-0063), or a retired field (ADR-0053), which is no
             # attribute, and the error says it is gone on purpose.
+            if _FERRO_UNLOADED_ATTR in self.__dict__ and item in type(self).model_fields:
+                raise _not_loaded(self)
             if item in type(self).__ferro_retired_names__:
                 raise AttributeError(
                     f"{type(self).__name__}.{item} is retired in this release: the "
@@ -428,6 +453,27 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                     obj=self,
                 )
             return super().__getattr__(item)
+
+        def __setattr__(self, name: str, value: Any) -> None:
+            if _FERRO_UNLOADED_ATTR in self.__dict__ and name in type(self).model_fields:
+                raise _not_loaded(self)
+            super().__setattr__(name, value)
+
+        def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+            if _FERRO_UNLOADED_ATTR in self.__dict__:
+                raise _not_loaded(self)
+            return super().model_dump(*args, **kwargs)
+
+        def model_dump_json(self, *args: Any, **kwargs: Any) -> str:
+            if _FERRO_UNLOADED_ATTR in self.__dict__:
+                raise _not_loaded(self)
+            return super().model_dump_json(*args, **kwargs)
+
+    def __repr__(self) -> str:
+        if _FERRO_UNLOADED_ATTR in self.__dict__:
+            pk = type(self).__ferro_pk__
+            return f"{type(self).__name__}({pk}={self.__dict__[pk]!r}, unloaded)"
+        return super().__repr__()
 
     @model_validator(mode="after")
     def _validate_required_foreign_keys(self) -> Self:
@@ -512,6 +558,8 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             assert rows[0].views == 1000
             ```
         """
+        if _FERRO_UNLOADED_ATTR in self.__dict__:
+            raise _not_loaded(self)
         if on_conflict not in (None, "update"):
             raise ValueError(
                 f'on_conflict must be None or "update", got {on_conflict!r}'

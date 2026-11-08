@@ -86,18 +86,23 @@ def _read_instance_order_value(row: Any, entry: OrderByEntry) -> Any:
     """Walk a populated relation path; unpopulated is a loud build-time error.
 
     Include-population puts the relation name in the instance ``__dict__``,
-    shadowing the class-level ``ForwardDescriptor``. A missing key is the
-    awaitable (unpopulated) contract — do not follow the descriptor.
+    shadowing the class-level ``ForwardDescriptor``. A missing key, or an
+    unloaded instance a first read cached there, is not populated — do not
+    follow the descriptor.
     """
+    from ..models import _FERRO_UNLOADED_ATTR
+
     current = row
     for hop in entry.path:
-        if hop not in vars(current):
+        hop_value = vars(current).get(hop)
+        if hop not in vars(current) or (
+            hop_value is not None and _FERRO_UNLOADED_ATTR in vars(hop_value)
+        ):
             dotted = _dotted_order_key(entry)
             raise ValueError(
                 f"position_of() requires relation path {dotted!r} populated "
                 "on the instance; pass a tuple if you only have the values"
             )
-        hop_value = vars(current)[hop]
         if hop_value is None:
             return None
         current = hop_value
