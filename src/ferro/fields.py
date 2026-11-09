@@ -1090,6 +1090,15 @@ else:
         return _relation_field("Reverse", "reverse", attribute)
 
 
+# The options a many-to-many refuses with words of their own, each naming its fix.
+_OWN_REASONS = {
+    "init": "a relation is never a constructor parameter, so drop init= from the "
+    "declaration",
+    "retired": "a many-to-many is a join table, not a column, so it cannot be "
+    "retired; delete the declaration to drop the join table",
+}
+
+
 def _many_to_many_field(
     through: str | None,
     related_name: str | None,
@@ -1100,11 +1109,9 @@ def _many_to_many_field(
     """The `FieldInfo` a `ManyToMany(...)` declares, refusing every option it
     would not use."""
     for name in unknown:
-        reason = (
-            "a relation is never a constructor parameter, so drop init= from "
-            "the declaration"
-            if name == "init"
-            else "a many-to-many adds no column, so it takes no column or field option"
+        reason = _OWN_REASONS.get(
+            name,
+            "a many-to-many adds no column, so it takes no column or field option",
         )
         raise TypeError(
             f"ManyToMany() got an unexpected keyword argument '{name}': {reason}. "

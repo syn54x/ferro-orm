@@ -285,8 +285,17 @@ async def test_auto_migrate_renames_a_join_table_in_place(db_url):
     await _ann_with_two_tags(db_url)
     Author, _ = _authors("author_tags", renamed_from="writer_tags")
 
-    report = await auto_migrate(db_url, updates=True)
+    report = await warned_auto_migrate(db_url, updates=True)
 
+    # SQLite renames a table in place but not its constraints, which only a
+    # migration's rebuild renames (ADR-0047), and says so.
+    stale = [
+        f"Constraint 'fk_writer_tags_{column}' on 'author_tags' is now named "
+        f"'fk_author_tags_{column}', and SQLite cannot rename a table constraint "
+        "in place; `ferro migrate new` renames it by rebuilding the table."
+        for column in ("author_id_author", "tag_id_tag")
+    ]
+    assert warning_texts(report) == on(db_url, sqlite=stale, postgres=[])
     statements = schema_sql(report)
     assert statements[0] == 'ALTER TABLE "writer_tags" RENAME TO "author_tags"'
     assert 'DROP TABLE "writer_tags"' not in statements
@@ -298,8 +307,9 @@ async def test_auto_migrate_renames_a_join_table_in_place(db_url):
         ann = await Author.where(lambda author: author.name == "Ann").first()
         assert sorted(tag.label for tag in await ann.tags.all()) == ["poetry", "prose"]
     ferro.reset_engine()
-    # The live database is the models': a second pass finds nothing to change.
-    assert schema_sql(await auto_migrate(db_url, updates=True)) == []
+    # A second pass finds nothing to change and says nothing.
+    again = await warned_auto_migrate(db_url, updates=True)
+    assert (schema_sql(again), warning_texts(again)) == ([], [])
 
 
 @pytest.mark.asyncio
@@ -397,9 +407,12 @@ class Post(Model):
 
 
 _ACCEPTED = {"through", "related_name", "renamed_from", "reverse_index"}
-# Every option of `Field` a many-to-many does not use; `init` has its own words.
+# Every option of `Field` a many-to-many does not use; `init` and `retired`
+# have words of their own.
 _UNUSED = sorted(
-    set(inspect.signature(Field).parameters) - _ACCEPTED - {"init", "unknown"}
+    set(inspect.signature(Field).parameters)
+    - _ACCEPTED
+    - {"init", "retired", "unknown"}
 )
 
 
