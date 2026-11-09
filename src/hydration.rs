@@ -482,7 +482,15 @@ fn fill_unloaded<'py>(
     // here and leaves the instance unloaded, exactly as it was.
     let filled = pyo3::types::PyDict::new(py);
     converters.sort_in_declaration_order(&mut fields);
-    apply_decoded_fields(py, cls, &filled, fields_set, fields, py_col_names, converters)?;
+    apply_decoded_fields(
+        py,
+        cls,
+        &filled,
+        fields_set,
+        fields,
+        py_col_names,
+        converters,
+    )?;
     for (name, value) in dict.iter() {
         if !filled.contains(&name)? && !name.eq(UNLOADED_MARKER)? {
             filled.set_item(name, value)?;
