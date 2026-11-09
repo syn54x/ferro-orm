@@ -29,7 +29,7 @@ Rejected alternatives:
 
 Consequences:
 
-- ADR-0007 and ADR-0008 are superseded in part: the complete-instance invariant has two states, and an unpopulated relation reads as an unloaded instance, not an awaitable. Projected records, materialization plans and the include rules stand.
+- ADR-0007 and ADR-0008 are superseded in part: the complete-instance invariant has two states, and a relation nothing loaded reads as an unloaded instance, not an awaitable. Projected records, materialization plans and the include rules stand.
 - `await player.team` raises Python's own `TypeError`; the fix is `await player.team.load()`. A one-to-one reverse relation is a query like every reverse relation, read with `.first()`.
 - `position_of()` treats an unloaded relation as not included.
 - A session that reads the forward relation of every row of a large query holds one identity-map entry per distinct target key, the same as an include of that relation would.

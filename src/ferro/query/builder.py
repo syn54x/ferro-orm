@@ -305,7 +305,7 @@ def _resolve_include_selector(
     """Resolve an ``include()`` selector into a relation path (#286).
 
     ``selector`` is a lambda receiving a validating `QueryProxy` and
-    naming a forward-FK RELATION path (``lambda t: t.account``,
+    naming a forward relation path (``lambda t: t.account``,
     ``lambda t: t.account.owner``) — the same traversal syntax as ``join()``,
     resolving to a `RelationProxy`. Each hop is validated against the
     relevant model at build time (the proxy raises ``AttributeError`` with a
@@ -391,7 +391,7 @@ def _resolve_projection_selector(
     field (``lambda t: t.amount``), a tuple/list of fields
     (``lambda t: (t.id, t.account.name)``), or a dict whose keys name the
     output fields (``lambda t: {"account_name": t.account.name}`` — output
-    aliases, GLOSSARY.md). Fields may traverse declared forward-FK relations
+    aliases, GLOSSARY.md). Fields may traverse declared forward relations
     at any depth; every hop validates at build time with did-you-mean,
     exactly like ``where()``/``order_by()``. Mixed nesting — a dict inside a
     tuple, a tuple inside a dict — is rejected: one selector, one shape.
@@ -2157,16 +2157,26 @@ if TYPE_CHECKING:
 
 
 class Relation(Query[T]):
-    """The type of a reverse (`Reverse`) or many-to-many collection on an instance.
+    """The annotation of every relation: forward, reverse and many-to-many.
 
-    Annotate the field as `Relation[list[Target]]`. On an instance, the field
-    is a query over the related rows: await `.all()` to load them, or chain
-    `where()`, `order_by()` and the other query methods first. See
+    A forward relation ([`Forward`][ferro.Forward]) is annotated
+    `Relation[Target]`, or `Relation[Target | None]` when its foreign-key
+    column allows `None`. On an instance it reads as the related instance,
+    unloaded until `include()` or `.load()` fills it, and assigning an
+    instance to it sets the column.
+
+    A reverse ([`Reverse`][ferro.Reverse]) or many-to-many
+    ([`ManyToMany`][ferro.ManyToMany]) relation is annotated
+    `Relation[list[Target]]`. On an instance it is this query over the
+    related rows: await `.all()` to read them, or chain `where()`,
+    `order_by()` and the other query methods first. See
     [Relationships](../guide/relationships.md).
 
     Examples:
         ```python {test=run prelude=reference}
-        ada = await Author.get(1)
+        post = await Post.where(lambda post: post.views > 1000).first()
+        ada = await post.author.load()
+        assert ada.name == "Ada Lovelace"
         posts = await ada.posts.all()
         assert [post.title for post in posts] == ["Notes on the Analytical Engine"]
         ```

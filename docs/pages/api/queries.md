@@ -28,7 +28,7 @@ The [Queries guide](../guide/queries.md) covers each feature with worked example
 | Call | Returns | Result of `.all()` |
 | :--- | :--- | :--- |
 | `Post.select()` | `Query[Post]` | `list[Post]`: the full query, unchanged. |
-| `Post.select(lambda post: (post.id, post.author.name))` | `ProjectedQuery[Post]` | `Rows[Row]`: one record per row; a field may follow forward foreign keys at any depth and takes the leaf column's name (one field: `select(lambda post: post.views)`). |
+| `Post.select(lambda post: (post.id, post.author.name))` | `ProjectedQuery[Post]` | `Rows[Row]`: one record per row; a field may follow forward relations at any depth and takes the leaf column's name (one field: `select(lambda post: post.views)`). |
 | `Post.select(lambda post: {"author_email": post.author.email})` | `ProjectedQuery[Post]` | `Rows[Row]`: the dict keys name the output fields; the values are field references or aggregates. |
 | `Post.select("id", "views")` | `ProjectedQuery[Post]` | `Rows[Row]`: root columns only, never a traversal, never mixed with a lambda. |
 

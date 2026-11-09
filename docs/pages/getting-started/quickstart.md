@@ -93,7 +93,7 @@ Load a post's author, then the author's published posts:
 --8<-- "docs/examples/quickstart.py:relationships"
 ```
 
-Awaiting the foreign key (`post.author`) loads the related `Author`. The reverse side (`author.posts`) is a query, so you can chain `.where()` and `.order_by()` before awaiting it.
+`post.author` is a forward relation. Until something loads it, it is an unloaded `Author` that holds only its key; `.load()` fills it in place and returns it. The reverse side (`author.posts`) is a query, so you can chain `.where()` and `.order_by()` before awaiting it.
 
 ## Update and delete
 
@@ -132,7 +132,7 @@ Pick a path by what you are building.
 For an API with FastAPI, Starlette or similar:
 
 1. [Models and fields](../guide/models-and-fields.md) covers field types, constraints and defaults.
-2. [Relationships](../guide/relationships.md) covers foreign keys, back-references and many-to-many.
+2. [Relationships](../guide/relationships.md) covers foreign-key columns, forward and reverse relations and many-to-many.
 3. [Queries](../guide/queries.md) covers filtering, ordering and slicing.
 4. [Pagination](../howto/pagination.md) shows offset and cursor pagination.
 5. [Testing](../howto/testing.md) shows fast, isolated tests on in-memory SQLite.

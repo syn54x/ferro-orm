@@ -93,7 +93,7 @@ default · sqlite:///./app.db
 0002_author_nickname  02_idx_author_nickname  applied (0 ms)
 ```
 
-The database now has the `nickname` column and its index. `new` diffs the models against the newest migration's [schema snapshot](#reading-a-migration), never against a database, so it needs no connection and gives every developer the same files. A change that renders no DDL (a Python-side default, a back-reference) writes nothing and says `no schema change: nothing written`.
+The database now has the `nickname` column and its index. `new` diffs the models against the newest migration's [schema snapshot](#reading-a-migration), never against a database, so it needs no connection and gives every developer the same files. A change that renders no DDL (a Python-side default, a reverse relation) writes nothing and says `no schema change: nothing written`.
 
 The example `docs/examples/migrations_quickstart.py` in the repository runs the whole loop on SQLite: `init`, `new`, `up`, `check`, `drift`, `down`.
 

@@ -947,11 +947,13 @@ else:
         """Declare a forward relation over a foreign-key column of this model.
 
         Assign it to a field annotated `Relation[Target]`, or
-        `Relation[Target | None]` when the column allows `None`. The relation
-        reads the row the column points at: awaiting it loads the target, and a
-        query's `include()` fills it in. It adds no column; the foreign-key
-        column is the field declared with `Field(foreign_key=Target)`. See
-        [Relationships](../guide/relationships.md).
+        `Relation[Target | None]` when the column allows `None`. On an
+        instance the relation reads as the related instance: unloaded, holding
+        only its key, until a query's `include()` or the instance's `.load()`
+        fills it. Assigning an instance to it sets the column. It adds no
+        column; the foreign-key column is the field declared with
+        `Field(foreign_key=Target)`. See
+        [Loaded relations](../guide/relationships.md#loaded-relations).
 
         Args:
             column: The name of the foreign-key column on this model.
