@@ -225,29 +225,29 @@ def test_override_field_nullable_true_on_required_type():
     assert t.c.field_a.nullable is True
 
 
-def test_override_foreign_key_nullable_false_optional_relation():
+def test_a_foreign_key_column_takes_no_nullable_false():
     class Parent(Model):
         id: Annotated[int, FerroField(primary_key=True)]
         name: str
 
-    class ChildOv(Model):
-        id: Annotated[int, FerroField(primary_key=True)]
-        parent_id: Annotated[
-            int | None, FerroField(foreign_key=Parent, nullable=False)
-        ] = None
+    # A key column's nullability is its annotation's: the fix drops `| None`.
+    with pytest.raises(TypeError, match=r"Write: parent_id: int = "):
 
-    t = get_metadata().tables["childov"]
-    assert t.c.parent_id.nullable is False
+        class ChildOv(Model):
+            id: Annotated[int, FerroField(primary_key=True)]
+            parent_id: Annotated[
+                int | None, FerroField(foreign_key=Parent, nullable=False)
+            ] = None
 
 
-def test_override_foreign_key_nullable_true_required_relation():
+def test_a_foreign_key_column_takes_no_nullable_true():
     class Parent(Model):
         id: Annotated[int, FerroField(primary_key=True)]
         name: str
 
-    class ChildFkTrue(Model):
-        id: Annotated[int, FerroField(primary_key=True)]
-        parent_id: Annotated[int, FerroField(foreign_key=Parent, nullable=True)]
+    # A key column's nullability is its annotation's: the fix adds `| None`.
+    with pytest.raises(TypeError, match=r"Write: parent_id: int \| None = "):
 
-    t = get_metadata().tables["childfktrue"]
-    assert t.c.parent_id.nullable is True
+        class ChildFkTrue(Model):
+            id: Annotated[int, FerroField(primary_key=True)]
+            parent_id: Annotated[int, FerroField(foreign_key=Parent, nullable=True)]

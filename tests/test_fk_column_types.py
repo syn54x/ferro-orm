@@ -48,7 +48,7 @@ def test_a_join_table_types_its_columns_as_each_model_s_primary_key():
 
     columns = {
         spec.name: (spec.logical_type, spec.python_type, spec.foreign_key.to_table)
-        for spec in REGISTRY.join_tables()["join_post_tags"]["columns"]
+        for spec in REGISTRY.join_tables()["join_post_tags"].columns
     }
     assert columns == {
         "joinintpost_id": ("integer", int, "joinintpost"),

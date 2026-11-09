@@ -180,6 +180,15 @@ def _key_cases(cases: dict, storage: str, t: str) -> None:
             f'team_id: {key} = Field(foreign_key="{t}"{stored})',
             False,
         ),
+        "key declaring nullable=": (
+            f'team_id: {key} | None = Field(foreign_key="{t}", nullable=False{stored})',
+            True,
+        ),
+        "SET NULL key declaring nullable=False": (
+            f"team_id: {key} | None = Field("
+            f'foreign_key="{t}", on_delete="SET NULL", nullable=False{stored})',
+            True,
+        ),
     }
     if storage == "int":
         columns["generated key"] = (
@@ -206,7 +215,7 @@ def _key_cases(cases: dict, storage: str, t: str) -> None:
         cases[f"{name} to {t}, read by a forward relation"] = _case(
             "key",
             "team_id",
-            local=local and name != "required SET NULL key",
+            local=local and "SET NULL" not in name,
             no_pk=no_pk,
             **_merge(team, {"Player": [line, reader]}),
         )
@@ -250,6 +259,7 @@ def _cases(storage: str) -> dict[str, dict]:
             "annotated without Relation": f'"{t}"',
             "a bare Relation": "Relation",
             "nullable over a required column": f'Relation["{t} | None"]',
+            "annotated as a union of models": f'Relation["{t} | Card"]',
         }.items():
             cases[f"forward {spelling} to {t}"] = _case(
                 "forward",
@@ -290,6 +300,7 @@ def _cases(storage: str) -> dict[str, dict]:
         for spelling, relation in {
             "annotated as one row": 'Relation["Player"]',
             "a bare Relation": "Relation",
+            "annotated as a union of models": 'Relation[list["Player | Card"]]',
         }.items():
             cases[f"reverse on {t} {spelling}"] = _case(
                 "reverse",
@@ -349,6 +360,14 @@ def _cases(storage: str) -> dict[str, dict]:
         local=None,
         owner="Team",
         Team=['players: Relation = Reverse("team_id")'],
+    )
+    cases["many-to-many over a union of models nothing names"] = _case(
+        "none",
+        "links",
+        local=None,
+        Player=[
+            'links: Relation[list["Tag | Card"]] = ManyToMany(through="player_links")'
+        ],
     )
     cases["bare many-to-many nothing names"] = _case(
         "none",
