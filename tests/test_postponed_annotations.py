@@ -127,8 +127,8 @@ async def _same_ddl(db_url, tmp_path, with_import: str, plain: str, *, future: b
 @pytest.mark.asyncio
 @pytest.mark.backend_matrix
 async def test_string_annotation_gives_the_same_ddl_as_the_twin(db_url, tmp_path):
-    post = AUTHOR + POST.format(target="Author")
-    got = await _same_ddl(db_url, tmp_path, post, post, future=True)
+    body = AUTHOR + POST.format(target="Author")
+    got = await _same_ddl(db_url, tmp_path, body, body, future=True)
     post = next(s for s in got if '"post"' in s and "CREATE TABLE" in s)
     assert '"author_id"' in post
     assert "fk_post_author_id_author" in post
