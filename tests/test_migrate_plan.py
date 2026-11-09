@@ -1006,7 +1006,7 @@ def _declare_library_models():
     declared child first so the planner, not declaration order, decides."""
     from enum import StrEnum
 
-    from ferro import BackRef, ForeignKey, Model, Relation
+    from ferro import Forward, Model, Relation, Reverse
     from ferro.base import FerroField
 
     class PlanStatus(StrEnum):
@@ -1019,7 +1019,8 @@ def _declare_library_models():
 
     class PlanBook(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
-        author: Annotated["PlanAuthor", ForeignKey(related_name="books")]
+        author_id: Annotated[int, FerroField(foreign_key="PlanAuthor")]
+        author: Relation["PlanAuthor"] = Forward("author_id")
         title: Annotated[str, FerroField(index=True)]
         status: PlanStatus = PlanStatus.DRAFT
         kind: Annotated[PlanKind, FerroField(db_type="text", db_check=True)] = (
@@ -1029,7 +1030,7 @@ def _declare_library_models():
     class PlanAuthor(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: Annotated[str, FerroField(unique=True)]
-        books: Relation[list[PlanBook]] = BackRef()
+        books: Relation[list[PlanBook]] = Reverse("author_id")
 
     return PlanAuthor, PlanBook
 

@@ -18,7 +18,7 @@ It lives in ``test_row_security_reconcile.py`` / ``_rebuild.py`` / ``_orphans.py
 import datetime
 import json
 import uuid
-from typing import Annotated, ClassVar
+from typing import ClassVar
 
 import pytest
 
@@ -356,27 +356,29 @@ def test_distinct_policy_names_that_truncate_together_are_rejected():
 
 
 def test_a_shorthand_over_a_forward_fk_revalidates_on_the_resolved_pass():
-    """A forward-referenced FK's shadow column only learns its real storage
-    when relationships resolve. The cast check re-runs there, so a target whose
-    PK turns out to be unsupported fails pointing at the declaration — and it
-    stays a TypeError, the class-definition contract, not an internal error."""
-    from ferro import BackRef, ForeignKey, Relation
+    """A key column over a forward-referenced target declares its storage, the
+    target key's type, so the cast check reads it when the class is defined: a
+    target whose key the shorthand cannot cast fails pointing at the
+    declaration, as a TypeError, the class-definition contract, not an
+    internal error."""
+    from ferro import Forward, Relation, Reverse
     from ferro.relations import resolve_relationships
 
-    class Doc(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        owner: Annotated["Owner", ForeignKey(related_name="docs")]
-
-        # Passes at class-body time: the shadow column is provisionally integer.
-        __ferro_rls__: ClassVar = RowSecurity(
-            RowPolicy(column="owner_id", setting="pinch.owner")
-        )
-
-    class Owner(Model):
-        id: datetime.datetime = Field(primary_key=True)
-        docs: Relation[list["Doc"]] = BackRef()
-
     with pytest.raises(TypeError) as excinfo:
+
+        class Doc(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            owner_id: datetime.datetime = Field(foreign_key="Owner")
+            owner: Relation["Owner"] = Forward("owner_id")
+
+            __ferro_rls__: ClassVar = RowSecurity(
+                RowPolicy(column="owner_id", setting="pinch.owner")
+            )
+
+        class Owner(Model):
+            id: datetime.datetime = Field(primary_key=True)
+            docs: Relation[list["Doc"]] = Reverse("owner_id")
+
         resolve_relationships()
 
     message = str(excinfo.value)

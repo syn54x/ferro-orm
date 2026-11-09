@@ -10,12 +10,9 @@ need a PK raise clear errors instead of guessing (the old silent ``"id"``
 fallback).
 """
 
-from typing import Annotated
-
 import pytest
 
-from ferro import Field, Model
-from ferro.base import ForeignKey
+from ferro import Field, Forward, Model, Relation
 
 
 @pytest.fixture(autouse=True)
@@ -72,4 +69,5 @@ def test_fk_to_pkless_target_is_refused_at_declaration_instead_of_guessing_id():
 
         class PkGuessReferrer(Model):
             id: int | None = Field(default=None, primary_key=True)
-            target: Annotated[PkLessTarget, ForeignKey(related_name="referrers")]
+            target_id: int = Field(foreign_key=PkLessTarget)
+            target: Relation[PkLessTarget] = Forward("target_id")

@@ -47,7 +47,7 @@ HEADER = """\
 from enum import StrEnum
 from typing import Annotated
 
-from ferro import BackRef, ForeignKey, Model, Relation, RowPolicy, RowSecurity
+from ferro import Forward, Model, Relation, Reverse, RowPolicy, RowSecurity
 from ferro.base import FerroField
 """
 
@@ -73,10 +73,11 @@ class Post(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     title: Annotated[str, FerroField(index=True)]
     kind: Kind = Kind.NOTE
-    author: Annotated[Author, ForeignKey(related_name="posts", on_delete="CASCADE")]
+    author_id: Annotated[int, FerroField(foreign_key=Author, on_delete="CASCADE")]
+    author: Relation[Author] = Forward("author_id")
 """
 
-LIBRARY = AUTHOR + '    posts: Relation[list["Post"]] = BackRef()\n' + POST
+LIBRARY = AUTHOR + '    posts: Relation[list["Post"]] = Reverse("author_id")\n' + POST
 
 
 def write_models(project: Path, pkg: str, body: str) -> None:

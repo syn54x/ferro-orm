@@ -11,10 +11,8 @@ import pytest
 
 import ferro
 from ferro import (
-    BackRef,
     FerroField,
     Field,
-    ForeignKey,
     Forward,
     Model,
     Relation,
@@ -187,11 +185,12 @@ if TYPE_CHECKING:
 
     class _StaticAuthor(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
-        posts: Relation[list["_StaticPost"]] = BackRef()
+        posts: Relation[list["_StaticPost"]] = Reverse("author_id")
 
     class _StaticPost(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
-        author: Annotated[_StaticAuthor, ForeignKey(related_name="posts")]
+        author_id: Annotated[int, FerroField(foreign_key=_StaticAuthor)]
+        author: Relation[_StaticAuthor] = Forward("author_id")
 
     async def _rendered_statement_shapes(author: _StaticAuthor) -> None:
         query = Query(_StaticUser).where(lambda user: user.archived == False)  # noqa: E712

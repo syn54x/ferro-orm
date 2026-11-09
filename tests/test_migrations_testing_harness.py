@@ -62,14 +62,14 @@ class Tag(Model):
     __ferro_table__ = "hrn_tag"
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     label: str
-    authors: Relation[list["Author"]] = BackRef()
+    authors: Relation[list["Author"]] = Reverse("tags")
 
 
 class Author(Model):
     __ferro_table__ = "hrn_author"
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     name: str
-    tags: Relation[list[Tag]] = ManyToMany(related_name="authors")
+    tags: Relation[list[Tag]] = ManyToMany(through="hrn_author_tags")
 """
 
 INDEXED = CREATE.replace(

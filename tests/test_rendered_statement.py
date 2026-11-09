@@ -26,14 +26,15 @@ from pydantic import SecretStr
 import ferro
 from ferro import (
     REDACTED,
-    BackRef,
+    Forward,
     Model,
     Relation,
     RenderedSql,
+    Reverse,
     engines,
 )
 from ferro._core import identity_map_len
-from ferro.base import FerroField, ForeignKey
+from ferro.base import FerroField
 
 pytestmark = pytest.mark.backend_matrix
 
@@ -43,13 +44,14 @@ class RsAccount(Model):
     email: Annotated[str, FerroField(unique=True)]
     token: SecretStr
     visits: int = 0
-    notes: Relation[list["RsNote"]] = BackRef()
+    notes: Relation[list["RsNote"]] = Reverse("account_id")
 
 
 class RsNote(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     label: str
-    account: Annotated[RsAccount | None, ForeignKey(related_name="notes")] = None
+    account_id: Annotated[int | None, FerroField(foreign_key=RsAccount)] = None
+    account: Relation[RsAccount | None] = Forward("account_id")
 
 
 async def _seeded(db_url: str) -> RsAccount:

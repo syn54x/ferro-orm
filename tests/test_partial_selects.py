@@ -20,7 +20,7 @@ from uuid import UUID
 import pytest
 
 import ferro
-from ferro import FerroField, ForeignKey, Model, Relation, BackRef
+from ferro import FerroField, Forward, Model, Relation, Reverse
 from ferro.query import ProjectedQuery, Query, Row, Rows
 
 pytestmark = pytest.mark.backend_matrix
@@ -34,14 +34,15 @@ pytestmark = pytest.mark.backend_matrix
 class PSAccount(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     label: str = ""
-    transactions: Relation[list["PSTransaction"]] = BackRef()
+    transactions: Relation[list["PSTransaction"]] = Reverse("account_id")
 
 
 class PSTransaction(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     amount: int = 0
     note: str = ""
-    account: Annotated[PSAccount, ForeignKey(related_name="transactions")]
+    account_id: Annotated[int, FerroField(foreign_key=PSAccount)]
+    account: Relation[PSAccount] = Forward("account_id")
 
 
 class PSTier(StrEnum):

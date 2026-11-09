@@ -18,11 +18,11 @@ from pathlib import Path
 from typing import Annotated, ClassVar
 
 from ferro import (
-    BackRef,
     FerroField,
     ManyToMany,
     Model,
     Relation,
+    Reverse,
     clear_registry,
 )
 
@@ -121,12 +121,12 @@ def test_clear_registry_evicts_join_table_envelopes(clean_registry):
     class Page(Model):
         __ferro_table__: ClassVar[str] = "reg_pages"
         id: Annotated[int | None, FerroField(primary_key=True)] = None
-        tags: Relation[list["PageTag"]] = ManyToMany(related_name="pages")
+        tags: Relation[list["PageTag"]] = ManyToMany(through="reg_pages_tags")
 
     class PageTag(Model):
         __ferro_table__: ClassVar[str] = "reg_page_tags"
         id: Annotated[int | None, FerroField(primary_key=True)] = None
-        pages: Relation[list[Page]] = BackRef()
+        pages: Relation[list[Page]] = Reverse("tags")
 
     resolve_relationships()
 

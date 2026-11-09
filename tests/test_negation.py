@@ -8,7 +8,7 @@ shape is pinned separately by the ``not`` golden vectors.
 
 import pytest
 from typing import Annotated
-from ferro import BackRef, Model, ForeignKey, Relation, connect, FerroField, engines
+from ferro import Forward, Model, Relation, Reverse, connect, FerroField, engines
 
 pytestmark = pytest.mark.backend_matrix
 
@@ -192,15 +192,14 @@ async def test_null_rows_are_excluded_under_negation(db_url):
 class NegAccount(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     label: str
-    transactions: Relation[list["NegTxn"]] = BackRef()
+    transactions: Relation[list["NegTxn"]] = Reverse("account_id")
 
 
 class NegTxn(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     amount: float
-    account: Annotated[NegAccount | None, ForeignKey(related_name="transactions")] = (
-        None
-    )
+    account_id: Annotated[int | None, FerroField(foreign_key=NegAccount)] = None
+    account: Relation[NegAccount | None] = Forward("account_id")
 
 
 @pytest.mark.asyncio
