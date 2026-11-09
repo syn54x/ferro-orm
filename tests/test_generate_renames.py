@@ -31,7 +31,7 @@ from typing import Annotated
 
 import pytest
 
-from ferro import BackRef, Field, ForeignKey, Model, Relation
+from ferro import Field, Model
 from tests._pg_sequence import pg_sequence_rename
 from tests.test_generate_columns import (  # noqa: F401 - fixtures
     no_bytecode,
@@ -75,14 +75,13 @@ def build_rename_hint_models() -> None:
 
     class Publisher(Model):
         id: int | None = Field(default=None, primary_key=True)
-        books: Relation[list["Book"]] = BackRef()
 
     class Book(Model):
         __ferro_renamed_from__ = "volume"
         id: int | None = Field(default=None, primary_key=True)
         full_name: str = Field(index=True, renamed_from="name")
         subtitle: Annotated[str, Field(renamed_from="tagline")]
-        house: Annotated[Publisher, ForeignKey("books", renamed_from="press")]
+        house_id: int = Field(foreign_key=Publisher, renamed_from="press_id")
 
     _ = (Publisher, Book)
 
@@ -145,14 +144,12 @@ def b3(table: str, backend: str, hint: bool = True) -> str:
 class Tag(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     label: str
-    {table}s: Relation[list["{model}"]] = BackRef()
 
 
 class {model}(Model):
 {renamed}    id: Annotated[int | None, FerroField(primary_key=True)] = None
     name: Annotated[str, FerroField(unique=True)]
-    books: Relation[list["Book"]] = BackRef()
-    tags: Relation[list["Tag"]] = ManyToMany(related_name="{table}s")
+    tags: Relation[list["Tag"]] = ManyToMany(through="{table}_tags")
     __ferro_checks__: ClassVar[tuple[Check, ...]] = (
         Check("named", lambda {table}: {table}.name != None),
     )
@@ -161,7 +158,7 @@ class {model}(Model):
 class Book(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     title: str
-    writer: Annotated[{model}, ForeignKey("books")]
+    writer_id: Annotated[int, FerroField(foreign_key={model})]
 """
     )
 

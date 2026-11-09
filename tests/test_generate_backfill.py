@@ -96,8 +96,11 @@ class Team(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     label: str
 """
-MEMBERS = '    members: Relation[list["Author"]] = BackRef()\n'
-REQUIRED_TEAM = '    team: Annotated[Team, ForeignKey(related_name="members", on_delete="CASCADE")]\n'
+MEMBERS = '    members: Relation[list["Author"]] = Reverse("team_id")\n'
+REQUIRED_TEAM = (
+    '    team_id: Annotated[int, FerroField(foreign_key=Team, on_delete="CASCADE")]\n'
+    '    team: Relation[Team] = Forward("team_id")\n'
+)
 
 SLUG_TODO = 'todo("the slug for an existing author")'
 
@@ -417,8 +420,9 @@ def test_two_columns_share_a_backfill_and_two_models_get_one_each_parent_first(
     # The child (author) sorts before its parent (team) by name.
     write_config(project, pkg)
     optional_team = (
-        '    team: Annotated[Team | None, ForeignKey(related_name="members", '
+        "    team_id: Annotated[int | None, FerroField(foreign_key=Team, "
         'on_delete="SET NULL")] = None\n'
+        '    team: Relation[Team | None] = Forward("team_id")\n'
     )
     write_models(project, pkg, TEAM + MEMBERS + HEAD + optional_team)
     new("create")

@@ -322,7 +322,7 @@ def test_a_crashed_builds_invalid_leftover_is_cleaned_by_the_rerun(project, pkg,
 # -- C1, C3: foreign keys on an existing table --------------------------------------
 
 TEAM_ID = (
-    '    team: Annotated[Team | None, ForeignKey(related_name="members", '
+    "    team_id: Annotated[int | None, FerroField(foreign_key=Team, "
     'on_delete="SET NULL")] = None\n'
 )
 
@@ -330,7 +330,7 @@ TEAM_ID = (
 @backend_matrix
 def test_c1_an_optional_foreign_key_is_added_not_valid_then_validated(project, pkg, db):
     start(project, pkg, db, TEAM + HEAD)
-    body = TEAM + '    members: Relation[list["Author"]] = BackRef()\n' + HEAD + TEAM_ID
+    body = TEAM + HEAD + TEAM_ID
 
     migration = generate(project, pkg, body, "author_team")
 
@@ -355,11 +355,8 @@ def test_c3_a_retargeted_foreign_key_drops_adds_not_valid_and_validates(
             TEAM
             + CLUB
             + HEAD
-            + f'    team: Annotated[{target} | None, ForeignKey(related_name="authors", '
+            + f"    team_id: Annotated[int | None, FerroField(foreign_key={target}, "
             'on_delete="SET NULL")] = None\n'
-        ).replace(
-            "    label: str\n",
-            '    label: str\n    authors: Relation[list["Author"]] = BackRef()\n',
         )
 
     start(project, pkg, db, body("Team"))

@@ -289,18 +289,16 @@ class Team(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     label: str
 """
+OPTIONAL_TEAM_ID = (
+    "    team_id: Annotated[int | None, FerroField(foreign_key=Team, "
+    'on_delete="SET NULL")] = None\n'
+)
 
 
 @backend_matrix
 def test_a1_an_optional_foreign_key_round_trips(project, pkg, db):
     start(project, pkg, db, TEAM + AUTHOR)
-    body = (
-        TEAM
-        + '    members: Relation[list["Author"]] = BackRef()\n'
-        + AUTHOR
-        + '    team: Annotated[Team | None, ForeignKey(related_name="members", '
-        'on_delete="SET NULL")] = None\n'
-    )
+    body = TEAM + AUTHOR + OPTIONAL_TEAM_ID
 
     up, down = edit(project, pkg, db, body, "author_team", validates=True)
 

@@ -21,7 +21,7 @@ from typing import Annotated
 
 import pytest
 
-from ferro import Field, ForeignKey, Model
+from ferro import Field, Model
 from ferro.base import FerroField
 
 from tests.test_generate_columns import MOOD, no_bytecode  # noqa: F401 - fixtures
@@ -86,7 +86,7 @@ RETIRED_BIO = (
 
 def build_retired_column_models() -> None:
     """A retired scalar in each declaration style and a retired
-    ``ForeignKey`` (ADR-0053). Pins the ``schema_retired_column_v2`` golden
+    foreign-key column (ADR-0053). Pins the ``schema_retired_column_v2`` golden
     vector."""
 
     class Team(Model):
@@ -97,7 +97,9 @@ def build_retired_column_models() -> None:
         name: str
         bio: str | None = Field(index=True, retired=True)
         nickname: Annotated[str | None, FerroField(unique=True, retired=True)] = None
-        team: Annotated[Team | None, ForeignKey(retired=True)] = None
+        team_id: Annotated[int | None, FerroField(foreign_key=Team, retired=True)] = (
+            None
+        )
 
     _ = (Team, Author)
 
@@ -173,16 +175,13 @@ def test_a_retired_foreign_key_keeps_its_constraint_in_the_snapshot(project, pkg
         "class Team(Model):\n"
         "    id: Annotated[int | None, FerroField(primary_key=True)] = None\n\n\n"
     )
-    members = '    members: Relation[list["Author"]] = BackRef()\n\n\n'
     write_config(project, pkg)
     write_models(
         project,
         pkg,
-        team.rstrip("\n")
-        + "\n"
-        + members
+        team
         + AUTHOR
-        + '    team: Annotated[Team | None, ForeignKey(related_name="members")] = None\n',
+        + "    team_id: Annotated[int | None, FerroField(foreign_key=Team)] = None\n",
     )
     assert run("migrate", "new", "first") == 0
     first = listing(project / "migrations")
@@ -191,19 +190,23 @@ def test_a_retired_foreign_key_keeps_its_constraint_in_the_snapshot(project, pkg
         pkg,
         team
         + AUTHOR
-        + "    team: Annotated[Team | None, ForeignKey(retired=True)] = None\n",
+        + "    team_id: Annotated[\n"
+        + "        int | None, FerroField(foreign_key=Team, retired=True)\n"
+        + "    ] = None\n",
     )
 
     assert run("migrate", "new", "retire_team") == 0
 
-    # A nullable relation retired is no schema change.
+    # A nullable key column retired is no schema change.
     assert listing(project / "migrations") == first
     write_models(
         project,
         pkg,
         team
         + AUTHOR
-        + "    team: Annotated[Team | None, ForeignKey(retired=True)] = None\n"
+        + "    team_id: Annotated[\n"
+        + "        int | None, FerroField(foreign_key=Team, retired=True)\n"
+        + "    ] = None\n"
         + "    bio: str | None = None\n",
     )
     assert run("migrate", "new", "bio") == 0
