@@ -10,14 +10,14 @@ from collections import defaultdict
 from decimal import Decimal
 from typing import Annotated
 
-from ferro import BackRef, Field, ForeignKey, Model, Relation
+from ferro import Field, Forward, Model, Relation, Reverse
 
 
 # --8<-- [start:schema]
 class Account(Model):
     id: Annotated[int | None, Field(primary_key=True)] = None
     label: str
-    transactions: Relation[list["Transaction"]] = BackRef()
+    transactions: Relation[list["Transaction"]] = Reverse("account_id")
 
 
 class Transaction(Model):
@@ -25,7 +25,8 @@ class Transaction(Model):
     amount: int
     price: Decimal | None = None
     memo: str
-    account: Annotated[Account | None, ForeignKey(related_name="transactions")] = None
+    account_id: Annotated[int | None, Field(foreign_key=Account)] = None
+    account: Relation[Account | None] = Forward("account_id")
 
 
 # --8<-- [end:schema]

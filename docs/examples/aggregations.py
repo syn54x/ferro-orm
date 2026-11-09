@@ -8,16 +8,15 @@ the guide shows and asserts the exact records that come back.
 import asyncio
 from collections import defaultdict
 from decimal import Decimal
-from typing import Annotated
 
-from ferro import BackRef, Field, ForeignKey, Model, Relation
+from ferro import Field, Forward, Model, Relation, Reverse
 
 
 # --8<-- [start:schema]
 class Account(Model):
     id: int | None = Field(default=None, primary_key=True)
     label: str
-    transactions: Relation[list["Transaction"]] = BackRef()
+    transactions: Relation[list["Transaction"]] = Reverse("account_id")
 
 
 class Transaction(Model):
@@ -25,7 +24,8 @@ class Transaction(Model):
     amount: int
     price: Decimal | None = None
     memo: str
-    account: Annotated[Account | None, ForeignKey(related_name="transactions")] = None
+    account_id: int | None = Field(default=None, foreign_key=Account)
+    account: Relation[Account | None] = Forward("account_id")
 
 
 # --8<-- [end:schema]
