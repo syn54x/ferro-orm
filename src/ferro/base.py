@@ -1,19 +1,17 @@
 """Field and relation options that model annotations carry.
 
-[`FerroField`][ferro.FerroField] holds a column's database options,
-[`ForeignKey`][ferro.ForeignKey] the owning side of a relation, and
-`ForwardRelation` and `ReverseRelation` what
-[`Forward`][ferro.Forward] and [`Reverse`][ferro.Reverse] declare.
+[`FerroField`][ferro.FerroField] holds a column's database options, a
+foreign key among them, and `ForwardRelation`, `ReverseRelation` and
+`ManyToManyRelation` what [`Forward`][ferro.Forward],
+[`Reverse`][ferro.Reverse] and [`ManyToMany`][ferro.ManyToMany] declare.
 """
 
-import warnings
 from typing import (
     Any,
     Literal,
     TypeVar,
 )
 
-from ._annotation_utils import annotation_allows_none
 
 T = TypeVar("T")
 """A type variable for generic helpers."""
@@ -264,143 +262,6 @@ class FerroField:
         """
 
 
-class ForeignKey:
-    """The owning side of a relation: a foreign key to another model.
-
-    Declare it as `Annotated[Target, ForeignKey(...)]`. The table gets a
-    `<field>_id` column holding the target's primary key, and the target
-    model reads the relation back through the [`BackRef`][ferro.BackRef]
-    that `related_name` names. The models these examples run against declare
-    the pair like this, other fields left out:
-
-    ```python {test=compile reason="the reference prelude already declares these models"}
-    class Author(Model):
-        ...
-        posts: Relation[list["Post"]] = BackRef()
-
-
-    class Post(Model):
-        ...
-        author: Annotated[Author, ForeignKey(related_name="posts")]
-    ```
-
-    See [Relationships](../guide/relationships.md) for one-to-one, nullable
-    and self-referential relations.
-
-    Examples:
-        ```python {test=run prelude=reference}
-        post = await Post.where(lambda post: post.views > 1000).first()
-        author = await post.author.load()
-        assert author.name == "Ada Lovelace"
-        ```
-    """
-
-    def __init__(
-        self,
-        related_name: str | None = None,
-        on_delete: str = "CASCADE",
-        unique: bool = False,
-        index: bool = False,
-        nullable: FerroNullable = "infer",
-        renamed_from: str | None = None,
-        retired: bool = False,
-    ):
-        """Declare a foreign key to the model in the annotation.
-
-        Args:
-            related_name: The name of the [`BackRef`][ferro.BackRef] on the
-                target model that reads this relation back. Required unless
-                `retired=True`.
-            on_delete: What the database does to this row when the target row
-                is deleted: `"CASCADE"` (the default), `"RESTRICT"`,
-                `"SET NULL"`, `"SET DEFAULT"` or `"NO ACTION"`.
-            unique: Make the relation one-to-one with a unique constraint on
-                the `<field>_id` column. The constraint indexes the column, so
-                `index=True` beside it is ignored with a `UserWarning`.
-            index: Add a non-unique index on the `<field>_id` column. Postgres
-                does not index a foreign key column on its own.
-            nullable: `"infer"` (the default) makes the `<field>_id` column
-                nullable when the relation's annotation allows `None` or
-                `on_delete` is `"SET NULL"`; `True` or `False` forces it.
-            renamed_from: The relation's previous field name. The
-                `<field>_id` column and its foreign key constraint are renamed
-                with it (`writer` to `author` renames `writer_id` to
-                `author_id`). See [Rename hints](../guide/schema/renames-and-retirements.md#rename-hints).
-            retired: Take the relation and its `<field>_id` column out of the
-                model while the column and its foreign key stay in the schema,
-                nullable, until a later release deletes the declaration.
-                Defaults to `False`. See
-                [Retiring a column](../guide/schema/renames-and-retirements.md#retiring-a-column).
-
-        Raises:
-            TypeError: `related_name` is missing on a relation that is not
-                retired, or an option has a value of the wrong type.
-            ValueError: `on_delete="SET NULL"` with `nullable=False`; the
-                database could not set the column to `NULL`.
-        """
-        self.to = None  # Resolved later
-        """The target model class, set once Ferro resolves the relation."""
-        self.related_name = related_name
-        """The name of the reverse relation on the target model."""
-        self.on_delete = on_delete
-        """The referential action when the target row is deleted."""
-        self.unique = unique
-        """Whether the relation is one-to-one."""
-        self.index = index
-        """Whether the `<field>_id` column has a non-unique index."""
-        self.nullable = _validate_nullable_option(nullable, "ForeignKey")
-        """`"infer"`, or a forced `True` or `False`."""
-        self.renamed_from = _validate_renamed_from(renamed_from, "ForeignKey")
-        """The relation's previous field name, or `None`."""
-        self.retired = _validate_retired(retired, "ForeignKey")
-        """Whether the relation is retired from the model."""
-        if related_name is None and not self.retired:
-            raise TypeError(
-                "ForeignKey requires related_name, the BackRef on the target "
-                'model that reads this relation back (ForeignKey(related_name="posts")); '
-                "only a retired relation (retired=True) has none"
-            )
-        if str(self.on_delete).upper() == "SET NULL" and self.nullable is False:
-            raise ValueError(
-                "ForeignKey(on_delete='SET NULL') requires nullable=True or 'infer'"
-            )
-        if unique and index:
-            warnings.warn(
-                "ForeignKey(unique=True, index=True) is redundant; unique=True "
-                "already implies an index. Ignoring index=True.",
-                UserWarning,
-                stacklevel=2,
-            )
-            self.index = False
-        # Set by the metaclass: forward fields are not in ``model_fields``, so
-        # nullability inference reads the relation's annotation from here.
-        self.relation_annotation: Any | None = None
-        """The relation's annotation, set when the model class is defined."""
-
-
-def foreign_key_allows_none(metadata: "ForeignKey") -> bool | None:
-    """Decide whether a foreign key's `<field>_id` column is nullable.
-
-    Args:
-        metadata: The relation's foreign key options.
-
-    Returns:
-        `True` or `False` when `nullable` forces it or `on_delete` is
-        `"SET NULL"`; otherwise whether the relation's annotation allows
-        `None`, or `None` when the annotation is not known yet.
-    """
-    if metadata.nullable is True:
-        return True
-    if metadata.nullable is False:
-        return False
-    if str(metadata.on_delete).upper() == "SET NULL":
-        return True
-    relation_annotation = getattr(metadata, "relation_annotation", None)
-    if relation_annotation is None:
-        return None
-    return annotation_allows_none(relation_annotation)
-
-
 class ForwardRelation:
     """A forward relation over a foreign-key column of its own model.
 
@@ -489,8 +350,7 @@ class ManyToManyRelation:
 
     def __init__(
         self,
-        related_name: str | None = None,
-        through: str | None = None,
+        through: str,
         reverse_index: bool = True,
         refusal: str | None = None,
         bound: frozenset[str] | None = None,
@@ -499,12 +359,7 @@ class ManyToManyRelation:
         """Store the options of a many-to-many relation.
 
         Args:
-            related_name: The `BackRef` on the target model that reads this
-                one back, or `None` when a `Reverse` on the target names
-                this field instead. Defaults to `None`.
-            through: The join table's name. Defaults to `None`, a name Ferro
-                derives from the two models, which only a relation with a
-                `related_name` may leave out.
+            through: The join table's name.
             reverse_index: Add an index on the join table's
                 `(target, source)` columns for queries from the other side.
                 Defaults to `True`; turn it off for a write-heavy join table.
@@ -519,11 +374,8 @@ class ManyToManyRelation:
         """
         self.to = None  # Resolved later
         """The target model class, set once Ferro resolves the relation."""
-        self.related_name = related_name
-        """The `BackRef` on the target model, or `None` for one declared with
-        `through=` alone."""
         self.through = through
-        """The join table's name, or `None` for the derived one."""
+        """The join table's name."""
         self.reverse_index = reverse_index
         """Whether the join table has an index for reverse queries."""
         self.refusal = refusal

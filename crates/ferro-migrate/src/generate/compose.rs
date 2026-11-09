@@ -558,14 +558,12 @@ impl Lineage {
             {
                 model.renamed_from = Some(old.clone());
             }
-            let mut shadows: Vec<(String, Option<String>)> = Vec::new();
             for col in &mut model.columns {
                 let here = Key::Column(table.clone(), col.name.clone());
                 if let Some(Key::Column(_, old)) = self.origin(&here)
                     && *old != col.name
                 {
                     col.renamed_from = Some(old.clone());
-                    shadows.push((col.name.clone(), self.relation_hint(sides, &here)));
                 }
                 let Some((type_name, declared)) = enum_declaration(col) else {
                     continue;
@@ -601,12 +599,6 @@ impl Lineage {
                     }
                 }
             }
-            // A foreign key's hint follows its shadow column's.
-            for (column, field) in shadows {
-                if let Some(fk) = model.foreign_keys.iter_mut().find(|fk| fk.column == column) {
-                    fk.renamed_from = field;
-                }
-            }
         }
         // The IR carries an enum's declaration on every column of it.
         for model in &mut target.models {
@@ -625,27 +617,6 @@ impl Lineage {
             }
         }
         Ok(target)
-    }
-
-    /// The relation field the foreign key on the shadow column `column` (a
-    /// key of the last side) was declared under on the parent: the
-    /// `ForeignKey(renamed_from=…)` of the step that first renamed it.
-    fn relation_hint(&self, sides: &[&SchemaIrPayload], column: &Key) -> Option<String> {
-        let id = self.id(sides.len() - 1, column)?;
-        let parent_name = self.key(id, 0)?.leaf();
-        let p = (1..sides.len()).find(|&p| self.key(id, p).map(Key::leaf) != Some(parent_name))?;
-        let Some(Key::Column(table, col)) = self.key(id, p) else {
-            return None;
-        };
-        sides[p]
-            .models
-            .iter()
-            .find(|m| &m.table_name == table)?
-            .foreign_keys
-            .iter()
-            .find(|fk| &fk.column == col)?
-            .renamed_from
-            .clone()
     }
 
     /// The enum class that declared the latest rename of `label` (a key of
@@ -924,8 +895,9 @@ mod tests {
         model("Order", vec![pk(), status(labels)])
     }
 
-    /// `post` with a foreign key to `author` under the relation field
-    /// `field`; `Some(old)` declares `ForeignKey(renamed_from=old)`.
+    /// `post` with the foreign-key column `<field>_id` to `author`;
+    /// `Some(old)` renames it from `<old>_id`, and its foreign key carries
+    /// `old` the way a snapshot from before the explicit key column did.
     fn post(field: &str, renamed_from: Option<&str>) -> SchemaModel {
         let shadow = format!("{field}_id");
         SchemaModel {
@@ -1442,7 +1414,7 @@ mod tests {
     // -- foreign keys ---------------------------------------------------------
 
     #[test]
-    fn compose_foreign_key_chained_renames_compose_with_the_shadow_column() {
+    fn compose_foreign_key_chained_renames_compose_on_the_column_alone() {
         let parent = payload(vec![author(), post("author", None)]);
         let range = [
             payload(vec![author(), post("writer", Some("author"))]),
@@ -1454,7 +1426,7 @@ mod tests {
             Some("author_id")
         );
         let fk = &composed.target.models[1].foreign_keys[0];
-        assert_eq!(fk.renamed_from.as_deref(), Some("author"));
+        assert_eq!(fk.renamed_from, None);
         assert_schema_is_last(&composed, &range);
         for dialect in [Dialect::Postgres, Dialect::Sqlite] {
             let sql = statements(&parent, &composed.target, dialect);

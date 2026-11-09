@@ -22,10 +22,7 @@ import pytest
 
 import ferro
 from ferro import (
-    BackRef,
-    FerroField,
     Field,
-    ForeignKey,
     Forward,
     Model,
     Relation,
@@ -349,31 +346,6 @@ def test_the_none_refusal_quotes_a_self_reference():
     _assigns_none(Player, "mentor", "mentor_id", mentor_id=1)
 
 
-def test_the_none_refusal_on_a_foreign_key_relation_writes_its_annotation():
-    class Author(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-        posts: Relation[list["Post"]] = BackRef()
-
-    class Post(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-        author: Annotated[Author, ForeignKey(related_name="posts", index=True)]
-
-    assert _refused_none(Post, "author", author_id=1) == (
-        "Post.author: author_id is not nullable, so the relation cannot be "
-        "None. Assign an Author, or add | None to author's annotation. Write: "
-        'author: Annotated[Author, ForeignKey(related_name="posts", index=True)] '
-        "| None = None"
-    )
-
-    class Post(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-        author: (
-            Annotated[Author, ForeignKey(related_name="posts", index=True)] | None
-        ) = None
-
-    _assigns_none(Post, "author", "author_id", author_id=1)
-
-
 def test_assigning_another_key_reads_as_an_unloaded_instance_with_that_key():
     m = _declare()
     crabs = m.Team(id=2, name="Crabs")
@@ -408,80 +380,6 @@ def test_assignment_needs_no_database():
 
     assert player.team_id == 1
     assert repr(player.mentor) == "Player(id=8, unloaded)"
-
-
-def test_a_foreign_key_relation_is_assigned_through_its_key_column():
-    """#755: `post.author = bob` raised Pydantic's ClassVar error."""
-
-    class Author(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-        name: str
-        posts: Relation[list["Post"]] = BackRef()
-
-    class Post(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-        title: str
-        author: Annotated[Author, ForeignKey(related_name="posts")]
-
-    bob = Author(id=4, name="Bob")
-    post = Post(title="Notes", author_id=1)
-
-    post.author = bob
-
-    assert post.author_id == bob.id == 4
-    assert post.author is bob
-
-
-def _declare_foreign_key() -> SimpleNamespace:
-    """Author and Post in the old `ForeignKey` form."""
-
-    class Author(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-        name: str
-        posts: Relation[list["Post"]] = BackRef()
-
-    class Post(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-        title: str
-        author: Annotated[Author, ForeignKey(related_name="posts")]
-
-    return SimpleNamespace(Author=Author, Post=Post)
-
-
-@pytest.mark.asyncio
-async def test_the_refusals_on_a_foreign_key_relation_name_fixes_that_work(db_url):
-    m = _declare_foreign_key()
-    await ferro.connect(db_url, auto_migrate=True)
-    async with engines.session():
-        ada = await m.Author.create(name="Ada")
-        post = await m.Post.create(title="Notes", author_id=ada.id)
-
-        with pytest.raises(TypeError) as refused:
-            post.author = 5
-        assert str(refused.value) == (
-            "Post.author: expected an Author, got int. Assign a saved Author "
-            "instance, or set author_id directly"
-        )
-        assert post.author_id == ada.id
-
-        new = m.Author(name="Grace")
-        with pytest.raises(ValueError) as refused:
-            post.author = new
-        assert str(refused.value) == (
-            "Post.author: the Author has no id yet. Save it first, then assign it"
-        )
-        assert post.author_id == ada.id
-
-        # The fixes: a saved instance, the key column set directly, and the
-        # unsaved one once it is saved.
-        post.author = ada
-        assert post.author is ada
-        post.author_id = ada.id
-        assert post.author is ada
-        await new.save()
-        post.author = new
-        assert post.author_id == new.id
-        assert post.author is new
 
 
 def test_a_refusal_writes_the_article_the_target_name_takes():

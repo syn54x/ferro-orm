@@ -173,9 +173,9 @@ pub struct SchemaColumn {
     /// Live introspection only: column is a Postgres native enum UDT.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub postgres_native_enum: bool,
-    /// Rename hint (`Field(renamed_from=…)`, or the shadow column of a
-    /// `ForeignKey(renamed_from=…)`; schema `ir_version` 2): the column this
-    /// one was called before (ADR-0032). Absent when undeclared.
+    /// Rename hint (`Field(renamed_from=…)`, a foreign-key column's
+    /// included; schema `ir_version` 2): the column this one was called
+    /// before (ADR-0032). Absent when undeclared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub renamed_from: Option<String>,
     /// Label rename hints (`__ferro_renamed_labels__` on the column's enum
@@ -197,8 +197,8 @@ pub struct SchemaColumn {
     /// byte-identical to before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_factory: Option<String>,
-    /// Retired column (`Field(retired=True)`, or the shadow column of a
-    /// `ForeignKey(retired=True)`; ADR-0053): the model no longer reads or
+    /// Retired column (`Field(retired=True)`, a foreign-key column's
+    /// included; ADR-0053): the model no longer reads or
     /// writes it, so it is nullable and no statement the model issues names
     /// it, but it stays in the snapshot and every emitter creates and keeps it
     /// as declared. Not a schema change by itself: the planner sees an
@@ -262,7 +262,7 @@ pub struct SchemaRenamedLabels {
 /// Foreign-key edge from `column` to `to_table.to_column`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SchemaForeignKey {
-    /// Local column (shadow `*_id` when using `ForeignKey`).
+    /// The foreign-key column on this table.
     pub column: String,
     /// Referenced table.
     pub to_table: String,
@@ -272,10 +272,10 @@ pub struct SchemaForeignKey {
     pub on_delete: Option<String>,
     /// Explicit constraint name when provided.
     pub name: Option<String>,
-    /// Rename hint (`ForeignKey(renamed_from=…)`; schema `ir_version` 2): the
-    /// relation *field* this foreign key was declared under before. Its
-    /// shadow column's own [`SchemaColumn::renamed_from`] carries the column
-    /// rename the planner acts on; this records the declaration. Absent when
+    /// The relation field this foreign key was declared under before, read
+    /// from old snapshots (schema `ir_version` 2) and no longer written: a
+    /// foreign-key column's rename is its own [`SchemaColumn::renamed_from`],
+    /// the hint the planner acts on (ADR-0032 as amended). Absent when
     /// undeclared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub renamed_from: Option<String>,
@@ -649,7 +649,7 @@ pub struct QueryJoin {
 pub struct QueryJoinHop {
     /// Relation field name on the source side of this hop.
     pub relation: String,
-    /// Local column the hop joins from (shadow `*_id` for `ForeignKey`).
+    /// Local column the hop joins from (the forward relation's foreign-key column).
     pub from_column: String,
     /// Table this hop joins into.
     pub to_table: String,

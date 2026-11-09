@@ -19,7 +19,6 @@ from typing import Any, Mapping
 from pydantic import SecretBytes, SecretStr
 from pydantic_core import to_json
 
-from .base import ForeignKey
 from .columns import retired_clause
 
 _SAVE_COLUMN_CONTAINERS = (set, frozenset, list, tuple)
@@ -244,8 +243,6 @@ def _relation_shadows(model_cls: type) -> dict[str, str | None]:
             if name in shadows and shadows[name] is not None:
                 continue
             shadow = getattr(meta, "fk_column", None)
-            if not isinstance(shadow, str) and isinstance(meta, ForeignKey):
-                shadow = f"{name}_id"
             if isinstance(shadow, str):
                 shadows[name] = shadow
             else:

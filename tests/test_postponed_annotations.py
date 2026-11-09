@@ -1,7 +1,5 @@
 """Foreign-key columns and their relations resolve under postponed annotations.
 
-The tests that read how the old declaration's target is parsed (in a string
-annotation and under an outer Optional) keep that declaration until it goes.
 Each case writes a real model module to ``tmp_path`` and imports it, so a
 ``from __future__ import annotations`` header is the one Python itself applies.
 The DDL comparison builds the same models once with the header and once
@@ -34,11 +32,10 @@ from ferro.relations.fixes import DeclarationRefusal
 _COUNTER = itertools.count()
 FUTURE = "from __future__ import annotations\n"
 
-# BackRef and ForeignKey serve the tests that read the old declaration.
 HEADER = """
 from typing import Annotated, Optional
 
-from ferro import BackRef, Field, ForeignKey, Forward, ManyToMany, Model, Relation, Reverse
+from ferro import Field, Forward, ManyToMany, Model, Relation, Reverse
 """
 
 AUTHOR = """
@@ -46,13 +43,6 @@ class Author(Model):
     id: int | None = Field(default=None, primary_key=True)
     name: str
     posts: Relation[list["Post"]] = Reverse("author_id")
-"""
-
-_OLD_AUTHOR = """
-class Author(Model):
-    id: int | None = Field(default=None, primary_key=True)
-    name: str
-    posts: Relation[list["Post"]] = BackRef()
 """
 
 
@@ -91,18 +81,6 @@ async def _create_statements(
     return statements
 
 
-def _post(annotation: str, *, extra: str = "") -> str:
-    return (
-        _OLD_AUTHOR
-        + f"""
-class Post(Model):
-    id: int | None = Field(default=None, primary_key=True)
-    title: str
-    author: {annotation}{extra}
-"""
-    )
-
-
 POST = """
 class Post(Model):
     id: int | None = Field(default=None, primary_key=True)
@@ -110,8 +88,6 @@ class Post(Model):
     author_id: int = Field(foreign_key={target})
     author: Relation[Author] = Forward("author_id")
 """
-
-INNER = 'Annotated[Author | None, ForeignKey(related_name="posts")]'
 
 
 async def _same_ddl(db_url, tmp_path, with_import: str, plain: str, *, future: bool):
@@ -178,101 +154,6 @@ async def _same_ddl_one(db_url, tmp_path, body) -> str:
     return next(s for s in got if "CREATE TABLE" in s)
 
 
-OUTER = [
-    ('Annotated[Author, ForeignKey(related_name="posts")] | None', " = None", False),
-    ('Optional[Annotated[Author, ForeignKey(related_name="posts")]]', " = None", False),
-    ('Annotated[Author, ForeignKey(related_name="posts")] | None', " = None", True),
-    ('Optional[Annotated[Author, ForeignKey(related_name="posts")]]', " = None", True),
-]
-
-
-@pytest.mark.asyncio
-@pytest.mark.backend_matrix
-@pytest.mark.parametrize(("annotation", "extra", "future"), OUTER)
-async def test_outer_optional_equals_the_inner_form(
-    db_url, tmp_path, annotation, extra, future
-):
-    got = await _same_ddl(
-        db_url,
-        tmp_path,
-        _post(annotation, extra=extra),
-        _post(INNER, extra=" = None"),
-        future=future,
-    )
-    post = next(s for s in got if "CREATE TABLE" in s and '"post"' in s)
-    assert '"author_id" integer NOT NULL' not in post
-    assert "fk_post_author_id_author" in post
-
-
-@pytest.mark.asyncio
-@pytest.mark.backend_matrix
-@pytest.mark.parametrize("future", [False, True])
-async def test_outer_optional_with_explicit_nullable_false_is_not_null(
-    db_url, tmp_path, future
-):
-    outer = 'Annotated[Author, ForeignKey(related_name="posts", nullable=False)] | None'
-    inner = 'Annotated[Author | None, ForeignKey(related_name="posts", nullable=False)]'
-    got = await _same_ddl(
-        db_url,
-        tmp_path,
-        _post(outer, extra=" = None"),
-        _post(inner, extra=" = None"),
-        future=future,
-    )
-    post = next(s for s in got if "CREATE TABLE" in s and '"post"' in s)
-    assert '"author_id" integer NOT NULL' in post
-
-
-def test_outer_optional_set_null_with_nullable_false_is_refused(tmp_path):
-    _wipe()
-    body = _post(
-        'Annotated[Author, ForeignKey(related_name="posts", on_delete="SET NULL", '
-        "nullable=False)] | None",
-        extra=" = None",
-    )
-    with pytest.raises(ValueError):
-        _import(tmp_path, body, future=False)
-
-
-@pytest.mark.asyncio
-@pytest.mark.backend_matrix
-async def test_outer_optional_include_of_a_null_row_is_none(db_url, tmp_path):
-    _wipe()
-    mod = _import(
-        tmp_path,
-        _post(
-            'Annotated[Author, ForeignKey(related_name="posts")] | None',
-            extra=" = None",
-        ),
-        future=True,
-    )
-    await ferro.connect(db_url, auto_migrate=True)
-    async with ferro.engines.session():
-        await mod.Author(name="Ada").save()
-        await mod.Post(title="with", author_id=1).save()
-        await mod.Post(title="without").save()
-        posts = (
-            await mod.Post.select()
-            .include(lambda post: post.author)
-            .order_by("id")
-            .all()
-        )
-        assert posts[0].author.name == "Ada"
-        assert posts[1].author is None
-
-
-def test_unresolvable_name_outside_the_target_is_refused(tmp_path):
-    _wipe()
-    body = _post("Annotated[Author, ForeignKey(related_name=posts_name)]")
-    with pytest.raises(TypeError) as excinfo:
-        _import(tmp_path, body, future=True)
-    text = str(excinfo.value)
-    assert "Post.author" in text
-    assert "'posts_name'" in text
-    assert 'Annotated["Author", ForeignKey(...)]' in text
-    assert not any(key.endswith(".Post") for key in REGISTRY.models())
-
-
 @pytest.mark.asyncio
 @pytest.mark.backend_matrix
 async def test_a_target_never_defined_fails_at_connect(db_url, tmp_path):
@@ -282,7 +163,7 @@ async def test_a_target_never_defined_fails_at_connect(db_url, tmp_path):
         """
 class Post(Model):
     id: int | None = Field(default=None, primary_key=True)
-    author: Annotated[Nowhere, ForeignKey(related_name="posts")]
+    author_id: int = Field(foreign_key="Nowhere")
 """,
         future=True,
     )
@@ -338,20 +219,6 @@ def test_a_model_defined_in_a_function_finds_its_sibling_target():
 
     assert Pet.__ferro_relations__["owner"].to is Owner
     assert "owner_id" in Pet.model_fields
-
-
-def test_undefined_module_in_the_target_names_the_written_target(tmp_path):
-    _wipe()
-    body = """
-class Post(Model):
-    id: int | None = Field(default=None, primary_key=True)
-    author: Annotated[models.Author, ForeignKey(related_name="posts")]
-"""
-    with pytest.raises(TypeError) as excinfo:
-        _import(tmp_path, body, future=True)
-    text = str(excinfo.value)
-    assert "'models'" in text
-    assert 'Annotated["models.Author", ForeignKey(...)]' in text
 
 
 def test_explicit_foreign_keys_resolve_under_postponed_annotations(tmp_path):

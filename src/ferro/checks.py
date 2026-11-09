@@ -37,7 +37,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import fn as _fn
-from .base import ForeignKey, ForwardRelation
+from .base import ForwardRelation
 from .query.nodes import (
     FieldProxy,
     Predicate,
@@ -351,7 +351,7 @@ def _declared_checks(model_cls: type[Any]) -> tuple[Check, ...]:
 def _relation_shadow_columns(
     model_cls: type[Any], columns: Mapping[str, Any]
 ) -> dict[str, str]:
-    """Map each forward-FK relation field to its shadow ``{field}_id`` column.
+    """Map each forward relation field to the key column its ``Forward`` names.
 
     Read from the class-body-registered ``__ferro_relations__`` (not from resolved
     relation specs) so the mapping is complete at class definition, before
@@ -361,25 +361,19 @@ def _relation_shadow_columns(
     for field_name, meta in (
         getattr(model_cls, "__ferro_relations__", {}) or {}
     ).items():
-        if isinstance(meta, ForwardRelation):
-            shadow = meta.fk_column
-        elif isinstance(meta, ForeignKey):
-            shadow = f"{field_name}_id"
-        else:
-            continue
-        if shadow in columns:
-            relations[field_name] = shadow
+        if isinstance(meta, ForwardRelation) and meta.fk_column in columns:
+            relations[field_name] = meta.fk_column
     return relations
 
 
 def _reverse_relation_names(model_cls: type[Any]) -> frozenset[str]:
-    """Declared BackRef / ManyToMany field names (rejected in a check body)."""
+    """Declared Reverse / ManyToMany field names (rejected in a check body)."""
     return frozenset(
         field_name
         for field_name, meta in (
             getattr(model_cls, "__ferro_relations__", {}) or {}
         ).items()
-        if not isinstance(meta, (ForeignKey, ForwardRelation))
+        if not isinstance(meta, ForwardRelation)
     )
 
 

@@ -36,7 +36,7 @@ from ._annotation_utils import (
     _strip_optional_and_annotated,
 )
 from ._shadow_fk_types import _scalar_part_of_annotation
-from .base import FerroField, ForeignKey, ForwardRelation, foreign_key_allows_none
+from .base import FerroField, ForwardRelation
 
 __all__ = [
     "ColumnSpec",
@@ -49,7 +49,6 @@ __all__ = [
     "fk_shadow_spec",
     "pk_spec",
     "primary_key_field_name",
-    "refuse_back_ref_over_retired_relation",
     "retired_clause",
     "retired_column_specs",
 ]
@@ -117,15 +116,15 @@ class RelationSpec:
     target: type
     """The model the relation points at."""
     fk_column: str
-    """The foreign-key column holding the target's primary key: the one
-    `Forward` names, or `<field>_id` for a `ForeignKey`."""
+    """The foreign-key column holding the target's primary key, the one
+    `Forward` names."""
     nullable: bool
     """Whether the foreign-key column is nullable."""
 
 
 @dataclass(frozen=True, slots=True)
 class ReverseSpec:
-    """One reverse (`BackRef` or many-to-many) relation's existence-test facts.
+    """One reverse (`Reverse` or many-to-many) relation's existence-test facts.
 
     Built beside `RelationSpec` at the same compile choke point and exposed
     as `cls.__ferro_reverse_specs__`. A reverse or many-to-many relation
@@ -148,7 +147,7 @@ class ReverseSpec:
     child_fk_column: str | None
     """The child table's foreign-key column the `EXISTS` correlates on; `None` for many-to-many."""
     is_one_to_one: bool = False
-    """Whether the child's foreign key is `unique=True`, a one-to-one `BackRef`.
+    """Whether the child's foreign-key column is `unique=True`, a one-to-one `Reverse`.
 
     The rendering is the same correlated `EXISTS` at every cardinality; this
     is a compile-side fact, not a render switch.
@@ -266,20 +265,14 @@ def _derive_nullable(
     *,
     explicit: bool | None,
     primary_key: bool,
-    fk_nullable: bool | None,
     allows_none: bool,
 ) -> bool:
     """Single derivation site for nullability (PK clamp included, FF-B B5).
 
-    Precedence: PK clamp (NOT NULL) > FK-derived > explicit > annotation. FK
-    outranks ``explicit`` only nominally — a shadow ``{fk}_id`` column has no
-    ``FerroField`` of its own, so its ``explicit`` is always ``None`` and the
-    two never compete; ordering FK first keeps the FK branch self-contained.
+    Precedence: PK clamp (NOT NULL) > explicit > annotation.
     """
     if primary_key:
         return False
-    if fk_nullable is not None:
-        return fk_nullable
     if explicit is not None:
         return explicit
     return allows_none
@@ -484,17 +477,10 @@ def build_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
     required = set(required_raw) if isinstance(required_raw, list) else set()
     model_fields = getattr(model_cls, "model_fields", {})
     declared_fields = getattr(model_cls, "__ferro_fields__", {}) or {}
-    declared_relations = getattr(model_cls, "__ferro_relations__", {}) or {}
     try:
         resolved_annotations = get_type_hints(model_cls, include_extras=True)
     except Exception:
         resolved_annotations = {}
-
-    fk_by_shadow = {
-        f"{fname}_id": meta
-        for fname, meta in declared_relations.items()
-        if isinstance(meta, ForeignKey)
-    }
 
     specs: dict[str, ColumnSpec] = {}
     for field_name, raw_prop in properties.items():
@@ -512,33 +498,20 @@ def build_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
 
         # The field options come from the field alone, never the JSON schema.
         declared = declared_fields.get(field_name, _NO_FIELD_OPTIONS)
-        fk_meta = fk_by_shadow.get(field_name)
 
         is_pk = bool(declared.primary_key)
         autoincrement = _derive_autoincrement(
             declared.autoincrement, is_pk, _property_is_integer(prop)
         )
 
-        if fk_meta is not None:
-            unique = bool(fk_meta.unique)
-            index = bool(fk_meta.index)
-            fk_ref = ForeignKeyRef(
-                to_table=_target_table_name(fk_meta.to),
-                on_delete=fk_meta.on_delete,
+        fk_ref = (
+            ForeignKeyRef(
+                to_table=_target_table_name(declared.foreign_key),
+                on_delete=declared.on_delete,
             )
-            fk_nullable = foreign_key_allows_none(fk_meta)
-        else:
-            unique = bool(declared.unique)
-            index = bool(declared.index)
-            fk_ref = (
-                ForeignKeyRef(
-                    to_table=_target_table_name(declared.foreign_key),
-                    on_delete=declared.on_delete,
-                )
-                if declared.foreign_key is not None
-                else None
-            )
-            fk_nullable = None
+            if declared.foreign_key is not None
+            else None
+        )
 
         explicit_nullable = (
             declared.nullable if isinstance(declared.nullable, bool) else None
@@ -551,7 +524,6 @@ def build_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
         nullable = _derive_nullable(
             explicit=explicit_nullable,
             primary_key=is_pk,
-            fk_nullable=fk_nullable,
             allows_none=allows_none,
         )
 
@@ -605,8 +577,8 @@ def build_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
             nullable=nullable,
             primary_key=is_pk,
             autoincrement=autoincrement,
-            unique=unique,
-            index=index,
+            unique=bool(declared.unique),
+            index=bool(declared.index),
             # A secret's default never becomes a schema default: the JSON
             # schema holds its mask, and the real value has no place in DDL,
             # snapshots or migration files.
@@ -635,12 +607,10 @@ def build_relation_specs(
 ) -> dict[str, RelationSpec]:
     """Build one `RelationSpec` per declared forward foreign-key relation.
 
-    Reads ``__ferro_relations__`` (the same class-body-registered relation
-    metadata ``build_column_specs`` reads via ``fk_by_shadow``) and pairs each
-    entry with its already-compiled shadow ``{field}_id`` ColumnSpec — the
-    single-source nullability derivation lives there, not here (design pin:
-    do not re-derive). ``ManyToManyRelation`` and BackRef entries in
-    ``__ferro_relations__`` are not ``ForeignKey`` instances and are skipped.
+    Reads the `ForwardRelation` entries of ``__ferro_relations__`` and pairs
+    each with the already-compiled ColumnSpec of the key column it names —
+    the single-source nullability derivation lives there, not here (design
+    pin: do not re-derive). Reverse and many-to-many entries are skipped.
 
     A relation whose target hasn't been resolved to a concrete class yet
     (provisional, class-body time, before ``resolve_relationships()``) is
@@ -660,12 +630,9 @@ def build_relation_specs(
     declared_relations = getattr(model_cls, "__ferro_relations__", {}) or {}
     specs: dict[str, RelationSpec] = {}
     for field_name, meta in declared_relations.items():
-        if isinstance(meta, ForwardRelation):
-            fk_column = meta.fk_column
-        elif isinstance(meta, ForeignKey):
-            fk_column = f"{field_name}_id"
-        else:
+        if not isinstance(meta, ForwardRelation):
             continue
+        fk_column = meta.fk_column
         target = meta.to
         if not isinstance(target, type):
             continue
@@ -682,7 +649,7 @@ def build_relation_specs(
 
 
 def build_reverse_specs(model_cls: type[Any]) -> dict[str, ReverseSpec]:
-    """Build one `ReverseSpec` per resolved reverse (`BackRef`) relation.
+    """Build one `ReverseSpec` per resolved reverse (`Reverse`) or many-to-many relation.
 
     Reads the `RelationshipDescriptor`
     instances ``resolve_relationships`` installs on the class — the facts a
@@ -696,7 +663,7 @@ def build_reverse_specs(model_cls: type[Any]) -> dict[str, ReverseSpec]:
     Many-to-many descriptors map to a join-table spec; each side's descriptor
     already orients ``source_col``/``target_col`` for that side, so the spec
     is a straight copy of resolution's facts on both the declaring and the
-    ``related_name`` side.
+    `Reverse` side.
 
     Callers store the result on ``cls.__ferro_reverse_specs__`` and must
     replace, never mutate — same convention as ``__ferro_columns__``.
@@ -797,7 +764,7 @@ def fk_shadow_spec(
 ) -> ColumnSpec:
     """Build a foreign-key column's spec at a known target.
 
-    Join tables and the resolve-time rebuilds use it.
+    Join tables use it.
 
     Args:
         name: The column's name.
@@ -823,10 +790,9 @@ def fk_shadow_spec(
 def retired_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
     """Return the retired columns of `model_cls`, flagged and nullable.
 
-    A retired scalar field's spec was derived once at class creation, before
-    the field left the Pydantic model (`__ferro_retired_fields__`); a retired
-    `ForeignKey`'s shadow column is derived here on every compile, as the
-    mapped relation's would be, so it follows its target's resolution.
+    A retired field's spec, a foreign-key column's included, was derived once
+    at class creation, before the field left the Pydantic model
+    (`__ferro_retired_fields__`).
 
     Args:
         model_cls: The model class.
@@ -834,34 +800,7 @@ def retired_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
     Returns:
         The retired columns' specs, keyed by column name.
     """
-    specs: dict[str, ColumnSpec] = dict(
-        model_cls.__dict__.get("__ferro_retired_fields__", {})
-    )
-    relations = model_cls.__dict__.get("__ferro_retired_relations__", {})
-    for field_name, meta in relations.items():
-        from ._shadow_fk_types import is_concrete_ferro_model, pk_python_type_for_model
-
-        target = meta.to
-        python_type = (
-            pk_python_type_for_model(target)
-            if is_concrete_ferro_model(target)
-            else None
-        )
-        name = f"{field_name}_id"
-        specs[name] = replace(
-            fk_shadow_spec(
-                name,
-                python_type=python_type,
-                to_table=_target_table_name(target),
-                on_delete=meta.on_delete,
-                unique=bool(meta.unique),
-                index=bool(meta.index),
-                nullable=True,
-            ),
-            default=None,
-            retired=True,
-        )
-    return specs
+    return dict(model_cls.__dict__.get("__ferro_retired_fields__", {}))
 
 
 def retired_clause(model_cls: type[Any], name: str) -> str:
@@ -885,32 +824,3 @@ def retired_clause(model_cls: type[Any], name: str) -> str:
         f" {model_cls.__name__}.{name} is retired in this release: the model "
         "no longer reads or writes it (ADR-0053)."
     )
-
-
-def refuse_back_ref_over_retired_relation(
-    model_cls: type[Any], field_name: str, meta: ForeignKey
-) -> None:
-    """Refuse a `BackRef` that reads a retired relation back.
-
-    A retired ``ForeignKey`` leaves the model, so nothing fills the target's
-    ``BackRef``; it renders no DDL, and the fix is to delete it. Checked when
-    the target is a concrete class: at class creation when the target already
-    exists, and again by relationship resolution for a forward reference.
-
-    Args:
-        model_cls: The model declaring the retired relation.
-        field_name: The retired relation's field name.
-        meta: The retired relation's `ForeignKey`.
-
-    Raises:
-        TypeError: The target declares `meta.related_name` as a `BackRef`.
-    """
-    target = meta.to
-    if meta.related_name is None or not isinstance(target, type):
-        return
-    relations = getattr(target, "__ferro_relations__", None) or {}
-    if relations.get(meta.related_name) == "BackRef":
-        raise TypeError(
-            f"{target.__name__}.{meta.related_name} is a BackRef over the retired "
-            f"relation {model_cls.__name__}.{field_name}; delete the BackRef"
-        )

@@ -1,0 +1,108 @@
+{
+  "ir_kind": "schema",
+  "ir_version": 4,
+  "parent_checksum": null,
+  "payload": {
+    "dialect_agnostic": true,
+    "models": [
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "string",
+            "name": "name",
+            "nullable": false,
+            "primary_key": false,
+            "unique": true
+          }
+        ],
+        "foreign_keys": [],
+        "indexes": [],
+        "model_name": "ferro_mnew_test_record_migration_cascade_0.models.Account",
+        "table_name": "account",
+        "uniques": [
+          {
+            "columns": [
+              "name"
+            ],
+            "name": "uq_account_name"
+          }
+        ]
+      },
+      {
+        "checks": [],
+        "columns": [
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "account_id",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          },
+          {
+            "autoincrement": true,
+            "default": null,
+            "format": null,
+            "index": false,
+            "logical_type": "integer",
+            "name": "id",
+            "nullable": false,
+            "primary_key": true,
+            "unique": false
+          },
+          {
+            "autoincrement": false,
+            "default": null,
+            "format": null,
+            "index": true,
+            "logical_type": "string",
+            "name": "title",
+            "nullable": false,
+            "primary_key": false,
+            "unique": false
+          }
+        ],
+        "foreign_keys": [
+          {
+            "column": "account_id",
+            "name": "fk_item_account_id_account",
+            "on_delete": "CASCADE",
+            "to_column": "id",
+            "to_table": "account"
+          }
+        ],
+        "indexes": [
+          {
+            "columns": [
+              "title"
+            ],
+            "name": "idx_item_title",
+            "unique": false
+          }
+        ],
+        "model_name": "ferro_mnew_test_record_migration_cascade_0.models.Item",
+        "table_name": "item",
+        "uniques": []
+      }
+    ]
+  }
+}

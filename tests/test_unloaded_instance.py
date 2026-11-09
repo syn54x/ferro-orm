@@ -16,17 +16,14 @@ import re
 from contextlib import closing
 import sqlite3
 from types import SimpleNamespace
-from typing import Annotated, ClassVar
+from typing import ClassVar
 from uuid import UUID
 
 import pytest
 
 import ferro
 from ferro import (
-    BackRef,
-    FerroField,
     Field,
-    ForeignKey,
     Forward,
     InstanceNotLoaded,
     Model,
@@ -54,62 +51,38 @@ def _empty_registry():
     REGISTRY.reset_for_test()
 
 
-def _declare(form: str = "forward") -> SimpleNamespace:
+def _declare() -> SimpleNamespace:
     """Team, Player (a required team and a nullable mentor) and a one-to-one
-    Profile, in the `Forward("team_id")` form or the old `ForeignKey` form."""
-    if form == "forward":
+    Profile."""
 
-        class Team(Model):
-            id: int | None = Field(default=None, primary_key=True)
-            name: str
-            players: Relation[list["Player"]] = Reverse("team_id")
+    class Team(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        name: str
+        players: Relation[list["Player"]] = Reverse("team_id")
 
-        class Player(Model):
-            id: int | None = Field(default=None, primary_key=True)
-            name: str
-            team_id: int = Field(foreign_key=Team)
-            team: Relation[Team] = Forward("team_id")
-            mentor_id: int | None = Field(
-                default=None, foreign_key="Player", on_delete="SET NULL"
-            )
-            mentor: Relation["Player | None"] = Forward("mentor_id")
-            profile: Relation[list["Profile"]] = Reverse("player_id")
+    class Player(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        name: str
+        team_id: int = Field(foreign_key=Team)
+        team: Relation[Team] = Forward("team_id")
+        mentor_id: int | None = Field(
+            default=None, foreign_key="Player", on_delete="SET NULL"
+        )
+        mentor: Relation["Player | None"] = Forward("mentor_id")
+        profile: Relation[list["Profile"]] = Reverse("player_id")
 
-        class Profile(Model):
-            id: int | None = Field(default=None, primary_key=True)
-            bio: str
-            player_id: int = Field(foreign_key=Player, unique=True)
-            player: Relation[Player] = Forward("player_id")
-
-    else:
-
-        class Team(Model):
-            id: Annotated[int | None, FerroField(primary_key=True)] = None
-            name: str
-            players: Relation[list["Player"]] = BackRef()
-
-        class Player(Model):
-            id: Annotated[int | None, FerroField(primary_key=True)] = None
-            name: str
-            team: Annotated[Team, ForeignKey(related_name="players")]
-            mentor: Annotated[
-                "Player",
-                ForeignKey(related_name="mentees", nullable=True, on_delete="SET NULL"),
-            ] = None
-            mentees: Relation[list["Player"]] = BackRef()
-            profile: "Profile" = BackRef()
-
-        class Profile(Model):
-            id: Annotated[int | None, FerroField(primary_key=True)] = None
-            bio: str
-            player: Annotated[Player, ForeignKey(related_name="profile", unique=True)]
+    class Profile(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        bio: str
+        player_id: int = Field(foreign_key=Player, unique=True)
+        player: Relation[Player] = Forward("player_id")
 
     return SimpleNamespace(Team=Team, Player=Player, Profile=Profile)
 
 
-async def _seed(db_url: str, form: str = "forward") -> SimpleNamespace:
+async def _seed(db_url: str) -> SimpleNamespace:
     """Team 1 "Rustaceans" with Ferris (id 1) and Corro (id 2, no mentor)."""
-    m = _declare(form)
+    m = _declare()
     await ferro.connect(db_url, auto_migrate=True)
     async with engines.session():
         await m.Team.create(id=1, name="Rustaceans")
@@ -219,10 +192,9 @@ async def test_an_included_relation_reads_with_no_statement(db_url, statement_re
         assert _statements(statement_records) == []
 
 
-@pytest.mark.parametrize("form", ["forward", "foreign_key"])
 @pytest.mark.asyncio
-async def test_a_one_to_one_reverse_relation_reads_with_first(db_url, form):
-    m = await _seed(db_url, form)
+async def test_a_one_to_one_reverse_relation_reads_with_first(db_url):
+    m = await _seed(db_url)
     async with engines.session():
         ferris = await m.Player.get(1)
         corro = await m.Player.get(2)
@@ -338,12 +310,11 @@ def _refusals(team) -> dict[str, object]:
     }
 
 
-@pytest.mark.parametrize("form", ["forward", "foreign_key"])
 @pytest.mark.asyncio
 async def test_an_unloaded_instance_refuses_every_use_but_its_key_naming_the_fix(
-    db_url, form
+    db_url,
 ):
-    m = await _seed(db_url, form)
+    m = await _seed(db_url)
     async with engines.session():
         player = await m.Player.get(1)
         team = player.team
@@ -370,12 +341,11 @@ def _printed_fixes(message: str) -> tuple[str, str]:
     return found.group(1), found.group(2)
 
 
-@pytest.mark.parametrize("form", ["forward", "foreign_key"])
 @pytest.mark.asyncio
 async def test_each_fix_the_refusal_prints_loads_the_relation_when_pasted_back(
-    db_url, form
+    db_url,
 ):
-    m = await _seed(db_url, form)
+    m = await _seed(db_url)
     async with engines.session():
         player = await m.Player.get(1)
         with pytest.raises(InstanceNotLoaded) as refusal:

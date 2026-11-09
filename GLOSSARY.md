@@ -21,7 +21,7 @@ Replacing an existing materialized view by dropping and recreating it when its d
 _Avoid_: Alter, migrate, update
 
 **Materialized view column**:
-A flat, typed field on a `MaterializedView` — same declarations as `Model` fields, but no `ForeignKey`, `BackRef`, or `ManyToMany`. Reference related entities by scalar columns (`order_id: int`), not relations.
+A flat, typed field on a `MaterializedView` — same declarations as `Model` fields, but no `Forward`, `Reverse` or `ManyToMany`. Reference related entities by scalar columns (`order_id: int`), not relations.
 _Avoid_: Relation column, FK field
 
 **Materialized query**:

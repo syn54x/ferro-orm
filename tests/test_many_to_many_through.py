@@ -11,10 +11,9 @@ class Tournament(Model):
 ```
 
 The join table is today's: the name passed to `through=`, one `<table>_id`
-column per side and the same two indexes, so a model converted from
-`ManyToMany(related_name=...)` plus `BackRef()` plans nothing against the
-snapshot `tests/fixtures/many_to_many_pre_conversion/` recorded from the old
-form.
+column per side and the same two indexes, so a model converted from the old
+form, whose two sides named each other, plans nothing against the snapshot
+`tests/fixtures/many_to_many_pre_conversion/` recorded from it.
 """
 
 import inspect
@@ -400,35 +399,7 @@ def test_a_join_table_rename_that_cannot_be_meant_is_refused(
     ferro.ensure_resolved_modelset()
 
 
-def test_renamed_from_on_the_old_many_to_many_is_refused(tmp_path):
-    body = """
-from ferro import BackRef
-
-class Tag(Model):
-    id: int | None = Field(default=None, primary_key=True)
-    posts: Relation[list["Post"]] = BackRef()
-
-class Post(Model):
-    id: int | None = Field(default=None, primary_key=True)
-    tags: Relation[list[Tag]] = {marker}
-"""
-    refused = 'ManyToMany(related_name="posts", renamed_from="old_tags")'
-    kept = 'ManyToMany(related_name="posts")'
-
-    message = _refusal(tmp_path, body.format(marker=refused), future=False)
-
-    assert message == (
-        "Post.tags: renamed_from renames a join table named with through=, and "
-        "related_name= derives its join table from the model, which "
-        "__ferro_renamed_from__ renames. "
-        f"Write: tags: Relation[list[Tag]] = {kept}"
-    )
-    _wipe()
-    _import(tmp_path, body.format(marker=kept), future=False)
-    ferro.ensure_resolved_modelset()
-
-
-_ACCEPTED = {"through", "related_name", "renamed_from", "reverse_index"}
+_ACCEPTED = {"through", "renamed_from", "reverse_index"}
 # Every option of `Field` a many-to-many does not use; `retired` is refused
 # with the declaration it is on (tests/test_retired_columns.py).
 _UNUSED = sorted(
@@ -465,7 +436,9 @@ _NEEDS_THROUGH = (
 )
 
 
-@pytest.mark.parametrize("marker", ["ManyToMany()", 'ManyToMany(through="")'])
+@pytest.mark.parametrize(
+    "marker", ["ManyToMany()", "ManyToMany(through=None)", 'ManyToMany(through="")']
+)
 def test_a_many_to_many_without_through_is_refused(tmp_path, marker):
     with pytest.raises(TypeError) as refused:
         _import(
@@ -481,6 +454,24 @@ class Player(Model):
     message = str(refused.value)
     assert message.startswith("Player.tournaments: ")
     assert message.endswith(_NEEDS_THROUGH)
+
+
+def test_a_join_table_named_as_a_models_table_is_refused_naming_a_free_one():
+    class Team(Model):
+        id: int | None = Field(default=None, primary_key=True)
+
+    class Player(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        teams: Relation[list[Team]] = ManyToMany(through="team")
+
+    with pytest.raises(DeclarationRefusal) as refused:
+        ferro.ensure_resolved_modelset()
+
+    assert str(refused.value) == (
+        'Player.teams: through="team" names the table of the model Team, and a '
+        "join table needs a table of its own. Write: teams: Relation[list[Team]] "
+        '= ManyToMany(through="player_teams")'
+    )
 
 
 def test_a_reverse_naming_a_many_to_many_aimed_elsewhere_is_refused():

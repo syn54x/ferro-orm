@@ -145,7 +145,7 @@ class TestExclusions:
 
         assert Post.__ferro_relation_specs__ == {}
 
-    def test_back_ref_field_absent_from_lookup(self, clean_registry):
+    def test_reverse_field_absent_from_lookup(self, clean_registry):
         class Author(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
             books: Relation[list["Book"]] = Reverse("author_id")

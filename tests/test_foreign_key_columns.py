@@ -12,22 +12,21 @@ class Player(Model):
     team: Relation[Team] = Forward("team_id")
 ```
 
-The new form sits beside `Annotated[Team, ForeignKey(...)]` and compiles to
-the same table, constraint and snapshot.
+It compiles to the table, constraint and snapshot the removed
+`Annotated[Team, ForeignKey(...)]` form compiled to.
 """
 
 import json
+from pathlib import Path
 from typing import Annotated, Literal, NewType
 
 import pytest
 
 import ferro
 from ferro import (
-    BackRef,
     Check,
     FerroField,
     Field,
-    ForeignKey,
     Forward,
     Model,
     Relation,
@@ -125,131 +124,77 @@ def test_ferro_field_takes_the_foreign_key_options():
     )
 
 
-def _define(form: str, key: str) -> None:
-    """Declare one key in the old form or the new; one function, so both
-    give their models the same qualified name."""
-    if form == "old":
-        if key == "required":
+# What `Annotated[Team, ForeignKey(...)]` compiled to for each key below,
+# recorded before the old form was removed.
+OLD_FORM_SNAPSHOTS = Path(__file__).parent / "fixtures" / "old_form_key_snapshots.json"
 
-            class Team(Model):
-                id: int | None = Field(default=None, primary_key=True)
-                players: Relation[list["Player"]] = BackRef()
 
-            class Player(Model):
-                id: int | None = Field(default=None, primary_key=True)
-                team: Annotated[Team, ForeignKey(related_name="players")]
+def _define(key: str) -> None:
+    """Declare one key in the explicit-column form."""
+    if key == "required":
 
-        elif key == "set-null":
+        class Team(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            players: Relation[list["Player"]] = Reverse("team_id")
 
-            class Team(Model):
-                id: int | None = Field(default=None, primary_key=True)
-                players: Relation[list["Player"]] = BackRef()
+        class Player(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            team_id: int = Field(foreign_key=Team)
+            team: Relation[Team] = Forward("team_id")
 
-            class Player(Model):
-                id: int | None = Field(default=None, primary_key=True)
-                team: Annotated[
-                    Team | None,
-                    ForeignKey(related_name="players", on_delete="SET NULL"),
-                ] = None
+    elif key == "set-null":
 
-        elif key == "indexed":
+        class Team(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            players: Relation[list["Player"]] = Reverse("team_id")
 
-            class Team(Model):
-                id: int | None = Field(default=None, primary_key=True)
-                players: Relation[list["Player"]] = BackRef()
+        class Player(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            team_id: int | None = Field(
+                default=None, foreign_key=Team, on_delete="SET NULL"
+            )
+            team: Relation[Team | None] = Forward("team_id")
 
-            class Player(Model):
-                id: int | None = Field(default=None, primary_key=True)
-                team: Annotated[Team, ForeignKey(related_name="players", index=True)]
+    elif key == "indexed":
 
-        elif key == "unique":
+        class Team(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            players: Relation[list["Player"]] = Reverse("team_id")
 
-            class Team(Model):
-                id: int | None = Field(default=None, primary_key=True)
-                captain: Relation[list["Player"]] = BackRef()
+        class Player(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            team_id: int = Field(foreign_key=Team, index=True)
+            team: Relation[Team] = Forward("team_id")
 
-            class Player(Model):
-                id: int | None = Field(default=None, primary_key=True)
-                team: Annotated[Team, ForeignKey(related_name="captain", unique=True)]
+    elif key == "unique":
 
-        else:
+        class Team(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            captain: Relation[list["Player"]] = Reverse("team_id")
 
-            class Player(Model):
-                id: int | None = Field(default=None, primary_key=True)
-                mentor: Annotated[
-                    "Player",
-                    ForeignKey(related_name="mentees", on_delete="SET NULL"),
-                ] = None
-                mentees: Relation[list["Player"]] = BackRef()
+        class Player(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            team_id: int = Field(foreign_key=Team, unique=True)
+            team: Relation[Team] = Forward("team_id")
+
     else:
-        if key == "required":
 
-            class Team(Model):
-                id: int | None = Field(default=None, primary_key=True)
-                players: Relation[list["Player"]] = Reverse("team_id")
-
-            class Player(Model):
-                id: int | None = Field(default=None, primary_key=True)
-                team_id: int = Field(foreign_key=Team)
-                team: Relation[Team] = Forward("team_id")
-
-        elif key == "set-null":
-
-            class Team(Model):
-                id: int | None = Field(default=None, primary_key=True)
-                players: Relation[list["Player"]] = Reverse("team_id")
-
-            class Player(Model):
-                id: int | None = Field(default=None, primary_key=True)
-                team_id: int | None = Field(
-                    default=None, foreign_key=Team, on_delete="SET NULL"
-                )
-                team: Relation[Team | None] = Forward("team_id")
-
-        elif key == "indexed":
-
-            class Team(Model):
-                id: int | None = Field(default=None, primary_key=True)
-                players: Relation[list["Player"]] = Reverse("team_id")
-
-            class Player(Model):
-                id: int | None = Field(default=None, primary_key=True)
-                team_id: int = Field(foreign_key=Team, index=True)
-                team: Relation[Team] = Forward("team_id")
-
-        elif key == "unique":
-
-            class Team(Model):
-                id: int | None = Field(default=None, primary_key=True)
-                captain: Relation[list["Player"]] = Reverse("team_id")
-
-            class Player(Model):
-                id: int | None = Field(default=None, primary_key=True)
-                team_id: int = Field(foreign_key=Team, unique=True)
-                team: Relation[Team] = Forward("team_id")
-
-        else:
-
-            class Player(Model):
-                id: int | None = Field(default=None, primary_key=True)
-                mentor_id: int | None = Field(
-                    default=None, foreign_key="Player", on_delete="SET NULL"
-                )
-                mentor: Relation["Player | None"] = Forward("mentor_id")
-                mentees: Relation[list["Player"]] = Reverse("mentor_id")
+        class Player(Model):
+            id: int | None = Field(default=None, primary_key=True)
+            mentor_id: int | None = Field(
+                default=None, foreign_key="Player", on_delete="SET NULL"
+            )
+            mentor: Relation["Player | None"] = Forward("mentor_id")
+            mentees: Relation[list["Player"]] = Reverse("mentor_id")
 
 
 @pytest.mark.parametrize(
     "key", ["required", "set-null", "indexed", "unique", "self-reference"]
 )
 def test_the_new_form_compiles_to_the_old_forms_snapshot(key):
-    _define("old", key)
-    old = _snapshot()
-    _wipe()
-    _define("new", key)
-    new = _snapshot()
+    _define(key)
 
-    assert new == old
+    assert json.loads(_snapshot()) == json.loads(OLD_FORM_SNAPSHOTS.read_text())[key]
 
 
 def test_the_key_column_name_is_free():

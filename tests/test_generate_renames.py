@@ -684,6 +684,38 @@ def test_a_drop_and_an_add_without_a_hint_is_destructive_and_names_renamed_from(
         assert not any("RENAME" in sql for sql in up)
 
 
+KEY_COLUMN_BEFORE = """
+class Author(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    name: str
+
+
+class Post(Model):
+    id: int | None = Field(default=None, primary_key=True)
+    author_id: int = Field(foreign_key=Author)
+"""
+
+
+def test_a_dropped_and_an_added_key_column_names_the_columns_renamed_from(project, pkg):
+    write_config(project, pkg)
+    write_models(project, pkg, KEY_COLUMN_BEFORE)
+    new("create")
+    write_models(
+        project,
+        pkg,
+        KEY_COLUMN_BEFORE.replace(
+            "    author_id: int = Field(foreign_key=Author)\n",
+            "    writer_id: int = Field(foreign_key=Author)\n",
+        ),
+    )
+    code, out, _ = _new_capturing("writer_id")
+    assert code == 0
+    assert (
+        'post: if "author_id" became "writer_id", declare renamed_from="author_id"'
+        in out
+    )
+
+
 # -- the declaration surface --------------------------------------------------------
 
 

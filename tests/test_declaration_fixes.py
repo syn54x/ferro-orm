@@ -368,14 +368,6 @@ def _cases(storage: str) -> dict[str, dict]:
             'team: Relation["Team"] = Forward("team_id")',
         ],
     )
-    cases["None assigned to a required ForeignKey relation"] = _case(
-        "plain",
-        "team",
-        local=True,
-        after=assign_none,
-        Team=['players: Relation[list["Player"]] = BackRef()'],
-        Player=['team: Annotated["Team", ForeignKey(related_name="players")]'],
-    )
     cases["column with on_delete and no foreign_key"] = _case(
         "plain",
         "note",
@@ -544,6 +536,12 @@ def _cases(storage: str) -> dict[str, dict]:
             'others: Relation[list["Tournament"]] = ManyToMany(through="player_links")',
         ],
     )
+    cases["many-to-many whose join table is a model's table"] = _case(
+        "many-to-many",
+        "links",
+        local=True,
+        Player=['links: Relation[list["Tag"]] = ManyToMany(through="team")'],
+    )
     # A join table's renamed_from that cannot be its previous name.
     for spelling, previous in {
         "its own join table": "player_links",
@@ -558,26 +556,6 @@ def _cases(storage: str) -> dict[str, dict]:
                 f'ManyToMany(through="player_links", renamed_from="{previous}")'
             ],
         )
-    cases["related_name many-to-many by Field renamed from a join table"] = _case(
-        "many-to-many",
-        "links",
-        local=True,
-        Tag=['linked: Relation[list["Player"]] = BackRef()'],
-        Player=[
-            'links: Relation[list["Tag"]] = Field(many_to_many=True, '
-            'related_name="linked", renamed_from="old_links")'
-        ],
-    )
-    cases["related_name many-to-many renamed from a join table"] = _case(
-        "many-to-many",
-        "links",
-        local=True,
-        Tag=['linked: Relation[list["Player"]] = BackRef()'],
-        Player=[
-            'links: Relation[list["Tag"]] = '
-            'ManyToMany(related_name="linked", renamed_from="old_links")'
-        ],
-    )
     # The key shared with the primary key, and every relation that names it.
     cases["key shared with the primary key"] = _case(
         "shared key",

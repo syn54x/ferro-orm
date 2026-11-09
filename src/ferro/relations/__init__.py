@@ -11,15 +11,14 @@ from pydantic_core import PydanticUndefined
 
 from .. import _core
 from .._annotation_utils import annotation_allows_none
-from .._shadow_fk_types import pk_python_type_for_model, reconcile_shadow_fk_types
+from .._shadow_fk_types import pk_python_type_for_model
 from ..base import (
     FerroField,
-    ForeignKey,
     ForwardRelation,
     ManyToManyRelation,
     ReverseRelation,
 )
-from ..columns import ColumnSpec, fk_shadow_spec, refuse_back_ref_over_retired_relation
+from ..columns import ColumnSpec, fk_shadow_spec
 from ..fields import annotation_text, field_line, field_options
 from ..ir.compiler import (
     RenameHints,
@@ -48,7 +47,8 @@ def is_table_name(name: str) -> bool:
 
 
 def _default_join_table(source_table: str, field_name: str) -> str:
-    """A ``ManyToMany``'s join table when ``through=`` is not set."""
+    """The join table a fix writes for a ``ManyToMany`` whose ``through=`` it
+    replaces: ``<table>_<field>``."""
     return f"{source_table}_{field_name}"
 
 
@@ -65,8 +65,7 @@ def _join_table_rename_hints(
 ) -> RenameHints:
     """What a join table and its columns were called before (ADR-0032).
 
-    The table's previous name is the relation's ``renamed_from``; a join
-    table the old form derived follows its source model's table rename. Its
+    The table's previous name is the relation's ``renamed_from``. Its
     columns follow their models' table renames, named by the same function
     that names them now.
     """
@@ -77,10 +76,7 @@ def _join_table_rename_hints(
         columns[_join_column(source_model.__ferro_table__)] = _join_column(source_prev)
     if target_prev is not None:
         columns[_join_column(target_model.__ferro_table__)] = _join_column(target_prev)
-    table = relation.renamed_from
-    if table is None and source_prev is not None and not relation.through:
-        table = _default_join_table(source_prev, field_name)
-    return RenameHints(table=table, columns=columns)
+    return RenameHints(table=relation.renamed_from, columns=columns)
 
 
 # -- foreign-key columns and the relations that name them -----------------------------
@@ -656,10 +652,9 @@ def _free_table_name(name: str, taken: set[str]) -> str:
 def _many_to_many_line(
     field_name: str,
     target: str,
-    through: str | None,
+    through: str,
     reverse_index: bool,
     bound: frozenset[str] | None,
-    related_name: str | None = None,
     renamed_from: str | None = None,
 ) -> str:
     """Write a many-to-many: ``tags: Relation[list[Tag]] = ManyToMany(through="post_tags")``.
@@ -667,16 +662,8 @@ def _many_to_many_line(
     A ``renamed_from`` the line could not keep (see `_renamed_from_reason`)
     is left out, so the line is one Ferro accepts.
     """
-    options = [
-        f"{option}={json.dumps(value)}"
-        for option, value in (("related_name", related_name), ("through", through))
-        if value is not None
-    ]
-    if (
-        renamed_from is not None
-        and through is not None
-        and _renamed_from_reason(renamed_from, through) is None
-    ):
+    options = [f"through={json.dumps(through)}"]
+    if renamed_from is not None and _renamed_from_reason(renamed_from, through) is None:
         options.append(f"renamed_from={json.dumps(renamed_from)}")
     if not reverse_index:
         options.append("reverse_index=False")
@@ -710,7 +697,7 @@ def check_join_table_rename(
     Raises:
         DeclarationRefusal: The hint cannot be meant; the fix drops it.
     """
-    if relation.renamed_from is None or relation.through is None:
+    if relation.renamed_from is None:
         return
     reason = _renamed_from_reason(relation.renamed_from, relation.through)
     if reason is None:
@@ -721,35 +708,10 @@ def check_join_table_rename(
         relation.through,
         relation.reverse_index,
         relation.bound,
-        relation.related_name,
     )
     model = model_cls.__name__
     raise DeclarationRefusal(
         model, name, reason, [Edit(model, name, "replace", (line,))]
-    )
-
-
-def related_name_rename_refusal(
-    model: str,
-    field_name: str,
-    target: str,
-    related_name: str,
-    through: str | None,
-    reverse_index: bool,
-    bound: frozenset[str] | None,
-) -> DeclarationRefusal:
-    """The refusal of ``renamed_from`` on ``ManyToMany(related_name=...)``,
-    whose join table follows its model's table rename; the fix drops it."""
-    line = _many_to_many_line(
-        field_name, target, through, reverse_index, bound, related_name
-    )
-    return DeclarationRefusal(
-        model,
-        field_name,
-        "renamed_from renames a join table named with through=, and "
-        "related_name= derives its join table from the model, which "
-        "__ferro_renamed_from__ renames",
-        [Edit(model, field_name, "replace", (line,))],
     )
 
 
@@ -779,8 +741,8 @@ def many_to_many_refusal(
         field_name: The relation's field name.
         reason: What is wrong with the declaration as written.
         targets: The models the many-to-many could link, by name.
-        through: The join table's name: the declared one, or the name the
-            old form derived, ``<table>_<field>``.
+        through: The join table's name: the declared one, or
+            ``<table>_<field>`` when that is no table name.
         reverse_index: Whether the join table keeps its reverse index.
         bound: The names defined where ``owner``'s class statement runs, or
             ``None`` under postponed annotations; a target outside them is
@@ -904,7 +866,7 @@ def _refuse_unnamed_many_to_many(
             name,
             relation.refusal or "",
             naming,
-            relation.through or "",
+            relation.through,
             relation.reverse_index,
             relation.bound,
             relation.renamed_from,
@@ -1354,11 +1316,7 @@ def check_declared_foreign_keys(model_cls: Any) -> None:
     for name, relation in model_cls.__ferro_relations__.items():
         # A many-to-many the class body refused, or one naming this model,
         # whose target the class body names; a bare one waits for resolution.
-        if (
-            isinstance(relation, ManyToManyRelation)
-            and relation.related_name is None
-            and relation.to is not None
-        ):
+        if isinstance(relation, ManyToManyRelation) and relation.to is not None:
             target = annotation_text(relation.to)
             if relation.refusal is not None or target == model_cls.__name__:
                 raise many_to_many_refusal(
@@ -1366,7 +1324,7 @@ def check_declared_foreign_keys(model_cls: Any) -> None:
                     name,
                     relation.refusal or SELF_MANY_TO_MANY,
                     [target],
-                    relation.through or "",
+                    relation.through,
                     relation.reverse_index,
                     relation.bound,
                     relation.renamed_from,
@@ -1425,25 +1383,48 @@ def _resolve_declared_foreign_key(
 _DECLARED_ORDER = {FerroField: 0, ForwardRelation: 1, ReverseRelation: 2}
 
 
-def _refuse_shared_join_table(
+def _refuse_taken_join_table(
     source_model: Any,
     field_name: str,
     relation: ManyToManyRelation,
     target_model: Any,
     join_table: str,
 ) -> None:
-    """Refuse a many-to-many whose join table another many-to-many declares.
+    """Refuse a many-to-many whose join table is a model's table, or one
+    another many-to-many declares.
 
-    Two relations over one join table would read and write each other's
-    rows, so the second one is refused, its fix a join table no other
-    declaration holds.
+    A join table over a model's table would write link rows into that
+    model's rows, and two relations over one join table would read and write
+    each other's rows, so the declaration is refused, its fix a join table
+    no other declaration holds.
     """
+    owner = next(
+        (
+            model.__name__
+            for model in REGISTRY.models().values()
+            if getattr(model, "__ferro_table__", None) == join_table
+        ),
+        None,
+    )
     held = REGISTRY.join_tables().get(join_table)
     declared_by = (source_model.__ferro_identity__, field_name)
-    if not isinstance(held, dict) or held.get("declared_by") in (None, declared_by):
+    if owner is not None:
+        reason = (
+            f"through={json.dumps(join_table)} names the table of the model "
+            f"{owner}, and a join table needs a table of its own"
+        )
+    elif isinstance(held, dict) and held.get("declared_by") not in (
+        None,
+        declared_by,
+    ):
+        holder, holder_field = held["declared_by"]
+        holder_name = REGISTRY.models()[holder].__name__
+        reason = (
+            f"{holder_name}.{holder_field} already declares the join table "
+            f"{join_table}, and two relations over one join table share their rows"
+        )
+    else:
         return
-    holder, holder_field = held["declared_by"]
-    holder_name = REGISTRY.models()[holder].__name__
     through = _free_table_name(
         _default_join_table(source_model.__ferro_table__, field_name),
         _tables_taken(source_model, field_name) | {join_table},
@@ -1454,16 +1435,11 @@ def _refuse_shared_join_table(
         through,
         relation.reverse_index,
         relation.bound,
-        relation.related_name,
         relation.renamed_from,
     )
     model = source_model.__name__
     raise DeclarationRefusal(
-        model,
-        field_name,
-        f"{holder_name}.{holder_field} already declares the join table "
-        f"{join_table}, and two relations over one join table share their rows",
-        [Edit(model, field_name, "replace", (line,))],
+        model, field_name, reason, [Edit(model, field_name, "replace", (line,))]
     )
 
 
@@ -1471,14 +1447,14 @@ def resolve_relationships():
     """Bind every declared relation to its target model and check the pair.
 
     Ferro calls this on `connect()` and before creating tables. Each
-    foreign key's `<field>_id` column takes the type of the target's primary
-    key, and the affected models are rebuilt and registered again.
+    foreign-key column and relation is checked against its target, each
+    many-to-many registers its join table, and the affected models are
+    compiled and registered again.
 
     Raises:
-        RuntimeError: A relation names a model that is not defined, the
-            target has no field named by `related_name`, a many-to-many join
-            table's name is another model's table, or a model's schema fails
-            to rebuild.
+        RuntimeError: A relation names a model that is not defined, a
+            many-to-many join table's name is another model's table, or a
+            model's schema fails to rebuild.
         TypeError: A model's declaration is invalid once its relations are
             known.
     """
@@ -1494,9 +1470,9 @@ def resolve_relationships():
         if type(rel) in _DECLARED_ORDER:
             declared.append((model_name, field_name, rel))
             continue
-        if isinstance(rel, ManyToManyRelation) and rel.refusal is not None:
+        # Everything else queued is a many-to-many.
+        if rel.refusal is not None:
             _refuse_unnamed_many_to_many(REGISTRY.models()[model_name], field_name, rel)
-        # 1. Resolve 'to' model
         if isinstance(rel.to, (str, ForwardRef)):
             to_name = rel.to if isinstance(rel.to, str) else rel.to.__forward_arg__
             target_model = REGISTRY.resolve_reference(to_name, default=None)
@@ -1506,13 +1482,8 @@ def resolve_relationships():
                 )
             rel.to = target_model
 
-        # 2. Cross-validate with declared reverse relation field.
         target_model = rel.to
-        if (
-            isinstance(rel, ManyToManyRelation)
-            and rel.related_name is None
-            and target_model is REGISTRY.models()[model_name]
-        ):
+        if target_model is REGISTRY.models()[model_name]:
             # The class body names a target by the name its model is
             # registered under, so class definition already refused this.
             raise RuntimeError(
@@ -1520,119 +1491,68 @@ def resolve_relationships():
                 "own model, which class definition should have refused"
             )
         recompile_targets.add(target_model.__ferro_identity__)
-        # A many-to-many declared with `through=` alone has no BackRef: a
-        # `Reverse` on the target, if any, reads it back.
-        if rel.related_name is not None and not hasattr(target_model, rel.related_name):
-            raise RuntimeError(
-                f"Model '{model_name}' defines a relationship to '{target_model.__name__}' "
-                f"with related_name='{rel.related_name}', but '{target_model.__name__}' "
-                f"does not have that field defined as BackRef()/Field(back_ref=True)."
-            )
+        source_model = REGISTRY.models()[model_name]
+        source_table = source_model.__ferro_table__
+        target_table = target_model.__ferro_table__
+        join_table = rel.through
 
-        # 3. Inject Descriptor into target model
-        if isinstance(rel, ForeignKey):
-            setattr(
-                target_model,
-                rel.related_name,
-                RelationshipDescriptor(
-                    target_model_name=model_name,
-                    field_name=field_name,
-                    fk_column=f"{field_name}_id",
-                    is_one_to_one=getattr(rel, "unique", False),
-                ),
-            )
-        elif isinstance(rel, ManyToManyRelation):
-            source_model = REGISTRY.models()[model_name]
-            source_table = source_model.__ferro_table__
-            target_table = target_model.__ferro_table__
+        _refuse_taken_join_table(
+            source_model, field_name, rel, target_model, join_table
+        )
 
-            # Resolve join table
-            if not rel.through:
-                # Default join table name: source table + field name.
-                join_table = _default_join_table(source_table, field_name)
-            else:
-                join_table = rel.through
+        source_col = _join_column(source_table)
+        target_col = _join_column(target_table)
+        join_hints = _join_table_rename_hints(
+            source_model, target_model, field_name, rel
+        )
 
-            for key, other in REGISTRY.models().items():
-                if getattr(other, "__ferro_table__", None) == join_table:
-                    raise RuntimeError(
-                        f"M2M relation '{model_name}.{field_name}' derives join "
-                        f"table '{join_table}', which is already the table of "
-                        f"model '{key}'. Set through= on the relation or "
-                        "__ferro_table__ on the model to resolve the collision."
-                    )
-            _refuse_shared_join_table(
-                source_model, field_name, rel, target_model, join_table
-            )
+        # The declaring side reads the relation; a `Reverse` on the target,
+        # if any, reads it back once the queued declarations resolve below.
+        setattr(
+            source_model,
+            field_name,
+            RelationshipDescriptor(
+                target_model_name=target_model.__ferro_identity__,
+                field_name=field_name,
+                is_m2m=True,
+                join_table=join_table,
+                source_col=source_col,
+                target_col=target_col,
+            ),
+        )
 
-            source_col = _join_column(source_table)
-            target_col = _join_column(target_table)
-            join_hints = _join_table_rename_hints(
-                source_model, target_model, field_name, rel
-            )
-
-            # Inject M2M descriptors into BOTH sides
-            # Source -> Target
-            setattr(
-                source_model,
-                field_name,
-                RelationshipDescriptor(
-                    target_model_name=target_model.__ferro_identity__,
-                    field_name=field_name,
-                    is_m2m=True,
-                    join_table=join_table,
-                    source_col=source_col,
-                    target_col=target_col,
-                ),
-            )
-            # Target -> Source
-            if rel.related_name is not None:
-                setattr(
-                    target_model,
-                    rel.related_name,
-                    RelationshipDescriptor(
-                        target_model_name=model_name,
-                        field_name=rel.related_name,
-                        is_m2m=True,
-                        join_table=join_table,
-                        source_col=target_col,  # Reversed for the back side
-                        target_col=source_col,
-                    ),
-                )
-
-            # 4. Register Join Table schema with Rust
-            join_columns = (
-                fk_shadow_spec(
-                    source_col,
-                    python_type=pk_python_type_for_model(source_model),
-                    to_table=source_table,
-                ),
-                fk_shadow_spec(
-                    target_col,
-                    python_type=pk_python_type_for_model(target_model),
-                    to_table=target_table,
-                ),
-            )
-            composite_uniques = ((source_col, target_col),)
-            composite_indexes = ((target_col, source_col),) if rel.reverse_index else ()
-            register_model_with_ir(
-                join_table,
-                join_columns,
-                join_table,
-                composite_uniques=composite_uniques,
-                composite_indexes=composite_indexes,
-                rename_hints=join_hints,
-            )
-            REGISTRY.add_join_table(
-                join_table,
-                {
-                    "declared_by": (model_name, field_name),
-                    "columns": join_columns,
-                    "composite_uniques": composite_uniques,
-                    "composite_indexes": composite_indexes,
-                    "rename_hints": join_hints,
-                },
-            )
+        join_columns = (
+            fk_shadow_spec(
+                source_col,
+                python_type=pk_python_type_for_model(source_model),
+                to_table=source_table,
+            ),
+            fk_shadow_spec(
+                target_col,
+                python_type=pk_python_type_for_model(target_model),
+                to_table=target_table,
+            ),
+        )
+        composite_uniques = ((source_col, target_col),)
+        composite_indexes = ((target_col, source_col),) if rel.reverse_index else ()
+        register_model_with_ir(
+            join_table,
+            join_columns,
+            join_table,
+            composite_uniques=composite_uniques,
+            composite_indexes=composite_indexes,
+            rename_hints=join_hints,
+        )
+        REGISTRY.add_join_table(
+            join_table,
+            {
+                "declared_by": (model_name, field_name),
+                "columns": join_columns,
+                "composite_uniques": composite_uniques,
+                "composite_indexes": composite_indexes,
+                "rename_hints": join_hints,
+            },
+        )
 
     # Key columns first, so a relation's check reads a bound column.
     for model_name, field_name, rel in sorted(
@@ -1640,30 +1560,9 @@ def resolve_relationships():
     ):
         _resolve_declared_foreign_key(model_name, field_name, rel)
 
-    # Retired relations (ADR-0053) never enter the pending queue: their shadow
-    # column compiles from the ForeignKey alone, so each needs its target
-    # resolved, a recompile against it, and no BackRef reading it back.
-    for model_name, model_cls in REGISTRY.models().items():
-        retired = model_cls.__dict__.get("__ferro_retired_relations__") or {}
-        for field_name, rel in retired.items():
-            if isinstance(rel.to, (str, ForwardRef)):
-                to_name = rel.to if isinstance(rel.to, str) else rel.to.__forward_arg__
-                target_model = REGISTRY.resolve_reference(to_name, default=None)
-                if not target_model:
-                    raise RuntimeError(
-                        f"Relationship resolution failed: '{to_name}' not found"
-                    )
-                rel.to = target_model
-            refuse_back_ref_over_retired_relation(model_cls, field_name, rel)
-            recompile_targets.add(model_name)
-
-    rebuilt = reconcile_shadow_fk_types(REGISTRY.models())
-    for model_cls in rebuilt:
-        recompile_targets.add(model_cls.__ferro_identity__)
-
     # Second pass: rebuild specs only for models whose schema changed during
-    # resolution (relationship sources/targets and shadow-FK reconciliation
-    # targets). Replacement, never mutation (grilling Q3).
+    # resolution (relationship sources and targets). Replacement, never
+    # mutation (grilling Q3).
     for model_name in sorted(recompile_targets):
         model_cls = REGISTRY.models().get(model_name)
         if model_cls is None:
@@ -1673,10 +1572,7 @@ def resolve_relationships():
         except TypeError:
             # Declaration errors are the class-definition contract and surface
             # unwrapped, exactly as the metaclass surfaces them on the first
-            # pass. A shadow FK column only learns its real storage here, so a
-            # `__ferro_rls__` shorthand over a forward-referenced FK is first
-            # provably wrong on THIS pass — and it must still read as the
-            # declaration error it is, not as an internal rebuild failure.
+            # pass, never as an internal rebuild failure.
             raise
         except Exception as exc:
             raise RuntimeError(

@@ -1148,7 +1148,7 @@ def validate_query_column(model_cls: type, name: str) -> str:
     )
     # `name`/`obj` carry the failing attribute and its model structurally
     # (PEP 678-era AttributeError metadata), so callers with a sharper story
-    # for a specific name — include()'s BackRef/M2M guardrail (#287) — can
+    # for a specific name — include()'s reverse/M2M guardrail (#287) — can
     # re-raise pointedly without parsing this message.
     raise AttributeError(
         f"{model_cls.__name__} has no queryable column {name!r}."
@@ -1581,7 +1581,7 @@ def _collect_inner_traversal_paths(
 
 
 class ReverseRelationProxy:
-    """The stand-in for a reverse (`BackRef`) or many-to-many relation in a query lambda.
+    """The stand-in for a reverse (`Reverse`) or many-to-many relation in a query lambda.
 
     `author.posts` gives one. Its one method is
     [`exists`][ferro.query.nodes.ReverseRelationProxy.exists], which tests

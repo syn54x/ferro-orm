@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from .rowsecurity import RowSecurity
     from .session import Session
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict
 
 from ._bind_payload import (
     apply_save_exclude,
@@ -44,7 +44,7 @@ from ._core import (
 from ._core import (
     evict_instance as _core_evict_instance,
 )
-from .base import ForeignKey, ForwardRelation, foreign_key_allows_none
+from .base import ForwardRelation
 from .exceptions import InstanceNotLoaded, ModelDoesNotExist
 from .metaclass import ModelMetaclass, _resolved_relation_specs, generated_refusal
 from .query import Predicate, Query
@@ -87,7 +87,7 @@ def _refuse_relation_keywords(model_cls: type, names: Any) -> None:
     forward = {
         name
         for name, declared in model_cls.__ferro_relations__.items()
-        if isinstance(declared, (ForeignKey, ForwardRelation))
+        if isinstance(declared, ForwardRelation)
     }
     passed = forward.intersection(names)
     if not passed:
@@ -101,12 +101,8 @@ def _refuse_relation_keywords(model_cls: type, names: Any) -> None:
         f"column's value, {spec.fk_column}={name}.{spec.target.__ferro_pk__}"
     )
     # Assigning on the instance is a fix only when the constructor can leave
-    # the key out; the old form checks its required key after validation.
-    optional = not model_cls.model_fields[spec.fk_column].is_required() and (
-        isinstance(model_cls.__ferro_relations__[name], ForwardRelation)
-        or spec.nullable
-    )
-    if optional:
+    # the key out.
+    if not model_cls.model_fields[spec.fk_column].is_required():
         refusal += (
             f", or set {_snake(model_cls.__name__)}.{name} = {name} on the instance"
         )
@@ -384,14 +380,14 @@ class Model(BaseModel, metaclass=ModelMetaclass):
     #: alongside ``__ferro_columns__``; ``None`` for a PK-less model.
     __ferro_pk__: ClassVar[str | None] = None
     __ferro_relation_specs__: ClassVar[dict[str, "RelationSpec"]] = {}
-    #: Reverse (BackRef) relation facts for existence tests (#314, ADR-0007),
+    #: Reverse and many-to-many relation facts for existence tests (#314, ADR-0007),
     #: refreshed at the same compile choke point as ``__ferro_relation_specs__``.
     __ferro_reverse_specs__: ClassVar[dict[str, "ReverseSpec"]] = {}
     #: Retired columns (ADR-0053), refreshed at the same compile choke point:
     #: in the schema snapshot, never in ``__ferro_columns__``.
     __ferro_retired_columns__: ClassVar[dict[str, "ColumnSpec"]] = {}
-    #: Every name a retired declaration took out of the model: retired fields,
-    #: retired relations and their shadow ``*_id`` columns.
+    #: Every name a retired declaration took out of the model: its retired
+    #: fields, foreign-key columns included.
     __ferro_retired_names__: ClassVar[frozenset[str]] = frozenset()
     #: Each generated column (ADR-0058) and the columns its expression reads,
     #: refreshed at the same compile choke point.
@@ -517,18 +513,6 @@ class Model(BaseModel, metaclass=ModelMetaclass):
             pk = type(self).__ferro_pk__
             return f"{type(self).__name__}({pk}={self.__dict__[pk]!r}, unloaded)"
         return super().__repr__()
-
-    @model_validator(mode="after")
-    def _validate_required_foreign_keys(self) -> Self:
-        """Keep Python model validation aligned with required FK nullability."""
-        relations = getattr(self.__class__, "__ferro_relations__", {})
-        for field_name, metadata in relations.items():
-            if not isinstance(metadata, ForeignKey):
-                continue
-            if foreign_key_allows_none(metadata) is False:
-                if getattr(self, f"{field_name}_id", None) is None:
-                    raise ValueError(f"{field_name} is required")
-        return self
 
     async def save(
         self,

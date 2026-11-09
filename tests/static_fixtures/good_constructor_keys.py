@@ -57,5 +57,5 @@ def _constructions() -> None:
     assert_type(team.players, Relation[list[Player]])
 
 
-def _field_takes_every_documented_option() -> None:
-    Field(many_to_many=True, through="post_tags", reverse_index=False)
+def _many_to_many_takes_its_documented_options() -> None:
+    ManyToMany(through="post_tags", reverse_index=False)
