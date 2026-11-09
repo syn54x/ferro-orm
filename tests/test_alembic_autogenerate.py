@@ -8,11 +8,8 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import CreateTable
 
 from ferro import (
-    BackRef,
     FerroField,
-    ForeignKey,
     Model,
-    Relation,
     clear_registry,
     reset_engine,
 )
@@ -194,15 +191,14 @@ def test_alembic_can_render_enum_for_postgres():
 
 
 def test_foreign_key_index_emits_single_column_index():
-    """ForeignKey(index=True) declares a non-unique index on the shadow *_id column."""
+    """A foreign-key column with index=True declares a non-unique index on it."""
 
     class Org(Model):
         id: Annotated[int, FerroField(primary_key=True)]
-        projects: Relation[list["Project"]] = BackRef()
 
     class Project(Model):
         id: Annotated[int, FerroField(primary_key=True)]
-        org: Annotated[Org, ForeignKey(related_name="projects", index=True)]
+        org_id: Annotated[int, FerroField(foreign_key=Org, index=True)]
 
     metadata = get_metadata()
     project_table = metadata.tables["project"]
@@ -211,40 +207,15 @@ def test_foreign_key_index_emits_single_column_index():
     assert index_names == {"idx_project_org_id": False}
 
 
-def test_foreign_key_unique_implies_index_warns():
-    """ForeignKey(unique=True, index=True) warns and emits only the unique constraint."""
-
-    class User(Model):
-        id: Annotated[int, FerroField(primary_key=True)]
-        profile: Relation[list["Profile"]] = BackRef()
-
-    with pytest.warns(UserWarning, match="redundant"):
-
-        class Profile(Model):
-            id: Annotated[int, FerroField(primary_key=True)]
-            user: Annotated[
-                User,
-                ForeignKey(related_name="profile", unique=True, index=True),
-            ]
-
-    metadata = get_metadata()
-    profile_table = metadata.tables["profile"]
-
-    # Only the unique artifact survives; the redundant index is dropped.
-    index_names = {idx.name: idx.unique for idx in profile_table.indexes}
-    assert index_names == {"uq_profile_user_id": True}
-
-
 def test_foreign_key_index_default_false():
-    """ForeignKey() without index=True keeps the shadow column unindexed."""
+    """A foreign-key column without index=True stays unindexed."""
 
     class Org(Model):
         id: Annotated[int, FerroField(primary_key=True)]
-        projects: Relation[list["Project"]] = BackRef()
 
     class Project(Model):
         id: Annotated[int, FerroField(primary_key=True)]
-        org: Annotated[Org, ForeignKey(related_name="projects")]
+        org_id: Annotated[int, FerroField(foreign_key=Org)]
 
     metadata = get_metadata()
     project_table = metadata.tables["project"]
@@ -253,21 +224,17 @@ def test_foreign_key_index_default_false():
 
 
 def test_foreign_key_index_with_nullable_fk():
-    """ForeignKey(index=True, on_delete='SET NULL') indexes the nullable shadow column."""
+    """A nullable foreign-key column with index=True and on_delete='SET NULL'
+    is indexed."""
 
     class Org(Model):
         id: Annotated[int, FerroField(primary_key=True)]
-        projects: Relation[list["Project"]] = BackRef()
 
     class Project(Model):
         id: Annotated[int, FerroField(primary_key=True)]
-        org: Annotated[
-            Org | None,
-            ForeignKey(
-                related_name="projects",
-                on_delete="SET NULL",
-                index=True,
-            ),
+        org_id: Annotated[
+            int | None,
+            FerroField(foreign_key=Org, on_delete="SET NULL", index=True),
         ] = None
 
     metadata = get_metadata()
@@ -288,11 +255,10 @@ def test_index_name_matches_rust_runtime_convention_for_fk():
 
     class Org(Model):
         id: Annotated[int, FerroField(primary_key=True)]
-        projects: Relation[list["Project"]] = BackRef()
 
     class Project(Model):
         id: Annotated[int, FerroField(primary_key=True)]
-        org: Annotated[Org, ForeignKey(related_name="projects", index=True)]
+        org_id: Annotated[int, FerroField(foreign_key=Org, index=True)]
 
     metadata = get_metadata()
     project_table = metadata.tables["project"]

@@ -5,10 +5,9 @@ from typing import Annotated
 import pytest
 
 import ferro
-from ferro import Model, Relation, connect, reset_engine
+from ferro import Model, connect, reset_engine
 from ferro._core import _bulk_install_count_for_test
-from ferro.base import FerroField, ForeignKey
-from ferro.fields import BackRef
+from ferro.base import FerroField
 from ferro.ir.compiler import (
     reset_schema_ir_compile_count_for_test,
     schema_ir_compile_count_for_test,
@@ -39,12 +38,11 @@ def test_resolve_clears_dirty_generation(clean_registry) -> None:
     class GcAuthor(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         name: str
-        posts: Relation[list["GcPost"]] = BackRef()
 
     class GcPost(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         title: str
-        author: Annotated["GcAuthor", ForeignKey(related_name="posts")]
+        author_id: Annotated[int, FerroField(foreign_key="GcAuthor")]
 
     assert REGISTRY.is_dirty()
     resolve_relationships()
@@ -96,8 +94,8 @@ async def test_clean_reconnect_zero_compiles_zero_bulk_install(
 def test_dirty_resolve_recompiles_only_affected_subset(
     clean_registry, monkeypatch
 ) -> None:
-    """Relationship resolution recompiles changed models and shadow-FK targets,
-    not the entire registry."""
+    """Relationship resolution recompiles the model whose foreign-key column
+    names its target by string, not the entire registry."""
     from ferro.relations import resolve_relationships
 
     compile_calls: list[str] = []
@@ -114,21 +112,20 @@ def test_dirty_resolve_recompiles_only_affected_subset(
     class GcIsland(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         note: str
-        leaves: Relation[list["GcLeaf"]] = BackRef()
 
-    island_identity = GcIsland.__ferro_identity__
+    class GcBystander(Model):
+        id: Annotated[int | None, FerroField(primary_key=True)] = None
 
     class GcLeaf(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
-        island_id: int | None = None
-        island: Annotated[GcIsland, ForeignKey(related_name="leaves")]
+        island_id: Annotated[int, FerroField(foreign_key="GcIsland")]
 
     compile_calls.clear()
     resolve_relationships()
 
-    assert island_identity in compile_calls
-    assert GcLeaf.__ferro_identity__ in compile_calls
-    assert len(compile_calls) == 2
+    assert compile_calls == [GcLeaf.__ferro_identity__]
+    assert GcIsland.__ferro_identity__ not in compile_calls
+    assert GcBystander.__ferro_identity__ not in compile_calls
 
 
 @pytest.mark.asyncio

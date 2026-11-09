@@ -240,21 +240,20 @@ async def test_hydration_holds_the_mapped_columns_only(db_url):
 @pytest.mark.asyncio
 async def test_hydrated_instances_list_fields_in_declaration_order(db_url):
     """A loaded instance lists fields like a built one on every fetch path (I-2)."""
-    from typing import Annotated
-
-    from ferro import BackRef, ForeignKey, Relation
+    from ferro import Forward, Relation, Reverse
 
     class OrderAuthor(Model):
         id: int | None = Field(default=None, primary_key=True)
         username: str
         email: str
         age: int
-        posts: Relation[list["OrderPost"]] = BackRef()
+        posts: Relation[list["OrderPost"]] = Reverse("author_id")
 
     class OrderPost(Model):
         id: int | None = Field(default=None, primary_key=True)
         title: str
-        author: Annotated[OrderAuthor, ForeignKey(related_name="posts")]
+        author_id: int = Field(foreign_key=OrderAuthor)
+        author: Relation[OrderAuthor] = Forward("author_id")
         body: str
 
     declared = ["id", "username", "email", "age"]
@@ -313,20 +312,16 @@ async def test_identity_refresh_keeps_field_order(db_url):
 
 @pytest.mark.asyncio
 async def test_hydration_order_with_shadow_column_and_retired_field(db_url):
-    """Dump keys follow model_fields with a shadow FK column and a retired field."""
-    from typing import Annotated
-
-    from ferro import BackRef, ForeignKey, Relation
+    """Dump keys follow model_fields with a foreign-key column and a retired field."""
     from ferro import Field as FerroFieldOption
 
     class OrderOwner(Model):
         id: int | None = Field(default=None, primary_key=True)
-        rows: Relation[list["OrderRetired"]] = BackRef()
 
     class OrderRetired(Model):
         id: int | None = Field(default=None, primary_key=True)
         zeta: str
-        owner: Annotated[OrderOwner, ForeignKey(related_name="rows")]
+        owner_id: int = FerroFieldOption(foreign_key=OrderOwner)
         gone: str | None = FerroFieldOption(retired=True)
         alpha: str
 

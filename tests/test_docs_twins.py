@@ -95,22 +95,22 @@ def test_existing_annotated_metadata_and_typing_imports_are_kept() -> None:
         """
         from typing import TYPE_CHECKING, Annotated
 
-        from ferro import Field, ForeignKey, Model
+        from ferro import Field, Model
 
 
         class Post(Model):
-            author: Annotated["Author", ForeignKey(related_name="posts")]
+            author_id: Annotated[int, Field(foreign_key="Author")]
             slug: Annotated[str, "slug"] = Field(unique=True)  # a URL part
         """
     ) == textwrap.dedent(
         """\
         from typing import TYPE_CHECKING, Annotated
 
-        from ferro import Field, ForeignKey, Model
+        from ferro import Field, Model
 
 
         class Post(Model):
-            author: Annotated["Author", ForeignKey(related_name="posts")]
+            author_id: Annotated[int, Field(foreign_key="Author")]
             slug: Annotated[str, "slug", Field(unique=True)]  # a URL part
         """
     )
