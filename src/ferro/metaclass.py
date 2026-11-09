@@ -186,7 +186,8 @@ def _node_view(node: ast.expr | None) -> tuple[bool, Any, bool]:
     members = _union_members(node)
     if members is not None:
         kept = [member for member in members if not _is_none(member)]
-        _, target, _ = _node_view(kept[0] if kept else None)
+        # A union of several models names no one target.
+        _, target, _ = _node_view(kept[0]) if len(kept) == 1 else (False, None, False)
         return False, target, len(kept) != len(members)
     return False, _head(node) or ast.unparse(node), False
 
@@ -196,7 +197,8 @@ def _relation_view(hint: Any) -> tuple[bool, Any, bool] | None:
 
     The target is a class, or its name when the annotation writes it as a
     string (as every annotation is under ``from __future__ import
-    annotations``). ``None`` when the annotation is not ``Relation[...]``.
+    annotations``), and ``None`` when it is a union of several models, which
+    names no one target. ``None`` when the annotation is not ``Relation[...]``.
     """
     if isinstance(hint, ForwardRef):
         hint = hint.__forward_arg__
@@ -220,9 +222,12 @@ def _relation_argument(argument: Any) -> tuple[bool, Any, bool]:
         _, target, _ = _relation_argument(inner[0] if inner else "")
         return True, target, False
     if get_origin(argument) in (Union, UnionType):
-        members = [arg for arg in get_args(argument) if arg is not type(None)]
-        _, target, _ = _relation_argument(members[0])
-        return False, target, len(members) != len(get_args(argument))
+        inner = _strip_optional_union(argument)
+        nullable = type(None) in get_args(argument)
+        # A union of several models names no one target.
+        several = get_origin(inner) in (Union, UnionType)
+        _, target, _ = (False, None, False) if several else _relation_argument(inner)
+        return False, target, nullable
     return False, argument, False
 
 
@@ -388,6 +393,15 @@ def _declared_relation(
     """
     core, wrapped, _ = _layers(annotation)
     view = _relation_view(core)
+    # `Relation[A | B]` (or `A | B` alone) names no one model: refused like a
+    # bare `Relation`, its target named from the column or at resolution.
+    several = (view is not None and view[1] is None) or (
+        view is None
+        and not _is_bare_relation(core)
+        and _relation_argument(core)[1] is None
+    )
+    if several:
+        view = None
     bound = None if scope is None else scope | frozenset(namespace)
     # The column the relation reads decides its target and nullability.
     declared = (
@@ -407,7 +421,7 @@ def _declared_relation(
         elif view is not None:
             _, target, nullable = view
             named = (annotation_text(target), nullable or wrapped)
-        elif not _is_bare_relation(core):
+        elif not several and not _is_bare_relation(core):
             named = (annotation_text(core), wrapped)
         else:
             named = None
@@ -488,6 +502,10 @@ def _declared_many_to_many(
     """
     core, wrapped, _ = _layers(annotation)
     view = _relation_view(core)
+    # `Relation[list[A | B]]` names no one model: refused like a bare `Relation`.
+    several = view is not None and view[1] is None
+    if several:
+        view = None
     through = options.get("through")
     reverse_index = options.get("reverse_index", True)
     # The order of `_declared_relation`: a missing `Relation[...]` is named
@@ -511,7 +529,7 @@ def _declared_many_to_many(
         through = default_join_table(table, field_name)
     if view is not None:
         target = view[1]
-    elif not _is_bare_relation(core):
+    elif not several and not _is_bare_relation(core):
         target = _relation_argument(core)[1]
     else:
         target = None

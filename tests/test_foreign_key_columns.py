@@ -731,6 +731,30 @@ def test_a_bare_reverse_relation_annotation_names_the_model_pointing_back():
     )
 
 
+def test_a_relation_over_a_union_of_models_is_refused_in_either_order():
+    class Team(Model):
+        id: int | None = Field(default=None, primary_key=True)
+
+    class Club(Model):
+        id: int | None = Field(default=None, primary_key=True)
+
+    # typing caches `Relation[Team | Club]`, so `Relation[Club | Team]` can
+    # come back as it: neither order may name a target.
+    for _ in range(2):
+        for refused in (Relation[Team | Club], Relation[Club | Team]):
+            with pytest.raises(TypeError) as refusal:
+
+                class Player(Model):
+                    id: int | None = Field(default=None, primary_key=True)
+                    team_id: int = Field(foreign_key=Team)
+                    team: refused = Forward("team_id")  # type: ignore[valid-type]
+
+            assert str(refusal.value) == (
+                "Player.team: a relation is annotated Relation[...]. "
+                'Write: team: Relation[Team] = Forward("team_id")'
+            )
+
+
 def test_a_bare_reverse_two_models_point_back_to_is_refused_with_the_class():
     class Player(Model):
         id: int | None = Field(default=None, primary_key=True)

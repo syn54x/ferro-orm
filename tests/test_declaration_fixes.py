@@ -259,6 +259,7 @@ def _cases(storage: str) -> dict[str, dict]:
             "annotated without Relation": f'"{t}"',
             "a bare Relation": "Relation",
             "nullable over a required column": f'Relation["{t} | None"]',
+            "annotated as a union of models": f'Relation["{t} | Card"]',
         }.items():
             cases[f"forward {spelling} to {t}"] = _case(
                 "forward",
@@ -299,6 +300,7 @@ def _cases(storage: str) -> dict[str, dict]:
         for spelling, relation in {
             "annotated as one row": 'Relation["Player"]',
             "a bare Relation": "Relation",
+            "annotated as a union of models": 'Relation[list["Player | Card"]]',
         }.items():
             cases[f"reverse on {t} {spelling}"] = _case(
                 "reverse",
@@ -358,6 +360,14 @@ def _cases(storage: str) -> dict[str, dict]:
         local=None,
         owner="Team",
         Team=['players: Relation = Reverse("team_id")'],
+    )
+    cases["many-to-many over a union of models nothing names"] = _case(
+        "none",
+        "links",
+        local=None,
+        Player=[
+            'links: Relation[list["Tag | Card"]] = ManyToMany(through="player_links")'
+        ],
     )
     cases["bare many-to-many nothing names"] = _case(
         "none",
