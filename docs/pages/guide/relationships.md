@@ -75,7 +75,7 @@ Every example on this page uses one roster. A team has players, a player may hav
     --8<-- "docs/examples/relationships_annotated.py:models"
     ```
 
-Each relation has two sides. The forward side is a [`ForeignKey`][ferro.ForeignKey] field on the model whose table holds the key column. The reverse side is a [`BackRef()`][ferro.BackRef] on the other model, named by the forward side's `related_name`. Ferro checks the pairing at `connect()`: a `related_name` with no matching `BackRef()` raises `RuntimeError` naming both models.
+Each relation has two sides. The forward side is a `ForeignKey` field on the model whose table holds the key column. The reverse side is a `BackRef()` on the other model, named by the forward side's `related_name`. Ferro checks the pairing at `connect()`: a `related_name` with no matching `BackRef()` raises `RuntimeError` naming both models.
 
 `create_tables()` returns a report of every statement it ran. The sections below print parts of it, so you can see the tables each relation creates.
 
@@ -232,7 +232,7 @@ ORDER BY "player"."name" ASC NULLS LAST;
 
 `include()` added a `LEFT JOIN` on `team`, whose columns come back under `j1_team__` names.
 
-The [`ForeignKey`][ferro.ForeignKey], [`BackRef`][ferro.BackRef] and [`Relation`][ferro.Relation] reference lists every parameter.
+The [`Field`][ferro.Field], [`Forward`][ferro.Forward], [`Reverse`][ferro.Reverse], [`ManyToMany`][ferro.ManyToMany] and [`Relation`][ferro.Relation] reference lists every parameter.
 
 ## One-to-one
 

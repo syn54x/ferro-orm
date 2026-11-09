@@ -18,6 +18,8 @@ Amended by ADR-0047 (2026-10-07): the reconciliation pass honours the same hints
 
 Amended by ADR-0062 (2026-11-09): a many-to-many's join table is declared with `through=`, so a model rename no longer renames it. Its own rename is declared on the relation, `tags: Relation[list[Tag]] = ManyToMany(through="author_tags", renamed_from="writer_tags")`, and recorded as that join table's table hint, read like a model's `__ferro_renamed_from__` by every emitter.
 
+Amended 2026-11-09 (#874): a foreign-key column is declared, so it is renamed by its own `renamed_from` like any column: `author_id: int = Field(foreign_key=Author, renamed_from="writer_id")`. `ForeignKey(renamed_from=...)` is gone. The snapshot and a squash no longer write `foreign_keys[].renamed_from`, which recorded the relation field the key was declared under before; a snapshot carrying it still loads, and the planner, which acted on the column's hint alone, plans as it did. For a dropped key column beside an added one, the generator's suggestion names the old column, `declare renamed_from="author_id"`, as it does for every column.
+
 A drop and an add with no hint are rendered as a drop and an add, marked destructive, and the generator's summary names `renamed_from`. The generator never matches a vanished column to a new one by type.
 
 An enum type's rename takes no hint. When every column of a vanished type now declares one and the same new type, `ALTER TYPE "status" RENAME TO "authorstatus"` and the swap-type recipe end in the identical schema and data, so rendering the rename is no guess about intent.
