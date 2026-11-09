@@ -14,7 +14,9 @@ import pytest
 from ferro import (
     BackRef,
     FerroField,
+    Field,
     ForeignKey,
+    ManyToMany,
     Model,
     Relation,
     clear_registry,
@@ -182,3 +184,33 @@ def test_on_delete_set_null_infers_nullable_shadow_fk():
 
     t = get_metadata().tables["childsetnull"]
     assert t.c.parent_id.nullable is True
+
+
+# -- from tests/test_composite_unique.py
+
+
+def test_m2m_reverse_index_lives_on_forward_side():
+    """D3: passing reverse_index= to BackRef() is a TypeError."""
+    with pytest.raises(TypeError):
+        BackRef(reverse_index=True)
+
+
+def test_m2m_self_referential_reverse_index():
+    """D7: self-referential M2M gets a reverse index on synthesized join table."""
+
+    class UserSelfRef(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        name: str
+        following: Relation[list["UserSelfRef"]] = ManyToMany(related_name="followers")
+        followers: Relation[list["UserSelfRef"]] = BackRef()
+
+    metadata = get_metadata()
+    join_tables = [
+        (name, t)
+        for name, t in metadata.tables.items()
+        if name != "userselfref" and "userselfref" in name
+    ]
+    assert join_tables, f"no join table found for self-ref M2M: {list(metadata.tables)}"
+    _, join = join_tables[0]
+    non_unique = [i for i in join.indexes if not i.unique]
+    assert len(non_unique) == 1

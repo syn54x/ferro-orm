@@ -15,7 +15,7 @@ from typing import Annotated
 import pytest
 
 import ferro
-from ferro import BackRef, ManyToMany, Model, Relation, connect
+from ferro import ManyToMany, Model, Relation, connect
 from ferro._core import _catalog_query_count_for_test
 from ferro.base import FerroField
 
@@ -46,7 +46,6 @@ async def test_steady_state_crud_issues_zero_catalog_queries(db_url, clean_regis
     class C2Tag(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
         label: str
-        tasks: Relation[list["C2Task"]] = BackRef()
 
     class C2Task(Model):
         id: Annotated[int | None, FerroField(primary_key=True)] = None
@@ -54,7 +53,7 @@ async def test_steady_state_crud_issues_zero_catalog_queries(db_url, clean_regis
         priority: C2Priority = C2Priority.LOW
         run_id: uuid.UUID | None = None
         due: datetime | None = None
-        tags: Relation[list["C2Tag"]] = ManyToMany(related_name="tasks")
+        tags: Relation[list["C2Tag"]] = ManyToMany(through="c2task_tags")
 
     await connect(db_url, auto_migrate=True)
     async with ferro.engines.session():
