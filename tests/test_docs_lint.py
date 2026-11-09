@@ -1,8 +1,9 @@
 """The docs lint (``tests._docs_checks``) as a gate over the whole tree.
 
 ``python -m tests._docs_checks docs/pages docs/examples src/ferro`` must find
-nothing: no query lambda with a one-letter parameter and no error check that
-cannot fail, on any docs page, in any example script or in any docstring.
+nothing: no query lambda with a one-letter parameter, no error check that
+cannot fail and no retired relation term, on any docs page, in any example
+script or in any docstring.
 ``tests/test_docs_checks.py`` covers each check case by case.
 """
 
@@ -43,4 +44,16 @@ def test_one_letter_lambda_on_a_page_fails_the_lint(tmp_path: Path) -> None:
     assert result.returncode == 1
     assert f"{page}:6: lambda passed to where() takes one-letter parameter 't'" in (
         result.stdout
+    )
+
+
+def test_a_retired_relation_term_on_a_page_fails_the_lint(tmp_path: Path) -> None:
+    page = tmp_path / "page.md"
+    page.write_text(
+        "# Page\n\nFerro reads the shadow column without a query.\n", encoding="utf-8"
+    )
+    result = _lint(str(page))
+    assert result.returncode == 1
+    assert result.stdout == (
+        f'{page}:3: "shadow column" is retired; write "foreign-key column"\n'
     )
