@@ -7,8 +7,9 @@ in page order, so later sections build on the rows earlier ones added.
 """
 
 import asyncio
-from typing import Annotated
+from typing import Annotated, Any
 
+import ferro
 from ferro import Field, Forward, ManyToMany, Model, Relation, Reverse
 
 
@@ -127,10 +128,25 @@ async def main() -> None:
             ("Gordon", "Gophers"),
         ]
 
+        # --8<-- [start:unloaded]
+        async with engines.session():  # a new session, holding no team yet
+            fetched = await Player.get(ferris.id)
+            print(repr(fetched.team), fetched.team.id)  # the key, with no query
+            try:
+                fetched.team.name
+            except ferro.InstanceNotLoaded as error:
+                print(f"{type(error).__name__}: {error}")
+
+            team = await fetched.team.load()  # one query fills it in place
+            print(team is fetched.team, team.name)
+        # --8<-- [end:unloaded]
+        assert team.name == "Rustaceans"
+
         # --8<-- [start:one-to-one]
         await Profile.create(bio="Plays in the front row", player_id=ferris.id)
 
-        profile = await ferris.profile.first()  # one instance, not a list
+        profile = await ferris.profile.first()  # one instance, or None
+        assert profile is not None
         assert profile.bio == "Plays in the front row"
         assert await corro.profile.first() is None  # Corro has no profile
         # --8<-- [end:one-to-one]
@@ -184,7 +200,9 @@ async def main() -> None:
             name="Crabby", team_id=rustaceans.id, mentor_id=ferris.id
         )
 
-        assert (await crabby.mentor.load()).name == "Ferris"
+        mentor = crabby.mentor  # Player | None: a player may have no mentor
+        assert mentor is not None
+        assert (await mentor.load()).name == "Ferris"
         mentees = await ferris.mentees.all()
         assert [player.name for player in mentees] == ["Crabby"]
         assert ferris.mentor_id is None  # Ferris has no mentor
@@ -198,6 +216,42 @@ async def main() -> None:
         titles = await rustaceans.titles.all()
         assert [tournament.name for tournament in titles] == ["Spring Open"]
         # --8<-- [end:nullable]
+
+        # --8<-- [start:assign]
+        ferris.team = gophers  # sets team_id; gophers is the loaded relation
+        await ferris.save()
+        print(ferris.team_id == gophers.id, ferris.team is gophers)
+
+        ferris.team_id = corro.team_id  # a new key drops the loaded relation
+        await ferris.save()
+        print(ferris.team.name)
+
+        crabby.mentor = None  # clears an optional key
+        print(crabby.mentor_id)
+
+        # Typed Any, so the type checker lets these reach the refusals.
+        wrong: list[Any] = [spring, Team(name="Unsaved"), None]
+        for value in wrong:
+            try:
+                ferris.team = value
+            except (TypeError, ValueError) as error:
+                print(f"{type(error).__name__}: {error}")
+        # --8<-- [end:assign]
+        assert ferris.team_id == rustaceans.id
+
+        # --8<-- [start:build]
+        rusty = await Player.create(name="Rusty", team_id=rustaceans.id)
+
+        winter = Tournament(name="Winter Cup")
+        winter.winner = gophers  # the key is optional, so set it after building
+        await winter.save()
+
+        assert rustaceans.id is not None  # saved, so it has its id
+        oxide = Player(name="Oxide", team_id=rustaceans.id)
+        await oxide.save()
+        # --8<-- [end:build]
+        assert (rusty.team_id, oxide.team_id) == (rustaceans.id, rustaceans.id)
+        assert winter.winner_id == gophers.id
 
         # --8<-- [start:on-delete]
         await rustaceans.delete()
