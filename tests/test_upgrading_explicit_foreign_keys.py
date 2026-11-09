@@ -89,10 +89,35 @@ def test_the_table_has_a_row_per_old_form_with_its_new_form() -> None:
 
 
 def test_the_many_to_many_row_writes_the_derived_join_table_name() -> None:
-    [row] = [
-        line for line in _table(_section()).splitlines() if "ManyToMany(" in line
-    ]
+    [row] = [line for line in _table(_section()).splitlines() if "ManyToMany(" in line]
     assert 'through="tag_notes"' in row
+
+
+def _old_form_fence(section: str) -> str:
+    start = section.index('```python {test=compile reason="shows the declarations')
+    return section[start : section.index("```\n", start + 3)]
+
+
+def test_the_old_optional_self_reference_is_one_old_ferro_accepted() -> None:
+    # Old Ferro resolved a string target by class name, so "Note | None" was
+    # never accepted; the optional key was nullable=True with a None default.
+    section = _section()
+    fence = _old_form_fence(section)
+    assert '"Note | None", ForeignKey' not in fence
+    assert 'nullable=True, on_delete="SET NULL"),\n    ] = None' in fence
+    [row] = [line for line in _table(section).splitlines() if "reply_to: " in line]
+    assert 'Annotated["Note", ForeignKey(' in row and "] = None" in row
+
+
+def test_the_removed_keywords_get_their_own_refusal_not_a_suggestion() -> None:
+    [paragraph] = [
+        line
+        for line in _section().splitlines()
+        if line.startswith("The old relation keywords")
+    ]
+    assert 'no "Did you mean"' in paragraph
+    assert "links this section" in paragraph
+    assert "the same way;" not in paragraph
 
 
 def test_the_section_holds_exactly_one_agent_prompt() -> None:

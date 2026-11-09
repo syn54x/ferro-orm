@@ -82,11 +82,11 @@ Each old declaration has one replacement. The rows use the models of this sectio
 | Old | New |
 | --- | --- |
 | `account: Annotated[Account, ForeignKey(related_name="notes", index=True)]` | `account_id: int = Field(foreign_key=Account, index=True)` and `account: Relation[Account] = Forward("account_id")` |
-| An optional key: annotation `Note \| None`, `nullable=True`, or `on_delete="SET NULL"` | `reply_to_id: int \| None = Field(default=None, foreign_key="Note", on_delete="SET NULL")` and `reply_to: Relation["Note \| None"] = Forward("reply_to_id")` |
+| `reply_to: Annotated["Note", ForeignKey(related_name="replies", nullable=True, on_delete="SET NULL")] = None`, or any optional key: an `Account \| None` annotation, `nullable=True` or `on_delete="SET NULL"` | `reply_to_id: int \| None = Field(default=None, foreign_key="Note", on_delete="SET NULL")` and `reply_to: Relation["Note \| None"] = Forward("reply_to_id")`, keeping the `on_delete` the old key declared |
 | `nullable=False` on an `Account \| None` annotation | The required column, `account_id: int = Field(foreign_key=Account)`, and `Relation[Account]` |
 | `ForeignKey(renamed_from="owner")` | `renamed_from="owner_id"` on the column |
 | `ForeignKey(retired=True)` | `retired=True` on an optional column, `account_id: int \| None = Field(default=None, foreign_key=Account, retired=True)` |
-| `replies: Relation[list["Note"]] = BackRef()` | `replies: Relation[list["Note"]] = Reverse("reply_to_id")`, naming the key column on `Note` |
+| `replies: Relation[list["Note"]] = BackRef()` | `replies: Relation[list["Note"]] = Reverse("reply_to_id")`, naming the key column on `Note`. A reverse side nothing reads can go, as `Account.notes` does here |
 | `pin: "Pin" = BackRef()`, the reverse side of a one-to-one | `pin: Relation[list["Pin"]] = Reverse("note_id")`; `await note.pin` becomes `await note.pin.first()` |
 | `notes: Relation[list[Note]] = ManyToMany(related_name="tags")` | `notes: Relation[list[Note]] = ManyToMany(through="tag_notes")`, today's derived `<table>_<field>` join-table name, and on `Note` `tags: Relation[list["Tag"]] = Reverse("notes")` |
 | `Field(back_ref=True)`, `Field(many_to_many=True, ...)` | The `Reverse` or `ManyToMany` assignment; a `Field` is always a column |
@@ -99,11 +99,16 @@ The `through=` name is the one Ferro derived before, the owning table and the at
 Here are the relations of this section as they were declared before `X.Y`. Each relation line had one valid form, so there is one block:
 
 ```python {test=compile reason="shows the declarations before X.Y, which X.Y refuses"}
+class Account(Model):
+    notes: Relation[list["Note"]] = BackRef()
+
+
 class Note(Model):
     account: Annotated[Account, ForeignKey(related_name="notes", index=True)]
     reply_to: Annotated[
-        "Note | None", ForeignKey(related_name="replies", on_delete="SET NULL")
-    ]
+        "Note",
+        ForeignKey(related_name="replies", nullable=True, on_delete="SET NULL"),
+    ] = None
     replies: Relation[list["Note"]] = BackRef()
     pin: "Pin" = BackRef()
     tags: Relation[list["Tag"]] = BackRef()
@@ -131,7 +136,7 @@ The same models in `X.Y`, each key a column and each relation naming one:
     --8<-- "docs/examples/upgrade_foreign_keys_annotated.py:models"
     ```
 
-`Note.account_id` and `Pin.note_id` are the columns the old form created; their types are the target's primary-key type, with `| None` only on `reply_to_id`, whose relation was optional. The relations themselves are assignments in both styles.
+`Note.account_id`, `Note.reply_to_id` and `Pin.note_id` are the columns the old form created; their types are the target's primary-key type, with `| None` only on `reply_to_id`, whose relation was optional. The relations themselves are assignments in both styles. `Account` loses its `notes` back-reference: a forward relation no longer needs its other side, and nothing on this page reads it.
 
 ### Call sites
 
@@ -254,7 +259,7 @@ else:
     raise AssertionError("an unknown keyword was accepted")
 ```
 
-The old relation keywords, `back_ref`, `many_to_many`, `related_name` and `through`, are refused the same way; write the `Reverse` or `ManyToMany` assignment from the table instead.
+The old relation keywords, `back_ref`, `many_to_many`, `related_name` and `through`, get a refusal of their own instead, with no "Did you mean": a `TypeError` that names the keyword, says what replaces it and links this section. `ManyToMany(related_name=...)` is refused the same way, and `from ferro import ForeignKey` or `BackRef` raises `ImportError` pointing here. Write the `Reverse` or `ManyToMany` assignment from the table.
 
 **Options in `json_schema_extra`.** A field option passed through `json_schema_extra` (`primary_key`, `unique`, `index`, `autoincrement`, `db_type`, `db_check` or `ferro_nullable`) is refused when the class is defined, naming the `Field()` argument to write:
 
@@ -357,17 +362,20 @@ A key column that gained a `db_type` is the one change that plans a statement, i
        - `account: Annotated[Account, ForeignKey(related_name="notes", index=True)]`
          -> `account_id: int = Field(foreign_key=Account, index=True)` and
             `account: Relation[Account] = Forward("account_id")`
-       - an optional key (annotation `Note | None`, `nullable=True`, or
-         `on_delete="SET NULL"`)
+       - an optional key: `reply_to: Annotated["Note", ForeignKey(related_name="replies", nullable=True, on_delete="SET NULL")] = None`,
+         or any key with an `Account | None` annotation, `nullable=True` or
+         `on_delete="SET NULL"`
          -> `reply_to_id: int | None = Field(default=None, foreign_key="Note", on_delete="SET NULL")`
-            and `reply_to: Relation["Note | None"] = Forward("reply_to_id")`
+            and `reply_to: Relation["Note | None"] = Forward("reply_to_id")`,
+            keeping the on_delete the old key declared (CASCADE when none)
        - `nullable=False` on an `Account | None` annotation
          -> the required column `account_id: int` and `Relation[Account]`
        - `ForeignKey(renamed_from="owner")` -> `renamed_from="owner_id"` on the column
        - `ForeignKey(retired=True)` -> `retired=True` on an optional column
        - `replies: Relation[list["Note"]] = BackRef()`
          -> `replies: Relation[list["Note"]] = Reverse("reply_to_id")`,
-            naming the key column on the other model
+            naming the key column on the other model; a BackRef nothing
+            reads can be deleted
        - `pin: "Pin" = BackRef()` (one-to-one reverse side)
          -> `pin: Relation[list["Pin"]] = Reverse("note_id")`
        - `notes: Relation[list[Note]] = ManyToMany(related_name="tags")`
@@ -392,8 +400,10 @@ A key column that gained a `db_type` is the one change that plans a statement, i
          RuntimeError; update any `except RuntimeError` around it.
        - Model sets extra="forbid": a misspelled constructor keyword raises
          pydantic.ValidationError. Fix the spelling.
-       - Field() refuses unknown keywords, naming the closest option, and
-         refuses back_ref, many_to_many, related_name and through.
+       - Field() refuses an unknown keyword, naming the closest option.
+         back_ref, many_to_many, related_name and through (and
+         ManyToMany(related_name=...)) get their own TypeError naming the
+         replacement and the Reference URL: use the forms from step 1.
        - Field(json_schema_extra={"primary_key": True}) and the other option
          keys (unique, index, autoincrement, db_type, db_check,
          ferro_nullable) are refused: pass them to Field() directly.
