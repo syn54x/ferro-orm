@@ -50,7 +50,7 @@ Every example on this page queries one small ledger. An owner holds accounts, an
     --8<-- "docs/examples/predicates_annotated.py:models"
     ```
 
-`Category.parent` points back at `Category`. A class cannot name itself in its own annotation, so the self-reference is a string (`"Category"`) and `nullable=True` makes the column optional.
+`Category.parent_id` points back at `Category`. A class cannot name itself while it is being defined, so `foreign_key=` takes the string `"Category"`, and the column is optional because its annotation is `int | None`.
 
 The ledger holds these nine transactions:
 
@@ -95,7 +95,7 @@ Ferro checks every column name when you build the query, before anything reaches
 --8<-- "docs/examples/predicates.py:typo"
 ```
 
-The list includes the `account_id` and `category_id` columns that each foreign key adds, so you can filter on them directly.
+The list includes the `account_id` and `category_id` foreign-key columns, so you can filter on them directly.
 
 ## Predicate style
 
@@ -1057,7 +1057,7 @@ The reverse relation became a filter on `account_id`.
 
 ### Result type of traversed queries
 
-A traversed query returns the model you queried: filtering `Transaction` through `transaction.account.owner` still returns `Transaction` instances, and it does not load the accounts. `await transaction.account` still runs its own query. To load related rows with the results, use [`include()`](#loading-relations-with-include).
+A traversed query returns the model you queried: filtering `Transaction` through `transaction.account.owner` still returns `Transaction` instances, and it does not load the accounts: `transaction.account` reads as an unloaded instance until `.load()` fetches it. To load related rows with the results, use [`include()`](#loading-relations-with-include).
 
 ### Traversal in `update()` and `delete()`
 
@@ -1119,7 +1119,7 @@ Both refusals happen when you build the query. [Relationships](relationships.md)
 
 ## Existence tests on reverse & many-to-many relations
 
-A foreign key points from the row you query to one related row. A reverse relation (`BackRef`) or a many-to-many relation goes the other way, to any number of rows on another table. In a predicate, those relations answer one question, "is there at least one?", with `.exists()`:
+A foreign key points from the row you query to one related row. A reverse relation (`Reverse`) or a many-to-many relation goes the other way, to any number of rows on another table. In a predicate, those relations answer one question, "is there at least one?", with `.exists()`:
 
 ```python
 --8<-- "docs/examples/existence_tests.py:first"
@@ -1314,7 +1314,7 @@ The [`Query` reference](../api/queries.md) describes `.exists()` with its parame
 
 ## Loading relations with `include()`
 
-Reading a relation runs a query. A list of 100 transactions that shows each account's label awaits `transaction.account` 100 times: 101 statements for one screen. [`include()`][ferro.query.builder.Query.include] asks the query to load the related rows in the same statement:
+A relation nothing loaded holds only its key. A list of 100 transactions that shows each account's label loads `transaction.account` 100 times: 101 statements for one screen. [`include()`][ferro.query.builder.Query.include] asks the query to load the related rows in the same statement:
 
 ```python
 --8<-- "docs/examples/loaded_relations.py:basic"
@@ -1329,7 +1329,7 @@ Office coffee | Petty cash
 Dinner in Lyon | Travel
 ```
 
-The query still returns `list[Transaction]`, and `transaction.account` is now the `Account` instance itself, as the field's annotation (`account: Account`) says. Reading it needs no `await` and runs no query. These examples run inside the session from [the first block](#queries).
+The query still returns `list[Transaction]`, and `transaction.account` is now the `Account` instance itself, as the relation's annotation (`account: Relation[Account]`) says. Reading it runs no query. These examples run inside the session from [the first block](#queries).
 
 The query sends this; on PostgreSQL only the placeholders differ:
 
@@ -1350,7 +1350,7 @@ The account's columns come back in the same rows, through a `LEFT JOIN`, under `
 A relation on an instance is either loaded or not:
 
 - **Loaded**, because a query included it: the attribute is the related instance. A nullable foreign key with no row loads as `None`.
-- **Not loaded**: the attribute is awaitable and runs its own query:
+- **Not loaded**: the attribute is an unloaded instance, a real `Account` holding only its key. `.load()` fetches the row into that same object:
 
 ```python
 --8<-- "docs/examples/loaded_relations.py:awaitable"
@@ -1358,7 +1358,7 @@ A relation on an instance is either loaded or not:
 
 `await transaction.account.load()` fetched the Travel account with a second query.
 
-The fetch and the await send these statements; on PostgreSQL only the placeholders differ:
+The fetch and the load send these statements; on PostgreSQL only the placeholders differ:
 
 ```sql
 -- loaded_relations.py:awaitable (sqlite)
@@ -1373,10 +1373,10 @@ WHERE "account"."id" = ?
 LIMIT ?;
 ```
 
-The second statement is the one `await transaction.account` ran.
+The second statement is the one `.load()` ran.
 
-!!! warning "Awaiting a loaded relation raises"
-    On a loaded instance, `await transaction.account` raises `TypeError: 'Account' object can't be awaited`, because the attribute is the instance, not a coroutine. Decide at the query: if you will read the relation, include it.
+!!! note "A relation is not awaitable"
+    `await transaction.account` raises Python's own `TypeError: 'Account' object can't be awaited`, loaded or not, because the attribute is the instance, not a coroutine. Load it with `await transaction.account.load()`, or, if the query will read it, include it.
 
 There is no separate "loaded" model type: an included query returns `list[Transaction]`, and a loaded relation is an ordinary instance. [Typed query predicates](../concepts/query-typing.md#included-queries) explains why.
 
@@ -1554,7 +1554,7 @@ Ferro refuses these when you build the query, before any SQL:
 
 | Form | Error | Use instead |
 | :--- | :--- | :--- |
-| A `BackRef` or `ManyToMany` relation | `TypeError` | `await account.transactions.all()`; to filter on the relation, an [existence test](#existence-tests-on-reverse-many-to-many-relations) |
+| A `Reverse` or `ManyToMany` relation | `TypeError` | `await account.transactions.all()`; to filter on the relation, an [existence test](#existence-tests-on-reverse-many-to-many-relations) |
 | A string (`include("account")`) or a column (`include(lambda transaction: transaction.account.label)`) | `TypeError` | A lambda that names a relation; each loaded step is a whole row |
 | `include()` with `select(...)`, in either order | `ValueError` | [A projection that reaches across the relation](#reaching-across-a-relation) |
 | `update()` or `delete()` on an included query | `ValueError` | The same query without `include()` |
@@ -1839,7 +1839,7 @@ Aggregates build on projection: `select(lambda transaction: {"total": transactio
 These query features are not available yet; the [Roadmap](../roadmap.md) tracks them:
 
 - `having()`, to filter on an aggregate. `where()` refuses an aggregate and names `having()`.
-- Loading a reverse or many-to-many relation with its rows. `include()` covers foreign keys; until then, await the relation (`await account.transactions.all()`). Filtering on one is the [existence test](#existence-tests-on-reverse-many-to-many-relations).
+- Loading a reverse (`Reverse`) or many-to-many (`ManyToMany`) relation with its rows. `include()` covers forward relations; until then, run the relation's query (`await account.transactions.all()`). Filtering on one is the [existence test](#existence-tests-on-reverse-many-to-many-relations).
 - Referring to the outer row inside an existence test's inner lambda, for example comparing a split line's amount to its transaction's amount. Ferro refuses it when you build the query.
 - Case-insensitive `ilike()`.
 
