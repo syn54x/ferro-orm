@@ -11,34 +11,33 @@ import asyncio
 # --8<-- [start:models]
 from datetime import date
 from decimal import Decimal
-from typing import Annotated
 
-from ferro import BackRef, Field, ForeignKey, ManyToMany, Model, Relation
+from ferro import Field, Forward, ManyToMany, Model, Relation, Reverse
 
 
 class Owner(Model):
     id: int | None = Field(default=None, primary_key=True)
     name: str
     email: str = Field(unique=True)
-    accounts: Relation[list["Account"]] = BackRef()
+    accounts: Relation[list["Account"]] = Reverse("owner_id")
 
 
 class Account(Model):
     id: int | None = Field(default=None, primary_key=True)
     label: str
-    owner: Annotated[Owner | None, ForeignKey(related_name="accounts")] = None
-    transactions: Relation[list["Transaction"]] = BackRef()
+    owner_id: int | None = Field(default=None, foreign_key=Owner)
+    owner: Relation[Owner | None] = Forward("owner_id")
+    transactions: Relation[list["Transaction"]] = Reverse("account_id")
 
 
 class Category(Model):
     id: int | None = Field(default=None, primary_key=True)
     name: str = Field(unique=True)
-    parent: Annotated[
-        "Category", ForeignKey(related_name="children", nullable=True)
-    ] = None
-    children: Relation[list["Category"]] = BackRef()
-    transactions: Relation[list["Transaction"]] = BackRef()
-    split_lines: Relation[list["SplitLine"]] = BackRef()
+    parent_id: int | None = Field(default=None, foreign_key="Category")
+    parent: Relation["Category | None"] = Forward("parent_id")
+    children: Relation[list["Category"]] = Reverse("parent_id")
+    transactions: Relation[list["Transaction"]] = Reverse("category_id")
+    split_lines: Relation[list["SplitLine"]] = Reverse("category_id")
 
 
 class Transaction(Model):
@@ -47,33 +46,37 @@ class Transaction(Model):
     amount: Decimal
     posted_on: date
     cleared_on: date | None = None
-    account: Annotated[Account, ForeignKey(related_name="transactions")]
-    category: Annotated[Category | None, ForeignKey(related_name="transactions")] = None
-    lines: Relation[list["SplitLine"]] = BackRef()
-    transfer_out: "Transfer" = BackRef()
-    transfer_in: "Transfer" = BackRef()
-    tags: Relation[list["Tag"]] = BackRef()
+    account_id: int = Field(foreign_key=Account)
+    account: Relation[Account] = Forward("account_id")
+    category_id: int | None = Field(default=None, foreign_key=Category)
+    category: Relation[Category | None] = Forward("category_id")
+    lines: Relation[list["SplitLine"]] = Reverse("transaction_id")
+    transfer_out: Relation[list["Transfer"]] = Reverse("outflow_id")
+    transfer_in: Relation[list["Transfer"]] = Reverse("inflow_id")
+    tags: Relation[list["Tag"]] = Reverse("transactions")
 
 
 class SplitLine(Model):
     id: int | None = Field(default=None, primary_key=True)
     amount: Decimal
-    transaction: Annotated[Transaction, ForeignKey(related_name="lines")]
-    category: Annotated[Category, ForeignKey(related_name="split_lines")]
+    transaction_id: int = Field(foreign_key=Transaction)
+    transaction: Relation[Transaction] = Forward("transaction_id")
+    category_id: int = Field(foreign_key=Category)
+    category: Relation[Category] = Forward("category_id")
 
 
 class Transfer(Model):
     id: int | None = Field(default=None, primary_key=True)
-    outflow: Annotated[
-        Transaction, ForeignKey(related_name="transfer_out", unique=True)
-    ]
-    inflow: Annotated[Transaction, ForeignKey(related_name="transfer_in", unique=True)]
+    outflow_id: int = Field(foreign_key=Transaction, unique=True)
+    outflow: Relation[Transaction] = Forward("outflow_id")
+    inflow_id: int = Field(foreign_key=Transaction, unique=True)
+    inflow: Relation[Transaction] = Forward("inflow_id")
 
 
 class Tag(Model):
     id: int | None = Field(default=None, primary_key=True)
     name: str = Field(unique=True)
-    transactions: Relation[list[Transaction]] = ManyToMany(related_name="tags")
+    transactions: Relation[list[Transaction]] = ManyToMany(through="tag_transactions")
 
 
 # --8<-- [end:models]

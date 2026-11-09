@@ -3,16 +3,14 @@
 import asyncio
 
 # --8<-- [start:models]
-from typing import Annotated
-
-from ferro import BackRef, Field, ForeignKey, Model, Relation, connect, engines
+from ferro import Field, Forward, Model, Relation, Reverse, connect, engines
 
 
 class Author(Model):
     id: int | None = Field(default=None, primary_key=True)
     name: str
     email: str = Field(unique=True)
-    posts: Relation[list["Post"]] = BackRef()
+    posts: Relation[list["Post"]] = Reverse("author_id")
 
 
 class Post(Model):
@@ -20,7 +18,8 @@ class Post(Model):
     title: str
     published: bool = False
     views: int = 0
-    author: Annotated[Author, ForeignKey(related_name="posts")]
+    author_id: int = Field(foreign_key=Author)
+    author: Relation[Author] = Forward("author_id")
 
 
 # --8<-- [end:models]
