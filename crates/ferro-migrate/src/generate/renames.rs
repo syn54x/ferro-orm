@@ -62,19 +62,7 @@ pub fn is_structural(op: &MigrationOp) -> bool {
 /// ```text
 /// author: if "name" became "full_name", declare renamed_from="name"
 /// ```
-pub fn suggestions(
-    ops: &[MigrationOp],
-    parent: &IrEnvelope<SchemaIrPayload>,
-    target: &IrEnvelope<SchemaIrPayload>,
-) -> Vec<String> {
-    let is_fk = |ir: &IrEnvelope<SchemaIrPayload>, table: &str, column: &str| {
-        ir.payload
-            .models
-            .iter()
-            .filter(|model| model.table_name == table)
-            .flat_map(|model| &model.foreign_keys)
-            .any(|fk| fk.column == column)
-    };
+pub fn suggestions(ops: &[MigrationOp]) -> Vec<String> {
     let mut lines = Vec::new();
     for op in ops {
         let MigrationOp::DropColumn { table, column: old } = op else {
@@ -91,17 +79,10 @@ pub fn suggestions(
             if t != table {
                 continue;
             }
-            // A relation field's hint names the field, not its shadow
-            // `<field>_id` column.
-            let declaration = match (
-                is_fk(parent, table, old) && is_fk(target, table, new),
-                old.strip_suffix("_id"),
-            ) {
-                (true, Some(field)) => format!("ForeignKey(renamed_from=\"{field}\")"),
-                _ => format!("renamed_from=\"{old}\""),
-            };
+            // A foreign-key column is renamed by its own `renamed_from`, like
+            // any column.
             lines.push(format!(
-                "{table}: if \"{old}\" became \"{new}\", declare {declaration}"
+                "{table}: if \"{old}\" became \"{new}\", declare renamed_from=\"{old}\""
             ));
         }
     }
