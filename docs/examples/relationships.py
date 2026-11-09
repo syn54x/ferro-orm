@@ -87,14 +87,14 @@ async def main() -> None:
         assert [player.name for player in roster] == ["Corro", "Ferris"]
         # --8<-- [end:one-to-many]
 
-        # --8<-- [start:shadow-column]
+        # --8<-- [start:foreign-key-column]
         assert ferris.team_id == rustaceans.id  # read without a query
 
         on_rustaceans = await Player.where(
             lambda player: player.team_id == rustaceans.id
         ).count()
         assert on_rustaceans == 2
-        # --8<-- [end:shadow-column]
+        # --8<-- [end:foreign-key-column]
 
         # --8<-- [start:player-ddl]
         for statement in report.statements:
@@ -131,7 +131,7 @@ async def main() -> None:
         assert profile.bio == "Plays in the front row"
         assert await corro.profile.first() is None  # Corro has no profile
         # --8<-- [end:one-to-one]
-        # unique=True gives the shadow column a unique index.
+        # unique=True gives the foreign-key column a unique index.
         assert (
             'CREATE UNIQUE INDEX IF NOT EXISTS "uq_profile_player_id" ON "profile" '
             '("player_id")'
@@ -190,7 +190,7 @@ async def main() -> None:
         # --8<-- [start:nullable]
         assert autumn.winner_id is None  # no winner yet
 
-        spring.winner_id = rustaceans.id  # set the shadow column, then save
+        spring.winner_id = rustaceans.id  # set the foreign-key column, then save
         await spring.save()
         titles = await rustaceans.titles.all()
         assert [tournament.name for tournament in titles] == ["Spring Open"]

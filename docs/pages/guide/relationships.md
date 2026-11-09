@@ -142,13 +142,13 @@ The reverse relation is a filter on the shadow column, `team_id`.
 For each `ForeignKey` field, Ferro adds a column and a model field named after it with `_id` (`team_id` for `team`), holding the related row's primary key. Its Python type follows the target model's primary key. Read it or filter on it without loading the team:
 
 ```python
---8<-- "docs/examples/relationships.py:shadow-column"
+--8<-- "docs/examples/relationships.py:foreign-key-column"
 ```
 
 `ferris.team_id` is already on the instance, and the count runs one query with no join. It sends this; on PostgreSQL only the placeholders differ:
 
 ```sql
--- relationships.py:shadow-column (sqlite)
+-- relationships.py:foreign-key-column (sqlite)
 SELECT COUNT(*)
 FROM "player"
 WHERE "player"."team_id" = ?;
