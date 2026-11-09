@@ -26,7 +26,14 @@ import ferro
 from ferro import Field, ManyToMany, Model, Relation, Reverse
 from ferro.ir.compiler import compile_registry_schema_ir
 from ferro.relations.fixes import DeclarationRefusal
-from tests._pass_harness import auto_migrate
+from ferro.raw import fetch_all
+from tests._pass_harness import (
+    auto_migrate,
+    on,
+    schema_sql,
+    warned_auto_migrate,
+    warning_texts,
+)
 from tests.test_migrate_new import listing, run, write_config, write_models
 from tests.test_postponed_annotations import (
     _ASSIGNED,
@@ -227,6 +234,88 @@ def test_reverse_index_false_keeps_the_unique_index_only():
         "uq_player_tournaments_player_id_tournament_id"
     ]
     assert join["indexes"] == []
+
+
+# -- renaming the join table ---------------------------------------------------------
+
+
+def _authors(through: str, renamed_from: str | None = None):
+    _wipe()
+
+    class Tag(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        label: str
+
+    class Author(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        name: str
+        tags: Relation[list["Tag"]] = ManyToMany(
+            through=through, renamed_from=renamed_from
+        )
+
+    return Author, Tag
+
+
+async def _ann_with_two_tags(db_url: str) -> None:
+    Author, Tag = _authors("writer_tags")
+    await auto_migrate(db_url)
+    async with ferro.engines.session():
+        ann = await Author.create(name="Ann")
+        for label in ("poetry", "prose"):
+            await ann.tags.add(await Tag.create(label=label))
+    ferro.reset_engine()
+
+
+async def _tables(db_url: str) -> set[str]:
+    rows = await fetch_all(
+        on(
+            db_url,
+            sqlite="SELECT name FROM sqlite_master WHERE type = 'table'",
+            postgres="SELECT table_name::text AS name FROM information_schema.tables "
+            "WHERE table_schema = current_schema()",
+        )
+    )
+    return {row["name"] for row in rows}
+
+
+@pytest.mark.asyncio
+@pytest.mark.backend_matrix
+async def test_auto_migrate_renames_a_join_table_in_place(db_url):
+    await _ann_with_two_tags(db_url)
+    Author, _ = _authors("author_tags", renamed_from="writer_tags")
+
+    report = await auto_migrate(db_url, updates=True)
+
+    statements = schema_sql(report)
+    assert statements[0] == 'ALTER TABLE "writer_tags" RENAME TO "author_tags"'
+    assert 'DROP TABLE "writer_tags"' not in statements
+    assert not any(
+        sql.startswith('CREATE TABLE IF NOT EXISTS "author_tags"') for sql in statements
+    )
+    async with ferro.engines.session():
+        assert "writer_tags" not in await _tables(db_url)
+        ann = await Author.where(lambda author: author.name == "Ann").first()
+        assert sorted(tag.label for tag in await ann.tags.all()) == ["poetry", "prose"]
+    ferro.reset_engine()
+    # The live database is the models': a second pass finds nothing to change.
+    assert schema_sql(await auto_migrate(db_url, updates=True)) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.backend_matrix
+async def test_a_join_table_rename_without_migrate_updates_names_the_relation(db_url):
+    await _ann_with_two_tags(db_url)
+    _authors("author_tags", renamed_from="writer_tags")
+
+    report = await warned_auto_migrate(db_url)
+
+    assert schema_sql(report) == []
+    assert warning_texts(report) == [
+        'join table "author_tags" declares ManyToMany(renamed_from="writer_tags"), '
+        'and the database holds "writer_tags" and no "author_tags": "author_tags" '
+        "was not created. The rename runs under connect(..., migrate_updates=True) "
+        "or in a migration from ferro migrate new."
+    ]
 
 
 # -- refusals ------------------------------------------------------------------------

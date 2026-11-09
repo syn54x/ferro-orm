@@ -4903,6 +4903,7 @@ mod renames {
                 table: Some("author".to_string()),
                 old: "name".to_string(),
                 claimants: vec!["full_name".to_string(), "display_name".to_string()],
+                join_tables: Vec::new(),
             }
         );
         let message = err.to_string();
