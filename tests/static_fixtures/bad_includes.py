@@ -10,7 +10,7 @@ suppress its diagnostic.
 
 from typing import Annotated
 
-from ferro import FerroField, ForeignKey, Model
+from ferro import FerroField, Forward, Model, Relation
 
 
 class BadIAccount(Model):
@@ -21,7 +21,8 @@ class BadIAccount(Model):
 class BadITxn(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     amount: int = 0
-    account: Annotated[BadIAccount, ForeignKey(related_name="txns")]
+    account_id: Annotated[int, FerroField(foreign_key=BadIAccount)]
+    account: Relation[BadIAccount] = Forward("account_id")
 
 
 async def _include_on_a_projection() -> None:

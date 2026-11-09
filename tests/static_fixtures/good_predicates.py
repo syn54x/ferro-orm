@@ -3,7 +3,7 @@
 
 from typing import Annotated, assert_type
 
-from ferro import FerroField, ForeignKey, Model
+from ferro import FerroField, Forward, Model, Relation
 from ferro.query import (
     FieldProxy,
     Predicate,
@@ -30,7 +30,7 @@ assert_type(pred_compare(QueryProxy[GoodUser](GoodUser)), QueryNode)
 assert_type(FieldProxy("age") >= 18, QueryNode)
 
 
-# Relation traversal (#270): attribute access on a forward-FK field is
+# Relation traversal (#270): attribute access on a forward relation is
 # statically chainable, and a comparison at any hop still yields a QueryNode.
 class GoodLedger(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
@@ -43,13 +43,15 @@ class GoodOwner(Model):
 
 class GoodAccount(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
-    ledger: Annotated[GoodLedger, ForeignKey(related_name="accounts")]
-    owner: Annotated[GoodOwner, ForeignKey(related_name="accounts")]
+    ledger_id: Annotated[int, FerroField(foreign_key=GoodLedger)]
+    owner_id: Annotated[int, FerroField(foreign_key=GoodOwner)]
+    owner: Relation[GoodOwner] = Forward("owner_id")
 
 
 class GoodTxn(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
-    account: Annotated[GoodAccount, ForeignKey(related_name="txns")]
+    account_id: Annotated[int, FerroField(foreign_key=GoodAccount)]
+    account: Relation[GoodAccount] = Forward("account_id")
 
 
 pred_hop1: Predicate[GoodTxn] = lambda t: t.account.ledger_id == 1

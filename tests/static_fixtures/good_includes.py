@@ -8,7 +8,7 @@ declared annotation.
 
 from typing import Annotated, assert_type
 
-from ferro import FerroField, ForeignKey, Model
+from ferro import FerroField, Forward, Model, Relation
 
 
 class GIAccount(Model):
@@ -19,7 +19,8 @@ class GIAccount(Model):
 class GITxn(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     amount: int = 0
-    account: Annotated[GIAccount, ForeignKey(related_name="txns")]
+    account_id: Annotated[int, FerroField(foreign_key=GIAccount)]
+    account: Relation[GIAccount] = Forward("account_id")
 
 
 async def _include_chain_stays_query_shaped() -> None:

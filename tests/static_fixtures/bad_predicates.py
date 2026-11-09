@@ -7,7 +7,7 @@ diagnostics -- if it starts passing, the static gate has stopped biting.
 
 from typing import Annotated
 
-from ferro import FerroField, ForeignKey, Model
+from ferro import FerroField, Forward, Model, Relation
 from ferro.query import Predicate
 
 
@@ -29,7 +29,8 @@ class BadAccount(Model):
 
 class BadTxn(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
-    account: Annotated[BadAccount, ForeignKey(related_name="txns")]
+    account_id: Annotated[int, FerroField(foreign_key=BadAccount)]
+    account: Relation[BadAccount] = Forward("account_id")
 
 
 # Bare relation as a predicate: `t.account` is a relation, not a QueryNode.

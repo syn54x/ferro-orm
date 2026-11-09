@@ -8,7 +8,7 @@ whose ``all()`` is ``Rows[Row]`` and ``first()`` is ``Row | None``.
 
 from typing import Annotated
 
-from ferro import FerroField, ForeignKey, Model
+from ferro import FerroField, Forward, Model, Relation
 from ferro.query import Row, Rows
 
 
@@ -20,13 +20,15 @@ class GoodPOwner(Model):
 class GoodPAccount(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     name: str = ""
-    owner: Annotated[GoodPOwner | None, ForeignKey(related_name="accounts")] = None
+    owner_id: Annotated[int | None, FerroField(foreign_key=GoodPOwner)] = None
+    owner: Relation[GoodPOwner | None] = Forward("owner_id")
 
 
 class GoodPTxn(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     amount: int = 0
-    account: Annotated[GoodPAccount | None, ForeignKey(related_name="txns")] = None
+    account_id: Annotated[int | None, FerroField(foreign_key=GoodPAccount)] = None
+    account: Relation[GoodPAccount | None] = Forward("account_id")
 
 
 async def _tuple_selector() -> None:
