@@ -4444,8 +4444,8 @@ fn foreign_key_of<'py>(
 ///         and no connection give one, and the instance is shared with nothing.
 ///
 /// # Errors
-/// `PyRuntimeError` when the target has no primary key or the route names an
-/// unknown connection.
+/// `PyRuntimeError` when the target has no primary key, or a route with a
+/// session names an unknown connection.
 #[pyfunction]
 #[pyo3(signature = (cls, pk, relation, route=None))]
 pub fn unloaded_instance<'py>(
@@ -4465,14 +4465,20 @@ pub fn unloaded_instance<'py>(
         return unloaded_for_key(py, &cls, &identity, None, None, false, &pk, &origin);
     };
     let r = route.get();
-    let (connection_name, engine, _, _) = route_engine(r)?;
+    // Only a session's identity map needs the engine: a sessionless read
+    // builds the instance on the route's connection and registers nothing,
+    // so it works after that connection is dropped.
+    let use_identity_map = match r.session_id {
+        Some(_) => route_engine(r)?.1.is_identity_map_enabled(),
+        None => false,
+    };
     unloaded_for_key(
         py,
         &cls,
         &identity,
-        Some(&connection_name),
+        Some(&r.connection_name),
         r.session_id.as_deref(),
-        engine.is_identity_map_enabled(),
+        use_identity_map,
         &pk,
         &origin,
     )

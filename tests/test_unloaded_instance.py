@@ -14,12 +14,15 @@ refusals (`Team`, `lambda player: player.team`) read as a user's would.
 
 import re
 from contextlib import closing
+from pathlib import Path
 import sqlite3
 from types import SimpleNamespace
 from typing import ClassVar
 from uuid import UUID
 
 import pytest
+from pydantic import BaseModel, TypeAdapter
+from pydantic_core import PydanticSerializationError
 
 import ferro
 from ferro import (
@@ -602,3 +605,162 @@ async def test_an_include_whose_row_row_security_hides_leaves_the_relation_unloa
     finally:
         async with engines.session():
             await _drop_tenant_role(role)
+
+
+def test_one_module_owns_the_unloaded_marker():
+    """Every Python site reads the unloaded state through `ferro._unloaded`, so
+    the marker's name and the layout the hydrator writes change in one place."""
+    package = Path(ferro.__file__).parent
+    marker = re.compile(r"__ferro_unloaded|UNLOADED_ATTR|_unloaded\.MARKER")
+    naming = sorted(
+        str(path.relative_to(package))
+        for path in package.rglob("*.py")
+        if marker.search(path.read_text())
+    )
+
+    assert naming == ["_unloaded.py"]
+
+
+@pytest.mark.asyncio
+async def test_every_pydantic_serializer_refuses_an_unloaded_instance(db_url):
+    """A nested model, a `TypeAdapter` and a response model serialize through
+    pydantic-core, never through the instance's own `model_dump()`.
+    pydantic-core wraps whatever a serializer raises in its own error, so the
+    refusal arrives as a `PydanticSerializationError` carrying its message."""
+    m = await _seed(db_url)
+    async with engines.session():
+        player = await m.Player.get(1)
+        team = player.team
+
+        class PlayerOut(BaseModel):
+            team: m.Team
+
+        nested = PlayerOut(team=team)
+        for use, call in {
+            "nested model_dump()": nested.model_dump,
+            "nested model_dump_json()": nested.model_dump_json,
+            "TypeAdapter.dump_python": lambda: TypeAdapter(m.Team).dump_python(team),
+            "TypeAdapter.dump_json": lambda: TypeAdapter(list[m.Team]).dump_json(
+                [team]
+            ),
+        }.items():
+            with pytest.raises(PydanticSerializationError) as refusal:
+                call()
+            assert f"InstanceNotLoaded: {_NOT_LOADED}" in str(refusal.value), use
+
+        await team.load()
+        assert PlayerOut(team=team).model_dump() == {
+            "team": {"id": 1, "name": "Rustaceans"}
+        }
+
+
+@pytest.mark.asyncio
+async def test_model_copy_with_a_new_key_reads_the_relation_the_new_key_names(db_url):
+    m = await _seed(db_url)
+    async with engines.session():
+        gophers = await m.Team.create(id=2, name="Gophers")
+        player = await m.Player.get(1)
+        assert player.team.id == 1  # cached on the player
+
+        moved = player.model_copy(update={"team_id": 2})
+
+        assert moved.team is gophers
+        assert player.team.id == 1
+
+
+@pytest.mark.asyncio
+async def test_model_copy_refuses_to_write_a_column_into_an_unloaded_instance(db_url):
+    m = await _seed(db_url)
+    async with engines.session():
+        team = (await m.Player.get(1)).team
+
+        with pytest.raises(InstanceNotLoaded, match=re.escape(_NOT_LOADED)):
+            team.model_copy(update={"name": "Ferrous"})
+
+
+def _declare_key_last() -> SimpleNamespace:
+    """An Account whose primary key is declared after its name."""
+
+    class Account(Model):
+        name: str
+        code: str = Field(primary_key=True)
+
+    class Note(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        account_code: str = Field(foreign_key=Account)
+        account: Relation[Account] = Forward("account_code")
+
+    return SimpleNamespace(Account=Account, Note=Note)
+
+
+@pytest.mark.parametrize("in_session", [True, False], ids=["session", "no-session"])
+@pytest.mark.asyncio
+async def test_a_filled_instance_lists_its_fields_in_declaration_order(
+    db_url, in_session
+):
+    m = _declare_key_last()
+    await ferro.connect(db_url, auto_migrate=True)
+    async with engines.session():
+        await m.Account.create(name="Ada", code="A-1")
+        await m.Note.create(id=1, account_code="A-1")
+
+    async def filled():
+        note = await m.Note.using("default").get(1)
+        return await note.account.load()
+
+    if in_session:
+        async with engines.session():
+            account = await filled()
+    else:
+        account = await filled()
+
+    fetched = await m.Account.using("default").get("A-1")
+    assert list(account.model_dump()) == list(fetched.model_dump()) == ["name", "code"]
+    assert account.model_dump_json() == fetched.model_dump_json()
+    assert repr(account) == repr(fetched)
+
+
+@pytest.mark.asyncio
+async def test_a_sessionless_read_needs_no_registered_connection(db_url):
+    m = await _seed(db_url)
+    player = await m.Player.using("default").get(1)
+    reset_engine()
+
+    assert player.team.id == 1
+    assert repr(player.team) == "Team(id=1, unloaded)"
+
+
+@pytest.mark.asyncio
+async def test_a_read_in_a_session_on_another_connection_leaves_the_conflict_to_load(
+    db_url,
+):
+    m = await _seed(db_url)
+    await ferro.connect(db_url, name="replica")
+    player = await m.Player.using("replica").get(1)
+
+    async with engines.session():
+        team = player.team
+
+        assert hasattr(player, "team")
+        assert repr(team) == "Team(id=1, unloaded)"
+        with pytest.raises(ValueError, match="replica"):
+            await team.load()
+        # Built on the player's connection, it is not the session's object.
+        assert await m.Team.get(1) is not team
+
+
+@pytest.mark.asyncio
+async def test_a_refresh_that_finds_the_row_gone_leaves_the_relation_unloaded(db_url):
+    m = await _seed(db_url)
+    async with engines.session():
+        player = await m.Player.get(1)
+        team = await m.Team.get(1)
+        await m.Player.where(lambda player: player.team_id == 1).delete()
+        await m.Team.where(lambda team: team.id == 1).delete()
+
+        with pytest.raises(ModelDoesNotExist):
+            await team.refresh()
+
+        assert player.team is not team
+        with pytest.raises(InstanceNotLoaded, match=re.escape(_NOT_LOADED)):
+            player.team.name

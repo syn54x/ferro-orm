@@ -228,8 +228,8 @@ fn finish_persisted_instance<'py>(
 /// The `__dict__` key marking an unloaded instance (ADR-0063). Its value is
 /// `(model, path, found_no_row)`: the model and relation path it was first
 /// read through (`("Player", "team")`), and whether an include looked for
-/// its row and found none. The refusals in `Model` read it; a refresh of the
-/// instance from a fetched row removes it.
+/// its row and found none. On the Python side `ferro._unloaded` alone reads
+/// it; a refresh of the instance from a fetched row removes it.
 pub const UNLOADED_MARKER: &str = "__ferro_unloaded";
 
 /// Where an unloaded instance was first read, for its refusal message.
@@ -425,7 +425,8 @@ fn apply_decoded_fields<'py>(
 /// Refresh a live cached instance from a freshly decoded row (FF-D D1b).
 ///
 /// Overwrites every decoded field and resets `__pydantic_fields_set__` to
-/// match a fresh hydration. Ferro markers (`__ferro_connection_name`,
+/// match a fresh hydration; an unloaded instance is filled through
+/// [`fill_unloaded`]. Ferro markers (`__ferro_connection_name`,
 /// `__ferro_persisted`) and pydantic extra/private slots are already present
 /// on the instance and are left untouched.
 ///
@@ -450,13 +451,42 @@ pub fn refresh_model_instance<'py>(
     let dict_attr = instance.getattr(pyo3::intern!(py, "__dict__"))?;
     let dict = dict_attr.cast::<pyo3::types::PyDict>()?;
     let fields_set = pyo3::types::PySet::empty(py)?;
-    apply_decoded_fields(py, cls, dict, &fields_set, fields, py_col_names, converters)?;
-    instance.setattr(pyo3::intern!(py, "__pydantic_fields_set__"), fields_set)?;
-    // A full row fills an unloaded instance in place: it is complete now.
     if dict.contains(UNLOADED_MARKER)? {
-        dict.del_item(UNLOADED_MARKER)?;
+        fill_unloaded(py, cls, dict, &fields_set, fields, py_col_names, converters)?;
+    } else {
+        apply_decoded_fields(py, cls, dict, &fields_set, fields, py_col_names, converters)?;
     }
+    instance.setattr(pyo3::intern!(py, "__pydantic_fields_set__"), fields_set)?;
     prune_stale_loaded_relations(py, cls, dict)?;
+    Ok(())
+}
+
+/// Fill an unloaded instance's `__dict__` from a full row, completing it.
+///
+/// An unloaded `__dict__` holds the key, then the markers; overwriting it in
+/// place would keep the key first. It is rebuilt as
+/// [`hydrate_model_instance`] lays one out (the fields in declaration
+/// order, then the connection and persisted markers), so a filled instance
+/// dumps the same shape as a fetched one (I-2). [`UNLOADED_MARKER`] goes.
+fn fill_unloaded<'py>(
+    py: Python<'py>,
+    cls: &Bound<'py, PyAny>,
+    dict: &Bound<'py, pyo3::types::PyDict>,
+    fields_set: &Bound<'py, pyo3::types::PySet>,
+    mut fields: Vec<(String, RustValue)>,
+    py_col_names: &HashMap<String, pyo3::Py<pyo3::types::PyString>>,
+    converters: &FieldConverters<'py>,
+) -> PyResult<()> {
+    let kept = dict.copy()?;
+    kept.del_item(UNLOADED_MARKER)?;
+    dict.clear();
+    converters.sort_in_declaration_order(&mut fields);
+    apply_decoded_fields(py, cls, dict, fields_set, fields, py_col_names, converters)?;
+    for (name, value) in kept.iter() {
+        if !dict.contains(&name)? {
+            dict.set_item(name, value)?;
+        }
+    }
     Ok(())
 }
 

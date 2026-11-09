@@ -41,6 +41,7 @@ from .._core import (
     render_update,
     update_filtered,
 )
+from .._unloaded import is_unloaded
 from .nodes import (
     AggregateExpr,
     FieldProxy,
@@ -93,13 +94,11 @@ def _read_instance_order_value(row: Any, entry: OrderByEntry) -> Any:
     unloaded instance a first read cached there, is not loaded — do not
     follow the descriptor.
     """
-    from ..models import _FERRO_UNLOADED_ATTR
-
     current = row
     for hop in entry.path:
         hop_value = vars(current).get(hop)
         if hop not in vars(current) or (
-            hop_value is not None and _FERRO_UNLOADED_ATTR in vars(hop_value)
+            hop_value is not None and is_unloaded(hop_value)
         ):
             dotted = _dotted_order_key(entry)
             raise ValueError(

@@ -382,6 +382,22 @@ def test_assignment_needs_no_database():
     assert repr(player.mentor) == "Player(id=8, unloaded)"
 
 
+def test_assigning_a_key_with_no_relation_cached_needs_no_target_model():
+    """`Team` lives in a module not imported yet: a plain key assignment has
+    no cached relation to check, so it resolves nothing."""
+
+    class Player(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        team_id: int = Field(foreign_key="Team")
+        team: Relation["Team"] = Forward("team_id")  # noqa: F821
+
+    player = Player(team_id=1)
+
+    player.team_id = 2
+
+    assert player.team_id == 2
+
+
 def test_a_refusal_writes_the_article_the_target_name_takes():
     class User(Model):
         id: int | None = Field(default=None, primary_key=True)

@@ -28,17 +28,23 @@ def _first_read_route(instance: object) -> "RouteHandle | None":
 
     The parent's own connection, inside the session or transaction around
     the read; `None` when neither the parent nor a session names one, and
-    the instance is cached on the parent alone.
+    the instance is cached on the parent alone. A parent from another
+    connection than the session's gets its own connection outside the
+    session: a read never raises, and `.load()` reports the conflict.
     """
-    from ..state import _CURRENT_SESSION, _CURRENT_TRANSACTION, resolve_operation_scope
+    from ..state import (
+        _CURRENT_SESSION,
+        _CURRENT_TRANSACTION,
+        RouteHandle,
+        resolve_operation_scope,
+    )
 
     origin = _instance_origin_outside_transaction(instance)
-    if (
-        origin is None
-        and _CURRENT_SESSION.get() is None
-        and _CURRENT_TRANSACTION.get() is None
-    ):
+    session = _CURRENT_SESSION.get()
+    if origin is None and session is None and _CURRENT_TRANSACTION.get() is None:
         return None
+    if origin is not None and session is not None and origin != session.connection_name:
+        return RouteHandle(connection_name=origin)
     return resolve_operation_scope(using=origin, session=None)
 
 
