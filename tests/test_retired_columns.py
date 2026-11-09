@@ -15,16 +15,14 @@ schema snapshot, nullable, with its index (ADR-0053).
 """
 
 from enum import StrEnum
-from typing import Annotated, Optional
+from typing import Annotated
 
 import pytest
 
 import ferro
 from ferro import (
-    BackRef,
     Check,
     Field,
-    ForeignKey,
     Forward,
     ManyToMany,
     Model,
@@ -291,66 +289,38 @@ def test_retiring_a_renamed_field_is_refused_naming_the_fix():
             bio: str | None = Field(retired=True, renamed_from="about")
 
 
-def test_a_back_ref_over_a_retired_foreign_key_is_refused_naming_the_fix():
-    class Team(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-        members: Relation[list["Author"]] = BackRef()
-
-    with pytest.raises(
-        TypeError,
-        match=(
-            r"Team\.members is a BackRef over the retired relation Author\.team; "
-            r"delete the BackRef"
-        ),
-    ):
-
-        class Author(Model):
-            id: Annotated[int | None, FerroField(primary_key=True)] = None
-            team: Annotated[
-                Team | None, ForeignKey(related_name="members", retired=True)
-            ] = None
-
-        resolve_relationships()
-
-
-def test_a_back_ref_declared_after_its_retired_foreign_key_is_refused_at_resolution():
-    class Author(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-        team: Annotated[
-            Optional["Team"], ForeignKey(related_name="members", retired=True)
-        ] = None
-
-    class Team(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-        members: Relation[list["Author"]] = BackRef()
-
-    with pytest.raises(
-        TypeError,
-        match=r"Team\.members is a BackRef over the retired relation Author\.team",
-    ):
-        resolve_relationships()
-
-
-def test_a_back_ref_and_a_many_to_many_cannot_be_retired():
-    with pytest.raises(TypeError, match=r"Team\.members: a BackRef cannot be retired"):
-
-        class Team(Model):
-            id: Annotated[int | None, FerroField(primary_key=True)] = None
-            members: Relation[list["Author"]] = BackRef(retired=True)  # noqa: F821
-
+def test_a_many_to_many_cannot_be_retired():
     with pytest.raises(TypeError, match=r"Post\.tags: a ManyToMany cannot be retired"):
 
         class Post(Model):
             id: Annotated[int | None, FerroField(primary_key=True)] = None
             tags: Relation[list["Tag"]] = ManyToMany(  # noqa: F821
-                related_name="posts", retired=True
+                through="post_tags", retired=True
             )
 
 
-def test_a_foreign_key_without_related_name_is_refused_unless_retired():
-    with pytest.raises(TypeError, match="related_name"):
-        ForeignKey()
-    assert ForeignKey(retired=True).retired is True
+def test_a_retired_key_column_keeps_its_foreign_key_and_no_relation_record():
+    class Team(Model):
+        id: int | None = Field(default=None, primary_key=True)
+
+    class Player(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        team_id: int | None = Field(default=None, foreign_key=Team, retired=True)
+
+    resolve_relationships()
+
+    column = _column("player", "team_id")
+    assert (column["retired"], column["nullable"]) == (True, True)
+    assert [fk["column"] for fk in _model("player")["foreign_keys"]] == ["team_id"]
+    with pytest.raises(AttributeError, match=RETIRED):
+        Player().team_id
+    # A retired key column is a retired field like any other; nothing records
+    # a retired relation beside it.
+    assert {name for name in vars(Player) if name.startswith("__ferro_retired")} == {
+        "__ferro_retired_columns__",
+        "__ferro_retired_fields__",
+        "__ferro_retired_names__",
+    }
 
 
 # -- the round trip -------------------------------------------------------------------

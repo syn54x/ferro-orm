@@ -1,4 +1,4 @@
-"""`Field`, `Forward`, `Reverse`, `BackRef` and `ManyToMany`: Pydantic's `Field` with Ferro's database options."""
+"""`Field`, `Forward`, `Reverse` and `ManyToMany`: Pydantic's `Field` with Ferro's database options."""
 
 from __future__ import annotations
 
@@ -52,9 +52,9 @@ _T = TypeVar("_T")
 
 
 class _RelationOptions:
-    """The relation keywords of one `Field()` call, carried in the field's metadata.
+    """What one `Forward`, `Reverse` or `ManyToMany` declares, carried in the field's metadata.
 
-    The metaclass reads them from there, so they never reach the field's JSON
+    The metaclass reads it from there, so it never reaches the field's JSON
     schema the way `json_schema_extra` would.
     """
 
@@ -65,6 +65,30 @@ class _RelationOptions:
 
     def __repr__(self) -> str:
         return f"_RelationOptions({self.options!r})"
+
+
+UPGRADING_URL = "https://ferro-orm.x54.sh/upgrading/#explicit-foreign-keys"
+"""The upgrading section every refusal of a removed relation declaration links."""
+
+# The relation keywords the explicit foreign-key column removed, per call, and
+# what replaces each one.
+_REMOVED_KEYWORDS = {
+    "Field": {
+        "back_ref": (
+            'a Field is a column; the reverse side of a relation is Reverse("<column>")'
+        ),
+        "many_to_many": 'a many-to-many is ManyToMany(through="<table>")',
+        "related_name": "the two sides of a relation never name each other",
+        "through": 'through= belongs on ManyToMany(through="<table>")',
+        "reverse_index": (
+            'reverse_index= belongs on ManyToMany(through="<table>", '
+            "reverse_index=False)"
+        ),
+    },
+    "ManyToMany": {
+        "related_name": 'the other model declares Reverse("<this attribute>")',
+    },
+}
 
 
 def _keywords(declare: Callable[..., Any]) -> list[str]:
@@ -79,15 +103,21 @@ def _keywords(declare: Callable[..., Any]) -> list[str]:
 def _unknown_keyword(name: str, declare: Callable[..., Any] | None = None) -> TypeError:
     """Refuse a keyword `Field()` or `ManyToMany()` does not take.
 
-    A many-to-many adds no column, so a `Field` option given to it is refused
-    as one; any other name gets the closest keyword the call takes. The
-    known names come from each call's own signature, so an option added as a
-    parameter is known here with no second list.
+    A relation keyword the explicit foreign-key column removed says what
+    replaces it and links the upgrading section. A many-to-many adds no
+    column, so a `Field` option given to it is refused as one; any other name
+    gets the closest keyword the call takes. The known names come from each
+    call's own signature, so an option added as a parameter is known here
+    with no second list.
     """
     declare = declare or Field
+    removed = _REMOVED_KEYWORDS[declare.__name__].get(name)
+    if removed is not None:
+        return TypeError(
+            f"{declare.__name__}({name}=...) is gone: {removed}. See {UPGRADING_URL}"
+        )
     known = _keywords(declare)
     close = difflib.get_close_matches(name, known, n=1)
-    # `related_name` is the old form's, which the upgrading guide replaces.
     takes = "through=, renamed_from= and reverse_index="
     if declare is not Field and name in _keywords(Field):
         hint = (
@@ -120,11 +150,6 @@ def Field(
     autoincrement: bool | None = ...,
     unique: bool = ...,
     index: bool = ...,
-    back_ref: bool = ...,
-    many_to_many: bool = ...,
-    related_name: str | None = ...,
-    through: str | None = ...,
-    reverse_index: bool = ...,
     nullable: FerroNullable = ...,
     db_type: DbType | None = ...,
     db_check: bool = ...,
@@ -179,11 +204,6 @@ def Field(
     autoincrement: bool | None = ...,
     unique: bool = ...,
     index: bool = ...,
-    back_ref: bool = ...,
-    many_to_many: bool = ...,
-    related_name: str | None = ...,
-    through: str | None = ...,
-    reverse_index: bool = ...,
     nullable: FerroNullable = ...,
     db_type: DbType | None = ...,
     db_check: bool = ...,
@@ -238,11 +258,6 @@ def Field(
     autoincrement: bool | None = ...,
     unique: bool = ...,
     index: bool = ...,
-    back_ref: bool = ...,
-    many_to_many: bool = ...,
-    related_name: str | None = ...,
-    through: str | None = ...,
-    reverse_index: bool = ...,
     nullable: FerroNullable = ...,
     db_type: DbType | None = ...,
     db_check: bool = ...,
@@ -296,11 +311,6 @@ def Field(
     autoincrement: bool | None = ...,
     unique: bool = ...,
     index: bool = ...,
-    back_ref: bool = ...,
-    many_to_many: bool = ...,
-    related_name: str | None = ...,
-    through: str | None = ...,
-    reverse_index: bool = ...,
     nullable: FerroNullable = ...,
     db_type: DbType | None = ...,
     db_check: bool = ...,
@@ -354,11 +364,6 @@ def Field(
     autoincrement: bool | None = ...,
     unique: bool = ...,
     index: bool = ...,
-    back_ref: bool = ...,
-    many_to_many: bool = ...,
-    related_name: str | None = ...,
-    through: str | None = ...,
-    reverse_index: bool = ...,
     nullable: FerroNullable = ...,
     db_type: DbType | None = ...,
     db_check: bool = ...,
@@ -411,11 +416,6 @@ def Field(
     autoincrement: bool | None = ...,
     unique: bool = ...,
     index: bool = ...,
-    back_ref: bool = ...,
-    many_to_many: bool = ...,
-    related_name: str | None = ...,
-    through: str | None = ...,
-    reverse_index: bool = ...,
     nullable: FerroNullable = ...,
     db_type: DbType | None = ...,
     db_check: bool = ...,
@@ -469,11 +469,6 @@ def Field(
     autoincrement: bool | None = ...,
     unique: bool = ...,
     index: bool = ...,
-    back_ref: bool = ...,
-    many_to_many: bool = ...,
-    related_name: str | None = ...,
-    through: str | None = ...,
-    reverse_index: bool = ...,
     nullable: FerroNullable = ...,
     db_type: DbType | None = ...,
     db_check: bool = ...,
@@ -527,11 +522,6 @@ def Field(
     autoincrement: bool | None = ...,
     unique: bool = ...,
     index: bool = ...,
-    back_ref: bool = ...,
-    many_to_many: bool = ...,
-    related_name: str | None = ...,
-    through: str | None = ...,
-    reverse_index: bool = ...,
     nullable: FerroNullable = ...,
     db_type: DbType | None = ...,
     db_check: bool = ...,
@@ -584,11 +574,6 @@ def Field(
     autoincrement: bool | None | Any = _Unset,
     unique: bool | Any = _Unset,
     index: bool | Any = _Unset,
-    back_ref: bool | Any = _Unset,
-    many_to_many: bool | Any = _Unset,
-    related_name: str | None | Any = _Unset,
-    through: str | None | Any = _Unset,
-    reverse_index: bool | Any = _Unset,
     nullable: FerroNullable | Any = _Unset,
     db_type: DbType | None | Any = _Unset,
     db_check: bool | Any = _Unset,
@@ -638,7 +623,7 @@ def Field(
 
     `Field` takes every argument of Pydantic's own `Field` and adds the
     database options Ferro reads: primary key, uniqueness, indexes, column
-    type, relations and rename hints. Use it as the field's default, or
+    type, foreign keys and rename hints. Use it as the field's default, or
     inside `Annotated[...]`. See
     [Field options](../guide/models-and-fields.md#field-options) for each
     database option at work.
@@ -664,17 +649,6 @@ def Field(
             the model (see
             [Composite uniques](../guide/models-and-fields.md#composite-uniques)).
         index: Add an index on the column.
-        back_ref: Mark the field as the reading side of a relation. Assigning
-            [`BackRef()`][ferro.BackRef] is the usual spelling.
-        many_to_many: Mark the field as a many-to-many relation.
-            [`ManyToMany(...)`][ferro.ManyToMany] is the usual spelling.
-        related_name: The name of the relation on the target model that reads
-            this one back.
-        through: The many-to-many join table's name. When not given, Ferro
-            derives one from the two models.
-        reverse_index: Add an index on the many-to-many join table's
-            `(target, source)` columns for queries from the other side. When
-            not given, the index is added.
         nullable: `"infer"` (the default) makes the column nullable when the
             annotation allows `None`; `True` or `False` forces `NULL` or
             `NOT NULL` in every schema Ferro emits, whatever the annotation
@@ -747,7 +721,10 @@ def Field(
         fail_fast: If `True`, validation will stop on the first error. If `False`, all validation errors will be collected.
             This option can be applied only to iterable types (list, tuple, set, and frozenset).
         **unknown: Refused: a keyword not listed here raises `TypeError`
-            naming the closest one that is.
+            naming the closest one that is. A relation keyword `Field` no
+            longer takes (`back_ref`, `many_to_many`, `related_name`,
+            `through`, `reverse_index`) names what replaces it; see
+            [Upgrading](../upgrading.md#explicit-foreign-keys).
 
     Returns:
         A new [`FieldInfo`][pydantic.fields.FieldInfo] that carries the
@@ -829,17 +806,6 @@ def Field(
         )
         if value is not _Unset
     }
-    relation_options = {
-        option: value
-        for option, value in (
-            ("back_ref", back_ref),
-            ("many_to_many", many_to_many),
-            ("related_name", related_name),
-            ("through", through),
-            ("reverse_index", reverse_index),
-        )
-        if value is not _Unset
-    }
     if (
         "generated" in column_options
         and default is PydanticUndefined
@@ -888,42 +854,7 @@ def Field(
     )
     if column_options:
         info.metadata.append(FerroField(**column_options))
-    if relation_options:
-        info.metadata.append(_RelationOptions(relation_options))
     return info
-
-
-class BackRef:
-    """The reading side of a relation, assigned as the field's default.
-
-    `BackRef()` is `Field(back_ref=True)`. Pair it with the
-    [`ForeignKey`][ferro.ForeignKey] or [`ManyToMany`][ferro.ManyToMany]
-    whose `related_name` names this field; the field adds no column. It
-    takes the keyword arguments of [`Field`][ferro.Field] except
-    `reverse_index`, which belongs on the `ManyToMany` side.
-
-    Examples:
-        ```python {test=run prelude=reference}
-        ada = await Author.where(lambda author: author.name == "Ada Lovelace").first()
-        titles = [post.title for post in await ada.posts.all()]
-        assert titles == ["Notes on the Analytical Engine"]
-        ```
-    """
-
-    def __new__(cls, **kwargs: Any) -> Any:
-        if "reverse_index" in kwargs:
-            raise TypeError(
-                "BackRef() does not accept 'reverse_index'; this kwarg lives on the "
-                "forward ManyToMany(...) declaration. Set reverse_index there instead."
-            )
-        return Field(back_ref=True, **kwargs)
-
-    @classmethod
-    def __class_getitem__(cls, _item: Any) -> Any:
-        raise TypeError(
-            "BackRef[...] is no longer a type annotation. Use "
-            "Relation[list[T]] = BackRef() for collection back-references."
-        )
 
 
 if TYPE_CHECKING:
@@ -932,8 +863,7 @@ if TYPE_CHECKING:
     # and the constructor refuses a relation keyword itself.
     def ManyToMany(
         *,
-        through: str | None = None,
-        related_name: str | None = None,
+        through: str,
         renamed_from: str | None = None,
         reverse_index: bool = True,
         init: Literal[False] = False,
@@ -947,8 +877,7 @@ else:
 
     def ManyToMany(
         *,
-        through: str | None = None,
-        related_name: str | None = None,
+        through: str,
         renamed_from: str | None = None,
         reverse_index: bool = True,
         **unknown: Any,
@@ -963,8 +892,9 @@ else:
         See [Many-to-many](../guide/relationships.md#many-to-many).
 
         Args:
-            through: The join table's name. Required: a model with no `through=`
-                is refused when its class is defined, naming the table to write.
+            through: The join table's name. Required; a name that is not a
+                table name is refused when the class is defined, naming the
+                table to write.
             renamed_from: The join table's previous name, so that
                 `ferro migrate new` and auto-migrate rename the table and keep
                 its rows. See [Renaming a join
@@ -977,8 +907,10 @@ else:
             The field's metadata, as [`Field`][ferro.Field] returns it.
 
         Raises:
-            TypeError: Any other keyword, such as a column option: a
-                many-to-many adds no column.
+            TypeError: `through` is missing, or any other keyword is given,
+                such as a column option (a many-to-many adds no column) or
+                `related_name`, which the other model's
+                [`Reverse`][ferro.Reverse] replaces.
 
         Examples:
             ```python {test=run prelude=reference}
@@ -1007,9 +939,7 @@ else:
             ]
             ```
         """
-        return _many_to_many_field(
-            through, related_name, renamed_from, reverse_index, unknown
-        )
+        return _many_to_many_field(through, renamed_from, reverse_index, unknown)
 
     def Forward(column: str) -> Any:
         """Declare a forward relation over a foreign-key column of this model.
@@ -1107,8 +1037,7 @@ else:
 
 
 def _many_to_many_field(
-    through: str | None,
-    related_name: str | None,
+    through: str,
     renamed_from: str | None,
     reverse_index: bool,
     unknown: dict[str, Any],
@@ -1126,8 +1055,6 @@ def _many_to_many_field(
     for name in unknown:
         raise _unknown_keyword(name, ManyToMany)
     _validate_renamed_from(renamed_from, "ManyToMany()")
-    if related_name is not None:
-        options["related_name"] = related_name
     if renamed_from is not None:
         options["renamed_from"] = renamed_from
     info = PydanticField()
@@ -1270,4 +1197,4 @@ def field_line(
     return f"{name}: {annotation} = Field({', '.join(arguments)})"
 
 
-__all__ = ["Field", "BackRef", "ManyToMany", "Forward", "Reverse"]
+__all__ = ["Field", "ManyToMany", "Forward", "Reverse"]

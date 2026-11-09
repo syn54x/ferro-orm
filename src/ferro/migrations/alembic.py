@@ -127,10 +127,9 @@ def get_metadata(database: "str | None" = None) -> "sa.MetaData":
     `sqlalchemy.exc.CompileError`.
 
     A column's `nullable` follows the `nullable` of its
-    [`FerroField`][ferro.FerroField] or [`ForeignKey`][ferro.ForeignKey]
-    when that is a boolean. The default, `nullable="infer"`, uses whether
-    the annotation allows `None`; a shadow `*_id` column infers from its
-    forward relation's annotation. Primary key columns are never nullable.
+    [`FerroField`][ferro.FerroField] when that is a boolean. The default,
+    `nullable="infer"`, uses whether the annotation allows `None`, a
+    foreign-key column's included. Primary key columns are never nullable.
 
     Args:
         database: The configured database whose tables to return. Defaults

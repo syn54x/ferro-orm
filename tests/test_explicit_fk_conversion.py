@@ -1,10 +1,11 @@
 """Converting a model to explicit foreign-key columns plans nothing (#876, I-1).
 
 `tests/fixtures/pre_explicit_fk_snapshots.json` holds, for every casebook
-side written with `Annotated[Team, ForeignKey(...)]`, the payload of the
+side once written with `Annotated[Team, ForeignKey(...)]`, the payload of the
 `ir.json` that `ferro migrate new` wrote for it on `main` before any
-conversion. The old form must keep compiling to it, and the converted form
-must compile to it too, so `ferro migrate new` plans no operation:
+conversion. The old form can no longer run, so that recording is what it
+produced; the converted form must compile to it, so `ferro migrate new`
+plans no operation:
 
 ```python
 team: Annotated[Team | None, ForeignKey(related_name="members", on_delete="SET NULL")] = None
@@ -24,7 +25,6 @@ import pytest
 
 from ferro import _core, clear_registry, reset_engine
 from ferro.registry import REGISTRY
-from tests import test_generate_backfill as backfill
 from tests._casebook import CASES
 from tests.test_migrate_down import migration_dir
 from tests.test_migrate_new import write_config, write_models
@@ -48,38 +48,12 @@ RECORDED_SIDES = (
 
 CASEBOOK = {case.id: case for case in CASES}
 
-_IMPORTS = "from ferro import Field, Forward, Reverse\n"
-
-_OPTIONAL_TEAM = (
-    '    team: Annotated[Team | None, ForeignKey(related_name="members", '
-    'on_delete="SET NULL")] = None\n'
+# The sides that added a key in the old form, as the casebook now declares
+# them with an explicit key column.
+CONVERTED = (
+    "C1-add-an-optional-foreign-key/after",
+    "C1-add-a-required-foreign-key/after",
 )
-
-CONVERTED = {
-    "C1-add-an-optional-foreign-key/after": _IMPORTS
-    + CASEBOOK["C1-add-an-optional-foreign-key"]
-    .after.replace(
-        '    members: Relation[list["Author"]] = BackRef()\n',
-        '    members: Relation[list["Author"]] = Reverse("team_id")\n',
-    )
-    .replace(
-        _OPTIONAL_TEAM,
-        "    team_id: int | None = Field(\n"
-        '        default=None, foreign_key=Team, on_delete="SET NULL"\n'
-        "    )\n"
-        '    team: Relation[Team | None] = Forward("team_id")\n',
-    ),
-    "C1-add-a-required-foreign-key/after": _IMPORTS
-    + CASEBOOK["C1-add-a-required-foreign-key"]
-    .after.replace(
-        backfill.MEMBERS, '    members: Relation[list["Author"]] = Reverse("team_id")\n'
-    )
-    .replace(
-        backfill.REQUIRED_TEAM,
-        '    team_id: int = Field(foreign_key=Team, on_delete="CASCADE")\n'
-        '    team: Relation[Team] = Forward("team_id")\n',
-    ),
-}
 
 
 def side_body(side: str) -> str:
@@ -148,17 +122,19 @@ def expected_payload(side: str, recorded: dict) -> dict:
 
 
 @pytest.mark.parametrize("side", RECORDED_SIDES)
-def test_the_old_form_still_compiles_to_its_recorded_snapshot(side, recorded, tmp_path):
+def test_each_converted_side_compiles_to_the_old_forms_snapshot(
+    side, recorded, tmp_path
+):
     assert recorded_envelope(side_body(side), tmp_path)["payload"] == expected_payload(
         side, recorded
     )
 
 
-@pytest.mark.parametrize("side", sorted(CONVERTED))
-def test_a_converted_side_compiles_to_the_recorded_snapshot_and_plans_nothing(
+@pytest.mark.parametrize("side", CONVERTED)
+def test_a_converted_key_plans_nothing_against_the_old_forms_snapshot(
     side, recorded, tmp_path
 ):
-    converted = recorded_envelope(CONVERTED[side], tmp_path)
+    converted = recorded_envelope(side_body(side), tmp_path)
 
     assert converted["payload"] == recorded[side]
     for dialect in ("postgres", "sqlite"):

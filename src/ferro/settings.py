@@ -73,7 +73,7 @@ from pydantic_settings import (
     TomlConfigSettingsSource,
 )
 
-from .base import ForeignKey, ManyToManyRelation
+from .base import ManyToManyRelation
 from .exceptions import FerroError
 
 __all__ = ["DatabaseSettings", "FerroSettings", "SettingsError"]
@@ -952,8 +952,8 @@ def _resolve_target(project: _Project, reference: str) -> type | None:
 def _check_references(
     project: _Project, model: type, database: DatabaseSettings
 ) -> None:
-    """Refuse a foreign key (or many-to-many) from ``model`` to a model that
-    ``database`` does not claim."""
+    """Refuse a foreign-key column (or many-to-many) from ``model`` to a
+    model that ``database`` does not claim."""
     databases = project.databases
     if len(databases) == 1:
         return
@@ -962,9 +962,8 @@ def _check_references(
     references = [
         (field_name, relation.to)
         for field_name, relation in relations.items()
-        if isinstance(relation, (ForeignKey, ManyToManyRelation))
+        if isinstance(relation, ManyToManyRelation)
     ]
-    # A foreign-key column declared with `Field(foreign_key=...)`.
     references += [
         (field_name, options.foreign_key)
         for field_name, options in (

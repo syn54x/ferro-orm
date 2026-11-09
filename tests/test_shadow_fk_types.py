@@ -1,31 +1,23 @@
 """Tests for ferro._shadow_fk_types."""
 
-import datetime
 import warnings
-from typing import Annotated, ClassVar, Union
+from typing import Annotated
 from uuid import UUID, uuid4
 
 import pytest
 
 import ferro
 from ferro import (
-    BackRef,
     FerroField,
     Field,
-    ForeignKey,
     Forward,
+    ManyToMany,
     Model,
     Relation,
     Reverse,
     connect,
 )
-from ferro._shadow_fk_types import (
-    is_fallback_shadow_annotation,
-    pk_python_type_for_model,
-    shadow_annotation_for_foreign_key,
-    shadow_annotation_for_pk,
-)
-from ferro.base import ForeignKey as ForeignKeyCls
+from ferro._shadow_fk_types import pk_python_type_for_model
 
 pytestmark = pytest.mark.backend_matrix
 
@@ -38,92 +30,30 @@ def test_pk_python_type_for_model_uuid():
     assert pk_python_type_for_model(UuidPkParent) is UUID
 
 
-def test_shadow_annotation_for_pk_wraps_required_uuid():
-    ann = shadow_annotation_for_pk(UUID)
-    assert ann == UUID | None
-
-
-def test_is_fallback_shadow_annotation():
-    assert is_fallback_shadow_annotation(Union[int, str, None])
-
-
-def test_shadow_annotation_for_foreign_key_concrete():
-    class IntPkParent(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-        name: str
-
-    fk = ForeignKeyCls(related_name="children")
-    fk.to = IntPkParent
-    assert shadow_annotation_for_foreign_key(fk) == (int | None)
-
-
-def test_shadow_annotation_for_foreign_key_unresolved_string():
-    fk = ForeignKeyCls(related_name="children")
-    fk.to = "Parent"
-    ann = shadow_annotation_for_foreign_key(fk)
-    assert is_fallback_shadow_annotation(ann)
-
-
-@pytest.fixture
-def _cleanup_registry():
+def test_a_join_table_types_its_columns_as_each_model_s_primary_key():
     from ferro.registry import REGISTRY
-
-    REGISTRY.reset_for_test()
-    yield
-    REGISTRY.reset_for_test()
-
-
-def test_reconcile_upgrades_forward_ref_shadow(_cleanup_registry):
-    """Models self-register on class creation; do not hand-fill the registry."""
     from ferro.relations import resolve_relationships
 
-    class ReconcileChild(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-        parent: Annotated["ReconcileParent", ForeignKey(related_name="children")]
+    ferro.clear_registry()
 
-    class ReconcileParent(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-        name: str
-        children: Relation[list[ReconcileChild]] = BackRef()
+    class JoinUuidTag(Model):
+        id: UUID = Field(default_factory=uuid4, primary_key=True)
+        posts: Relation[list["JoinIntPost"]] = Reverse("tags")
 
-    assert is_fallback_shadow_annotation(ReconcileChild.__annotations__["parent_id"])
+    class JoinIntPost(Model):
+        id: int | None = Field(default=None, primary_key=True)
+        tags: Relation[list[JoinUuidTag]] = ManyToMany(through="join_post_tags")
 
     resolve_relationships()
 
-    assert ReconcileChild.__annotations__["parent_id"] == (int | None)
-    assert ReconcileChild.model_fields["parent_id"].annotation == (int | None)
-
-
-def test_a_shorthand_over_a_forward_fk_revalidates_on_the_resolved_pass(
-    _cleanup_registry,
-):
-    """A forward-referenced FK's shadow column only learns its real storage
-    when relationships resolve. The cast check re-runs there, so a target whose
-    PK turns out to be unsupported fails pointing at the declaration — and it
-    stays a TypeError, the class-definition contract, not an internal error."""
-    from ferro import RowPolicy, RowSecurity
-    from ferro.relations import resolve_relationships
-
-    class Doc(Model):
-        id: int | None = Field(default=None, primary_key=True)
-        owner: Annotated["Owner", ForeignKey(related_name="docs")]
-
-        # Passes at class-body time: the shadow column is provisionally integer.
-        __ferro_rls__: ClassVar = RowSecurity(
-            RowPolicy(column="owner_id", setting="pinch.owner")
-        )
-
-    class Owner(Model):
-        id: datetime.datetime = Field(primary_key=True)
-        docs: Relation[list["Doc"]] = BackRef()
-
-    with pytest.raises(TypeError) as excinfo:
-        resolve_relationships()
-
-    message = str(excinfo.value)
-    assert "Doc.__ferro_rls__" in message
-    assert "owner_id" in message
-    assert "timestamptz" in message
+    columns = {
+        spec.name: (spec.logical_type, spec.python_type, spec.foreign_key.to_table)
+        for spec in REGISTRY.join_tables()["join_post_tags"]["columns"]
+    }
+    assert columns == {
+        "joinintpost_id": ("integer", int, "joinintpost"),
+        "joinuuidtag_id": ("uuid", UUID, "joinuuidtag"),
+    }
 
 
 @pytest.mark.asyncio
@@ -215,25 +145,6 @@ def test_uuid_child_model_validate_accepts_string_parent_id():
     row = VChild.model_validate({"id": cid, "parent_id": str(pid)})
     assert row.parent_id == pid
     assert isinstance(row.parent_id, UUID)
-
-
-def test_nullable_fk_annotation_does_not_crash():
-    from ferro.relations import resolve_relationships
-
-    ferro.clear_registry()
-
-    class NullableFkParent(Model):
-        id: UUID = Field(default_factory=uuid4, primary_key=True)
-        children: Relation[list["NullableFkChild"]] = BackRef()
-
-    class NullableFkChild(Model):
-        id: UUID = Field(default_factory=uuid4, primary_key=True)
-        parent: Annotated[
-            NullableFkParent | None, ForeignKey(related_name="children")
-        ] = None
-
-    resolve_relationships()
-    assert NullableFkChild.__ferro_relations__["parent"].to is NullableFkParent
 
 
 @pytest.mark.asyncio

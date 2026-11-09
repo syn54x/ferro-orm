@@ -434,8 +434,9 @@ class Registry:
         Args:
             identity: The declaring model's canonical identity.
             field_name: The relation field's name.
-            metadata: The relation's declaration (`ForeignKey`,
-                `ManyToManyRelation` or `"BackRef"`).
+            metadata: What the declaration records: a foreign-key column's
+                `FerroField`, or a `ForwardRelation`, `ReverseRelation` or
+                `ManyToManyRelation`.
         """
         self._pending_relations.append((identity, field_name, metadata))
 

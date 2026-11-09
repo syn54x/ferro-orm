@@ -7,12 +7,13 @@ import pytest
 from pydantic.fields import FieldInfo
 
 from ferro import (
-    BackRef,
     FerroField,
     Field,
+    Forward,
     ManyToMany,
     Model,
     Relation,
+    Reverse,
     connect,
     create_tables,
     engines,
@@ -131,9 +132,7 @@ _OPTION_NAMES = (
     "renamed_from",
     "retired",
     "generated",
-    "back_ref",
     "many_to_many",
-    "related_name",
     "through",
     "reverse_index",
 )
@@ -251,18 +250,16 @@ def test_field_returns_one_ferro_field_in_its_metadata():
 
 
 @pytest.mark.asyncio
-async def test_relation_keywords_leave_the_json_schema_and_the_relation_loads(db_url):
+async def test_relation_options_leave_the_json_schema_and_the_relation_loads(db_url):
     class SchemaTag(Model):
         id: int | None = Field(default=None, primary_key=True)
         label: str
-        posts: Relation[list["SchemaArticle"]] = BackRef()
+        posts: Relation[list["SchemaArticle"]] = Reverse("tags")
 
     class SchemaArticle(Model):
         id: int | None = Field(default=None, primary_key=True)
         title: str
-        tags: Relation[list[SchemaTag]] = ManyToMany(
-            related_name="posts", through="article_tags"
-        )
+        tags: Relation[list[SchemaTag]] = ManyToMany(through="article_tags")
 
     assert _schema_option_names(SchemaTag) == set()
     assert _schema_option_names(SchemaArticle) == set()
@@ -392,11 +389,6 @@ def test_field_refuses_an_unknown_keyword_listing_the_options():
         Field(zzz=1)
 
 
-def test_back_ref_refuses_a_misspelled_option():
-    with pytest.raises(TypeError, match=r"Did you mean 'index'"):
-        BackRef(indx=True)
-
-
 def test_generated_none_is_no_field_option():
     info = Field(generated=None, default=None)
     assert not [item for item in info.metadata if isinstance(item, FerroField)]
@@ -409,12 +401,6 @@ def test_generated_none_is_no_field_option():
 
     assert PlainScore.__ferro_fields__["score"].index is True
     assert PlainScore.__ferro_fields__["score"].generated is None
-
-
-def test_field_still_accepts_the_relation_keywords():
-    Field(back_ref=True)
-    Field(many_to_many=True, related_name="x")
-    Field(through="t")
 
 
 def test_ferro_field_and_field_options_together_are_refused():
@@ -441,15 +427,14 @@ def test_field_options_live_in_the_renamed_class_store():
 
 
 def test_relations_live_in_the_renamed_class_store():
-    from ferro import ForeignKey
-
     class StoreAuthor(Model):
         id: int | None = Field(default=None, primary_key=True)
-        posts: Relation[list["StorePost"]] = BackRef()
+        posts: Relation[list["StorePost"]] = Reverse("author_id")
 
     class StorePost(Model):
         id: int | None = Field(default=None, primary_key=True)
-        author: Annotated[StoreAuthor, ForeignKey(related_name="posts")]
+        author_id: int = Field(foreign_key=StoreAuthor)
+        author: Relation[StoreAuthor] = Forward("author_id")
 
     assert "author" in StorePost.__ferro_relations__
     assert not hasattr(StorePost, _OLD_RELATION_STORE)

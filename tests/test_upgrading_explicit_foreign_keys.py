@@ -10,6 +10,7 @@ pinned here; its fences run in ``tests/test_docs_examples.py``.
 import asyncio
 import importlib
 import re
+import shutil
 from pathlib import Path
 from typing import Annotated
 
@@ -286,22 +287,15 @@ def test_the_three_spellings_of_an_optional_key_declare_one_column() -> None:
 
 _FERRO_FIELD_IMPORTS = "from ferro import Field, Forward, Reverse\n"
 
-# The old form and its conversion by the rule above, one pair per `on_delete`.
+# A class that declares its options with FerroField, converted by the rule
+# above, one per `on_delete`. Before the old form was removed,
+#     items: Relation[list["Item"]] = BackRef()
+#     account: Annotated[Account, ForeignKey(related_name="items")]
+# (with `Account | None`, `on_delete="SET NULL"` and `= None` for the second)
+# sent SQLite `_OLD_FORM_DDL` and recorded the migration in
+# `tests/fixtures/ferro_field_pre_conversion/<on_delete>/`.
 _FERRO_FIELD_MODELS = {
-    "CASCADE": (
-        """
-class Account(Model):
-    id: Annotated[int | None, FerroField(primary_key=True)] = None
-    name: Annotated[str, FerroField(unique=True)]
-    items: Relation[list["Item"]] = BackRef()
-
-
-class Item(Model):
-    id: Annotated[int | None, FerroField(primary_key=True)] = None
-    title: Annotated[str, FerroField(index=True)]
-    account: Annotated[Account, ForeignKey(related_name="items")]
-""",
-        """
+    "CASCADE": """
 class Account(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     name: Annotated[str, FerroField(unique=True)]
@@ -314,23 +308,7 @@ class Item(Model):
     account_id: Annotated[int, FerroField(foreign_key=Account)]
     account: Relation[Account] = Forward("account_id")
 """,
-    ),
-    "SET NULL": (
-        """
-class Account(Model):
-    id: Annotated[int | None, FerroField(primary_key=True)] = None
-    name: Annotated[str, FerroField(unique=True)]
-    items: Relation[list["Item"]] = BackRef()
-
-
-class Item(Model):
-    id: Annotated[int | None, FerroField(primary_key=True)] = None
-    title: Annotated[str, FerroField(index=True)]
-    account: Annotated[
-        Account | None, ForeignKey(related_name="items", on_delete="SET NULL")
-    ] = None
-""",
-        """
+    "SET NULL": """
 class Account(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     name: Annotated[str, FerroField(unique=True)]
@@ -345,8 +323,25 @@ class Item(Model):
     ] = None
     account: Relation[Account | None] = Forward("account_id")
 """,
-    ),
 }
+
+_ACCOUNT_DDL = [
+    'CREATE TABLE IF NOT EXISTS "account" ( "id" integer NOT NULL PRIMARY KEY '
+    'AUTOINCREMENT, "name" varchar NOT NULL )',
+    'CREATE UNIQUE INDEX IF NOT EXISTS "uq_account_name" ON "account" ("name")',
+]
+_OLD_FORM_DDL = {
+    on_delete: [
+        *_ACCOUNT_DDL,
+        f'CREATE TABLE IF NOT EXISTS "item" ( "account_id" integer{not_null}, "id" '
+        'integer NOT NULL PRIMARY KEY AUTOINCREMENT, "title" varchar NOT NULL, '
+        'CONSTRAINT "fk_item_account_id_account" FOREIGN KEY ("account_id") '
+        f'REFERENCES "account" ("id") ON DELETE {on_delete} )',
+        'CREATE INDEX IF NOT EXISTS "idx_item_title" ON "item" ("title")',
+    ]
+    for on_delete, not_null in (("CASCADE", " NOT NULL"), ("SET NULL", ""))
+}
+_OLD_FORM_MIGRATIONS = REPO_ROOT / "tests" / "fixtures" / "ferro_field_pre_conversion"
 
 
 @pytest.fixture
@@ -377,12 +372,9 @@ def _ddl(project: Path, pkg: str, body: str) -> list[str]:
 def test_a_ferro_field_class_converts_to_the_same_ddl(
     on_delete: str, project: Path, pkg: str
 ) -> None:
-    old, converted = _FERRO_FIELD_MODELS[on_delete]
+    after = _ddl(project, pkg, _FERRO_FIELD_IMPORTS + _FERRO_FIELD_MODELS[on_delete])
 
-    before = _ddl(project, pkg, old)
-    after = _ddl(project, pkg, _FERRO_FIELD_IMPORTS + converted)
-
-    assert after == before
+    assert after == _OLD_FORM_DDL[on_delete]
     [table] = [
         sql for sql in after if sql.startswith('CREATE TABLE IF NOT EXISTS "item"')
     ]
@@ -395,14 +387,13 @@ def test_a_ferro_field_class_converts_to_the_same_ddl(
 def test_a_ferro_field_class_converts_and_migrate_new_plans_nothing(
     on_delete: str, project: Path, pkg: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    old, converted = _FERRO_FIELD_MODELS[on_delete]
     write_config(project, pkg)
-    write_models(project, pkg, old)
-    new("record")
+    shutil.copytree(
+        _OLD_FORM_MIGRATIONS / on_delete.replace(" ", "_"), project / "migrations"
+    )
     recorded = sorted(path.name for path in (project / "migrations").iterdir())
-    capsys.readouterr()
 
-    write_models(project, pkg, _FERRO_FIELD_IMPORTS + converted)
+    write_models(project, pkg, _FERRO_FIELD_IMPORTS + _FERRO_FIELD_MODELS[on_delete])
     new("convert")
 
     assert "no schema change: nothing written" in capsys.readouterr().out

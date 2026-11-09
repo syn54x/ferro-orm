@@ -13,17 +13,13 @@ empty registry, so the names in the refusals read as a user's would.
 """
 
 from types import SimpleNamespace
-from typing import Annotated
 
 import pytest
 from pydantic import ValidationError
 
 import ferro
 from ferro import (
-    BackRef,
-    FerroField,
     Field,
-    ForeignKey,
     Forward,
     Model,
     Relation,
@@ -239,54 +235,6 @@ def test_the_refusal_names_the_target_primary_key_and_a_snake_case_instance():
     item = LineItem()
     item.order = order
     assert item.order_id == "A-1"
-
-
-def test_a_foreign_key_relation_keyword_is_refused_the_same_way():
-    class Author(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-        name: str
-        books: Relation[list["Book"]] = BackRef()
-
-    class Book(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-        title: str
-        author: Annotated[Author, ForeignKey(related_name="books")]
-
-    author = Author(id=4, name="Ada")
-    with pytest.raises(TypeError) as refused:
-        Book(title="x", author=author)
-
-    # The old form's required key is checked after validation, so the
-    # assignment is no fix here either.
-    assert str(refused.value) == (
-        "Book.author is a relation. Pass the foreign-key column's value, "
-        "author_id=author.id"
-    )
-    assert Book(title="x", author_id=author.id).author_id == 4
-
-
-def test_a_nullable_foreign_key_relation_names_both_fixes():
-    class Author(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-        name: str
-        reviews: Relation[list["Review"]] = BackRef()
-
-    class Review(Model):
-        id: Annotated[int | None, FerroField(primary_key=True)] = None
-        author: Annotated[Author, ForeignKey(related_name="reviews")] | None = None
-
-    author = Author(id=4, name="Ada")
-    with pytest.raises(TypeError) as refused:
-        Review(author=author)
-
-    assert str(refused.value) == (
-        "Review.author is a relation. Pass the foreign-key column's value, "
-        "author_id=author.id, or set review.author = author on the instance"
-    )
-    assert Review(author_id=author.id).author_id == 4
-    review = Review()
-    review.author = author
-    assert review.author_id == 4
 
 
 def test_an_unknown_keyword_is_refused():

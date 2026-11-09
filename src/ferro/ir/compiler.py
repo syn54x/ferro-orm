@@ -20,7 +20,6 @@ from .._core import (
     _ddl_single_unique_name,
     _ddl_table_check_constraint_name,
 )
-from ..base import ForeignKey
 from ..checks import TableCheckSpec, compile_table_checks
 from ..generated import GeneratedColumnSpec, compile_generated_columns
 from ..columns import (
@@ -48,36 +47,24 @@ _IR_VERSION = 4
 class RenameHints:
     """A model's declared rename hints (ADR-0032).
 
-    ``table`` is ``__ferro_renamed_from__``; ``columns`` maps each column to
-    the name it had before (a ``ForeignKey`` hint's shadow column included);
-    ``foreign_keys`` maps a foreign key's shadow column to the relation field
-    it was declared under before.
+    ``table`` is ``__ferro_renamed_from__``; ``columns`` maps each column,
+    a foreign-key column included, to the name it had before.
     """
 
     table: str | None = None
     columns: Mapping[str, str] = field(default_factory=dict)
-    foreign_keys: Mapping[str, str] = field(default_factory=dict)
 
 
 def declared_rename_hints(model_cls: type[Any]) -> RenameHints:
     """Collect ``model_cls``'s rename hints from its declarations."""
     columns: dict[str, str] = {}
-    foreign_keys: dict[str, str] = {}
     for field_name, meta in (getattr(model_cls, "__ferro_fields__", {}) or {}).items():
         previous = getattr(meta, "renamed_from", None)
         if previous is not None:
             columns[field_name] = previous
-    for field_name, meta in (
-        getattr(model_cls, "__ferro_relations__", {}) or {}
-    ).items():
-        previous = getattr(meta, "renamed_from", None)
-        if isinstance(meta, ForeignKey) and previous is not None:
-            columns[f"{field_name}_id"] = f"{previous}_id"
-            foreign_keys[f"{field_name}_id"] = previous
     return RenameHints(
         table=getattr(model_cls, "__ferro_renamed_from__", None),
         columns=columns,
-        foreign_keys=foreign_keys,
     )
 
 
@@ -402,9 +389,6 @@ def compile_schema_ir_payload(
                     resolved_table_name, spec.name, spec.foreign_key.to_table
                 ),
             }
-            previous_field = hints.foreign_keys.get(spec.name)
-            if previous_field is not None:
-                fk_entry["renamed_from"] = previous_field
             foreign_keys.append(fk_entry)
         if spec.index:
             indexes.append(

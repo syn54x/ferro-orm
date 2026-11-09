@@ -368,14 +368,6 @@ def _cases(storage: str) -> dict[str, dict]:
             'team: Relation["Team"] = Forward("team_id")',
         ],
     )
-    cases["None assigned to a required ForeignKey relation"] = _case(
-        "plain",
-        "team",
-        local=True,
-        after=assign_none,
-        Team=['players: Relation[list["Player"]] = BackRef()'],
-        Player=['team: Annotated["Team", ForeignKey(related_name="players")]'],
-    )
     cases["column with on_delete and no foreign_key"] = _case(
         "plain",
         "note",
@@ -466,7 +458,7 @@ def _cases(storage: str) -> dict[str, dict]:
         "reverse", "players", local=False, Player=[tournaments, elsewhere]
     )
     spellings = {
-        "with no through": 'Relation[list["{t}"]] = ManyToMany()',
+        "with no through": 'Relation[list["{t}"]] = ManyToMany(through=None)',
         "under | None": 'Relation[list["{t}"]] | None = ManyToMany(through="player_links")',
         "with | None inside": (
             'Relation[list["{t}"] | None] = ManyToMany(through="player_links")'
@@ -521,7 +513,7 @@ def _cases(storage: str) -> dict[str, dict]:
         "many-to-many",
         _LONG_FIELD,
         local=True,
-        Player=[f'{_LONG_FIELD}: Relation[list["Tag"]] = ManyToMany()'],
+        Player=[f'{_LONG_FIELD}: Relation[list["Tag"]] = ManyToMany(through=None)'],
     )
     # The fix's join table is free of every other declaration: here the name
     # the long field's derived one shortens to is taken already.
@@ -532,7 +524,7 @@ def _cases(storage: str) -> dict[str, dict]:
         local=True,
         Player=[
             f'{_LONG_FIELD}: Relation[list["Tag"]] = ManyToMany(through="{shortened}")',
-            f'{_LONG_FIELD}_b: Relation[list["Tournament"]] = ManyToMany()',
+            f'{_LONG_FIELD}_b: Relation[list["Tournament"]] = ManyToMany(through=None)',
         ],
     )
     cases["two many-to-manys declaring one join table"] = _case(
@@ -558,26 +550,6 @@ def _cases(storage: str) -> dict[str, dict]:
                 f'ManyToMany(through="player_links", renamed_from="{previous}")'
             ],
         )
-    cases["related_name many-to-many by Field renamed from a join table"] = _case(
-        "many-to-many",
-        "links",
-        local=True,
-        Tag=['linked: Relation[list["Player"]] = BackRef()'],
-        Player=[
-            'links: Relation[list["Tag"]] = Field(many_to_many=True, '
-            'related_name="linked", renamed_from="old_links")'
-        ],
-    )
-    cases["related_name many-to-many renamed from a join table"] = _case(
-        "many-to-many",
-        "links",
-        local=True,
-        Tag=['linked: Relation[list["Player"]] = BackRef()'],
-        Player=[
-            'links: Relation[list["Tag"]] = '
-            'ManyToMany(related_name="linked", renamed_from="old_links")'
-        ],
-    )
     # The key shared with the primary key, and every relation that names it.
     cases["key shared with the primary key"] = _case(
         "shared key",
