@@ -360,6 +360,8 @@ def _refusals(team) -> dict[str, object]:
         "assign a column": assign,
         "model_dump()": team.model_dump,
         "model_dump_json()": team.model_dump_json,
+        "iter()": lambda: iter(team),
+        "dict()": lambda: dict(team),
     }
 
 

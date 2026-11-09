@@ -16,8 +16,7 @@ instead of string-matching driver messages:
         - `CheckViolationError`
     - `ModelDoesNotExist`: no row matched the primary key (also a
       `LookupError`).
-    - `InstanceNotLoaded`: an unloaded instance was asked for a column
-      (also an `AttributeError`).
+    - `InstanceNotLoaded`: an unloaded instance was asked for a column.
 
 Exceptions raised from the Rust core keep the driver's message and, where
 the backend reports them, the SQLSTATE code and the violated constraint's

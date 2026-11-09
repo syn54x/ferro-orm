@@ -459,6 +459,11 @@ class Model(BaseModel, metaclass=ModelMetaclass):
                 _unloaded.require_loaded(self)
             super().__setattr__(name, value)
 
+        def __iter__(self) -> Any:
+            # `dict(instance)` reads the fields through here, as model_dump does.
+            _unloaded.require_loaded(self)
+            return super().__iter__()
+
         def model_dump(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
             """Dump the instance's fields to a dict, as Pydantic's `model_dump` does.
 
