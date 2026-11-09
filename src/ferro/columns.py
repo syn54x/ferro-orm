@@ -33,9 +33,9 @@ from ._annotation_utils import (
     enum_subclass_from_annotation,
     validate_db_type_declaration,
     _is_json_family,
+    _scalar_part_of_annotation,
     _strip_optional_and_annotated,
 )
-from ._fk_column_types import _scalar_part_of_annotation
 from .base import FerroField, ForwardRelation
 
 __all__ = [
@@ -47,6 +47,7 @@ __all__ = [
     "build_relation_specs",
     "build_reverse_specs",
     "fk_column_spec",
+    "pk_python_type_for_model",
     "pk_spec",
     "primary_key_field_name",
     "retired_clause",
@@ -715,6 +716,16 @@ _PK_TYPE_FACTS: dict[Any, tuple[str, str | None]] = {
     bool: ("boolean", None),
     bytes: ("binary", "binary"),
 }
+
+
+def pk_python_type_for_model(target: type[Any]) -> Any | None:
+    """Return the PK column's scalar python type from the target's specs."""
+    pk_field = getattr(target, "__ferro_pk__", None)
+    if pk_field is None:
+        return None
+    specs = getattr(target, "__ferro_columns__", None) or {}
+    spec = specs.get(pk_field)
+    return spec.python_type if spec is not None else None
 
 
 def pk_spec(name: str, python_type: Any) -> ColumnSpec:

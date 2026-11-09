@@ -1,4 +1,4 @@
-"""Tests for ferro._fk_column_types."""
+"""Tests for UUID and other non-integer foreign-key columns."""
 
 import warnings
 from typing import Annotated
@@ -17,7 +17,7 @@ from ferro import (
     Reverse,
     connect,
 )
-from ferro._fk_column_types import pk_python_type_for_model
+from ferro.columns import pk_python_type_for_model
 
 pytestmark = pytest.mark.backend_matrix
 
