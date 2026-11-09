@@ -421,3 +421,38 @@ def test_a_docstring_fence_is_reported_once(tmp_path: Path) -> None:
         ''',
     )
     assert _retired_messages(module) == [(6, BACKREF_RETIRED)]
+
+
+def test_a_comment_in_code_is_prose(tmp_path: Path) -> None:
+    page = _write(
+        tmp_path,
+        "page.md",
+        """
+        # Page
+
+        ```python
+        team_id: int  # the shadow column
+        ```
+        """,
+    )
+    module = _write(
+        tmp_path,
+        "module.py",
+        '''
+        def helper():
+            """Return the posts.
+
+            ```python
+            posts = author.posts  # a populated relation
+            ```
+            """
+            return author.team  # read the BackRef( side
+        ''',
+    )
+    assert _retired_messages(page) == [
+        (4, '"shadow column" is retired; write "foreign-key column"')
+    ]
+    assert _retired_messages(module) == [
+        (5, '"populated relation" is retired; write "loaded relation"'),
+        (8, BACKREF_RETIRED),
+    ]

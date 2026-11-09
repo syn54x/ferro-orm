@@ -12,7 +12,7 @@ Three mistakes compile and run but teach the wrong thing:
 
 The checks read Python files (with the fences in their docstrings) and the
 Python fences of Markdown pages; the retired-terms check also reads Markdown
-prose and docstring prose. Run them from the command line:
+prose, docstring prose and comments. Run them from the command line:
 
     python -m tests._docs_checks docs/examples docs/pages src/ferro
 
@@ -23,8 +23,10 @@ from __future__ import annotations
 
 import ast
 import inspect
+import io
 import re
 import sys
+import tokenize
 import typing
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -296,11 +298,21 @@ def _retired_calls(path: Path, tree: ast.AST) -> list[Violation]:
     return violations
 
 
+def _comments(source: str, first_line: int) -> dict[int, str]:
+    """Each comment in ``source``, keyed by the file line it is on."""
+    return {
+        first_line + token.start[0] - 1: token.string
+        for token in tokenize.generate_tokens(io.StringIO(source).readline)
+        if token.type == tokenize.COMMENT
+    }
+
+
 def retired_vocabulary(path: Path) -> list[Violation]:
     """Report each use of a retired relation term in ``path``.
 
     Prose (Markdown outside Python fences, a docstring outside its Python
-    fences) is matched for every term. Python is read as code: a call to
+    fences, and every comment in Python code) is matched for every term.
+    Python is otherwise read as code: a call to
     ``ForeignKey`` or ``BackRef`` that the source did not import from another
     library, and any call with a ``related_name=`` keyword. A string literal
     in code, such as a refusal message, is never matched. ``upgrading.md``
@@ -329,8 +341,9 @@ def retired_vocabulary(path: Path) -> list[Violation]:
         for number in range(fence.start_line, fence.end_line + 1):
             prose.pop(number, None)
     violations = _retired_in_prose(path, prose)
-    for tree in _trees(path):
-        violations += _retired_calls(path, tree)
+    for source, first_line in _sources(path):
+        violations += _retired_calls(path, _parse(source, path, first_line))
+        violations += _retired_in_prose(path, _comments(source, first_line))
     return sorted(violations, key=lambda violation: violation.line)
 
 
