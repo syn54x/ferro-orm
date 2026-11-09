@@ -133,52 +133,6 @@ def _many_to_many_retired(model: str, field_name: str) -> TypeError:
     )
 
 
-# Each field option a `json_schema_extra` key once declared, and the `Field()`
-# argument that declares it now.
-_SCHEMA_EXTRA_OPTIONS = {
-    "primary_key": "primary_key",
-    "unique": "unique",
-    "index": "index",
-    "autoincrement": "autoincrement",
-    "db_type": "db_type",
-    "db_check": "db_check",
-    "ferro_nullable": "nullable",
-}
-
-# The key the old `Field()` wrote its options under: a dict keyed by the
-# `Field()` arguments themselves.
-_OLD_FIELD_OPTIONS_KEY = "ferro_field"
-
-
-def _refuse_options_in_schema_extra(
-    model: str, field_name: str, field_info: FieldInfo
-) -> None:
-    """Refuse a field option given through ``json_schema_extra``.
-
-    The options live in the field's metadata, so a key there would be printed
-    into the JSON schema and read by nothing.
-    """
-    extra = field_info.json_schema_extra
-    if not isinstance(extra, dict):
-        return
-    for key, value in extra.items():
-        if key == _OLD_FIELD_OPTIONS_KEY:
-            arguments = (
-                ", ".join(f"{option}={given!r}" for option, given in value.items())
-                if isinstance(value, dict) and value
-                else "its options"
-            )
-        elif key in _SCHEMA_EXTRA_OPTIONS:
-            arguments = f"{_SCHEMA_EXTRA_OPTIONS[key]}={value!r}"
-        else:
-            continue
-        raise TypeError(
-            f"{model}.{field_name} declares {key!r} in json_schema_extra, "
-            f"which Ferro does not read. Pass {arguments} to Field() "
-            "instead of json_schema_extra"
-        )
-
-
 def _parsed(text: str) -> ast.expr | None:
     """``text`` as an expression node, or ``None`` when it does not parse."""
     try:
@@ -1223,19 +1177,17 @@ class ModelMetaclass(type(BaseModel)):
         ``Field(...)`` and ``FerroField(...)`` each leave one ``FerroField``
         in the field's ``FieldInfo.metadata``, whether assigned or given inside
         ``Annotated[...]`` (Pydantic merges both into the same ``FieldInfo``).
-        The options never live in ``json_schema_extra``: a key there that
-        names an option is refused, naming the ``Field()`` argument to use.
+        The options never live in ``json_schema_extra``; `build_column_specs`
+        refuses a key there that names one.
 
         Returns:
             Dictionary mapping field names to FerroField metadata
 
         Raises:
-            TypeError: A field declares its options twice, or its
-                ``json_schema_extra`` carries an option key.
+            TypeError: A field declares its options twice.
         """
         declared_fields = {}
         for f_name, field_info in cls.model_fields.items():
-            _refuse_options_in_schema_extra(cls.__name__, f_name, field_info)
             declared = [
                 metadata
                 for metadata in field_info.metadata

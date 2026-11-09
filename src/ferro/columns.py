@@ -458,6 +458,51 @@ def _enum_values(col_info: dict[str, Any]) -> list[Any] | None:
     return None
 
 
+# Each field option a `json_schema_extra` key once declared, and the `Field()`
+# argument that declares it now.
+_SCHEMA_EXTRA_OPTIONS = {
+    "primary_key": "primary_key",
+    "unique": "unique",
+    "index": "index",
+    "autoincrement": "autoincrement",
+    "db_type": "db_type",
+    "db_check": "db_check",
+    "ferro_nullable": "nullable",
+}
+
+# The key the old `Field()` wrote its options under: a dict keyed by the
+# `Field()` arguments themselves.
+_OLD_FIELD_OPTIONS_KEY = "ferro_field"
+
+
+def _refuse_options_in_schema_extra(
+    model: str, field_name: str, extra: dict[str, Any]
+) -> None:
+    """Refuse a field option given through ``json_schema_extra``.
+
+    ``extra`` is the dict as written, or for a callable the field's schema
+    property it wrote into, so both are refused alike. The options live in
+    the field's metadata, so a key there would be printed into the JSON
+    schema and read by nothing.
+    """
+    for key, value in extra.items():
+        if key == _OLD_FIELD_OPTIONS_KEY:
+            arguments = (
+                ", ".join(f"{option}={given!r}" for option, given in value.items())
+                if isinstance(value, dict) and value
+                else "its options"
+            )
+        elif key in _SCHEMA_EXTRA_OPTIONS:
+            arguments = f"{_SCHEMA_EXTRA_OPTIONS[key]}={value!r}"
+        else:
+            continue
+        raise TypeError(
+            f"{model}.{field_name} declares {key!r} in json_schema_extra, "
+            f"which Ferro does not read. Pass {arguments} to Field() "
+            "instead of json_schema_extra"
+        )
+
+
 def foreign_key_ref(options: FerroField) -> ForeignKeyRef | None:
     """Return the foreign key a column's options declare, or `None`.
 
@@ -491,6 +536,10 @@ def build_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
 
     Returns:
         The column specs, keyed by column name.
+
+    Raises:
+        TypeError: A field's ``json_schema_extra`` names a field option,
+            which `Field()` declares instead.
     """
     schema = model_cls.model_json_schema()
     properties = schema.get("properties")
@@ -512,6 +561,14 @@ def build_column_specs(model_cls: type[Any]) -> dict[str, ColumnSpec]:
         prop = _resolve_nested_refs(schema, _resolve_ref(schema, raw_prop))
 
         field_info = model_fields.get(field_name)
+        extra = field_info.json_schema_extra if field_info is not None else None
+        if extra is not None:
+            # A dict as written; a callable by what it wrote into the schema.
+            _refuse_options_in_schema_extra(
+                model_cls.__name__,
+                field_name,
+                extra if isinstance(extra, dict) else raw_prop,
+            )
         ann = resolved_annotations.get(
             field_name, field_info.annotation if field_info is not None else None
         )
