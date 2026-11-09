@@ -209,7 +209,7 @@ def test_a_model_redefined_in_one_process_keeps_its_join_table():
     ferro.ensure_resolved_modelset()
 
     join = ferro.registry.REGISTRY.join_tables()["player_tournaments"]
-    assert join["declared_by"] == (Player.__ferro_identity__, "events")
+    assert join.declared_by == (Player.__ferro_identity__, "events")
     assert Player.__ferro_reverse_specs__["events"].join_table == "player_tournaments"
 
 

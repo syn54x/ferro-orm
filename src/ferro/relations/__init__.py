@@ -29,7 +29,7 @@ from ..ir.compiler import (
     compile_model_schema_ir,
     register_model_with_ir,
 )
-from ..registry import REGISTRY
+from ..registry import REGISTRY, JoinTableBundle
 from .descriptors import RelationshipDescriptor
 from .fixes import DeclarationRefusal, Edit
 
@@ -1403,11 +1403,8 @@ def _refuse_taken_join_table(
             f"through={json.dumps(join_table)} names the table of the model "
             f"{owner}, and a join table needs a table of its own"
         )
-    elif isinstance(held, dict) and held.get("declared_by") not in (
-        None,
-        declared_by,
-    ):
-        holder, holder_field = held["declared_by"]
+    elif held is not None and held.declared_by != declared_by:
+        holder, holder_field = held.declared_by
         holder_name = REGISTRY.models()[holder].__name__
         reason = (
             f"{holder_name}.{holder_field} already declares the join table "
@@ -1532,13 +1529,13 @@ def _resolve_pending() -> None:
         )
         REGISTRY.add_join_table(
             join_table,
-            {
-                "declared_by": (model_name, field_name),
-                "columns": join_columns,
-                "composite_uniques": composite_uniques,
-                "composite_indexes": composite_indexes,
-                "rename_hints": join_hints,
-            },
+            JoinTableBundle(
+                declared_by=(model_name, field_name),
+                columns=join_columns,
+                composite_uniques=composite_uniques,
+                composite_indexes=composite_indexes,
+                rename_hints=join_hints,
+            ),
         )
 
     # Key columns first, so a relation's check reads a bound column.
