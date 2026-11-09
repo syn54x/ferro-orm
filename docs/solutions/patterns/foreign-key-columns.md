@@ -7,7 +7,6 @@ related_files:
   - src/ferro/fields.py
   - src/ferro/metaclass.py
   - src/ferro/columns.py
-  - src/ferro/_fk_column_types.py
   - src/ferro/relations/__init__.py
 related_issues: [874, 887]
 captured: 2026-11-09
@@ -58,7 +57,7 @@ its attribute name, and neither adds anything to the schema.
 - **Join tables are Ferro's.** A `ManyToMany` still gets a join table whose
   two `<table>_id` columns Ferro builds with `fk_column_spec` in
   `src/ferro/columns.py`, typed from each side's primary key
-  (`pk_python_type_for_model` in `src/ferro/_fk_column_types.py`).
+  (`pk_python_type_for_model`, beside it).
 
 ## Recipe: test a column option
 
@@ -70,8 +69,8 @@ assert table.c.team_id.nullable is False
 assert "idx_player_team_id" in {index.name for index in table.indexes}
 ```
 
-`table.c.team` raises `KeyError`: a relation's name reaches no schema
-artifact.
+`table.c.team` raises `AttributeError` (and `table.c["team"]` a `KeyError`):
+a relation's name reaches no schema artifact.
 
 ## How to recognize
 
