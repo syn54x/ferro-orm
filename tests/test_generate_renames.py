@@ -537,6 +537,24 @@ def test_a_join_table_renamed_from_its_old_name_keeps_its_rows(
     assert db.rows(links.replace("author_tags", "writer_tags")) == [(1, 1), (1, 2)]
 
 
+def test_two_join_tables_renamed_from_one_name_are_refused_naming_the_relations(
+    project, pkg
+):
+    twice = JOIN_TABLE_AFTER + (
+        "    labels: Relation[list[Tag]] = "
+        'ManyToMany(through="author_labels", renamed_from="writer_tags")\n'
+    )
+
+    err = refused(project, pkg, "sqlite", JOIN_TABLE_BEFORE, twice)
+
+    assert (
+        'join table "author_labels" declares ManyToMany(renamed_from="writer_tags") '
+        'and join table "author_tags" declares '
+        'ManyToMany(renamed_from="writer_tags"): one table becomes one table; keep '
+        'the hint on the table "writer_tags" became'
+    ) in err
+
+
 def test_a_join_table_renamed_without_its_hint_names_the_hint_on_sqlite(project, pkg):
     """The model rename carries the join table's key column, which SQLite
     rebuilds the table to rename, but the table itself is gone from the
