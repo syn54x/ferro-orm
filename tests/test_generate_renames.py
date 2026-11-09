@@ -537,6 +537,33 @@ def test_a_join_table_renamed_from_its_old_name_keeps_its_rows(
     assert db.rows(links.replace("author_tags", "writer_tags")) == [(1, 1), (1, 2)]
 
 
+def test_a_join_table_renamed_without_its_hint_names_the_hint_on_sqlite(project, pkg):
+    """The model rename carries the join table's key column, which SQLite
+    rebuilds the table to rename, but the table itself is gone from the
+    models under its old name."""
+    renamed = b3("author", "sqlite").replace(
+        'through="writer_tags"', 'through="author_tags"'
+    )
+
+    err = refused(project, pkg, "sqlite", b3("writer", "sqlite"), renamed)
+
+    assert err.splitlines()[-1].endswith(
+        "cannot rebuild table 'writer_tags': it is missing from the new snapshot. "
+        "If the join table was renamed, declare "
+        'ManyToMany(renamed_from="writer_tags") on the many-to-many that names it '
+        "now; if it was dropped, drop it in a migration of its own before this change"
+    )
+    # Followed, the fix renames the join table and its key column.
+    hinted = renamed.replace(
+        'through="author_tags"', 'through="author_tags", renamed_from="writer_tags"'
+    )
+    write_models(project, pkg, hinted)
+    new("rename_writer")
+    up = statements(schema_file(project, 2, "up", "sqlite"))
+    assert 'ALTER TABLE "writer_tags" RENAME TO "author_tags"' in up
+    assert 'ALTER TABLE "author_tags" RENAME COLUMN "writer_id" TO "author_id"' in up
+
+
 # -- a rename and a type change in one edit ------------------------------------------
 
 
