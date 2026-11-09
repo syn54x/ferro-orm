@@ -19,7 +19,7 @@ from uuid import UUID
 import pytest
 
 import ferro
-from ferro import BackRef, FerroField, ForeignKey, ManyToMany, Model, Relation
+from ferro import FerroField, Forward, ManyToMany, Model, Relation, Reverse
 from ferro.query import Query, QueryNode
 from ferro.query.nodes import FieldProxy, QueryProxy
 from ferro.query.wire import compile_query
@@ -36,51 +36,56 @@ pytestmark = pytest.mark.backend_matrix
 class QJLedger(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     name: str = ""
-    accounts: Relation[list["QJAccount"]] = BackRef()
+    accounts: Relation[list["QJAccount"]] = Reverse("ledger_id")
 
 
 class QJOwner(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     email: str = ""
-    accounts: Relation[list["QJAccount"]] = BackRef()
+    accounts: Relation[list["QJAccount"]] = Reverse("owner_id")
 
 
 class QJAccount(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     label: str = ""
-    ledger: Annotated[QJLedger, ForeignKey(related_name="accounts")]
-    owner: Annotated[QJOwner, ForeignKey(related_name="accounts")]
-    transactions: Relation[list["QJTransaction"]] = BackRef()
-    transfers_out: Relation[list["QJTransfer"]] = BackRef()
-    transfers_in: Relation[list["QJTransfer"]] = BackRef()
-    notes: Relation[list["QJNote"]] = BackRef()
+    ledger_id: Annotated[int, FerroField(foreign_key=QJLedger)]
+    ledger: Relation[QJLedger] = Forward("ledger_id")
+    owner_id: Annotated[int, FerroField(foreign_key=QJOwner)]
+    owner: Relation[QJOwner] = Forward("owner_id")
+    transactions: Relation[list["QJTransaction"]] = Reverse("account_id")
+    transfers_out: Relation[list["QJTransfer"]] = Reverse("from_account_id")
+    transfers_in: Relation[list["QJTransfer"]] = Reverse("to_account_id")
+    notes: Relation[list["QJNote"]] = Reverse("account_id")
 
 
 class QJTransaction(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     amount: int = 0
-    account: Annotated[QJAccount, ForeignKey(related_name="transactions")]
+    account_id: Annotated[int, FerroField(foreign_key=QJAccount)]
+    account: Relation[QJAccount] = Forward("account_id")
 
 
 class QJTransfer(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
-    from_account: Annotated[QJAccount, ForeignKey(related_name="transfers_out")]
-    to_account: Annotated[QJAccount, ForeignKey(related_name="transfers_in")]
+    from_account_id: Annotated[int, FerroField(foreign_key=QJAccount)]
+    from_account: Relation[QJAccount] = Forward("from_account_id")
+    to_account_id: Annotated[int, FerroField(foreign_key=QJAccount)]
+    to_account: Relation[QJAccount] = Forward("to_account_id")
 
 
 class QJEmployee(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     name: str = ""
-    manager: Annotated[
-        "QJEmployee", ForeignKey(related_name="reports", nullable=True)
-    ] = None
-    reports: Relation[list["QJEmployee"]] = BackRef()
+    manager_id: Annotated[int | None, FerroField(foreign_key="QJEmployee")] = None
+    manager: Relation["QJEmployee | None"] = Forward("manager_id")
+    reports: Relation[list["QJEmployee"]] = Reverse("manager_id")
 
 
 class QJNote(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     body: str = ""
-    account: Annotated[QJAccount | None, ForeignKey(related_name="notes")] = None
+    account_id: Annotated[int | None, FerroField(foreign_key=QJAccount)] = None
+    account: Relation[QJAccount | None] = Forward("account_id")
 
 
 # Nullable-FK chain at BOTH hops (Doc -> Folder -> FolderOwner) so whole-path
@@ -91,20 +96,22 @@ class QJNote(Model):
 class QJFolderOwner(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     name: str = ""
-    folders: Relation[list["QJFolder"]] = BackRef()
+    folders: Relation[list["QJFolder"]] = Reverse("owner_id")
 
 
 class QJFolder(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     label: str = ""
-    owner: Annotated[QJFolderOwner | None, ForeignKey(related_name="folders")] = None
-    docs: Relation[list["QJDoc"]] = BackRef()
+    owner_id: Annotated[int | None, FerroField(foreign_key=QJFolderOwner)] = None
+    owner: Relation[QJFolderOwner | None] = Forward("owner_id")
+    docs: Relation[list["QJDoc"]] = Reverse("folder_id")
 
 
 class QJDoc(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     title: str = ""
-    folder: Annotated[QJFolder | None, ForeignKey(related_name="docs")] = None
+    folder_id: Annotated[int | None, FerroField(foreign_key=QJFolder)] = None
+    folder: Relation[QJFolder | None] = Forward("folder_id")
 
 
 # M2M pair whose TARGET model carries a forward FK, so an M2M association
@@ -115,20 +122,21 @@ class QJDoc(Model):
 class QJMAuthor(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     role: str = ""
-    tags: Relation[list["QJMTag"]] = BackRef()
+    tags: Relation[list["QJMTag"]] = Reverse("created_by_id")
 
 
 class QJMTag(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     name: str = ""
-    created_by: Annotated[QJMAuthor, ForeignKey(related_name="tags")]
-    posts: Relation[list["QJMPost"]] = BackRef()
+    created_by_id: Annotated[int, FerroField(foreign_key=QJMAuthor)]
+    created_by: Relation[QJMAuthor] = Forward("created_by_id")
+    posts: Relation[list["QJMPost"]] = Reverse("tags")
 
 
 class QJMPost(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     title: str = ""
-    tags: Relation[list["QJMTag"]] = ManyToMany(related_name="posts")
+    tags: Relation[list["QJMTag"]] = ManyToMany(through="qjmpost_tags")
 
 
 # Typed-bind matrix (#270 critical): a related model carrying datetime, uuid,
@@ -153,14 +161,15 @@ class QJTBProfile(Model):
     nickname: str | None = None
     # Plain-text column; collides by name with QJTBUser.tag (a native enum).
     tag: str = ""
-    users: Relation[list["QJTBUser"]] = BackRef()
+    users: Relation[list["QJTBUser"]] = Reverse("profile_id")
 
 
 class QJTBUser(Model):
     id: Annotated[int | None, FerroField(primary_key=True)] = None
     # Native-enum column named identically to the related plain-text QJTBProfile.tag.
     tag: QJTBTier = QJTBTier.FREE
-    profile: Annotated[QJTBProfile, ForeignKey(related_name="users")]
+    profile_id: Annotated[int, FerroField(foreign_key=QJTBProfile)]
+    profile: Relation[QJTBProfile] = Forward("profile_id")
 
 
 _TB_T1 = datetime(2020, 1, 1, tzinfo=timezone.utc)
